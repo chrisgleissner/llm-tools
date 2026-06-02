@@ -1,0 +1,28 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare fake Copilot CLI
+        run: |
+          mkdir -p .ci-bin
+          printf '#!/usr/bin/env bash\nsleep 99\n' > .ci-bin/copilot
+          chmod +x .ci-bin/copilot
+
+      - name: Install test dependencies
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
+
+      - name: Run tests
+        run: |
+          PATH="$PWD/.ci-bin:$PATH" ./llm-usage-tests.sh

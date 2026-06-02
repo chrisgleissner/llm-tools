@@ -1,0 +1,583 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+set -euo pipefail
+
+# llm-usage: show remaining usage for Codex, Claude Code, and GitHub Copilot.
+#
+# Data sources:
+#   Codex:  latest rate_limits/rateLimits object found in ~/.codex/sessions/**/*.jsonl
+#   Claude: latest cached statusline JSON written by this script, then ~/.claude/projects/**/*.jsonl fallback
+#   Copilot: local Copilot CLI screen footer captured in a pseudo-terminal
+#
+# Optional Claude Code integration:
+#   Configure this script as your Claude Code statusLine command. When Claude Code sends
+#   statusline JSON on stdin, this script caches it and prints a compact statusline.
+#
+# Dependencies: bash, curl, jq, find, sort, tail, date
+# Optional for Copilot capture: timeout and python3/python
+
+APP_NAME="llm-usage"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage"
+CLAUDE_CACHE="$CACHE_DIR/claude-status.json"
+CLAUDE_API_CACHE="$CACHE_DIR/claude-usage-api.json"
+WATCH_INTERVAL=0
+JSON_OUTPUT=0
+STATUSLINE_MODE=0
+NO_HEADER=0
+
+usage() {
+  cat <<USAGE
+Usage: $APP_NAME [--json] [--watch SECONDS] [--statusline] [--no-header]
+
+Shows remaining percentage for:
+  - Codex current session / 5-hour window
+  - Codex weekly / 7-day window
+  - Claude Code current session / 5-hour window
+  - Claude Code weekly / 7-day window
+  - Copilot monthly usage
+  - Copilot AI credits
+
+Options:
+  --json              Emit JSON instead of a table.
+  --watch SECONDS     Refresh repeatedly.
+  --statusline        Read Claude Code statusline JSON from stdin, cache it, print compact line.
+  --no-header         Omit table header.
+  -h, --help          Show this help.
+USAGE
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "error: required command not found: $1" >&2
+    exit 127
+  }
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUTPUT=1; shift ;;
+    --watch)
+      [[ $# -ge 2 ]] || { echo "error: --watch requires seconds" >&2; exit 2; }
+      WATCH_INTERVAL="$2"; shift 2 ;;
+    --statusline) STATUSLINE_MODE=1; shift ;;
+    --no-header) NO_HEADER=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+need jq
+need curl
+need find
+need sort
+need tail
+need date
+mkdir -p "$CACHE_DIR"
+
+# Format reset timestamps. Handles epoch seconds and ISO timestamps. Empty/null -> empty.
+fmt_reset() {
+  local ts="${1:-}"
+  [[ -n "$ts" && "$ts" != "null" ]] || return 0
+  if [[ "$ts" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    ts="${ts%%.*}"
+    date -d "@$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || true
+  else
+    date -d "$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || true
+  fi
+}
+
+# Convert a used percentage into remaining percentage with one decimal where needed.
+remaining_from_used() {
+  local used="${1:-}"
+  [[ -n "$used" && "$used" != "null" ]] || return 0
+  jq -nr --argjson u "$used" '([0, (100 - $u), 100] | sort | .[1]) | if . == floor then tostring else (.*10|round/10|tostring) end' 2>/dev/null || true
+}
+
+# Print percent with at most one decimal.
+fmt_pct() {
+  local p="${1:-}"
+  [[ -n "$p" && "$p" != "null" ]] || { printf 'n/a'; return; }
+  jq -nr --argjson p "$p" 'if $p == floor then ($p|tostring) else ($p*10|round/10|tostring) end' 2>/dev/null || printf '%s' "$p"
+}
+
+# Emit the most recent line from JSONL files matching a jq predicate.
+latest_matching_line() {
+  local root="$1"
+  local predicate="$2"
+  [[ -d "$root" ]] || return 1
+
+  # Newest files first, bounded to avoid crawling huge histories on every run.
+  # Tune MAX_FILES if your local history is very large and relevant data is older.
+  local max_files="${LLM_USAGE_MAX_FILES:-250}"
+  local file
+  while IFS= read -r file; do
+    [[ -r "$file" ]] || continue
+    # Search from the end of each file. tail keeps the command cheap for long sessions.
+    local line
+    line=$(tail -n "${LLM_USAGE_TAIL_LINES:-2000}" "$file" \
+      | jq -c "select($predicate)" 2>/dev/null \
+      | tail -n 1 || true)
+    if [[ -n "$line" ]]; then
+      printf '%s\n' "$line"
+      return 0
+    fi
+  done < <(find "$root" -type f \( -name '*.jsonl' -o -name 'rollout-*.jsonl' \) -printf '%T@ %p\n' 2>/dev/null \
+            | sort -nr \
+            | head -n "$max_files" \
+            | cut -d' ' -f2-)
+
+  return 1
+}
+
+# Normalize Codex rate-limit object into {five_hour, week, source_note}.
+# Handles observed snake_case/camelCase variants from local rollout JSONL and app-server payloads.
+normalize_codex() {
+  jq -c --arg source "$1" '
+    def num: if type == "number" then . elif type == "string" then (tonumber? // empty) else empty end;
+    def pct($x): ($x.used_percent // $x.usedPercent // empty) | num;
+    def reset($x): ($x.resets_at // $x.resetsAt // empty) | num;
+    def mins($x): ($x.window_minutes // $x.windowDurationMins // empty) | num;
+
+    (.rate_limits // .rateLimits // .rateLimits.rateLimits // .msg.rate_limits // .msg.rateLimits // .payload.rate_limits // .payload.rateLimits // empty) as $rl
+    | if ($rl|type) == "object" then
+        ($rl.primary // $rl.five_hour // $rl.fiveHour // empty) as $p
+        | ($rl.secondary // $rl.weekly // $rl.seven_day // $rl.sevenDay // empty) as $s
+        | {
+            provider: "codex",
+            source: $source,
+            plan: ($rl.plan_type // $rl.planType // null),
+            five_hour: (if ($p|type)=="object" then {used: pct($p), resets_at: reset($p), window_minutes: (mins($p) // 300)} else null end),
+            week: (if ($s|type)=="object" then {used: pct($s), resets_at: reset($s), window_minutes: (mins($s) // 10080)} else null end)
+          }
+      else empty end'
+}
+
+# Normalize Claude statusline/transcript shape into {five_hour, week, source_note}.
+normalize_claude() {
+  jq -c --arg source "$1" '
+    def num: if type == "number" then . elif type == "string" then (tonumber? // empty) else empty end;
+    def pct($x): ($x.used_percentage // $x.usedPercent // $x.used_percent // $x.utilization // empty) | num;
+    def reset($x): ($x.resets_at // $x.resetsAt // empty);
+
+    (.rate_limits // .rateLimits // .message.rate_limits // .message.rateLimits // {five_hour: .five_hour, seven_day: .seven_day, seven_day_sonnet: .seven_day_sonnet, extra_usage: .extra_usage}) as $rl
+    | if ($rl|type) == "object" then
+        ($rl.five_hour // $rl.fiveHour // $rl.primary // empty) as $p
+        | ($rl.seven_day // $rl.sevenDay // $rl.weekly // $rl.secondary // empty) as $s
+        | {
+            provider: "claude",
+            source: $source,
+            plan: null,
+            five_hour: (if ($p|type)=="object" then {used: pct($p), resets_at: reset($p), window_minutes: 300} else null end),
+            week: (if ($s|type)=="object" then {used: pct($s), resets_at: reset($s), window_minutes: 10080} else null end)
+          }
+      else empty end'
+}
+
+read_codex() {
+  local line norm
+  line=$(latest_matching_line "$HOME/.codex/sessions" '(.rate_limits? // .rateLimits? // .rateLimits.rateLimits? // .msg.rate_limits? // .msg.rateLimits? // .payload.rate_limits? // .payload.rateLimits?) != null' || true)
+  [[ -n "$line" ]] || return 1
+  norm=$(printf '%s\n' "$line" | normalize_codex '~/.codex/sessions')
+  [[ -n "$norm" ]] || return 1
+  printf '%s\n' "$norm"
+}
+
+read_claude_api() {
+  local access_token resp norm
+  [[ -r "$HOME/.claude/.credentials.json" ]] || return 1
+  access_token=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null || true)
+  [[ -n "$access_token" ]] || return 1
+
+  resp=$(curl -fsS --max-time 20 \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $access_token" \
+    -H 'anthropic-beta: oauth-2025-04-20' \
+    'https://api.anthropic.com/api/oauth/usage' 2>/dev/null || true)
+  if [[ -n "$resp" ]]; then
+    printf '%s\n' "$resp" > "$CLAUDE_API_CACHE"
+    norm=$(printf '%s\n' "$resp" | normalize_claude 'api.anthropic.com/api/oauth/usage')
+    [[ -n "$norm" ]] || return 1
+    printf '%s\n' "$norm"
+    return 0
+  fi
+
+  if [[ -s "$CLAUDE_API_CACHE" ]]; then
+    norm=$(normalize_claude "$CLAUDE_API_CACHE" < "$CLAUDE_API_CACHE" || true)
+    [[ -n "$norm" ]] || return 1
+    printf '%s\n' "$norm"
+    return 0
+  fi
+
+  return 1
+}
+
+read_claude() {
+  local norm line
+  norm=$(read_claude_api || true)
+  if [[ -n "$norm" ]]; then
+    printf '%s\n' "$norm"
+    return 0
+  fi
+
+  if [[ -s "$CLAUDE_CACHE" ]]; then
+    norm=$(normalize_claude "$CLAUDE_CACHE" < "$CLAUDE_CACHE" || true)
+    if [[ -n "$norm" ]]; then
+      printf '%s\n' "$norm"
+      return 0
+    fi
+  fi
+
+  # Fallback only. Claude's documented, reliable machine-readable source is statusline stdin.
+  line=$(latest_matching_line "$HOME/.claude/projects" '(.rate_limits? // .rateLimits? // .message.rate_limits? // .message.rateLimits?) != null' || true)
+  [[ -n "$line" ]] || return 1
+  norm=$(printf '%s\n' "$line" | normalize_claude '~/.claude/projects')
+  [[ -n "$norm" ]] || return 1
+  printf '%s\n' "$norm"
+}
+
+find_copilot_cli() {
+  if command -v copilot >/dev/null 2>&1; then
+    command -v copilot
+  elif command -v github-copilot >/dev/null 2>&1; then
+    command -v github-copilot
+  else
+    return 1
+  fi
+}
+
+COPILOT_CAPTURE_STATUS=""
+COPILOT_CAPTURE_OUTPUT=""
+
+capture_copilot_screen() {
+  local cli python_bin capture_cwd timeout_seconds output status helper_cmd
+  COPILOT_CAPTURE_STATUS=""
+  COPILOT_CAPTURE_OUTPUT=""
+
+  if [[ "${LLM_USAGE_DISABLE_COPILOT:-0}" == "1" ]]; then
+    COPILOT_CAPTURE_STATUS="disabled"
+    return 1
+  fi
+
+  if [[ -n "${LLM_USAGE_COPILOT_CAPTURE_TEXT+x}" ]]; then
+    COPILOT_CAPTURE_STATUS="fixture"
+    COPILOT_CAPTURE_OUTPUT="$LLM_USAGE_COPILOT_CAPTURE_TEXT"
+    printf '%s\n' "$COPILOT_CAPTURE_OUTPUT"
+    return 0
+  fi
+
+  cli=$(find_copilot_cli || true)
+  if [[ -z "$cli" ]]; then
+    COPILOT_CAPTURE_STATUS="missing-cli"
+    return 1
+  fi
+
+  if ! command -v timeout >/dev/null 2>&1; then
+    COPILOT_CAPTURE_STATUS="no-timeout"
+    return 1
+  fi
+
+  python_bin=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+  if [[ -z "$python_bin" ]]; then
+    COPILOT_CAPTURE_STATUS="no-pty-helper"
+    return 1
+  fi
+
+  capture_cwd="${LLM_USAGE_COPILOT_CWD:-$(cd "$(dirname "$0")" && pwd)}"
+  timeout_seconds="${LLM_USAGE_COPILOT_TIMEOUT:-10}"
+  helper_cmd="${LLM_USAGE_COPILOT_CAPTURE_CMD:-}"
+
+  set +e
+  output=$(
+    LLM_USAGE_COPILOT_CAPTURE_CWD="$capture_cwd" \
+    LLM_USAGE_COPILOT_CAPTURE_CMD="$helper_cmd" \
+    timeout "$timeout_seconds" "$python_bin" - "$cli" <<'PY'
+import os
+import pty
+import re
+import select
+import signal
+import sys
+import time
+
+cli = sys.argv[1]
+capture_cwd = os.environ.get("LLM_USAGE_COPILOT_CAPTURE_CWD") or os.getcwd()
+override_cmd = os.environ.get("LLM_USAGE_COPILOT_CAPTURE_CMD", "")
+
+pid, fd = pty.fork()
+if pid == 0:
+    try:
+        os.chdir(capture_cwd)
+    except OSError:
+        pass
+    if override_cmd:
+        os.execvp("bash", ["bash", "-lc", override_cmd])
+    os.execvp(cli, [cli, "--screen-reader", "-C", capture_cwd])
+
+parts = []
+trust_sent = False
+trust_seen = False
+start = time.time()
+
+while time.time() - start < 60:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if fd in ready:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        parts.append(chunk.decode("utf-8", "replace"))
+
+    text = "".join(parts)
+    if "Confirm folder trust" in text or "Do you trust the files in this folder?" in text:
+        trust_seen = True
+        if not trust_sent:
+            # Best effort only. In some terminal modes Copilot ignores raw PTY newlines.
+            try:
+                os.write(fd, b"\r")
+            except OSError:
+                pass
+            trust_sent = True
+
+    if "Monthly:" in text and "AI Credits:" in text:
+        break
+
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        break
+    time.sleep(0.15)
+
+text = "".join(parts)
+text = text.replace("\r", "\n").replace("\a", "")
+text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+text = re.sub(r"[^\S\n]+", " ", text)
+text = re.sub(r"\n{3,}", "\n\n", text)
+if trust_seen and "Monthly:" not in text:
+    text += "\ntrust_prompt_seen\n"
+print(text.strip())
+PY
+  )
+  status=$?
+  set -e
+
+  case "$status" in
+    0) COPILOT_CAPTURE_STATUS="ok" ;;
+    124) COPILOT_CAPTURE_STATUS="timeout" ;;
+    *) COPILOT_CAPTURE_STATUS="capture-error" ;;
+  esac
+
+  COPILOT_CAPTURE_OUTPUT="$output"
+  [[ -n "$COPILOT_CAPTURE_OUTPUT" ]] || return 1
+  printf '%s\n' "$COPILOT_CAPTURE_OUTPUT"
+}
+
+parse_copilot_monthly_used() {
+  local text="${1:-}"
+  if [[ "$text" =~ Monthly:[[:space:]]*([0-9]+([.][0-9]+)?)%[[:space:]]*used ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+parse_copilot_ai_credits() {
+  local text="${1:-}"
+  if [[ "$text" =~ AI[[:space:]]+Credits:[[:space:]]*([0-9]+([.][0-9]+)?) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+}
+
+read_copilot() {
+  local screen monthly_used ai_credits reason
+  capture_copilot_screen >/dev/null 2>&1 || true
+  screen="$COPILOT_CAPTURE_OUTPUT"
+  monthly_used=$(parse_copilot_monthly_used "$screen")
+  ai_credits=$(parse_copilot_ai_credits "$screen")
+
+  if [[ -n "$monthly_used" || -n "$ai_credits" ]]; then
+    jq -nc \
+      --arg source 'copilot cli' \
+      --arg capture_status "$COPILOT_CAPTURE_STATUS" \
+      --arg monthly_used "$monthly_used" \
+      --arg ai_credits "$ai_credits" '
+        def num_or_null($x): if $x == "" then null else ($x | tonumber?) end;
+        {
+          provider: "copilot",
+          source: $source,
+          capture_status: $capture_status,
+          monthly: (num_or_null($monthly_used) | if . == null then null else {used: ., remaining: ([0, (100 - .), 100] | sort | .[1])} end),
+          ai_credits: (num_or_null($ai_credits) | if . == null then null else {used: .} end)
+        }'
+    return 0
+  fi
+
+  reason="$COPILOT_CAPTURE_STATUS"
+  if [[ "$screen" == *"trust_prompt_seen"* ]]; then
+    reason="trust-prompt"
+  elif [[ "$screen" =~ [Ll]og[[:space:]-]?[Ii]n|[Aa]uth ]]; then
+    reason="not-authenticated"
+  elif [[ -n "$screen" ]]; then
+    reason="format-changed"
+  fi
+
+  jq -nc --arg source 'copilot cli' --arg reason "$reason" \
+    '{provider:"copilot", source:$source, available:false, reason:$reason}'
+}
+
+json_for_provider() {
+  local provider_json="${1:-}"
+  local provider="$2"
+  if [[ -z "$provider_json" ]]; then
+    jq -nc --arg provider "$provider" '{provider:$provider, available:false}'
+  else
+    printf '%s\n' "$provider_json" | jq -c '
+      def remain($x): if $x == null or $x.used == null then null else ([0, (100 - $x.used), 100] | sort | .[1]) end;
+      . + {
+        available: true,
+        five_hour: (.five_hour + {remaining: remain(.five_hour)}),
+        week: (.week + {remaining: remain(.week)})
+      }'
+  fi
+}
+
+json_for_copilot() {
+  local copilot_json="${1:-}"
+  if [[ -z "$copilot_json" ]]; then
+    jq -nc '{provider:"copilot", source:"copilot cli", available:false, reason:"unavailable"}'
+  else
+    printf '%s\n' "$copilot_json" | jq -c '
+      if .available? == false then .
+      else . + {available: ((.monthly != null) or (.ai_credits != null))}
+      end'
+  fi
+}
+
+print_value_row() {
+  local provider="$1" window="$2" remaining="$3" used="$4" reset="$5" source="$6"
+  printf '%-10s %-12s %10s %10s %-16s %s\n' \
+    "$provider" "$window" "$remaining" "$used" "$reset" "$source"
+}
+
+print_row() {
+  local provider="$1" window="$2" used="$3" reset="$4" source="$5"
+  local remaining reset_text
+  remaining=$(remaining_from_used "$used")
+  [[ -n "$remaining" ]] || remaining="n/a"
+  reset_text=$(fmt_reset "$reset")
+  [[ -n "$reset_text" ]] || reset_text="n/a"
+  print_value_row "$provider" "$window" "$(fmt_pct "$remaining")%" "$(fmt_pct "${used:-}")%" "$reset_text" "$source"
+}
+
+print_unavailable_rows() {
+  local provider="$1"
+  print_value_row "$provider" "5h" "n/a" "n/a" "n/a" "no local data"
+  print_value_row "$provider" "weekly" "n/a" "n/a" "n/a" "no local data"
+}
+
+print_copilot_rows() {
+  local copilot_json="$1"
+  local source monthly_used monthly_remaining ai_credits
+
+  if [[ -z "$copilot_json" ]]; then
+    print_value_row "Copilot" "monthly" "unavailable" "unavailable" "-" "copilot cli"
+    print_value_row "Copilot" "ai-credits" "unavailable" "unavailable" "-" "copilot cli"
+    return
+  fi
+
+  source=$(jq -r '.source // "copilot cli"' <<<"$copilot_json")
+  if [[ "$(jq -r 'if .available? == false then "false" else "true" end' <<<"$copilot_json")" == "false" ]]; then
+    print_value_row "Copilot" "monthly" "unavailable" "unavailable" "-" "$source"
+    print_value_row "Copilot" "ai-credits" "unavailable" "unavailable" "-" "$source"
+    return
+  fi
+
+  monthly_used=$(jq -r '.monthly.used // empty' <<<"$copilot_json")
+  monthly_remaining=$(jq -r '.monthly.remaining // empty' <<<"$copilot_json")
+  ai_credits=$(jq -r '.ai_credits.used // empty' <<<"$copilot_json")
+
+  if [[ -n "$monthly_remaining" ]]; then
+    monthly_remaining="$(fmt_pct "$monthly_remaining")%"
+  else
+    monthly_remaining="unknown"
+  fi
+  if [[ -n "$monthly_used" ]]; then
+    monthly_used="$(fmt_pct "$monthly_used")%"
+  else
+    monthly_used="unknown"
+  fi
+  [[ -n "$ai_credits" ]] || ai_credits="unknown"
+
+  print_value_row "Copilot" "monthly" "$monthly_remaining" "$monthly_used" "-" "$source"
+  print_value_row "Copilot" "ai-credits" "unknown" "$ai_credits" "-" "$source"
+}
+
+render_once() {
+  local codex claude copilot codex_json claude_json copilot_json
+  codex=$(read_codex || true)
+  claude=$(read_claude || true)
+  copilot=$(read_copilot || true)
+
+  if [[ "$JSON_OUTPUT" -eq 1 ]]; then
+    codex_json=$(json_for_provider "$codex" codex)
+    claude_json=$(json_for_provider "$claude" claude)
+    copilot_json=$(json_for_copilot "$copilot")
+    jq -nc --arg generated_at "$(date -Is)" --argjson codex "$codex_json" --argjson claude "$claude_json" --argjson copilot "$copilot_json" \
+      '{generated_at:$generated_at, codex:$codex, claude:$claude, copilot:$copilot}'
+    return
+  fi
+
+  if [[ "$NO_HEADER" -eq 0 ]]; then
+    printf '%-10s %-12s %10s %10s %-16s %s\n' "Tool" "Window" "Remaining" "Used" "Resets" "Source"
+    printf '%-10s %-12s %10s %10s %-16s %s\n' "----------" "------------" "----------" "----------" "----------------" "----------------"
+  fi
+
+  if [[ -n "$codex" ]]; then
+    print_row "Codex" "5h"     "$(jq -r '.five_hour.used // empty' <<<"$codex")" "$(jq -r '.five_hour.resets_at // empty' <<<"$codex")" "$(jq -r '.source' <<<"$codex")"
+    print_row "Codex" "weekly" "$(jq -r '.week.used // empty' <<<"$codex")"      "$(jq -r '.week.resets_at // empty' <<<"$codex")"      "$(jq -r '.source' <<<"$codex")"
+  else
+    print_unavailable_rows "Codex"
+  fi
+
+  if [[ -n "$claude" ]]; then
+    print_row "Claude" "5h"     "$(jq -r '.five_hour.used // empty' <<<"$claude")" "$(jq -r '.five_hour.resets_at // empty' <<<"$claude")" "$(jq -r '.source' <<<"$claude")"
+    print_row "Claude" "weekly" "$(jq -r '.week.used // empty' <<<"$claude")"      "$(jq -r '.week.resets_at // empty' <<<"$claude")"      "$(jq -r '.source' <<<"$claude")"
+  else
+    print_unavailable_rows "Claude"
+  fi
+
+  print_copilot_rows "$copilot"
+}
+
+statusline_mode() {
+  local input five week five_rem week_rem out
+  input=$(cat)
+  if jq -e '.rate_limits? // .rateLimits?' >/dev/null 2>&1 <<<"$input"; then
+    printf '%s\n' "$input" > "$CLAUDE_CACHE"
+  fi
+
+  five=$(jq -r '.rate_limits.five_hour.used_percentage // .rateLimits.fiveHour.usedPercent // empty' <<<"$input" 2>/dev/null || true)
+  week=$(jq -r '.rate_limits.seven_day.used_percentage // .rateLimits.sevenDay.usedPercent // empty' <<<"$input" 2>/dev/null || true)
+  five_rem=$(remaining_from_used "$five")
+  week_rem=$(remaining_from_used "$week")
+
+  out="Claude"
+  [[ -n "$five_rem" ]] && out="$out 5h ${five_rem}% left"
+  [[ -n "$week_rem" ]] && out="$out weekly ${week_rem}% left"
+  printf '%s\n' "$out"
+}
+
+if [[ "$STATUSLINE_MODE" -eq 1 ]]; then
+  statusline_mode
+  exit 0
+fi
+
+if [[ "$WATCH_INTERVAL" != "0" ]]; then
+  while true; do
+    clear 2>/dev/null || true
+    render_once
+    sleep "$WATCH_INTERVAL"
+  done
+else
+  render_once
+fi
