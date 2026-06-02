@@ -18,7 +18,7 @@ Tool             Window         Remaining    Remaining Time   Resets            
 --------------   ------------   ----------   --------------   ----------------   ------------
 Codex            5h             100%         -                2026-06-02 23:59   4h 58m      
 Codex            weekly         53%          -                2026-06-07 16:25   4d 21h 25m  
-Claude           5h             29%          0m               2026-06-02 23:20   4h 19m      
+Claude           5h             29%          -                2026-06-02 23:20   4h 19m      
 Claude           weekly         58%          10m              2026-06-04 13:00   1d 17h 59m  
 Copilot          monthly        79%          -                2026-07-01 00:00   28d 4h 59m    
 ```
