@@ -24,6 +24,19 @@ WATCH_INTERVAL=0
 JSON_OUTPUT=0
 STATUSLINE_MODE=0
 NO_HEADER=0
+COLOR_ENABLED=0
+RED=''
+YELLOW=''
+GREEN=''
+RESET=''
+
+if [[ -t 1 && -z "${LLM_USAGE_NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
+  COLOR_ENABLED=1
+  RED=$'\033[0;31m'
+  YELLOW=$'\033[0;33m'
+  GREEN=$'\033[0;32m'
+  RESET=$'\033[0m'
+fi
 
 usage() {
   cat <<USAGE
@@ -453,10 +466,42 @@ json_for_copilot() {
   fi
 }
 
+colorize_percent() {
+  local value="${1:-}"
+  if [[ "$COLOR_ENABLED" -ne 1 ]]; then
+    printf '%s' "$value"
+    return
+  fi
+
+  case "$value" in
+    n/a|unavailable|unknown|-|"") printf '%s' "$value"; return;;
+  esac
+
+  local numeric="${value%\%}"
+  if [[ ! "$numeric" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    printf '%s' "$value"
+    return
+  fi
+
+  local integer="${numeric%.*}"
+  [[ -z "$integer" ]] && integer="0"
+
+  if (( integer < 30 )); then
+    printf '%s%s%s' "$RED" "$value" "$RESET"
+  elif (( integer < 70 )); then
+    printf '%s%s%s' "$YELLOW" "$value" "$RESET"
+  else
+    printf '%s%s%s' "$GREEN" "$value" "$RESET"
+  fi
+}
+
 print_value_row() {
   local provider="$1" window="$2" remaining="$3" used="$4" reset="$5" source="$6"
+  local remaining_colored used_colored
+  remaining_colored=$(colorize_percent "$remaining")
+  used_colored=$(colorize_percent "$used")
   printf '%-10s %-12s %10s %10s %-16s %s\n' \
-    "$provider" "$window" "$remaining" "$used" "$reset" "$source"
+    "$provider" "$window" "$remaining_colored" "$used_colored" "$reset" "$source"
 }
 
 print_row() {

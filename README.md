@@ -25,6 +25,7 @@ Copilot    ai-credits      unknown          0 -                copilot cli
 - Reads available local state and optionally queries the Anthropic usage endpoint when credentials are present.
 - Outputs a human-friendly table by default and optional JSON output for tooling.
 - `--watch` now prefixes each refresh with `Last refreshed: YYYY-MM-DD HH:MM:SS` and appends new rows without clearing the screen.
+- Percentages use terminal color for quick scanning (red → yellow → green by remaining usage).
 - Runs as a tiny executable script with no build step.
 
 ## What it does not do
