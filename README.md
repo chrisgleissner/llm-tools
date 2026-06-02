@@ -5,14 +5,36 @@ Tiny Linux CLI for checking remaining Codex, Claude Code, and GitHub Copilot usa
 `llm-usage` is a small Bash utility for developers who use multiple AI coding tools and want a quick local usage snapshot without opening several apps or dashboards.
 
 ```log
-Tool       Window        Remaining       Resets           Source
----------- ------------ ---------- ---------------- ----------------
-Codex      5h                47% 2026-06-02 13:49 ~/.codex/sessions
-Codex      weekly            59% 2026-06-07 16:25 ~/.codex/sessions
-Claude     5h                94% 2026-06-02 18:20 /home/chris/.cache/llm-usage/claude-usage-api.json
-Claude     weekly            74% 2026-06-04 13:00 /home/chris/.cache/llm-usage/claude-usage-api.json
-Copilot    monthly           79% -                copilot cli
+Last refreshed: 2026-06-02 18:30:00
+Tool                       Window         Remaining    Remaining Time   Resets             Time to Reset
+------------------------   ------------   ----------   --------------   ----------------   ------------
+Codex                      5h             78%          -                2026-06-02 18:49   19m         
+Codex                      weekly         53%          -                2026-06-07 16:25   4d 21h 55m  
+Claude                     5h             69%          22m              2026-06-02 23:20   4h 49m      
+Claude                     weekly         62%          -                2026-06-04 13:00   1d 18h 29m  
+Copilot                    monthly        79%          -                2026-07-01 00:00   28d 5h 29m  
 ```
+
+### Output columns
+
+`Tool`: Provider or row type (`Codex`, `Claude`, `Copilot`, plus `ai-credits` when enabled).  
+`Window`: Quota window (for example `5h`, `weekly`, `monthly`).  
+`Remaining`: Remaining quota as a percentage (or `-` when unavailable).  
+`Remaining Time`: Estimated time to consume the current remaining quota at the recent burn rate; `-` when unknown/unreliable.  
+`Resets`: Local reset time for that window, formatted as `YYYY-MM-DD HH:MM` in your local time zone.  
+`Time to Reset`: Relative time until the window reset.  
+`Source` (shown with `--show-source`): Origin of the row data (`codex`, `claude cache`, etc.).
+
+### Cell coloring
+
+The `Remaining` column is color-coded when color output is enabled:
+
+* Red: remaining usage is under 10%.
+* Yellow: remaining usage is 10% to 29%.
+* Green: remaining usage is 30% or above.
+* Unknown/unavailable values (for example `-`) are not colorized.
+
+Colors are disabled automatically when output is not a TTY, when `TERM=dumb`, or when `LLM_USAGE_NO_COLOR` is set.
 
 ## Features
 
