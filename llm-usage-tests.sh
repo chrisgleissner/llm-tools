@@ -308,6 +308,27 @@ suspend_dir="$(awk '{print $NF}' "$tmpdir/scheduler-suspend.txt")"
 jq -e 'select(.type=="suspend_schedule_plan") | .data.reason == "rate-limited" and .data.target_epoch == 1780441200' "$suspend_dir/events.jsonl" >/dev/null \
   || fail "suspend-until-ready did not record schedule plan"
 
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run-confirm.log"
+SYSTEMCTL_LOG="$tmpdir/systemctl-confirm.log"
+: > "$SYSTEMD_RUN_LOG"
+: > "$SYSTEMCTL_LOG"
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+printf 'confirm prompt\n' > "$tmpdir/scheduler-confirm-prompt.md"
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
+LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS=0 \
+SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+  "$SCHEDULER" --tool claude --prompt-file "$tmpdir/scheduler-confirm-prompt.md" --command-template 'sched-mock {prompt}' --suspend-until-ready --log-dir "$tmpdir/scheduler-confirm-logs" > "$tmpdir/scheduler-confirm.txt"
+assert_grep 'suspend-until-ready armed' "$tmpdir/scheduler-confirm.txt"
+assert_grep 'wake/run at: .*1780441200' "$tmpdir/scheduler-confirm.txt"
+assert_grep 'tool: claude' "$tmpdir/scheduler-confirm.txt"
+assert_grep 'model: from command template' "$tmpdir/scheduler-confirm.txt"
+assert_grep "prompt: $tmpdir/scheduler-confirm-prompt.md" "$tmpdir/scheduler-confirm.txt"
+assert_grep "directory: $SCRIPT_DIR" "$tmpdir/scheduler-confirm.txt"
+assert_grep '^suspend$' "$SYSTEMCTL_LOG"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "0" ]] || fail "confirmation suspend should not submit before resumed scheduler"
+
 LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$weekly_exhausted_usage" \
   "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-weekly-logs" > "$tmpdir/scheduler-weekly.txt"

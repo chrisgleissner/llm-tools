@@ -94,6 +94,7 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_COPILOT_CWD`
 * `LLM_USAGE_COPILOT_CAPTURE_CWD`
 * `LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS`
+* `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS`
 
 Document any new user-facing or test-facing variable here and in `README.md` when appropriate.
 

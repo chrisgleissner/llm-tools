@@ -33,6 +33,7 @@ DRY_RUN=0
 WAKE=0
 WAKE_TEST=0
 SUSPEND_UNTIL_READY=0
+PRE_SUSPEND_CONFIRMATION_SECONDS="${LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS:-5}"
 
 RUN_DIR=""
 TEXT_LOG=""
@@ -197,6 +198,7 @@ validate_args() {
     err "--poll-interval must be at least 1"
     exit 2
   fi
+  is_integer "$PRE_SUSPEND_CONFIRMATION_SECONDS" || { err "LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS must be integer seconds"; exit 2; }
   validate_retry_delays "$RETRY_DELAYS"
 }
 
@@ -380,6 +382,53 @@ command_argv_json() {
     template_argv_json "$COMMAND_TEMPLATE"
   else
     provider_default_argv_json
+  fi
+}
+
+scheduler_model_description() {
+  if [[ -n "$COMMAND_TEMPLATE" ]]; then
+    printf '%s\n' 'from command template'
+    return 0
+  fi
+  case "$TOOL" in
+    codex) printf '%s\n' 'Codex CLI default/configured model' ;;
+    claude) printf '%s\n' 'Claude Code default/configured model' ;;
+    copilot) printf '%s\n' 'GitHub Copilot CLI default/configured model' ;;
+  esac
+}
+
+format_local_epoch() {
+  local epoch="$1"
+  date -d "@$epoch" '+%Y-%m-%d %H:%M:%S %Z'
+}
+
+print_pre_suspend_confirmation() {
+  local target_epoch="$1"
+  local unit="$2"
+  local reason="$3"
+  local seconds="$PRE_SUSPEND_CONFIRMATION_SECONDS"
+  local prompt_display model_display wake_display
+
+  if [[ -n "$PROMPT_FILE" ]]; then
+    prompt_display="$PROMPT_FILE (saved copy: $RUN_DIR/prompt.txt)"
+  else
+    prompt_display="inline prompt (saved copy: $RUN_DIR/prompt.txt)"
+  fi
+  model_display="$(scheduler_model_description)"
+  wake_display="$(format_local_epoch "$target_epoch")"
+
+  printf 'suspend-until-ready armed\n'
+  printf '  wake/run at: %s (epoch %s)\n' "$wake_display" "$target_epoch"
+  printf '  reason: %s\n' "$reason"
+  printf '  tool: %s\n' "$TOOL"
+  printf '  model: %s\n' "$model_display"
+  printf '  prompt: %s\n' "$prompt_display"
+  printf '  directory: %s\n' "$CWD"
+  printf '  timer unit: %s\n' "$unit"
+  printf '  logs: %s\n' "$RUN_DIR"
+  if (( seconds > 0 )); then
+    printf 'suspending in %s seconds...\n' "$seconds"
+    sleep "$seconds"
   fi
 }
 
@@ -710,6 +759,8 @@ PY
     return 0
   fi
 
+  print_pre_suspend_confirmation "$target_epoch" "$unit" "$reason"
+  log_event "pre_suspend_confirmation" "$(jq -nc --arg unit "$unit" --arg reason "$reason" --argjson target_epoch "$target_epoch" --arg model "$(scheduler_model_description)" --arg prompt "$PROMPT_SOURCE" --arg cwd "$CWD" --argjson seconds "$PRE_SUSPEND_CONFIRMATION_SECONDS" '{unit:$unit,reason:$reason,target_epoch:$target_epoch,model:$model,prompt:$prompt,cwd:$cwd,seconds:$seconds}')"
   log_text "systemctl suspend requested"
   sync
   systemctl suspend
