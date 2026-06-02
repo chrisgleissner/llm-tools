@@ -7,6 +7,6 @@
 - [x] Add README
 - [x] Add GitHub Actions workflow
 - [x] Preserve local command availability
-- [ ] Run validation
-- [ ] Initialise Git repository and create initial commit
-- [ ] Final verification
+- [x] Run validation
+- [x] Initialise Git repository and create initial commit
+- [x] Final verification
