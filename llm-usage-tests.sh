@@ -148,11 +148,11 @@ assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+-[[:space:]]+
 LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
   run_tool "$tmpdir/codex-spark.txt"
 assert_grep '^Codex[[:space:]]+5h[[:space:]]+47%[[:space:]]+' "$tmpdir/codex-spark.txt"
-assert_grep '^GPT-5\.3-Codex-Spark[[:space:]]+5h[[:space:]]+1%[[:space:]]+' "$tmpdir/codex-spark.txt"
+assert_grep '^GPT-5\.3[[:space:]]+Spark[[:space:]]+5h[[:space:]]+1%[[:space:]]+' "$tmpdir/codex-spark.txt"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
   run_tool "$tmpdir/codex-spark-hidden.txt" --hide-codex-spark
-assert_not_grep '^GPT-5\.3-Codex-Spark[[:space:]]+5h' "$tmpdir/codex-spark-hidden.txt"
+assert_not_grep '^GPT-5\.3[[:space:]]+Spark[[:space:]]+5h' "$tmpdir/codex-spark-hidden.txt"
 assert_grep '^Codex[[:space:]]+5h[[:space:]]+47%[[:space:]]+' "$tmpdir/codex-spark-hidden.txt"
 
 LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \

@@ -35,7 +35,7 @@ SHOW_CODEX_SPARK="${LLM_USAGE_SHOW_CODEX_SPARK:-1}"
 COPILOT_MONTHLY_RESET_OFFSET_DAYS="${LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS:-0}"
 LOG_ENABLED=0
 COLOR_ENABLED=0
-TOOL_COL_WIDTH=24
+TOOL_COL_WIDTH=14
 TABLE_GAP_WIDTH=3
 RED=''
 YELLOW=''
@@ -230,6 +230,7 @@ estimate_remaining_time_from_log() {
   local stale_mult
   local first_decrease_ts=""
   local last_decrease_ts=""
+  local trend_start_ts=""
   local decay_window=0
   local stale_seconds=0
   local stale_threshold=0
@@ -251,6 +252,9 @@ estimate_remaining_time_from_log() {
     if [[ -n "$prev_ts" ]]; then
       dt=$(( ts - prev_ts ))
       if (( dt > 0 )); then
+        if [[ -z "$trend_start_ts" ]]; then
+          trend_start_ts="$prev_ts"
+        fi
         prev_rem_tenths=$(awk -v v="$prev_rem" 'BEGIN {printf "%d", (v*10 + 0.5)}')
         rem_tenths=$(awk -v v="$rem" 'BEGIN {printf "%d", (v*10 + 0.5)}')
         if (( rem_tenths < prev_rem_tenths )); then
@@ -262,15 +266,18 @@ estimate_remaining_time_from_log() {
           total_reduction_tenths=$(( total_reduction_tenths + (prev_rem_tenths - rem_tenths) ))
           total_seconds=$(( total_seconds + dt ))
           if [[ -z "$first_decrease_ts" ]]; then
-            first_decrease_ts="$prev_ts"
+            first_decrease_ts="$trend_start_ts"
           fi
           last_decrease_ts="$ts"
         elif (( rem_tenths > prev_rem_tenths )); then
           # usage window reset or quota refill; discard older trend history.
+          trend_start_ts="$ts"
           first_decrease_ts=""
           last_decrease_ts=""
           total_reduction_tenths=0
           total_seconds=0
+        else
+          total_seconds=$(( total_seconds + dt ))
         fi
       fi
     fi
@@ -315,8 +322,10 @@ estimate_remaining_time_from_log() {
   local remaining_seconds
   remaining_seconds=$(awk -v rem="$now_tenths" -v reduction="$total_reduction_tenths" -v elapsed="$total_seconds" \
     'BEGIN { printf "%d", (rem * elapsed) / reduction }')
-  if (( remaining_seconds < 1 )); then
-    printf '0m'
+  if (( remaining_seconds <= 0 )); then
+    printf '-'
+  elif (( remaining_seconds < 60 )); then
+    printf '1m'
   else
     fmt_duration "$remaining_seconds"
   fi
@@ -839,6 +848,18 @@ print_rule_cell() {
   fi
 }
 
+format_tool_name() {
+  local name="${1:-}"
+  case "$name" in
+    GPT-5.3-Codex-Spark|*GPT-5.3*Codex*Spark*)
+      printf 'GPT-5.3 Spark'
+      ;;
+    *)
+      printf '%s' "$name"
+      ;;
+  esac
+}
+
 print_value_row() {
   local provider="$1"
   local window="$2"
@@ -869,7 +890,9 @@ print_value_row() {
 }
 
 print_row() {
-  local provider="$1" window="$2" used="$3" reset="$4" source="$5"
+  local provider="$1"
+  local window="$2" used="$3" reset="$4" source="$5"
+  local display_provider="${6:-$1}"
   local remaining remaining_time reset_text time_to_reset
   remaining=$(remaining_from_used "$used")
   [[ -n "$remaining" ]] || remaining="-"
@@ -885,20 +908,21 @@ print_row() {
 
   local fmt_remaining="$(fmt_pct "$remaining")"
   if [[ "$fmt_remaining" == "-" || "$fmt_remaining" == "unknown" ]]; then
-    print_value_row "$provider" "$window" "$fmt_remaining" "$remaining_time" "$reset_text" "$time_to_reset" "$source"
+    print_value_row "$display_provider" "$window" "$fmt_remaining" "$remaining_time" "$reset_text" "$time_to_reset" "$source"
   else
-    print_value_row "$provider" "$window" "${fmt_remaining}%" "$remaining_time" "$reset_text" "$time_to_reset" "$source"
+    print_value_row "$display_provider" "$window" "${fmt_remaining}%" "$remaining_time" "$reset_text" "$time_to_reset" "$source"
   fi
 }
 
 log_and_print_row() {
   local provider="$1" window="$2" used="$3" reset="$4" source="$5"
+  local display_provider="${6:-$provider}"
   local remaining
   remaining=$(remaining_from_used "$used")
   if [[ "$LOG_ENABLED" -eq 1 ]]; then
     log_usage_sample "$provider" "$window" "$remaining"
   fi
-  print_row "$provider" "$window" "$used" "$reset" "$source"
+  print_row "$provider" "$window" "$used" "$reset" "$source" "$display_provider"
 }
 
 print_unavailable_rows() {
@@ -928,9 +952,10 @@ print_codex_rows() {
   fi
 
   while IFS= read -r row; do
-    local row_key provider source row_is_spark
+    local row_key provider source row_is_spark display_provider
     row_key=$(jq -r '.key // "codex"' <<<"$row")
     provider=$(jq -r '.name // "Codex"' <<<"$row")
+    display_provider=$(format_tool_name "$provider")
     row_is_spark=0
     if [[ "$row_key" == "codex-spark" || "${provider,,}" == *spark* ]]; then
       row_is_spark=1
@@ -942,8 +967,8 @@ print_codex_rows() {
     source=$(jq -r '.source // empty' <<<"$row")
     [[ -n "$source" ]] || source=$(jq -r '.source // empty' <<<"$codex_json")
 
-    log_and_print_row "$provider" "5h" "$(jq -r '.five_hour.used // empty' <<<"$row")" "$(jq -r '.five_hour.resets_at // empty' <<<"$row")" "$source"
-    log_and_print_row "$provider" "weekly" "$(jq -r '.week.used // empty' <<<"$row")" "$(jq -r '.week.resets_at // empty' <<<"$row")" "$source"
+    log_and_print_row "$provider" "5h" "$(jq -r '.five_hour.used // empty' <<<"$row")" "$(jq -r '.five_hour.resets_at // empty' <<<"$row")" "$source" "$display_provider"
+    log_and_print_row "$provider" "weekly" "$(jq -r '.week.used // empty' <<<"$row")" "$(jq -r '.week.resets_at // empty' <<<"$row")" "$source" "$display_provider"
   done < <(jq -c '.rows[]' <<<"$codex_json")
 
 }

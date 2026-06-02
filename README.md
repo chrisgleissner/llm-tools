@@ -13,14 +13,14 @@
 Run `llm-usage -w 60` to see your live token use, updated every 60 seconds:
 
 ```log
-Last refreshed: 2026-06-02 18:30:00
-Tool                       Window         Remaining    Remaining Time   Resets             Time to Reset
-------------------------   ------------   ----------   --------------   ----------------   ------------
-Codex                      5h             78%          -                2026-06-02 18:49   19m         
-Codex                      weekly         53%          -                2026-06-07 16:25   4d 21h 55m  
-Claude                     5h             69%          22m              2026-06-02 23:20   4h 49m      
-Claude                     weekly         62%          -                2026-06-04 13:00   1d 18h 29m  
-Copilot                    monthly        79%          -                2026-07-01 00:00   28d 5h 29m  
+Last refreshed: 2026-06-02 19:00:38
+Tool             Window         Remaining    Remaining Time   Resets             Time to Reset
+--------------   ------------   ----------   --------------   ----------------   ------------
+Codex            5h             100%         -                2026-06-02 23:59   4h 58m      
+Codex            weekly         53%          -                2026-06-07 16:25   4d 21h 25m  
+Claude           5h             29%          0m               2026-06-02 23:20   4h 19m      
+Claude           weekly         58%          10m              2026-06-04 13:00   1d 17h 59m  
+Copilot          monthly        79%          -                2026-07-01 00:00   28d 4h 59m    
 ```
 
 ## Install
