@@ -23,7 +23,6 @@ MIN_REMAINING="1"
 POLL_INTERVAL="60"
 MAX_UNAVAILABLE_WAIT="900"
 RETRY_DELAYS="60,180,600"
-NO_RETRY=0
 CWD="$(pwd)"
 EXEC_MODE="fresh"
 TMUX_TARGET=""
@@ -36,11 +35,14 @@ WAKE_TEST=0
 SUSPEND_UNTIL_READY=0
 PRE_SUSPEND_CONFIRMATION_SECONDS="${LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS:-5}"
 
+NOT_BEFORE_EPOCH=""
 RUN_DIR=""
 TEXT_LOG=""
 EVENT_LOG=""
 PROMPT_SHA=""
-PROMPT_PATH=""
+# Tracks the latest OS wake target already armed, so a long poll loop under --wake
+# does not arm a fresh transient systemd timer on every iteration.
+WAKE_ARMED_TARGET=0
 
 usage() {
   cat <<USAGE
@@ -104,17 +106,11 @@ is_integer() {
 
 # A usage decision is "undeterminable" when we cannot positively measure the
 # remaining quota: no network, a transient API failure, an unsupported window,
-# or inconclusive data. These are distinct from "rate-limited", which carries a
-# real reset epoch we can wait for precisely.
+# inconclusive data, or any provider-specific unavailable reason. These are
+# distinct from "rate-limited", which carries a real reset epoch to wait for.
+# Invert logic: only "rate-limited" is NOT undetermined.
 is_undetermined_reason() {
-  case "${1:-}" in
-    unavailable|inconclusive-usage|unsupported-window) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-json_quote() {
-  jq -Rn --arg v "${1:-}" '$v'
+  [[ "${1:-}" != "rate-limited" ]]
 }
 
 log_text() {
@@ -168,7 +164,7 @@ parse_args() {
       --poll-interval) [[ $# -ge 2 ]] || { err "--poll-interval requires seconds"; exit 2; }; POLL_INTERVAL="$2"; shift 2 ;;
       --max-unavailable-wait) [[ $# -ge 2 ]] || { err "--max-unavailable-wait requires seconds"; exit 2; }; MAX_UNAVAILABLE_WAIT="$2"; shift 2 ;;
       --retry-delays) [[ $# -ge 2 ]] || { err "--retry-delays requires a list"; exit 2; }; RETRY_DELAYS="$2"; shift 2 ;;
-      --no-retry) NO_RETRY=1; RETRY_DELAYS=""; shift ;;
+      --no-retry) RETRY_DELAYS=""; shift ;;
       --cwd) [[ $# -ge 2 ]] || { err "--cwd requires a directory"; exit 2; }; CWD="$2"; shift 2 ;;
       --fresh) EXEC_MODE="fresh"; TMUX_TARGET=""; shift ;;
       --tmux) [[ $# -ge 2 ]] || { err "--tmux requires SESSION[:WINDOW]"; exit 2; }; EXEC_MODE="tmux"; TMUX_TARGET="$2"; shift 2 ;;
@@ -212,6 +208,20 @@ validate_args() {
     auto|5h|weekly|monthly) ;;
     *) err "invalid --window: $WINDOW"; exit 2 ;;
   esac
+  # A window must actually exist for the chosen tool, otherwise gating can never
+  # resolve to a known limit (copilot has only a monthly window; codex/claude
+  # have 5h and weekly windows but no monthly one).
+  case "$TOOL" in
+    copilot)
+      case "$WINDOW" in
+        auto|monthly) ;;
+        *) err "--window $WINDOW is not valid for copilot (use auto or monthly)"; exit 2 ;;
+      esac ;;
+    codex|claude)
+      if [[ "$WINDOW" == "monthly" ]]; then
+        err "--window monthly is not valid for $TOOL (use auto, 5h, or weekly)"; exit 2
+      fi ;;
+  esac
   is_number "$MIN_REMAINING" || { err "--min-remaining must be numeric"; exit 2; }
   is_integer "$POLL_INTERVAL" || { err "--poll-interval must be integer seconds"; exit 2; }
   if (( POLL_INTERVAL < 1 )); then
@@ -221,10 +231,21 @@ validate_args() {
   is_integer "$MAX_UNAVAILABLE_WAIT" || { err "--max-unavailable-wait must be integer seconds (0 to wait forever)"; exit 2; }
   is_integer "$PRE_SUSPEND_CONFIRMATION_SECONDS" || { err "LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS must be integer seconds"; exit 2; }
   validate_retry_delays "$RETRY_DELAYS"
+  # Validate --at / --not-before early so an invalid time exits before setup_logs
+  # creates a run directory.
+  if [[ -n "$AT_TIME" ]]; then
+    NOT_BEFORE_EPOCH="$(date -d "$AT_TIME" +%s 2>/dev/null)" || {
+      err "could not parse --at/--not-before time: $AT_TIME"
+      exit 2
+    }
+  else
+    NOT_BEFORE_EPOCH=""
+  fi
 }
 
 validate_retry_delays() {
   local list="${1:-}" part
+  local parts=()
   [[ -n "$list" ]] || return 0
   IFS=',' read -r -a parts <<< "$list"
   for part in "${parts[@]}"; do
@@ -234,11 +255,9 @@ validate_retry_delays() {
 
 load_prompt() {
   if [[ -n "$PROMPT_FILE" ]]; then
-    PROMPT_PATH="$PROMPT_FILE"
     cp "$PROMPT_FILE" "$RUN_DIR/prompt.txt"
     IFS= read -r -d '' PROMPT_TEXT < "$RUN_DIR/prompt.txt" || true
   else
-    PROMPT_PATH="$RUN_DIR/prompt.txt"
     printf '%s' "$PROMPT_TEXT" > "$RUN_DIR/prompt.txt"
   fi
   chmod 600 "$RUN_DIR/prompt.txt"
@@ -261,14 +280,11 @@ setup_logs() {
 }
 
 parse_not_before_epoch() {
-  if [[ -z "$AT_TIME" ]]; then
+  if [[ -n "${NOT_BEFORE_EPOCH:-}" ]]; then
+    printf '%s\n' "$NOT_BEFORE_EPOCH"
+  else
     now_epoch
-    return
   fi
-  date -d "$AT_TIME" +%s 2>/dev/null || {
-    err "could not parse --at/--not-before time: $AT_TIME"
-    exit 2
-  }
 }
 
 scheduler_usage_snapshot() {
@@ -315,7 +331,7 @@ usage_decision() {
           (($r | sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | sub("-00:00$"; "Z") | fromdateiso8601?) // null)
         else null end;
       def win($name; $obj):
-        if $obj == null then empty
+        if $obj == null then null
         else {name:$name, remaining:($obj.remaining|num), resets_at:($obj.resets_at // null), reset_epoch:reset_epoch($obj.resets_at)}
         end;
       def selected:
@@ -324,17 +340,23 @@ usage_decision() {
             [ {name:"monthly", remaining:(.monthly.remaining|num), resets_at:($copilot_reset|tostring), reset_epoch:$copilot_reset} ]
           else [] end
         elif $window == "auto" then
-          [win("5h"; .five_hour), win("weekly"; .week)]
+          [win("5h"; .five_hour), win("weekly"; .week)] | map(select(. != null))
         elif $window == "5h" then
-          [win("5h"; .five_hour)]
+          [win("5h"; .five_hour)] | map(select(. != null))
         elif $window == "weekly" then
-          [win("weekly"; .week)]
+          [win("weekly"; .week)] | map(select(. != null))
         else [] end;
+      # A window is actively exhausted only if remaining is low AND the reset
+      # epoch is in the future (or unknown). A past reset_epoch means the
+      # snapshot is stale — the window has already refilled.
+      def is_active_exhausted($w):
+        $w.remaining != null and $w.remaining <= $min
+        and ($w.reset_epoch == null or $w.reset_epoch > $now);
       $snapshot
       | selected as $windows
       | ($windows | map(select(.remaining != null))) as $known
-      | ($known | map(select(.remaining <= $min))) as $exhausted
-      | ($exhausted | map(.reset_epoch // empty) | max? // null) as $latest_reset
+      | ($known | map(select(is_active_exhausted(.)))) as $exhausted
+      | ($exhausted | map(select(.reset_epoch != null and .reset_epoch > $now) | .reset_epoch) | max? // null) as $latest_reset
       | if (.available? == false) then
           {usable:false, reason:(.reason // "unavailable"), wait_until:($now + $poll), windows:$windows}
         elif ($windows|length) == 0 then
@@ -342,7 +364,7 @@ usage_decision() {
         elif ($known|length) == 0 then
           {usable:false, reason:"inconclusive-usage", wait_until:($now + $poll), windows:$windows}
         elif ($exhausted|length) > 0 then
-          {usable:false, reason:"rate-limited", wait_until:(if $latest_reset != null and $latest_reset > $now then $latest_reset else ($now + $poll) end), windows:$windows, exhausted:$exhausted}
+          {usable:false, reason:"rate-limited", wait_until:(if $latest_reset != null then $latest_reset else ($now + $poll) end), windows:$windows, exhausted:$exhausted}
         else
           {usable:true, reason:"usable", wait_until:null, windows:$windows}
         end'
@@ -362,7 +384,7 @@ provider_default_argv_json() {
       jq -nc --arg prompt "$PROMPT_TEXT" --arg cwd "$CWD" '["codex","exec","-C",$cwd,$prompt]'
       ;;
     claude)
-      jq -nc --arg prompt "$PROMPT_TEXT" '["claude","--print",$prompt]'
+      jq -nc --arg prompt "$PROMPT_TEXT" '["claude","--dangerously-skip-permissions","--print",$prompt]'
       ;;
     copilot)
       jq -nc --arg prompt "$PROMPT_TEXT" --arg cwd "$CWD" '["copilot","-C",$cwd,"--prompt",$prompt]'
@@ -561,9 +583,16 @@ run_tmux() {
     return 127
   }
   local session window target cmd_file command_line waited
-  session="${TMUX_TARGET%%:*}"
-  window="${TMUX_TARGET#*:}"
-  if [[ "$session" == "$window" ]]; then
+  if [[ "$TMUX_TARGET" == *:* ]]; then
+    session="${TMUX_TARGET%%:*}"
+    window="${TMUX_TARGET#*:}"
+    if [[ -z "$session" || -z "$window" ]]; then
+      printf 'invalid tmux target: %s\n' "$TMUX_TARGET" > "$output_file"
+      printf '2' > "$status_file"
+      return 2
+    fi
+  else
+    session="$TMUX_TARGET"
     window="llm-scheduler"
   fi
   target="$session:$window"
@@ -584,7 +613,11 @@ PY
     printf '%s\n' 'set +e'
     printf '%s\n' "$command_line"
     printf '%s\n' 'status=$?'
+    # These single-quoted strings are literal lines of the generated script, not
+    # expansions in this script.
+    # shellcheck disable=SC2016
     printf 'printf %%s "$status" > %q\n' "$status_file"
+    # shellcheck disable=SC2016
     printf '%s\n' 'exit "$status"'
   } > "$cmd_file"
   chmod 700 "$cmd_file"
@@ -610,10 +643,17 @@ PY
 output_is_retryable() {
   local status="$1"
   local output_file="$2"
+  # A non-zero exit is the primary, reliable signal: most CLIs exit non-zero on
+  # rate-limit/overload.
   if [[ "$status" -ne 0 ]]; then
     return 0
   fi
-  if grep -Eiq 'rate.?limit|quota|try again|temporar|timeout|too many requests' "$output_file"; then
+  # On a clean exit, only retry for specific provider rate-limit/overload phrases.
+  # The previous broad set (bare "timeout", "quota", "try again", "temporar")
+  # matched ordinary successful agent output (e.g. a prompt about fixing a
+  # "timeout bug"), causing expensive autonomous runs to be re-submitted. Keep
+  # patterns specific enough that they rarely appear outside an error banner.
+  if grep -Eiq 'rate[ _-]?limited|rate[ _-]?limit (exceeded|reached|hit)|too many requests|http[ /?]429|status 429|429 too many requests|quota (exceeded|reached)|usage limit (exceeded|reached)|overloaded|service unavailable|temporarily unavailable|try again later' "$output_file"; then
     return 0
   fi
   return 1
@@ -630,7 +670,16 @@ submit_once() {
   else
     run_fresh "$argv_json" "$output_file" "$status_file" || true
   fi
+  # 124 = timeout/incomplete (same code run_fresh uses for a timed-out PTY).
+  # Use it as the synthetic status when the runner never wrote the status file,
+  # so submit_once can log a controlled failure rather than dying via set -e.
+  if [[ ! -s "$status_file" ]]; then
+    printf '124' > "$status_file"
+  fi
+  [[ -f "$output_file" ]] || : > "$output_file"
   status="$(<"$status_file")"
+  # status must be an integer; guard against corrupt/empty reads.
+  [[ "$status" =~ ^[0-9]+$ ]] || status=124
   cat "$output_file" >> "$TEXT_LOG"
   log_event "attempt_result" "$(jq -nc --argjson attempt "$attempt" --argjson status "$status" --rawfile output "$output_file" '{attempt:$attempt,status:$status,output:$output}')"
   if output_is_retryable "$status" "$output_file"; then
@@ -647,11 +696,19 @@ retry_delays_array() {
 }
 
 wake_diagnostics_json() {
-  local has_systemd_run=0 has_rtcwake=0 user_systemd="unknown"
+  local has_systemd_run=0 has_rtcwake=0 user_systemd="unknown" systemd_state
   have_cmd systemd-run && has_systemd_run=1
   have_cmd rtcwake && has_rtcwake=1
-  if have_cmd systemctl && systemctl --user is-system-running >/dev/null 2>&1; then
-    user_systemd="available"
+  if have_cmd systemctl; then
+    set +e
+    systemd_state="$(systemctl --user is-system-running 2>/dev/null)"
+    set -e
+    case "${systemd_state:-}" in
+      running)  user_systemd="running" ;;
+      degraded) user_systemd="degraded" ;;
+      "")       user_systemd="unknown" ;;
+      *)        user_systemd="$systemd_state" ;;
+    esac
   fi
   jq -nc --argjson systemd_run "$has_systemd_run" --argjson rtcwake "$has_rtcwake" --arg user_systemd "$user_systemd" \
     '{systemd_run:($systemd_run==1),rtcwake:($rtcwake==1),user_systemd:$user_systemd,note:"wake is best effort and depends on firmware, kernel, RTC, and systemd support"}'
@@ -663,10 +720,24 @@ print_wake_test() {
 
 log_wake_plan() {
   local target_epoch="$1"
-  local wake_epoch cmd unit output status
+  local wake_epoch cmd unit output status now lead min_lead
   (( WAKE == 1 )) || return 0
+  now="$(now_epoch)"
+  # An OS wake timer only recovers from an *unexpected* suspend during the wait.
+  # Short polls (we are already awake and sleeping in-process) do not need one,
+  # and arming one per poll iteration would leak hundreds of transient units over
+  # a long rate-limit wait. Only arm when there is meaningful lead time, and never
+  # re-arm for a target we have already covered.
+  min_lead="${LLM_SCHEDULER_WAKE_MIN_LEAD:-120}"
+  lead=$(( target_epoch - now ))
+  if (( lead < min_lead )); then
+    return 0
+  fi
+  if (( target_epoch <= WAKE_ARMED_TARGET )); then
+    return 0
+  fi
   wake_epoch=$(( target_epoch - 120 ))
-  (( wake_epoch > $(now_epoch) )) || wake_epoch="$target_epoch"
+  (( wake_epoch > now )) || wake_epoch="$target_epoch"
   unit="llm-scheduler-wake-$(date +%s)"
   cmd="systemd-run --user --unit=$unit --on-calendar=@$wake_epoch --timer-property=WakeSystem=true true"
   log_event "wake_diagnostics" "$(wake_diagnostics_json)"
@@ -680,6 +751,7 @@ log_wake_plan() {
     log_text "wake systemd-run status=$status output=$output"
     log_event "wake_attempt" "$(jq -nc --arg unit "$unit" --argjson wake_epoch "$wake_epoch" --argjson status "$status" --arg output "$output" '{method:"systemd-run",unit:$unit,wake_epoch:$wake_epoch,status:$status,output:$output}')"
   fi
+  WAKE_ARMED_TARGET="$target_epoch"
 }
 
 scheduler_resume_argv_json() {
@@ -728,7 +800,7 @@ scheduler_resume_argv_json() {
 schedule_resume_and_suspend() {
   local target_epoch="$1"
   local reason="$2"
-  local unit output status argv_json command_line env_path
+  local unit output status argv_json command_line env_path now lead min_lead
 
   if ! have_cmd systemd-run; then
     log_text "suspend-until-ready unavailable: systemd-run missing"
@@ -738,6 +810,17 @@ schedule_resume_and_suspend() {
   if ! have_cmd systemctl; then
     log_text "suspend-until-ready unavailable: systemctl missing"
     log_event "suspend_schedule_failed" '{"reason":"missing-systemctl"}'
+    return 1
+  fi
+
+  # Minimum lead guard: a target too close to now causes pointless suspend churn
+  # or a near-past systemd-run failure. Fall back to in-process waiting instead.
+  min_lead="${LLM_SCHEDULER_SUSPEND_MIN_LEAD:-120}"
+  now="$(now_epoch)"
+  lead=$(( target_epoch - now ))
+  if (( lead < min_lead )); then
+    log_text "suspend-until-ready lead=${lead}s < min_lead=${min_lead}s; falling back to in-process wait"
+    log_event "suspend_schedule_failed" "$(jq -nc --argjson lead "$lead" --argjson min_lead "$min_lead" '{reason:"insufficient-lead",lead:$lead,min_lead:$min_lead}')"
     return 1
   fi
 
@@ -760,6 +843,8 @@ PY
   if (( DRY_RUN == 1 )); then
     log_text "dry-run suspend-until-ready command: systemd-run --user --unit=$unit --on-calendar=@$target_epoch --timer-property=WakeSystem=true --setenv=PATH=... /bin/bash -lc '$command_line'"
     log_event "suspend_schedule_dry_run" "$(jq -nc --arg unit "$unit" --arg command "$command_line" --argjson target_epoch "$target_epoch" '{unit:$unit,target_epoch:$target_epoch,command:$command}')"
+    printf 'dry-run: would schedule %s.timer at epoch %s (%s); logs: %s\n' \
+      "$unit" "$target_epoch" "$(format_local_epoch "$target_epoch")" "$RUN_DIR"
     return 0
   fi
 
@@ -774,6 +859,13 @@ PY
     return 1
   fi
 
+  # Verify the timer is actually active before suspending.
+  if ! systemctl --user is-active --quiet "${unit}.timer" 2>/dev/null; then
+    log_text "suspend-until-ready timer ${unit}.timer not active after systemd-run; aborting suspend"
+    log_event "suspend_schedule_failed" "$(jq -nc --arg unit "$unit" '{reason:"timer-not-active",unit:$unit}')"
+    return 1
+  fi
+
   if [[ "${LLM_SCHEDULER_NO_ACTUAL_SUSPEND:-0}" == "1" ]]; then
     log_text "suspend skipped by LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1"
     log_event "suspend_skipped" '{"reason":"env"}'
@@ -781,8 +873,26 @@ PY
     return 0
   fi
 
+  # Install Ctrl-C / SIGTERM cleanup so the armed timer is stopped if the user
+  # cancels during the pre-suspend countdown.
+  _suspend_unit="$unit"
+  _suspend_cleanup() {
+    local cleanup_status=0
+    printf '\nsuspend cancelled: disarming timer %s.timer\n' "$_suspend_unit"
+    systemctl --user stop "${_suspend_unit}.timer" 2>/dev/null || cleanup_status=$?
+    if (( cleanup_status != 0 )); then
+      printf 'WARNING: timer stop may have failed. To disarm manually:\n'
+      printf '  systemctl --user stop %s.timer\n' "$_suspend_unit"
+    fi
+    exit 130
+  }
+  trap '_suspend_cleanup' INT TERM
+
   print_pre_suspend_confirmation "$target_epoch" "$unit" "$reason"
   log_event "pre_suspend_confirmation" "$(jq -nc --arg unit "$unit" --arg reason "$reason" --argjson target_epoch "$target_epoch" --arg model "$(scheduler_model_description)" --arg prompt "$PROMPT_SOURCE" --arg cwd "$CWD" --argjson seconds "$PRE_SUSPEND_CONFIRMATION_SECONDS" '{unit:$unit,reason:$reason,target_epoch:$target_epoch,model:$model,prompt:$prompt,cwd:$cwd,seconds:$seconds}')"
+
+  trap - INT TERM
+
   log_text "systemctl suspend requested"
   sync
   systemctl suspend
@@ -800,9 +910,13 @@ wait_until_usable() {
       log_event "wait_decision" "$(jq -nc --arg reason "not-before" --argjson wait_until "$not_before" '{reason:$reason,wait_until:$wait_until}')"
       log_wake_plan "$not_before"
       if (( SUSPEND_UNTIL_READY == 1 )); then
-        schedule_resume_and_suspend "$not_before" "not-before"
-        log_event "final" '{"status":"scheduled"}'
-        exit 0
+        if schedule_resume_and_suspend "$not_before" "not-before"; then
+          log_event "final" '{"status":"scheduled"}'
+          exit 0
+        else
+          printf 'error: suspend scheduling failed; falling back to in-process wait\n' >&2
+          log_event "suspend_schedule_fallback" '{"reason":"schedule_resume_and_suspend failed","gate":"not-before"}'
+        fi
       fi
       if (( DRY_RUN == 1 )); then
         return 0
@@ -851,9 +965,13 @@ wait_until_usable() {
     target="${wait_until:-$(( $(now_epoch) + POLL_INTERVAL ))}"
     log_wake_plan "$target"
     if (( SUSPEND_UNTIL_READY == 1 )); then
-      schedule_resume_and_suspend "$target" "$reason"
-      log_event "final" '{"status":"scheduled"}'
-      exit 0
+      if schedule_resume_and_suspend "$target" "$reason"; then
+        log_event "final" '{"status":"scheduled"}'
+        exit 0
+      else
+        printf 'error: suspend scheduling failed; falling back to in-process wait\n' >&2
+        log_event "suspend_schedule_fallback" "$(jq -nc --arg reason "$reason" '{reason:"schedule_resume_and_suspend failed",gate:$reason}')"
+      fi
     fi
     if (( DRY_RUN == 1 )); then
       return 0

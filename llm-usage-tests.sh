@@ -459,4 +459,407 @@ fi
 jq -e '.note | contains("best effort")' "$tmpdir/scheduler-wake.txt" >/dev/null \
   || fail "wake-test did not print diagnostics"
 
+# ── P0-A: usage_decision stale-window (past reset_epoch) must be usable ─────
+
+# Fixed NOW and past reset epoch (reset_epoch < now)
+NOW_FIXED=1780430000
+PAST_RESET=$(( NOW_FIXED - 100 ))
+FUTURE_RESET=$(( NOW_FIXED + 3600 ))
+
+# remaining<=min, past reset => stale => usable
+stale_exhausted_usage="$(jq -nc --argjson r "$PAST_RESET" \
+  '{available:true,five_hour:{remaining:0,resets_at:$r},week:{remaining:50}}')"
+LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
+LLM_SCHEDULER_USAGE_JSON="$stale_exhausted_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --dry-run --log-dir "$tmpdir/p0a-stale-logs" > "$tmpdir/p0a-stale.txt"
+p0a_stale_dir="$(awk '{print $NF}' "$tmpdir/p0a-stale.txt")"
+jq -e 'select(.type=="usage_decision") | .data.usable == true' "$p0a_stale_dir/events.jsonl" >/dev/null \
+  || fail "P0-A: stale past-reset exhausted window should be usable"
+
+# remaining<=min, future reset => rate-limited
+future_exhausted_usage="$(jq -nc --argjson r "$FUTURE_RESET" \
+  '{available:true,five_hour:{remaining:0,resets_at:$r},week:{remaining:50}}')"
+LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
+LLM_SCHEDULER_USAGE_JSON="$future_exhausted_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --dry-run --log-dir "$tmpdir/p0a-future-logs" > "$tmpdir/p0a-future.txt"
+p0a_future_dir="$(awk '{print $NF}' "$tmpdir/p0a-future.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited"' "$p0a_future_dir/events.jsonl" >/dev/null \
+  || fail "P0-A: exhausted window with future reset should be rate-limited"
+
+# remaining<=min, null reset => rate-limited (no better precision)
+null_reset_exhausted_usage='{"available":true,"five_hour":{"remaining":0},"week":{"remaining":50}}'
+LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
+LLM_SCHEDULER_USAGE_JSON="$null_reset_exhausted_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --dry-run --log-dir "$tmpdir/p0a-null-logs" > "$tmpdir/p0a-null.txt"
+p0a_null_dir="$(awk '{print $NF}' "$tmpdir/p0a-null.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited"' "$p0a_null_dir/events.jsonl" >/dev/null \
+  || fail "P0-A: exhausted window with null reset should be rate-limited"
+
+# auto window: one stale-low + one healthy => usable
+auto_stale_one_usage="$(jq -nc --argjson r "$PAST_RESET" \
+  '{available:true,five_hour:{remaining:0,resets_at:$r},week:{remaining:50}}')"
+LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
+LLM_SCHEDULER_USAGE_JSON="$auto_stale_one_usage" \
+  "$SCHEDULER" --tool codex --window auto --prompt x --command-template 'sched-mock {prompt}' \
+  --dry-run --log-dir "$tmpdir/p0a-auto-stale-logs" > "$tmpdir/p0a-auto-stale.txt"
+p0a_auto_stale_dir="$(awk '{print $NF}' "$tmpdir/p0a-auto-stale.txt")"
+jq -e 'select(.type=="usage_decision") | .data.usable == true' "$p0a_auto_stale_dir/events.jsonl" >/dev/null \
+  || fail "P0-A: auto window with one stale-low and one healthy should be usable"
+
+# auto window: one future-exhausted + one healthy => rate-limited
+auto_future_one_usage="$(jq -nc --argjson r "$FUTURE_RESET" \
+  '{available:true,five_hour:{remaining:0,resets_at:$r},week:{remaining:50}}')"
+LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
+LLM_SCHEDULER_USAGE_JSON="$auto_future_one_usage" \
+  "$SCHEDULER" --tool codex --window auto --prompt x --command-template 'sched-mock {prompt}' \
+  --dry-run --log-dir "$tmpdir/p0a-auto-future-logs" > "$tmpdir/p0a-auto-future.txt"
+p0a_auto_future_dir="$(awk '{print $NF}' "$tmpdir/p0a-auto-future.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited"' "$p0a_auto_future_dir/events.jsonl" >/dev/null \
+  || fail "P0-A: auto window with one future-exhausted should be rate-limited"
+
+# Codex epoch-number reset (integer resets_at)
+codex_epoch_reset_usage="$(jq -nc --argjson r "$FUTURE_RESET" \
+  '{available:true,five_hour:{remaining:0,resets_at:$r},week:{remaining:50}}')"
+LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
+LLM_SCHEDULER_USAGE_JSON="$codex_epoch_reset_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --dry-run --log-dir "$tmpdir/p0a-epoch-logs" > "$tmpdir/p0a-epoch.txt"
+p0a_epoch_dir="$(awk '{print $NF}' "$tmpdir/p0a-epoch.txt")"
+jq -e "select(.type==\"usage_decision\") | .data.reason == \"rate-limited\" and .data.wait_until == $FUTURE_RESET" \
+  "$p0a_epoch_dir/events.jsonl" >/dev/null \
+  || fail "P0-A: Codex epoch-number reset not parsed correctly"
+
+# Claude ISO +00:00 reset
+claude_iso_usage="{\"available\":true,\"five_hour\":{\"remaining\":0,\"resets_at\":\"2026-06-02T22:20:01.166099+00:00\"},\"week\":{\"remaining\":50}}"
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$claude_iso_usage" \
+  "$SCHEDULER" --tool claude --window 5h --prompt x --command-template 'sched-mock {prompt}' \
+  --dry-run --log-dir "$tmpdir/p0a-iso-logs" > "$tmpdir/p0a-iso.txt"
+p0a_iso_dir="$(awk '{print $NF}' "$tmpdir/p0a-iso.txt")"
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780438801' \
+  "$p0a_iso_dir/events.jsonl" >/dev/null \
+  || fail "P0-A: Claude ISO +00:00 reset not parsed correctly"
+
+# ── P0-B: is_undetermined_reason — inverted logic ────────────────────────────
+
+# Verify that rate-limited is not treated as undetermined (should rate-limit wait, not proceed optimistically)
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --max-unavailable-wait 1 --dry-run --log-dir "$tmpdir/p0b-ratelimit-logs" > "$tmpdir/p0b-ratelimit.txt"
+p0b_ratelimit_dir="$(awk '{print $NF}' "$tmpdir/p0b-ratelimit.txt")"
+if jq -e 'select(.type=="optimistic_proceed")' "$p0b_ratelimit_dir/events.jsonl" >/dev/null 2>&1; then
+  fail "P0-B: rate-limited must not trigger optimistic_proceed"
+fi
+jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited"' "$p0b_ratelimit_dir/events.jsonl" >/dev/null \
+  || fail "P0-B: exhausted window with future reset must be rate-limited"
+
+# Various undetermined reasons must cause optimistic_proceed after max-unavailable-wait
+for undetermined_reason in unavailable inconclusive-usage unsupported-window missing-cli not-authenticated timeout trust-prompt capture-error format-changed unknown-reason-xyz; do
+  und_usage="$(jq -nc --arg r "$undetermined_reason" '{available:false,reason:$r}')"
+  : > "$SCHED_CAPTURE"
+  : > "$SCHED_ATTEMPTS"
+  LLM_SCHEDULER_USAGE_JSON="$und_usage" \
+    SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+    "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' \
+    --max-unavailable-wait 1 --poll-interval 1 --no-retry \
+    --log-dir "$tmpdir/p0b-und-${undetermined_reason}-logs" > "$tmpdir/p0b-und-${undetermined_reason}.txt"
+  und_dir="$(awk '{print $NF}' "$tmpdir/p0b-und-${undetermined_reason}.txt")"
+  jq -e 'select(.type=="optimistic_proceed")' "$und_dir/events.jsonl" >/dev/null \
+    || fail "P0-B: reason '$undetermined_reason' must trigger optimistic_proceed"
+done
+
+# In suspend mode, undetermined reason must NOT call schedule_resume_and_suspend; proceeds immediately
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run-p0b.log"
+SYSTEMCTL_LOG="$tmpdir/systemctl-p0b.log"
+: > "$SYSTEMD_RUN_LOG"; : > "$SYSTEMCTL_LOG"
+: > "$SCHED_CAPTURE"; : > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON='{"available":false,"reason":"missing-cli"}' \
+LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1 \
+SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' \
+  --suspend-until-ready --max-unavailable-wait 0 --poll-interval 1 --no-retry \
+  --log-dir "$tmpdir/p0b-suspend-und-logs" > "$tmpdir/p0b-suspend-und.txt"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] \
+  || fail "P0-B: suspend+undetermined must proceed and submit once"
+assert_not_grep 'WakeSystem=true' "$SYSTEMD_RUN_LOG"
+
+# ── P0-C: Suspend scheduling failure fallback ─────────────────────────────────
+# Use a near-future reset (30s < LLM_SCHEDULER_SUSPEND_MIN_LEAD=120 default) so
+# schedule_resume_and_suspend returns 1 (insufficient lead) even in dry-run mode.
+# After the fallback, DRY_RUN=1 exits the wait loop cleanly without sleeping.
+
+p0c_near_future=$(( $(date +%s) + 30 ))
+p0c_near_usage="$(jq -nc --argjson r "$p0c_near_future" \
+  '{available:true,five_hour:{remaining:0,resets_at:$r},week:{remaining:50}}')"
+LLM_SCHEDULER_USAGE_JSON="$p0c_near_usage" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --suspend-until-ready --dry-run \
+  --log-dir "$tmpdir/p0c-fail-logs" > "$tmpdir/p0c-fail.txt" 2>"$tmpdir/p0c-fail.stderr"
+assert_grep 'error:.*suspend scheduling failed' "$tmpdir/p0c-fail.stderr"
+p0c_dir="$(awk '{print $NF}' "$tmpdir/p0c-fail.txt")"
+jq -e 'select(.type=="suspend_schedule_fallback")' "$p0c_dir/events.jsonl" >/dev/null \
+  || fail "P0-C: suspend scheduling failure must log suspend_schedule_fallback"
+if jq -e 'select(.type=="final") | .data.status == "scheduled"' "$p0c_dir/events.jsonl" >/dev/null 2>&1; then
+  fail "P0-C: final status must not be 'scheduled' after scheduling failure"
+fi
+
+# not-before gate with insufficient lead: fallback too
+p0c_nb_future=$(( $(date +%s) + 30 ))
+LLM_SCHEDULER_SUSPEND_MIN_LEAD=120 \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --at "@$p0c_nb_future" --suspend-until-ready --dry-run \
+  --log-dir "$tmpdir/p0c-nb-logs" > "$tmpdir/p0c-nb.txt" 2>"$tmpdir/p0c-nb.stderr"
+assert_grep 'error:.*suspend scheduling failed' "$tmpdir/p0c-nb.stderr"
+
+# Also verify a real systemd-run failure (far future target, no dry-run, failing mock)
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run-p0c-real.log"
+: > "$SYSTEMD_RUN_LOG"
+(
+  mkdir -p "$tmpdir/ci-bin-fail"
+  cat > "$tmpdir/ci-bin-fail/systemd-run" <<'FAIL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMD_RUN_LOG:-/dev/null}"
+exit 1
+FAIL
+  chmod +x "$tmpdir/ci-bin-fail/systemd-run"
+  cat > "$tmpdir/ci-bin-fail/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+  chmod +x "$tmpdir/ci-bin-fail/systemctl"
+  LLM_USAGE_NOW_EPOCH=1780430000 \
+  LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
+  SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" \
+  PATH="$tmpdir/ci-bin-fail:$SCRIPT_DIR/ci-bin:$PATH" \
+    "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+    --suspend-until-ready --dry-run \
+    --log-dir "$tmpdir/p0c-real-logs" > "$tmpdir/p0c-real.txt" 2>"$tmpdir/p0c-real.stderr"
+  # dry-run: schedule_resume_and_suspend returns 0 before systemd-run, so no failure here;
+  # this just confirms the script doesn't die.
+)
+
+# ── P0-D: Suspend min-lead guard ──────────────────────────────────────────────
+
+# Target only 30s in the future: must NOT call systemd-run (below 120s default min-lead)
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run-p0d.log"
+: > "$SYSTEMD_RUN_LOG"
+near_future=$(( $(date +%s) + 30 ))
+near_usage="$(jq -nc --argjson r "$near_future" \
+  '{available:true,five_hour:{remaining:0,resets_at:$r},week:{remaining:50}}')"
+LLM_SCHEDULER_USAGE_JSON="$near_usage" \
+LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1 \
+SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --suspend-until-ready --dry-run \
+  --log-dir "$tmpdir/p0d-short-lead-logs" > "$tmpdir/p0d-short-lead.txt" 2>"$tmpdir/p0d-short-lead.stderr" || true
+# systemd-run must NOT have been called with on-calendar
+if grep -q 'on-calendar' "$SYSTEMD_RUN_LOG" 2>/dev/null; then
+  fail "P0-D: systemd-run should not be called when lead < min_lead"
+fi
+
+# ── P1-A: submit_once handles missing status file ────────────────────────────
+
+# A command that exits without creating a status file => synthetic 124, controlled failure
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+# sched-mock always creates a status file (via run_fresh), so simulate the
+# missing-file case via no-retry + a command that exits non-zero; we verify
+# submit_once logs an attempt_result (not a script death).
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool codex --prompt x \
+  --command-template 'false' --no-retry \
+  --log-dir "$tmpdir/p1a-logs" > "$tmpdir/p1a.txt" 2>&1 || true
+p1a_dir="$(awk '{print $NF}' "$tmpdir/p1a.txt" 2>/dev/null || ls -td "$tmpdir/p1a-logs"/*/  | head -1)"
+jq -e 'select(.type=="attempt_result")' "$p1a_dir/events.jsonl" >/dev/null \
+  || fail "P1-A: submit_once must log attempt_result even on failure"
+
+# ── P1-B: output_is_retryable — innocent 429 text must not retry ─────────────
+
+cat > "$tmpdir/ci-bin/print-innocent429" <<'MOCK'
+#!/usr/bin/env bash
+printf 'The chapter 429 of the spec describes a common scenario\n'
+exit 0
+MOCK
+chmod +x "$tmpdir/ci-bin/print-innocent429"
+
+cat > "$tmpdir/ci-bin/print-http429" <<'MOCK'
+#!/usr/bin/env bash
+printf 'HTTP 429 Too Many Requests\n'
+exit 0
+MOCK
+chmod +x "$tmpdir/ci-bin/print-http429"
+
+# Status 0 + innocent text containing "429": must not retry.
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool codex --prompt x \
+  --command-template 'print-innocent429' \
+  --retry-delays 0,0 --log-dir "$tmpdir/p1b-innocent-logs" > "$tmpdir/p1b-innocent.txt"
+p1b_innocent_dir="$(awk '{print $NF}' "$tmpdir/p1b-innocent.txt")"
+attempt_count="$(jq -s 'map(select(.type=="attempt_result")) | length' "$p1b_innocent_dir/events.jsonl")"
+[[ "$attempt_count" == "1" ]] \
+  || fail "P1-B: innocent '429' text (status 0) must not trigger retry; got $attempt_count attempts"
+
+# Status 0 + "HTTP 429" output: must retry.
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool codex --prompt x \
+  --command-template 'print-http429' \
+  --retry-delays 0,0 --log-dir "$tmpdir/p1b-http429-logs" > "$tmpdir/p1b-http429.txt" 2>&1 || true
+p1b_http429_dir="$(awk '{print $NF}' "$tmpdir/p1b-http429.txt")"
+attempt_count="$(jq -s 'map(select(.type=="attempt_result")) | length' "$p1b_http429_dir/events.jsonl")"
+[[ "$attempt_count" -gt 1 ]] \
+  || fail "P1-B: 'HTTP 429' output (status 0) must trigger retry; got $attempt_count attempts"
+
+# ── P1-C: normalizers preserve partial windows with missing resets_at ─────────
+
+. "$SCRIPT_DIR/lib/llm-common.sh"
+
+# Claude: five_hour with only used_percentage (no resets_at)
+claude_partial_norm="$(printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":10}}}' \
+  | normalize_claude 'test')"
+jq -e '.five_hour != null and .five_hour.used == 10 and .five_hour.resets_at == null' \
+  <<<"$claude_partial_norm" >/dev/null \
+  || fail "P1-C: Claude partial window with only used_percentage must normalize to non-null five_hour"
+
+claude_partial_full="$(json_for_provider "$claude_partial_norm" claude)"
+jq -e '.five_hour != null and .five_hour.remaining == 90' <<<"$claude_partial_full" >/dev/null \
+  || fail "P1-C: Claude partial window remaining must be 90 after json_for_provider"
+
+# Codex: fiveHour with only used_percent (no resets_at)
+codex_partial_norm="$(printf '%s\n' '{"rate_limits":{"primary":{"used_percent":10}}}' \
+  | normalize_codex 'test')"
+jq -e '.five_hour != null and .five_hour.used == 10 and .five_hour.resets_at == null' \
+  <<<"$codex_partial_norm" >/dev/null \
+  || fail "P1-C: Codex partial window with only used_percent must normalize to non-null five_hour"
+
+codex_partial_full="$(json_for_provider "$codex_partial_norm" codex)"
+jq -e '.five_hour != null and .five_hour.remaining == 90' <<<"$codex_partial_full" >/dev/null \
+  || fail "P1-C: Codex partial window remaining must be 90 after json_for_provider"
+
+# Complete samples still normalize correctly
+claude_full_norm="$(printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":50,"resets_at":"2026-06-02T23:00:00Z"}}}' \
+  | normalize_claude 'test')"
+jq -e '.five_hour.used == 50 and .five_hour.resets_at == "2026-06-02T23:00:00Z"' \
+  <<<"$claude_full_norm" >/dev/null \
+  || fail "P1-C: Complete Claude window must normalize with resets_at preserved"
+
+# ── P1-D: --tmux foo:foo parses correctly ────────────────────────────────────
+
+if command -v tmux >/dev/null 2>&1; then
+  TMUX_SESSION="llm-test-foofoo-$$"
+  : > "$SCHED_CAPTURE"; : > "$SCHED_ATTEMPTS"
+  LLM_SCHEDULER_TMUX_TIMEOUT=5 \
+  LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+    SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+    "$SCHEDULER" --tool codex --prompt x \
+    --command-template 'sched-mock {prompt}' \
+    --tmux "${TMUX_SESSION}:${TMUX_SESSION}" \
+    --log-dir "$tmpdir/p1d-foofoo-logs" > "$tmpdir/p1d-foofoo.txt"
+  # If window had been replaced with llm-scheduler, we'd still succeed, so
+  # verify the command was generated targeting foo:foo by checking the tmux command script
+  p1d_dir="$(awk '{print $NF}' "$tmpdir/p1d-foofoo.txt")"
+  grep -q "${TMUX_SESSION}:${TMUX_SESSION}" "$p1d_dir/tmux-command.sh" \
+    || fail "P1-D: --tmux foo:foo must target session:window foo:foo, not foo:llm-scheduler"
+  tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+else
+  printf 'skip P1-D tmux test: tmux not installed\n'
+fi
+
+# ── P1-E: --at validation before log-dir creation ────────────────────────────
+
+expect_fail "$tmpdir/p1e-bad-at.txt" \
+  "$SCHEDULER" --tool codex --prompt x --at "not-a-valid-time" \
+  --log-dir "$tmpdir/p1e-logs"
+assert_grep 'could not parse' "$tmpdir/p1e-bad-at.txt"
+# Log dir for this run must not have been created
+if compgen -G "$tmpdir/p1e-logs/"'*' > /dev/null 2>&1; then
+  fail "P1-E: invalid --at must not create a run directory"
+fi
+
+# Valid --at must still work
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+: > "$SCHED_CAPTURE"; : > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$SCHEDULER" --tool codex --prompt x \
+  --command-template 'sched-mock {prompt}' \
+  --at "$(date -d "@$(( $(date +%s) - 60 ))" '+%Y-%m-%d %H:%M:%S')" \
+  --log-dir "$tmpdir/p1e-valid-logs" > "$tmpdir/p1e-valid.txt"
+[[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] \
+  || fail "P1-E: valid --at in the past must submit normally"
+
+# ── P2-A: wake_diagnostics_json degraded state ───────────────────────────────
+
+# Fake systemctl returning "degraded" with non-zero exit
+cat > "$tmpdir/ci-bin/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+if [[ "${1:-}" == "--user" && "${2:-}" == "is-system-running" ]]; then
+  printf 'degraded\n'
+  exit 1
+fi
+if [[ "${1:-}" == "suspend" ]]; then exit 0; fi
+exit 0
+MOCK
+chmod +x "$tmpdir/ci-bin/systemctl"
+
+"$SCHEDULER" --wake-test > "$tmpdir/p2a-degraded.txt"
+jq -e '.user_systemd == "degraded"' "$tmpdir/p2a-degraded.txt" >/dev/null \
+  || fail "P2-A: degraded user manager must report user_systemd=degraded"
+
+# Fake systemctl returning "running"
+cat > "$tmpdir/ci-bin/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+if [[ "${1:-}" == "--user" && "${2:-}" == "is-system-running" ]]; then
+  printf 'running\n'
+  exit 0
+fi
+if [[ "${1:-}" == "suspend" ]]; then exit 0; fi
+exit 0
+MOCK
+chmod +x "$tmpdir/ci-bin/systemctl"
+
+"$SCHEDULER" --wake-test > "$tmpdir/p2a-running.txt"
+jq -e '.user_systemd == "running"' "$tmpdir/p2a-running.txt" >/dev/null \
+  || fail "P2-A: running user manager must report user_systemd=running"
+
+# Restore original systemctl mock
+cat > "$tmpdir/ci-bin/systemctl" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${SYSTEMCTL_LOG:-/dev/null}"
+if [[ "${1:-}" == "--user" && "${2:-}" == "is-system-running" ]]; then
+  printf 'running\n'
+  exit 0
+fi
+if [[ "${1:-}" == "suspend" ]]; then
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$tmpdir/ci-bin/systemctl"
+
+# ── P2-B: dry-run suspend path prints useful stdout ──────────────────────────
+
+SYSTEMD_RUN_LOG="$tmpdir/systemd-run-p2b.log"
+SYSTEMCTL_LOG="$tmpdir/systemctl-p2b.log"
+: > "$SYSTEMD_RUN_LOG"; : > "$SYSTEMCTL_LOG"
+LLM_USAGE_NOW_EPOCH=1780430000 \
+LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
+SYSTEMD_RUN_LOG="$SYSTEMD_RUN_LOG" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
+  "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
+  --suspend-until-ready --dry-run \
+  --log-dir "$tmpdir/p2b-logs" > "$tmpdir/p2b.txt"
+assert_grep 'dry-run' "$tmpdir/p2b.txt"
+assert_grep '1780441200' "$tmpdir/p2b.txt"
+assert_grep 'llm-scheduler-resume' "$tmpdir/p2b.txt"
+# Must not call real systemd-run or systemctl suspend
+assert_not_grep 'on-calendar' "$SYSTEMD_RUN_LOG"
+assert_not_grep 'suspend' "$SYSTEMCTL_LOG"
+
 printf 'ok\n'

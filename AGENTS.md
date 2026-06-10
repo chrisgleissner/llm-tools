@@ -2,27 +2,33 @@
 
 ## Scope
 
-This repo contains a small Linux Bash CLI for showing local usage for Codex, Claude Code, and GitHub Copilot.
+This repo contains small Linux Bash CLIs for Codex, Claude Code, and GitHub Copilot:
 
-* Main script: `llm-usage`
-* Regression tests: `llm-usage-tests.sh`
+* `llm-usage` — show local usage/quota for each provider.
+* `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a window reset).
+* `lib/llm-common.sh` — shared, non-UI helpers (provider readers, normalization, time/reset formatting) sourced by both CLIs.
+* Regression tests: `llm-usage-tests.sh` (covers both CLIs).
 * User docs: `README.md`
-* Runtime log: `llm-usage.log` beside the script when writable
+* Runtime log: `llm-usage.log` beside the scripts when writable
 * Cache: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage`
+* Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs`
 
-Keep it a single-file CLI with no build step, daemon, server, database, package framework, telemetry, or broad provider SDK design unless explicitly requested.
+Keep these as dependency-light Bash CLIs sharing one helper library: no build step, daemon, server, database, package framework, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `lib/llm-common.sh`, not duplicated across the two CLIs.
 
 ## Fast checks
 
 ```bash
-chmod +x llm-usage llm-usage-tests.sh
+chmod +x llm-usage llm-scheduler llm-usage-tests.sh
 ./llm-usage
 ./llm-usage --json
 ./llm-usage --show-source --show-remaining-time
 ./llm-usage --hide-remaining-time --show-source
 ./llm-usage --show-copilot-credits --show-source
 ./llm-usage --hide-codex-spark
+./llm-scheduler --tool codex --prompt x --dry-run --command-template true
+./llm-scheduler --wake-test
 ./llm-usage-tests.sh
+shellcheck -x llm-usage llm-scheduler lib/llm-common.sh   # must be clean at default severity
 ```
 
 Statusline mode reads Claude statusline JSON from stdin:
@@ -73,6 +79,16 @@ Preserve fallback order: API/cache/statusline/local project data. `--statusline`
 
 Tests should use `LLM_USAGE_COPILOT_CAPTURE_TEXT` or bounded timeout paths, not live Copilot state. Keep `LLM_USAGE_DISABLE_COPILOT=1` reliable. If footer parsing fails, report unavailable with a reason rather than inventing values.
 
+## Scheduler invariants
+
+* `llm-scheduler` gates on the same `lib/llm-common.sh` provider readers as `llm-usage`; tests inject usage via `LLM_SCHEDULER_USAGE_JSON` and the command via `--command-template`, never live providers.
+* A `rate-limited` decision (a known window with a real reset epoch) must wait for that reset, not proceed early.
+* An *undeterminable* decision (`unavailable`, `inconclusive-usage`, `unsupported-window`) must never block forever: bound the wait with `--max-unavailable-wait`, then launch optimistically. See `is_undetermined_reason`.
+* `--window` must be valid for the tool (copilot: auto/monthly; codex/claude: auto/5h/weekly). Reject other combinations in `validate_args`.
+* Treat a tool launch as needing retry on non-zero exit, or on a clean exit whose output clearly signals a provider rate-limit/overload. Keep `output_is_retryable` patterns specific so ordinary successful agent output is not re-submitted.
+* Under `--wake`, arm at most one OS wake timer per distinct, far-enough target (`log_wake_plan` lead guard + `WAKE_ARMED_TARGET`); never one per poll iteration.
+* Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
+
 ## Environment knobs
 
 Important knobs that tests or users may rely on:
@@ -95,6 +111,11 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_COPILOT_CAPTURE_CWD`
 * `LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS`
 * `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS`
+* `LLM_SCHEDULER_USAGE_JSON` (test: inject a usage snapshot)
+* `LLM_SCHEDULER_NO_ACTUAL_SUSPEND` (test: skip the real `systemctl suspend`)
+* `LLM_SCHEDULER_PTY_TIMEOUT` (fresh-process launch timeout, seconds)
+* `LLM_SCHEDULER_TMUX_TIMEOUT` (tmux completion timeout, seconds)
+* `LLM_SCHEDULER_WAKE_MIN_LEAD` (min seconds before a target to bother arming an OS wake timer)
 
 Document any new user-facing or test-facing variable here and in `README.md` when appropriate.
 

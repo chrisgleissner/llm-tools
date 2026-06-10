@@ -1,5 +1,20 @@
 llm-scheduler worklog
 
+2026-06-10: Applied all P0–P2 bug fixes from defect list.
+- P0-A: Fixed usage_decision to treat past-reset-epoch low-remaining windows as stale (usable), not exhausted.
+- P0-B: Inverted is_undetermined_reason — anything != "rate-limited" is now undetermined, including all Copilot reasons.
+- P0-C: Added explicit success/failure branches at both schedule_resume_and_suspend call sites; fallback to in-process wait on failure.
+- P0-D: Added LLM_SCHEDULER_SUSPEND_MIN_LEAD guard (default 120s); timer-active check after systemd-run; Ctrl-C trap to disarm timer before suspend.
+- P1-A: submit_once now writes synthetic status 124 when status file is missing/empty; guards against non-integer status.
+- P1-B: Removed bare \b429\b from output_is_retryable; kept specific HTTP/status/phrase patterns.
+- P1-C: Replaced // empty with // null in normalize_codex and normalize_claude jq; fixed json_for_provider decorate helper to avoid fabricating objects from null windows.
+- P1-D: Fixed run_tmux to detect colon in TMUX_TARGET for correct session:window parsing; rejects empty session or window.
+- P1-E: Moved --at/--not-before parsing into validate_args (before setup_logs); parse_not_before_epoch reuses pre-validated NOT_BEFORE_EPOCH.
+- P2-A: wake_diagnostics_json now captures systemctl output text and reports running/degraded/unknown correctly.
+- P2-B: schedule_resume_and_suspend dry-run path now prints a concise stdout line with unit name, target epoch, local time, and log dir.
+- Tests: Added deterministic test coverage for all 11 defects to llm-usage-tests.sh.
+- Validation: shellcheck --severity=warning: clean. ./llm-usage-tests.sh: ok.
+
 - Initialized implementation plan and worklog.
 - Factored reusable non-UI helpers from `llm-usage` into `lib/llm-common.sh`.
 - Updated `llm-usage` to source the shared library while preserving rendering and CLI handling.

@@ -84,12 +84,7 @@ Options:
 USAGE
 }
 
-need() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "error: required command not found: $1" >&2
-    exit 127
-  }
-}
+# need() and other shared helpers come from lib/llm-common.sh (sourced above).
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -263,7 +258,8 @@ print_row() {
   [[ -n "$reset_text" ]] || reset_text="-"
   time_to_reset=$(time_until "$reset")
 
-  local fmt_remaining="$(fmt_pct "$remaining")"
+  local fmt_remaining
+  fmt_remaining="$(fmt_pct "$remaining")"
   if [[ "$fmt_remaining" == "-" || "$fmt_remaining" == "unknown" ]]; then
     print_value_row "$display_provider" "$window" "$fmt_remaining" "$remaining_time" "$reset_text" "$time_to_reset" "$source"
   else
@@ -383,7 +379,9 @@ print_copilot_rows() {
   if [[ -n "$monthly_remaining" ]]; then
     monthly_remaining="$(fmt_pct "$monthly_remaining")%"
   else
-    monthly_remaining="unknown"
+    # No monthly figure: the JSON path reports the provider as available:false in
+    # this case, so the table must not imply a usable value here.
+    monthly_remaining="unavailable"
   fi
   if [[ "$LOG_ENABLED" -eq 1 ]]; then
     log_usage_sample "copilot" "monthly" "$monthly_remaining_raw"
