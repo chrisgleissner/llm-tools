@@ -695,9 +695,24 @@ def test_ralph_loops_until_max_iterations(monkeypatch: pytest.MonkeyPatch, tmp_p
     calls: list[str] = []
     monkeypatch.setattr(ralph_robin, "run_scheduler_inline", lambda scfg: (calls.append(scfg.tool), 0)[1])
 
-    rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "3", "--max-duration", "0"))
+    rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "3", "--max-duration", "0", "--min-iteration-seconds", "0"))
     assert rc == 0
     assert len(calls) == 3  # looped instead of exiting after the first success
+
+
+def test_ralph_aborts_on_instant_success_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A provider that returns success instantly (misconfig / no-op) must not let
+    # the orchestrator spin forever; it aborts after a sustained fast streak.
+    monkeypatch.setattr(common, "migrate_legacy_cache_dirs", lambda: None)
+    monkeypatch.setattr(ralph_robin, "select_tool", lambda cfg, logs, ci, sk: _usable_selection())
+    monkeypatch.setattr(ralph_robin, "monotonic", lambda: 1000.0)  # no time ever elapses per iteration
+    monkeypatch.setattr(ralph_robin, "sleep_seconds", lambda s: None)
+    calls: list[str] = []
+    monkeypatch.setattr(ralph_robin, "run_scheduler_inline", lambda scfg: (calls.append(scfg.tool), 0)[1])
+
+    rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "0", "--max-duration", "0", "--min-iteration-seconds", "5"))
+    assert rc == common.AUTONOMY_ABORT_STATUS
+    assert len(calls) == ralph_robin.FAST_SUCCESS_ABORT_STREAK
 
 
 def test_ralph_loops_until_max_duration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -740,8 +740,14 @@ class ProgressGuard:
         self.last_progress = time.time()
         if any(pattern.search(combined_tail) for pattern in common.BLOCKING_PROMPT_PATTERNS):
             return True
+        # Only treat the run as "waiting on a question" when the most recent
+        # output still ends in a question. If the model asked something and then
+        # resumed producing output, clear the pending-question state so we do not
+        # kill a provider that is actually making progress.
         if common.QUESTION_LINE_RE.search(combined_tail[-4000:]):
             self.question_seen_at = time.time()
+        else:
+            self.question_seen_at = None
         return False
 
     def overdue(self) -> str | None:

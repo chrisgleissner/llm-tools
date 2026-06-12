@@ -14,6 +14,11 @@ from . import scheduler
 
 APP_NAME = "ralph-robin"
 
+# A provider that "succeeds" this many times in a row faster than the minimum
+# iteration floor is not doing real work (instant no-op / misconfiguration). The
+# orchestrator stops rather than spin or burn quota forever.
+FAST_SUCCESS_ABORT_STREAK = 5
+
 
 USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
 
@@ -65,6 +70,11 @@ Options:
                               e.g. 24h, 90m, 30s, or bare seconds (default: 24h;
                               0 means no time limit). The loop stops when either
                               --max-iterations or --max-duration is reached.
+  --min-iteration-seconds N   Floor on how fast successive increments may run
+                              (default: 5; 0 disables). Paces the loop so a
+                              provider that exits instantly cannot spin, and
+                              aborts if it keeps returning instant successes
+                              without doing real work.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process through llm-scheduler (default).
   --headless                  Always use the non-interactive provider command
@@ -114,6 +124,7 @@ class RalphConfig:
     even_burn: bool = True
     max_iterations: str = "0"
     max_duration: str = "24h"
+    min_iteration_seconds: str = "5"
 
 
 def trim(value: str) -> str:
@@ -297,6 +308,8 @@ def parse_args(argv: list[str]) -> RalphConfig:
             cfg.max_iterations = need_value("--max-iterations requires a count")
         elif arg == "--max-duration":
             cfg.max_duration = need_value("--max-duration requires a duration")
+        elif arg == "--min-iteration-seconds":
+            cfg.min_iteration_seconds = need_value("--min-iteration-seconds requires seconds")
         elif arg == "--cwd":
             cfg.cwd = need_value("--cwd requires a directory")
         elif arg == "--fresh":
@@ -357,6 +370,9 @@ def validate_args(cfg: RalphConfig) -> None:
     if parse_duration(cfg.max_duration) is None:
         common.err("--max-duration must be a duration like 24h, 90m, 30s, or seconds")
         raise SystemExit(2)
+    if not common.is_integer(cfg.min_iteration_seconds) or int(cfg.min_iteration_seconds) < 0:
+        common.err("--min-iteration-seconds must be a non-negative integer")
+        raise SystemExit(2)
     if not common.is_integer(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600")):
         common.err("LLM_SCHEDULER_IDLE_TIMEOUT must be integer seconds")
         raise SystemExit(2)
@@ -390,6 +406,7 @@ def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
         "even_burn": cfg.even_burn,
         "max_iterations": int(cfg.max_iterations),
         "max_duration_seconds": parse_duration(cfg.max_duration) or 0,
+        "min_iteration_seconds": int(cfg.min_iteration_seconds),
     }
 
 
@@ -706,8 +723,10 @@ def main(argv: list[str] | None = None) -> int:
     skipped: set[str] = set()
     max_iterations = int(cfg.max_iterations)
     max_duration = parse_duration(cfg.max_duration) or 0
+    min_iteration_seconds = int(cfg.min_iteration_seconds)
     start_monotonic = monotonic()
     completed = 0
+    fast_streak = 0
 
     def out_of_time() -> bool:
         return bool(max_duration) and (monotonic() - start_monotonic) >= max_duration
@@ -752,15 +771,30 @@ def main(argv: list[str] | None = None) -> int:
         provider_prompt = provider_prompt_for(cfg, selected_tool, selection, prompt)
         scfg = scheduler_config_for(cfg, selected_tool, logs, all_rate_limited, provider_prompt)
         common.log_event(logs, "scheduler_command", {"argv": ["llm-scheduler", "--tool", selected_tool]})
+        iter_start = monotonic()
         status = run_scheduler_inline(scfg)
-        common.log_event(logs, "scheduler_result", {"status": status})
+        iter_seconds = monotonic() - iter_start
+        common.log_event(logs, "scheduler_result", {"status": status, "seconds": round(iter_seconds, 3)})
         if status == 0:
             completed += 1
-            common.log_event(logs, "iteration_complete", {"tool": selected_tool, "index": selected_index, "completed": completed})
+            common.log_event(logs, "iteration_complete", {"tool": selected_tool, "index": selected_index, "completed": completed, "seconds": round(iter_seconds, 3)})
             if max_iterations and completed >= max_iterations:
                 common.log_event(logs, "final", {"status": "success", "completed": completed})
                 status_line(f"completed {completed} iteration(s); stopping (--max-iterations)", level="ok")
                 return 0
+            # Tight-loop guard: a real increment takes time. If the provider keeps
+            # "succeeding" instantly it is not doing work; pace the loop and abort
+            # a sustained instant-success streak so the orchestrator stays in
+            # control instead of spinning and burning quota.
+            if min_iteration_seconds > 0 and iter_seconds < min_iteration_seconds:
+                fast_streak += 1
+                if fast_streak >= FAST_SUCCESS_ABORT_STREAK:
+                    common.log_event(logs, "final", {"status": "autonomy-abort", "reason": "fast-success-loop", "completed": completed, "streak": fast_streak})
+                    status_line(f"{selected_tool} returned success in under {min_iteration_seconds}s {fast_streak} times running; aborting to stay in control", level="error")
+                    return common.AUTONOMY_ABORT_STATUS
+                sleep_seconds(min_iteration_seconds - iter_seconds)
+            else:
+                fast_streak = 0
             status_line(f"{selected_tool} finished increment {completed}; re-selecting provider", level="ok")
             # Persistent Ralph loop: hand back, re-evaluate usage, and continue.
             # Stay anchored on the provider that just ran so even-burn keeps it
