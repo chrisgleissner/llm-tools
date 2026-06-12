@@ -88,6 +88,39 @@ printf 'no input\n'
 MOCK
 chmod +x "$tmpdir/ci-bin/unsafe-mock"
 
+cat > "$tmpdir/ci-bin/blocking-question-mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'What do you want to do?\n'
+printf 'Enter to confirm - Esc to cancel\n'
+sleep 99
+MOCK
+chmod +x "$tmpdir/ci-bin/blocking-question-mock"
+
+cat > "$tmpdir/ci-bin/idle-mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'working\n'
+sleep 99
+MOCK
+chmod +x "$tmpdir/ci-bin/idle-mock"
+
+cat > "$tmpdir/ci-bin/ralph-autonomy-mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+tool="${1:-}"
+printf '%s\n' "$tool" >> "${SCHED_CAPTURE:?}"
+printf 'attempt\n' >> "${SCHED_ATTEMPTS:?}"
+if [[ "$tool" == "claude" ]]; then
+  printf "You've hit your monthly spend limit.\n"
+  printf 'What do you want to do?\n'
+  printf 'Enter to confirm - Esc to cancel\n'
+  sleep 99
+fi
+printf 'mock ok %s\n' "$tool"
+MOCK
+chmod +x "$tmpdir/ci-bin/ralph-autonomy-mock"
+
 cat > "$tmpdir/ci-bin/systemd-run" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -305,6 +338,127 @@ LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt 'hello quiet' --command-template 'sched-mock {prompt}' --log-dir "$tmpdir/scheduler-logs" > "$tmpdir/scheduler-quiet.txt"
 assert_not_grep 'mock ok' "$tmpdir/scheduler-quiet.txt"
 
+expect_fail "$tmpdir/scheduler-blocking-question.txt" env \
+  LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool claude --prompt x --headless \
+  --command-template 'blocking-question-mock' \
+  --retry-delays 0,0 \
+  --log-dir "$tmpdir/scheduler-blocking-question-logs"
+blocking_question_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-blocking-question.txt")"
+assert_grep 'autonomous abort: interactive prompt detected' "$blocking_question_dir/attempt-1.out"
+[[ ! -e "$blocking_question_dir/attempt-2.out" ]] \
+  || fail "scheduler must not retry the same interactive prompt after autonomy abort"
+jq -e 'select(.type=="final") | .data.status == "autonomy-abort"' "$blocking_question_dir/events.jsonl" >/dev/null \
+  || fail "scheduler did not log autonomy-abort final status"
+
+expect_fail "$tmpdir/scheduler-idle.txt" env \
+  LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  "$SCHEDULER" --tool codex --prompt x --headless \
+  --command-template 'idle-mock' \
+  --headless-idle-timeout 1 \
+  --retry-delays 0,0 \
+  --log-dir "$tmpdir/scheduler-idle-logs"
+idle_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-idle.txt")"
+assert_grep 'autonomous abort: no output progress for 1s' "$idle_dir/attempt-1.out"
+
+# Attached mode: on an interactive terminal the child CLI must be wired
+# straight to that terminal, including stdin, exactly like a direct launch.
+if command -v script >/dev/null 2>&1; then
+  cat > "$tmpdir/ci-bin/attach-mock" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -t 0 && -t 1 ]]; then
+  printf 'mock tty yes\n'
+else
+  printf 'mock tty no\n'
+fi
+IFS= read -r line
+printf 'mock got:%s\n' "$line"
+MOCK
+  chmod +x "$tmpdir/ci-bin/attach-mock"
+  ATTACH_OUT="$tmpdir/scheduler-attached.txt"
+  LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+    SCHEDULER_BIN="$SCHEDULER" ATTACH_LOG_DIR="$tmpdir/scheduler-attached-logs" ATTACH_OUT="$ATTACH_OUT" \
+    python3 - <<'PY' || fail "attached-mode scheduler run failed"
+import os
+import pty
+import select
+import signal
+import sys
+import time
+
+scheduler = os.environ["SCHEDULER_BIN"]
+log_dir = os.environ["ATTACH_LOG_DIR"]
+out_path = os.environ["ATTACH_OUT"]
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(scheduler, [
+        scheduler, "--tool", "claude", "--prompt", "attached run",
+        "--command-template", "attach-mock {prompt}",
+        "--log-dir", log_dir, "--no-retry",
+    ])
+
+parts = []
+sent = False
+exit_code = None
+eof = False
+deadline = time.time() + 60
+while time.time() < deadline and not eof:
+    ready, _, _ = select.select([fd], [], [], 0.2)
+    if fd in ready:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            eof = True
+        else:
+            if not chunk:
+                eof = True
+            else:
+                parts.append(chunk.decode("utf-8", "replace"))
+                if not sent and "mock tty" in "".join(parts):
+                    os.write(fd, b"ping\n")
+                    sent = True
+    try:
+        done, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        exit_code = 0
+        break
+    if done == pid:
+        exit_code = os.waitstatus_to_exitcode(status)
+        break
+
+if exit_code is None:
+    reap_deadline = time.time() + (10.0 if eof else 0.0)
+    while exit_code is None:
+        try:
+            done, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            exit_code = 0
+            break
+        if done == pid:
+            exit_code = os.waitstatus_to_exitcode(status)
+            break
+        if time.time() >= reap_deadline:
+            os.kill(pid, signal.SIGKILL)
+            exit_code = 124
+            break
+        time.sleep(0.05)
+
+with open(out_path, "w", encoding="utf-8") as fh:
+    fh.write("".join(parts))
+sys.exit(0 if exit_code == 0 else 1)
+PY
+  assert_grep 'mock tty yes' "$ATTACH_OUT"
+  assert_grep 'mock got:ping' "$ATTACH_OUT"
+  assert_grep 'success: logs written to' "$ATTACH_OUT"
+  assert_grep 'mock got:ping' "$tmpdir/scheduler-attached-logs/latest/attempt-1.out"
+  jq -e 'select(.type=="start") | .data.attached == 1' "$tmpdir/scheduler-attached-logs/latest/events.jsonl" >/dev/null \
+    || fail "scheduler did not record attached=1 on a terminal run"
+else
+  printf 'skip attached-mode test: script not installed\n'
+fi
+
 : > "$SCHED_CAPTURE"
 : > "$SCHED_ATTEMPTS"
 LLM_SCHEDULER_USAGE_JSON="$available_usage" \
@@ -334,6 +488,25 @@ jq -e 'select(.type=="selection") | .data.tool == "claude" and .data.rotation_re
 [[ -L "$tmpdir/ralph-logs/latest" ]] || fail "ralph-robin did not create latest symlink"
 # The child CLI output must stream through llm-scheduler to ralph-robin's stdout.
 assert_grep 'mock ok' "$tmpdir/ralph-submit.txt"
+
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$ralph_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  "$RALPH" --tools claude,codex --prompt 'rr-autonomy' \
+  --command-template 'ralph-autonomy-mock {tool}' \
+  --state-file "$tmpdir/ralph-autonomy-state.json" \
+  --log-dir "$tmpdir/ralph-autonomy-logs" \
+  --no-retry > "$tmpdir/ralph-autonomy.txt" 2> "$tmpdir/ralph-autonomy.err"
+assert_grep '^claude$' "$SCHED_CAPTURE"
+assert_grep '^codex$' "$SCHED_CAPTURE"
+assert_grep 'blocked autonomously; re-evaluating rotation' "$tmpdir/ralph-autonomy.err"
+assert_grep 'mock ok codex' "$tmpdir/ralph-autonomy.txt"
+jq -e '.current_tool == "codex" and .current_index == 1' "$tmpdir/ralph-autonomy-state.json" >/dev/null \
+  || fail "ralph-robin did not persist Codex after rotating away from autonomy-blocked Claude"
+ralph_autonomy_dir="$(awk '/ralph-robin: logs:/ {print $NF}' "$tmpdir/ralph-autonomy.txt")"
+jq -e 'select(.type=="provider_autonomy_abort") | .data.tool == "claude"' "$ralph_autonomy_dir/events.jsonl" >/dev/null \
+  || fail "ralph-robin did not log provider autonomy abort"
 
 ralph_rotate_usage='{"claude":{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50,"resets_at":1780441200},"week":{"remaining":50}}}'
 : > "$SCHED_CAPTURE"

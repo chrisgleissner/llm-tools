@@ -1,5 +1,14 @@
 llm-scheduler worklog
 
+2026-06-12: Attached terminal mode — fresh runs now show the real CLI experience.
+- Problem: `ralph-robin --prompt-file …` from a terminal showed nothing until Ctrl-C (Python PTY relay + `claude --print`, which emits no output until completion), then died with a KeyboardInterrupt traceback.
+- Fresh mode on an interactive terminal (`resolve_attach_mode`) now runs the provider CLI in its normal interactive form (`claude --dangerously-skip-permissions <prompt>`, `codex -C <cwd> <prompt>`, `copilot -C <cwd> -i <prompt>`) on a PTY wired directly to the terminal via `script(1)` — output, stdin, resizes, and Ctrl-C are byte-for-byte identical to a direct launch.
+- Headless contexts (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, `LLM_SCHEDULER_NO_STREAM=1`) keep the previous non-interactive commands and capture relay; new `--headless` flag on llm-scheduler and ralph-robin (forwarded).
+- Attached runs never retry on clean exit or user cancel (130/143) and skip the rate-limit phrase grep; `clean_capture_file` strips CSI/OSC/charset escapes from the typescript for `attempt-N.out`.
+- Headless Python relay now handles KeyboardInterrupt: kills the child, writes status 130, no traceback.
+- Tests: PTY-driven attached-mode test (TTY visible to child, stdin forwarded, attached=1 event, cleaned attempt log). Verified live: ralph-robin under a PTY launched the real Claude Code TUI, answered a prompt, `/exit` ended the run with status 0; SIGINT on the headless relay produced status 130 with no traceback.
+- Validation: shellcheck clean; ./llm-usage-tests.sh: ok.
+
 2026-06-10: Applied all P0–P2 bug fixes from defect list.
 - P0-A: Fixed usage_decision to treat past-reset-epoch low-remaining windows as stale (usable), not exhausted.
 - P0-B: Inverted is_undetermined_reason — anything != "rate-limited" is now undetermined, including all Copilot reasons.

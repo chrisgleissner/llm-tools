@@ -66,7 +66,7 @@ Important options:
 
 `llm-scheduler` submits a prompt once the selected CLI has known remaining capacity above a threshold. It runs once and exits after success, terminal failure, or retry exhaustion.
 
-In the default fresh mode, the launched CLI's output is streamed live to the terminal you invoked the scheduler from, just as if you had run `claude`, `codex`, or `copilot` directly; a cleaned copy is also written to the run directory (`attempt-N.out`). Set `LLM_SCHEDULER_NO_STREAM=1` to disable the live stream and only write logs. In tmux mode the output appears in the tmux pane instead.
+In the default fresh mode on an interactive terminal, the provider CLI launches in its normal interactive form attached directly to that terminal — output, key input, window resizes, and Ctrl-C behave exactly as if you had run `claude`, `codex`, or `copilot` yourself. An ANSI-cleaned transcript is also written to the run directory (`attempt-N.out`). Without a terminal (pipes, cron, systemd resume), or with `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`, the non-interactive provider form runs on a captured PTY instead and its output streams to stdout (suppressed under `LLM_SCHEDULER_NO_STREAM=1`). In tmux mode the output appears in the tmux pane instead.
 
 ```bash
 llm-scheduler --tool codex --prompt-file task.md
@@ -95,9 +95,12 @@ Scheduler options:
 - `--retry-delays LIST` defaults to `60,180,600`; `--no-retry` disables retries.
 - `--cwd DIR` sets the target CLI working directory.
 - `--fresh` launches a fresh foreground CLI process and is the default.
+- `--headless` always uses the non-interactive provider command and captured PTY, even on a terminal.
 - `--tmux SESSION[:WINDOW]` runs through tmux, creating the session/window when practical.
 - `--command-template TEMPLATE` overrides CLI syntax. Placeholders are `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. The template is tokenized with Python `shlex`; it is not evaluated by a shell.
 - `--auto-confirm` is enabled by default and only sends Return for recognised safe trust prompts. `--no-auto-confirm` disables it.
+- `--headless-idle-timeout SECONDS` defaults to `600` (`LLM_SCHEDULER_IDLE_TIMEOUT`). In headless fresh mode, abort the provider if no output progress is observed for this long; `0` disables the idle watchdog.
+- `--headless-question-timeout SECONDS` defaults to `30` (`LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT`). In headless fresh mode, abort if question-like output appears and then no further progress is observed; `0` disables this watchdog. Known blocking prompt UIs, such as spend-limit menus, abort immediately.
 - `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`.
 - `--run-dir DIR` writes or resumes a specific run directory. This is mainly useful for wrappers and scheduled resume invocations that should keep all logs in one predictable place.
 - `--dry-run` resolves usage state, timing, command plan, and logs without submitting.
@@ -111,7 +114,13 @@ Example for a Claude 5-hour reset:
 llm-scheduler --tool claude --window 5h --prompt-file task.md --suspend-until-ready
 ```
 
-Default provider adapters:
+Default provider adapters, attached (interactive terminal):
+
+- Codex: `codex -C <cwd> <prompt>`
+- Claude Code: `claude --dangerously-skip-permissions <prompt>` with the process working directory set to `--cwd`
+- GitHub Copilot: `copilot -C <cwd> -i <prompt>`
+
+Default provider adapters, headless (no terminal, or `--headless`):
 
 - Codex: `codex exec -C <cwd> <prompt>`
 - Claude Code: `claude --dangerously-skip-permissions --print <prompt>` with the process working directory set to `--cwd`
@@ -125,7 +134,7 @@ Use `--command-template` if an installed CLI changes syntax or you use a wrapper
 
 `ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, advances only when that tool is rate-limited, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
 
-The selected CLI's chat output streams live to the terminal you ran `ralph-robin` from — including after a provider switch — so no extra `tail` command is needed to follow the run.
+`ralph-robin` defaults to autonomous headless launches even from an interactive terminal. The scheduler uses the provider's non-interactive adapter when available, streams output to your terminal, and aborts/re-evaluates rotation if a provider stops making progress or presents an input prompt.
 
 ```bash
 ralph-robin --prompt-file task.md
@@ -145,11 +154,13 @@ Important options:
 
 - `--tools LIST` sets the comma-separated rotation. Values are `claude`, `codex`, and `copilot`.
 - `--prompt TEXT` and `--prompt-file FILE` match `llm-scheduler`.
-- `--window`, `--min-remaining`, `--poll-interval`, `--max-unavailable-wait`, `--retry-delays`, `--cwd`, `--fresh`, `--tmux`, `--command-template`, `--auto-confirm`, and `--no-auto-confirm` are passed through to `llm-scheduler`.
+- `--window`, `--min-remaining`, `--poll-interval`, `--max-unavailable-wait`, `--retry-delays`, `--cwd`, `--fresh`, `--headless`, `--tmux`, `--command-template`, `--auto-confirm`, `--no-auto-confirm`, `--headless-idle-timeout`, and `--headless-question-timeout` are passed through to `llm-scheduler`.
 - `--state-file FILE` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json` and stores the current provider index.
 - `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.
 
 When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, the scheduler's bounded unavailable wait behavior still applies.
+
+If a selected provider exits with a scheduler autonomy abort, `ralph-robin` skips that provider for the current invocation, re-checks usage for the remaining tools, and launches the next usable provider. If every configured provider blocks this way, it exits with status `75` and leaves the logs under the printed run directory.
 
 ## Logs and Cached Data
 

@@ -91,10 +91,10 @@ The PTY capture is slow (up to `LLM_USAGE_COPILOT_TIMEOUT` seconds), so `read_co
 * A `rate-limited` decision (a known window with a real reset epoch) must wait for that reset, not proceed early.
 * An *undeterminable* decision (`unavailable`, `inconclusive-usage`, `unsupported-window`) must never block forever: bound the wait with `--max-unavailable-wait`, then launch optimistically. See `is_undetermined_reason`.
 * `--window` must be valid for the tool (copilot: auto/monthly; codex/claude: auto/5h/weekly). Reject other combinations in `validate_args`.
-* Treat a tool launch as needing retry on non-zero exit, or on a clean exit whose output clearly signals a provider rate-limit/overload. Keep `output_is_retryable` patterns specific so ordinary successful agent output is not re-submitted.
+* Treat a tool launch as needing retry on non-zero exit, or on a clean exit whose output clearly signals a provider rate-limit/overload. Keep `output_is_retryable` patterns specific so ordinary successful agent output is not re-submitted. The synthetic autonomy-abort status `75` is different: do not retry the same provider session inside `llm-scheduler`.
 * Under `--wake`, arm at most one OS wake timer per distinct, far-enough target (`log_wake_plan` lead guard + `WAKE_ARMED_TARGET`); never one per poll iteration.
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
-* Fresh mode streams the child CLI output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`; the cleaned copy still goes to `attempt-N.out`. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
+* Fresh mode on an interactive terminal runs the provider CLI in its normal interactive form on a PTY wired directly to that terminal via `script(1)` (`resolve_attach_mode`, `ATTACHED=1`): output, stdin, resizes, and Ctrl-C must behave exactly as a direct CLI launch. Headless fresh mode (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`) keeps the non-interactive provider commands and streams the child output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`. Both paths write the ANSI-cleaned copy to `attempt-N.out`. Attached runs never retry on a clean exit or user cancel (130/143) and skip the rate-limit phrase grep, since interactive screen content can legitimately mention rate limits. Headless runs must abort with status `75` when a blocking prompt UI is detected, when question-like output stalls, or when there is no output progress past `LLM_SCHEDULER_IDLE_TIMEOUT`; `ralph-robin` must treat status `75` as a reason to re-evaluate rotation, not as a final failure after the first provider. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
 
 ## Environment knobs
 
@@ -120,10 +120,13 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_COPILOT_CAPTURE_CWD`
 * `LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS`
 * `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS`
-* `LLM_SCHEDULER_NO_STREAM` (disable live pass-through of the child CLI output to stdout in fresh mode)
+* `LLM_SCHEDULER_NO_STREAM` (disable live pass-through of the child CLI output to stdout in fresh mode; also forces headless commands)
+* `LLM_SCHEDULER_HEADLESS` (force the non-interactive provider command and captured PTY even on a terminal)
 * `LLM_SCHEDULER_USAGE_JSON` (test: inject a usage snapshot)
 * `LLM_SCHEDULER_NO_ACTUAL_SUSPEND` (test: skip the real `systemctl suspend`)
-* `LLM_SCHEDULER_PTY_TIMEOUT` (fresh-process launch timeout, seconds)
+* `LLM_SCHEDULER_PTY_TIMEOUT` (headless fresh-process launch timeout, seconds; attached terminal runs have no timeout)
+* `LLM_SCHEDULER_IDLE_TIMEOUT` (headless idle watchdog; abort when no output progress is seen for this many seconds; 0 disables)
+* `LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT` (headless question watchdog; abort when question-like output stops progressing for this many seconds; 0 disables)
 * `LLM_SCHEDULER_TMUX_TIMEOUT` (tmux completion timeout, seconds)
 * `LLM_SCHEDULER_WAKE_MIN_LEAD` (min seconds before a target to bother arming an OS wake timer)
 

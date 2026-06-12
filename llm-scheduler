@@ -29,6 +29,11 @@ EXEC_MODE="fresh"
 TMUX_TARGET=""
 COMMAND_TEMPLATE=""
 AUTO_CONFIRM=1
+HEADLESS=0
+# Resolved at runtime: 1 when fresh mode runs on a real terminal, where the
+# provider CLI is attached directly to that terminal via script(1).
+ATTACHED=0
+AUTONOMY_ABORT_STATUS=75
 LOG_DIR="$LLM_TOOLS_CACHE_DIR/llm-scheduler/logs"
 DRY_RUN=0
 WAKE=0
@@ -50,6 +55,13 @@ usage() {
 Usage: $APP_NAME --tool codex|claude|copilot (--prompt TEXT | --prompt-file FILE) [options]
 
 Submit a prompt to a local LLM CLI as soon as shared llm-usage data says it is usable.
+
+When fresh mode runs on an interactive terminal, the provider CLI is launched
+in its normal interactive form attached directly to that terminal: output,
+key input, window resizes, and Ctrl-C behave exactly as if the CLI had been
+started directly in the shell. Without a terminal (pipes, cron, systemd
+resume) or with --headless, the non-interactive form (claude --print,
+codex exec, copilot --prompt) runs on a captured PTY instead.
 
 Examples:
   llm-scheduler --tool codex --prompt-file task.md
@@ -79,10 +91,18 @@ Options:
   --no-retry                  Disable retries after failed submission.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process (default).
+  --headless                  Always use the non-interactive provider command
+                              and captured PTY, even on a terminal.
   --tmux SESSION[:WINDOW]     Execute via tmux instead of foreground process.
   --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
   --auto-confirm              Acknowledge only known safe prompts (default).
   --no-auto-confirm           Disable automatic prompt acknowledgement.
+  --headless-idle-timeout SECONDS
+                              Abort headless runs with no output progress
+                              (default: LLM_SCHEDULER_IDLE_TIMEOUT or 600; 0 disables).
+  --headless-question-timeout SECONDS
+                              Abort headless runs that ask a question then stop
+                              making progress (default: LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT or 30; 0 disables).
   --log-dir DIR               Log directory (default: ~/.cache/llm-tools/llm-scheduler/logs).
   --run-dir DIR               Reuse/write one specific run directory.
   --dry-run                   Resolve state and command plan without submitting.
@@ -116,11 +136,15 @@ safe_args_json() {
     --arg tmux "$TMUX_TARGET" \
     --arg prompt_source "$PROMPT_SOURCE" \
     --arg log_dir "$LOG_DIR" \
+    --arg headless_idle_timeout "${LLM_SCHEDULER_IDLE_TIMEOUT:-600}" \
+    --arg headless_question_timeout "${LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT:-30}" \
     --argjson auto_confirm "$AUTO_CONFIRM" \
+    --argjson headless "$HEADLESS" \
+    --argjson attached "$ATTACHED" \
     --argjson dry_run "$DRY_RUN" \
     --argjson wake "$WAKE" \
     --argjson suspend_until_ready "$SUSPEND_UNTIL_READY" \
-    '{tool:$tool,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),max_unavailable_wait:($max_unavailable_wait|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,auto_confirm:$auto_confirm,dry_run:$dry_run,wake:$wake,suspend_until_ready:$suspend_until_ready}'
+    '{tool:$tool,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),max_unavailable_wait:($max_unavailable_wait|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,headless_idle_timeout:($headless_idle_timeout|tonumber),headless_question_timeout:($headless_question_timeout|tonumber),auto_confirm:$auto_confirm,headless:$headless,attached:$attached,dry_run:$dry_run,wake:$wake,suspend_until_ready:$suspend_until_ready}'
 }
 
 parse_args() {
@@ -138,10 +162,13 @@ parse_args() {
       --no-retry) RETRY_DELAYS=""; shift ;;
       --cwd) [[ $# -ge 2 ]] || { err "--cwd requires a directory"; exit 2; }; CWD="$2"; shift 2 ;;
       --fresh) EXEC_MODE="fresh"; TMUX_TARGET=""; shift ;;
+      --headless) HEADLESS=1; shift ;;
       --tmux) [[ $# -ge 2 ]] || { err "--tmux requires SESSION[:WINDOW]"; exit 2; }; EXEC_MODE="tmux"; TMUX_TARGET="$2"; shift 2 ;;
       --command-template) [[ $# -ge 2 ]] || { err "--command-template requires a template"; exit 2; }; COMMAND_TEMPLATE="$2"; shift 2 ;;
       --auto-confirm) AUTO_CONFIRM=1; shift ;;
       --no-auto-confirm) AUTO_CONFIRM=0; shift ;;
+      --headless-idle-timeout) [[ $# -ge 2 ]] || { err "--headless-idle-timeout requires seconds"; exit 2; }; LLM_SCHEDULER_IDLE_TIMEOUT="$2"; export LLM_SCHEDULER_IDLE_TIMEOUT; shift 2 ;;
+      --headless-question-timeout) [[ $# -ge 2 ]] || { err "--headless-question-timeout requires seconds"; exit 2; }; LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT="$2"; export LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT; shift 2 ;;
       --log-dir) [[ $# -ge 2 ]] || { err "--log-dir requires a directory"; exit 2; }; LOG_DIR="$2"; shift 2 ;;
       --run-dir) [[ $# -ge 2 ]] || { err "--run-dir requires a directory"; exit 2; }; RUN_DIR="$2"; shift 2 ;;
       --dry-run) DRY_RUN=1; shift ;;
@@ -166,6 +193,8 @@ validate_args() {
   validate_prompt_args || exit 2
   validate_tool_window "$TOOL" "$WINDOW" || exit 2
   validate_gate_args || exit 2
+  is_integer "${LLM_SCHEDULER_IDLE_TIMEOUT:-600}" || { err "LLM_SCHEDULER_IDLE_TIMEOUT must be integer seconds"; exit 2; }
+  is_integer "${LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT:-30}" || { err "LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT must be integer seconds"; exit 2; }
   is_integer "$PRE_SUSPEND_CONFIRMATION_SECONDS" || { err "LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS must be integer seconds"; exit 2; }
   # Validate --at / --not-before early so an invalid time exits before
   # setup_run_logs creates a run directory.
@@ -204,7 +233,37 @@ sleep_until() {
   sleep "$seconds"
 }
 
+# Attached mode: fresh execution on an interactive terminal. The provider CLI
+# runs in its normal interactive form on a PTY wired straight to the invoking
+# terminal, so the user sees and drives exactly what a direct CLI launch shows.
+# Headless --print/exec forms stay reserved for non-terminal contexts, where
+# nobody is watching and output only needs to be captured.
+resolve_attach_mode() {
+  ATTACHED=0
+  [[ "$EXEC_MODE" == "fresh" ]] || return 0
+  (( HEADLESS == 0 )) || return 0
+  [[ "${LLM_SCHEDULER_HEADLESS:-0}" != "1" ]] || return 0
+  [[ "${LLM_SCHEDULER_NO_STREAM:-0}" != "1" ]] || return 0
+  [[ -t 0 && -t 1 ]] || return 0
+  have_cmd script || return 0
+  ATTACHED=1
+}
+
 provider_default_argv_json() {
+  if (( ATTACHED == 1 )); then
+    case "$TOOL" in
+      codex)
+        jq -nc --arg prompt "$PROMPT_TEXT" --arg cwd "$CWD" '["codex","-C",$cwd,$prompt]'
+        ;;
+      claude)
+        jq -nc --arg prompt "$PROMPT_TEXT" '["claude","--dangerously-skip-permissions",$prompt]'
+        ;;
+      copilot)
+        jq -nc --arg prompt "$PROMPT_TEXT" --arg cwd "$CWD" '["copilot","-C",$cwd,"-i",$prompt]'
+        ;;
+    esac
+    return 0
+  fi
   case "$TOOL" in
     codex)
       jq -nc --arg prompt "$PROMPT_TEXT" --arg cwd "$CWD" '["codex","exec","-C",$cwd,$prompt]'
@@ -297,7 +356,62 @@ print_pre_suspend_confirmation() {
   fi
 }
 
+# Strip carriage returns, bells, and ANSI escape sequences from a captured
+# typescript in place so attempt logs stay readable as plain text.
+clean_capture_file() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  CAPTURE_FILE="$file" python3 - <<'PY'
+import os
+import re
+
+path = os.environ["CAPTURE_FILE"]
+with open(path, encoding="utf-8", errors="replace") as fh:
+    text = fh.read()
+# Escape sequences must go before BEL/CR cleanup: BEL terminates OSC titles.
+text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
+text = re.sub(r"\x1b\[[0-9;?<>=]*[ -/]*[@-~]", "", text)
+text = re.sub(r"\x1b[()][\x20-\x7e]", "", text)
+text = re.sub(r"\x1b[@-Z\\^_<>=78]", "", text)
+text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\a", "")
+text = text.replace("\x0e", "").replace("\x0f", "")
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(text)
+PY
+}
+
 run_fresh() {
+  local argv_json="$1"
+  local output_file="$2"
+  local status_file="$3"
+  if (( ATTACHED == 1 )); then
+    run_fresh_attached "$argv_json" "$output_file" "$status_file"
+  else
+    run_fresh_headless "$argv_json" "$output_file" "$status_file"
+  fi
+}
+
+# Run the provider CLI on a PTY connected directly to the invoking terminal
+# via script(1). Output bytes, key input, window resizes, and Ctrl-C reach the
+# CLI exactly as a direct shell launch; the typescript doubles as the attempt
+# output capture and is ANSI-cleaned afterwards. No PTY timeout applies here:
+# the user is present and ends the session themselves.
+run_fresh_attached() {
+  local argv_json="$1"
+  local output_file="$2"
+  local status_file="$3"
+  local command_line status
+  command_line="$(argv_json_to_command_line "$argv_json")"
+  set +e
+  (cd "$CWD" && exec script --return --quiet --flush --command "$command_line" "$output_file")
+  status=$?
+  set -e
+  printf '%s' "$status" > "$status_file"
+  clean_capture_file "$output_file"
+  return "$status"
+}
+
+run_fresh_headless() {
   local argv_json="$1"
   local output_file="$2"
   local status_file="$3"
@@ -319,6 +433,9 @@ output_file = os.environ["OUTPUT_FILE"]
 status_file = os.environ["STATUS_FILE"]
 auto_confirm = os.environ.get("AUTO_CONFIRM_VALUE") == "1"
 timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600"))
+idle_timeout = int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600"))
+question_idle_timeout = int(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30"))
+autonomy_abort_status = 75
 # Stream the child CLI's output live to our stdout so the user watches the
 # chat output exactly where they invoked the scheduler (or ralph-robin).
 stream = os.environ.get("LLM_SCHEDULER_NO_STREAM") != "1"
@@ -326,6 +443,27 @@ stream = os.environ.get("LLM_SCHEDULER_NO_STREAM") != "1"
 safe_prompts = (
     "Confirm folder trust",
     "Do you trust the files in this folder?",
+)
+
+blocking_prompt_patterns = (
+    re.compile(r"\bwhat do you want to do\?", re.I),
+    re.compile(r"\benter to confirm\b", re.I),
+    re.compile(r"\besc to cancel\b", re.I),
+    re.compile(r"\buse (?:the )?arrow keys\b", re.I),
+    re.compile(r"\bpress (?:enter|return) to\b", re.I),
+    re.compile(r"\badjust monthly spend limit\b", re.I),
+    re.compile(r"\bwait for limit to reset\b", re.I),
+    re.compile(r"\bupgrade to max\b", re.I),
+    re.compile(r"\byou(?:'|\u2019)ve hit your monthly spend limit\b", re.I),
+    re.compile(r"\bmonthly spend limit\b", re.I),
+    re.compile(r"\brate[- ]limit options\b", re.I),
+    re.compile(r"\b(?:proceed|continue)\?\s*(?:\[[yYnN]/[yYnN]\]|\([yYnN]/[yYnN]\))", re.I),
+)
+
+question_line_pattern = re.compile(
+    r"(?im)^\s*(?:[>\-\*\d.)\s]*)?"
+    r"(?:what|which|who|when|where|why|how|do you|would you|should i|should we|"
+    r"can i|may i|please (?:choose|select)|select|choose|confirm|proceed|continue)\b[^\n?]{0,180}\?\s*$"
 )
 
 pid, fd = pty.fork()
@@ -350,6 +488,9 @@ trust_sent = False
 exit_code = 124
 eof = False
 start = time.time()
+last_progress = start
+question_seen_at = None
+abort_reason = ""
 out_fh = open(output_file, "w", encoding="utf-8")
 
 def clean(text):
@@ -363,42 +504,93 @@ def reap_status(status):
         return 128 + os.WTERMSIG(status)
     return None
 
-while True:
-    if time.time() - start > timeout:
-        break
-    ready, _, _ = select.select([fd], [], [], 0.2)
-    if fd in ready:
-        try:
-            chunk = os.read(fd, 65536)
-        except OSError:
-            eof = True
-            break
-        if not chunk:
-            eof = True
-            break
-        text = chunk.decode("utf-8", "replace")
-        parts.append(text)
-        if stream:
-            try:
-                os.write(sys.stdout.fileno(), chunk)
-            except OSError:
-                stream = False
-        out_fh.write(clean(text))
-        out_fh.flush()
-        combined = "".join(parts)
-        if auto_confirm and not trust_sent and any(p in combined for p in safe_prompts):
-            os.write(fd, b"\r")
-            trust_sent = True
+def record_abort(reason):
+    global abort_reason, exit_code
+    abort_reason = reason
+    line = f"\nllm-scheduler: autonomous abort: {reason}\n"
     try:
-        done, status = os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError:
-        done = pid
-        status = 0
-    if done == pid:
-        code = reap_status(status)
-        if code is not None:
-            exit_code = code
-        break
+        out_fh.write(line)
+        out_fh.flush()
+    except OSError:
+        pass
+    if stream:
+        try:
+            os.write(sys.stdout.fileno(), line.encode("utf-8", "replace"))
+        except OSError:
+            pass
+    exit_code = autonomy_abort_status
+
+try:
+    while True:
+        now = time.time()
+        if now - start > timeout:
+            break
+        if idle_timeout > 0 and now - last_progress > idle_timeout:
+            record_abort(f"no output progress for {idle_timeout}s")
+            break
+        if (
+            question_idle_timeout > 0
+            and question_seen_at is not None
+            and now - question_seen_at > question_idle_timeout
+        ):
+            record_abort(f"question required a response for {question_idle_timeout}s")
+            break
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if fd in ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                eof = True
+                break
+            if not chunk:
+                eof = True
+                break
+            text = chunk.decode("utf-8", "replace")
+            last_progress = time.time()
+            parts.append(text)
+            if stream:
+                try:
+                    os.write(sys.stdout.fileno(), chunk)
+                except OSError:
+                    stream = False
+            out_fh.write(clean(text))
+            out_fh.flush()
+            combined = clean("".join(parts))
+            if auto_confirm and not trust_sent and any(p in combined for p in safe_prompts):
+                os.write(fd, b"\r")
+                trust_sent = True
+                question_seen_at = None
+            elif any(pattern.search(combined) for pattern in blocking_prompt_patterns):
+                record_abort("interactive prompt detected")
+                break
+            elif question_line_pattern.search(combined[-4000:]):
+                question_seen_at = time.time()
+        try:
+            done, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            done = pid
+            status = 0
+        if done == pid:
+            code = reap_status(status)
+            if code is not None:
+                exit_code = code
+            break
+except KeyboardInterrupt:
+    # Ctrl-C lands on this relay, not the child: pass it on, reap, and report
+    # the conventional 130 instead of dying with a traceback.
+    exit_code = 130
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
+        try:
+            done, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            break
+        if done == pid:
+            break
 
 if exit_code == 124:
     # On Linux a child's PTY fds close (EOF/EIO on the master) slightly before
@@ -420,7 +612,7 @@ if exit_code == 124:
             break
         time.sleep(0.01)
 
-if exit_code == 124:
+if exit_code in (124, autonomy_abort_status):
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.kill(pid, sig)
@@ -429,6 +621,8 @@ if exit_code == 124:
         time.sleep(0.2)
 
 text = clean("".join(parts))
+if abort_reason and "llm-scheduler: autonomous abort:" not in text:
+    text += f"\nllm-scheduler: autonomous abort: {abort_reason}\n"
 out_fh.seek(0)
 out_fh.truncate()
 out_fh.write(text)
@@ -503,6 +697,15 @@ run_tmux() {
 output_is_retryable() {
   local status="$1"
   local output_file="$2"
+  # Attached interactive runs are driven by a present user: a clean exit or a
+  # user cancel (SIGINT/SIGTERM) is final, and the captured screen content can
+  # legitimately mention rate limits, so phrase matching is skipped.
+  if (( ATTACHED == 1 )); then
+    case "$status" in
+      0|130|143) return 1 ;;
+      *) return 0 ;;
+    esac
+  fi
   # A non-zero exit is the primary, reliable signal: most CLIs exit non-zero on
   # rate-limit/overload.
   if [[ "$status" -ne 0 ]]; then
@@ -544,6 +747,10 @@ submit_once() {
   [[ "$status" =~ ^[0-9]+$ ]] || status=124
   cat "$output_file" >> "$TEXT_LOG"
   log_event "attempt_result" "$(jq -nc --argjson attempt "$attempt" --argjson status "$status" --rawfile output "$output_file" '{attempt:$attempt,status:$status,output:$output}')"
+  if [[ "$status" -eq "$AUTONOMY_ABORT_STATUS" ]]; then
+    log_event "autonomy_abort" "$(jq -nc --argjson attempt "$attempt" --rawfile output "$output_file" '{attempt:$attempt,output:$output}')"
+    return "$AUTONOMY_ABORT_STATUS"
+  fi
   if output_is_retryable "$status" "$output_file"; then
     return 1
   fi
@@ -642,6 +849,8 @@ scheduler_resume_argv_json() {
     --min-remaining "$MIN_REMAINING"
     --poll-interval "$POLL_INTERVAL"
     --max-unavailable-wait "$MAX_UNAVAILABLE_WAIT"
+    --headless-idle-timeout "${LLM_SCHEDULER_IDLE_TIMEOUT:-600}"
+    --headless-question-timeout "${LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT:-30}"
     --cwd "$CWD"
     "$auto_flag"
     --log-dir "$LOG_DIR"
@@ -652,6 +861,9 @@ scheduler_resume_argv_json() {
     args+=(--tmux "$TMUX_TARGET")
   else
     args+=(--fresh)
+  fi
+  if (( HEADLESS == 1 )); then
+    args+=(--headless)
   fi
   if [[ -n "$COMMAND_TEMPLATE" ]]; then
     args+=(--command-template "$COMMAND_TEMPLATE")
@@ -848,9 +1060,10 @@ main() {
   need sha256sum
   need awk
   need python3
+  resolve_attach_mode
   setup_run_logs "${TOOL:-wake}" "${TOOL:-}"
   load_prompt
-  log_text "start provider=$TOOL cwd=$CWD"
+  log_text "start provider=$TOOL cwd=$CWD attached=$ATTACHED"
   log_event "start" "$(safe_args_json)"
   log_event "prompt" "$(jq -nc --arg source "$PROMPT_SOURCE" --arg sha256 "$PROMPT_SHA" --rawfile prompt "$RUN_DIR/prompt.txt" '{source:$source,sha256:$sha256,prompt:$prompt}')"
 
@@ -866,12 +1079,22 @@ main() {
   fi
 
   retry_delays_array "$RETRY_DELAYS"
-  local attempt=1 delay
-  if submit_once "$attempt" "$argv_json"; then
+  local attempt=1 delay submit_status
+  set +e
+  submit_once "$attempt" "$argv_json"
+  submit_status=$?
+  set -e
+  if (( submit_status == 0 )); then
     log_text "final status: success"
     log_event "final" '{"status":"success"}'
     printf 'success: logs written to %s\n' "$RUN_DIR"
     exit 0
+  fi
+  if (( submit_status == AUTONOMY_ABORT_STATUS )); then
+    log_text "final status: autonomy-abort"
+    log_event "final" '{"status":"autonomy-abort"}'
+    printf 'autonomy-abort: logs written to %s\n' "$RUN_DIR" >&2
+    exit "$AUTONOMY_ABORT_STATUS"
   fi
 
   for delay in "${RETRY_ARRAY[@]}"; do
@@ -879,11 +1102,21 @@ main() {
     log_event "retry" "$(jq -nc --argjson attempt "$attempt" --argjson delay "$delay" '{after_attempt:$attempt,delay:$delay}')"
     sleep "$delay"
     attempt=$(( attempt + 1 ))
-    if submit_once "$attempt" "$argv_json"; then
+    set +e
+    submit_once "$attempt" "$argv_json"
+    submit_status=$?
+    set -e
+    if (( submit_status == 0 )); then
       log_text "final status: success"
       log_event "final" '{"status":"success"}'
       printf 'success: logs written to %s\n' "$RUN_DIR"
       exit 0
+    fi
+    if (( submit_status == AUTONOMY_ABORT_STATUS )); then
+      log_text "final status: autonomy-abort"
+      log_event "final" '{"status":"autonomy-abort"}'
+      printf 'autonomy-abort: logs written to %s\n' "$RUN_DIR" >&2
+      exit "$AUTONOMY_ABORT_STATUS"
     fi
   done
   log_text "final status: failed"

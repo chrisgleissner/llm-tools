@@ -30,6 +30,8 @@ EXEC_MODE="fresh"
 TMUX_TARGET=""
 COMMAND_TEMPLATE=""
 AUTO_CONFIRM=1
+HEADLESS=1
+AUTONOMY_ABORT_STATUS=75
 LOG_DIR="$LLM_TOOLS_CACHE_DIR/ralph-robin/logs"
 STATE_FILE="$LLM_TOOLS_CACHE_DIR/ralph-robin/state.json"
 DRY_RUN=0
@@ -40,6 +42,7 @@ RUN_DIR=""
 TEXT_LOG=""
 EVENT_LOG=""
 PROMPT_SHA=""
+SKIPPED_TOOLS=()
 
 usage() {
   cat <<USAGE
@@ -48,6 +51,10 @@ Usage: $APP_NAME (--prompt TEXT | --prompt-file FILE) [options]
 Round-robin prompt submission across local LLM CLIs. By default it keeps using
 Claude while usable, switches to Codex when Claude is exhausted, then switches
 back after Codex is exhausted.
+
+By default the selected CLI uses llm-scheduler's autonomous headless adapter
+even from an interactive terminal. This avoids provider prompts blocking the
+rotation. Use llm-scheduler directly for an attached interactive run.
 
 Examples:
   ralph-robin --prompt-file task.md
@@ -70,10 +77,18 @@ Options:
   --no-retry                  Disable retries after failed submission.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process through llm-scheduler (default).
+  --headless                  Always use the non-interactive provider command
+                              and captured PTY, even on a terminal.
   --tmux SESSION[:WINDOW]     Execute through tmux via llm-scheduler.
   --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
   --auto-confirm              Acknowledge only known safe prompts (default).
   --no-auto-confirm           Disable automatic prompt acknowledgement.
+  --headless-idle-timeout SECONDS
+                              Abort headless runs with no output progress
+                              (default: LLM_SCHEDULER_IDLE_TIMEOUT or 600; 0 disables).
+  --headless-question-timeout SECONDS
+                              Abort headless runs that ask a question then stop
+                              making progress (default: LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT or 30; 0 disables).
   --log-dir DIR               Log directory (default: ~/.cache/llm-tools/ralph-robin/logs).
   --state-file FILE           Rotation state file (default: ~/.cache/llm-tools/ralph-robin/state.json).
   --wake                      Pass best-effort wake scheduling to llm-scheduler.
@@ -123,10 +138,13 @@ parse_args() {
       --no-retry) RETRY_DELAYS=""; shift ;;
       --cwd) [[ $# -ge 2 ]] || { err "--cwd requires a directory"; exit 2; }; CWD="$2"; shift 2 ;;
       --fresh) EXEC_MODE="fresh"; TMUX_TARGET=""; shift ;;
+      --headless) HEADLESS=1; shift ;;
       --tmux) [[ $# -ge 2 ]] || { err "--tmux requires SESSION[:WINDOW]"; exit 2; }; EXEC_MODE="tmux"; TMUX_TARGET="$2"; shift 2 ;;
       --command-template) [[ $# -ge 2 ]] || { err "--command-template requires a template"; exit 2; }; COMMAND_TEMPLATE="$2"; shift 2 ;;
       --auto-confirm) AUTO_CONFIRM=1; shift ;;
       --no-auto-confirm) AUTO_CONFIRM=0; shift ;;
+      --headless-idle-timeout) [[ $# -ge 2 ]] || { err "--headless-idle-timeout requires seconds"; exit 2; }; LLM_SCHEDULER_IDLE_TIMEOUT="$2"; export LLM_SCHEDULER_IDLE_TIMEOUT; shift 2 ;;
+      --headless-question-timeout) [[ $# -ge 2 ]] || { err "--headless-question-timeout requires seconds"; exit 2; }; LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT="$2"; export LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT; shift 2 ;;
       --log-dir) [[ $# -ge 2 ]] || { err "--log-dir requires a directory"; exit 2; }; LOG_DIR="$2"; shift 2 ;;
       --state-file) [[ $# -ge 2 ]] || { err "--state-file requires a file"; exit 2; }; STATE_FILE="$2"; shift 2 ;;
       --wake) WAKE=1; shift ;;
@@ -146,6 +164,8 @@ validate_args() {
     validate_tool_window "$tool" "$WINDOW" || exit 2
   done
   validate_gate_args || exit 2
+  is_integer "${LLM_SCHEDULER_IDLE_TIMEOUT:-600}" || { err "LLM_SCHEDULER_IDLE_TIMEOUT must be integer seconds"; exit 2; }
+  is_integer "${LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT:-30}" || { err "LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT must be integer seconds"; exit 2; }
   [[ -x "$SCHEDULER_PATH" ]] || { err "llm-scheduler is not executable beside $APP_NAME"; exit 2; }
 }
 
@@ -165,12 +185,15 @@ safe_args_json() {
     --arg prompt_source "$PROMPT_SOURCE" \
     --arg log_dir "$LOG_DIR" \
     --arg state_file "$STATE_FILE" \
+    --arg headless_idle_timeout "${LLM_SCHEDULER_IDLE_TIMEOUT:-600}" \
+    --arg headless_question_timeout "${LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT:-30}" \
     --argjson auto_confirm "$AUTO_CONFIRM" \
+    --argjson headless "$HEADLESS" \
     --argjson dry_run "$DRY_RUN" \
     --argjson wake "$WAKE" \
     --argjson suspend_until_ready "$SUSPEND_UNTIL_READY" \
     --argjson tools "$tools_json" \
-    '{tools_spec:$tools_spec,tools:$tools,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),max_unavailable_wait:($max_unavailable_wait|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,state_file:$state_file,auto_confirm:$auto_confirm,dry_run:$dry_run,wake:$wake,suspend_until_ready:$suspend_until_ready}'
+    '{tools_spec:$tools_spec,tools:$tools,window:$window,min_remaining:($min_remaining|tonumber),poll_interval:($poll_interval|tonumber),max_unavailable_wait:($max_unavailable_wait|tonumber),retry_delays:$retry_delays,cwd:$cwd,mode:$mode,tmux:$tmux,prompt_source:$prompt_source,log_dir:$log_dir,state_file:$state_file,headless_idle_timeout:($headless_idle_timeout|tonumber),headless_question_timeout:($headless_question_timeout|tonumber),auto_confirm:$auto_confirm,headless:$headless,dry_run:$dry_run,wake:$wake,suspend_until_ready:$suspend_until_ready}'
 }
 
 current_index_from_state() {
@@ -206,6 +229,28 @@ save_state() {
   chmod 600 "$STATE_FILE" 2>/dev/null || true
 }
 
+tool_is_skipped() {
+  local needle="$1" skipped
+  for skipped in "${SKIPPED_TOOLS[@]}"; do
+    [[ "$skipped" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+skip_tool_for_current_run() {
+  local tool="$1"
+  tool_is_skipped "$tool" && return 0
+  SKIPPED_TOOLS+=("$tool")
+}
+
+skipped_tools_json() {
+  if (( ${#SKIPPED_TOOLS[@]} == 0 )); then
+    printf '[]\n'
+  else
+    argv_to_json "${SKIPPED_TOOLS[@]}"
+  fi
+}
+
 select_tool() {
   local current_index="$1"
   local count="${#TOOLS[@]}"
@@ -222,7 +267,7 @@ select_tool() {
   done
 
   usable="$(jq -r '.usable' <<<"${decisions[$current_index]}")"
-  if [[ "$usable" == "true" ]]; then
+  if [[ "$usable" == "true" ]] && ! tool_is_skipped "${TOOLS[$current_index]}"; then
     jq -nc --argjson index "$current_index" --arg tool "${TOOLS[$current_index]}" --arg rotation_reason "current-usable" --argjson all_rate_limited false --argjson decision "${decisions[$current_index]}" \
       '{index:$index,tool:$tool,rotation_reason:$rotation_reason,all_rate_limited:$all_rate_limited,decision:$decision}'
     return 0
@@ -231,7 +276,7 @@ select_tool() {
   for (( i=1; i<count; i++ )); do
     local next=$(( (current_index + i) % count ))
     usable="$(jq -r '.usable' <<<"${decisions[$next]}")"
-    if [[ "$usable" == "true" ]]; then
+    if [[ "$usable" == "true" ]] && ! tool_is_skipped "${TOOLS[$next]}"; then
       jq -nc --argjson index "$next" --arg tool "${TOOLS[$next]}" --arg rotation_reason "advanced-to-usable" --argjson all_rate_limited false --argjson decision "${decisions[$next]}" \
         '{index:$index,tool:$tool,rotation_reason:$rotation_reason,all_rate_limited:$all_rate_limited,decision:$decision}'
       return 0
@@ -241,6 +286,7 @@ select_tool() {
   local best_index="-1"
   local best_wait=""
   for (( i=0; i<count; i++ )); do
+    tool_is_skipped "${TOOLS[$i]}" && continue
     reason="$(jq -r '.reason' <<<"${decisions[$i]}")"
     wait_until="$(jq -r '.wait_until // empty' <<<"${decisions[$i]}")"
     if [[ "$reason" == "rate-limited" && "$wait_until" =~ ^[0-9]+$ ]]; then
@@ -251,7 +297,18 @@ select_tool() {
     fi
   done
   if [[ "$best_index" == "-1" ]]; then
-    best_index="$current_index"
+    for (( i=0; i<count; i++ )); do
+      local fallback=$(( (current_index + i) % count ))
+      if ! tool_is_skipped "${TOOLS[$fallback]}"; then
+        best_index="$fallback"
+        break
+      fi
+    done
+  fi
+  if [[ "$best_index" == "-1" ]]; then
+    jq -nc --arg rotation_reason "all-skipped" --argjson all_rate_limited false \
+      '{index:-1,tool:"",rotation_reason:$rotation_reason,all_rate_limited:$all_rate_limited,decision:{usable:false,reason:"all-skipped"}}'
+    return 0
   fi
   jq -nc --argjson index "$best_index" --arg tool "${TOOLS[$best_index]}" --arg rotation_reason "all-unusable" --argjson all_rate_limited "$([[ -n "$best_wait" ]] && printf true || printf false)" --argjson decision "${decisions[$best_index]}" \
     '{index:$index,tool:$tool,rotation_reason:$rotation_reason,all_rate_limited:$all_rate_limited,decision:$decision}'
@@ -272,6 +329,8 @@ build_scheduler_args() {
     --min-remaining "$MIN_REMAINING"
     --poll-interval "$POLL_INTERVAL"
     --max-unavailable-wait "$MAX_UNAVAILABLE_WAIT"
+    --headless-idle-timeout "${LLM_SCHEDULER_IDLE_TIMEOUT:-600}"
+    --headless-question-timeout "${LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT:-30}"
     --cwd "$CWD"
     --log-dir "$RUN_DIR"
     --run-dir "$RUN_DIR/scheduler"
@@ -291,6 +350,9 @@ build_scheduler_args() {
     SCHEDULER_ARGS+=(--tmux "$TMUX_TARGET")
   else
     SCHEDULER_ARGS+=(--fresh)
+  fi
+  if (( HEADLESS == 1 )); then
+    SCHEDULER_ARGS+=(--headless)
   fi
   if [[ -n "$COMMAND_TEMPLATE" ]]; then
     SCHEDULER_ARGS+=(--command-template "$COMMAND_TEMPLATE")
@@ -330,46 +392,75 @@ main() {
   log_event "start" "$(safe_args_json)"
   log_event "prompt" "$(jq -nc --arg source "$PROMPT_SOURCE" --arg sha256 "$PROMPT_SHA" --rawfile prompt "$RUN_DIR/prompt.txt" '{source:$source,sha256:$sha256,prompt:$prompt}')"
 
-  local current_index selection selected_index selected_tool rotation_reason all_rate_limited wait_until wait_display status
+  local current_index selection selected_index selected_tool rotation_reason all_rate_limited wait_until wait_display status skipped_json
   current_index="$(current_index_from_state)"
-  log_event "state" "$(jq -nc --arg state_file "$STATE_FILE" --argjson current_index "$current_index" '{state_file:$state_file,current_index:$current_index}')"
-  selection="$(select_tool "$current_index")"
-  selected_index="$(jq -r '.index' <<<"$selection")"
-  selected_tool="$(jq -r '.tool' <<<"$selection")"
-  rotation_reason="$(jq -r '.rotation_reason' <<<"$selection")"
-  all_rate_limited="$(jq -r '.all_rate_limited' <<<"$selection")"
-  wait_until="$(jq -r '.decision.wait_until // empty' <<<"$selection")"
-  log_event "selection" "$selection"
-  log_text "selected provider=$selected_tool reason=$rotation_reason all_rate_limited=$all_rate_limited"
-
   printf 'ralph-robin: logs: %s\n' "$RUN_DIR"
-  printf 'ralph-robin: selected %s (%s)\n' "$selected_tool" "$rotation_reason"
-  if [[ "$all_rate_limited" == "true" ]]; then
-    if [[ "$wait_until" =~ ^[0-9]+$ ]]; then
-      wait_display="$(format_local_epoch "$wait_until") (epoch $wait_until)"
-    else
-      wait_display="unknown"
+
+  while true; do
+    log_event "state" "$(jq -nc --arg state_file "$STATE_FILE" --argjson current_index "$current_index" '{state_file:$state_file,current_index:$current_index}')"
+    selection="$(select_tool "$current_index")"
+    selected_index="$(jq -r '.index' <<<"$selection")"
+    selected_tool="$(jq -r '.tool' <<<"$selection")"
+    rotation_reason="$(jq -r '.rotation_reason' <<<"$selection")"
+    all_rate_limited="$(jq -r '.all_rate_limited' <<<"$selection")"
+    wait_until="$(jq -r '.decision.wait_until // empty' <<<"$selection")"
+    skipped_json="$(skipped_tools_json)"
+    log_event "selection" "$(jq -nc --argjson selection "$selection" --argjson skipped "$skipped_json" '$selection + {skipped:$skipped}')"
+
+    if [[ "$selected_index" == "-1" || -z "$selected_tool" ]]; then
+      log_text "final status: autonomy-abort all providers skipped"
+      log_event "final" "$(jq -nc --argjson skipped "$skipped_json" '{status:"autonomy-abort",reason:"all-providers-skipped",skipped:$skipped}')"
+      printf 'autonomy-abort: all configured tools blocked; logs: %s\n' "$RUN_DIR" >&2
+      exit "$AUTONOMY_ABORT_STATUS"
     fi
-    printf 'ralph-robin: all configured tools are rate-limited; suspending via llm-scheduler until %s\n' "$wait_display"
-  fi
 
-  save_state "$selected_index" "$selected_tool"
+    log_text "selected provider=$selected_tool reason=$rotation_reason all_rate_limited=$all_rate_limited"
+    printf 'ralph-robin: selected %s (%s)\n' "$selected_tool" "$rotation_reason"
+    if [[ "$all_rate_limited" == "true" ]]; then
+      if [[ "$wait_until" =~ ^[0-9]+$ ]]; then
+        wait_display="$(format_local_epoch "$wait_until") (epoch $wait_until)"
+      else
+        wait_display="unknown"
+      fi
+      printf 'ralph-robin: all configured tools are rate-limited; suspending via llm-scheduler until %s\n' "$wait_display"
+    fi
 
-  if (( DRY_RUN == 1 )); then
-    log_event "final" '{"status":"dry-run"}'
-    printf 'dry-run: no prompt submitted\n'
-    exit 0
-  fi
+    save_state "$selected_index" "$selected_tool"
 
-  build_scheduler_args "$selected_tool" "$([[ "$all_rate_limited" == "true" ]] && printf 1 || printf 0)"
-  if run_scheduler; then
-    status=0
-    log_event "final" '{"status":"success"}'
-  else
-    status=$?
+    if (( DRY_RUN == 1 )); then
+      log_event "final" '{"status":"dry-run"}'
+      printf 'dry-run: no prompt submitted\n'
+      exit 0
+    fi
+
+    build_scheduler_args "$selected_tool" "$([[ "$all_rate_limited" == "true" ]] && printf 1 || printf 0)"
+    if run_scheduler; then
+      status=0
+    else
+      status=$?
+    fi
+    if (( status == 0 )); then
+      log_event "final" '{"status":"success"}'
+      exit 0
+    fi
+
+    if (( status == AUTONOMY_ABORT_STATUS )); then
+      log_text "scheduler autonomy-abort for provider=$selected_tool; re-evaluating rotation"
+      log_event "provider_autonomy_abort" "$(jq -nc --arg tool "$selected_tool" --argjson index "$selected_index" '{tool:$tool,index:$index}')"
+      printf 'ralph-robin: %s blocked autonomously; re-evaluating rotation\n' "$selected_tool" >&2
+      skip_tool_for_current_run "$selected_tool"
+      if (( ${#SKIPPED_TOOLS[@]} >= ${#TOOLS[@]} )); then
+        skipped_json="$(skipped_tools_json)"
+        log_event "final" "$(jq -nc --argjson skipped "$skipped_json" '{status:"autonomy-abort",reason:"all-providers-skipped",skipped:$skipped}')"
+        printf 'autonomy-abort: all configured tools blocked; logs: %s\n' "$RUN_DIR" >&2
+        exit "$AUTONOMY_ABORT_STATUS"
+      fi
+      current_index=$(( (selected_index + 1) % ${#TOOLS[@]} ))
+      continue
+    fi
     log_event "final" "$(jq -nc --argjson status "$status" '{status:"failed",exit_code:$status}')"
-  fi
-  exit "$status"
+    exit "$status"
+  done
 }
 
 main "$@"
