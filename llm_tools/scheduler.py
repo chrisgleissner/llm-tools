@@ -195,6 +195,12 @@ def parse_args(argv: list[str]) -> SchedulerConfig:
             common.err(f"unknown option: {arg}")
             print(USAGE, end="", file=sys.stderr)
             raise SystemExit(2)
+
+    raw = os.environ.get("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS", "5") or "5"
+    if not common.is_integer(raw):
+        common.err("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS must be integer seconds")
+        raise SystemExit(2)
+    cfg.pre_suspend_confirmation_seconds = int(raw)
     return cfg
 
 
