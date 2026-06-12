@@ -217,8 +217,10 @@ Options:
 | `--tools LIST`       | Set comma-separated rotation. Values: `claude`, `codex`, `copilot`.                                        |
 | `--prompt TEXT`      | Prompt text passed to the selected provider.                                                               |
 | `--prompt-file FILE` | Prompt file passed to the selected provider.                                                               |
-| `--even-burn`        | Prefer the provider with the highest weekly remaining allowance per day, waiting through short-window resets when needed. Enabled by default. |
+| `--even-burn`        | Prefer the provider with the highest remaining daily capacity (weekly remaining ÷ days until weekly reset), waiting through short-window resets when needed. Enabled by default. |
 | `--no-even-burn`     | Keep using the current provider until it is exhausted.                                                      |
+| `--max-iterations N` | Stop after `N` successful increments. Default `0` means no iteration cap; use `1` for single-shot. |
+| `--max-duration D`   | Stop once `D` of wall-clock time elapses (e.g. `24h`, `90m`, `30s`, or seconds). Default `24h`; `0` disables. Whichever of `--max-iterations`/`--max-duration` is hit first wins. |
 | `--state-file FILE`  | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`. |
 | `--log-dir DIR`      | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.            |
 
@@ -244,8 +246,9 @@ Passed through to `llm-scheduler`:
 Behavior:
 
 * Defaults to autonomous headless launches, even from an interactive terminal.
-* Defaults to even burn-down: when multiple providers have comparable weekly reset data, selects the highest `weekly remaining percentage / days until weekly reset`, even if that provider needs to wait for a shorter session-window reset first.
+* Defaults to even burn-down: when multiple providers are available, selects the one with the highest remaining *daily* capacity — the weekly remaining percentage divided by the days until weekly reset (e.g. 80% remaining with 4 days left is 20% per day) — even if that provider needs to wait for a shorter session-window reset first. This spreads each provider's weekly quota evenly across the days until it resets. When a provider's weekly reset time is unknown or stale, a full weekly window is assumed so it is still ranked rather than skipped.
 * Use `--no-even-burn` to restore current-provider-until-exhausted rotation.
+* Loops persistently: after each provider finishes an increment, Ralph re-evaluates usage, re-selects a provider, and submits the prompt again — so a long task is handed back and forth (e.g. Claude → ralph-robin → Claude) without stopping. The loop ends when every provider is blocked, on a non-recoverable failure, or after `--max-iterations` increments.
 * Streams provider output without injected labels.
 * Highlights status lines, diffs, commands, warnings, and errors on interactive terminals.
 * Disables colors for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.

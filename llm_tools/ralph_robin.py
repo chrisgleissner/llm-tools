@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,10 +18,19 @@ APP_NAME = "ralph-robin"
 USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
 
 Round-robin prompt submission across local LLM CLIs. By default it prefers the
-provider with the highest remaining weekly capacity, waiting through a shorter
-session-window reset when needed, so weekly quotas burn down more evenly.
-Disable this with --no-even-burn to keep using the current provider until it is
-exhausted.
+provider with the highest remaining daily capacity (weekly remaining broken down
+over the days until weekly reset), waiting through a shorter session-window reset
+when needed, so weekly quotas burn down more evenly. Disable this with
+--no-even-burn to keep using the current provider until it is exhausted.
+
+ralph-robin runs a persistent loop and owns the orchestration: it picks a
+provider, submits the prompt for one increment, and when that provider's CLI
+exits cleanly it makes a fresh routing decision and submits again (e.g. Claude
+-> ralph-robin -> Claude). When every configured provider is blocked it does not
+stop; it suspends until the soonest provider becomes available again and then
+continues. The loop ends only after --max-duration (default 24h) or
+--max-iterations successful increments, or on a non-recoverable failure. Use
+--max-iterations 1 for the legacy single-shot behavior.
 
 By default the selected CLI uses llm-scheduler's autonomous headless adapter
 even from an interactive terminal. This avoids provider prompts blocking the
@@ -45,9 +55,16 @@ Options:
                               launch (default: 900; 0 waits forever).
   --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
   --no-retry                  Disable retries after failed submission.
-  --even-burn                 Prefer the tool with the highest remaining weekly
-                              capacity (default).
+  --even-burn                 Prefer the tool with the highest remaining daily
+                              capacity, i.e. weekly remaining divided by the days
+                              until weekly reset (default).
   --no-even-burn              Keep using the current provider until exhausted.
+  --max-iterations N          Stop after N successful increments (default: 0,
+                              meaning no iteration limit).
+  --max-duration DURATION     Stop once this much wall-clock time has elapsed,
+                              e.g. 24h, 90m, 30s, or bare seconds (default: 24h;
+                              0 means no time limit). The loop stops when either
+                              --max-iterations or --max-duration is reached.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process through llm-scheduler (default).
   --headless                  Always use the non-interactive provider command
@@ -95,10 +112,43 @@ class RalphConfig:
     suspend_until_ready: bool = False
     dry_run: bool = False
     even_burn: bool = True
+    max_iterations: str = "0"
+    max_duration: str = "24h"
 
 
 def trim(value: str) -> str:
     return value.strip()
+
+
+def parse_duration(text: str) -> int | None:
+    """Parse a duration like 24h, 90m, 30s, 1d, 1.5h, or bare seconds.
+
+    Returns the number of seconds (0 means "no limit"), or None if invalid.
+    """
+    s = text.strip().lower()
+    if s == "":
+        return None
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    mult = 1
+    if s[-1] in units:
+        mult = units[s[-1]]
+        s = s[:-1]
+    try:
+        value = float(s)
+    except ValueError:
+        return None
+    if value < 0:
+        return None
+    return int(value * mult)
+
+
+def monotonic() -> float:
+    return time.monotonic()
+
+
+def sleep_seconds(seconds: float) -> None:
+    if seconds > 0:
+        time.sleep(seconds)
 
 
 def color_enabled() -> bool:
@@ -243,6 +293,10 @@ def parse_args(argv: list[str]) -> RalphConfig:
         elif arg == "--no-even-burn":
             cfg.even_burn = False
             i += 1
+        elif arg == "--max-iterations":
+            cfg.max_iterations = need_value("--max-iterations requires a count")
+        elif arg == "--max-duration":
+            cfg.max_duration = need_value("--max-duration requires a duration")
         elif arg == "--cwd":
             cfg.cwd = need_value("--cwd requires a directory")
         elif arg == "--fresh":
@@ -297,6 +351,12 @@ def validate_args(cfg: RalphConfig) -> None:
     for tool in cfg.tools:
         common.validate_tool_window(tool, cfg.window)
     common.validate_gate_args(cfg.cwd, cfg.min_remaining, cfg.poll_interval, cfg.max_unavailable_wait, cfg.retry_delays)
+    if not common.is_integer(cfg.max_iterations) or int(cfg.max_iterations) < 0:
+        common.err("--max-iterations must be a non-negative integer")
+        raise SystemExit(2)
+    if parse_duration(cfg.max_duration) is None:
+        common.err("--max-duration must be a duration like 24h, 90m, 30s, or seconds")
+        raise SystemExit(2)
     if not common.is_integer(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600")):
         common.err("LLM_SCHEDULER_IDLE_TIMEOUT must be integer seconds")
         raise SystemExit(2)
@@ -328,6 +388,8 @@ def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
         "wake": cfg.wake,
         "suspend_until_ready": cfg.suspend_until_ready,
         "even_burn": cfg.even_burn,
+        "max_iterations": int(cfg.max_iterations),
+        "max_duration_seconds": parse_duration(cfg.max_duration) or 0,
     }
 
 
@@ -372,7 +434,20 @@ def rotation_order_indices(length: int, current_index: int) -> list[int]:
     return [(current_index + i) % length for i in range(length)]
 
 
-def weekly_remaining(decision: dict[str, Any]) -> float | None:
+WEEKLY_WINDOW_DAYS = common.REMAINING_TIME_WINDOW_SECONDS["weekly"] / 86400.0
+
+
+def remaining_daily_capacity(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
+    """Weekly remaining percentage broken down over the days until weekly reset.
+
+    e.g. 80% remaining with 4 days until reset yields 20% remaining per day.
+    A higher value means more headroom to spend each day, so even-burn prefers
+    it. When the weekly reset time is unknown or already elapsed (stale data),
+    fall back to a full weekly window so even-burn can still rank the provider
+    instead of silently abandoning the comparison. Returns None only when the
+    weekly remaining percentage itself is unavailable.
+    """
+    env = env or os.environ
     windows = decision.get("windows")
     if not isinstance(windows, list):
         return None
@@ -382,7 +457,13 @@ def weekly_remaining(decision: dict[str, Any]) -> float | None:
         remaining = window.get("remaining")
         if not isinstance(remaining, (int, float)):
             return None
-        return float(remaining)
+        reset_epoch = window.get("reset_epoch")
+        days_until_reset = WEEKLY_WINDOW_DAYS
+        if isinstance(reset_epoch, int):
+            seconds_until_reset = reset_epoch - common.now_epoch(env)
+            if seconds_until_reset > 0:
+                days_until_reset = seconds_until_reset / 86400.0
+        return float(remaining) / days_until_reset
     return None
 
 
@@ -410,7 +491,7 @@ def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_i
     scored: list[tuple[float, int, int]] = []
     rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(cfg.tools), current_index))}
     for i in usable_indices:
-        score = weekly_remaining(decisions[i])
+        score = remaining_daily_capacity(decisions[i])
         if score is None:
             return None
         scored.append((score, -rotation_rank[i], i))
@@ -562,6 +643,53 @@ def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
     return 1
 
 
+def soonest_wait_until(selection: dict[str, Any], env: dict[str, str] | None = None) -> int | None:
+    """Earliest future reset epoch across the providers in this selection."""
+    decisions = selection.get("decisions")
+    if not isinstance(decisions, list):
+        return None
+    now = common.now_epoch(env)
+    waits = [
+        int(d["wait_until"])
+        for d in decisions
+        if isinstance(d, dict) and isinstance(d.get("wait_until"), int) and int(d["wait_until"]) > now
+    ]
+    return min(waits) if waits else None
+
+
+def suspend_until_available(
+    cfg: RalphConfig,
+    logs: common.RunLogs,
+    selection: dict[str, Any],
+    start_monotonic: float,
+    max_duration: int,
+    reason: str,
+) -> bool:
+    """Wait for a blocked provider to free up instead of giving up.
+
+    Sleeps until the soonest provider reset (or one poll interval when no reset
+    time is known), bounded by the remaining --max-duration budget. Returns True
+    when the loop should retry, or False when the time budget is exhausted.
+    """
+    target = soonest_wait_until(selection)
+    now = common.now_epoch()
+    if target is not None:
+        wait_s: float = max(0, target - now)
+        wait_msg = f"until {common.format_local_epoch(target)} (epoch {target})"
+    else:
+        wait_s = float(int(cfg.poll_interval))
+        wait_msg = f"{int(wait_s)}s before retrying"
+    if max_duration:
+        remaining = max_duration - (monotonic() - start_monotonic)
+        if remaining <= 0:
+            return False
+        wait_s = min(wait_s, remaining)
+    common.log_event(logs, "all_blocked_suspend", {"reason": reason, "wait_seconds": int(wait_s), "wait_until": target})
+    status_line(f"all configured tools blocked ({reason}); suspending {wait_msg}", level="warn")
+    sleep_seconds(wait_s)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     common.migrate_legacy_cache_dirs()
     cfg = parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -576,16 +704,36 @@ def main(argv: list[str] | None = None) -> int:
     current_index = current_index_from_state(cfg)
     status_line(f"logs: {logs.run_dir}", level="dim")
     skipped: set[str] = set()
+    max_iterations = int(cfg.max_iterations)
+    max_duration = parse_duration(cfg.max_duration) or 0
+    start_monotonic = monotonic()
+    completed = 0
+
+    def out_of_time() -> bool:
+        return bool(max_duration) and (monotonic() - start_monotonic) >= max_duration
+
+    def stop_timed_out() -> int:
+        # Stopping on the time budget is success when we made progress, but an
+        # autonomy-abort when every provider stayed blocked the whole time.
+        code = 0 if completed else common.AUTONOMY_ABORT_STATUS
+        common.log_event(logs, "final", {"status": "success" if completed else "autonomy-abort", "completed": completed, "reason": "max-duration"})
+        status_line(f"reached max duration after {completed} iteration(s); stopping", level="ok" if completed else "warn")
+        return code
+
     while True:
+        if out_of_time():
+            return stop_timed_out()
         common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index})
         selection = select_tool(cfg, logs, current_index, skipped)
         common.log_event(logs, "selection", {**selection, "skipped": sorted(skipped)})
         selected_index = int(selection.get("index", -1))
         selected_tool = str(selection.get("tool", ""))
         if selected_index == -1 or not selected_tool:
-            common.log_event(logs, "final", {"status": "autonomy-abort", "reason": "all-providers-skipped", "skipped": sorted(skipped)})
-            status_line(f"autonomy-abort: all configured tools blocked; logs: {logs.run_dir}", level="error")
-            return common.AUTONOMY_ABORT_STATUS
+            # Every provider is blocked. Do not stop: wait for one to free up.
+            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-skipped"):
+                return stop_timed_out()
+            skipped = set()
+            continue
         reason = str(selection.get("rotation_reason"))
         all_rate_limited = bool(selection.get("all_rate_limited"))
         common.log_text(logs, f"selected provider={selected_tool} reason={reason} all_rate_limited={str(all_rate_limited).lower()}")
@@ -607,17 +755,31 @@ def main(argv: list[str] | None = None) -> int:
         status = run_scheduler_inline(scfg)
         common.log_event(logs, "scheduler_result", {"status": status})
         if status == 0:
-            common.log_event(logs, "final", {"status": "success"})
-            return 0
+            completed += 1
+            common.log_event(logs, "iteration_complete", {"tool": selected_tool, "index": selected_index, "completed": completed})
+            if max_iterations and completed >= max_iterations:
+                common.log_event(logs, "final", {"status": "success", "completed": completed})
+                status_line(f"completed {completed} iteration(s); stopping (--max-iterations)", level="ok")
+                return 0
+            status_line(f"{selected_tool} finished increment {completed}; re-selecting provider", level="ok")
+            # Persistent Ralph loop: hand back, re-evaluate usage, and continue.
+            # Stay anchored on the provider that just ran so even-burn keeps it
+            # while it remains the best choice, and current-until-exhausted keeps
+            # using it until a limit is hit.
+            current_index = selected_index
+            skipped = set()
+            continue
         if status == common.AUTONOMY_ABORT_STATUS:
             common.log_text(logs, f"scheduler autonomy-abort for provider={selected_tool}; re-evaluating rotation")
             common.log_event(logs, "provider_autonomy_abort", {"tool": selected_tool, "index": selected_index})
             status_line(f"{selected_tool} blocked autonomously; re-evaluating rotation", level="warn")
             skipped.add(selected_tool)
             if len(skipped) >= len(cfg.tools):
-                common.log_event(logs, "final", {"status": "autonomy-abort", "reason": "all-providers-skipped", "skipped": sorted(skipped)})
-                status_line(f"autonomy-abort: all configured tools blocked; logs: {logs.run_dir}", level="error")
-                return common.AUTONOMY_ABORT_STATUS
+                # All providers aborted this pass. Do not stop: wait and retry.
+                if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-autonomy-abort"):
+                    return stop_timed_out()
+                skipped = set()
+                continue
             current_index = (selected_index + 1) % len(cfg.tools)
             continue
         common.log_event(logs, "final", {"status": "failed", "exit_code": status})

@@ -168,6 +168,39 @@ def test_scheduler_autonomy_abort_no_retry(env: dict[str, str], fake_provider: P
     assert not (run_dir / "attempt-2.out").exists()
 
 
+def test_scheduler_aborts_on_no_output_progress(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
+    # exact-stdout path (e.g. codex): a provider that prints then stalls without
+    # any recognizable prompt must be detected as "no progress" and killed.
+    env.update({"LLM_SCHEDULER_USAGE_JSON": AVAILABLE, "PROVIDER_MODE": "idle_no_prompt"})
+    result = run_cmd(
+        [
+            "./llm-scheduler", "--tool", "codex", "--prompt", "x",
+            "--command-template", "provider-mock",
+            "--no-retry", "--log-dir", str(tmp_path / "logs"),
+            "--headless-idle-timeout", "1", "--headless-question-timeout", "0",
+        ],
+        env,
+    )
+    assert result.returncode == common.AUTONOMY_ABORT_STATUS
+    run_dir = Path(result.stderr.strip().split()[-1])
+    assert "no output progress" in (run_dir / "attempt-1.out").read_text()
+
+
+def test_scheduler_aborts_on_credit_question(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
+    # A "out of credit / wait or upgrade?" style prompt is a blocking prompt.
+    env.update({"LLM_SCHEDULER_USAGE_JSON": AVAILABLE, "PROVIDER_MODE": "credit_question"})
+    result = run_cmd(
+        [
+            "./llm-scheduler", "--tool", "codex", "--prompt", "x",
+            "--command-template", "provider-mock",
+            "--no-retry", "--log-dir", str(tmp_path / "logs"),
+        ],
+        env,
+    )
+    assert result.returncode == common.AUTONOMY_ABORT_STATUS
+    assert "autonomous abort" in (Path(result.stderr.strip().split()[-1]) / "attempt-1.out").read_text()
+
+
 def ralph_stdout(env: dict[str, str], mode: str, tmp_path: Path) -> subprocess.CompletedProcess:
     renv = env.copy()
     renv.update(
@@ -188,6 +221,8 @@ def ralph_stdout(env: dict[str, str], mode: str, tmp_path: Path) -> subprocess.C
             "--log-dir",
             str(tmp_path / f"{mode}-logs"),
             "--no-retry",
+            "--max-iterations",
+            "1",
         ],
         renv,
     )
@@ -238,6 +273,8 @@ for event in events:
             "--log-dir",
             str(tmp_path / "claude-stream-logs"),
             "--no-retry",
+            "--max-iterations",
+            "1",
         ],
         env
         | {

@@ -78,6 +78,14 @@ elif mode == "blocking":
     sys.stdout.write("What do you want to do?\\nEnter to confirm - Esc to cancel\\n")
     sys.stdout.flush()
     time.sleep(20)
+elif mode == "idle_no_prompt":
+    sys.stdout.write("working...\\n")
+    sys.stdout.flush()
+    time.sleep(20)
+elif mode == "credit_question":
+    sys.stdout.write("You've hit your monthly spend limit. Wait for limit to reset or upgrade to Max?\\n")
+    sys.stdout.flush()
+    time.sleep(20)
 sys.stdout.flush()
 """,
     )

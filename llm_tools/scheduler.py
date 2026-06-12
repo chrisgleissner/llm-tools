@@ -718,6 +718,46 @@ class ClaudeStreamRenderer:
         return rendered.encode("utf-8", "replace")
 
 
+class ProgressGuard:
+    """Detect no-progress and waiting-for-input conditions in a captured run.
+
+    Distinguishes a model that is merely thinking (no output, allowed up to the
+    full idle timeout) from one that has asked a question or hit an interactive
+    credit/limit prompt and is now stalled (terminated quickly). The orchestrator
+    forcefully kills such a run and treats it as an autonomous abort so it can
+    re-route to another provider.
+    """
+
+    def __init__(self) -> None:
+        self.idle_timeout = int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600") or "600")
+        self.question_idle_timeout = int(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30") or "30")
+        now = time.time()
+        self.last_progress = now
+        self.question_seen_at: float | None = None
+
+    def note_output(self, combined_tail: str) -> bool:
+        """Record fresh output. Returns True if an interactive prompt was seen."""
+        self.last_progress = time.time()
+        if any(pattern.search(combined_tail) for pattern in common.BLOCKING_PROMPT_PATTERNS):
+            return True
+        if common.QUESTION_LINE_RE.search(combined_tail[-4000:]):
+            self.question_seen_at = time.time()
+        return False
+
+    def overdue(self) -> str | None:
+        """Return an abort reason when the run has stalled, else None."""
+        now = time.time()
+        if self.idle_timeout > 0 and now - self.last_progress > self.idle_timeout:
+            return f"no output progress for {self.idle_timeout}s"
+        if (
+            self.question_idle_timeout > 0
+            and self.question_seen_at is not None
+            and now - self.question_seen_at > self.question_idle_timeout
+        ):
+            return f"question required a response for {self.question_idle_timeout}s"
+        return None
+
+
 def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
     import os
     import select
@@ -734,27 +774,22 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     stdout_buffer = b""
     combined_parts: list[bytes] = []
     start = time.time()
-    last_progress = start
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
-    idle_timeout = int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600") or "600")
     exit_code = 124
     blocking = False
-    blocking_re = re.compile(
-        rb"what do you want to do\?|enter to confirm|esc to cancel|monthly spend limit|rate[- ]limit options",
-        re.I,
-    )
+    abort_reason = ""
+    guard = ProgressGuard()
+
+    def scan_tail() -> bool:
+        tail = common.strip_ansi(b"".join(combined_parts)[-8000:].decode("utf-8", "replace"))
+        return guard.note_output(tail)
 
     while open_fds:
         if time.time() - start > timeout:
             break
-        if idle_timeout > 0 and time.time() - last_progress > idle_timeout:
-            abort_line = f"\nllm-scheduler: autonomous abort: no output progress for {idle_timeout}s\n".encode()
-            combined_parts.append(abort_line)
-            try:
-                sys.stderr.buffer.write(highlight_provider_text(abort_line, stream_name="stderr", enabled=stderr_color))
-                sys.stderr.buffer.flush()
-            except OSError:
-                pass
+        reason = guard.overdue()
+        if reason:
+            abort_reason = reason
             exit_code = common.AUTONOMY_ABORT_STATUS
             break
         ready, _, _ = select.select(list(open_fds), [], [], 0.2)
@@ -768,18 +803,19 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     rendered = renderer.render_line(stdout_buffer)
                     if rendered:
                         combined_parts.append(rendered)
-                        last_progress = time.time()
                         try:
                             sys.stdout.buffer.write(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color))
                             sys.stdout.buffer.flush()
                         except OSError:
                             pass
+                        if scan_tail():
+                            blocking = True
                     stdout_buffer = b""
                 open_fds.pop(fd, None)
                 continue
+            guard.last_progress = time.time()
             if open_fds.get(fd) == "stdout":
                 stdout_buffer += chunk
-                last_progress = time.time()
                 lines = stdout_buffer.splitlines(keepends=True)
                 if lines and not lines[-1].endswith((b"\n", b"\r")):
                     stdout_buffer = lines.pop()
@@ -795,25 +831,29 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                         sys.stdout.buffer.flush()
                     except OSError:
                         pass
+                    if scan_tail():
+                        blocking = True
+                        break
             else:
                 combined_parts.append(chunk)
-                last_progress = time.time()
                 try:
                     sys.stderr.buffer.write(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color))
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-            if blocking_re.search(b"".join(combined_parts)[-4000:]):
-                blocking = True
+                if scan_tail():
+                    blocking = True
+            if blocking:
                 break
         if blocking:
+            abort_reason = "interactive prompt detected"
             exit_code = common.AUTONOMY_ABORT_STATUS
             break
         polled = proc.poll()
         if polled is not None and not open_fds:
             exit_code = polled
             break
-    if blocking or exit_code == 124:
+    if blocking or exit_code in (124, common.AUTONOMY_ABORT_STATUS):
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if proc.poll() is not None:
                 break
@@ -824,8 +864,14 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
             time.sleep(0.2)
     if proc.poll() is not None and not blocking and exit_code == 124:
         exit_code = int(proc.returncode)
-    if blocking:
-        combined_parts.append(b"\nllm-scheduler: autonomous abort: interactive prompt detected\n")
+    if abort_reason:
+        abort_line = f"\nllm-scheduler: autonomous abort: {abort_reason}\n".encode()
+        combined_parts.append(abort_line)
+        try:
+            sys.stderr.buffer.write(highlight_provider_text(abort_line, stream_name="stderr", enabled=stderr_color))
+            sys.stderr.buffer.flush()
+        except OSError:
+            pass
     output_file.write_text(b"".join(combined_parts).decode("utf-8", "replace"), encoding="utf-8")
     status_file.write_text(str(exit_code), encoding="utf-8")
     return exit_code
@@ -849,12 +895,15 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
     exit_code = 124
     blocking = False
-    blocking_re = __import__("re").compile(
-        rb"what do you want to do\?|enter to confirm|esc to cancel|monthly spend limit|rate[- ]limit options",
-        __import__("re").I,
-    )
+    abort_reason = ""
+    guard = ProgressGuard()
     while open_fds:
         if time.time() - start > timeout:
+            break
+        reason = guard.overdue()
+        if reason:
+            abort_reason = reason
+            exit_code = common.AUTONOMY_ABORT_STATUS
             break
         ready, _, _ = select.select(list(open_fds), [], [], 0.2)
         for fd in ready:
@@ -879,17 +928,19 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-            if blocking_re.search(b"".join(combined_parts)[-4000:]):
+            tail = common.strip_ansi(b"".join(combined_parts)[-8000:].decode("utf-8", "replace"))
+            if guard.note_output(tail):
                 blocking = True
                 break
         if blocking:
+            abort_reason = "interactive prompt detected"
             exit_code = common.AUTONOMY_ABORT_STATUS
             break
         polled = proc.poll()
         if polled is not None and not open_fds:
             exit_code = polled
             break
-    if blocking or exit_code == 124:
+    if blocking or exit_code in (124, common.AUTONOMY_ABORT_STATUS):
         for sig in (signal.SIGTERM, signal.SIGKILL):
             if proc.poll() is not None:
                 break
@@ -900,8 +951,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
             time.sleep(0.2)
     if proc.poll() is not None and not blocking and exit_code == 124:
         exit_code = int(proc.returncode)
-    if blocking:
-        combined_parts.append(b"\nllm-scheduler: autonomous abort: interactive prompt detected\n")
+    if abort_reason:
+        combined_parts.append(f"\nllm-scheduler: autonomous abort: {abort_reason}\n".encode())
     output_file.write_text(b"".join(combined_parts).decode("utf-8", "replace"), encoding="utf-8")
     status_file.write_text(str(exit_code), encoding="utf-8")
     return exit_code

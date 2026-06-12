@@ -209,13 +209,13 @@ def test_ralph_validation_dry_run_rotation_and_autonomy(env: dict[str, str], fak
     assert dry.returncode == 0
     assert "dry-run" in dry.stderr
     run = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {tool}", "--state-file", str(tmp_path / "s2.json"), "--log-dir", str(tmp_path / "logs2"), "--no-retry"],
+        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {tool}", "--state-file", str(tmp_path / "s2.json"), "--log-dir", str(tmp_path / "logs2"), "--no-retry", "--max-iterations", "1"],
         env | {"LLM_USAGE_NOW_EPOCH": "1780430000", "LLM_SCHEDULER_USAGE_JSON": usage_json},
     )
     assert run.returncode == 0
     assert json.loads((tmp_path / "s2.json").read_text())["current_tool"] == "codex"
     blocked = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {tool}", "--state-file", str(tmp_path / "s3.json"), "--log-dir", str(tmp_path / "logs3"), "--no-retry"],
+        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {tool}", "--state-file", str(tmp_path / "s3.json"), "--log-dir", str(tmp_path / "logs3"), "--no-retry", "--max-duration", "3"],
         env | {"LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}', "PROVIDER_MODE": "blocking"},
     )
     assert blocked.returncode == common.AUTONOMY_ABORT_STATUS
@@ -237,6 +237,8 @@ def test_ralph_injects_selected_provider_context(env: dict[str, str], fake_provi
             "--log-dir",
             str(tmp_path / "logs"),
             "--no-retry",
+            "--max-iterations",
+            "1",
         ],
         env
         | {
@@ -581,12 +583,13 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     assert sel3["all_rate_limited"] is False
 
 
-def test_ralph_even_burn_prefers_highest_weekly_remaining(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ralph_even_burn_prefers_highest_remaining_daily_capacity(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
     logs = common.setup_run_logs(tmp_path / "logs", "r")
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
-    # Codex resets sooner, but Claude has far more remaining capacity. Even-burn
-    # must prefer the higher remaining capacity regardless of reset timing.
+    # Even-burn compares remaining *daily* capacity = weekly remaining / days
+    # until reset. For example, Codex could have less weekly headroom (50%) but resets in 2 days
+    # (25%/day) so it outranks Claude's 80% spread over 5 days (16%/day).
     snapshots = {
         "claude": {
             "available": True,
@@ -601,15 +604,143 @@ def test_ralph_even_burn_prefers_highest_weekly_remaining(monkeypatch: pytest.Mo
     }
     monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
 
-    # current_index points at codex; even-burn should still advance to claude.
+    selected = ralph_robin.select_tool(cfg, logs, 0, set())
+    assert selected["tool"] == "codex"
+    assert selected["rotation_reason"] == "even-burn"
+
+    cfg.even_burn = False
+    old_rotation = ralph_robin.select_tool(cfg, logs, 0, set())
+    assert old_rotation["tool"] == "claude"
+    assert old_rotation["rotation_reason"] == "current-usable"
+
+
+def test_ralph_even_burn_prefers_higher_remaining_when_resets_align(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # When weekly resets are (near) simultaneous, daily capacity reduces to
+    # remaining, so the provider with more weekly headroom wins regardless of
+    # which one is current. This mirrors the real Claude(81%)/Codex(47%) case.
+    cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 96},
+            "week": {"remaining": 81, "resets_at": 1000 + (6 * 86400)},
+        },
+        "codex": {
+            "available": True,
+            "five_hour": {"remaining": 85},
+            "week": {"remaining": 47, "resets_at": 1000 + (6 * 86400)},
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
+
+    # current_index points at codex; even-burn must still advance to claude.
     selected = ralph_robin.select_tool(cfg, logs, 1, set())
     assert selected["tool"] == "claude"
     assert selected["rotation_reason"] == "even-burn"
 
-    cfg.even_burn = False
-    old_rotation = ralph_robin.select_tool(cfg, logs, 1, set())
-    assert old_rotation["tool"] == "codex"
-    assert old_rotation["rotation_reason"] == "current-usable"
+
+def test_ralph_even_burn_handles_unknown_weekly_reset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Claude reports weekly remaining but no reset time. Even-burn must fall back
+    # to a full weekly window and still rank Claude rather than silently bailing
+    # to the current provider (codex).
+    cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 96},
+            "week": {"remaining": 81},  # no resets_at -> reset_epoch is None
+        },
+        "codex": {
+            "available": True,
+            "five_hour": {"remaining": 85},
+            "week": {"remaining": 47, "resets_at": 1000 + (6 * 86400)},
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
+
+    # 81% / 7d ~= 11.6%/day beats 47% / 6d ~= 7.8%/day.
+    selected = ralph_robin.select_tool(cfg, logs, 1, set())
+    assert selected["tool"] == "claude"
+    assert selected["rotation_reason"] == "even-burn"
+
+
+def _usable_selection(tool: str = "claude") -> dict:
+    return {
+        "index": 0,
+        "tool": tool,
+        "rotation_reason": "even-burn",
+        "all_rate_limited": False,
+        "decision": {"tool": tool, "usable": True, "wait_until": None},
+        "decisions": [{"tool": tool, "usable": True, "wait_until": None}],
+    }
+
+
+def _ralph_main_argv(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "--prompt", "x",
+        "--tools", "claude,codex",
+        "--log-dir", str(tmp_path / "logs"),
+        "--state-file", str(tmp_path / "state.json"),
+        *extra,
+    ]
+
+
+def test_ralph_loops_until_max_iterations(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(common, "migrate_legacy_cache_dirs", lambda: None)
+    monkeypatch.setattr(ralph_robin, "select_tool", lambda cfg, logs, ci, sk: _usable_selection())
+    calls: list[str] = []
+    monkeypatch.setattr(ralph_robin, "run_scheduler_inline", lambda scfg: (calls.append(scfg.tool), 0)[1])
+
+    rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "3", "--max-duration", "0"))
+    assert rc == 0
+    assert len(calls) == 3  # looped instead of exiting after the first success
+
+
+def test_ralph_loops_until_max_duration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(common, "migrate_legacy_cache_dirs", lambda: None)
+    monkeypatch.setattr(ralph_robin, "select_tool", lambda cfg, logs, ci, sk: _usable_selection())
+    clock = {"t": 0.0}
+    monkeypatch.setattr(ralph_robin, "monotonic", lambda: clock["t"])
+    calls: list[str] = []
+
+    def fake_run(scfg: scheduler.SchedulerConfig) -> int:
+        clock["t"] += 2000.0  # each increment burns ~33 minutes
+        calls.append(scfg.tool)
+        return 0
+
+    monkeypatch.setattr(ralph_robin, "run_scheduler_inline", fake_run)
+    rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "0", "--max-duration", "1h"))
+    assert rc == 0
+    assert len(calls) == 2  # 0s -> 2000s -> 4000s exceeds 3600s budget
+
+
+def test_ralph_suspends_when_all_blocked_then_continues(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(common, "migrate_legacy_cache_dirs", lambda: None)
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "100")
+    selections = [
+        {  # everything blocked: soonest reset at epoch 1000
+            "index": -1,
+            "tool": "",
+            "rotation_reason": "all-skipped",
+            "decisions": [
+                {"tool": "claude", "wait_until": 1000},
+                {"tool": "codex", "wait_until": 2000},
+            ],
+        },
+        _usable_selection(),  # provider free again after the wait
+    ]
+    monkeypatch.setattr(ralph_robin, "select_tool", lambda cfg, logs, ci, sk: selections.pop(0))
+    slept: list[float] = []
+    monkeypatch.setattr(ralph_robin, "sleep_seconds", lambda s: slept.append(s))
+    monkeypatch.setattr(ralph_robin, "run_scheduler_inline", lambda scfg: 0)
+
+    rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "1", "--max-duration", "0"))
+    assert rc == 0
+    assert slept == [900]  # waited until the soonest reset (epoch 1000 - now 100) instead of exiting
 
 
 def test_ralph_even_burn_can_wait_for_short_window_reset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

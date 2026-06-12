@@ -1146,6 +1146,37 @@ def template_argv(template: str, *, tool: str, prompt: str, prompt_file: Path, c
     return out
 
 
+# Prompts ralph-robin/llm-scheduler may safely auto-acknowledge.
+SAFE_TRUST_PROMPTS = ("Confirm folder trust", "Do you trust the files in this folder?")
+
+# Interactive prompts that mean the CLI has stopped to wait for a human decision
+# (e.g. it ran out of credit and is offering to wait/upgrade). Matching any of
+# these is treated as a no-progress block and the run is aborted + terminated.
+BLOCKING_PROMPT_PATTERNS = (
+    re.compile(r"\bwhat do you want to do\?", re.I),
+    re.compile(r"\benter to confirm\b", re.I),
+    re.compile(r"\besc to cancel\b", re.I),
+    re.compile(r"\buse (?:the )?arrow keys\b", re.I),
+    re.compile(r"\bpress (?:enter|return) to\b", re.I),
+    re.compile(r"\badjust monthly spend limit\b", re.I),
+    re.compile(r"\bwait for limit to reset\b", re.I),
+    re.compile(r"\bupgrade to max\b", re.I),
+    re.compile(r"\byou(?:'|’)ve hit your monthly spend limit\b", re.I),
+    re.compile(r"\bmonthly spend limit\b", re.I),
+    re.compile(r"\brate[- ]limit options\b", re.I),
+    re.compile(r"\b(?:run|reach|reached|hit)[\w ]{0,30}\busage limit\b", re.I),
+    re.compile(r"\bout of (?:credit|credits|tokens)\b", re.I),
+    re.compile(r"\bbuy more (?:credits|tokens)\b", re.I),
+    re.compile(r"\bdowngrade to (?:a )?(?:simpler|smaller|cheaper) model\b", re.I),
+    re.compile(r"\b(?:proceed|continue)\?\s*(?:\[[yYnN]/[yYnN]\]|\([yYnN]/[yYnN]\))", re.I),
+)
+
+# A line that reads like the CLI asked the user a question and is now waiting.
+QUESTION_LINE_RE = re.compile(
+    r"(?im)^\s*(?:[>\-\*\d.)\s]*)?(?:what|which|who|when|where|why|how|do you|would you|should i|should we|can i|may i|please (?:choose|select)|select|choose|confirm|proceed|continue)\b[^\n?]{0,180}\?\s*$"
+)
+
+
 def run_pty_capture(
     argv: Sequence[str],
     cwd: Path,
@@ -1160,24 +1191,9 @@ def run_pty_capture(
     question_idle_timeout: int = 0,
     env: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    safe_prompts = ("Confirm folder trust", "Do you trust the files in this folder?")
-    blocking_patterns = (
-        re.compile(r"\bwhat do you want to do\?", re.I),
-        re.compile(r"\benter to confirm\b", re.I),
-        re.compile(r"\besc to cancel\b", re.I),
-        re.compile(r"\buse (?:the )?arrow keys\b", re.I),
-        re.compile(r"\bpress (?:enter|return) to\b", re.I),
-        re.compile(r"\badjust monthly spend limit\b", re.I),
-        re.compile(r"\bwait for limit to reset\b", re.I),
-        re.compile(r"\bupgrade to max\b", re.I),
-        re.compile(r"\byou(?:'|\u2019)ve hit your monthly spend limit\b", re.I),
-        re.compile(r"\bmonthly spend limit\b", re.I),
-        re.compile(r"\brate[- ]limit options\b", re.I),
-        re.compile(r"\b(?:proceed|continue)\?\s*(?:\[[yYnN]/[yYnN]\]|\([yYnN]/[yYnN]\))", re.I),
-    )
-    question_line = re.compile(
-        r"(?im)^\s*(?:[>\-\*\d.)\s]*)?(?:what|which|who|when|where|why|how|do you|would you|should i|should we|can i|may i|please (?:choose|select)|select|choose|confirm|proceed|continue)\b[^\n?]{0,180}\?\s*$"
-    )
+    safe_prompts = SAFE_TRUST_PROMPTS
+    blocking_patterns = BLOCKING_PROMPT_PATTERNS
+    question_line = QUESTION_LINE_RE
     pid, fd = pty.fork()
     if pid == 0:
         try:
