@@ -143,9 +143,11 @@ def test_scheduler_tmux_missing_and_template_error(env: dict[str, str], tmp_path
 
 def test_ralph_and_scheduler_highlight_helpers(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     assert scheduler.provider_env(scheduler.SchedulerConfig()) is None
-    env = scheduler.provider_env(scheduler.SchedulerConfig(ralph_robin_active=True))
+    env = scheduler.provider_env(scheduler.SchedulerConfig(tool="codex", ralph_robin_active=True, ralph_robin_tools="claude,codex"))
     assert env is not None
     assert env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] == "1"
+    assert env["LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL"] == "codex"
+    assert env["LLM_TOOLS_RALPH_ROBIN_TOOLS"] == "claude,codex"
 
     class Tty:
         def isatty(self) -> bool:
@@ -153,15 +155,24 @@ def test_ralph_and_scheduler_highlight_helpers(monkeypatch: pytest.MonkeyPatch, 
 
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.delenv("LLM_USAGE_NO_COLOR", raising=False)
+    monkeypatch.delenv("LLM_TOOLS_COLOR_DIFF_ADD", raising=False)
+    monkeypatch.delenv("LLM_TOOLS_SYMBOL_COMMAND", raising=False)
+    monkeypatch.delenv("LLM_TOOLS_NO_SYMBOLS", raising=False)
     monkeypatch.setenv("TERM", "xterm")
     assert scheduler.stream_color_enabled(Tty()) is True
-    assert b"\x1b[32m+added\x1b[0m\n" == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
-    assert b"\x1b[31m-removed\x1b[0m\n" == scheduler.highlight_provider_text(b"-removed\n", stream_name="stdout", enabled=True)
-    assert b"\x1b[36;1m@@ hunk\x1b[0m\n" == scheduler.highlight_provider_text(b"@@ hunk\n", stream_name="stdout", enabled=True)
-    assert b"\x1b[36mgit status\x1b[0m\n" == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
-    assert b"\x1b[31;1merror failed\x1b[0m\n" == scheduler.highlight_provider_text(b"error failed\n", stream_name="stdout", enabled=True)
-    assert b"\x1b[33mprogress\x1b[0m\n" == scheduler.highlight_provider_text(b"progress\n", stream_name="stderr", enabled=True)
+    assert f"\x1b[{common.color_code('diff_add')}m+added\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('diff_remove')}m-removed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"-removed\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('diff_hunk')}m{common.symbol_prefix('diff_hunk')}@@ hunk\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"@@ hunk\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('command')}m{common.symbol_prefix('command')}git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('error')}m{common.symbol_prefix('error')}error failed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"error failed\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('stderr')}m{common.symbol_prefix('stderr')}progress\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"progress\n", stream_name="stderr", enabled=True)
     assert scheduler.highlight_provider_text(b"\x1b[31mred\x1b[0m\n", stream_name="stdout", enabled=True) == b"\x1b[31mred\x1b[0m\n"
+    monkeypatch.setenv("LLM_TOOLS_COLOR_DIFF_ADD", "1;34")
+    assert b"\x1b[1;34m+added\x1b[0m\n" == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
+    monkeypatch.setenv("LLM_TOOLS_SYMBOL_COMMAND", "$")
+    assert b"\x1b[38;5;39m$ git status\x1b[0m\n" == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    monkeypatch.setenv("LLM_TOOLS_NO_SYMBOLS", "1")
+    assert b"\x1b[38;5;39mgit status\x1b[0m\n" == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
 
     decision = {"tool": "claude", "usable": False, "reason": "rate-limited", "wait_until": 2000, "windows": [{"name": "5h", "remaining": 0}]}
     assert "rate-limited" in ralph_robin.decision_summary(decision)
@@ -190,6 +201,40 @@ def test_ralph_validation_dry_run_rotation_and_autonomy(env: dict[str, str], fak
         env | {"LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}', "PROVIDER_MODE": "blocking"},
     )
     assert blocked.returncode == common.AUTONOMY_ABORT_STATUS
+
+
+def test_ralph_injects_selected_provider_context(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
+    capture = tmp_path / "capture.txt"
+    usage_json = '{"claude":{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":60},"week":{"remaining":68}}}'
+    prompt = "When continuation is required, run exactly: llm-scheduler --tool claude --prompt-file task.md --suspend-until-ready"
+    result = run_cmd(
+        [
+            "./ralph-robin",
+            "--prompt",
+            prompt,
+            "--command-template",
+            "provider-mock {tool} {prompt}",
+            "--state-file",
+            str(tmp_path / "state.json"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+            "--no-retry",
+        ],
+        env
+        | {
+            "LLM_USAGE_NOW_EPOCH": "1780430000",
+            "LLM_SCHEDULER_USAGE_JSON": usage_json,
+            "PROVIDER_CAPTURE": str(capture),
+        },
+    )
+    assert result.returncode == 0
+    captured = capture.read_text(encoding="utf-8")
+    assert "codex RALPH ROBIN RUNTIME CONTEXT" in captured
+    assert "Current selected provider: codex" in captured
+    assert "claude: rate-limited" in captured
+    assert "codex: usable" in captured
+    assert "Do not run provider-specific llm-scheduler --suspend-until-ready commands" in captured
+    assert prompt in captured
 
 
 def test_common_extra_branches(env: dict[str, str], fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

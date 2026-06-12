@@ -241,6 +241,63 @@ def fmt_pct(value: Any) -> str:
     return fmt_number(value)
 
 
+ANSI_COLOR_ROLES: dict[str, str] = {
+    "brand": "1;38;5;33",
+    "info": "38;5;39",
+    "ok": "38;5;34",
+    "warn": "38;5;37",
+    "error": "1;38;5;27",
+    "dim": "38;5;66",
+    "diff_add": "38;5;35",
+    "diff_remove": "38;5;31",
+    "diff_hunk": "1;38;5;37",
+    "command": "38;5;39",
+    "tool": "1;38;5;37",
+    "stderr": "38;5;38",
+    "heading": "1;38;5;33",
+}
+
+
+UTF_SYMBOL_ROLES: dict[str, str] = {
+    "brand": "◆",
+    "info": "›",
+    "ok": "✓",
+    "warn": "◇",
+    "error": "✕",
+    "dim": "·",
+    "diff_add": "+",
+    "diff_remove": "−",
+    "diff_hunk": "§",
+    "command": "λ",
+    "tool": "⚙",
+    "stderr": "⋯",
+    "heading": "◆",
+}
+
+
+def color_code(role: str, env: dict[str, str] | None = None) -> str:
+    env = env or os.environ
+    key = f"LLM_TOOLS_COLOR_{role.upper()}"
+    return env.get(key, ANSI_COLOR_ROLES.get(role, ANSI_COLOR_ROLES["info"]))
+
+
+def ansi_wrap(text: str, role: str, env: dict[str, str] | None = None) -> str:
+    return f"\033[{color_code(role, env)}m{text}\033[0m"
+
+
+def symbol_for(role: str, env: dict[str, str] | None = None) -> str:
+    env = env or os.environ
+    if env.get("LLM_TOOLS_NO_SYMBOLS"):
+        return ""
+    key = f"LLM_TOOLS_SYMBOL_{role.upper()}"
+    return env.get(key, UTF_SYMBOL_ROLES.get(role, ""))
+
+
+def symbol_prefix(role: str, env: dict[str, str] | None = None) -> str:
+    symbol = symbol_for(role, env)
+    return f"{symbol} " if symbol else ""
+
+
 def read_json_text(text: str) -> Any | None:
     try:
         return json.loads(text)

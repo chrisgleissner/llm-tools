@@ -104,14 +104,15 @@ def color_enabled() -> bool:
     )
 
 
-def style(text: str, code: str) -> str:
-    return f"\033[{code}m{text}\033[0m" if color_enabled() else text
+def style(text: str, role: str) -> str:
+    return common.ansi_wrap(text, role) if color_enabled() else text
 
 
 def status_line(message: str, *, level: str = "info") -> None:
-    colors = {"info": "36", "ok": "32", "warn": "33", "error": "31;1", "dim": "2"}
-    prefix = style("ralph-robin", "1")
-    print(f"{prefix}: {style(message, colors.get(level, '36'))}", file=sys.stderr)
+    role = level if level in common.ANSI_COLOR_ROLES else "info"
+    prefix = style(f"{common.symbol_prefix('brand')}ralph-robin", "brand")
+    body = f"{common.symbol_prefix(role)}{message}"
+    print(f"{prefix}: {style(body, role)}", file=sys.stderr)
 
 
 def decision_summary(decision: dict[str, Any]) -> str:
@@ -144,12 +145,38 @@ def print_usage_summary(selection: dict[str, Any]) -> None:
         tool = str(item.get("tool", "?"))
         summary = decision_summary(item)
         if item.get("usable") is True:
-            rendered.append(style(f"{tool}: {summary}", "32"))
+            rendered.append(style(f"{tool}: {summary}", "ok"))
         elif item.get("reason") == "rate-limited":
-            rendered.append(style(f"{tool}: {summary}", "31"))
+            rendered.append(style(f"{tool}: {summary}", "error"))
         else:
-            rendered.append(style(f"{tool}: {summary}", "33"))
+            rendered.append(style(f"{tool}: {summary}", "warn"))
     status_line("usage " + " | ".join(rendered), level="dim")
+
+
+def ralph_runtime_context(cfg: RalphConfig, selected_tool: str, selection: dict[str, Any]) -> str:
+    decisions = selection.get("decisions")
+    summaries: list[str] = []
+    if isinstance(decisions, list):
+        for item in decisions:
+            if isinstance(item, dict):
+                summaries.append(f"- {item.get('tool', '?')}: {decision_summary(item)}")
+    decision_text = "\n".join(summaries) if summaries else "- unavailable"
+    return (
+        "RALPH ROBIN RUNTIME CONTEXT\n"
+        "This block is injected by ralph-robin and takes precedence for scheduling, handoff, and session-window decisions.\n"
+        f"- Current selected provider: {selected_tool}\n"
+        f"- Configured provider rotation: {', '.join(cfg.tools)}\n"
+        "- Treat any original prompt instruction to check or schedule a different provider as stale unless Ralph's latest decisions show the current provider is unusable.\n"
+        f"- For stop thresholds such as session window, credits, capacity, or below 25%, evaluate the current selected provider ({selected_tool}), not a previously-used provider named in the prompt.\n"
+        "- Do not run provider-specific llm-scheduler --suspend-until-ready commands from the original prompt while the current selected provider is usable; Ralph owns cross-provider rotation and suspend decisions.\n"
+        "- Latest Ralph usage decisions:\n"
+        f"{decision_text}\n"
+        "END RALPH ROBIN RUNTIME CONTEXT\n"
+    )
+
+
+def provider_prompt_for(cfg: RalphConfig, selected_tool: str, selection: dict[str, Any], prompt: str) -> str:
+    return f"{ralph_runtime_context(cfg, selected_tool, selection)}\n{prompt}"
 
 
 def parse_tools(raw: str) -> list[str]:
@@ -387,11 +414,11 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
     }
 
 
-def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunLogs, force_suspend: bool) -> scheduler.SchedulerConfig:
+def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunLogs, force_suspend: bool, provider_prompt: str) -> scheduler.SchedulerConfig:
     return scheduler.SchedulerConfig(
         tool=selected_tool,
-        prompt_file=str(logs.run_dir / "prompt.txt"),
-        prompt_source=f"file:{logs.run_dir / 'prompt.txt'}",
+        prompt_text=provider_prompt,
+        prompt_source=f"ralph-runtime:{selected_tool}",
         window=cfg.window,
         min_remaining=cfg.min_remaining,
         poll_interval=cfg.poll_interval,
@@ -410,6 +437,7 @@ def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunL
         suspend_until_ready=cfg.suspend_until_ready or force_suspend,
         exact_stdout=True,
         ralph_robin_active=True,
+        ralph_robin_tools=",".join(cfg.tools),
     )
 
 
@@ -497,7 +525,8 @@ def main(argv: list[str] | None = None) -> int:
             common.log_event(logs, "final", {"status": "dry-run"})
             print("dry-run: no prompt submitted", file=sys.stderr)
             return 0
-        scfg = scheduler_config_for(cfg, selected_tool, logs, all_rate_limited)
+        provider_prompt = provider_prompt_for(cfg, selected_tool, selection, prompt)
+        scfg = scheduler_config_for(cfg, selected_tool, logs, all_rate_limited, provider_prompt)
         common.log_event(logs, "scheduler_command", {"argv": ["llm-scheduler", "--tool", selected_tool]})
         status = run_scheduler_inline(scfg)
         common.log_event(logs, "scheduler_result", {"status": status})

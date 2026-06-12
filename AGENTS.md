@@ -70,7 +70,9 @@ Prefer changing the smallest relevant function surface. Preserve existing functi
 * One provider failing must not block other provider rows.
 * Table and JSON must agree on provider availability and values.
 * Keep at least three visible spaces between table columns.
-* Keep color disabled for non-TTY output, `TERM=dumb`, or `LLM_USAGE_NO_COLOR`.
+* Keep color disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
+* Ralph/scheduler highlighting should default to a readable green/blue/teal palette that works on typical dark and light terminals. Keep colors centralized in `common.ANSI_COLOR_ROLES` and configurable through `LLM_TOOLS_COLOR_<ROLE>` rather than hard-coding ANSI codes at call sites.
+* Ralph/scheduler live output may use compact UTF-8 symbols to distinguish status, command, tool-call, stderr, diff hunk, and error blocks. Keep symbols centralized in `common.UTF_SYMBOL_ROLES`, configurable through `LLM_TOOLS_SYMBOL_<ROLE>`, and suppressible with `LLM_TOOLS_NO_SYMBOLS=1`.
 * Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`.
 * Keep Copilot unavailable shape explicit: `available:false`, with `reason` when known.
 * Keep option semantics stable: `--show-source`, `--hide-source`, `--show-remaining-time`, `--hide-remaining-time`, `--show-codex-spark`, `--hide-codex-spark`, `--show-copilot-credits`.
@@ -104,6 +106,7 @@ The PTY capture is slow (up to `LLM_USAGE_COPILOT_TIMEOUT` seconds), so `read_co
 * Under `--wake`, arm at most one OS wake timer per distinct, far-enough target (`log_wake_plan` lead guard + `WAKE_ARMED_TARGET`); never one per poll iteration.
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
 * Fresh mode on an interactive terminal runs the provider CLI in its normal interactive form on a PTY wired directly to that terminal via `script(1)` (`resolve_attach_mode`, `ATTACHED=1`): output, stdin, resizes, and Ctrl-C must behave exactly as a direct CLI launch. Headless fresh mode (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`) keeps the non-interactive provider commands and streams the child output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`. Both paths write the ANSI-cleaned copy to `attempt-N.out`. Attached runs never retry on a clean exit or user cancel (130/143) and skip the rate-limit phrase grep, since interactive screen content can legitimately mention rate limits. Headless runs must abort with status `75` when a blocking prompt UI is detected, when question-like output stalls, or when there is no output progress past `LLM_SCHEDULER_IDLE_TIMEOUT`; `ralph-robin` must treat status `75` as a reason to re-evaluate rotation, not as a final failure after the first provider. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
+* Ralph must prepend provider-aware runtime context before launching a selected provider. That context must identify the selected provider, list latest usage decisions, and override stale provider-specific handoff/scheduler instructions in the original prompt so Codex does not hand off merely because Claude is exhausted, and vice versa.
 
 ## Environment knobs
 
@@ -138,7 +141,12 @@ Important knobs that tests or users may rely on:
 * `LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT` (headless question watchdog; abort when question-like output stops progressing for this many seconds; 0 disables)
 * `LLM_SCHEDULER_TMUX_TIMEOUT` (tmux completion timeout, seconds)
 * `LLM_SCHEDULER_WAKE_MIN_LEAD` (min seconds before a target to bother arming an OS wake timer)
+* `LLM_TOOLS_COLOR_<ROLE>` (override one Ralph/scheduler ANSI SGR color role; roles: `BRAND`, `INFO`, `OK`, `WARN`, `ERROR`, `DIM`, `DIFF_ADD`, `DIFF_REMOVE`, `DIFF_HUNK`, `COMMAND`, `TOOL`, `STDERR`, `HEADING`)
+* `LLM_TOOLS_SYMBOL_<ROLE>` (override one Ralph/scheduler UTF-8 symbol role; same roles as `LLM_TOOLS_COLOR_<ROLE>`)
+* `LLM_TOOLS_NO_SYMBOLS` (disable Ralph/scheduler live-output symbols while keeping color enabled)
 * `LLM_TOOLS_RALPH_ROBIN_ACTIVE` (internal/inherited guard: provider subprocesses launched by `ralph-robin` set this to prevent child `llm-scheduler --suspend-until-ready` calls from suspending outside Ralph's all-providers-exhausted decision)
+* `LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL` (internal/inherited context: provider selected by Ralph for the current child run)
+* `LLM_TOOLS_RALPH_ROBIN_TOOLS` (internal/inherited context: comma-separated Ralph rotation for the current child run)
 * `LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND` (internal/test bypass for the inherited Ralph suspend guard)
 
 Document any new user-facing or test-facing variable here and in `README.md` when appropriate.

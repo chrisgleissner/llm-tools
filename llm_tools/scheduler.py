@@ -110,6 +110,7 @@ class SchedulerConfig:
     wake_armed_target: int = 0
     exact_stdout: bool = False
     ralph_robin_active: bool = False
+    ralph_robin_tools: str = ""
 
 
 def parse_args(argv: list[str]) -> SchedulerConfig:
@@ -287,6 +288,7 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "wake": cfg.wake,
         "suspend_until_ready": cfg.suspend_until_ready,
         "ralph_robin_active": cfg.ralph_robin_active,
+        "ralph_robin_tools": cfg.ralph_robin_tools,
     }
 
 
@@ -295,6 +297,9 @@ def provider_env(cfg: SchedulerConfig) -> dict[str, str] | None:
         return None
     env = os.environ.copy()
     env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] = "1"
+    env["LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL"] = cfg.tool
+    if cfg.ralph_robin_tools:
+        env["LLM_TOOLS_RALPH_ROBIN_TOOLS"] = cfg.ralph_robin_tools
     env.setdefault("LLM_TOOLS_RALPH_ROBIN_SCHEDULER", "guarded")
     return env
 
@@ -308,10 +313,6 @@ def stream_color_enabled(stream: Any) -> bool:
     )
 
 
-def ansi_wrap(text: str, code: str) -> str:
-    return f"\033[{code}m{text}\033[0m"
-
-
 def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> bytes:
     if not enabled:
         return raw
@@ -321,27 +322,31 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
         bare = line.rstrip("\r\n")
         ending = line[len(bare):]
         stripped = bare.lstrip()
-        code = ""
+        role = ""
         if "\033[" in bare:
             out.append(line)
             continue
         if stream_name == "stderr":
-            code = "33"
+            role = "stderr"
         if re.match(r"^(diff --git|@@\s)", stripped):
-            code = "36;1"
+            role = "diff_hunk"
         elif stripped.startswith("+") and not stripped.startswith("+++"):
-            code = "32"
+            role = "diff_add"
         elif stripped.startswith("-") and not stripped.startswith("---"):
-            code = "31"
+            role = "diff_remove"
         elif re.search(r"\b(tool call|function call|exec_command|apply_patch|running command|command:)\b", stripped, re.I):
-            code = "36;1"
+            role = "tool"
         elif re.match(r"^(\$|>|python\b|pytest\b|git\b|gh\b|./|llm-|codex\b|claude\b|copilot\b|bash\b|make\b|npm\b|pnpm\b)", stripped):
-            code = "36"
+            role = "command"
         elif re.search(r"\b(error|failed|failure|rate[- ]limit|autonomous abort|blocked)\b", stripped, re.I):
-            code = "31;1"
+            role = "error"
         elif re.match(r"^[A-Z][A-Za-z0-9 _/-]{2,40}:$", stripped):
-            code = "1"
-        out.append(ansi_wrap(bare, code) + ending if code else line)
+            role = "heading"
+        if role:
+            prefix = "" if role in {"diff_add", "diff_remove"} else common.symbol_prefix(role)
+            out.append(common.ansi_wrap(f"{prefix}{bare}", role) + ending)
+        else:
+            out.append(line)
     return "".join(out).encode("utf-8", "replace")
 
 
