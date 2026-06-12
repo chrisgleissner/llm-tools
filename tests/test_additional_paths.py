@@ -159,21 +159,34 @@ def test_ralph_and_scheduler_highlight_helpers(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.delenv("LLM_TOOLS_SYMBOL_COMMAND", raising=False)
     monkeypatch.delenv("LLM_TOOLS_NO_SYMBOLS", raising=False)
     monkeypatch.setenv("TERM", "xterm")
+    assert common.ANSI_COLOR_ROLES["info"] == "39"
+    assert common.ANSI_COLOR_ROLES["heading"] == "1;39"
+    assert common.ANSI_COLOR_ROLES["ok"].endswith(";77")
+    assert common.ANSI_COLOR_ROLES["error"].endswith(";81")
+    assert not {
+        "1;38;5;203",
+        "38;5;203",
+        "1;38;5;219",
+        "1;38;5;222",
+        "1;38;5;183",
+    } & set(common.ANSI_COLOR_ROLES.values())
     assert scheduler.stream_color_enabled(Tty()) is True
     assert f"\x1b[{common.color_code('diff_add')}m+added\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
     assert f"\x1b[{common.color_code('diff_remove')}m-removed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"-removed\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('diff_hunk')}m{common.block_prefix('diff_hunk')}@@ hunk\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"@@ hunk\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('command')}m{common.block_prefix('command')}git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('error')}m{common.block_prefix('error')}error failed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"error failed\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('stderr')}m{common.block_prefix('stderr')}progress\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"progress\n", stream_name="stderr", enabled=True)
+    assert f"\x1b[{common.color_code('diff_hunk')}m@@ hunk\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"@@ hunk\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('command')}mgit status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('error')}merror failed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"error failed\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('warn')}mwarning: check this\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"warning: check this\n", stream_name="stdout", enabled=True)
+    assert scheduler.highlight_provider_text(b"progress\n", stream_name="stderr", enabled=True) == b"progress\n"
+    assert f"\x1b[{common.color_code('error')}merror failed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"error failed\n", stream_name="stderr", enabled=True)
     assert scheduler.highlight_provider_text(b"\x1b[31mred\x1b[0m\n", stream_name="stdout", enabled=True) == b"\x1b[31mred\x1b[0m\n"
     monkeypatch.setenv("LLM_TOOLS_COLOR_DIFF_ADD", "1;34")
     assert b"\x1b[1;34m+added\x1b[0m\n" == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
     monkeypatch.setenv("LLM_TOOLS_SYMBOL_COMMAND", "$")
-    assert f"\x1b[{common.color_code('command')}m$ CMD    git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('command')}mgit status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
     monkeypatch.setenv("LLM_TOOLS_NO_SYMBOLS", "1")
-    assert f"\x1b[{common.color_code('command')}mCMD    git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
-    assert scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=False) == b"CMD    git status\n"
+    assert f"\x1b[{common.color_code('command')}mgit status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=False) == b"git status\n"
 
     decision = {"tool": "claude", "usable": False, "reason": "rate-limited", "wait_until": 2000, "windows": [{"name": "5h", "remaining": 0}]}
     assert "rate-limited" in ralph_robin.decision_summary(decision)

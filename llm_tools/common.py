@@ -242,19 +242,19 @@ def fmt_pct(value: Any) -> str:
 
 
 ANSI_COLOR_ROLES: dict[str, str] = {
-    "brand": "1;38;5;81",
-    "info": "38;5;117",
-    "ok": "1;38;5;120",
-    "warn": "1;38;5;222",
-    "error": "1;38;5;203",
-    "dim": "38;5;250",
-    "diff_add": "38;5;120",
-    "diff_remove": "38;5;203",
-    "diff_hunk": "1;38;5;183",
-    "command": "1;38;5;159",
-    "tool": "1;38;5;222",
-    "stderr": "1;38;5;219",
-    "heading": "1;38;5;255",
+    "brand": "1;38;5;39",
+    "info": "39",
+    "ok": "1;38;5;77",
+    "warn": "1;38;5;110",
+    "error": "1;38;5;81",
+    "dim": "2;39",
+    "diff_add": "38;5;76",
+    "diff_remove": "38;5;109",
+    "diff_hunk": "1;38;5;75",
+    "command": "1;38;5;74",
+    "tool": "1;38;5;80",
+    "stderr": "2;38;5;117",
+    "heading": "1;39",
 }
 
 
@@ -275,12 +275,6 @@ UTF_SYMBOL_ROLES: dict[str, str] = {
 }
 
 OUTPUT_BLOCK_LABELS: dict[str, str] = {
-    "command": "CMD",
-    "diff_hunk": "DIFF",
-    "error": "ERROR",
-    "heading": "INFO",
-    "stderr": "STDERR",
-    "tool": "TOOL",
 }
 
 

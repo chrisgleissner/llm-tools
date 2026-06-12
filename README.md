@@ -133,11 +133,11 @@ Use `--command-template` if an installed CLI changes syntax or you use a wrapper
 
 `ralph-robin` defaults to autonomous headless launches even from an interactive terminal. The scheduler uses the provider's non-interactive adapter when available, streams output to your terminal, and aborts/re-evaluates rotation if a provider stops making progress or presents an input prompt.
 
-On an interactive terminal, Ralph status lines and common streamed provider patterns such as diffs, command/tool-call lines, warnings, and errors are highlighted with ANSI color; colors are disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
+On an interactive terminal, Ralph status lines and common streamed provider patterns such as diffs, command/tool-call lines, warnings, and errors are highlighted with ANSI color; streamed provider text is preserved without injected labels such as `STDERR`, `DIFF`, or `CMD`. Colors are disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 
-The default Ralph/scheduler palette uses green, blue, and teal ANSI colors chosen to remain readable on typical dark and light terminals. Override any role with `LLM_TOOLS_COLOR_<ROLE>` set to an ANSI SGR code, for example `LLM_TOOLS_COLOR_ERROR=1;34`. Supported roles are `BRAND`, `INFO`, `OK`, `WARN`, `ERROR`, `DIM`, `DIFF_ADD`, `DIFF_REMOVE`, `DIFF_HUNK`, `COMMAND`, `TOOL`, `STDERR`, and `HEADING`.
+The default Ralph/scheduler palette uses the terminal default foreground plus green, blue, and teal ANSI colors chosen to remain readable on typical dark and light terminals. Override any role with `LLM_TOOLS_COLOR_<ROLE>` set to an ANSI SGR code, for example `LLM_TOOLS_COLOR_ERROR=1;34`. Supported roles are `BRAND`, `INFO`, `OK`, `WARN`, `ERROR`, `DIM`, `DIFF_ADD`, `DIFF_REMOVE`, `DIFF_HUNK`, `COMMAND`, `TOOL`, `STDERR`, and `HEADING`.
 
-The same roles also have compact UTF-8 symbols so block types remain distinguishable without relying only on color. Override a symbol with `LLM_TOOLS_SYMBOL_<ROLE>`, for example `LLM_TOOLS_SYMBOL_COMMAND=$`, or set `LLM_TOOLS_NO_SYMBOLS=1` to keep color only.
+Ralph status lines also use compact UTF-8 symbols so state remains distinguishable without relying only on color. Override a symbol with `LLM_TOOLS_SYMBOL_<ROLE>`, for example `LLM_TOOLS_SYMBOL_ERROR=!`, or set `LLM_TOOLS_NO_SYMBOLS=1` to keep color only.
 
 ```bash
 ralph-robin --prompt-file task.md

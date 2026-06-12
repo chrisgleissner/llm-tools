@@ -324,8 +324,6 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
         if "\033[" in bare:
             out.append(line)
             continue
-        if stream_name == "stderr":
-            role = "stderr"
         if re.match(r"^(diff --git|@@\s)", stripped):
             role = "diff_hunk"
         elif stripped.startswith("+") and not stripped.startswith("+++"):
@@ -338,11 +336,12 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
             role = "command"
         elif re.search(r"\b(error|failed|failure|rate[- ]limit|autonomous abort|blocked)\b", stripped, re.I):
             role = "error"
+        elif re.search(r"\b(warn|warning|deprecated)\b", stripped, re.I):
+            role = "warn"
         elif re.match(r"^[A-Z][A-Za-z0-9 _/-]{2,40}:$", stripped):
             role = "heading"
         if role:
-            prefix = "" if role in {"diff_add", "diff_remove"} else common.block_prefix(role)
-            rendered = f"{prefix}{bare}"
+            rendered = bare
             out.append((common.ansi_wrap(rendered, role) if enabled else rendered) + ending)
         else:
             out.append(line)
