@@ -1,15 +1,19 @@
 # llm-tools
 
+<img src="./docs/img/logo.png" alt="LLM Tools"/>
+
 [![Build](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/chrisgleissner/llm-tools/graph/badge.svg)](https://codecov.io/gh/chrisgleissner/llm-tools)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
-[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey)](https://github.com/chrisgleissner/llm-tools/releases)
+[![Platform](https://img.shields.io/badge/platform-Linux-blue)](https://github.com/chrisgleissner/llm-tools/releases)
+
 
 Small command-line tools for local LLM CLI usage:
 
 - `llm-usage` shows remaining local usage for Codex, Claude Code, and GitHub Copilot.
 - `llm-scheduler` waits until one selected CLI appears usable again, then submits one prompt.
 - `ralph-robin` keeps using one configured CLI until its usage window is exhausted, then advances to the next configured CLI.
+
 
 ## Install
 
