@@ -111,8 +111,9 @@ def style(text: str, role: str) -> str:
 def status_line(message: str, *, level: str = "info") -> None:
     role = level if level in common.ANSI_COLOR_ROLES else "info"
     prefix = style(f"{common.symbol_prefix('brand')}ralph-robin", "brand")
-    body = f"{common.symbol_prefix(role)}{message}"
-    print(f"{prefix}: {style(body, role)}", file=sys.stderr)
+    marker = common.symbol_prefix(role).rstrip()
+    marker_text = f"{style(marker, role)} " if marker else ""
+    print(f"{prefix}: {marker_text}{message}", file=sys.stderr)
 
 
 def decision_summary(decision: dict[str, Any]) -> str:
@@ -145,11 +146,11 @@ def print_usage_summary(selection: dict[str, Any]) -> None:
         tool = str(item.get("tool", "?"))
         summary = decision_summary(item)
         if item.get("usable") is True:
-            rendered.append(style(f"{tool}: {summary}", "ok"))
+            rendered.append(f"{style(tool, 'ok')}: {summary}")
         elif item.get("reason") == "rate-limited":
-            rendered.append(style(f"{tool}: {summary}", "error"))
+            rendered.append(f"{style(tool, 'error')}: {summary}")
         else:
-            rendered.append(style(f"{tool}: {summary}", "warn"))
+            rendered.append(f"{style(tool, 'warn')}: {summary}")
     status_line("usage " + " | ".join(rendered), level="dim")
 
 

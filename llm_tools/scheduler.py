@@ -106,7 +106,7 @@ class SchedulerConfig:
     wake: bool = False
     wake_test: bool = False
     suspend_until_ready: bool = False
-    pre_suspend_confirmation_seconds: int = field(default_factory=lambda: int(os.environ.get("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS", "5") or "5"))
+    pre_suspend_confirmation_seconds: int = 5
     wake_armed_target: int = 0
     exact_stdout: bool = False
     ralph_robin_active: bool = False
@@ -314,8 +314,6 @@ def stream_color_enabled(stream: Any) -> bool:
 
 
 def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> bytes:
-    if not enabled:
-        return raw
     text = raw.decode("utf-8", "replace")
     out: list[str] = []
     for line in text.splitlines(True):
@@ -343,8 +341,9 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
         elif re.match(r"^[A-Z][A-Za-z0-9 _/-]{2,40}:$", stripped):
             role = "heading"
         if role:
-            prefix = "" if role in {"diff_add", "diff_remove"} else common.symbol_prefix(role)
-            out.append(common.ansi_wrap(f"{prefix}{bare}", role) + ending)
+            prefix = "" if role in {"diff_add", "diff_remove"} else common.block_prefix(role)
+            rendered = f"{prefix}{bare}"
+            out.append((common.ansi_wrap(rendered, role) if enabled else rendered) + ending)
         else:
             out.append(line)
     return "".join(out).encode("utf-8", "replace")

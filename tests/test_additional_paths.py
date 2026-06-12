@@ -162,22 +162,27 @@ def test_ralph_and_scheduler_highlight_helpers(monkeypatch: pytest.MonkeyPatch, 
     assert scheduler.stream_color_enabled(Tty()) is True
     assert f"\x1b[{common.color_code('diff_add')}m+added\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
     assert f"\x1b[{common.color_code('diff_remove')}m-removed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"-removed\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('diff_hunk')}m{common.symbol_prefix('diff_hunk')}@@ hunk\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"@@ hunk\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('command')}m{common.symbol_prefix('command')}git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('error')}m{common.symbol_prefix('error')}error failed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"error failed\n", stream_name="stdout", enabled=True)
-    assert f"\x1b[{common.color_code('stderr')}m{common.symbol_prefix('stderr')}progress\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"progress\n", stream_name="stderr", enabled=True)
+    assert f"\x1b[{common.color_code('diff_hunk')}m{common.block_prefix('diff_hunk')}@@ hunk\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"@@ hunk\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('command')}m{common.block_prefix('command')}git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('error')}m{common.block_prefix('error')}error failed\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"error failed\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('stderr')}m{common.block_prefix('stderr')}progress\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"progress\n", stream_name="stderr", enabled=True)
     assert scheduler.highlight_provider_text(b"\x1b[31mred\x1b[0m\n", stream_name="stdout", enabled=True) == b"\x1b[31mred\x1b[0m\n"
     monkeypatch.setenv("LLM_TOOLS_COLOR_DIFF_ADD", "1;34")
     assert b"\x1b[1;34m+added\x1b[0m\n" == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
     monkeypatch.setenv("LLM_TOOLS_SYMBOL_COMMAND", "$")
-    assert b"\x1b[38;5;39m$ git status\x1b[0m\n" == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('command')}m$ CMD    git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
     monkeypatch.setenv("LLM_TOOLS_NO_SYMBOLS", "1")
-    assert b"\x1b[38;5;39mgit status\x1b[0m\n" == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert f"\x1b[{common.color_code('command')}mCMD    git status\x1b[0m\n".encode() == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=False) == b"CMD    git status\n"
 
     decision = {"tool": "claude", "usable": False, "reason": "rate-limited", "wait_until": 2000, "windows": [{"name": "5h", "remaining": 0}]}
     assert "rate-limited" in ralph_robin.decision_summary(decision)
     ralph_robin.print_usage_summary({"decisions": [decision, {"tool": "codex", "usable": True, "reason": "usable", "windows": [{"name": "5h", "remaining": 61.5}]}]})
     assert "claude" in capsys.readouterr().err
+    monkeypatch.setattr(ralph_robin, "color_enabled", lambda: True)
+    ralph_robin.status_line("plain body", level="error")
+    body = capsys.readouterr().err.split(": ", 1)[1]
+    assert body == "plain body\n"
 
 
 def test_ralph_validation_dry_run_rotation_and_autonomy(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
@@ -511,3 +516,115 @@ def test_scheduler_more_system_edges(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     status = tmp_path / "status"
     assert scheduler.run_tmux(cfg2, logs, ["true"], out, status) == 127
     assert "tmux not installed" in out.read_text()
+
+
+def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("PATH", env["PATH"])
+    write_exe(fake_bin / "date", "#!/usr/bin/env python3\nimport sys\nprint('1234' if '-d' in sys.argv else '')\n")
+    assert common.parse_epoch("next friday") == 1234
+    write_exe(fake_bin / "date", "#!/usr/bin/env python3\nimport sys\nprint('not-an-int')\n")
+    assert common.parse_epoch("next friday") is None
+    write_exe(fake_bin / "date", "#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n")
+    assert common.fmt_reset(None) == ""
+    assert common.fmt_reset(0).startswith("1970-01-01")
+    assert common.format_local_epoch(0).startswith("1970-01-01")
+    assert common.now_epoch({"LLM_USAGE_NOW_EPOCH": "bad"}) > 0
+    assert common.copilot_monthly_reset_epoch({"LLM_USAGE_NOW_EPOCH": "1798761600", "LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS": "bad"}) is not None
+    assert common.num(True) is None
+    assert common.num(None) is None
+    assert common.num("nope") is None
+    assert common.fmt_number("1.25") == "1.2"
+    assert common.remaining_from_used(-5) == 100
+    assert common.remaining_from_used(125) == 0
+    assert common.window_from({"resets_at": 99}, 300) == {"used": None, "resets_at": 99, "window_minutes": 300}
+
+    assert common.normalize_codex_obj({"msg": {"rateLimits": {"spark-model": {"primary": {"used_percent": 3}}}}}, "src")["rows"][0]["key"] == "codex-spark"
+    assert common.normalize_claude_obj({"five_hour": {"utilization": 7}, "seven_day": {"used_percent": 8}}, "src")["week"]["used"] == 8
+    assert common.json_for_provider(None, "codex") == {"provider": "codex", "available": False}
+    assert common.decorate_window(None) is None
+    assert common.json_for_copilot({"provider": "copilot", "monthly": None}, True)["available"] is False
+    assert common.read_copilot_live(env | {"LLM_USAGE_COPILOT_CAPTURE_TEXT": "trust_prompt_seen"})["reason"] == "trust-prompt"
+    assert common.read_copilot_live(env | {"LLM_USAGE_COPILOT_CAPTURE_TEXT": "AI Credits: 4"})["ai_credits"]["used"] == 4
+
+    cache_dir = common.usage_cache_dir(env)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "copilot-usage.json").write_text("{bad", encoding="utf-8")
+    fake_proc: list[list[str]] = []
+    original_popen = subprocess.Popen
+
+    class PopenStub:
+        def __init__(self, args, **kwargs) -> None:
+            fake_proc.append(list(args))
+
+    monkeypatch.setattr(common.subprocess, "Popen", PopenStub)
+    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "999", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["reason"] == "refresh-pending"
+    fresh_env = env | {"XDG_CACHE_HOME": str(tmp_path / "fresh-xdg"), "LLM_USAGE_COPILOT_CACHE_TTL": "999", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}
+    assert common.read_copilot(fresh_env)["reason"] == "refresh-pending"
+    assert fake_proc
+    monkeypatch.setattr(common.subprocess, "Popen", original_popen)
+    (cache_dir / "copilot-refresh.lock").mkdir(exist_ok=True)
+    os.utime(cache_dir / "copilot-refresh.lock", (1, 1))
+    (cache_dir / "copilot-usage.json").write_text('{"provider":"copilot","monthly":{"remaining":2}}', encoding="utf-8")
+    os.utime(cache_dir / "copilot-usage.json", (1, 1))
+    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "1", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["monthly"]["remaining"] == 2
+
+    log = cache_dir / "llm-usage.log"
+    log.write_text(
+        '{"ts":1000,"provider":"p","window":"w","remaining":80}\n'
+        '{"ts":1060,"provider":"p","window":"w","remaining":90}\n'
+        '{"ts":1120,"provider":"p","window":"w","remaining":89}\n'
+        'not-json\n',
+        encoding="utf-8",
+    )
+    assert common.estimate_remaining_time_from_log("p", "w", 1, env | {"LLM_USAGE_NOW_EPOCH": "1120", "LLM_USAGE_LOG_TAIL_LINES": "bad"}) == "1m"
+    assert common.estimate_remaining_time_from_log("p", "missing", 1, env) == "-"
+    assert common.estimate_remaining_time_from_log("p", "w", "bad", env) == "-"
+    common.log_usage_sample("p", "w", "-", env)
+
+    assert common.usage_decision_for_tool("copilot", "weekly", "1", "60", {}, env)["reason"] == "unsupported-window"
+    assert common.usage_decision_for_tool("codex", "monthly", "1", "60", {"available": True}, env)["reason"] == "unsupported-window"
+    assert common.usage_decision_for_tool("codex", "5h", "1", "60", {"available": True, "five_hour": {"resets_at": 2000}}, env)["reason"] == "inconclusive-usage"
+    assert common.usage_snapshot_for_tool("unknown", env)["reason"] == "unsupported-tool"
+    assert common.output_is_retryable(130, "", attached=True) is False
+    assert common.output_is_retryable(1, "", attached=True) is True
+
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("same", encoding="utf-8")
+    logs = common.setup_run_logs(tmp_path / "logs-same", "same", run_dir=tmp_path)
+    assert common.load_prompt("", str(prompt), logs)[0] == "same"
+
+    with pytest.raises(SystemExit):
+        scheduler.parse_args(["--help"])
+    monkeypatch.setenv("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS", "bad")
+    with pytest.raises(SystemExit):
+        scheduler.parse_args([])
+    monkeypatch.delenv("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS", raising=False)
+    cfg = scheduler.SchedulerConfig(tool="codex", prompt_text="p", cwd=str(tmp_path))
+    monkeypatch.setenv("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "bad")
+    with pytest.raises(SystemExit):
+        scheduler.validate_args(cfg)
+    monkeypatch.delenv("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", raising=False)
+    assert scheduler.parse_date_d("not-a-date") is None
+    assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="codex", command_template="true")) == "from command template"
+    assert scheduler.highlight_provider_text(b"Tool call: shell\nTitle:\nplain\n", stream_name="stdout", enabled=True).count(b"\x1b[") >= 2
+    assert scheduler.highlight_provider_text(b"plain\n", stream_name="stdout", enabled=False) == b"plain\n"
+
+    cfg = scheduler.SchedulerConfig(tool="codex", prompt_text="p", cwd=str(tmp_path), attached=True)
+    logs2 = common.setup_run_logs(tmp_path / "submit-logs", "s")
+    monkeypatch.setattr(scheduler, "run_fresh_attached", lambda _cfg, _argv, _out, _status: 0)
+    assert scheduler.submit_once(cfg, logs2, 1, ["true"]) == 1
+    (logs2.run_dir / "attempt-2.status").write_text("bad", encoding="utf-8")
+    (logs2.run_dir / "attempt-2.out").write_text("", encoding="utf-8")
+    monkeypatch.setattr(scheduler, "run_fresh_attached", lambda _cfg, _argv, _out, _status: 0)
+    assert scheduler.submit_once(cfg, logs2, 2, ["true"]) == 1
+
+    ucfg = usage.Config()
+    ucfg.color_enabled = True
+    assert usage.colorize_percent("9%", ucfg).startswith("\x1b[0;31m")
+    assert usage.colorize_percent("29%", ucfg).startswith("\x1b[0;33m")
+    assert usage.colorize_percent("30%", ucfg).startswith("\x1b[0;32m")
+    assert usage.colorize_percent("bad%", ucfg) == "bad%"
+    usage.print_codex_rows(ucfg, {"source": "src", "five_hour": {"used": 10}, "week": {"used": 20}})
+    usage.print_copilot_rows(ucfg, None)
+    out = capsys.readouterr().out
+    assert "Codex" in out and "Copilot" in out

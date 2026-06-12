@@ -242,36 +242,45 @@ def fmt_pct(value: Any) -> str:
 
 
 ANSI_COLOR_ROLES: dict[str, str] = {
-    "brand": "1;38;5;33",
-    "info": "38;5;39",
-    "ok": "38;5;34",
-    "warn": "38;5;37",
-    "error": "1;38;5;27",
-    "dim": "38;5;66",
-    "diff_add": "38;5;35",
-    "diff_remove": "38;5;31",
-    "diff_hunk": "1;38;5;37",
-    "command": "38;5;39",
-    "tool": "1;38;5;37",
-    "stderr": "38;5;38",
-    "heading": "1;38;5;33",
+    "brand": "1;38;5;81",
+    "info": "38;5;117",
+    "ok": "1;38;5;120",
+    "warn": "1;38;5;222",
+    "error": "1;38;5;203",
+    "dim": "38;5;250",
+    "diff_add": "38;5;120",
+    "diff_remove": "38;5;203",
+    "diff_hunk": "1;38;5;183",
+    "command": "1;38;5;159",
+    "tool": "1;38;5;222",
+    "stderr": "1;38;5;219",
+    "heading": "1;38;5;255",
 }
 
 
 UTF_SYMBOL_ROLES: dict[str, str] = {
     "brand": "◆",
-    "info": "›",
+    "info": "•",
     "ok": "✓",
-    "warn": "◇",
+    "warn": "!",
     "error": "✕",
     "dim": "·",
     "diff_add": "+",
     "diff_remove": "−",
-    "diff_hunk": "§",
-    "command": "λ",
-    "tool": "⚙",
-    "stderr": "⋯",
+    "diff_hunk": "╭",
+    "command": "$",
+    "tool": "◆",
+    "stderr": "!",
     "heading": "◆",
+}
+
+OUTPUT_BLOCK_LABELS: dict[str, str] = {
+    "command": "CMD",
+    "diff_hunk": "DIFF",
+    "error": "ERROR",
+    "heading": "INFO",
+    "stderr": "STDERR",
+    "tool": "TOOL",
 }
 
 
@@ -296,6 +305,14 @@ def symbol_for(role: str, env: dict[str, str] | None = None) -> str:
 def symbol_prefix(role: str, env: dict[str, str] | None = None) -> str:
     symbol = symbol_for(role, env)
     return f"{symbol} " if symbol else ""
+
+
+def block_prefix(role: str, env: dict[str, str] | None = None) -> str:
+    label = OUTPUT_BLOCK_LABELS.get(role)
+    if not label:
+        return symbol_prefix(role, env)
+    symbol = symbol_for(role, env)
+    return f"{symbol} {label:<6} " if symbol else f"{label:<6} "
 
 
 def read_json_text(text: str) -> Any | None:
