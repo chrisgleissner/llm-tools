@@ -16,10 +16,11 @@ APP_NAME = "ralph-robin"
 
 USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
 
-Round-robin prompt submission across local LLM CLIs. By default it keeps using
-the usable provider with the highest weekly remaining allowance per day, so
-weekly quotas burn down more evenly. Disable this with --no-even-burn to keep
-using the current provider until it is exhausted.
+Round-robin prompt submission across local LLM CLIs. By default it prefers the
+provider with the highest weekly remaining allowance per day, waiting through a
+shorter session-window reset when needed, so weekly quotas burn down more
+evenly. Disable this with --no-even-burn to keep using the current provider
+until it is exhausted.
 
 By default the selected CLI uses llm-scheduler's autonomous headless adapter
 even from an interactive terminal. This avoids provider prompts blocking the
@@ -44,8 +45,8 @@ Options:
                               launch (default: 900; 0 waits forever).
   --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
   --no-retry                  Disable retries after failed submission.
-  --even-burn                 Prefer the usable tool with the highest weekly
-                              remaining allowance per day (default).
+  --even-burn                 Prefer the tool with the highest weekly remaining
+                              allowance per day (default).
   --no-even-burn              Keep using the current provider until exhausted.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process through llm-scheduler (default).
@@ -391,11 +392,24 @@ def weekly_allowance_per_day(decision: dict[str, Any], env: dict[str, str] | Non
     return None
 
 
+def weekly_window_exhausted(decision: dict[str, Any]) -> bool:
+    exhausted = decision.get("exhausted")
+    if not isinstance(exhausted, list):
+        return False
+    return any(isinstance(window, dict) and window.get("name") == "weekly" for window in exhausted)
+
+
+def even_burn_candidate(decision: dict[str, Any]) -> bool:
+    if decision.get("usable") is True:
+        return True
+    return decision.get("reason") == "rate-limited" and not weekly_window_exhausted(decision)
+
+
 def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_index: int, skipped: set[str]) -> int | None:
     usable_indices = [
         i
         for i, decision in enumerate(decisions)
-        if decision.get("usable") is True and cfg.tools[i] not in skipped
+        if even_burn_candidate(decision) and cfg.tools[i] not in skipped
     ]
     if len(usable_indices) < 2:
         return None

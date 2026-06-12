@@ -298,7 +298,9 @@ def test_parser_option_coverage(tmp_path: Path) -> None:
     assert scfg.tmux_target == "s:w"
     assert scfg.suspend_until_ready is True
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="codex", cwd="/c", attached=True), "p") == ["codex", "-C", "/c", "p"]
-    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude", attached=True), "p")[0] == "claude"
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude", attached=True), "p") == ["claude", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude"), "p") == ["claude", "--print", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude", claude_stream_json=True), "p") == ["claude", "--print", "--output-format", "stream-json", "--verbose", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="copilot", cwd="/c", attached=True), "p") == ["copilot", "-C", "/c", "-i", "p"]
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="codex")).startswith("Codex")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="claude")).startswith("Claude")
@@ -566,6 +568,40 @@ def test_ralph_even_burn_prefers_highest_weekly_allowance_per_day(monkeypatch: p
     old_rotation = ralph_robin.select_tool(cfg, logs, 0, set())
     assert old_rotation["tool"] == "claude"
     assert old_rotation["rotation_reason"] == "current-usable"
+
+
+def test_ralph_even_burn_can_wait_for_short_window_reset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 0, "resets_at": 1100},
+            "week": {"remaining": 81, "resets_at": 1000 + (6 * 86400)},
+        },
+        "codex": {
+            "available": True,
+            "five_hour": {"remaining": 100, "resets_at": 2000},
+            "week": {"remaining": 50, "resets_at": 1000 + (6 * 86400)},
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
+
+    selected = ralph_robin.select_tool(cfg, logs, 1, set())
+    assert selected["tool"] == "claude"
+    assert selected["rotation_reason"] == "even-burn"
+    assert selected["decision"]["reason"] == "rate-limited"
+    assert selected["decision"]["wait_until"] == 1100
+
+    snapshots["claude"] = {
+        "available": True,
+        "five_hour": {"remaining": 100, "resets_at": 2000},
+        "week": {"remaining": 0, "resets_at": 1000 + (6 * 86400)},
+    }
+    selected_weekly_exhausted = ralph_robin.select_tool(cfg, logs, 1, set())
+    assert selected_weekly_exhausted["tool"] == "codex"
+    assert selected_weekly_exhausted["rotation_reason"] == "current-usable"
 
 
 def test_scheduler_more_system_edges(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

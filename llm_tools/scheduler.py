@@ -355,14 +355,14 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
         if cfg.tool == "codex":
             return ["codex", "-C", cfg.cwd, prompt]
         if cfg.tool == "claude":
-            return ["claude", "--dangerously-skip-permissions", prompt]
+            return ["claude", prompt]
         return ["copilot", "-C", cfg.cwd, "-i", prompt]
     if cfg.tool == "codex":
         return ["codex", "exec", "-C", cfg.cwd, prompt]
     if cfg.tool == "claude":
         if cfg.claude_stream_json:
-            return ["claude", "--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose", prompt]
-        return ["claude", "--dangerously-skip-permissions", "--print", prompt]
+            return ["claude", "--print", "--output-format", "stream-json", "--verbose", prompt]
+        return ["claude", "--print", prompt]
     return ["copilot", "-C", cfg.cwd, "--prompt", prompt]
 
 

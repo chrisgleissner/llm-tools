@@ -154,13 +154,13 @@ Default provider commands:
 
 | Mode        | Codex                          | Claude Code                                              | GitHub Copilot                       |
 | ----------- | ------------------------------ | -------------------------------------------------------- | ------------------------------------ |
-| Interactive | `codex -C <cwd> <prompt>`      | `claude --dangerously-skip-permissions <prompt>`         | `copilot -C <cwd> -i <prompt>`       |
-| Headless    | `codex exec -C <cwd> <prompt>` | `claude --dangerously-skip-permissions --print <prompt>` | `copilot -C <cwd> --prompt <prompt>` |
+| Interactive | `codex -C <cwd> <prompt>`      | `claude <prompt>`                                        | `copilot -C <cwd> -i <prompt>`       |
+| Headless    | `codex exec -C <cwd> <prompt>` | `claude --print <prompt>`                                | `copilot -C <cwd> --prompt <prompt>` |
 
-The default Claude adapter skips permission prompts so unattended runs cannot stall. To keep Claude Code’s normal permission checks:
+The default Claude adapter relies on your local Claude Code permission settings. To override Claude Code settings for one scheduler run:
 
 ```bash
-llm-scheduler --tool claude --prompt-file task.md --command-template 'claude --print {prompt}'
+llm-scheduler --tool claude --prompt-file task.md --command-template 'claude --permission-mode plan --print {prompt}'
 ```
 
 ## `ralph-robin`
@@ -199,7 +199,7 @@ Options:
 | `--tools LIST`       | Set comma-separated rotation. Values: `claude`, `codex`, `copilot`.                                        |
 | `--prompt TEXT`      | Prompt text passed to the selected provider.                                                               |
 | `--prompt-file FILE` | Prompt file passed to the selected provider.                                                               |
-| `--even-burn`        | Prefer the usable provider with the highest weekly remaining allowance per day. Enabled by default.         |
+| `--even-burn`        | Prefer the provider with the highest weekly remaining allowance per day, waiting through short-window resets when needed. Enabled by default. |
 | `--no-even-burn`     | Keep using the current provider until it is exhausted.                                                      |
 | `--state-file FILE`  | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`. |
 | `--log-dir DIR`      | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.            |
@@ -226,7 +226,7 @@ Passed through to `llm-scheduler`:
 Behavior:
 
 * Defaults to autonomous headless launches, even from an interactive terminal.
-* Defaults to even burn-down: when multiple providers are usable and have comparable weekly reset data, selects the highest `weekly remaining percentage / days until weekly reset`.
+* Defaults to even burn-down: when multiple providers have comparable weekly reset data, selects the highest `weekly remaining percentage / days until weekly reset`, even if that provider needs to wait for a shorter session-window reset first.
 * Use `--no-even-burn` to restore current-provider-until-exhausted rotation.
 * Streams provider output without injected labels.
 * Highlights status lines, diffs, commands, warnings, and errors on interactive terminals.
