@@ -73,6 +73,11 @@ def test_scheduler_argument_branches(env: dict[str, str], tmp_path: Path) -> Non
     )
     assert guarded.returncode == common.AUTONOMY_ABORT_STATUS
     assert "disabled inside an active ralph-robin" in guarded.stderr
+    allowed = run_cmd(
+        ["./llm-scheduler", "--tool", "claude", "--prompt", "x", "--suspend-until-ready", "--dry-run", "--command-template", "true"],
+        env | {"LLM_TOOLS_RALPH_ROBIN_ACTIVE": "1", "LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND": "1", "LLM_SCHEDULER_USAGE_JSON": '{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}'},
+    )
+    assert allowed.returncode == 0
 
 
 def test_scheduler_unavailable_suspend_and_no_stream(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
@@ -134,6 +139,34 @@ def test_scheduler_tmux_missing_and_template_error(env: dict[str, str], tmp_path
         env | {"LLM_SCHEDULER_USAGE_JSON": '{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}'},
     )
     assert tmux.returncode == 1
+
+
+def test_ralph_and_scheduler_highlight_helpers(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    assert scheduler.provider_env(scheduler.SchedulerConfig()) is None
+    env = scheduler.provider_env(scheduler.SchedulerConfig(ralph_robin_active=True))
+    assert env is not None
+    assert env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] == "1"
+
+    class Tty:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("LLM_USAGE_NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm")
+    assert scheduler.stream_color_enabled(Tty()) is True
+    assert b"\x1b[32m+added\x1b[0m\n" == scheduler.highlight_provider_text(b"+added\n", stream_name="stdout", enabled=True)
+    assert b"\x1b[31m-removed\x1b[0m\n" == scheduler.highlight_provider_text(b"-removed\n", stream_name="stdout", enabled=True)
+    assert b"\x1b[36;1m@@ hunk\x1b[0m\n" == scheduler.highlight_provider_text(b"@@ hunk\n", stream_name="stdout", enabled=True)
+    assert b"\x1b[36mgit status\x1b[0m\n" == scheduler.highlight_provider_text(b"git status\n", stream_name="stdout", enabled=True)
+    assert b"\x1b[31;1merror failed\x1b[0m\n" == scheduler.highlight_provider_text(b"error failed\n", stream_name="stdout", enabled=True)
+    assert b"\x1b[33mprogress\x1b[0m\n" == scheduler.highlight_provider_text(b"progress\n", stream_name="stderr", enabled=True)
+    assert scheduler.highlight_provider_text(b"\x1b[31mred\x1b[0m\n", stream_name="stdout", enabled=True) == b"\x1b[31mred\x1b[0m\n"
+
+    decision = {"tool": "claude", "usable": False, "reason": "rate-limited", "wait_until": 2000, "windows": [{"name": "5h", "remaining": 0}]}
+    assert "rate-limited" in ralph_robin.decision_summary(decision)
+    ralph_robin.print_usage_summary({"decisions": [decision, {"tool": "codex", "usable": True, "reason": "usable", "windows": [{"name": "5h", "remaining": 61.5}]}]})
+    assert "claude" in capsys.readouterr().err
 
 
 def test_ralph_validation_dry_run_rotation_and_autonomy(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:

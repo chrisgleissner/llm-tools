@@ -60,7 +60,9 @@ Important options:
 
 `llm-scheduler` submits a prompt once the selected CLI has known remaining capacity above a threshold. It runs once and exits after success, terminal failure, or retry exhaustion.
 
-In the default fresh mode on an interactive terminal, the provider CLI launches in its normal interactive form attached directly to that terminal — output, key input, window resizes, and Ctrl-C behave exactly as if you had run `claude`, `codex`, or `copilot` yourself. An ANSI-cleaned transcript is also written to the run directory (`attempt-N.out`). Without a terminal (pipes, cron, systemd resume), or with `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`, the non-interactive provider form runs on a captured PTY instead and its output streams to stdout (suppressed under `LLM_SCHEDULER_NO_STREAM=1`). In tmux mode the output appears in the tmux pane instead.
+In the default fresh mode on an interactive terminal, the provider CLI launches in its normal interactive form attached directly to that terminal — output, key input, window resizes, and Ctrl-C behave exactly as if you had run `claude`, `codex`, or `copilot` yourself. An ANSI-cleaned transcript is also written to the run directory (`attempt-N.out`).
+
+Without a terminal (pipes, cron, systemd resume), or with `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`, the non-interactive provider form runs on a captured PTY instead and its output streams to stdout (suppressed under `LLM_SCHEDULER_NO_STREAM=1`). In tmux mode the output appears in the tmux pane instead.
 
 ```bash
 llm-scheduler --tool codex --prompt-file task.md

@@ -7,13 +7,19 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, and GitHub Co
 * `llm-usage` — show local usage/quota for each provider.
 * `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a window reset).
 * `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`.
-* `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
-* Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`.
+* `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, usage decisions, PTY capture, wake diagnostics, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
+* Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
 * Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`.
 * Regression tests: `tests/` with pytest and fake provider commands.
-* User docs: `README.md`
+* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`.
+* Project/package config: `pyproject.toml`.
+* Import/test bootstrap: `sitecustomize.py`.
+* CI: `.github/workflows/test.yml`.
+* User docs: `README.md`.
+* Local planning/work logs: `PLANS.md`, `WORKLOG.md`.
 * Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `llm_tools/common.py`.
 * Usage cache and samples log: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage` (`claude-status.json`, `claude-usage-api.json`, `llm-usage.log`)
+* Copilot background refresh helper: `llm_tools/copilot_refresh.py`, launched by `read_copilot` for detached cache refreshes.
 * Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`
 * Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`
 * Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`
@@ -52,6 +58,8 @@ printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":10}}}' | ./llm-usa
 * Table rendering: `print_cell`, `print_value_row`, `print_row`, `print_unavailable_rows`, `print_codex_rows`, `print_copilot_rows`
 * Remaining-time logic: `log_usage_sample`, `estimate_remaining_time_from_log`
 * Time/reset formatting: `now_epoch`, `parse_epoch`, `fmt_reset`, `fmt_duration`, `time_until`
+* Scheduler gates and launch: `usage_decision_for_tool`, `wait_until_usable`, `schedule_resume_and_suspend`, `command_argv`, `submit_once`, `run_fresh_headless`, `run_fresh_exact_stdout`, `run_tmux`
+* Ralph Robin rotation: `select_tool`, `scheduler_config_for`, `run_scheduler_inline`, state helpers, status/highlight helpers
 
 Prefer changing the smallest relevant function surface. Preserve existing function boundaries unless a helper clearly reduces duplication or risk.
 
@@ -144,7 +152,10 @@ When changing behavior:
 1. Add or update the narrowest fixture assertion.
 2. Run a targeted command for the changed path.
 3. Run `python -m pytest -q`.
-4. Update `README.md` for user-visible changes.
+4. Run coverage and require at least 80% total coverage: `coverage run -m pytest && coverage combine && coverage report --fail-under=80`.
+5. Update `README.md` for user-visible changes.
+
+Do not consider work done, even for small changes, unless the coverage gate has run and passed at `--fail-under=80`. If `coverage` is not installed in the active interpreter, use a temporary virtual environment or otherwise report the dependency/environment blocker explicitly.
 
 ## Common failures
 
@@ -164,7 +175,7 @@ A change is complete only when:
 * `./llm-usage --json` emits valid JSON.
 * `./llm-usage --show-source --show-remaining-time` has aligned columns and no empty cells.
 * `python -m pytest -q` passes.
-* `coverage run -m pytest && coverage combine && coverage report --fail-under=80` passes.
+* `coverage run -m pytest && coverage combine && coverage report --fail-under=80` passes with total coverage at or above 80%; this is mandatory for completion.
 * Missing-provider and timeout paths degrade gracefully.
 * Table, JSON, README, and tests are consistent for any user-visible change.
 * Generated files such as `llm-usage.log` are not committed.
