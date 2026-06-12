@@ -581,10 +581,12 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     assert sel3["all_rate_limited"] is False
 
 
-def test_ralph_even_burn_prefers_highest_weekly_allowance_per_day(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ralph_even_burn_prefers_highest_weekly_remaining(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
     logs = common.setup_run_logs(tmp_path / "logs", "r")
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    # Codex resets sooner, but Claude has far more remaining capacity. Even-burn
+    # must prefer the higher remaining capacity regardless of reset timing.
     snapshots = {
         "claude": {
             "available": True,
@@ -599,13 +601,14 @@ def test_ralph_even_burn_prefers_highest_weekly_allowance_per_day(monkeypatch: p
     }
     monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
 
-    selected = ralph_robin.select_tool(cfg, logs, 0, set())
-    assert selected["tool"] == "codex"
+    # current_index points at codex; even-burn should still advance to claude.
+    selected = ralph_robin.select_tool(cfg, logs, 1, set())
+    assert selected["tool"] == "claude"
     assert selected["rotation_reason"] == "even-burn"
 
     cfg.even_burn = False
-    old_rotation = ralph_robin.select_tool(cfg, logs, 0, set())
-    assert old_rotation["tool"] == "claude"
+    old_rotation = ralph_robin.select_tool(cfg, logs, 1, set())
+    assert old_rotation["tool"] == "codex"
     assert old_rotation["rotation_reason"] == "current-usable"
 
 

@@ -17,10 +17,10 @@ APP_NAME = "ralph-robin"
 USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
 
 Round-robin prompt submission across local LLM CLIs. By default it prefers the
-provider with the highest weekly remaining allowance per day, waiting through a
-shorter session-window reset when needed, so weekly quotas burn down more
-evenly. Disable this with --no-even-burn to keep using the current provider
-until it is exhausted.
+provider with the highest remaining weekly capacity, waiting through a shorter
+session-window reset when needed, so weekly quotas burn down more evenly.
+Disable this with --no-even-burn to keep using the current provider until it is
+exhausted.
 
 By default the selected CLI uses llm-scheduler's autonomous headless adapter
 even from an interactive terminal. This avoids provider prompts blocking the
@@ -45,8 +45,8 @@ Options:
                               launch (default: 900; 0 waits forever).
   --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
   --no-retry                  Disable retries after failed submission.
-  --even-burn                 Prefer the tool with the highest weekly remaining
-                              allowance per day (default).
+  --even-burn                 Prefer the tool with the highest remaining weekly
+                              capacity (default).
   --no-even-burn              Keep using the current provider until exhausted.
   --cwd DIR                   Working directory for the target CLI (default: current directory).
   --fresh                     Launch a fresh CLI process through llm-scheduler (default).
@@ -372,8 +372,7 @@ def rotation_order_indices(length: int, current_index: int) -> list[int]:
     return [(current_index + i) % length for i in range(length)]
 
 
-def weekly_allowance_per_day(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
-    env = env or os.environ
+def weekly_remaining(decision: dict[str, Any]) -> float | None:
     windows = decision.get("windows")
     if not isinstance(windows, list):
         return None
@@ -381,14 +380,9 @@ def weekly_allowance_per_day(decision: dict[str, Any], env: dict[str, str] | Non
         if not isinstance(window, dict) or window.get("name") != "weekly":
             continue
         remaining = window.get("remaining")
-        reset_epoch = window.get("reset_epoch")
-        if not isinstance(remaining, (int, float)) or not isinstance(reset_epoch, int):
+        if not isinstance(remaining, (int, float)):
             return None
-        seconds_until_reset = reset_epoch - common.now_epoch(env)
-        if seconds_until_reset <= 0:
-            return None
-        days_until_reset = seconds_until_reset / 86400.0
-        return float(remaining) / days_until_reset
+        return float(remaining)
     return None
 
 
@@ -416,7 +410,7 @@ def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_i
     scored: list[tuple[float, int, int]] = []
     rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(cfg.tools), current_index))}
     for i in usable_indices:
-        score = weekly_allowance_per_day(decisions[i])
+        score = weekly_remaining(decisions[i])
         if score is None:
             return None
         scored.append((score, -rotation_rank[i], i))
