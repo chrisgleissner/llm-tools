@@ -19,10 +19,11 @@ set -euo pipefail
 APP_NAME="llm-usage"
 SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage"
+LLM_TOOLS_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools"
+CACHE_DIR="$LLM_TOOLS_CACHE_DIR/llm-usage"
 CLAUDE_CACHE="$CACHE_DIR/claude-status.json"
 CLAUDE_API_CACHE="$CACHE_DIR/claude-usage-api.json"
-USAGE_LOG_FILE="$SCRIPT_DIR/llm-usage.log"
+USAGE_LOG_FILE="$CACHE_DIR/llm-usage.log"
 USAGE_LOG_TAIL_LINES="${LLM_USAGE_LOG_TAIL_LINES:-20000}"
 WATCH_INTERVAL=0
 JSON_OUTPUT=0
@@ -165,7 +166,11 @@ print_cell() {
   local width="$1"
   local text="$2"
   local plain
-  plain=$(printf '%s' "$text" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')
+  if [[ "$text" == *$'\x1b'* ]]; then
+    plain=$(printf '%s' "$text" | sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g')
+  else
+    plain="$text"
+  fi
   local pad=$((width - ${#plain}))
   printf '%s' "$text"
   if (( pad > 0 )); then
@@ -406,9 +411,23 @@ print_copilot_rows() {
 
 render_once() {
   local codex claude copilot codex_json claude_json copilot_json
-  codex=$(read_codex || true)
-  claude=$(read_claude || true)
-  copilot=$(read_copilot || true)
+  # The three provider reads are independent and dominated by I/O (HTTP for
+  # Claude, PTY capture/cache for Copilot), so run them concurrently.
+  local fetch_dir codex_pid claude_pid copilot_pid
+  fetch_dir="$(mktemp -d)"
+  read_codex > "$fetch_dir/codex" &
+  codex_pid=$!
+  read_claude > "$fetch_dir/claude" &
+  claude_pid=$!
+  read_copilot > "$fetch_dir/copilot" &
+  copilot_pid=$!
+  wait "$codex_pid" || true
+  wait "$claude_pid" || true
+  wait "$copilot_pid" || true
+  codex="$(<"$fetch_dir/codex")"
+  claude="$(<"$fetch_dir/claude")"
+  copilot="$(<"$fetch_dir/copilot")"
+  rm -rf "$fetch_dir"
 
   if [[ "$JSON_OUTPUT" -eq 1 ]]; then
     codex_json=$(json_for_provider "$codex" codex)

@@ -6,10 +6,11 @@ APP_NAME="ralph-robin"
 SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 SCHEDULER_PATH="$SCRIPT_DIR/llm-scheduler"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage"
+LLM_TOOLS_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools"
+CACHE_DIR="$LLM_TOOLS_CACHE_DIR/llm-usage"
 CLAUDE_CACHE="$CACHE_DIR/claude-status.json"
 CLAUDE_API_CACHE="$CACHE_DIR/claude-usage-api.json"
-USAGE_LOG_FILE="$SCRIPT_DIR/llm-usage.log"
+USAGE_LOG_FILE="$CACHE_DIR/llm-usage.log"
 
 # shellcheck source=lib/llm-common.sh
 . "$SCRIPT_DIR/lib/llm-common.sh"
@@ -29,8 +30,8 @@ EXEC_MODE="fresh"
 TMUX_TARGET=""
 COMMAND_TEMPLATE=""
 AUTO_CONFIRM=1
-LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/logs"
-STATE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/state.json"
+LOG_DIR="$LLM_TOOLS_CACHE_DIR/ralph-robin/logs"
+STATE_FILE="$LLM_TOOLS_CACHE_DIR/ralph-robin/state.json"
 DRY_RUN=0
 WAKE=0
 SUSPEND_UNTIL_READY=0
@@ -73,8 +74,8 @@ Options:
   --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
   --auto-confirm              Acknowledge only known safe prompts (default).
   --no-auto-confirm           Disable automatic prompt acknowledgement.
-  --log-dir DIR               Log directory (default: ~/.cache/ralph-robin/logs).
-  --state-file FILE           Rotation state file (default: ~/.cache/ralph-robin/state.json).
+  --log-dir DIR               Log directory (default: ~/.cache/llm-tools/ralph-robin/logs).
+  --state-file FILE           Rotation state file (default: ~/.cache/llm-tools/ralph-robin/state.json).
   --wake                      Pass best-effort wake scheduling to llm-scheduler.
   --suspend-until-ready       Suspend even for the selected tool's own wait gates.
   --dry-run                   Resolve rotation and usage state without submitting.

@@ -6,10 +6,13 @@
 # This file expects the caller to run under bash strict mode and to set app-specific paths if defaults are not suitable.
 
 : "${LLM_COMMON_APP_NAME:=llm-common}"
-: "${CACHE_DIR:=${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage}"
+: "${LLM_TOOLS_CACHE_DIR:=${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools}"
+: "${CACHE_DIR:=$LLM_TOOLS_CACHE_DIR/llm-usage}"
 : "${CLAUDE_CACHE:=$CACHE_DIR/claude-status.json}"
 : "${CLAUDE_API_CACHE:=$CACHE_DIR/claude-usage-api.json}"
-: "${USAGE_LOG_FILE:=./llm-usage.log}"
+: "${COPILOT_RESULT_CACHE:=$CACHE_DIR/copilot-usage.json}"
+: "${COPILOT_REFRESH_LOCK:=$CACHE_DIR/copilot-refresh.lock}"
+: "${USAGE_LOG_FILE:=$CACHE_DIR/llm-usage.log}"
 : "${USAGE_LOG_TAIL_LINES:=${LLM_USAGE_LOG_TAIL_LINES:-20000}}"
 : "${COPILOT_MONTHLY_RESET_OFFSET_DAYS:=${LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS:-0}}"
 
@@ -19,6 +22,21 @@ need() {
     exit 127
   }
 }
+
+# One-time migration from the pre-llm-tools cache layout, where each tool kept
+# its own directory directly under ~/.cache. A legacy directory is moved only
+# while the new per-tool directory does not exist yet.
+migrate_legacy_cache_dirs() {
+  local legacy_root="${XDG_CACHE_HOME:-$HOME/.cache}"
+  local name
+  for name in llm-usage llm-scheduler ralph-robin; do
+    if [[ -d "$legacy_root/$name" && ! -e "$LLM_TOOLS_CACHE_DIR/$name" ]]; then
+      mkdir -p "$LLM_TOOLS_CACHE_DIR" 2>/dev/null || return 0
+      mv "$legacy_root/$name" "$LLM_TOOLS_CACHE_DIR/$name" 2>/dev/null || true
+    fi
+  done
+}
+migrate_legacy_cache_dirs
 
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
@@ -119,7 +137,7 @@ estimate_remaining_time_from_log() {
   [[ "$remaining" == "-" || "$remaining" == "unknown" || -z "$remaining" ]] && { printf '-'; return; }
   [[ -s "$USAGE_LOG_FILE" ]] || { printf '-'; return; }
 
-  local now cutoff prev_ts prev_rem rem now_tenths
+  local now cutoff prev_ts now_tenths
   local stale_mult
   local first_decrease_ts=""
   local last_decrease_ts=""
@@ -130,8 +148,7 @@ estimate_remaining_time_from_log() {
   local max_stale_seconds
   local dt prev_rem_tenths rem_tenths
   prev_ts=""
-  prev_rem=""
-  rem=""
+  prev_rem_tenths=0
   local total_reduction_tenths=0
   local total_seconds=0
   stale_mult="${LLM_USAGE_REMAINING_TIME_STALE_MULTIPLIER:-3}"
@@ -139,8 +156,10 @@ estimate_remaining_time_from_log() {
   now=$(now_epoch)
   cutoff=$(( now - 604800 ))
 
-  while IFS=$'\t' read -r ts rem; do
-    [[ -z "$ts" || -z "$rem" ]] && continue
+  # jq emits remaining pre-scaled to integer tenths so the loop needs no
+  # per-line process spawns; this keeps long logs cheap to scan.
+  while IFS=$'\t' read -r ts rem_tenths; do
+    [[ -z "$ts" || -z "$rem_tenths" ]] && continue
 
     if [[ -n "$prev_ts" ]]; then
       dt=$(( ts - prev_ts ))
@@ -148,14 +167,7 @@ estimate_remaining_time_from_log() {
         if [[ -z "$trend_start_ts" ]]; then
           trend_start_ts="$prev_ts"
         fi
-        prev_rem_tenths=$(awk -v v="$prev_rem" 'BEGIN {printf "%d", (v*10 + 0.5)}')
-        rem_tenths=$(awk -v v="$rem" 'BEGIN {printf "%d", (v*10 + 0.5)}')
         if (( rem_tenths < prev_rem_tenths )); then
-          if [[ -z "${prev_rem_tenths+x}" || -z "${rem_tenths+x}" ]]; then
-            prev_ts="$ts"
-            prev_rem="$rem"
-            continue
-          fi
           total_reduction_tenths=$(( total_reduction_tenths + (prev_rem_tenths - rem_tenths) ))
           total_seconds=$(( total_seconds + dt ))
           if [[ -z "$first_decrease_ts" ]]; then
@@ -176,7 +188,7 @@ estimate_remaining_time_from_log() {
     fi
 
     prev_ts="$ts"
-    prev_rem="$rem"
+    prev_rem_tenths="$rem_tenths"
   done < <(tail -n "$USAGE_LOG_TAIL_LINES" "$USAGE_LOG_FILE" 2>/dev/null \
     | jq -R -r --arg provider "$provider" --arg window "$window" --argjson cutoff "$cutoff" '
       select(length > 0)
@@ -184,7 +196,7 @@ estimate_remaining_time_from_log() {
       | select(($o | type) == "object")
       | select($o.provider == $provider and $o.window == $window and $o.remaining != null and $o.ts != null)
       | select((($o.ts | tonumber) >= $cutoff))
-      | "\($o.ts)\t\($o.remaining)"')
+      | "\($o.ts)\t\((($o.remaining | tonumber? // 0) * 10 + 0.5) | floor)"')
 
   now_tenths=$(awk -v v="$remaining" 'BEGIN {printf "%d", (v*10 + 0.5)}')
   if (( total_seconds <= 0 || total_reduction_tenths <= 0 || now_tenths <= 0 )); then
@@ -388,7 +400,8 @@ read_claude_api() {
     -H 'anthropic-beta: oauth-2025-04-20' \
     'https://api.anthropic.com/api/oauth/usage' 2>/dev/null || true)
   if [[ -n "$resp" ]]; then
-    printf '%s\n' "$resp" > "$CLAUDE_API_CACHE"
+    mkdir -p "${CLAUDE_API_CACHE%/*}" 2>/dev/null || true
+    printf '%s\n' "$resp" > "$CLAUDE_API_CACHE" 2>/dev/null || true
     norm=$(printf '%s\n' "$resp" | normalize_claude 'api.anthropic.com/api/oauth/usage')
     [[ -n "$norm" ]] || return 1
     printf '%s\n' "$norm"
@@ -588,7 +601,7 @@ parse_copilot_ai_credits() {
   fi
 }
 
-read_copilot() {
+read_copilot_live() {
   local screen monthly_used ai_credits reason
   capture_copilot_screen >/dev/null 2>&1 || true
   screen="$COPILOT_CAPTURE_OUTPUT"
@@ -623,6 +636,105 @@ read_copilot() {
 
   jq -nc --arg source 'copilot cli' --arg reason "$reason" \
     '{provider:"copilot", source:$source, available:false, reason:$reason}'
+}
+
+# ── Cached copilot read ──────────────────────────────────────────────────────
+# The PTY screen capture can take up to LLM_USAGE_COPILOT_TIMEOUT (10s) per
+# run, which dominated llm-usage wall time. The monthly window moves slowly,
+# so results are cached and refreshed by a detached background capture
+# (stale-while-revalidate). Fixture and override knobs keep the original
+# synchronous capture so tests and explicit overrides see unchanged behavior.
+
+file_mtime_epoch() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true
+}
+
+copilot_cache_is_fresh() {
+  local ttl="$1" mtime now
+  [[ -s "$COPILOT_RESULT_CACHE" ]] || return 1
+  mtime="$(file_mtime_epoch "$COPILOT_RESULT_CACHE")"
+  [[ -n "$mtime" ]] || return 1
+  now="$(date +%s)"
+  (( now - mtime <= ttl ))
+}
+
+copilot_cache_bypass() {
+  [[ -n "${LLM_USAGE_COPILOT_CAPTURE_TEXT+x}" ]] && return 0
+  [[ -n "${LLM_USAGE_COPILOT_CAPTURE_CMD:-}" ]] && return 0
+  [[ "${LLM_USAGE_DISABLE_COPILOT:-0}" == "1" ]] && return 0
+  [[ "${LLM_USAGE_COPILOT_CACHE_TTL:-300}" == "0" ]] && return 0
+  return 1
+}
+
+# Start one detached background capture that rewrites the cache atomically.
+# A lock directory keeps concurrent runs (and --watch frames) from stacking
+# captures; locks older than the capture timeout plus slack are reclaimed.
+refresh_copilot_cache_async() {
+  local lock="$COPILOT_REFRESH_LOCK"
+  local stale_after=$(( ${LLM_USAGE_COPILOT_TIMEOUT:-10} + 30 ))
+  mkdir -p "$CACHE_DIR" 2>/dev/null || return 0
+  if ! mkdir "$lock" 2>/dev/null; then
+    local lock_mtime now
+    lock_mtime="$(file_mtime_epoch "$lock")"
+    now="$(date +%s)"
+    if [[ -n "$lock_mtime" ]] && (( now - lock_mtime <= stale_after )); then
+      return 0
+    fi
+    rmdir "$lock" 2>/dev/null || true
+    mkdir "$lock" 2>/dev/null || return 0
+  fi
+  # All fds detach from the caller so command substitutions never block on the
+  # refresher, and the refresher survives this process exiting.
+  (
+    trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+    local tmp
+    tmp="$(mktemp "$COPILOT_RESULT_CACHE.XXXXXX" 2>/dev/null)" || exit 0
+    if read_copilot_live > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+      mv -f "$tmp" "$COPILOT_RESULT_CACHE"
+    else
+      rm -f "$tmp"
+    fi
+  ) </dev/null >/dev/null 2>&1 &
+  disown $! 2>/dev/null || true
+}
+
+read_copilot() {
+  if copilot_cache_bypass; then
+    read_copilot_live
+    return
+  fi
+
+  local ttl="${LLM_USAGE_COPILOT_CACHE_TTL:-300}"
+  if copilot_cache_is_fresh "$ttl"; then
+    cat "$COPILOT_RESULT_CACHE"
+    return 0
+  fi
+
+  refresh_copilot_cache_async
+
+  # Give a fast capture a brief window to land before serving stale data; a
+  # refresher that fails fast (e.g. missing CLI) releases the lock early.
+  local wait_budget="${LLM_USAGE_COPILOT_REFRESH_WAIT:-1}"
+  local iterations i
+  iterations="$(awk -v w="$wait_budget" 'BEGIN { printf "%d", (w / 0.05) }' 2>/dev/null || echo 0)"
+  for (( i = 0; i < iterations; i++ )); do
+    sleep 0.05
+    if copilot_cache_is_fresh "$ttl"; then
+      cat "$COPILOT_RESULT_CACHE"
+      return 0
+    fi
+    [[ -d "$COPILOT_REFRESH_LOCK" ]] || break
+  done
+
+  if [[ -s "$COPILOT_RESULT_CACHE" ]]; then
+    # Stale-while-revalidate: serve the last snapshot; the background capture
+    # refreshes it for subsequent runs.
+    cat "$COPILOT_RESULT_CACHE"
+    return 0
+  fi
+
+  jq -nc --arg source 'copilot cli' \
+    '{provider:"copilot", source:$source, available:false, reason:"refresh-pending"}'
 }
 
 json_for_provider() {

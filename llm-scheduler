@@ -5,10 +5,11 @@ set -euo pipefail
 APP_NAME="llm-scheduler"
 SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage"
+LLM_TOOLS_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools"
+CACHE_DIR="$LLM_TOOLS_CACHE_DIR/llm-usage"
 CLAUDE_CACHE="$CACHE_DIR/claude-status.json"
 CLAUDE_API_CACHE="$CACHE_DIR/claude-usage-api.json"
-USAGE_LOG_FILE="$SCRIPT_DIR/llm-usage.log"
+USAGE_LOG_FILE="$CACHE_DIR/llm-usage.log"
 
 # shellcheck source=lib/llm-common.sh
 . "$SCRIPT_DIR/lib/llm-common.sh"
@@ -28,7 +29,7 @@ EXEC_MODE="fresh"
 TMUX_TARGET=""
 COMMAND_TEMPLATE=""
 AUTO_CONFIRM=1
-LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs"
+LOG_DIR="$LLM_TOOLS_CACHE_DIR/llm-scheduler/logs"
 DRY_RUN=0
 WAKE=0
 WAKE_TEST=0
@@ -82,7 +83,7 @@ Options:
   --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
   --auto-confirm              Acknowledge only known safe prompts (default).
   --no-auto-confirm           Disable automatic prompt acknowledgement.
-  --log-dir DIR               Log directory (default: ~/.cache/llm-scheduler/logs).
+  --log-dir DIR               Log directory (default: ~/.cache/llm-tools/llm-scheduler/logs).
   --run-dir DIR               Reuse/write one specific run directory.
   --dry-run                   Resolve state and command plan without submitting.
   --wake                      Best-effort wake scheduling diagnostics/logging.
@@ -301,6 +302,7 @@ run_fresh() {
   local output_file="$2"
   local status_file="$3"
   AUTO_CONFIRM_VALUE="$AUTO_CONFIRM" CWD_VALUE="$CWD" ARGV_JSON="$argv_json" OUTPUT_FILE="$output_file" STATUS_FILE="$status_file" python3 - <<'PY'
+import fcntl
 import json
 import os
 import pty
@@ -308,6 +310,7 @@ import re
 import select
 import signal
 import sys
+import termios
 import time
 
 argv = json.loads(os.environ["ARGV_JSON"])
@@ -316,6 +319,9 @@ output_file = os.environ["OUTPUT_FILE"]
 status_file = os.environ["STATUS_FILE"]
 auto_confirm = os.environ.get("AUTO_CONFIRM_VALUE") == "1"
 timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600"))
+# Stream the child CLI's output live to our stdout so the user watches the
+# chat output exactly where they invoked the scheduler (or ralph-robin).
+stream = os.environ.get("LLM_SCHEDULER_NO_STREAM") != "1"
 
 safe_prompts = (
     "Confirm folder trust",
@@ -329,6 +335,15 @@ if pid == 0:
     except OSError:
         pass
     os.execvp(argv[0], argv)
+
+# Give the child PTY the invoking terminal's window size so the CLI renders
+# as it would when launched directly.
+try:
+    if sys.stdout.isatty():
+        winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+except OSError:
+    pass
 
 parts = []
 trust_sent = False
@@ -363,6 +378,11 @@ while True:
             break
         text = chunk.decode("utf-8", "replace")
         parts.append(text)
+        if stream:
+            try:
+                os.write(sys.stdout.fileno(), chunk)
+            except OSError:
+                stream = False
         out_fh.write(clean(text))
         out_fh.flush()
         combined = "".join(parts)

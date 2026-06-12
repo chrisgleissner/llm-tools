@@ -66,6 +66,8 @@ Important options:
 
 `llm-scheduler` submits a prompt once the selected CLI has known remaining capacity above a threshold. It runs once and exits after success, terminal failure, or retry exhaustion.
 
+In the default fresh mode, the launched CLI's output is streamed live to the terminal you invoked the scheduler from, just as if you had run `claude`, `codex`, or `copilot` directly; a cleaned copy is also written to the run directory (`attempt-N.out`). Set `LLM_SCHEDULER_NO_STREAM=1` to disable the live stream and only write logs. In tmux mode the output appears in the tmux pane instead.
+
 ```bash
 llm-scheduler --tool codex --prompt-file task.md
 llm-scheduler --tool claude --prompt "Continue the work in this repo until CI is green"
@@ -96,7 +98,7 @@ Scheduler options:
 - `--tmux SESSION[:WINDOW]` runs through tmux, creating the session/window when practical.
 - `--command-template TEMPLATE` overrides CLI syntax. Placeholders are `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. The template is tokenized with Python `shlex`; it is not evaluated by a shell.
 - `--auto-confirm` is enabled by default and only sends Return for recognised safe trust prompts. `--no-auto-confirm` disables it.
-- `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs`.
+- `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`.
 - `--run-dir DIR` writes or resumes a specific run directory. This is mainly useful for wrappers and scheduled resume invocations that should keep all logs in one predictable place.
 - `--dry-run` resolves usage state, timing, command plan, and logs without submitting.
 - `--wake` enables best-effort wake scheduling.
@@ -123,6 +125,8 @@ Use `--command-template` if an installed CLI changes syntax or you use a wrapper
 
 `ralph-robin` is a small rotation wrapper around `llm-scheduler`. It checks the configured tools in order, keeps using the current tool while it is still usable, advances only when that tool is rate-limited, and delegates the actual prompt launch, retry, wake, and suspend behavior to `llm-scheduler`.
 
+The selected CLI's chat output streams live to the terminal you ran `ralph-robin` from — including after a provider switch — so no extra `tail` command is needed to follow the run.
+
 ```bash
 ralph-robin --prompt-file task.md
 ralph-robin --prompt "Continue until tests pass"
@@ -142,14 +146,22 @@ Important options:
 - `--tools LIST` sets the comma-separated rotation. Values are `claude`, `codex`, and `copilot`.
 - `--prompt TEXT` and `--prompt-file FILE` match `llm-scheduler`.
 - `--window`, `--min-remaining`, `--poll-interval`, `--max-unavailable-wait`, `--retry-delays`, `--cwd`, `--fresh`, `--tmux`, `--command-template`, `--auto-confirm`, and `--no-auto-confirm` are passed through to `llm-scheduler`.
-- `--state-file FILE` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/state.json` and stores the current provider index.
-- `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/logs`.
+- `--state-file FILE` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json` and stores the current provider index.
+- `--log-dir DIR` defaults to `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.
 
 When every configured tool is known to be rate-limited, `ralph-robin` chooses the earliest real reset and invokes `llm-scheduler --suspend-until-ready` for that provider. If usage cannot be measured rather than being known exhausted, the scheduler's bounded unavailable wait behavior still applies.
 
-## Logs
+## Logs and Cached Data
 
-`llm-scheduler` creates a per-run directory under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs` by default. It uses restrictive permissions where possible and writes:
+All tools keep their runtime data under one root, `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, with one subdirectory per tool:
+
+- `llm-tools/llm-usage/` — Claude status/API caches (`claude-status.json`, `claude-usage-api.json`) and `llm-usage.log`, the usage-sample log that drives `Remaining Time` estimates.
+- `llm-tools/llm-scheduler/logs/` — per-run scheduler log directories.
+- `llm-tools/ralph-robin/` — rotation `state.json` and per-run `logs/`.
+
+Legacy locations from older versions (`~/.cache/llm-usage`, `~/.cache/llm-scheduler`, `~/.cache/ralph-robin`) are moved to the new root automatically on first run. The `llm-usage.log` that used to be written beside the scripts now lives in `llm-tools/llm-usage/`.
+
+`llm-scheduler` creates a per-run directory under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs` by default. It uses restrictive permissions where possible and writes:
 
 - `run.log` for human-readable audit output.
 - `events.jsonl` for machine-readable events.
@@ -161,17 +173,17 @@ The scheduler logs normalized arguments, prompt source, prompt SHA-256, full pro
 For reconnecting from another shell, use the latest symlinks and attempt logs:
 
 ```bash
-tail -f ~/.cache/llm-scheduler/logs/latest/run.log
-tail -f ~/.cache/llm-scheduler/logs/latest/attempt-1.out
+tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
+tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/attempt-1.out
 ```
 
-Provider-specific symlinks such as `latest-claude` and `latest-codex` point at the most recent scheduler run for that provider. `ralph-robin` writes its own run log under `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/logs` and places the child scheduler logs in a `scheduler/` subdirectory of each `ralph-robin` run.
+Provider-specific symlinks such as `latest-claude` and `latest-codex` point at the most recent scheduler run for that provider. `ralph-robin` writes its own run log under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs` and places the child scheduler logs in a `scheduler/` subdirectory of each `ralph-robin` run.
 
 ## Data Sources
 
 - Codex: local JSONL under `~/.codex/sessions`.
 - Claude Code: OAuth usage API/cache, statusline cache, then local project JSONL fallback.
-- GitHub Copilot: local Copilot CLI footer captured through a bounded PTY helper.
+- GitHub Copilot: local Copilot CLI footer captured through a bounded PTY helper. Because the capture is slow, results are cached (`LLM_USAGE_COPILOT_CACHE_TTL`, default 300s) and refreshed by a detached background capture, so `llm-usage` never blocks on it; set `LLM_USAGE_COPILOT_CACHE_TTL=0` to force a synchronous capture.
 
 ## Requirements
 

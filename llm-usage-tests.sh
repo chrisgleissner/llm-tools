@@ -120,10 +120,12 @@ cat > "$HOME_FIXTURE/.claude/projects/proj.jsonl" <<'JSON'
 {"rate_limits":{"five_hour":{"used_percentage":0,"resets_at":"2026-06-02T13:20:00Z"},"seven_day":{"used_percentage":25,"resets_at":"2026-06-04T13:00:00Z"}}}
 JSON
 
+USAGE_LOG_FIXTURE="$HOME_FIXTURE/.cache/llm-tools/llm-usage/llm-usage.log"
+
 run_tool() {
   local output_file=$1
   shift
-  rm -f "$(dirname "$TOOL")/llm-usage.log"
+  rm -f "$USAGE_LOG_FIXTURE"
   HOME="$HOME_FIXTURE" "$TOOL" "$@" >"$output_file"
 }
 
@@ -231,7 +233,8 @@ LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
 assert_not_grep '^Tool[[:space:]]+Window[[:space:]]+Remaining[[:space:]]+Remaining[[:space:]]+Time$' "$tmpdir/no-remaining-time.txt"
 assert_grep '^Copilot[[:space:]]+monthly[[:space:]]+95%[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}[[:space:]]+[0-9].*copilot cli$' "$tmpdir/no-remaining-time.txt"
 
-printf '%s\n' '{"ts":1750000000,"provider":"copilot","window":"monthly","remaining":100}' > "$(dirname "$TOOL")/llm-usage.log"
+mkdir -p "$(dirname "$USAGE_LOG_FIXTURE")"
+printf '%s\n' '{"ts":1750000000,"provider":"copilot","window":"monthly","remaining":100}' > "$USAGE_LOG_FIXTURE"
 LLM_USAGE_NOW_EPOCH=1750003600 \
   LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 50% used · AI Credits: 0' \
   run_tool_keep_log "$tmpdir/remaining-time-estimate.txt" --show-source
@@ -291,6 +294,16 @@ LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt 'hello world' --command-template 'sched-mock {prompt}' --log-dir "$tmpdir/scheduler-logs" > "$tmpdir/scheduler-submit.txt"
 assert_grep '^hello world$' "$SCHED_CAPTURE"
 [[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] || fail "scheduler did not submit exactly once"
+# Fresh-mode runs stream the child CLI output live to the scheduler's stdout.
+assert_grep 'mock ok' "$tmpdir/scheduler-submit.txt"
+
+: > "$SCHED_CAPTURE"
+: > "$SCHED_ATTEMPTS"
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
+  LLM_SCHEDULER_NO_STREAM=1 \
+  "$SCHEDULER" --tool codex --prompt 'hello quiet' --command-template 'sched-mock {prompt}' --log-dir "$tmpdir/scheduler-logs" > "$tmpdir/scheduler-quiet.txt"
+assert_not_grep 'mock ok' "$tmpdir/scheduler-quiet.txt"
 
 : > "$SCHED_CAPTURE"
 : > "$SCHED_ATTEMPTS"
@@ -319,6 +332,8 @@ jq -e 'select(.type=="selection") | .data.tool == "claude" and .data.rotation_re
   || fail "ralph-robin did not log current-usable selection"
 [[ -s "$ralph_dir/scheduler/attempt-1.out" ]] || fail "ralph-robin scheduler child did not write attempt output"
 [[ -L "$tmpdir/ralph-logs/latest" ]] || fail "ralph-robin did not create latest symlink"
+# The child CLI output must stream through llm-scheduler to ralph-robin's stdout.
+assert_grep 'mock ok' "$tmpdir/ralph-submit.txt"
 
 ralph_rotate_usage='{"claude":{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50,"resets_at":1780441200},"week":{"remaining":50}}}'
 : > "$SCHED_CAPTURE"
@@ -352,14 +367,14 @@ assert_grep '--on-calendar=@1780441200' "$SYSTEMD_RUN_LOG"
 LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-dry-logs" > "$tmpdir/scheduler-dry.txt"
-dry_dir="$(awk '{print $NF}' "$tmpdir/scheduler-dry.txt")"
+dry_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-dry.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780441200' "$dry_dir/events.jsonl" >/dev/null \
   || fail "dry-run did not record reset wait decision"
 
 LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$exhausted_offset_usage" \
   "$SCHEDULER" --tool claude --window 5h --prompt x --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-offset-logs" > "$tmpdir/scheduler-offset.txt"
-offset_dir="$(awk '{print $NF}' "$tmpdir/scheduler-offset.txt")"
+offset_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-offset.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780438801' "$offset_dir/events.jsonl" >/dev/null \
   || fail "dry-run did not parse Claude offset reset timestamp"
 
@@ -379,7 +394,7 @@ assert_grep '--timer-property=WakeSystem=true' "$SYSTEMD_RUN_LOG"
 assert_grep '--on-calendar=@1780441200' "$SYSTEMD_RUN_LOG"
 assert_not_grep 'suspend' "$SYSTEMCTL_LOG"
 [[ "$(wc -l < "$SCHED_ATTEMPTS")" == "0" ]] || fail "suspend-until-ready should not submit before resumed scheduler"
-suspend_dir="$(awk '{print $NF}' "$tmpdir/scheduler-suspend.txt")"
+suspend_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-suspend.txt")"
 jq -e 'select(.type=="suspend_schedule_plan") | .data.reason == "rate-limited" and .data.target_epoch == 1780441200' "$suspend_dir/events.jsonl" >/dev/null \
   || fail "suspend-until-ready did not record schedule plan"
 
@@ -407,14 +422,14 @@ assert_grep '^suspend$' "$SYSTEMCTL_LOG"
 LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$weekly_exhausted_usage" \
   "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-weekly-logs" > "$tmpdir/scheduler-weekly.txt"
-weekly_dir="$(awk '{print $NF}' "$tmpdir/scheduler-weekly.txt")"
+weekly_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-weekly.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and (.data.exhausted[]?.name == "weekly")' "$weekly_dir/events.jsonl" >/dev/null \
   || fail "scheduler did not consider weekly Claude/Codex window"
 
 LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$weekly_exhausted_usage" \
   "$SCHEDULER" --tool claude --prompt x --window 5h --command-template 'sched-mock {prompt}' --dry-run --log-dir "$tmpdir/scheduler-5h-logs" > "$tmpdir/scheduler-5h.txt"
-five_dir="$(awk '{print $NF}' "$tmpdir/scheduler-5h.txt")"
+five_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-5h.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "usable"' "$five_dir/events.jsonl" >/dev/null \
   || fail "scheduler --window 5h did not limit gating to 5h"
 
@@ -448,7 +463,7 @@ LLM_SCHEDULER_USAGE_JSON="$unavailable_usage" \
   --max-unavailable-wait 1 --poll-interval 1 --no-retry \
   --log-dir "$tmpdir/scheduler-unavail-logs" > "$tmpdir/scheduler-unavail.txt"
 [[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] || fail "undeterminable usage did not proceed optimistically and submit once"
-unavail_dir="$(awk '{print $NF}' "$tmpdir/scheduler-unavail.txt")"
+unavail_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-unavail.txt")"
 jq -e 'select(.type=="optimistic_proceed") | .data.reason == "unavailable"' "$unavail_dir/events.jsonl" >/dev/null \
   || fail "undeterminable usage did not log optimistic_proceed"
 
@@ -472,7 +487,7 @@ SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
 [[ "$(wc -l < "$SCHED_ATTEMPTS")" == "1" ]] || fail "suspend-mode undeterminable usage did not proceed optimistically and submit once"
 assert_not_grep 'WakeSystem=true' "$SYSTEMD_RUN_LOG"
 assert_not_grep 'suspend' "$SYSTEMCTL_LOG"
-unavail_suspend_dir="$(awk '{print $NF}' "$tmpdir/scheduler-unavail-suspend.txt")"
+unavail_suspend_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-unavail-suspend.txt")"
 jq -e 'select(.type=="optimistic_proceed") | .data.suspend_mode == true' "$unavail_suspend_dir/events.jsonl" >/dev/null \
   || fail "suspend-mode undeterminable usage did not log optimistic_proceed"
 
@@ -482,7 +497,7 @@ LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
   --max-unavailable-wait 1 --dry-run --log-dir "$tmpdir/scheduler-ratelimit-excl-logs" > "$tmpdir/scheduler-ratelimit-excl.txt"
-ratelimit_excl_dir="$(awk '{print $NF}' "$tmpdir/scheduler-ratelimit-excl.txt")"
+ratelimit_excl_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-ratelimit-excl.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780441200' "$ratelimit_excl_dir/events.jsonl" >/dev/null \
   || fail "known rate-limit did not record precise reset wait"
 if jq -e 'select(.type=="optimistic_proceed")' "$ratelimit_excl_dir/events.jsonl" >/dev/null; then
@@ -496,7 +511,7 @@ printf 'line one\nline two with ; $HOME and spaces\n' > "$prompt_file"
 LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   SCHED_CAPTURE="$SCHED_CAPTURE" SCHED_ATTEMPTS="$SCHED_ATTEMPTS" \
   "$SCHEDULER" --tool codex --prompt-file "$prompt_file" --command-template 'sched-mock {prompt}' --log-dir "$tmpdir/scheduler-prompt-logs" > "$tmpdir/scheduler-prompt.txt"
-prompt_dir="$(awk '{print $NF}' "$tmpdir/scheduler-prompt.txt")"
+prompt_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-prompt.txt")"
 cmp -s "$prompt_file" "$prompt_dir/prompt.txt" || fail "prompt file content was not preserved in log"
 assert_grep 'line two with ; \$HOME and spaces' "$SCHED_CAPTURE"
 
@@ -509,12 +524,12 @@ assert_grep '^--flag a b ; \$HOME$' "$SCHED_CAPTURE"
 
 LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'trust-mock' --log-dir "$tmpdir/scheduler-trust-logs" > "$tmpdir/scheduler-trust.txt"
-trust_dir="$(awk '{print $NF}' "$tmpdir/scheduler-trust.txt")"
+trust_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-trust.txt")"
 assert_grep 'trusted' "$trust_dir/attempt-1.out"
 
 LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'unsafe-mock' --log-dir "$tmpdir/scheduler-unsafe-logs" > "$tmpdir/scheduler-unsafe.txt"
-unsafe_dir="$(awk '{print $NF}' "$tmpdir/scheduler-unsafe.txt")"
+unsafe_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/scheduler-unsafe.txt")"
 assert_grep 'no input' "$unsafe_dir/attempt-1.out"
 
 if command -v tmux >/dev/null 2>&1; then
@@ -548,7 +563,7 @@ LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
 LLM_SCHEDULER_USAGE_JSON="$stale_exhausted_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
   --dry-run --log-dir "$tmpdir/p0a-stale-logs" > "$tmpdir/p0a-stale.txt"
-p0a_stale_dir="$(awk '{print $NF}' "$tmpdir/p0a-stale.txt")"
+p0a_stale_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0a-stale.txt")"
 jq -e 'select(.type=="usage_decision") | .data.usable == true' "$p0a_stale_dir/events.jsonl" >/dev/null \
   || fail "P0-A: stale past-reset exhausted window should be usable"
 
@@ -559,7 +574,7 @@ LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
 LLM_SCHEDULER_USAGE_JSON="$future_exhausted_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
   --dry-run --log-dir "$tmpdir/p0a-future-logs" > "$tmpdir/p0a-future.txt"
-p0a_future_dir="$(awk '{print $NF}' "$tmpdir/p0a-future.txt")"
+p0a_future_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0a-future.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited"' "$p0a_future_dir/events.jsonl" >/dev/null \
   || fail "P0-A: exhausted window with future reset should be rate-limited"
 
@@ -569,7 +584,7 @@ LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
 LLM_SCHEDULER_USAGE_JSON="$null_reset_exhausted_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
   --dry-run --log-dir "$tmpdir/p0a-null-logs" > "$tmpdir/p0a-null.txt"
-p0a_null_dir="$(awk '{print $NF}' "$tmpdir/p0a-null.txt")"
+p0a_null_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0a-null.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited"' "$p0a_null_dir/events.jsonl" >/dev/null \
   || fail "P0-A: exhausted window with null reset should be rate-limited"
 
@@ -580,7 +595,7 @@ LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
 LLM_SCHEDULER_USAGE_JSON="$auto_stale_one_usage" \
   "$SCHEDULER" --tool codex --window auto --prompt x --command-template 'sched-mock {prompt}' \
   --dry-run --log-dir "$tmpdir/p0a-auto-stale-logs" > "$tmpdir/p0a-auto-stale.txt"
-p0a_auto_stale_dir="$(awk '{print $NF}' "$tmpdir/p0a-auto-stale.txt")"
+p0a_auto_stale_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0a-auto-stale.txt")"
 jq -e 'select(.type=="usage_decision") | .data.usable == true' "$p0a_auto_stale_dir/events.jsonl" >/dev/null \
   || fail "P0-A: auto window with one stale-low and one healthy should be usable"
 
@@ -591,7 +606,7 @@ LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
 LLM_SCHEDULER_USAGE_JSON="$auto_future_one_usage" \
   "$SCHEDULER" --tool codex --window auto --prompt x --command-template 'sched-mock {prompt}' \
   --dry-run --log-dir "$tmpdir/p0a-auto-future-logs" > "$tmpdir/p0a-auto-future.txt"
-p0a_auto_future_dir="$(awk '{print $NF}' "$tmpdir/p0a-auto-future.txt")"
+p0a_auto_future_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0a-auto-future.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited"' "$p0a_auto_future_dir/events.jsonl" >/dev/null \
   || fail "P0-A: auto window with one future-exhausted should be rate-limited"
 
@@ -602,7 +617,7 @@ LLM_USAGE_NOW_EPOCH=$NOW_FIXED \
 LLM_SCHEDULER_USAGE_JSON="$codex_epoch_reset_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
   --dry-run --log-dir "$tmpdir/p0a-epoch-logs" > "$tmpdir/p0a-epoch.txt"
-p0a_epoch_dir="$(awk '{print $NF}' "$tmpdir/p0a-epoch.txt")"
+p0a_epoch_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0a-epoch.txt")"
 jq -e "select(.type==\"usage_decision\") | .data.reason == \"rate-limited\" and .data.wait_until == $FUTURE_RESET" \
   "$p0a_epoch_dir/events.jsonl" >/dev/null \
   || fail "P0-A: Codex epoch-number reset not parsed correctly"
@@ -613,7 +628,7 @@ LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$claude_iso_usage" \
   "$SCHEDULER" --tool claude --window 5h --prompt x --command-template 'sched-mock {prompt}' \
   --dry-run --log-dir "$tmpdir/p0a-iso-logs" > "$tmpdir/p0a-iso.txt"
-p0a_iso_dir="$(awk '{print $NF}' "$tmpdir/p0a-iso.txt")"
+p0a_iso_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0a-iso.txt")"
 jq -e 'select(.type=="usage_decision") | .data.reason == "rate-limited" and .data.wait_until == 1780438801' \
   "$p0a_iso_dir/events.jsonl" >/dev/null \
   || fail "P0-A: Claude ISO +00:00 reset not parsed correctly"
@@ -625,7 +640,7 @@ LLM_USAGE_NOW_EPOCH=1780430000 \
 LLM_SCHEDULER_USAGE_JSON="$exhausted_usage" \
   "$SCHEDULER" --tool codex --prompt x --command-template 'sched-mock {prompt}' \
   --max-unavailable-wait 1 --dry-run --log-dir "$tmpdir/p0b-ratelimit-logs" > "$tmpdir/p0b-ratelimit.txt"
-p0b_ratelimit_dir="$(awk '{print $NF}' "$tmpdir/p0b-ratelimit.txt")"
+p0b_ratelimit_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0b-ratelimit.txt")"
 if jq -e 'select(.type=="optimistic_proceed")' "$p0b_ratelimit_dir/events.jsonl" >/dev/null 2>&1; then
   fail "P0-B: rate-limited must not trigger optimistic_proceed"
 fi
@@ -642,7 +657,7 @@ for undetermined_reason in unavailable inconclusive-usage unsupported-window mis
     "$SCHEDULER" --tool claude --prompt x --command-template 'sched-mock {prompt}' \
     --max-unavailable-wait 1 --poll-interval 1 --no-retry \
     --log-dir "$tmpdir/p0b-und-${undetermined_reason}-logs" > "$tmpdir/p0b-und-${undetermined_reason}.txt"
-  und_dir="$(awk '{print $NF}' "$tmpdir/p0b-und-${undetermined_reason}.txt")"
+  und_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0b-und-${undetermined_reason}.txt")"
   jq -e 'select(.type=="optimistic_proceed")' "$und_dir/events.jsonl" >/dev/null \
     || fail "P0-B: reason '$undetermined_reason' must trigger optimistic_proceed"
 done
@@ -676,7 +691,7 @@ LLM_SCHEDULER_USAGE_JSON="$p0c_near_usage" \
   --suspend-until-ready --dry-run \
   --log-dir "$tmpdir/p0c-fail-logs" > "$tmpdir/p0c-fail.txt" 2>"$tmpdir/p0c-fail.stderr"
 assert_grep 'error:.*suspend scheduling failed' "$tmpdir/p0c-fail.stderr"
-p0c_dir="$(awk '{print $NF}' "$tmpdir/p0c-fail.txt")"
+p0c_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p0c-fail.txt")"
 jq -e 'select(.type=="suspend_schedule_fallback")' "$p0c_dir/events.jsonl" >/dev/null \
   || fail "P0-C: suspend scheduling failure must log suspend_schedule_fallback"
 if jq -e 'select(.type=="final") | .data.status == "scheduled"' "$p0c_dir/events.jsonl" >/dev/null 2>&1; then
@@ -749,7 +764,7 @@ LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt x \
   --command-template 'false' --no-retry \
   --log-dir "$tmpdir/p1a-logs" > "$tmpdir/p1a.txt" 2>&1 || true
-p1a_dir="$(awk '{print $NF}' "$tmpdir/p1a.txt" 2>/dev/null || ls -td "$tmpdir/p1a-logs"/*/  | head -1)"
+p1a_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p1a.txt" 2>/dev/null || ls -td "$tmpdir/p1a-logs"/*/  | head -1)"
 jq -e 'select(.type=="attempt_result")' "$p1a_dir/events.jsonl" >/dev/null \
   || fail "P1-A: submit_once must log attempt_result even on failure"
 
@@ -774,7 +789,7 @@ LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt x \
   --command-template 'print-innocent429' \
   --retry-delays 0,0 --log-dir "$tmpdir/p1b-innocent-logs" > "$tmpdir/p1b-innocent.txt"
-p1b_innocent_dir="$(awk '{print $NF}' "$tmpdir/p1b-innocent.txt")"
+p1b_innocent_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p1b-innocent.txt")"
 attempt_count="$(jq -s 'map(select(.type=="attempt_result")) | length' "$p1b_innocent_dir/events.jsonl")"
 [[ "$attempt_count" == "1" ]] \
   || fail "P1-B: innocent '429' text (status 0) must not trigger retry; got $attempt_count attempts"
@@ -784,7 +799,7 @@ LLM_SCHEDULER_USAGE_JSON="$available_usage" \
   "$SCHEDULER" --tool codex --prompt x \
   --command-template 'print-http429' \
   --retry-delays 0,0 --log-dir "$tmpdir/p1b-http429-logs" > "$tmpdir/p1b-http429.txt" 2>&1 || true
-p1b_http429_dir="$(awk '{print $NF}' "$tmpdir/p1b-http429.txt")"
+p1b_http429_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p1b-http429.txt")"
 attempt_count="$(jq -s 'map(select(.type=="attempt_result")) | length' "$p1b_http429_dir/events.jsonl")"
 [[ "$attempt_count" -gt 1 ]] \
   || fail "P1-B: 'HTTP 429' output (status 0) must trigger retry; got $attempt_count attempts"
@@ -836,7 +851,7 @@ if command -v tmux >/dev/null 2>&1; then
     --log-dir "$tmpdir/p1d-foofoo-logs" > "$tmpdir/p1d-foofoo.txt"
   # If window had been replaced with llm-scheduler, we'd still succeed, so
   # verify the command was generated targeting foo:foo by checking the tmux command script
-  p1d_dir="$(awk '{print $NF}' "$tmpdir/p1d-foofoo.txt")"
+  p1d_dir="$(awk '/logs written to /{dir=$NF} END{print dir}' "$tmpdir/p1d-foofoo.txt")"
   grep -q "${TMUX_SESSION}:${TMUX_SESSION}" "$p1d_dir/tmux-command.sh" \
     || fail "P1-D: --tmux foo:foo must target session:window foo:foo, not foo:llm-scheduler"
   tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
@@ -936,5 +951,43 @@ assert_grep 'llm-scheduler-resume' "$tmpdir/p2b.txt"
 # Must not call real systemd-run or systemctl suspend
 assert_not_grep 'on-calendar' "$SYSTEMD_RUN_LOG"
 assert_not_grep 'suspend' "$SYSTEMCTL_LOG"
+
+# ── Cache layout: per-tool subfolders under ~/.cache/llm-tools ───────────────
+
+LLM_USAGE_COPILOT_CAPTURE_TEXT='Monthly: 5% used · AI Credits: 0' \
+  run_tool "$tmpdir/cache-layout.txt"
+[[ -f "$USAGE_LOG_FIXTURE" ]] || fail "usage log not written under .cache/llm-tools/llm-usage"
+
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$tmpdir/cache-layout-capture.txt" SCHED_ATTEMPTS="$tmpdir/cache-layout-attempts.txt" \
+  HOME="$HOME_FIXTURE" \
+  "$SCHEDULER" --tool codex --prompt 'cache layout' --command-template 'sched-mock {prompt}' > "$tmpdir/cache-layout-sched.txt"
+[[ -d "$HOME_FIXTURE/.cache/llm-tools/llm-scheduler/logs" ]] \
+  || fail "scheduler default log dir not under .cache/llm-tools/llm-scheduler/logs"
+
+LLM_SCHEDULER_USAGE_JSON="$available_usage" \
+  SCHED_CAPTURE="$tmpdir/cache-layout-capture.txt" SCHED_ATTEMPTS="$tmpdir/cache-layout-attempts.txt" \
+  HOME="$HOME_FIXTURE" \
+  "$RALPH" --prompt 'cache layout' --command-template 'sched-mock {tool} {prompt}' --no-retry > "$tmpdir/cache-layout-ralph.txt"
+[[ -d "$HOME_FIXTURE/.cache/llm-tools/ralph-robin/logs" ]] \
+  || fail "ralph-robin default log dir not under .cache/llm-tools/ralph-robin/logs"
+[[ -f "$HOME_FIXTURE/.cache/llm-tools/ralph-robin/state.json" ]] \
+  || fail "ralph-robin default state file not under .cache/llm-tools/ralph-robin"
+
+# Legacy per-tool dirs directly under ~/.cache migrate to ~/.cache/llm-tools.
+MIGRATE_HOME="$tmpdir/migrate-home"
+mkdir -p \
+  "$MIGRATE_HOME/.codex/sessions" \
+  "$MIGRATE_HOME/.claude/projects" \
+  "$MIGRATE_HOME/.cache/llm-usage" \
+  "$MIGRATE_HOME/.cache/ralph-robin"
+printf '%s\n' '{"legacy":"status"}' > "$MIGRATE_HOME/.cache/llm-usage/claude-status.json"
+printf '%s\n' '{"tool_index":1}' > "$MIGRATE_HOME/.cache/ralph-robin/state.json"
+LLM_USAGE_DISABLE_COPILOT=1 HOME="$MIGRATE_HOME" "$TOOL" --json > "$tmpdir/migrate-out.json"
+[[ -f "$MIGRATE_HOME/.cache/llm-tools/llm-usage/claude-status.json" ]] \
+  || fail "legacy llm-usage cache dir was not migrated"
+[[ ! -e "$MIGRATE_HOME/.cache/llm-usage" ]] || fail "legacy llm-usage cache dir still present"
+[[ -f "$MIGRATE_HOME/.cache/llm-tools/ralph-robin/state.json" ]] \
+  || fail "legacy ralph-robin dir was not migrated"
 
 printf 'ok\n'

@@ -10,11 +10,11 @@ This repo contains small Linux Bash CLIs for Codex, Claude Code, and GitHub Copi
 * `lib/llm-common.sh` — shared helpers (provider readers, normalization, time/reset formatting, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion) sourced by the CLIs.
 * Regression tests: `llm-usage-tests.sh` (covers all CLIs).
 * User docs: `README.md`
-* Runtime log: `llm-usage.log` beside the scripts when writable
-* Cache: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-usage`
-* Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-scheduler/logs`
-* Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/logs`
-* Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/ralph-robin/state.json`
+* Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `lib/llm-common.sh`.
+* Usage cache and samples log: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage` (`claude-status.json`, `claude-usage-api.json`, `llm-usage.log`)
+* Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`
+* Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`
+* Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`
 
 Keep these as dependency-light Bash CLIs sharing one helper library: no build step, daemon, server, database, package framework, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `lib/llm-common.sh`, not duplicated across CLIs.
 
@@ -83,6 +83,8 @@ Preserve fallback order: API/cache/statusline/local project data. `--statusline`
 
 Tests should use `LLM_USAGE_COPILOT_CAPTURE_TEXT` or bounded timeout paths, not live Copilot state. Keep `LLM_USAGE_DISABLE_COPILOT=1` reliable. If footer parsing fails, report unavailable with a reason rather than inventing values.
 
+The PTY capture is slow (up to `LLM_USAGE_COPILOT_TIMEOUT` seconds), so `read_copilot` serves a cached snapshot (`copilot-usage.json`, TTL `LLM_USAGE_COPILOT_CACHE_TTL`, default 300s) and revalidates it with a detached background capture. The fixture/override knobs above and `LLM_USAGE_COPILOT_CACHE_TTL=0` force the original synchronous capture; keep that bypass intact so tests stay deterministic.
+
 ## Scheduler invariants
 
 * `llm-scheduler` gates on the same `lib/llm-common.sh` provider readers as `llm-usage`; tests inject usage via `LLM_SCHEDULER_USAGE_JSON` and the command via `--command-template`, never live providers.
@@ -92,6 +94,7 @@ Tests should use `LLM_USAGE_COPILOT_CAPTURE_TEXT` or bounded timeout paths, not 
 * Treat a tool launch as needing retry on non-zero exit, or on a clean exit whose output clearly signals a provider rate-limit/overload. Keep `output_is_retryable` patterns specific so ordinary successful agent output is not re-submitted.
 * Under `--wake`, arm at most one OS wake timer per distinct, far-enough target (`log_wake_plan` lead guard + `WAKE_ARMED_TARGET`); never one per poll iteration.
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
+* Fresh mode streams the child CLI output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`; the cleaned copy still goes to `attempt-N.out`. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
 
 ## Environment knobs
 
@@ -111,10 +114,13 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_COPILOT_TIMEOUT`
 * `LLM_USAGE_COPILOT_CAPTURE_TEXT`
 * `LLM_USAGE_COPILOT_CAPTURE_CMD`
+* `LLM_USAGE_COPILOT_CACHE_TTL` (seconds a cached Copilot snapshot stays fresh; 0 forces synchronous capture)
+* `LLM_USAGE_COPILOT_REFRESH_WAIT` (seconds to wait for a background Copilot refresh before serving stale data)
 * `LLM_USAGE_COPILOT_CWD`
 * `LLM_USAGE_COPILOT_CAPTURE_CWD`
 * `LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS`
 * `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS`
+* `LLM_SCHEDULER_NO_STREAM` (disable live pass-through of the child CLI output to stdout in fresh mode)
 * `LLM_SCHEDULER_USAGE_JSON` (test: inject a usage snapshot)
 * `LLM_SCHEDULER_NO_ACTUAL_SUSPEND` (test: skip the real `systemctl suspend`)
 * `LLM_SCHEDULER_PTY_TIMEOUT` (fresh-process launch timeout, seconds)
