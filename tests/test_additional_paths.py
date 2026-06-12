@@ -436,6 +436,45 @@ def test_estimate_remaining_time_survives_resets_and_gaps(env: dict[str, str]) -
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "bad"}) == "5h"
 
 
+def test_estimate_remaining_time_requires_minimum_span_for_real_windows(env: dict[str, str]) -> None:
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    base = 1_000_000
+    # A lone coarse step (a stale 80% reading jumping to the steady 49%) followed
+    # by a few flat seconds. Read literally this looks like 31% burned in 33s, which
+    # the old estimator extrapolated to "weekly gone in ~5m". With only ~3.5min of
+    # history there is not enough evidence to estimate a weekly/5h ETA.
+    rows = [(base, 80)] + [(base + 33 + i * 30, 49) for i in range(7)]
+    log = cache / "llm-usage.log"
+    now = rows[-1][0]
+    for window in ("weekly", "5h", "monthly"):
+        log.write_text(
+            "".join(f'{{"ts":{ts},"provider":"Codex","window":"{window}","remaining":{rem}}}\n' for ts, rem in rows),
+            encoding="utf-8",
+        )
+        now_env = env | {"LLM_USAGE_NOW_EPOCH": str(now)}
+        assert common.estimate_remaining_time_from_log("Codex", window, 49, now_env) == "-"
+
+    # Once the same flat reading has been observed across enough wall-clock history,
+    # the lone step is diluted and a (large, sane) estimate appears instead of "-".
+    long_rows = [(base, 80)] + [(base + 33 + i * 3600, 49) for i in range(8)]
+    long_now = long_rows[-1][0]
+    log.write_text(
+        "".join(f'{{"ts":{ts},"provider":"Codex","window":"weekly","remaining":{rem}}}\n' for ts, rem in long_rows),
+        encoding="utf-8",
+    )
+    est = common.estimate_remaining_time_from_log("Codex", "weekly", 49, env | {"LLM_USAGE_NOW_EPOCH": str(long_now)})
+    assert est not in ("-", "1m")
+
+    # The gate is tunable: dropping the fraction to 0 restores the raw estimate.
+    short_env = env | {"LLM_USAGE_NOW_EPOCH": str(now), "LLM_USAGE_REMAINING_TIME_MIN_SPAN_FRACTION": "0"}
+    log.write_text(
+        "".join(f'{{"ts":{ts},"provider":"Codex","window":"weekly","remaining":{rem}}}\n' for ts, rem in rows),
+        encoding="utf-8",
+    )
+    assert common.estimate_remaining_time_from_log("Codex", "weekly", 49, short_env) != "-"
+
+
 def test_prune_usage_log(env: dict[str, str]) -> None:
     cache = common.usage_cache_dir(env)
     cache.mkdir(parents=True, exist_ok=True)

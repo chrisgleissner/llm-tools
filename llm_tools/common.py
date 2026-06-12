@@ -815,6 +815,15 @@ def prune_usage_log(env: dict[str, str] | None = None) -> None:
         pass
 
 
+# Approximate length of each usage window, used to require a minimum amount of
+# observed history before extrapolating a window-scale burn-time estimate.
+REMAINING_TIME_WINDOW_SECONDS = {
+    "5h": 5 * 3600,
+    "weekly": 7 * 24 * 3600,
+    "monthly": 30 * 24 * 3600,
+}
+
+
 def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any, env: dict[str, str] | None = None) -> str:
     env = env or os.environ
     rem = num(remaining)
@@ -829,6 +838,14 @@ def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any,
         max_gap = int(env.get("LLM_USAGE_REMAINING_TIME_MAX_GAP_SECONDS", "3600") or "3600")
     except ValueError:
         max_stale, lookback, max_gap = 600, 259200, 3600
+    try:
+        min_span_floor = int(env.get("LLM_USAGE_REMAINING_TIME_MIN_SPAN_SECONDS", "0") or "0")
+    except ValueError:
+        min_span_floor = 0
+    try:
+        min_span_fraction = float(env.get("LLM_USAGE_REMAINING_TIME_MIN_SPAN_FRACTION", "0.02") or "0.02")
+    except ValueError:
+        min_span_fraction = 0.02
     now = now_epoch(env)
     cutoff = now - lookback
     samples: list[tuple[int, float]] = []
@@ -848,6 +865,16 @@ def estimate_remaining_time_from_log(provider: str, window: str, remaining: Any,
     if not samples:
         return "-"
     if max_stale > 0 and now - samples[-1][0] > max_stale:
+        return "-"
+    # Refuse to extrapolate a window-scale ETA from a sliver of history: a single
+    # coarse step (e.g. a stale reading jumping to the current value) would
+    # otherwise be read as a sustained burn rate and produce a wildly short
+    # estimate. Require the observed span to cover a meaningful fraction of the
+    # window before reporting anything.
+    observed_span = samples[-1][0] - samples[0][0]
+    window_seconds = REMAINING_TIME_WINDOW_SECONDS.get(window, 0)
+    min_span = max(min_span_floor, int(window_seconds * min_span_fraction))
+    if observed_span < min_span:
         return "-"
     prev_ts: int | None = None
     prev_rem = 0.0

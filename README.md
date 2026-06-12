@@ -17,6 +17,26 @@ Small Linux command-line tools for keeping local LLM CLIs productive, observable
 | `llm-scheduler` | Submit one prompt to one selected CLI as soon as that CLI has usable capacity.                              |
 | `ralph-robin`   | Keep autonomous work moving by rotating across configured CLIs instead of stopping at the first rate limit. |
 
+## Required Dependencies
+
+These tools drive the official command-line clients of the supported LLM providers. Install the CLI for each provider you want to use:
+
+| Provider       | CLI binary             | Download / install                                                                                    |
+| -------------- | ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| OpenAI Codex   | `codex`                | [github.com/openai/codex](https://github.com/openai/codex) — `npm install -g @openai/codex`           |
+| Claude Code    | `claude`               | [claude.com/product/claude-code](https://www.claude.com/product/claude-code) — `npm install -g @anthropic-ai/claude-code` |
+| GitHub Copilot | `copilot`              | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) — `npm install -g @github/copilot` |
+
+After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`) so it has a usable local session.
+
+**You do not need all of them.** Every tool works with whatever subset of provider CLIs is installed and authenticated:
+
+* `llm-usage` shows `unavailable` for any provider it cannot read and still reports the rest.
+* `llm-scheduler` only needs the one provider you target with `--tool`.
+* `ralph-robin` skips providers it cannot use and rotates across the ones that are available (its default rotation is `claude,codex`; narrow or widen it with `--tools`).
+
+None of the tools call a hard "command not found" guard on a provider binary, so a missing CLI is handled gracefully rather than aborting the run.
+
 ## Install
 
 ```bash
