@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -31,11 +32,14 @@ when needed, so weekly quotas burn down more evenly. Disable this with
 ralph-robin runs a persistent loop and owns the orchestration: it picks a
 provider, submits the prompt for one increment, and when that provider's CLI
 exits cleanly it makes a fresh routing decision and submits again (e.g. Claude
--> ralph-robin -> Claude). When every configured provider is blocked it does not
-stop; it suspends until the soonest provider becomes available again and then
-continues. The loop ends only after --max-duration (default 24h) or
---max-iterations successful increments, or on a non-recoverable failure. Use
---max-iterations 1 for the legacy single-shot behavior.
+-> ralph-robin -> Claude). When every configured provider is rate-limited it
+does not stop; it suspends the computer with an RTC wake-up timer set to the
+earliest provider window renewal, then on wake resumes this same loop and
+re-evaluates the rotation (falling back to an in-process wait when suspend is
+unavailable). The loop ends only after --max-duration (default 24h) or
+--max-iterations increments, on a non-recoverable failure, or if a provider
+keeps returning instant successes without doing work. Use --max-iterations 1
+for the legacy single-shot behavior.
 
 By default the selected CLI uses llm-scheduler's autonomous headless adapter
 even from an interactive terminal. This avoids provider prompts blocking the
@@ -505,15 +509,19 @@ def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_i
     ]
     if len(usable_indices) < 2:
         return None
-    scored: list[tuple[float, int, int]] = []
+    scored: list[tuple[float, int, int, int]] = []
     rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(cfg.tools), current_index))}
     for i in usable_indices:
         score = remaining_daily_capacity(decisions[i])
         if score is None:
             return None
-        scored.append((score, -rotation_rank[i], i))
+        # Tie-break toward a provider that is usable right now: only wait through
+        # a rate-limited provider's window when it genuinely has higher daily
+        # capacity, never when capacities are equal and another is ready to run.
+        usable = 1 if decisions[i].get("usable") is True else 0
+        scored.append((score, usable, -rotation_rank[i], i))
     scored.sort(reverse=True)
-    return scored[0][2] if scored else None
+    return scored[0][3] if scored else None
 
 
 def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skipped: set[str]) -> dict[str, Any]:
@@ -587,7 +595,7 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
     }
 
 
-def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunLogs, force_suspend: bool, provider_prompt: str) -> scheduler.SchedulerConfig:
+def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunLogs, provider_prompt: str, iteration: int) -> scheduler.SchedulerConfig:
     return scheduler.SchedulerConfig(
         tool=selected_tool,
         prompt_text=provider_prompt,
@@ -604,10 +612,15 @@ def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunL
         auto_confirm=cfg.auto_confirm,
         headless=cfg.headless,
         log_dir=logs.run_dir,
-        run_dir=logs.run_dir / "scheduler",
+        # Each iteration gets its own subdir so per-iteration provider logs
+        # (attempt output, status, events) are preserved instead of overwritten.
+        run_dir=logs.run_dir / f"iter-{iteration:03d}-{selected_tool}",
         dry_run=cfg.dry_run,
         wake=cfg.wake,
-        suspend_until_ready=cfg.suspend_until_ready or force_suspend,
+        # Ralph owns cross-provider suspend (see suspend_machine_until); it never
+        # delegates the all-blocked suspend to llm-scheduler, whose resume would
+        # wake into a single configured provider instead of the rotation.
+        suspend_until_ready=cfg.suspend_until_ready,
         exact_stdout=True,
         claude_stream_json=selected_tool == "claude" and not cfg.command_template,
         ralph_robin_active=True,
@@ -707,6 +720,85 @@ def suspend_until_available(
     return True
 
 
+def rtc_suspend(logs: common.RunLogs, target_epoch: int) -> bool:
+    """Suspend the computer with an RTC wake-up timer set to target_epoch.
+
+    Returns True only if the machine was actually suspended (and has since
+    resumed). Returns False — so the caller falls back to an in-process wait —
+    when suspend infrastructure is missing, the lead time is too short, or
+    suspension is disabled for testing/dry-run.
+    """
+    if os.environ.get("LLM_SCHEDULER_NO_ACTUAL_SUSPEND", "0") == "1":
+        common.log_event(logs, "rtc_suspend_skipped", {"reason": "env", "target_epoch": target_epoch})
+        return False
+    if not (common.have_cmd("systemd-run") and common.have_cmd("systemctl")):
+        common.log_event(logs, "rtc_suspend_skipped", {"reason": "missing-systemd", "target_epoch": target_epoch})
+        return False
+    min_lead = int(os.environ.get("LLM_SCHEDULER_SUSPEND_MIN_LEAD", "120") or "120")
+    if target_epoch - common.now_epoch() < min_lead:
+        common.log_event(logs, "rtc_suspend_skipped", {"reason": "insufficient-lead", "target_epoch": target_epoch, "min_lead": min_lead})
+        return False
+    unit = f"ralph-robin-wake-{int(time.time())}"
+    # A no-op command whose only purpose is the WakeSystem=true RTC alarm; the
+    # orchestrator itself resumes in-process when systemctl suspend returns.
+    proc = subprocess.run(
+        [
+            "systemd-run", "--user", f"--unit={unit}",
+            f"--on-calendar=@{target_epoch}", "--timer-property=WakeSystem=true",
+            "/bin/true",
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+    )
+    common.log_event(logs, "rtc_suspend_schedule", {"unit": unit, "status": proc.returncode, "output": proc.stdout, "target_epoch": target_epoch})
+    if proc.returncode != 0:
+        return False
+    active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", f"{unit}.timer"], check=False)
+    if active.returncode != 0:
+        common.log_event(logs, "rtc_suspend_skipped", {"reason": "timer-not-active", "unit": unit})
+        return False
+    common.log_event(logs, "rtc_suspend", {"unit": unit, "target_epoch": target_epoch})
+    subprocess.run(["sync"], check=False)
+    subprocess.run(["systemctl", "suspend"], check=False)
+    return True
+
+
+def suspend_machine_until(
+    cfg: RalphConfig,
+    logs: common.RunLogs,
+    target_epoch: int,
+    start_monotonic: float,
+    max_duration: int,
+) -> bool:
+    """Suspend until target_epoch (the earliest provider renewal), then resume.
+
+    Ralph owns this cross-provider suspend: it sleeps the whole machine via an
+    RTC wake-up timer and, on resume, continues its own rotation loop. Falls back
+    to an in-process wait when real suspend is unavailable. Returns True when the
+    loop should continue, or False when the --max-duration budget is exhausted.
+    """
+    now = common.now_epoch()
+    wait_s: float = max(0, target_epoch - now)
+    if max_duration:
+        remaining = max_duration - (monotonic() - start_monotonic)
+        if remaining <= 0:
+            return False
+        if wait_s > remaining:
+            wait_s = remaining
+            target_epoch = now + int(remaining)
+    common.log_event(logs, "suspend_until_renewal", {"target_epoch": target_epoch, "wait_seconds": int(wait_s)})
+    status_line(
+        f"all providers rate-limited; suspending until earliest renewal {common.format_local_epoch(target_epoch)} (epoch {target_epoch})",
+        level="warn",
+    )
+    rtc_suspend(logs, target_epoch)
+    # Guarantee we do not return before the renewal even if real suspend was
+    # unavailable or inhibited (a no-op systemctl suspend must not busy-loop).
+    remaining = target_epoch - common.now_epoch()
+    if remaining > 0:
+        sleep_seconds(remaining)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     common.migrate_legacy_cache_dirs()
     cfg = parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -727,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
     start_monotonic = monotonic()
     completed = 0
     fast_streak = 0
+    iteration = 0
 
     def out_of_time() -> bool:
         return bool(max_duration) and (monotonic() - start_monotonic) >= max_duration
@@ -760,17 +853,29 @@ def main(argv: list[str] | None = None) -> int:
         level = "warn" if all_rate_limited else "ok"
         status_line(f"selected {selected_tool} ({reason})", level=level)
         if all_rate_limited:
-            wait_until = selection.get("decision", {}).get("wait_until")
-            wait_display = f"{common.format_local_epoch(int(wait_until))} (epoch {wait_until})" if isinstance(wait_until, int) else "unknown"
-            status_line(f"all configured tools are rate-limited; suspending via llm-scheduler until {wait_display}", level="warn")
+            # Every provider is rate-limited. Ralph owns the suspend: sleep the
+            # machine until the EARLIEST window renews across the rotation, then
+            # resume this loop and re-evaluate which provider to use. Do not run a
+            # provider or count this as an increment.
+            target = soonest_wait_until(selection) or (common.now_epoch() + int(cfg.poll_interval))
+            save_state(cfg, selected_index, selected_tool)
+            if cfg.dry_run:
+                common.log_event(logs, "final", {"status": "dry-run"})
+                print("dry-run: no prompt submitted", file=sys.stderr)
+                return 0
+            if not suspend_machine_until(cfg, logs, target, start_monotonic, max_duration):
+                return stop_timed_out()
+            skipped = set()
+            continue
         save_state(cfg, selected_index, selected_tool)
         if cfg.dry_run:
             common.log_event(logs, "final", {"status": "dry-run"})
             print("dry-run: no prompt submitted", file=sys.stderr)
             return 0
         provider_prompt = provider_prompt_for(cfg, selected_tool, selection, prompt)
-        scfg = scheduler_config_for(cfg, selected_tool, logs, all_rate_limited, provider_prompt)
-        common.log_event(logs, "scheduler_command", {"argv": ["llm-scheduler", "--tool", selected_tool]})
+        iteration += 1
+        scfg = scheduler_config_for(cfg, selected_tool, logs, provider_prompt, iteration)
+        common.log_event(logs, "scheduler_command", {"argv": ["llm-scheduler", "--tool", selected_tool], "iteration": iteration, "run_dir": str(scfg.run_dir)})
         iter_start = monotonic()
         status = run_scheduler_inline(scfg)
         iter_seconds = monotonic() - iter_start

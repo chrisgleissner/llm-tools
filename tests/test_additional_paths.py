@@ -758,6 +758,38 @@ def test_ralph_suspends_when_all_blocked_then_continues(monkeypatch: pytest.Monk
     assert slept == [900]  # waited until the soonest reset (epoch 1000 - now 100) instead of exiting
 
 
+def test_ralph_suspends_machine_until_earliest_renewal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # When every provider is rate-limited, Ralph suspends until the EARLIEST
+    # window renewal across the rotation (epoch 1000 here), then resumes its own
+    # loop and re-selects. Suspend infra is disabled so it uses the in-process
+    # fallback we can observe.
+    monkeypatch.setattr(common, "migrate_legacy_cache_dirs", lambda: None)
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "100")
+    monkeypatch.setenv("LLM_SCHEDULER_NO_ACTUAL_SUSPEND", "1")
+    selections = [
+        {
+            "index": 0,
+            "tool": "claude",
+            "rotation_reason": "all-unusable",
+            "all_rate_limited": True,
+            "decision": {"tool": "claude", "wait_until": 1000},
+            "decisions": [
+                {"tool": "claude", "wait_until": 2000},
+                {"tool": "codex", "wait_until": 1000},
+            ],
+        },
+        _usable_selection(),  # rotation recovers after the wake
+    ]
+    monkeypatch.setattr(ralph_robin, "select_tool", lambda cfg, logs, ci, sk: selections.pop(0))
+    slept: list[float] = []
+    monkeypatch.setattr(ralph_robin, "sleep_seconds", lambda s: slept.append(s))
+    monkeypatch.setattr(ralph_robin, "run_scheduler_inline", lambda scfg: 0)
+
+    rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "1", "--max-duration", "0", "--min-iteration-seconds", "0"))
+    assert rc == 0
+    assert slept == [900]  # epoch 1000 (earliest of 2000/1000) minus now 100
+
+
 def test_ralph_even_burn_can_wait_for_short_window_reset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
     logs = common.setup_run_logs(tmp_path / "logs", "r")
