@@ -5,7 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from llm_tools import common
+from llm_tools import common, scheduler
 
 from .conftest import ROOT, run_cmd, run_cmd_bytes, write_exe
 
@@ -208,6 +208,57 @@ def test_ralph_robin_exact_stdout_passthrough(env: dict[str, str], fake_provider
         assert result.stdout == expected
         if mode == "stderr":
             assert b"progress on stderr" in result.stderr
+
+
+def test_ralph_robin_claude_stream_json_passthrough(env: dict[str, str], fake_bin: Path, tmp_path: Path) -> None:
+    write_exe(
+        fake_bin / "claude",
+        """#!/usr/bin/env python3
+import json, sys, time
+assert "--output-format" in sys.argv
+assert "stream-json" in sys.argv
+events = [
+    {"type":"assistant","message":{"content":[{"type":"text","text":"I will inspect it.\\n"}]}},
+    {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pytest -q"}}]}},
+    {"type":"user","message":{"content":[{"type":"tool_result","content":"1 passed\\n"}]}},
+    {"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+    time.sleep(0.01)
+""",
+    )
+    result = run_cmd_bytes(
+        [
+            "./ralph-robin",
+            "--prompt",
+            "rr",
+            "--state-file",
+            str(tmp_path / "claude-stream.json"),
+            "--log-dir",
+            str(tmp_path / "claude-stream-logs"),
+            "--no-retry",
+        ],
+        env
+        | {
+            "LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}',
+        },
+    )
+    assert result.returncode == 0, result.stderr.decode()
+    assert b"I will inspect it.\n" in result.stdout
+    assert b"Tool call: Bash\n" in result.stdout
+    assert b'"command": "pytest -q"' in result.stdout
+    assert b"Tool result:\n1 passed\n" in result.stdout
+    assert b"Done.\n" in result.stdout
+    assert b'"type":"assistant"' not in result.stdout
+
+
+def test_claude_stream_result_fallback_after_tool_only_event() -> None:
+    renderer = scheduler.ClaudeStreamRenderer()
+    tool_event = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"true"}}]}}\n'
+    result_event = b'{"type":"result","result":"final answer"}\n'
+    assert b"Tool call: Bash\n" in renderer.render_line(tool_event)
+    assert renderer.render_line(result_event) == b"final answer\n"
 
 
 def test_ralph_robin_partial_stdout_on_provider_failure(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:

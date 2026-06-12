@@ -503,6 +503,7 @@ def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunL
         wake=cfg.wake,
         suspend_until_ready=cfg.suspend_until_ready or force_suspend,
         exact_stdout=True,
+        claude_stream_json=selected_tool == "claude" and not cfg.command_template,
         ralph_robin_active=True,
         ralph_robin_tools=",".join(cfg.tools),
     )

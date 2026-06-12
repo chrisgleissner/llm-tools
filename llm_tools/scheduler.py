@@ -109,6 +109,7 @@ class SchedulerConfig:
     pre_suspend_confirmation_seconds: int = 5
     wake_armed_target: int = 0
     exact_stdout: bool = False
+    claude_stream_json: bool = False
     ralph_robin_active: bool = False
     ralph_robin_tools: str = ""
 
@@ -287,6 +288,7 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "dry_run": cfg.dry_run,
         "wake": cfg.wake,
         "suspend_until_ready": cfg.suspend_until_ready,
+        "claude_stream_json": cfg.claude_stream_json,
         "ralph_robin_active": cfg.ralph_robin_active,
         "ralph_robin_tools": cfg.ralph_robin_tools,
     }
@@ -358,6 +360,8 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
     if cfg.tool == "codex":
         return ["codex", "exec", "-C", cfg.cwd, prompt]
     if cfg.tool == "claude":
+        if cfg.claude_stream_json:
+            return ["claude", "--dangerously-skip-permissions", "--print", "--output-format", "stream-json", "--verbose", prompt]
         return ["claude", "--dangerously-skip-permissions", "--print", prompt]
     return ["copilot", "-C", cfg.cwd, "--prompt", prompt]
 
@@ -605,6 +609,8 @@ def run_fresh_attached(cfg: SchedulerConfig, argv: list[str], output_file: Path,
 
 
 def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
+    if cfg.claude_stream_json:
+        return run_fresh_claude_stream_json(cfg, argv, output_file, status_file)
     if cfg.exact_stdout:
         return run_fresh_exact_stdout(cfg, argv, output_file, status_file)
     status, _text = common.run_pty_capture(
@@ -620,6 +626,209 @@ def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path,
         env=provider_env(cfg),
     )
     return status
+
+
+def render_claude_content_block(block: Any) -> str:
+    if isinstance(block, str):
+        return block
+    if not isinstance(block, dict):
+        return ""
+    block_type = str(block.get("type", ""))
+    if block_type == "text":
+        return str(block.get("text", ""))
+    if block_type == "tool_use":
+        name = str(block.get("name") or "tool")
+        rendered = f"Tool call: {name}\n"
+        tool_input = block.get("input")
+        if tool_input not in (None, "", {}, []):
+            try:
+                rendered += json.dumps(tool_input, ensure_ascii=False, indent=2) + "\n"
+            except (TypeError, ValueError):
+                rendered += str(tool_input) + "\n"
+        return rendered
+    if block_type == "tool_result":
+        content = block.get("content")
+        if isinstance(content, list):
+            rendered = "".join(render_claude_content_block(item) for item in content)
+        elif content is None:
+            rendered = ""
+        else:
+            rendered = str(content)
+        if not rendered:
+            return ""
+        prefix = "Tool error:\n" if block.get("is_error") else "Tool result:\n"
+        return prefix + rendered
+    return ""
+
+
+class ClaudeStreamRenderer:
+    def __init__(self) -> None:
+        self.rendered_assistant_text = False
+
+    def render_event(self, event: dict[str, Any]) -> str:
+        event_type = str(event.get("type", ""))
+        if event_type == "assistant":
+            message = event.get("message")
+            if not isinstance(message, dict):
+                return ""
+            content = message.get("content")
+            blocks = content if isinstance(content, list) else [content]
+            rendered = "".join(render_claude_content_block(block) for block in blocks)
+            has_text = any(
+                (isinstance(block, str) and bool(block))
+                or (isinstance(block, dict) and block.get("type") == "text" and bool(block.get("text")))
+                for block in blocks
+            )
+            if has_text:
+                self.rendered_assistant_text = True
+            return rendered
+        if event_type == "user":
+            message = event.get("message")
+            if not isinstance(message, dict):
+                return ""
+            content = message.get("content")
+            blocks = content if isinstance(content, list) else [content]
+            return "".join(render_claude_content_block(block) for block in blocks)
+        if event_type in {"assistant_delta", "content_block_delta"}:
+            delta = event.get("delta")
+            if isinstance(delta, dict):
+                text = delta.get("text")
+                if isinstance(text, str):
+                    self.rendered_assistant_text = True
+                    return text
+        if event_type == "result" and not self.rendered_assistant_text:
+            result = event.get("result")
+            if isinstance(result, str):
+                return result
+        return ""
+
+    def render_line(self, line: bytes) -> bytes:
+        stripped = line.strip()
+        if not stripped:
+            return b""
+        try:
+            event = json.loads(stripped.decode("utf-8", "replace"))
+        except json.JSONDecodeError:
+            return line
+        if not isinstance(event, dict):
+            return b""
+        rendered = self.render_event(event)
+        if rendered and not rendered.endswith("\n"):
+            rendered += "\n"
+        return rendered.encode("utf-8", "replace")
+
+
+def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
+    import os
+    import select
+    import signal
+
+    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg))
+    assert proc.stdout is not None and proc.stderr is not None
+    stdout_fd = proc.stdout.fileno()
+    stderr_fd = proc.stderr.fileno()
+    open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
+    stdout_color = stream_color_enabled(sys.stdout)
+    stderr_color = stream_color_enabled(sys.stderr)
+    renderer = ClaudeStreamRenderer()
+    stdout_buffer = b""
+    combined_parts: list[bytes] = []
+    start = time.time()
+    last_progress = start
+    timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
+    idle_timeout = int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600") or "600")
+    exit_code = 124
+    blocking = False
+    blocking_re = re.compile(
+        rb"what do you want to do\?|enter to confirm|esc to cancel|monthly spend limit|rate[- ]limit options",
+        re.I,
+    )
+
+    while open_fds:
+        if time.time() - start > timeout:
+            break
+        if idle_timeout > 0 and time.time() - last_progress > idle_timeout:
+            abort_line = f"\nllm-scheduler: autonomous abort: no output progress for {idle_timeout}s\n".encode()
+            combined_parts.append(abort_line)
+            try:
+                sys.stderr.buffer.write(highlight_provider_text(abort_line, stream_name="stderr", enabled=stderr_color))
+                sys.stderr.buffer.flush()
+            except OSError:
+                pass
+            exit_code = common.AUTONOMY_ABORT_STATUS
+            break
+        ready, _, _ = select.select(list(open_fds), [], [], 0.2)
+        for fd in ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                if open_fds.get(fd) == "stdout" and stdout_buffer:
+                    rendered = renderer.render_line(stdout_buffer)
+                    if rendered:
+                        combined_parts.append(rendered)
+                        last_progress = time.time()
+                        try:
+                            sys.stdout.buffer.write(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color))
+                            sys.stdout.buffer.flush()
+                        except OSError:
+                            pass
+                    stdout_buffer = b""
+                open_fds.pop(fd, None)
+                continue
+            if open_fds.get(fd) == "stdout":
+                stdout_buffer += chunk
+                last_progress = time.time()
+                lines = stdout_buffer.splitlines(keepends=True)
+                if lines and not lines[-1].endswith((b"\n", b"\r")):
+                    stdout_buffer = lines.pop()
+                else:
+                    stdout_buffer = b""
+                for line in lines:
+                    rendered = renderer.render_line(line)
+                    if not rendered:
+                        continue
+                    combined_parts.append(rendered)
+                    try:
+                        sys.stdout.buffer.write(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color))
+                        sys.stdout.buffer.flush()
+                    except OSError:
+                        pass
+            else:
+                combined_parts.append(chunk)
+                last_progress = time.time()
+                try:
+                    sys.stderr.buffer.write(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color))
+                    sys.stderr.buffer.flush()
+                except OSError:
+                    pass
+            if blocking_re.search(b"".join(combined_parts)[-4000:]):
+                blocking = True
+                break
+        if blocking:
+            exit_code = common.AUTONOMY_ABORT_STATUS
+            break
+        polled = proc.poll()
+        if polled is not None and not open_fds:
+            exit_code = polled
+            break
+    if blocking or exit_code == 124:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if proc.poll() is not None:
+                break
+            try:
+                proc.send_signal(sig)
+            except OSError:
+                break
+            time.sleep(0.2)
+    if proc.poll() is not None and not blocking and exit_code == 124:
+        exit_code = int(proc.returncode)
+    if blocking:
+        combined_parts.append(b"\nllm-scheduler: autonomous abort: interactive prompt detected\n")
+    output_file.write_text(b"".join(combined_parts).decode("utf-8", "replace"), encoding="utf-8")
+    status_file.write_text(str(exit_code), encoding="utf-8")
+    return exit_code
 
 
 def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
