@@ -236,9 +236,7 @@ def validate_args(cfg: SchedulerConfig) -> None:
     if not common.is_integer(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30")):
         common.err("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT must be integer seconds")
         raise SystemExit(2)
-    if not isinstance(cfg.pre_suspend_confirmation_seconds, int):
-        common.err("LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS must be integer seconds")
-        raise SystemExit(2)
+    # pre_suspend_confirmation_seconds is validated and parsed in parse_args().
     if cfg.at_time:
         cfg.not_before_epoch = parse_date_d(cfg.at_time)
         if cfg.not_before_epoch is None:
