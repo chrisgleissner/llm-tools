@@ -373,8 +373,8 @@ def test_ralph_robin_partial_stdout_on_provider_failure(env: dict[str, str], fak
     assert result.returncode == 1
     assert b"partial" in result.stdout
     assert b"failures in a row" in result.stderr
-    run_dirs = [p for p in (tmp_path / "pf-logs").iterdir() if p.is_dir() and not p.is_symlink()]
-    events = (run_dirs[0] / "events.jsonl").read_text()
+    run_dir = tmp_path / "pf-logs" / "latest"
+    events = (run_dir / "events.jsonl").read_text()
     assert '"type":"provider_failed"' in events
     assert '"reason":"hard-fail-streak"' in events
 
