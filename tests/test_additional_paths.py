@@ -1034,7 +1034,9 @@ def test_ralph_suspends_machine_until_earliest_renewal(monkeypatch: pytest.Monke
     assert slept == [900]  # epoch 1000 (earliest of 2000/1000) minus now 100
 
 
-def test_ralph_even_burn_can_wait_for_short_window_reset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ralph_even_burn_prefers_ready_provider_over_blocked_higher_weekly_headroom(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     cfg = ralph_robin.RalphConfig(tools_spec="claude,codex", tools=["claude", "codex"], state_file=tmp_path / "state.json")
     logs = common.setup_run_logs(tmp_path / "logs", "r")
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
@@ -1053,10 +1055,9 @@ def test_ralph_even_burn_can_wait_for_short_window_reset(monkeypatch: pytest.Mon
     monkeypatch.setattr(common, "usage_snapshot_for_tool", lambda tool: snapshots[tool])
 
     selected = ralph_robin.select_tool(cfg, logs, 1, set())
-    assert selected["tool"] == "claude"
-    assert selected["rotation_reason"] == "even-burn"
-    assert selected["decision"]["reason"] == "rate-limited"
-    assert selected["decision"]["wait_until"] == 1100
+    assert selected["tool"] == "codex"
+    assert selected["rotation_reason"] == "current-usable"
+    assert selected["decision"]["reason"] == "usable"
 
     snapshots["claude"] = {
         "available": True,
