@@ -60,7 +60,7 @@ command -v ralph-robin
 Prefer a pre-built artifact? Each [release](https://github.com/chrisgleissner/llm-tools/releases) ships a wheel ZIP archive you can install without a build step:
 
 ```bash
-pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.2.1/llm_tools-0.2.1-py3-none-any.whl
+pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.2.2/llm_tools-0.2.2-py3-none-any.whl
 ```
 
 ### From a local checkout
