@@ -30,8 +30,9 @@ USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
 
 Round-robin prompt submission across local LLM CLIs. By default it prefers the
 provider with the highest remaining daily capacity (weekly remaining broken down
-over the days until weekly reset), waiting through a shorter session-window reset
-when needed, so weekly quotas burn down more evenly. Disable this with
+over the days until weekly reset) among providers that are currently usable, so
+weekly quotas burn down more evenly without idling on a rate-limited provider.
+Disable this with
 --no-even-burn to keep using the current provider until it is exhausted.
 
 ralph-robin runs a persistent loop and owns the orchestration: it picks a
@@ -508,22 +509,25 @@ def even_burn_candidate(decision: dict[str, Any]) -> bool:
 
 
 def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_index: int, skipped: set[str]) -> int | None:
-    usable_indices = [
+    ranked_indices = [
         i
         for i, decision in enumerate(decisions)
         if even_burn_candidate(decision) and cfg.tools[i] not in skipped
     ]
-    if len(usable_indices) < 2:
+    if len(ranked_indices) < 2:
+        return None
+    ready_indices = [i for i in ranked_indices if decisions[i].get("usable") is True]
+    candidate_indices = ready_indices if ready_indices else ranked_indices
+    if len(candidate_indices) < 2:
         return None
     scored: list[tuple[float, int, int, int]] = []
     rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(cfg.tools), current_index))}
-    for i in usable_indices:
+    for i in candidate_indices:
         score = remaining_daily_capacity(decisions[i])
         if score is None:
             return None
-        # Tie-break toward a provider that is usable right now: only wait through
-        # a rate-limited provider's window when it genuinely has higher daily
-        # capacity, never when capacities are equal and another is ready to run.
+        # When several providers are ready, tie-break toward the one that is
+        # usable right now and closest in the configured rotation.
         usable = 1 if decisions[i].get("usable") is True else 0
         scored.append((score, usable, -rotation_rank[i], i))
     scored.sort(reverse=True)
