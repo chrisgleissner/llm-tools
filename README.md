@@ -40,10 +40,10 @@ After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`)
 Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` and can be run from any directory — no checkout required:
 
 ```bash
-pipx install git+https://github.com/chrisgleissner/llm-tools.git@0.1.0
+pipx install git+https://github.com/chrisgleissner/llm-tools.git@0.2.0
 ```
 
-Drop `@0.1.0` to track the latest `main`, or pin a different [release](https://github.com/chrisgleissner/llm-tools/releases) tag for reproducible installs.
+Drop `@0.2.0` to track the latest `main`, or pin a different [release](https://github.com/chrisgleissner/llm-tools/releases) tag for reproducible installs.
 
 `pipx` keeps each tool in its own virtual environment, so this also works on externally managed systems (Debian/Ubuntu, Homebrew Python) where installing into the system interpreter is blocked with an `externally-managed-environment` error. If you do not have `pipx` yet: `python3 -m pip install --user pipx && python3 -m pipx ensurepath` (or `brew install pipx` on macOS), then open a new shell.
 
