@@ -55,7 +55,7 @@ command -v llm-scheduler
 command -v ralph-robin
 ```
 
-Prefer a pre-built artifact? Each [release](https://github.com/chrisgleissner/llm-tools/releases) ships a wheel you can install without a build step:
+Prefer a pre-built artifact? Each [release](https://github.com/chrisgleissner/llm-tools/releases) ships a [wheel](https://packaging.python.org/en/latest/glossary/#term-Wheel) you can install without a build step:
 
 ```bash
 pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.1.0/llm_tools-0.1.0-py3-none-any.whl
