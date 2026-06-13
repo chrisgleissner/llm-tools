@@ -40,7 +40,7 @@ chmod +x llm-usage llm-scheduler ralph-robin
 ./llm-scheduler --wake-test
 ./ralph-robin --prompt x --dry-run --command-template true
 python -m pytest -q
-coverage run -m pytest && coverage combine && coverage report --fail-under=80
+coverage run -m pytest && coverage combine && coverage report --fail-under=85
 ```
 
 Statusline mode reads Claude statusline JSON from stdin:
@@ -160,10 +160,10 @@ When changing behavior:
 1. Add or update the narrowest fixture assertion.
 2. Run a targeted command for the changed path.
 3. Run `python -m pytest -q`.
-4. Run coverage and require at least 80% total coverage: `coverage run -m pytest && coverage combine && coverage report --fail-under=80`.
+4. Run coverage and require at least 85% total coverage: `coverage run -m pytest && coverage combine && coverage report --fail-under=85`.
 5. Update `README.md` for user-visible changes.
 
-Do not consider work done, even for small changes, unless the coverage gate has run and passed at `--fail-under=80`. If `coverage` is not installed in the active interpreter, use a temporary virtual environment or otherwise report the dependency/environment blocker explicitly.
+Do not consider work done, even for small changes, unless the coverage gate has run and passed at `--fail-under=85`. If `coverage` is not installed in the active interpreter, use a temporary virtual environment or otherwise report the dependency/environment blocker explicitly.
 
 ## Common failures
 
@@ -183,7 +183,7 @@ A change is complete only when:
 * `./llm-usage --json` emits valid JSON.
 * `./llm-usage --show-source --show-remaining-time` has aligned columns and no empty cells.
 * `python -m pytest -q` passes.
-* `coverage run -m pytest && coverage combine && coverage report --fail-under=80` passes with total coverage at or above 80%; this is mandatory for completion.
+* `coverage run -m pytest && coverage combine && coverage report --fail-under=85` passes with total coverage at or above 85%; this is mandatory for completion.
 * Missing-provider and timeout paths degrade gracefully.
 * Table, JSON, README, and tests are consistent for any user-visible change.
 * Generated files such as `llm-usage.log` are not committed.
