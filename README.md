@@ -25,9 +25,9 @@ These tools drive the official command-line clients of the supported LLM provide
 
 | Provider       | CLI binary             | Download / install                                                                                    |
 | -------------- | ---------------------- | ----------------------------------------------------------------------------------------------------- |
-| OpenAI Codex   | `codex`                | [github.com/openai/codex](https://github.com/openai/codex) — `npm install -g @openai/codex`           |
-| Claude Code    | `claude`               | [claude.com/product/claude-code](https://www.claude.com/product/claude-code) — `npm install -g @anthropic-ai/claude-code` |
-| GitHub Copilot | `copilot`              | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) — `npm install -g @github/copilot` |
+| OpenAI Codex   | `codex`                | [github.com/openai/codex](https://github.com/openai/codex) - `npm install -g @openai/codex`           |
+| Claude Code    | `claude`               | [claude.com/product/claude-code](https://www.claude.com/product/claude-code) - `npm install -g @anthropic-ai/claude-code` |
+| GitHub Copilot | `copilot`              | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) - `npm install -g @github/copilot` |
 
 After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`) so it has a usable local session.
 
@@ -39,7 +39,7 @@ After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`)
 
 ## Install
 
-Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` and can be run from any directory — no checkout required:
+Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` and can be run from any directory - no checkout required:
 
 ```bash
 pipx install git+https://github.com/chrisgleissner/llm-tools.git
@@ -135,10 +135,10 @@ Copilot    yes     monthly   36% ████░░░░░░    ↓ conserve 
 
 The table is meant to answer four questions quickly:
 
-- **Ready** — `yes` means every blocking quota window for that tool has usable capacity now; `no` means at least one blocking window must reset.
-- **Guidance** — `5h` rows forecast whether current burn lasts until reset; weekly and monthly rows compare remaining quota to a linear budget pace.
-- **Remaining** — remaining quota, with the exact percentage before the bar.
-- **Resets in** — relative reset time first, so near-term recovery is easy to scan.
+- **Ready** - `yes` means every blocking quota window for that tool has usable capacity now; `no` means at least one blocking window must reset.
+- **Guidance** - `5h` rows forecast whether current burn lasts until reset; weekly and monthly rows compare remaining quota to a linear budget pace.
+- **Remaining** - remaining quota, with the exact percentage before the bar.
+- **Resets in** - relative reset time first, so near-term recovery is easy to scan.
 
 Short and long windows can disagree. For example, a 5h row may last until reset while a weekly row says `↓ conserve`; treat the slower long-window row as the limiting constraint.
 
@@ -298,8 +298,8 @@ Passed through to `llm-scheduler`:
 Behavior:
 
 * Defaults to autonomous headless launches, even from an interactive terminal.
-* Defaults to even burn-down: selects the provider with the highest remaining *daily* capacity — weekly remaining % ÷ days until weekly reset (e.g. 80% with 4 days left is 20%/day) — even if it must first wait for a shorter session-window reset. This spreads each weekly quota evenly across the days until it resets. A provider with an unknown or stale weekly reset is assumed to have a full week, so it is still ranked rather than skipped.
-* Loops persistently: after each provider finishes an increment, Ralph re-evaluates usage, re-selects a provider, and submits the prompt again — so a long task is handed back and forth (e.g. Claude → ralph-robin → Claude). It does **not** stop when every provider is blocked: it owns the suspend decision and waits for the rotation to recover. The loop ends only on a non-recoverable failure, a degenerate instant-success streak, or once `--max-duration` / `--max-iterations` is reached.
+* Defaults to even burn-down: selects the provider with the highest remaining *daily* capacity - weekly remaining % ÷ days until weekly reset (e.g. 80% with 4 days left is 20%/day) - even if it must first wait for a shorter session-window reset. This spreads each weekly quota evenly across the days until it resets. A provider with an unknown or stale weekly reset is assumed to have a full week, so it is still ranked rather than skipped.
+* Loops persistently: after each provider finishes an increment, Ralph re-evaluates usage, re-selects a provider, and submits the prompt again - so a long task is handed back and forth (e.g. Claude → ralph-robin → Claude). It does **not** stop when every provider is blocked: it owns the suspend decision and waits for the rotation to recover. The loop ends only on a non-recoverable failure, a degenerate instant-success streak, or once `--max-duration` / `--max-iterations` is reached.
 * When **all** providers are rate-limited, Ralph suspends the computer with an RTC wake-up timer set to the **earliest** provider window renewal across the whole rotation, then on wake resumes its *own* loop and re-evaluates which provider to use. (When suspend infrastructure is unavailable, the lead time is too short, or `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1`/`--dry-run` is set, it falls back to an in-process wait.) This is distinct from `llm-scheduler --suspend-until-ready`, which wakes into a single configured provider; Ralph wakes back into cross-provider rotation.
 * Streams provider output without injected labels.
 * Highlights status lines, diffs, commands, warnings, and errors on interactive terminals.
