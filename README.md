@@ -45,7 +45,9 @@ Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` an
 pipx install git+https://github.com/chrisgleissner/llm-tools.git
 ```
 
-`pipx` keeps each tool in its own virtual environment, so this also works on externally managed systems (Debian/Ubuntu, Homebrew Python) where installing into the system interpreter is blocked with an `externally-managed-environment` error. If you do not have `pipx` yet: `python3 -m pip install --user pipx && python3 -m pipx ensurepath` (or `brew install pipx` on macOS), then open a new shell.
+`pipx` keeps each tool in its own virtual environment, so this also works on externally managed systems (Debian/Ubuntu, Homebrew Python) where installing into the system interpreter is blocked with an `externally-managed-environment` error. 
+
+If you do not have `pipx` yet: `python3 -m pip install --user pipx && python3 -m pipx ensurepath` (or `brew install pipx` on macOS), then open a new shell.
 
 Verify the commands are on your `PATH`:
 
