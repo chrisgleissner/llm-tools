@@ -35,8 +35,6 @@ After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`)
 * `llm-scheduler` only needs the one provider you target with `--tool`.
 * `ralph-robin` skips providers it cannot use and rotates across the ones that are available (its default rotation is `claude,codex`; narrow or widen it with `--tools`).
 
-None of the tools call a hard "command not found" guard on a provider binary, so a missing CLI is handled gracefully rather than aborting the run.
-
 ## Install
 
 Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` and can be run from any directory:
@@ -231,7 +229,7 @@ Options:
 | `--tools LIST`       | Set comma-separated rotation. Values: `claude`, `codex`, `copilot`.                                        |
 | `--prompt TEXT`      | Prompt text passed to the selected provider.                                                               |
 | `--prompt-file FILE` | Prompt file passed to the selected provider.                                                               |
-| `--even-burn`        | Prefer the provider with the highest remaining daily capacity (weekly remaining ÷ days until weekly reset), waiting through short-window resets when needed. Enabled by default. |
+| `--even-burn`        | Spread work to burn each provider's weekly quota down evenly (see Behavior below). Enabled by default.      |
 | `--no-even-burn`     | Keep using the current provider until it is exhausted.                                                      |
 | `--max-iterations N` | Stop after `N` successful increments. Default `0` means no iteration cap; use `1` for single-shot. |
 | `--max-duration D`   | Stop once `D` of wall-clock time elapses (e.g. `24h`, `90m`, `30s`, or seconds). Default `24h`; `0` disables. Whichever of `--max-iterations`/`--max-duration` is hit first wins. |
@@ -260,8 +258,7 @@ Passed through to `llm-scheduler`:
 Behavior:
 
 * Defaults to autonomous headless launches, even from an interactive terminal.
-* Defaults to even burn-down: when multiple providers are available, selects the one with the highest remaining *daily* capacity — the weekly remaining percentage divided by the days until weekly reset (e.g. 80% remaining with 4 days left is 20% per day) — even if that provider needs to wait for a shorter session-window reset first. This spreads each provider's weekly quota evenly across the days until it resets. When a provider's weekly reset time is unknown or stale, a full weekly window is assumed so it is still ranked rather than skipped.
-* Use `--no-even-burn` to restore current-provider-until-exhausted rotation.
+* Defaults to even burn-down: selects the provider with the highest remaining *daily* capacity — weekly remaining % ÷ days until weekly reset (e.g. 80% with 4 days left is 20%/day) — even if it must first wait for a shorter session-window reset. This spreads each weekly quota evenly across the days until it resets. A provider with an unknown or stale weekly reset is assumed to have a full week, so it is still ranked rather than skipped.
 * Loops persistently: after each provider finishes an increment, Ralph re-evaluates usage, re-selects a provider, and submits the prompt again — so a long task is handed back and forth (e.g. Claude → ralph-robin → Claude). It does **not** stop when every provider is blocked: it owns the suspend decision and waits for the rotation to recover. The loop ends only on a non-recoverable failure, a degenerate instant-success streak, or once `--max-duration` / `--max-iterations` is reached.
 * When **all** providers are rate-limited, Ralph suspends the computer with an RTC wake-up timer set to the **earliest** provider window renewal across the whole rotation, then on wake resumes its *own* loop and re-evaluates which provider to use. (When suspend infrastructure is unavailable, the lead time is too short, or `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1`/`--dry-run` is set, it falls back to an in-process wait.) This is distinct from `llm-scheduler --suspend-until-ready`, which wakes into a single configured provider; Ralph wakes back into cross-provider rotation.
 * Streams provider output without injected labels.
@@ -269,7 +266,6 @@ Behavior:
 * Disables colors for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 * If usage cannot be measured, tries that provider before suspending.
 * If a provider exits with a scheduler autonomy abort, skips it for the current invocation and tries the next usable provider.
-* If every provider blocks, exits with status `75` and leaves logs under the printed run directory.
 
 Color overrides:
 
@@ -329,7 +325,7 @@ attempt-N.status
 
 The scheduler logs arguments, prompt source, prompt SHA-256, prompt content, usage snapshots, wait decisions, command plan, output, exit code, retry delays, and final status.
 
-Useful symlinks:
+Symlinks:
 
 ```text
 ~/.cache/llm-tools/llm-scheduler/logs/latest
@@ -387,7 +383,6 @@ llm-scheduler --wake-test
 * Not an official billing dashboard.
 * Missing or inconclusive provider data is shown as `-`, `unknown`, or `unavailable`.
 * If usage remains unavailable beyond `--max-unavailable-wait`, the scheduler launches optimistically and lets provider rate-limit handling and retry behavior take over.
-* Known rate limits with real reset times still wait for reset.
 * Provider local data formats and CLI syntax can change.
 * Copilot AI credits are parsed when requested, but scheduler gating currently uses monthly remaining usage.
 
