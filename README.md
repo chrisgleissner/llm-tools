@@ -37,11 +37,13 @@ After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`)
 
 ## Install
 
-Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` and can be run from any directory:
+Install with [pipx](https://pipx.pypa.io) so the commands land on your `PATH` and can be run from any directory — no checkout required:
 
 ```bash
-pipx install .
+pipx install git+https://github.com/chrisgleissner/llm-tools.git@0.1.0
 ```
+
+Drop `@0.1.0` to track the latest `main`, or pin a different [release](https://github.com/chrisgleissner/llm-tools/releases) tag for reproducible installs.
 
 `pipx` keeps each tool in its own virtual environment, so this also works on externally managed systems (Debian/Ubuntu, Homebrew Python) where installing into the system interpreter is blocked with an `externally-managed-environment` error. If you do not have `pipx` yet: `python3 -m pip install --user pipx && python3 -m pipx ensurepath` (or `brew install pipx` on macOS), then open a new shell.
 
@@ -53,7 +55,21 @@ command -v llm-scheduler
 command -v ralph-robin
 ```
 
-Alternatively, install into a virtual environment:
+Prefer a pre-built artifact? Each [release](https://github.com/chrisgleissner/llm-tools/releases) ships a wheel you can install without a build step:
+
+```bash
+pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.1.0/llm_tools-0.1.0-py3-none-any.whl
+```
+
+### From a local checkout
+
+If you have cloned the repository, install it from the working tree:
+
+```bash
+pipx install .
+```
+
+Or into a virtual environment:
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
