@@ -219,7 +219,9 @@ def test_provider_default_argv_kilo_and_opencode_cwd_handling() -> None:
     assert scheduler.provider_default_argv(attached_kilo, "prompt") == ["kilo", "run", "prompt"]
 
     headless_kilo = scheduler.SchedulerConfig(provider="kilo", cwd="/tmp/work")
-    assert scheduler.provider_default_argv(headless_kilo, "prompt") == ["kilo", "run", "--auto", "prompt"]
+    assert scheduler.provider_default_argv(headless_kilo, "prompt") == [
+        "kilo", "run", "--dir", "/tmp/work", "prompt",
+    ]
 
     attached_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work", attached=True)
     assert scheduler.provider_default_argv(attached_opencode, "prompt") == ["opencode"]

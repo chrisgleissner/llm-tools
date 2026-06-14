@@ -584,7 +584,7 @@ def test_parser_option_coverage(tmp_path: Path) -> None:
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="claude", claude_stream_json=True), "p") == ["claude", "--print", "--output-format", "stream-json", "--verbose", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="copilot", cwd="/c", attached=True), "p") == ["copilot", "-C", "/c", "-i", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c", attached=True), "p") == ["kilo", "run", "p"]
-    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c"), "p") == ["kilo", "run", "--auto", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c"), "p") == ["kilo", "run", "--dir", "/c", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="opencode", cwd="/c", attached=True), "p") == ["opencode"]
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(provider="codex")).startswith("Codex")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(provider="claude")).startswith("Claude")
@@ -1391,3 +1391,58 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     usage.print_copilot_rows(ucfg, None)
     out = capsys.readouterr().out
     assert "Codex" in out and "Copilot" in out
+
+
+def test_usage_snapshot_and_decision_no_delegation_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_snapshot(provider: str, env=None):
+        calls["snapshot_provider"] = provider
+        return {"provider": provider, "available": True}
+
+    def fake_decision(provider, window, min_remaining, poll_interval, snapshot, env=None, *, model=None, allow_fallback=True):
+        calls["decision_provider"] = provider
+        calls["model"] = model
+        calls["allow_fallback"] = allow_fallback
+        return {"provider": provider, "usable": True, "reason": "usable"}
+
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", fake_snapshot)
+    monkeypatch.setattr(common, "usage_decision_for_provider", fake_decision)
+
+    snap, dec = common.usage_snapshot_and_decision("claude", None, "auto", "1", "60", model="sonnet", allow_fallback=False)
+    assert calls["snapshot_provider"] == "claude"
+    assert calls["decision_provider"] == "claude"
+    # No delegation: the pinned model and allow_fallback flow straight through.
+    assert calls["model"] == "sonnet"
+    assert calls["allow_fallback"] is False
+    assert dec["provider"] == "claude"
+    assert "capacity_provider" not in dec
+
+
+def test_usage_snapshot_and_decision_delegates_to_capacity_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_snapshot(provider: str, env=None):
+        calls["snapshot_provider"] = provider
+        return {"provider": provider, "available": True}
+
+    def fake_decision(provider, window, min_remaining, poll_interval, snapshot, env=None, *, model=None, allow_fallback=True):
+        calls["decision_provider"] = provider
+        calls["model"] = model
+        calls["allow_fallback"] = allow_fallback
+        return {"provider": provider, "usable": True, "reason": "usable", "windows": [{"name": "5h"}]}
+
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", fake_snapshot)
+    monkeypatch.setattr(common, "usage_decision_for_provider", fake_decision)
+
+    snap, dec = common.usage_snapshot_and_decision("opencode", "minimax", "auto", "1", "60", model="ignored", allow_fallback=False)
+    # Capacity is read from minimax...
+    assert calls["snapshot_provider"] == "minimax"
+    assert calls["decision_provider"] == "minimax"
+    # ...gated purely on minimax's aggregate windows (requesting model ignored).
+    assert calls["model"] is None
+    assert calls["allow_fallback"] is True
+    # ...but relabelled back to the provider whose CLI actually runs.
+    assert dec["provider"] == "opencode"
+    assert dec["capacity_provider"] == "minimax"
+    assert dec["windows"] == [{"name": "5h"}]

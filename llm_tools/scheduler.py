@@ -96,6 +96,10 @@ class SchedulerConfig:
     # from the shared config file's per-provider policy (CLI --model wins).
     model: str = ""
     allow_fallback: bool = False
+    # When set, gate on this other provider's usage windows instead of
+    # ``provider``'s own (e.g. opencode running the minimax model). The
+    # ``provider`` CLI is still the one launched.
+    capacity_provider: str = ""
     scope: str = "auto"
     min_remaining: str = "1"
     poll_interval: str = "60"
@@ -258,7 +262,9 @@ def validate_args(cfg: SchedulerConfig) -> None:
             common.err(f"invalid --provider: {cfg.provider}")
         raise SystemExit(2)
     common.validate_prompt_args(cfg.prompt_text, cfg.prompt_file)
-    common.validate_provider_scope(cfg.provider, cfg.scope)
+    # A delegated provider is gated on its capacity_provider's windows, so the
+    # scope must be valid for that provider (e.g. opencode->minimax allows 5h).
+    common.validate_provider_scope(cfg.capacity_provider or cfg.provider, cfg.scope)
     common.validate_gate_args(cfg.cwd, cfg.min_remaining, cfg.poll_interval, cfg.max_unavailable_wait, cfg.retry_delays)
     if not common.is_integer(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600")):
         common.err("LLM_SCHEDULER_IDLE_TIMEOUT must be integer seconds")
@@ -298,6 +304,7 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "provider": cfg.provider,
         "model": cfg.model,
         "allow_fallback": cfg.allow_fallback,
+        "capacity_provider": cfg.capacity_provider,
         "scope": cfg.scope,
         "min_remaining": float(cfg.min_remaining),
         "poll_interval": int(cfg.poll_interval),
@@ -414,7 +421,11 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
             return ["claude", "--print", "--output-format", "stream-json", "--verbose", *m, prompt]
         return ["claude", "--print", *m, prompt]
     if cfg.provider == "kilo":
-        return ["kilo", "run", "--auto", prompt]
+        # kilo uses `--dir` for the working directory. We do not inject any
+        # permission-bypassing flag (e.g. `--auto`): whether a headless run may
+        # act without prompting is governed by the user's own Kilo `permission`
+        # config, not by this framework.
+        return ["kilo", "run", "--dir", cfg.cwd, prompt]
     if cfg.provider == "opencode":
         # opencode uses `--dir` (not `-C`) for the working directory. We do not
         # inject any permission-bypassing flag: whether a headless run may act
@@ -628,17 +639,16 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
             if cfg.dry_run:
                 return
             sleep_until(not_before)
-        snapshot = common.usage_snapshot_for_provider(cfg.provider)
-        common.log_event(logs, "usage_snapshot", snapshot)
-        decision = common.usage_decision_for_provider(
+        snapshot, decision = common.usage_snapshot_and_decision(
             cfg.provider,
+            cfg.capacity_provider or None,
             cfg.scope,
             cfg.min_remaining,
             cfg.poll_interval,
-            snapshot,
             model=cfg.model or None,
             allow_fallback=cfg.allow_fallback,
         )
+        common.log_event(logs, "usage_snapshot", snapshot)
         common.log_event(logs, "usage_decision", decision)
         reason = str(decision.get("reason"))
         common.log_text(logs, f"usage decision: {reason}")
@@ -1159,6 +1169,8 @@ def apply_config(cfg: SchedulerConfig, env: dict[str, str] | None = None) -> Non
     if cfg.provider:
         policy = toolconfig.provider_policy(conf, cfg.provider)
         cfg.allow_fallback = policy.allow_fallback
+        if policy.capacity_provider:
+            cfg.capacity_provider = policy.capacity_provider
         if "model" not in cfg.explicit and policy.model:
             cfg.model = policy.model
         if "scope" not in cfg.explicit and policy.scope:

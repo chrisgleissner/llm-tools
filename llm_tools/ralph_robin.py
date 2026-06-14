@@ -61,7 +61,7 @@ Examples:
   ralph-robin --prompt-file task.md --dry-run
 
 Options:
-  -P, --providers LIST                     Providers in rotation (default: claude,codex).
+  -P, --providers LIST                     Providers in rotation (default: claude,codex,opencode).
   -p, --prompt TEXT                        Prompt text.
   -f, --prompt-file FILE                   Read prompt from FILE, preserving content.
   -s, --scope SCOPE                        Capacity scope to gate on (default: auto).
@@ -101,7 +101,7 @@ Scopes: auto, 5h, weekly, monthly, balance, budget, byok, ungated.
 
 @dataclass
 class RalphConfig:
-    providers_spec: str = "claude,codex"
+    providers_spec: str = "claude,codex,opencode"
     providers: list[str] = field(default_factory=list)
     prompt_text: str = ""
     prompt_file: str = ""
@@ -511,7 +511,7 @@ def resolve_policies(cfg: RalphConfig, conf: dict[str, Any]) -> None:
         policy = toolconfig.provider_policy(conf, provider)
         if policy.model and provider not in scheduler.MODEL_FLAG_PROVIDERS:
             common.err(f"warning: model pinning is not supported for provider '{provider}'; ignoring model={policy.model}")
-            policy = toolconfig.ProviderPolicy(model=None, allow_fallback=policy.allow_fallback, scope=policy.scope, min_remaining=policy.min_remaining)
+            policy = toolconfig.ProviderPolicy(model=None, allow_fallback=policy.allow_fallback, scope=policy.scope, min_remaining=policy.min_remaining, capacity_provider=policy.capacity_provider)
         policies[provider] = policy
     cfg.policies = policies
 
@@ -519,8 +519,13 @@ def resolve_policies(cfg: RalphConfig, conf: dict[str, Any]) -> None:
 def validate_args(cfg: RalphConfig) -> None:
     cfg.providers = parse_providers(cfg.providers_spec)
     common.validate_prompt_args(cfg.prompt_text, cfg.prompt_file)
+    # The scope must be valid for whichever provider's windows are actually read:
+    # a provider with capacity_provider set is gated on that other provider's
+    # scopes (e.g. opencode->minimax makes 5h/weekly valid for the opencode slot).
+    conf = toolconfig.load_config()
     for provider in cfg.providers:
-        common.validate_provider_scope(provider, cfg.scope)
+        capacity_provider = toolconfig.provider_policy(conf, provider).capacity_provider or provider
+        common.validate_provider_scope(capacity_provider, cfg.scope)
     common.validate_gate_args(cfg.cwd, cfg.min_remaining, cfg.poll_interval, cfg.max_unavailable_wait, cfg.retry_delays)
     if not common.is_integer(cfg.max_iterations) or int(cfg.max_iterations) < 0:
         common.err("--max-iterations must be a non-negative integer")
@@ -547,7 +552,7 @@ def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
     return {
         "providers_spec": cfg.providers_spec,
         "providers": cfg.providers,
-        "policies": {p: {"model": pol.model, "allow_fallback": pol.allow_fallback} for p, pol in cfg.policies.items()},
+        "policies": {p: {"model": pol.model, "allow_fallback": pol.allow_fallback, "capacity_provider": pol.capacity_provider} for p, pol in cfg.policies.items()},
         "scope": cfg.scope,
         "min_remaining": float(cfg.min_remaining),
         "poll_interval": int(cfg.poll_interval),
@@ -723,19 +728,19 @@ def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_i
 def select_provider(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skipped: set[str]) -> dict[str, Any]:
     decisions: list[dict[str, Any]] = []
     for provider in cfg.providers:
-        snapshot = common.usage_snapshot_for_provider(provider)
         policy = cfg.policies.get(provider)
-        decision = common.usage_decision_for_provider(
+        capacity_provider = policy.capacity_provider if policy else None
+        snapshot, decision = common.usage_snapshot_and_decision(
             provider,
+            capacity_provider,
             cfg.scope,
             cfg.min_remaining,
             cfg.poll_interval,
-            snapshot,
             model=policy.model if policy else None,
             allow_fallback=policy.allow_fallback if policy else True,
         )
         decisions.append(decision)
-        common.log_event(logs, "usage_snapshot", {"provider": provider, "snapshot": snapshot})
+        common.log_event(logs, "usage_snapshot", {"provider": provider, "capacity_provider": capacity_provider, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
     if cfg.even_burn:
         balanced_index = even_burn_index(cfg, decisions, current_index, skipped)
@@ -823,6 +828,7 @@ def scheduler_config_for(cfg: RalphConfig, selected_provider: str, logs: common.
         provider=selected_provider,
         model=model,
         allow_fallback=policy.allow_fallback if policy else False,
+        capacity_provider=(policy.capacity_provider or "") if policy else "",
         prompt_text=provider_prompt,
         prompt_source=f"ralph-runtime:{selected_provider}",
         scope=cfg.scope,

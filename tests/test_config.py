@@ -332,6 +332,76 @@ def test_provider_policy_returns_set_values() -> None:
     assert p.min_remaining == "5"
 
 
+def test_provider_policy_parses_capacity_provider() -> None:
+    cfg = {"providers": {"opencode": {"capacity_provider": "minimax"}}}
+    p = provider_policy(cfg, "opencode")
+    assert p.capacity_provider == "minimax"
+    # A provider without the key keeps the None default.
+    assert provider_policy(cfg, "claude").capacity_provider is None
+
+
+def test_validate_capacity_provider_loads_when_valid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        "[providers.opencode]\ncapacity_provider = \"minimax\"\n",
+    )
+    loaded = load_config()
+    assert loaded["providers"]["opencode"]["capacity_provider"] == "minimax"
+
+
+def test_validate_capacity_provider_unknown_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        "[providers.opencode]\ncapacity_provider = \"nope\"\n",
+    )
+    with pytest.raises(SystemExit):
+        load_config()
+
+
+def test_validate_capacity_provider_rejects_self_reference(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        "[providers.opencode]\ncapacity_provider = \"opencode\"\n",
+    )
+    with pytest.raises(SystemExit):
+        load_config()
+
+
+def test_validate_capacity_provider_rejects_chains(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        """
+        [providers.opencode]
+        capacity_provider = "minimax"
+
+        [providers.minimax]
+        capacity_provider = "claude"
+        """,
+    )
+    with pytest.raises(SystemExit):
+        load_config()
+
+
 def test_provider_policy_uses_false_default_for_allow_fallback() -> None:
     cfg = {"providers": {"claude": {"model": "sonnet"}}}
     p = provider_policy(cfg, "claude")

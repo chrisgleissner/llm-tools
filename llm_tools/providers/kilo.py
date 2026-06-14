@@ -486,13 +486,20 @@ def read_kilo(env: dict[str, str] | None = None) -> ProviderSnapshot:
 def kilo_command_argv(cfg_attached: bool, cwd: str, prompt: str) -> list[str]:
     """Build the default argv for launching Kilo.
 
-    Attached/interactive: ``kilo run <prompt>`` (run from --cwd).
-    Headless/autonomous: ``kilo run --auto <prompt>``.
+    Attached/interactive: ``kilo run <prompt>`` — Kilo picks up the working
+    directory from the launching process, so we set it via the subprocess cwd.
+    Headless/autonomous: ``kilo run --dir <cwd> <prompt>`` so the agent works
+    in the configured directory.
+
+    We deliberately do not inject any permission-bypassing flag (such as
+    ``--auto`` or ``--dangerously-skip-permissions``). Whether a headless run
+    may act without prompting is left entirely to the user's own Kilo config
+    (its ``permission`` settings); the framework never elevates privileges on
+    the user's behalf.
     """
-    base = ["kilo", "run"]
-    if not cfg_attached:
-        base.append("--auto")
-    return [*base, prompt]
+    if cfg_attached:
+        return ["kilo", "run", prompt]
+    return ["kilo", "run", "--dir", cwd, prompt]
 
 
 __all__ = [

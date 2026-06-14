@@ -2130,6 +2130,50 @@ def usage_decision_for_provider(
     return decision
 
 
+def usage_snapshot_and_decision(
+    provider: str,
+    capacity_provider: str | None,
+    window: str,
+    min_remaining: str,
+    poll_interval: str,
+    env: dict[str, Any] | None = None,
+    *,
+    model: str | None = None,
+    allow_fallback: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Snapshot + usability decision for ``provider``, optionally delegated.
+
+    When ``capacity_provider`` is set and differs from ``provider``, the snapshot
+    and decision are read from that other provider's usage windows instead of
+    ``provider``'s own — the generic "this CLI actually runs another provider's
+    model" case (e.g. OpenCode pointed at MiniMax). The decision is gated purely
+    on the capacity provider's aggregate windows (the requesting provider's
+    pinned ``model`` has no rate-limit bucket there), then relabelled back to
+    ``provider`` and tagged with ``capacity_provider`` so callers, logs, and the
+    rotation display still reason about the provider whose CLI actually runs.
+
+    Returns ``(snapshot, decision)``. With no delegation it is exactly the
+    ``usage_snapshot_for_provider`` + ``usage_decision_for_provider`` pair.
+    """
+    source = capacity_provider or provider
+    snapshot = usage_snapshot_for_provider(source, env)
+    if source == provider:
+        decision = usage_decision_for_provider(
+            provider, window, min_remaining, poll_interval, snapshot, env,
+            model=model, allow_fallback=allow_fallback,
+        )
+        return snapshot, decision
+    decision = dict(
+        usage_decision_for_provider(
+            source, window, min_remaining, poll_interval, snapshot, env,
+            model=None, allow_fallback=True,
+        )
+    )
+    decision["provider"] = provider
+    decision["capacity_provider"] = source
+    return snapshot, decision
+
+
 def argv_to_command_line(argv: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv)
 

@@ -135,7 +135,7 @@ You do not need every provider CLI installed.
 
 * `llm-usage` reports unavailable providers as `unavailable` and still shows the rest.
 * `llm-scheduler` only needs the provider selected with `--provider`.
-* `ralph-robin` skips unavailable providers and rotates across the usable ones. Its default rotation is `claude,codex`; use `--providers` to change it.
+* `ralph-robin` skips unavailable providers and rotates across the usable ones. Its default rotation is `claude,codex,opencode`; use `--providers` to change it.
 
 ## Capacity Scopes
 
@@ -182,7 +182,7 @@ The main thing the file lets you set is which model each provider should run, an
 
 [defaults]
 # Order ralph-robin tries providers when --providers isn't given.
-providers     = ["claude", "codex"]
+providers     = ["claude", "codex", "opencode"]
 # Which capacity check to use. One of:
 # auto | 5h | weekly | monthly | balance | budget | byok | ungated
 scope         = "auto"
@@ -204,6 +204,15 @@ allow_fallback = false
 model          = "spark"
 allow_fallback = false
 
+[providers.opencode]
+# Tie opencode's availability/capacity to another provider's usage windows
+# instead of its own. Use it when the opencode CLI is configured to run another
+# provider's model (e.g. the MiniMax API), so opencode's own balance is
+# irrelevant. ralph-robin then only routes to opencode while minimax has
+# capacity, ranks even-burn on minimax's remaining, and suspends on minimax's
+# reset — while still launching the opencode CLI.
+capacity_provider = "minimax"
+
 [ralph]                                # ralph-robin-only settings (override [defaults] above)
 # One example key — see config.example.toml for the full list:
 providers      = ["claude", "codex", "kilo"]
@@ -216,6 +225,8 @@ provider       = "claude"
 A complete template with every supported key (all commented out) is shipped at [config.example.toml](./config.example.toml) in this repository. Copy it to one of the locations above and uncomment the lines you want to set.
 
 When `model` is set, `llm-scheduler` and `ralph-robin` call the provider with `--model NAME` and only run while that model still has capacity. With `allow_fallback = false` (the default), the tool treats the provider as unavailable once that model's limit is used up and switches to the next provider. With `allow_fallback = true`, the tool keeps trying the provider but drops the model setting and lets the provider's CLI pick a different model. Pass `--model NAME` on the command line to override the file for a single run.
+
+`capacity_provider` ties one provider's gating to another provider's usage windows. It is generic: any provider may borrow any other provider's windows (a single hop — a provider cannot reference itself or a provider that itself delegates). The borrowing provider's own CLI is still the one launched; only the availability/capacity reading is delegated. The motivating case is a CLI configured to run a different provider's model — for example OpenCode pointed at the MiniMax API, where OpenCode's own balance says nothing about whether a run will succeed. With `capacity_provider = "minimax"`, `ralph-robin` only routes to OpenCode while MiniMax has capacity, ranks even-burn on MiniMax's remaining-per-day, and suspends until MiniMax's reset; the scope you gate on (e.g. `5h`, `weekly`) is then validated against MiniMax's windows rather than OpenCode's.
 
 Unknown sections or keys are rejected at load time so typos surface immediately.
 
@@ -402,7 +413,7 @@ llm-scheduler --provider codex --prompt-file task.md --dry-run
 | Mode        | Codex                          | Claude Code               | GitHub Copilot                       | Kilo Code                                |
 | ----------- | ------------------------------ | ------------------------- | ------------------------------------ | ---------------------------------------- |
 | Interactive | `codex -C <cwd> <prompt>`      | `claude <prompt>`         | `copilot -C <cwd> -i <prompt>`       | `kilo run <prompt>` using `--cwd`        |
-| Headless    | `codex exec -C <cwd> <prompt>` | `claude --print <prompt>` | `copilot -C <cwd> --prompt <prompt>` | `kilo run --auto <prompt>` using `--cwd` |
+| Headless    | `codex exec -C <cwd> <prompt>` | `claude --print <prompt>` | `copilot -C <cwd> --prompt <prompt>` | `kilo run --dir <cwd> <prompt>`          |
 
 The default Claude adapter uses your local Claude Code permission settings. To override Claude Code settings for one scheduler run:
 
