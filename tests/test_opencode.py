@@ -271,11 +271,11 @@ def test_opencode_command_argv_headless() -> None:
 # --- Scheduler: OpenCode end-to-end ------------------------------------------
 
 
-def test_scheduler_accepts_opencode_tool(env: dict[str, str]) -> None:
+def test_scheduler_accepts_opencode_provider(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "opencode",
             "--prompt",
             "x",
@@ -300,7 +300,7 @@ def test_scheduler_rejects_opencode_invalid_scope(env: dict[str, str]) -> None:
     bad = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "opencode",
             "--prompt",
             "x",
@@ -320,7 +320,7 @@ def test_scheduler_opencode_balance_below_minimum_blocks(env: dict[str, str]) ->
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "opencode",
             "--prompt",
             "x",
@@ -355,7 +355,7 @@ def test_scheduler_opencode_byok_launches_with_headless_command(
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "opencode",
             "--prompt",
             "x",
@@ -379,7 +379,7 @@ def test_scheduler_dry_run_opencode_balance_event(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "opencode",
             "--prompt",
             "x",
@@ -410,7 +410,7 @@ def test_scheduler_dry_run_opencode_budget_pacing(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "opencode",
             "--prompt",
             "x",
@@ -544,7 +544,7 @@ def test_usage_table_renders_opencode_spent(env: dict[str, str], capsys, monkeyp
     out = buf.getvalue()
     assert "OpenCode" in out
     assert "spent $0" in out
-    # A spent-cost row from an available snapshot means the tool is ready.
+    # A spent-cost row from an available snapshot means the provider is ready.
     assert "yes" in out
 
 

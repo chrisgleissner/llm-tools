@@ -160,7 +160,7 @@ class ProviderSnapshot:
 
 @dataclass
 class UsageDecision:
-    tool: str
+    provider: str
     usable: bool
     reason: str
     wait_until: int | None = None
@@ -240,7 +240,7 @@ def decide(
 
     if not snapshot.available:
         return UsageDecision(
-            tool=snapshot.provider,
+            provider=snapshot.provider,
             usable=False,
             reason=snapshot.reason or "unavailable",
             wait_until=now + poll,
@@ -249,7 +249,7 @@ def decide(
 
     if not cli_present:
         return UsageDecision(
-            tool=snapshot.provider,
+            provider=snapshot.provider,
             usable=False,
             reason="missing-cli",
             wait_until=now + poll,
@@ -263,7 +263,7 @@ def decide(
 
     if not scopes:
         return UsageDecision(
-            tool=snapshot.provider,
+            provider=snapshot.provider,
             usable=False,
             reason="unsupported-scope",
             wait_until=now + poll,
@@ -282,7 +282,7 @@ def decide(
             known.append(s)
     if not known and not inconclusive:
         return UsageDecision(
-            tool=snapshot.provider,
+            provider=snapshot.provider,
             usable=False,
             reason="unsupported-scope",
             wait_until=now + poll,
@@ -290,7 +290,7 @@ def decide(
         )
     if not known:
         return UsageDecision(
-            tool=snapshot.provider,
+            provider=snapshot.provider,
             usable=False,
             reason="inconclusive-usage",
             wait_until=now + poll,
@@ -311,7 +311,7 @@ def decide(
 
     if not blocked:
         return UsageDecision(
-            tool=snapshot.provider,
+            provider=snapshot.provider,
             usable=True,
             reason="usable",
             wait_until=None,
@@ -324,7 +324,7 @@ def decide(
         wait_until = now + poll
     exhausted_reason = _combined_block_reason(blocked)
     return UsageDecision(
-        tool=snapshot.provider,
+        provider=snapshot.provider,
         usable=False,
         reason=exhausted_reason,
         wait_until=wait_until,

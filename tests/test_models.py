@@ -3,7 +3,7 @@
 These tests lock in two related behaviours:
 
 * Providers can surface model-specific rate limits as their own rows under the
-  same provider section, named in a dedicated ``Model`` column. The Tool column
+  same provider section, named in a dedicated ``Model`` column. The Provider column
   no longer overflows with a long combined name (the bug that broke alignment).
 * Claude's per-model weekly buckets (``seven_day_sonnet`` etc.) are display
   only: they never gate scheduler/rotation decisions.
@@ -149,7 +149,7 @@ def test_claude_sonnet_row_is_colocated_under_claude() -> None:
     assert rows[-1].model == "Sonnet"
     out = _render(cfg, rows)
     assert "Sonnet" in out
-    # The Sonnet row must not start a new provider block (Tool column blank).
+    # The Sonnet row must not start a new provider block (Provider column blank).
     sonnet_line = next(line for line in out.splitlines() if "Sonnet" in line)
     assert sonnet_line.startswith(" ")
 
@@ -177,10 +177,10 @@ def test_codex_spark_renders_under_codex_with_model_column() -> None:
         ],
     }
     out = _render(cfg, usage.codex_rows(cfg, codex_json))
-    assert "GPT-5.3 Spark" not in out  # no longer crammed into the Tool column
+    assert "GPT-5.3 Spark" not in out  # no longer crammed into the Provider column
     assert "Spark" in out
     spark_line = next(line for line in out.splitlines() if "Spark" in line)
-    assert spark_line.startswith(" ")  # colocated under Codex, Tool blank
+    assert spark_line.startswith(" ")  # colocated under Codex, Provider blank
 
 
 def test_model_rows_keep_columns_aligned() -> None:

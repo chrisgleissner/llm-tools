@@ -1532,29 +1532,29 @@ def validate_retry_delays(value: str) -> None:
         raise SystemExit(2)
 
 
-def validate_tool_window(tool: str, window: str) -> None:
-    """Deprecated alias for :func:`validate_tool_scope`."""
-    validate_tool_scope(tool, window)
+def validate_provider_window(provider: str, window: str) -> None:
+    """Deprecated alias for :func:`validate_provider_scope`."""
+    validate_provider_scope(provider, window)
 
 
-def validate_tool_scope(tool: str, scope: str) -> None:
+def validate_provider_scope(provider: str, scope: str) -> None:
     from .capacity import validate_scope, valid_scopes_for_provider
 
     try:
-        validate_scope(tool, scope)
+        validate_scope(provider, scope)
     except ValueError as exc:
         err(str(exc))
         raise SystemExit(2) from exc
-    allowed = valid_scopes_for_provider(tool)
+    allowed = valid_scopes_for_provider(provider)
     if scope not in allowed:
-        if tool == "copilot":
+        if provider == "copilot":
             err(f"--scope {scope} is not valid for copilot (use one of: {', '.join(sorted(allowed))})")
-        elif tool == "kilo":
+        elif provider == "kilo":
             err(f"--scope {scope} is not valid for kilo (use one of: {', '.join(sorted(allowed))})")
-        elif tool == "minimax":
+        elif provider == "minimax":
             err(f"--scope {scope} is not valid for minimax (use one of: {', '.join(sorted(allowed))})")
         else:
-            err(f"--scope {scope} is not valid for {tool} (use one of: {', '.join(sorted(allowed))})")
+            err(f"--scope {scope} is not valid for {provider} (use one of: {', '.join(sorted(allowed))})")
         raise SystemExit(2)
 
 
@@ -1585,7 +1585,7 @@ class RunLogs:
     prompt_sha: str = ""
 
 
-def setup_run_logs(log_dir: Path, suffix: str, tool_link: str = "", run_dir: Path | None = None) -> RunLogs:
+def setup_run_logs(log_dir: Path, suffix: str, provider_link: str = "", run_dir: Path | None = None) -> RunLogs:
     old_umask = os.umask(0o077)
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1615,8 +1615,8 @@ def setup_run_logs(log_dir: Path, suffix: str, tool_link: str = "", run_dir: Pat
             except OSError:
                 pass
         _symlink(run, log_dir / "latest")
-        if tool_link:
-            _symlink(run, log_dir / f"latest-{tool_link}")
+        if provider_link:
+            _symlink(run, log_dir / f"latest-{provider_link}")
         return RunLogs(run, text_log, event_log)
     finally:
         os.umask(old_umask)
@@ -1669,8 +1669,8 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
     return text, digest
 
 
-def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dict[str, Any]:
-    """Build a JSON-friendly snapshot for ``tool``.
+def usage_snapshot_for_provider(provider: str, env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Build a JSON-friendly snapshot for ``provider``.
 
     The legacy wire format (e.g. ``five_hour``, ``week``, ``monthly``) is
     preserved for Codex/Claude/Copilot so existing tests, JSON consumers, and
@@ -1682,16 +1682,16 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
     injected = env.get("LLM_SCHEDULER_USAGE_JSON")
     if injected:
         raw = json.loads(injected)
-        if isinstance(raw, dict) and tool in raw:
-            return raw[tool]
+        if isinstance(raw, dict) and provider in raw:
+            return raw[provider]
         return raw
-    if tool == "codex":
+    if provider == "codex":
         return json_for_provider(read_codex(env), "codex")
-    if tool == "claude":
+    if provider == "claude":
         return json_for_provider(read_claude(env), "claude")
-    if tool == "copilot":
+    if provider == "copilot":
         return json_for_copilot(read_copilot(env), False)
-    if tool == "kilo":
+    if provider == "kilo":
         snap = _kilo_snapshot(env)
         return {
             "provider": snap.provider,
@@ -1701,7 +1701,7 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
             "selected_model": snap.selected_model,
             "scopes": [_scope_to_dict(s) for s in snap.scopes],
         }
-    if tool == "opencode":
+    if provider == "opencode":
         snap = _opencode_snapshot(env)
         return {
             "provider": snap.provider,
@@ -1711,7 +1711,7 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
             "selected_model": snap.selected_model,
             "scopes": [_scope_to_dict(s) for s in snap.scopes],
         }
-    if tool == "minimax":
+    if provider == "minimax":
         snap = _minimax_snapshot(env)
         return {
             "provider": snap.provider,
@@ -1721,7 +1721,7 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
             "selected_model": snap.selected_model,
             "scopes": [_scope_to_dict(s) for s in snap.scopes],
         }
-    return {"provider": tool, "available": False, "reason": "unsupported-tool"}
+    return {"provider": provider, "available": False, "reason": "unsupported-provider"}
 
 
 def _kilo_snapshot(env: dict[str, str] | None):
@@ -1808,9 +1808,9 @@ def _legacy_snapshot_to_scopes(snapshot: dict[str, Any]) -> list[dict[str, Any]]
     return scopes
 
 
-def _decision_scopes(snapshot: dict[str, Any], tool: str) -> list[dict[str, Any]]:
-    """Return the decision-ready scope dicts for ``tool``."""
-    if tool in ("kilo", "opencode", "minimax"):
+def _decision_scopes(snapshot: dict[str, Any], provider: str) -> list[dict[str, Any]]:
+    """Return the decision-ready scope dicts for ``provider``."""
+    if provider in ("kilo", "opencode", "minimax"):
         existing = snapshot.get("scopes")
         if isinstance(existing, list) and existing and isinstance(existing[0], dict) and "kind" in existing[0]:
             return existing
@@ -1824,7 +1824,7 @@ def _scope_filtered(scopes: list[dict[str, Any]], requested: str) -> list[dict[s
 
 
 def decide_with_scopes(
-    tool: str,
+    provider: str,
     scope: str,
     min_remaining_percent: float,
     min_remaining_amount: float,
@@ -1836,10 +1836,10 @@ def decide_with_scopes(
     snapshot_reason: str = "",
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Decide for ``tool`` against the given pre-built scope dicts.
+    """Decide for ``provider`` against the given pre-built scope dicts.
 
     Thin compatibility shim over :func:`llm_tools.capacity.decide` that keeps
-    the existing public JSON shape (``tool``/``usable``/``reason``/
+    the existing public JSON shape (``provider``/``usable``/``reason``/
     ``wait_until``/``windows``/``exhausted``) so every consumer keeps
     working unchanged.
     """
@@ -1850,7 +1850,7 @@ def decide_with_scopes(
 
     if not snapshot_available and not scopes:
         return {
-            "tool": tool,
+            "provider": provider,
             "usable": False,
             "reason": snapshot_reason or "unavailable",
             "wait_until": now + poll,
@@ -1858,7 +1858,7 @@ def decide_with_scopes(
         }
     if not cli_present:
         return {
-            "tool": tool,
+            "provider": provider,
             "usable": False,
             "reason": "missing-cli",
             "wait_until": now + poll,
@@ -1872,7 +1872,7 @@ def decide_with_scopes(
 
     typed_scopes = [_dict_to_scope(s) for s in chosen]
     snap = ProviderSnapshot(
-        provider=tool,
+        provider=provider,
         available=bool(snapshot_available),
         reason=str(snapshot_reason),
         scopes=typed_scopes,
@@ -1886,7 +1886,7 @@ def decide_with_scopes(
         cli_present=cli_present,
         env=env,
     )
-    return _decision_to_legacy(decision, scopes, tool)
+    return _decision_to_legacy(decision, scopes, provider)
 
 
 def _dict_to_scope(d: dict[str, Any]) -> Any:
@@ -1924,9 +1924,9 @@ def _windows_from_dicts(scopes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _decision_to_legacy(decision: Any, original_scopes: list[dict[str, Any]], tool: str) -> dict[str, Any]:
+def _decision_to_legacy(decision: Any, original_scopes: list[dict[str, Any]], provider: str) -> dict[str, Any]:
     out: dict[str, Any] = {
-        "tool": tool,
+        "provider": provider,
         "usable": decision.usable,
         "reason": decision.reason,
         "wait_until": decision.wait_until,
@@ -1946,8 +1946,85 @@ def _decision_to_legacy(decision: Any, original_scopes: list[dict[str, Any]], to
     return out
 
 
-def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_interval: str, snapshot: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, Any]:
-    """Decide whether ``tool`` is usable under the requested ``window``.
+def _window_scope_dict(name: str, window: dict[str, Any], source: str) -> dict[str, Any]:
+    """Build a decision-ready scope dict from a normalized window."""
+    rem = num(window.get("remaining"))
+    if rem is None:
+        rem = remaining_from_used(window.get("used"))
+    reset = window.get("resets_at")
+    return {
+        "name": name,
+        "kind": "reset_window",
+        "ready": rem is not None and rem > 0,
+        "reason": "",
+        "remaining_percent": rem,
+        "reset_epoch": parse_epoch(reset),
+        "resets_at": reset,
+        "source": source,
+    }
+
+
+def model_decision_scopes(provider: str, snapshot: dict[str, Any], model: str | None) -> list[dict[str, Any]] | None:
+    """Decision scopes for a provider's *specific* model, or ``None``.
+
+    Returns ``None`` when the provider/model combination has no dedicated
+    rate-limit bucket (most providers/models) so callers fall back to the
+    aggregate window. Today only Claude (per-model weekly buckets) and Codex
+    (the ``codex-spark`` row) expose model-specific limits; the mechanism is
+    generic so new ones slot in here.
+    """
+    if not model:
+        return None
+    want = model.strip().lower()
+    if provider == "claude":
+        entries = snapshot.get("model_weeks")
+        if not isinstance(entries, list):
+            return None
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            label = str(entry.get("model") or "").strip().lower()
+            # Match a short alias ("sonnet") or a full id ("claude-sonnet-4-6")
+            # against the bucket label ("Sonnet") in either direction.
+            if label and (label == want or label in want or want in label):
+                week = entry.get("week")
+                if not isinstance(week, dict):
+                    return None
+                return [_window_scope_dict("weekly", week, str(snapshot.get("source", "")))]
+        return None
+    if provider == "codex":
+        # The spark row is the only per-model Codex bucket; any other model maps
+        # to the aggregate "codex" row, which is already the default gate.
+        if "spark" not in want:
+            return None
+        rows = snapshot.get("rows")
+        if not isinstance(rows, list):
+            return None
+        spark = next((r for r in rows if isinstance(r, dict) and r.get("key") == "codex-spark"), None)
+        if spark is None:
+            return None
+        source = str(spark.get("source") or snapshot.get("source", ""))
+        scopes: list[dict[str, Any]] = []
+        for name, key in (("5h", "five_hour"), ("weekly", "week")):
+            window = spark.get(key)
+            if isinstance(window, dict):
+                scopes.append(_window_scope_dict(name, window, source))
+        return scopes or None
+    return None
+
+
+def usage_decision_for_provider(
+    provider: str,
+    window: str,
+    min_remaining: str,
+    poll_interval: str,
+    snapshot: dict[str, Any],
+    env: dict[str, str] | None = None,
+    *,
+    model: str | None = None,
+    allow_fallback: bool = True,
+) -> dict[str, Any]:
+    """Decide whether ``provider`` is usable under the requested ``window``.
 
     Implementation is a thin compatibility shim over
     :func:`llm_tools.capacity.decide`: it translates the legacy
@@ -1955,6 +2032,19 @@ def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_int
     generic decider, and re-shapes the result to keep the existing public
     JSON (``windows``, ``usable``, ``reason``, ``wait_until``,
     ``exhausted``) stable for every consumer (scheduler, ralph, tests).
+
+    When ``model`` names a provider model that has its own rate-limit bucket
+    (e.g. Claude Sonnet, Codex Spark) the decision becomes model-aware:
+
+    * ``allow_fallback=False`` (the default for pinned models) gates *only* on
+      that model's limit, so an exhausted model makes the provider unusable and
+      callers rotate away instead of silently running a different model.
+    * ``allow_fallback=True`` keeps the aggregate gate (the provider stays
+      usable while any model has room) but reports ``model_exhausted`` so the
+      caller can drop the model pin and let the CLI choose.
+
+    The returned dict carries ``model`` and ``model_exhausted`` whenever a model
+    was supplied.
     """
     env = env or os.environ
     poll = max(1, int(poll_interval))
@@ -1963,36 +2053,56 @@ def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_int
     try:
         from .providers import kilo_min_balance, opencode_min_balance
 
-        if tool == "kilo":
+        if provider == "kilo":
             min_amount = kilo_min_balance(env)
-        elif tool == "opencode":
+        elif provider == "opencode":
             min_amount = opencode_min_balance(env)
     except Exception:
         pass
 
-    scopes = _scope_filtered(_decision_scopes(snapshot, tool), window)
+    available = bool(snapshot.get("available", True))
+    reason = str(snapshot.get("reason", ""))
 
-    return decide_with_scopes(
-        tool,
-        window,
-        min_percent,
-        min_amount,
-        poll,
-        scopes,
-        cli_present=True,
-        snapshot_available=bool(snapshot.get("available", True)),
-        snapshot_reason=str(snapshot.get("reason", "")),
-        env=env,
-    )
+    def decide_on(base_scopes: list[dict[str, Any]]) -> dict[str, Any]:
+        return decide_with_scopes(
+            provider,
+            window,
+            min_percent,
+            min_amount,
+            poll,
+            _scope_filtered(base_scopes, window),
+            cli_present=True,
+            snapshot_available=available,
+            snapshot_reason=reason,
+            env=env,
+        )
+
+    model_scopes = model_decision_scopes(provider, snapshot, model)
+    # A non-auto scope the model has no bucket for cannot gate on the model.
+    if model_scopes is not None and window != "auto" and not any(s.get("name") == window for s in model_scopes):
+        model_scopes = None
+    model_decision = decide_on(model_scopes) if model_scopes is not None else None
+
+    if model_scopes is not None and not allow_fallback:
+        decision = model_decision
+    else:
+        decision = decide_on(_decision_scopes(snapshot, provider))
+
+    if model:
+        decision["model"] = model
+        decision["model_exhausted"] = (
+            model_decision.get("usable") is not True if model_decision is not None else False
+        )
+    return decision
 
 
 def argv_to_command_line(argv: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv)
 
 
-def template_argv(template: str, *, tool: str, prompt: str, prompt_file: Path, cwd: str) -> list[str]:
+def template_argv(template: str, *, provider: str, prompt: str, prompt_file: Path, cwd: str) -> list[str]:
     parts = shlex.split(template)
-    values = {"{tool}": tool, "{prompt}": prompt, "{prompt_file}": str(prompt_file), "{cwd}": cwd}
+    values = {"{provider}": provider, "{prompt}": prompt, "{prompt_file}": str(prompt_file), "{cwd}": cwd}
     out = []
     for part in parts:
         for key, value in values.items():
@@ -2227,10 +2337,10 @@ def output_is_retryable(status: int, output: str, attached: bool = False, trust_
 
 # Fields that may appear, in any combination and order, inside the `[ ]` marker
 # prepended to each relayed provider line. "time" is the wall-clock HH:MM:SS;
-# "tool" is the provider name (codex/claude/...); "usage" is the remaining
+# "provider" is the provider name (codex/claude/...), "usage" is the remaining
 # percentage per window (e.g. "5h=10% week=30%"). An empty selection disables
 # the marker entirely (no brackets).
-LINE_PREFIX_FIELDS = ("time", "tool", "usage")
+LINE_PREFIX_FIELDS = ("time", "provider", "usage")
 
 # Short labels for the scopes shown by the "usage" prefix field.
 USAGE_PREFIX_WINDOW_LABELS = {
@@ -2244,17 +2354,17 @@ USAGE_PREFIX_WINDOW_LABELS = {
 }
 
 
-def usage_prefix_text(tool: str, env: dict[str, str] | None = None) -> str:
+def usage_prefix_text(provider: str, env: dict[str, str] | None = None) -> str:
     """Remaining-percentage summary for the "usage" prefix field.
 
-    Renders e.g. ``5h=10% week=30%`` for the tool's current scopes, or
+    Renders e.g. ``5h=10% week=30%`` for the provider's current scopes, or
     ``bal=£12.40`` / ``bud=62%`` for Kilo. Returns an empty string when no
     scope has a usable remaining value. This shells out to the provider
     usage source, so callers must cache it (see UsagePrefixCache) instead
     of calling it per line.
     """
-    snapshot = usage_snapshot_for_tool(tool, env)
-    decision = usage_decision_for_tool(tool, "auto", "1", "60", snapshot, env)
+    snapshot = usage_snapshot_for_provider(provider, env)
+    decision = usage_decision_for_provider(provider, "auto", "1", "60", snapshot, env)
     windows = decision.get("windows")
     if not isinstance(windows, list):
         return ""
@@ -2287,10 +2397,10 @@ def usage_prefix_text(tool: str, env: dict[str, str] | None = None) -> str:
 
 
 class UsagePrefixCache:
-    """Process-local TTL cache for the per-tool "usage" prefix string.
+    """Process-local TTL cache for the per-provider "usage" prefix string.
 
     Computing the usage field shells out to provider CLIs, far too slow to do per
-    relayed line. This caches the rendered string per tool and recomputes it at
+    relayed line. This caches the rendered string per provider and recomputes it at
     most once per ``ttl`` seconds, so the field stays cheap enough to stamp on
     every line. One module-level instance (USAGE_PREFIX_CACHE) is shared across
     the stdout/stderr prefixers and successive ralph-robin increments in the same
@@ -2302,18 +2412,18 @@ class UsagePrefixCache:
         self._builder = builder or usage_prefix_text
         self._cache: dict[str, tuple[float, str]] = {}
 
-    def get(self, tool: str, ttl: float = 15.0) -> str:
+    def get(self, provider: str, ttl: float = 15.0) -> str:
         now = self._clock()
-        hit = self._cache.get(tool)
+        hit = self._cache.get(provider)
         if hit is not None and now - hit[0] < ttl:
             return hit[1]
         try:
-            value = self._builder(tool)
+            value = self._builder(provider)
         except Exception:
             # A transient usage-source failure must not break output relaying:
             # reuse the last known value (or empty) and try again next interval.
             value = hit[1] if hit is not None else ""
-        self._cache[tool] = (now, value)
+        self._cache[provider] = (now, value)
         return value
 
 
@@ -2322,7 +2432,7 @@ USAGE_PREFIX_CACHE = UsagePrefixCache()
 
 def render_line_prefix(
     fields: list[str],
-    tool: str = "",
+    provider: str = "",
     now: float | None = None,
     usage_ttl: float = 15.0,
     usage_cache: UsagePrefixCache | None = None,
@@ -2339,11 +2449,11 @@ def render_line_prefix(
         if name == "time":
             moment = time.localtime(now if now is not None else time.time())
             parts.append(time.strftime("%H:%M:%S", moment))
-        elif name == "tool" and tool:
-            parts.append(tool)
-        elif name == "usage" and tool:
+        elif name == "provider" and provider:
+            parts.append(provider)
+        elif name == "usage" and provider:
             cache = usage_cache if usage_cache is not None else USAGE_PREFIX_CACHE
-            text = cache.get(tool, usage_ttl)
+            text = cache.get(provider, usage_ttl)
             if text:
                 parts.append(text)
     if not parts:
@@ -2356,7 +2466,7 @@ class LinePrefixer:
 
     A long autonomous increment can go minutes between visible lines; a per-line
     marker (wall-clock time, the provider name, and/or remaining usage) lets a
-    watcher tell "thinking" from "wedged" and tell which tool in the rotation is
+    watcher tell "thinking" from "wedged" and tell which provider in the rotation is
     talking. This stamps the STREAMED copy only — the captured transcript that is
     logged and scanned for rate-limit signatures stays byte-exact. It tracks
     line-start state across calls so chunked, non-line-aligned output (a PTY that
@@ -2367,13 +2477,13 @@ class LinePrefixer:
     def __init__(
         self,
         fields: list[str] | None = None,
-        tool: str = "",
+        provider: str = "",
         clock: Any | None = None,
         usage_ttl: float = 15.0,
         usage_cache: UsagePrefixCache | None = None,
     ) -> None:
         self.fields = list(fields or [])
-        self.tool = tool
+        self.provider = provider
         self.at_line_start = True
         self._clock = clock or time.time
         self._usage_ttl = usage_ttl
@@ -2386,7 +2496,7 @@ class LinePrefixer:
     def apply(self, raw: bytes) -> bytes:
         if not self.enabled or not raw:
             return raw
-        stamp = render_line_prefix(self.fields, self.tool, self._clock(), self._usage_ttl, self._usage_cache)
+        stamp = render_line_prefix(self.fields, self.provider, self._clock(), self._usage_ttl, self._usage_cache)
         if not stamp:
             return raw
         out = bytearray()

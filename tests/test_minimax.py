@@ -265,7 +265,7 @@ def test_minimax_cli_finds_binary(env: dict[str, str], fake_bin: Path) -> None:
 # --- Scheduler / Ralph integration --------------------------------------------
 
 
-def test_scheduler_accepts_minimax_tool(env: dict[str, str]) -> None:
+def test_scheduler_accepts_minimax_provider(env: dict[str, str]) -> None:
     env["LLM_USAGE_MINIMAX_5H_PERCENT"] = "75"
     env["LLM_USAGE_MINIMAX_5H_RESET_EPOCH"] = "1700000000"
     env["LLM_USAGE_MINIMAX_WEEKLY_PERCENT"] = "97"
@@ -273,7 +273,7 @@ def test_scheduler_accepts_minimax_tool(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "minimax",
             "--prompt",
             "x",
@@ -297,7 +297,7 @@ def test_scheduler_accepts_minimax_tool(env: dict[str, str]) -> None:
 
 def test_scheduler_rejects_minimax_invalid_scope(env: dict[str, str]) -> None:
     bad = run_cmd(
-        ["./llm-scheduler", "--tool", "minimax", "--prompt", "x", "--scope", "balance"],
+        ["./llm-scheduler", "--provider", "minimax", "--prompt", "x", "--scope", "balance"],
         env,
     )
     assert bad.returncode == 2
@@ -316,7 +316,7 @@ def test_scheduler_minimax_5h_below_minimum_blocks(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "minimax",
             "--prompt",
             "x",
@@ -339,16 +339,16 @@ def test_scheduler_minimax_5h_below_minimum_blocks(env: dict[str, str]) -> None:
     assert decisions[0]["data"]["reason"] == "rate-limited"
 
 
-def test_ralph_robin_rejects_unknown_tool(env: dict[str, str]) -> None:
+def test_ralph_robin_rejects_unknown_provider(env: dict[str, str]) -> None:
     bad = run_cmd(
-        ["./ralph-robin", "--tools", "minimax,bogus", "--prompt", "x"],
+        ["./ralph-robin", "--providers", "minimax,bogus", "--prompt", "x"],
         env,
     )
     assert bad.returncode == 2
-    assert "invalid tool in --tools" in bad.stderr
+    assert "invalid provider in --providers" in bad.stderr
 
 
-def test_ralph_robin_accepts_minimax_tool(env: dict[str, str]) -> None:
+def test_ralph_robin_accepts_minimax_provider(env: dict[str, str]) -> None:
     env["LLM_USAGE_MINIMAX_5H_PERCENT"] = "75"
     env["LLM_USAGE_MINIMAX_5H_RESET_EPOCH"] = "1700000000"
     env["LLM_USAGE_MINIMAX_WEEKLY_PERCENT"] = "97"
@@ -356,7 +356,7 @@ def test_ralph_robin_accepts_minimax_tool(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./ralph-robin",
-            "--tools",
+            "--providers",
             "minimax",
             "--prompt",
             "x",

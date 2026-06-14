@@ -17,7 +17,7 @@ from .capacity import ProviderSnapshot
 
 
 APP_NAME = "llm-usage"
-TOOL_COL_WIDTH = 8
+PROVIDER_COL_WIDTH = 8
 MODEL_COL_WIDTH = 7
 TABLE_GAP_WIDTH = 3
 SOURCE_COL_WIDTH = 18
@@ -324,7 +324,7 @@ def row_is_ready(row: UsageRow) -> bool:
     return rem is not None and rem > 0
 
 
-def tool_ready(rows: list[UsageRow], provider: str) -> bool:
+def provider_ready(rows: list[UsageRow], provider: str) -> bool:
     blocking = [row for row in rows if row.provider == provider and row.scope not in ("ai-credits", "ungated", "byok", "local")]
     return bool(blocking) and all(row_is_ready(row) for row in blocking)
 
@@ -448,7 +448,7 @@ def rule(width: int, gap: bool = False, char: str = "-") -> str:
 
 
 def table_columns(cfg: Config, show_model: bool = False) -> list[tuple[str, int]]:
-    cols = [("Tool", TOOL_COL_WIDTH)]
+    cols = [("Provider", PROVIDER_COL_WIDTH)]
     if show_model:
         cols.append(("Model", MODEL_COL_WIDTH))
     cols += [("Ready", 5), ("Scope", 7), ("Remaining", REMAINING_COL_WIDTH)]
@@ -559,7 +559,7 @@ def print_value_row(cfg: Config, provider: str, window: str, remaining: str, rem
 
 def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: str, display_model: str = "") -> dict[str, str]:
     values = {
-        "Tool": display_provider,
+        "Provider": display_provider,
         "Model": display_model,
         "Ready": ready_text,
         "Scope": row.scope,
@@ -582,7 +582,7 @@ def print_usage_rows(cfg: Config, rows: list[UsageRow]) -> None:
         if previous_provider and first_of_provider:
             print()
         display_provider = row.provider if first_of_provider else ""
-        ready_text = render_ready(1 if tool_ready(rows, row.provider) else 0, cfg) if display_provider else ""
+        ready_text = render_ready(1 if provider_ready(rows, row.provider) else 0, cfg) if display_provider else ""
         if first_of_provider:
             previous_model = ""
         # Show the model label only on the first row of each model sub-block so
@@ -680,7 +680,7 @@ def codex_rows(cfg: Config, codex_json: dict[str, Any] | None) -> list[UsageRow]
             continue
         # All Codex models live under the same "Codex" provider section; the
         # specific model (e.g. Spark) is surfaced via the Model column instead
-        # of overflowing the Tool column with a long combined name.
+        # of overflowing the Provider column with a long combined name.
         model = "Spark" if is_spark else ""
         source = row.get("source") or codex_json.get("source", "")
         five_used = (row.get("five_hour") or {}).get("used")
@@ -781,7 +781,7 @@ def kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> list[UsageRow]:
             extras = scope.get("extras") or {}
             if extras.get("spent") and amount is not None:
                 text = format_spent(amount, currency)
-                # Spent-cost rows are informational; the tool is ready when
+                # Spent-cost rows are informational; the provider is ready when
                 # the snapshot says the CLI is present and functional.
                 row_remaining: float | None = 1.0 if kilo_json.get("available") else None
             else:
@@ -906,7 +906,7 @@ def opencode_rows(cfg: Config, opencode_json: dict[str, Any] | None) -> list[Usa
             extras = scope.get("extras") or {}
             if extras.get("spent") and amount is not None:
                 text = format_spent(amount, currency)
-                # Spent-cost rows are informational; the tool is ready when
+                # Spent-cost rows are informational; the provider is ready when
                 # the snapshot says the CLI is present and functional.
                 row_remaining: float | None = 1.0 if opencode_json.get("available") else None
             else:

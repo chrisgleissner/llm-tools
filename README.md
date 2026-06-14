@@ -17,7 +17,7 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 
 ## Tools at a Glance
 
-| Tool            | Use it when you want to...                                                                       |
+| Command         | Use it when you want to...                                                                       |
 | --------------- | ------------------------------------------------------------------------------------------------ |
 | `llm-usage`     | Check remaining LLM capacity before starting work.                                               |
 | `llm-scheduler` | Run one prompt through one selected provider once that provider has usable capacity.             |
@@ -100,9 +100,9 @@ llm-usage --watch 60
 Run a prompt once a specific provider is ready:
 
 ```bash
-llm-scheduler --tool codex --prompt-file task.md
-llm-scheduler --tool kilo --prompt-file task.md
-llm-scheduler --tool minimax --prompt-file task.md
+llm-scheduler --provider codex --prompt-file task.md
+llm-scheduler --provider kilo --prompt-file task.md
+llm-scheduler --provider minimax --prompt-file task.md
 ```
 
 Keep work moving across providers:
@@ -134,8 +134,8 @@ tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/attempt-1.out
 You do not need every provider CLI installed.
 
 * `llm-usage` reports unavailable providers as `unavailable` and still shows the rest.
-* `llm-scheduler` only needs the provider selected with `--tool`.
-* `ralph-robin` skips unavailable providers and rotates across the usable ones. Its default rotation is `claude,codex`; use `--tools` to change it.
+* `llm-scheduler` only needs the provider selected with `--provider`.
+* `ralph-robin` skips unavailable providers and rotates across the usable ones. Its default rotation is `claude,codex`; use `--providers` to change it.
 
 ## Capacity Scopes
 
@@ -185,7 +185,7 @@ Bars: █ available · ░ spent
 Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.
           ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve
 
-Tool       Model     Ready   Scope     Remaining         Guidance              Resets in
+Provider   Model     Ready   Scope     Remaining         Guidance              Resets in
 ────────   ───────   ─────   ───────   ───────────────   ───────────────────   ──────────
 Codex                yes     5h        90% █████████░    ✓ lasts until reset   4h 34m
                              weekly    34% ███░░░░░░░    ↓ conserve            5d 2h
@@ -213,7 +213,7 @@ How to read the table:
 | Column      | Meaning                                                                                                                                            |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Model`     | The specific model a row reports on (e.g. `Spark`, `Sonnet`). Blank for a provider's aggregate rows. Only shown when model-specific data exists.   |
-| `Ready`     | `yes` means every blocking scope for that tool has usable capacity now. `no` means at least one scope must reset or recover.                       |
+| `Ready`     | `yes` means every blocking scope for that provider has usable capacity now. `no` means at least one scope must reset or recover.                   |
 | `Scope`     | The capacity measure, such as `5h`, `weekly`, `monthly`, `balance`, or `budget`.                                                                   |
 | `Remaining` | Remaining percentage, balance, or an unmetered state such as `byok`, `local`, or `ungated`.                                                        |
 | `Guidance`  | For `5h`, whether current burn should last until reset. For weekly, monthly, and budget scopes, whether usage is ahead of or behind a linear pace. |
@@ -256,17 +256,17 @@ It is useful for:
 ### Basic Usage
 
 ```bash
-llm-scheduler --tool codex --prompt-file task.md
-llm-scheduler --tool claude --prompt "Continue the work in this repo until CI is green"
-llm-scheduler --tool copilot --prompt-file task.md --retry-delays 60,180,600
-llm-scheduler --tool kilo --prompt-file task.md
-llm-scheduler --tool minimax --prompt-file task.md
+llm-scheduler --provider codex --prompt-file task.md
+llm-scheduler --provider claude --prompt "Continue the work in this repo until CI is green"
+llm-scheduler --provider copilot --prompt-file task.md --retry-delays 60,180,600
+llm-scheduler --provider kilo --prompt-file task.md
+llm-scheduler --provider minimax --prompt-file task.md
 ```
 
 Required form:
 
 ```bash
-llm-scheduler --tool codex|claude|copilot|kilo|minimax (--prompt TEXT | --prompt-file FILE) [options]
+llm-scheduler --provider codex|claude|copilot|kilo|minimax (--prompt TEXT | --prompt-file FILE) [options]
 ```
 
 ### Common Examples
@@ -274,31 +274,31 @@ llm-scheduler --tool codex|claude|copilot|kilo|minimax (--prompt TEXT | --prompt
 Run after a specific local time:
 
 ```bash
-llm-scheduler --tool codex --prompt-file task.md --at "23:05"
+llm-scheduler --provider codex --prompt-file task.md --at "23:05"
 ```
 
 Run inside tmux:
 
 ```bash
-llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
+llm-scheduler --provider codex --prompt-file task.md --tmux llm-work
 ```
 
 Schedule a wake-up:
 
 ```bash
-llm-scheduler --tool codex --prompt-file task.md --wake
+llm-scheduler --provider codex --prompt-file task.md --wake
 ```
 
 Suspend until the selected provider is ready:
 
 ```bash
-llm-scheduler --tool claude --prompt-file task.md --scope 5h --suspend-until-ready
+llm-scheduler --provider claude --prompt-file task.md --scope 5h --suspend-until-ready
 ```
 
 Show the resolved plan without launching:
 
 ```bash
-llm-scheduler --tool codex --prompt-file task.md --dry-run
+llm-scheduler --provider codex --prompt-file task.md --dry-run
 ```
 
 ### Runtime Behavior
@@ -312,7 +312,7 @@ llm-scheduler --tool codex --prompt-file task.md --dry-run
 
 | Option                                                              | Purpose                                                                                                                                            |
 | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-t`, `--tool TOOL`                                                 | Provider: `codex`, `claude`, `copilot`, `kilo`, `opencode`, or `minimax`.                                                                          |
+| `-P`, `--provider PROVIDER`                                         | Provider: `codex`, `claude`, `copilot`, `kilo`, `opencode`, or `minimax`.                                                                          |
 | `-p`, `--prompt TEXT`                                               | Prompt text.                                                                                                                                       |
 | `-f`, `--prompt-file FILE`                                          | Read prompt from `FILE`, preserving content.                                                                                                       |
 | `-a`, `--at TIME`                                                   | Delay launch until a `date -d` compatible local time.                                                                                              |
@@ -328,7 +328,7 @@ llm-scheduler --tool codex --prompt-file task.md --dry-run
 | `-F`, `--fresh`                                                     | Launch a fresh foreground provider process. This is the default.                                                                                   |
 | `-H`, `--headless`                                                  | Force non-interactive provider command and captured PTY.                                                                                           |
 | `-T`, `--tmux SESSION[:WINDOW]`                                     | Run through tmux.                                                                                                                                  |
-| `-e`, `--command-template TEMPLATE`                                 | Override provider syntax. Supports `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. Parsed with Python `shlex`, not a shell.                    |
+| `-e`, `--command-template TEMPLATE`                                 | Override provider syntax. Supports `{provider}`, `{prompt}`, `{prompt_file}`, and `{cwd}`. Parsed with Python `shlex`, not a shell.                    |
 | `-y`, `--auto-confirm`                                              | Auto-confirm recognised safe trust prompts. This is the default.                                                                                   |
 | `-Y`, `--no-auto-confirm`                                           | Disable safe auto-confirmation.                                                                                                                    |
 | `-I`, `--headless-idle-timeout SECONDS`                             | Abort headless fresh mode after no output progress. Default: `600`. Use `0` to disable.                                                            |
@@ -351,7 +351,7 @@ llm-scheduler --tool codex --prompt-file task.md --dry-run
 The default Claude adapter uses your local Claude Code permission settings. To override Claude Code settings for one scheduler run:
 
 ```bash
-llm-scheduler --tool claude --prompt-file task.md --command-template 'claude --permission-mode plan --print {prompt}'
+llm-scheduler --provider claude --prompt-file task.md --command-template 'claude --permission-mode plan --print {prompt}'
 ```
 
 ## `ralph-robin`
@@ -376,7 +376,7 @@ When Ralph selects Claude Code through the built-in adapter, it uses Claude's `s
 ```bash
 ralph-robin --prompt-file task.md
 ralph-robin --prompt "Continue until tests pass"
-ralph-robin --tools claude,codex,copilot,kilo,minimax --prompt-file task.md
+ralph-robin --providers claude,codex,copilot,kilo,minimax --prompt-file task.md
 ralph-robin --prompt-file task.md --tmux llm-work
 ralph-robin --prompt-file task.md --dry-run
 ```
@@ -396,12 +396,12 @@ ralph-robin --prompt-file /home/chris/dev/ralph.prompt.md
 [16:22:54 claude] }
 ```
 
-Each relayed provider line is prefixed with `[time tool]` by default. This makes a quiet increment distinguishable from a wedged one and keeps the active provider visible.
+Each relayed provider line is prefixed with `[time provider]` by default. This makes a quiet increment distinguishable from a wedged one and keeps the active provider visible.
 
 Customize the prefix with `--prefix`:
 
 ```bash
-ralph-robin --prompt-file task.md --prefix time,tool,usage
+ralph-robin --prompt-file task.md --prefix time,provider,usage
 ralph-robin --prompt-file task.md --prefix none
 ```
 
@@ -409,7 +409,7 @@ ralph-robin --prompt-file task.md --prefix none
 
 | Option                                                              | Purpose                                                                                                                                                       |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-t`, `--tools LIST`                                                | Set comma-separated provider rotation. Values include `claude`, `codex`, `copilot`, `kilo`, `opencode`, and `minimax`.                                       |
+| `-P`, `--providers LIST`                                            | Set comma-separated provider rotation. Values include `claude`, `codex`, `copilot`, `kilo`, `opencode`, and `minimax`.                                       |
 | `-p`, `--prompt TEXT`                                               | Prompt text passed to the selected provider.                                                                                                                  |
 | `-f`, `--prompt-file FILE`                                          | Prompt file passed to the selected provider.                                                                                                                  |
 | `-s`, `--scope auto\|5h\|weekly\|monthly\|balance\|budget\|byok\|ungated` | Capacity scope to gate on. Default: `auto`.                                                                                                         |
@@ -424,13 +424,13 @@ ralph-robin --prompt-file task.md --prefix none
 | `-n`, `--max-iterations N`                                          | Stop after `N` successful increments. Default `0` means no iteration cap. Use `1` for single-shot.                                                            |
 | `-D`, `--max-duration D`                                            | Stop once `D` of wall-clock time elapses, such as `24h`, `90m`, `30s`, or seconds. Default: `24h`. Use `0` to disable. Whichever limit is reached first wins. |
 | `-I`, `--min-iteration-seconds N`                                   | Minimum runtime floor for successive increments. Default: `5`; `0` disables.                                                                                  |
-| `-P`, `--prefix LIST`                                               | Comma-separated fields stamped on each relayed provider line. Fields: `time`, `tool`, `usage`. Default: `time,tool`. Use `none` or an empty value to disable. |
+| `-x`, `--prefix LIST`                                               | Comma-separated fields stamped on each relayed provider line. Fields: `time`, `provider`, `usage`. Default: `time,provider`. Use `none` or an empty value to disable. |
 | `-X`, `--prefix-usage-interval S`                                   | Refresh interval in seconds for the cached `usage` prefix field. Default: `15`. Use `0` to refresh every line.                                                |
 | `-C`, `--cwd DIR`                                                   | Set provider working directory.                                                                                                                               |
 | `-F`, `--fresh`                                                     | Launch a fresh provider process through `llm-scheduler`.                                                                                                      |
 | `-H`, `--headless`                                                  | Force non-interactive provider command and captured PTY.                                                                                                      |
 | `-T`, `--tmux SESSION[:WINDOW]`                                     | Execute through tmux via `llm-scheduler`.                                                                                                                     |
-| `-g`, `--command-template TEMPLATE`                                 | Override provider syntax. Supports `{tool}`, `{prompt}`, `{prompt_file}`, and `{cwd}`.                                                                        |
+| `-g`, `--command-template TEMPLATE`                                 | Override provider syntax. Supports `{provider}`, `{prompt}`, `{prompt_file}`, and `{cwd}`.                                                                        |
 | `-y`, `--auto-confirm`                                              | Auto-confirm recognised safe trust prompts. This is the default.                                                                                              |
 | `-Y`, `--no-auto-confirm`                                           | Disable safe auto-confirmation.                                                                                                                               |
 | `-q`, `--headless-idle-timeout SECONDS`                             | Abort headless fresh mode after no output progress. Default: `600`. Use `0` to disable.                                                                       |
@@ -438,7 +438,7 @@ ralph-robin --prompt-file task.md --prefix none
 | `-S`, `--state-file FILE`                                           | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`.                                                    |
 | `-L`, `--log-dir DIR`                                               | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.                                                               |
 | `-k`, `--wake`                                                      | Pass best-effort wake scheduling to `llm-scheduler`.                                                                                                          |
-| `-U`, `--suspend-until-ready`                                       | Suspend even for the selected tool's own wait gates.                                                                                                         |
+| `-U`, `--suspend-until-ready`                                       | Suspend even for the selected provider's own wait gates.                                                                                                     |
 | `-d`, `--dry-run`                                                   | Resolve rotation and usage state without submitting.                                                                                                          |
 | `-h`, `--help`                                                      | Show help.                                                                                                                                                    |
 
@@ -783,8 +783,8 @@ Ralph-launched provider processes inherit:
 
 ```text
 LLM_TOOLS_RALPH_ROBIN_ACTIVE=1
-LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL
-LLM_TOOLS_RALPH_ROBIN_TOOLS
+LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER
+LLM_TOOLS_RALPH_ROBIN_PROVIDERS
 ```
 
 If a child process tries to run `llm-scheduler --suspend-until-ready` while Ralph is active, the scheduler exits with status `75` instead of suspending. Ralph remains the single rotation and suspend coordinator.
@@ -875,7 +875,7 @@ Everything else works on Linux and macOS.
    scheduler.highlight_provider_text
    ```
 
-7. Add `--tool` and `--tools` membership in the relevant validators:
+7. Add `--provider` and `--providers` membership in the relevant validators:
 
    ```text
    scheduler.py

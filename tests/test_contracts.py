@@ -52,7 +52,7 @@ def test_short_cli_aliases(env: dict[str, str]) -> None:
     sched_short = run_cmd(
         [
             "./llm-scheduler",
-            "-t",
+            "-P",
             "codex",
             "-p",
             "x",
@@ -71,7 +71,7 @@ def test_short_cli_aliases(env: dict[str, str]) -> None:
     ralph_short = run_cmd(
         [
             "./ralph-robin",
-            "-t",
+            "-P",
             "codex",
             "-p",
             "x",
@@ -154,12 +154,12 @@ def test_usage_log_only(env: dict[str, str]) -> None:
 
 
 def test_scheduler_validation_and_dry_run(env: dict[str, str]) -> None:
-    assert "one of --prompt" in run_cmd(["./llm-scheduler", "--tool", "codex"], env).stderr
-    assert "invalid --tool" in run_cmd(["./llm-scheduler", "--tool", "bad", "--prompt", "x"], env).stderr
-    assert "not valid for copilot" in run_cmd(["./llm-scheduler", "--tool", "copilot", "--window", "weekly", "--prompt", "x"], env).stderr
+    assert "one of --prompt" in run_cmd(["./llm-scheduler", "--provider", "codex"], env).stderr
+    assert "invalid --provider" in run_cmd(["./llm-scheduler", "--provider", "bad", "--prompt", "x"], env).stderr
+    assert "not valid for copilot" in run_cmd(["./llm-scheduler", "--provider", "copilot", "--window", "weekly", "--prompt", "x"], env).stderr
     env["LLM_USAGE_NOW_EPOCH"] = "1780430000"
     env["LLM_SCHEDULER_USAGE_JSON"] = '{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}}'
-    result = run_cmd(["./llm-scheduler", "--tool", "codex", "--prompt", "x", "--command-template", "true", "--dry-run", "--log-dir", str(Path(env["HOME"]) / "logs")], env)
+    result = run_cmd(["./llm-scheduler", "--provider", "codex", "--prompt", "x", "--command-template", "true", "--dry-run", "--log-dir", str(Path(env["HOME"]) / "logs")], env)
     assert result.returncode == 0
     assert "dry-run: logs written to" in result.stdout
     run_dir = Path(result.stdout.strip().split()[-1])
@@ -182,7 +182,7 @@ def test_scheduler_submission_prompt_files_retry_and_logs(env: dict[str, str], f
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "codex",
             "--prompt-file",
             str(prompt),
@@ -211,7 +211,7 @@ sys.exit(0)
 """,
     )
     env["ATTEMPTS"] = str(attempts)
-    retry = run_cmd(["./llm-scheduler", "--tool", "copilot", "--prompt", "x", "--command-template", "flaky", "--retry-delays", "0,0", "--log-dir", str(tmp_path / "retry")], env | {"LLM_SCHEDULER_USAGE_JSON": COPILOT_AVAILABLE})
+    retry = run_cmd(["./llm-scheduler", "--provider", "copilot", "--prompt", "x", "--command-template", "flaky", "--retry-delays", "0,0", "--log-dir", str(tmp_path / "retry")], env | {"LLM_SCHEDULER_USAGE_JSON": COPILOT_AVAILABLE})
     assert retry.returncode == 0
     assert attempts.read_text() == "2"
 
@@ -221,7 +221,7 @@ def test_scheduler_autonomy_abort_no_retry(env: dict[str, str], fake_provider: P
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "claude",
             "--prompt",
             "x",
@@ -246,7 +246,7 @@ def test_scheduler_aborts_on_no_output_progress(env: dict[str, str], fake_provid
     env.update({"LLM_SCHEDULER_USAGE_JSON": AVAILABLE, "PROVIDER_MODE": "idle_no_prompt"})
     result = run_cmd(
         [
-            "./llm-scheduler", "--tool", "codex", "--prompt", "x",
+            "./llm-scheduler", "--provider", "codex", "--prompt", "x",
             "--command-template", "provider-mock",
             "--no-retry", "--log-dir", str(tmp_path / "logs"),
             "--headless-idle-timeout", "1", "--headless-question-timeout", "0",
@@ -263,7 +263,7 @@ def test_scheduler_aborts_on_credit_question(env: dict[str, str], fake_provider:
     env.update({"LLM_SCHEDULER_USAGE_JSON": AVAILABLE, "PROVIDER_MODE": "credit_question"})
     result = run_cmd(
         [
-            "./llm-scheduler", "--tool", "codex", "--prompt", "x",
+            "./llm-scheduler", "--provider", "codex", "--prompt", "x",
             "--command-template", "provider-mock",
             "--no-retry", "--log-dir", str(tmp_path / "logs"),
         ],
@@ -290,7 +290,7 @@ def ralph_stdout(env: dict[str, str], mode: str, tmp_path: Path) -> subprocess.C
             "--prompt",
             "rr",
             "--command-template",
-            "provider-mock {tool} {prompt}",
+            "provider-mock {provider} {prompt}",
             "--state-file",
             str(tmp_path / f"{mode}.json"),
             "--log-dir",
@@ -368,8 +368,8 @@ for event in events:
 
 
 def test_ralph_robin_timestamps_each_relayed_line(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
-    # With the default prefix (time,tool) every relayed provider line is stamped
-    # with a [HH:MM:SS tool] marker so a watcher can tell a slow increment from a
+    # With the default prefix (time,provider) every relayed provider line is stamped
+    # with a [HH:MM:SS provider] marker so a watcher can tell a slow increment from a
     # wedged one and see which provider is talking. The two relayed lines must
     # each carry their own stamp.
     renv = env.copy()
@@ -382,7 +382,7 @@ def test_ralph_robin_timestamps_each_relayed_line(env: dict[str, str], fake_prov
     result = run_cmd_bytes(
         [
             "./ralph-robin", "--prompt", "rr",
-            "--command-template", "provider-mock {tool} {prompt}",
+            "--command-template", "provider-mock {provider} {prompt}",
             "--state-file", str(tmp_path / "ts.json"),
             "--log-dir", str(tmp_path / "ts-logs"),
             "--no-retry", "--max-iterations", "1",
@@ -410,7 +410,7 @@ def test_ralph_robin_prefix_can_be_disabled(env: dict[str, str], fake_provider: 
     result = run_cmd_bytes(
         [
             "./ralph-robin", "--prompt", "rr",
-            "--command-template", "provider-mock {tool} {prompt}",
+            "--command-template", "provider-mock {provider} {prompt}",
             "--state-file", str(tmp_path / "off.json"),
             "--log-dir", str(tmp_path / "off-logs"),
             "--no-retry", "--max-iterations", "1",
@@ -423,7 +423,7 @@ def test_ralph_robin_prefix_can_be_disabled(env: dict[str, str], fake_provider: 
 
 
 def test_ralph_robin_prefix_usage_field(env: dict[str, str], fake_provider: Path, tmp_path: Path) -> None:
-    # --prefix time,tool,usage adds remaining percentages per window, e.g.
+    # --prefix time,provider,usage adds remaining percentages per window, e.g.
     # "[19:13:39 claude 5h=90% week=75%] line one".
     renv = env.copy()
     renv.update(
@@ -435,11 +435,11 @@ def test_ralph_robin_prefix_usage_field(env: dict[str, str], fake_provider: Path
     result = run_cmd_bytes(
         [
             "./ralph-robin", "--prompt", "rr",
-            "--command-template", "provider-mock {tool} {prompt}",
+            "--command-template", "provider-mock {provider} {prompt}",
             "--state-file", str(tmp_path / "usage.json"),
             "--log-dir", str(tmp_path / "usage-logs"),
             "--no-retry", "--max-iterations", "1",
-            "--prefix", "time,tool,usage",
+            "--prefix", "time,provider,usage",
         ],
         renv,
     )
@@ -457,11 +457,11 @@ def test_ralph_robin_invalid_prefix_field(env: dict[str, str], tmp_path: Path) -
     assert "invalid field in --prefix" in result.stderr
 
 
-def test_claude_stream_result_fallback_after_tool_only_event() -> None:
+def test_claude_stream_result_fallback_after_provider_only_event() -> None:
     renderer = scheduler.ClaudeStreamRenderer()
-    tool_event = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"true"}}]}}\n'
+    provider_event = b'{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"true"}}]}}\n'
     result_event = b'{"type":"result","result":"final answer"}\n'
-    assert b"Tool call: Bash\n" in renderer.render_line(tool_event)
+    assert b"Tool call: Bash\n" in renderer.render_line(provider_event)
     assert renderer.render_line(result_event) == b"final answer\n"
 
 
@@ -480,8 +480,8 @@ def test_ralph_robin_partial_stdout_on_provider_failure(env: dict[str, str], fak
     result = run_cmd_bytes(
         [
             "./ralph-robin", "--prompt", "rr",
-            "--tools", "claude",
-            "--command-template", "provider-mock {tool} {prompt}",
+            "--providers", "claude",
+            "--command-template", "provider-mock {provider} {prompt}",
             "--state-file", str(tmp_path / "pf.json"),
             "--log-dir", str(tmp_path / "pf-logs"),
             "--no-retry", "--poll-interval", "1", "--max-duration", "120",
@@ -507,11 +507,11 @@ def test_common_normalization_usage_decisions_and_time(env: dict[str, str]) -> N
     assert full["five_hour"]["remaining"] == 90
     assert common.fmt_duration(90061) == "1d 1h 1m"
     env["LLM_USAGE_NOW_EPOCH"] = "1000"
-    stale = common.usage_decision_for_tool("codex", "auto", "1", "60", {"available": True, "five_hour": {"remaining": 0, "resets_at": 900}, "week": {"remaining": 50}}, env)
+    stale = common.usage_decision_for_provider("codex", "auto", "1", "60", {"available": True, "five_hour": {"remaining": 0, "resets_at": 900}, "week": {"remaining": 50}}, env)
     assert stale["usable"] is True
-    limited = common.usage_decision_for_tool("codex", "auto", "1", "60", {"available": True, "five_hour": {"remaining": 0, "resets_at": 2000}, "week": {"remaining": 50}}, env)
+    limited = common.usage_decision_for_provider("codex", "auto", "1", "60", {"available": True, "five_hour": {"remaining": 0, "resets_at": 2000}, "week": {"remaining": 50}}, env)
     assert limited["reason"] == "rate-limited"
-    unavailable = common.usage_decision_for_tool("claude", "auto", "1", "60", {"available": False, "reason": "missing-cli"}, env)
+    unavailable = common.usage_decision_for_provider("claude", "auto", "1", "60", {"available": False, "reason": "missing-cli"}, env)
     assert unavailable["wait_until"] == 1060
 
 

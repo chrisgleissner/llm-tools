@@ -281,14 +281,14 @@ def test_kilo_command_argv_headless() -> None:
 # --- Scheduler: Kilo end-to-end ------------------------------------------------
 
 
-def test_scheduler_accepts_kilo_tool(env: dict[str, str]) -> None:
+def test_scheduler_accepts_kilo_provider(env: dict[str, str]) -> None:
     # Use --dry-run so the scheduler resolves the kilo decision without
     # looping on the inconclusive-usage wait gate. The check is that kilo
-    # is accepted as a tool and the decision event is recorded.
+    # is accepted as a provider and the decision event is recorded.
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "kilo",
             "--prompt",
             "x",
@@ -311,7 +311,7 @@ def test_scheduler_accepts_kilo_tool(env: dict[str, str]) -> None:
 
 def test_scheduler_rejects_kilo_invalid_scope(env: dict[str, str]) -> None:
     bad = run_cmd(
-        ["./llm-scheduler", "--tool", "kilo", "--prompt", "x", "--scope", "5h"],
+        ["./llm-scheduler", "--provider", "kilo", "--prompt", "x", "--scope", "5h"],
         env,
     )
     assert bad.returncode == 2
@@ -328,7 +328,7 @@ def test_scheduler_kilo_balance_below_minimum_blocks(env: dict[str, str]) -> Non
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "kilo",
             "--prompt",
             "x",
@@ -360,7 +360,7 @@ def test_scheduler_kilo_byok_launches_with_attached_command(env: dict[str, str],
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "kilo",
             "--prompt",
             "x",
@@ -383,7 +383,7 @@ def test_scheduler_dry_run_kilo_balance_event(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "kilo",
             "--prompt",
             "x",
@@ -413,7 +413,7 @@ def test_scheduler_dry_run_kilo_budget_pacing(env: dict[str, str]) -> None:
     result = run_cmd(
         [
             "./llm-scheduler",
-            "--tool",
+            "--provider",
             "kilo",
             "--prompt",
             "x",
@@ -548,7 +548,7 @@ def test_usage_table_renders_kilo_spent(env: dict[str, str], capsys, monkeypatch
     assert "spent $7" in out
     # The renderer must NOT label this as a remaining balance.
     assert "balance   $7" not in out
-    # A spent-cost row from an available snapshot means the tool is ready.
+    # A spent-cost row from an available snapshot means the provider is ready.
     assert "yes" in out
 
 

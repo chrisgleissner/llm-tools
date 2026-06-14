@@ -39,7 +39,7 @@ chmod +x llm-usage llm-scheduler ralph-robin
 ./llm-usage --hide-remaining-time --show-source
 ./llm-usage --show-copilot-credits --show-source
 ./llm-usage --hide-codex-spark
-./llm-scheduler --tool codex --prompt x --dry-run --command-template true
+./llm-scheduler --provider codex --prompt x --dry-run --command-template true
 ./llm-scheduler --wake-test
 ./ralph-robin --prompt x --dry-run --command-template true
 python -m pytest -q
@@ -135,8 +135,8 @@ Missing CLI with no env-var fallback is `reason="missing-cli"`. The provider is 
 * `llm-scheduler` gates on the same `llm_tools.common` provider readers as `llm-usage`; tests inject usage via `LLM_SCHEDULER_USAGE_JSON` and the command via `--command-template`, never live providers.
 * A `rate-limited` decision (a known window with a real reset epoch) must wait for that reset, not proceed early.
 * An *undeterminable* decision (`unavailable`, `inconclusive-usage`, `unsupported-window`) must never block forever: bound the wait with `--max-unavailable-wait`, then launch optimistically. See `is_undetermined_reason`.
-* `--window` must be valid for the tool (copilot: auto/monthly; codex/claude: auto/5h/weekly). Reject other combinations in `validate_args`.
-* Treat a tool launch as needing retry on non-zero exit, or on a clean exit whose output clearly signals a provider rate-limit/overload. Keep `output_is_retryable` patterns specific so ordinary successful agent output is not re-submitted. The synthetic autonomy-abort status `75` is different: do not retry the same provider session inside `llm-scheduler`.
+* `--window` must be valid for the provider (copilot: auto/monthly; codex/claude: auto/5h/weekly). Reject other combinations in `validate_args`.
+* Treat a provider launch as needing retry on non-zero exit, or on a clean exit whose output clearly signals a provider rate-limit/overload. Keep `output_is_retryable` patterns specific so ordinary successful agent output is not re-submitted. The synthetic autonomy-abort status `75` is different: do not retry the same provider session inside `llm-scheduler`.
 * Under `--wake`, arm at most one OS wake timer per distinct, far-enough target (`log_wake_plan` lead guard + `WAKE_ARMED_TARGET`); never one per poll iteration.
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
 * Fresh mode on an interactive terminal runs the provider CLI in its normal interactive form on a PTY wired directly to that terminal via `script(1)` (`resolve_attach_mode`, `ATTACHED=1`): output, stdin, resizes, and Ctrl-C must behave exactly as a direct CLI launch. Headless fresh mode (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`) keeps the non-interactive provider commands and streams the child output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`. Both paths write the ANSI-cleaned copy to `attempt-N.out`. Attached runs never retry on a clean exit or user cancel (130/143) and skip the rate-limit phrase grep, since interactive screen content can legitimately mention rate limits. Headless runs must abort with status `75` when a blocking prompt UI is detected, when question-like output stalls, or when there is no output progress past `LLM_SCHEDULER_IDLE_TIMEOUT`; `ralph-robin` must treat status `75` as a reason to re-evaluate rotation, not as a final failure after the first provider. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
@@ -187,8 +187,8 @@ Important knobs that tests or users may rely on:
 * `LLM_TOOLS_SYMBOL_<ROLE>` (override one Ralph/scheduler UTF-8 symbol role; same roles as `LLM_TOOLS_COLOR_<ROLE>`)
 * `LLM_TOOLS_NO_SYMBOLS` (disable Ralph/scheduler live-output symbols while keeping color enabled)
 * `LLM_TOOLS_RALPH_ROBIN_ACTIVE` (internal/inherited guard: provider subprocesses launched by `ralph-robin` set this to prevent child `llm-scheduler --suspend-until-ready` calls from suspending outside Ralph's all-providers-exhausted decision)
-* `LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL` (internal/inherited context: provider selected by Ralph for the current child run)
-* `LLM_TOOLS_RALPH_ROBIN_TOOLS` (internal/inherited context: comma-separated Ralph rotation for the current child run)
+* `LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER` (internal/inherited context: provider selected by Ralph for the current child run)
+* `LLM_TOOLS_RALPH_ROBIN_PROVIDERS` (internal/inherited context: comma-separated Ralph rotation for the current child run)
 * `LLM_TOOLS_RALPH_ROBIN_ALLOW_SUSPEND` (internal/test bypass for the inherited Ralph suspend guard)
 
 Document any new user-facing or test-facing variable here and in `README.md` when appropriate.

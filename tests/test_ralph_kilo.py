@@ -107,10 +107,10 @@ def test_remaining_daily_capacity_picks_highest_among_known() -> None:
 
 
 def test_even_burn_index_picks_highest_pace() -> None:
-    cfg = ralph_robin.RalphConfig(tools=["codex", "kilo"], even_burn=True, scope="auto")
+    cfg = ralph_robin.RalphConfig(providers=["codex", "kilo"], even_burn=True, scope="auto")
     decisions = [
         {
-            "tool": "codex",
+            "provider": "codex",
             "usable": True,
             "reason": "usable",
             "windows": [
@@ -118,7 +118,7 @@ def test_even_burn_index_picks_highest_pace() -> None:
             ],
         },
         {
-            "tool": "kilo",
+            "provider": "kilo",
             "usable": True,
             "reason": "usable",
             "windows": [
@@ -131,10 +131,10 @@ def test_even_burn_index_picks_highest_pace() -> None:
 
 
 def test_even_burn_index_skips_ungated_provider() -> None:
-    cfg = ralph_robin.RalphConfig(tools=["kilo", "codex"], even_burn=True, scope="auto")
+    cfg = ralph_robin.RalphConfig(providers=["kilo", "codex"], even_burn=True, scope="auto")
     decisions = [
         {
-            "tool": "kilo",
+            "provider": "kilo",
             "usable": True,
             "reason": "usable",
             "windows": [
@@ -142,7 +142,7 @@ def test_even_burn_index_skips_ungated_provider() -> None:
             ],
         },
         {
-            "tool": "codex",
+            "provider": "codex",
             "usable": True,
             "reason": "usable",
             "windows": [
@@ -155,10 +155,10 @@ def test_even_burn_index_skips_ungated_provider() -> None:
     assert ralph_robin.even_burn_index(cfg, decisions, current_index=0, skipped=set()) is None
 
 
-# --- select_tool: end-to-end --------------------------------------------------
+# --- select_provider: end-to-end --------------------------------------------------
 
 
-def test_select_tool_falls_back_to_kilo_when_codex_rate_limited(
+def test_select_provider_falls_back_to_kilo_when_codex_rate_limited(
     tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # codex 5h exhausted with a future reset, codex weekly still rate-rankable
@@ -169,11 +169,11 @@ def test_select_tool_falls_back_to_kilo_when_codex_rate_limited(
     monkeypatch.setenv("LLM_USAGE_KILO_BALANCE", "10")
     monkeypatch.setenv("LLM_USAGE_KILO_MONTHLY_BUDGET", "100")
     monkeypatch.setenv("LLM_USAGE_KILO_MONTHLY_SPENT", "20")
-    cfg = ralph_robin.RalphConfig(tools=["codex", "kilo"], even_burn=False, scope="auto")
+    cfg = ralph_robin.RalphConfig(providers=["codex", "kilo"], even_burn=False, scope="auto")
     cfg.even_burn = False  # plain rotation
     logs = common.setup_run_logs(tmp_path, "test")
-    selection = ralph_robin.select_tool(cfg, logs, current_index=0, skipped=set())
-    assert selection["tool"] in {"codex", "kilo"}
+    selection = ralph_robin.select_provider(cfg, logs, current_index=0, skipped=set())
+    assert selection["provider"] in {"codex", "kilo"}
 
 
 def test_select_tool_uses_kilo_in_byok_mode(
@@ -185,22 +185,22 @@ def test_select_tool_uses_kilo_in_byok_mode(
     monkeypatch.setenv("PATH", str(fake_bin))
     monkeypatch.setenv("LLM_USAGE_KILO_MODE", "byok")
     monkeypatch.setenv("LLM_USAGE_KILO_BALANCE", "5")
-    cfg = ralph_robin.RalphConfig(tools=["kilo"], even_burn=False, scope="auto")
+    cfg = ralph_robin.RalphConfig(providers=["kilo"], even_burn=False, scope="auto")
     logs = common.setup_run_logs(tmp_path, "test")
-    selection = ralph_robin.select_tool(cfg, logs, current_index=0, skipped=set())
-    assert selection["tool"] == "kilo"
+    selection = ralph_robin.select_provider(cfg, logs, current_index=0, skipped=set())
+    assert selection["provider"] == "kilo"
     assert selection["decision"]["usable"] is True
 
 
-def test_select_tool_marks_kilo_byok_missing_cli_unusable(
+def test_select_provider_marks_kilo_byok_missing_cli_unusable(
     tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", "/var/empty")
     monkeypatch.setenv("LLM_USAGE_KILO_MODE", "byok")
     monkeypatch.setenv("LLM_USAGE_KILO_BALANCE", "5")
-    cfg = ralph_robin.RalphConfig(tools=["kilo"], even_burn=False, scope="auto")
+    cfg = ralph_robin.RalphConfig(providers=["kilo"], even_burn=False, scope="auto")
     logs = common.setup_run_logs(tmp_path, "test")
-    selection = ralph_robin.select_tool(cfg, logs, current_index=0, skipped=set())
-    assert selection["tool"] == "kilo"
+    selection = ralph_robin.select_provider(cfg, logs, current_index=0, skipped=set())
+    assert selection["provider"] == "kilo"
     assert selection["decision"]["usable"] is False
     assert selection["decision"]["reason"] == "missing-cli"

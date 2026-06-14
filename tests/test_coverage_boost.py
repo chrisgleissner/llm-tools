@@ -101,19 +101,19 @@ def test_claude_stream_renderer_render_line() -> None:
 
 
 def test_render_line_prefix_fields_and_order() -> None:
-    # time field renders HH:MM:SS; combine with tool in the configured order.
+    # time field renders HH:MM:SS; combine with provider in the configured order.
     assert common.render_line_prefix(["time"], "codex", now=0).startswith(b"[")
-    assert common.render_line_prefix(["tool"], "codex") == b"[codex] "
-    assert common.render_line_prefix(["tool", "time"], "codex", now=0).endswith(b"] ")
+    assert common.render_line_prefix(["provider"], "codex") == b"[codex] "
+    assert common.render_line_prefix(["provider", "time"], "codex", now=0).endswith(b"] ")
     # An empty selection emits no marker at all (not even brackets).
     assert common.render_line_prefix([], "codex") == b""
-    # The "tool"/"usage" fields drop out when no tool is known.
-    assert common.render_line_prefix(["tool"], "") == b""
+    # The "provider"/"usage" fields drop out when no provider is known.
+    assert common.render_line_prefix(["provider"], "") == b""
 
 
 def test_render_line_prefix_usage_field_uses_cache() -> None:
-    cache = common.UsagePrefixCache(clock=lambda: 0.0, builder=lambda tool: "5h=10% week=30%")
-    out = common.render_line_prefix(["tool", "usage"], "codex", usage_cache=cache)
+    cache = common.UsagePrefixCache(clock=lambda: 0.0, builder=lambda provider: "5h=10% week=30%")
+    out = common.render_line_prefix(["provider", "usage"], "codex", usage_cache=cache)
     assert out == b"[codex 5h=10% week=30%] "
 
 
@@ -121,8 +121,8 @@ def test_usage_prefix_cache_ttl_and_fallback() -> None:
     calls: list[str] = []
     now = {"t": 0.0}
 
-    def builder(tool: str) -> str:
-        calls.append(tool)
+    def builder(provider: str) -> str:
+        calls.append(provider)
         return f"v{len(calls)}"
 
     cache = common.UsagePrefixCache(clock=lambda: now["t"], builder=builder)
@@ -137,7 +137,7 @@ def test_usage_prefix_cache_ttl_and_fallback() -> None:
     assert calls == ["codex", "codex"]
 
     # A builder failure reuses the last known value instead of breaking output.
-    def boom(tool: str) -> str:
+    def boom(provider: str) -> str:
         raise RuntimeError("usage source down")
 
     failing = common.UsagePrefixCache(clock=lambda: now["t"], builder=boom)
@@ -146,7 +146,7 @@ def test_usage_prefix_cache_ttl_and_fallback() -> None:
 
 
 def test_line_prefixer_chunked_lines_stamped_once() -> None:
-    prefixer = common.LinePrefixer(["tool"], "codex")
+    prefixer = common.LinePrefixer(["provider"], "codex")
     # Half a line, then the rest: the marker appears once at the true line start.
     assert prefixer.apply(b"hel") == b"[codex] hel"
     assert prefixer.apply(b"lo\nworld\n") == b"lo\n[codex] world\n"
@@ -156,10 +156,10 @@ def test_line_prefixer_chunked_lines_stamped_once() -> None:
 
 
 def test_parse_prefix_fields() -> None:
-    assert ralph_robin.parse_prefix_fields("time,tool") == ["time", "tool"]
-    assert ralph_robin.parse_prefix_fields("tool,time") == ["tool", "time"]
+    assert ralph_robin.parse_prefix_fields("time,provider") == ["time", "provider"]
+    assert ralph_robin.parse_prefix_fields("provider,time") == ["provider", "time"]
     # De-duplicated, whitespace tolerant.
-    assert ralph_robin.parse_prefix_fields(" time , time ,tool") == ["time", "tool"]
+    assert ralph_robin.parse_prefix_fields(" time , time ,provider") == ["time", "provider"]
     # "none"/"off"/empty disable entirely.
     assert ralph_robin.parse_prefix_fields("none") == []
     assert ralph_robin.parse_prefix_fields("") == []
@@ -215,13 +215,13 @@ def test_is_undetermined_reason_and_sleep_until(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_provider_default_argv_kilo_and_opencode_cwd_handling() -> None:
-    attached_kilo = scheduler.SchedulerConfig(tool="kilo", cwd="/tmp/work", attached=True)
+    attached_kilo = scheduler.SchedulerConfig(provider="kilo", cwd="/tmp/work", attached=True)
     assert scheduler.provider_default_argv(attached_kilo, "prompt") == ["kilo", "run", "prompt"]
 
-    headless_kilo = scheduler.SchedulerConfig(tool="kilo", cwd="/tmp/work")
+    headless_kilo = scheduler.SchedulerConfig(provider="kilo", cwd="/tmp/work")
     assert scheduler.provider_default_argv(headless_kilo, "prompt") == ["kilo", "run", "--auto", "prompt"]
 
-    attached_opencode = scheduler.SchedulerConfig(tool="opencode", cwd="/tmp/work", attached=True)
+    attached_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work", attached=True)
     assert scheduler.provider_default_argv(attached_opencode, "prompt") == ["opencode"]
 
 
