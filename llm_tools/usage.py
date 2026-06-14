@@ -27,15 +27,14 @@ GUIDANCE_TOLERANCE_PP = 5.0
 
 USAGE = """Usage: llm-usage [--json] [--watch SECONDS] [--show-copilot-credits] [--statusline] [--no-header] [--log-only]
 
-Shows remaining percentage for:
-  - Codex current session / 5-hour window
-  - Codex Spark current session / 5-hour window
+Shows remaining capacity per scope for:
+  - Codex 5-hour window
   - Codex weekly / 7-day window
-  - Codex Spark weekly / 7-day window
-  - Claude Code current session / 5-hour window
-  - Claude Code weekly / 7-day window
+  - Codex Spark 5-hour and weekly windows
+  - Claude Code 5-hour and weekly windows
   - Copilot monthly usage
   - Copilot AI credits (optional, with --show-copilot-credits)
+  - Kilo balance, monthly budget, and BYOK/local/ungated state
 
 Options:
   --json              Emit JSON instead of a table.
@@ -78,12 +77,17 @@ class Config:
 @dataclass
 class UsageRow:
     provider: str
-    window: str
+    scope: str
     remaining: float | None
     left_text: str
     reset: Any
     source: str
     remaining_time: str = "-"
+    # Optional secondary fields for non-percent scopes (Kilo balance/ungated).
+    amount: float | None = None
+    currency: str | None = None
+    kind: str | None = None
+    label: str | None = None
 
 
 @dataclass
@@ -277,7 +281,7 @@ def row_is_ready(row: UsageRow) -> bool:
 
 
 def tool_ready(rows: list[UsageRow], provider: str) -> bool:
-    blocking = [row for row in rows if row.provider == provider and row.window != "ai-credits"]
+    blocking = [row for row in rows if row.provider == provider and row.scope not in ("ai-credits", "ungated", "byok", "local")]
     return bool(blocking) and all(row_is_ready(row) for row in blocking)
 
 
@@ -406,7 +410,7 @@ def format_tool_name(name: str) -> str:
 
 
 def table_columns(cfg: Config) -> list[tuple[str, int]]:
-    cols = [("Tool", TOOL_COL_WIDTH), ("Ready", 5), ("Window", 7), ("Remaining", REMAINING_COL_WIDTH)]
+    cols = [("Tool", TOOL_COL_WIDTH), ("Ready", 5), ("Scope", 7), ("Remaining", REMAINING_COL_WIDTH)]
     if cfg.show_daily_budget:
         cols.append(("Guidance", GUIDANCE_COL_WIDTH))
     if cfg.show_remaining_time:
@@ -425,7 +429,7 @@ def print_dashboard_header(cfg: Config) -> None:
     print()
     if cfg.show_daily_budget:
         print("Bars: █ available · ░ spent")
-        print("Guidance: 5h rows forecast runout; weekly/monthly rows compare remaining quota to time left.")
+        print("Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.")
         print("          ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve")
         print()
 
@@ -501,7 +505,7 @@ def unavailable_rows(provider: str) -> list[UsageRow]:
 def print_value_row(cfg: Config, provider: str, window: str, remaining: str, remaining_time: str, reset_text: str, time_to_reset: str, source: str, daily_value: float | None = None) -> None:
     rem = common.num(remaining.rstrip("%")) if isinstance(remaining, str) and remaining.endswith("%") else None
     reset = None if time_to_reset == "-" else reset_text
-    row = UsageRow(provider, window, rem, remaining, reset, source, remaining_time or "-")
+    row = UsageRow(provider=provider, scope=window, remaining=rem, left_text=remaining, reset=reset, source=source, remaining_time=remaining_time or "-")
     print_usage_rows(cfg, [row])
 
 
@@ -509,9 +513,9 @@ def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: st
     values = {
         "Tool": display_provider,
         "Ready": ready_text,
-        "Window": row.window,
+        "Scope": row.scope,
         "Remaining": render_remaining(row.left_text, cfg),
-        "Guidance": render_guidance(row.provider, row.window, row.remaining, row.reset, cfg),
+        "Guidance": render_guidance(row.provider, row.scope, row.remaining, row.reset, cfg),
         "Remaining Time": row.remaining_time,
         "Resets in": format_reset(row.reset, cfg),
     }
@@ -625,16 +629,126 @@ def print_copilot_rows(cfg: Config, copilot_json: dict[str, Any] | None) -> None
     print_usage_rows(cfg, copilot_rows(cfg, copilot_json))
 
 
+def kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> list[UsageRow]:
+    """Render Kilo scopes into a flat list of table rows.
+
+    Kilo does not have session windows: its scopes are balance, budget, and
+    (optionally) byok/local/ungated. Each scope becomes its own row with a
+    ``scope`` name that the table renders in the Scope column.
+    """
+    from .providers import kilo_min_balance, kilo_currency
+    from .capacity import CapacityKind
+
+    if not kilo_json:
+        return [UsageRow("Kilo", "balance", None, "unavailable", None, "kilo cli")]
+    source = kilo_json.get("source", "kilo cli")
+    if kilo_json.get("available") is False:
+        reason = kilo_json.get("reason") or "unavailable"
+        rows: list[UsageRow] = []
+        # Show one row for the most informative scope (balance when not
+        # configured, otherwise the first known scope) so the user sees why
+        # Kilo is currently unavailable.
+        rows.append(UsageRow("Kilo", "balance", None, reason, None, source))
+        return rows
+    scopes = kilo_json.get("scopes") if isinstance(kilo_json.get("scopes"), list) else []
+    rows = []
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            continue
+        name = str(scope.get("name", "?"))
+        kind = str(scope.get("kind", ""))
+        if kind == CapacityKind.UNGATED:
+            label = scope.get("label") or name
+            rows.append(
+                UsageRow(
+                    "Kilo",
+                    name,
+                    None,
+                    str(label),
+                    None,
+                    source,
+                    "-",
+                    kind=kind,
+                    label=label,
+                )
+            )
+            continue
+        if kind == CapacityKind.BALANCE:
+            amount = scope.get("remaining_amount")
+            currency = scope.get("currency")
+            text = format_balance(amount, currency)
+            rows.append(
+                UsageRow(
+                    "Kilo",
+                    "balance",
+                    None,
+                    text,
+                    None,
+                    source,
+                    "-",
+                    amount=amount,
+                    currency=currency,
+                    kind=kind,
+                )
+            )
+            continue
+        if kind == CapacityKind.BUDGET:
+            rem = scope.get("remaining_percent")
+            total = scope.get("total_amount")
+            currency = scope.get("currency")
+            reset = scope.get("reset_epoch")
+            if rem is None:
+                text = "unknown"
+            else:
+                text = row_left_text(rem)
+            remaining_time = common.estimate_remaining_time_from_log("Kilo", "budget", rem) if cfg.show_remaining_time else "-"
+            rows.append(
+                UsageRow(
+                    "Kilo",
+                    "budget",
+                    rem,
+                    text,
+                    reset,
+                    source,
+                    remaining_time or "-",
+                    amount=scope.get("remaining_amount"),
+                    currency=currency,
+                    kind=kind,
+                )
+            )
+            continue
+    if not rows:
+        rows.append(UsageRow("Kilo", "balance", None, "unavailable", None, source))
+    return rows
+
+
+def format_balance(amount: float | None, currency: str | None) -> str:
+    if amount is None:
+        return "-"
+    text = common.fmt_number(amount)
+    if currency:
+        return f"{currency}{text}"
+    return text
+
+
+def print_kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> None:
+    print_usage_rows(cfg, kilo_rows(cfg, kilo_json))
+
+
 def render_once(cfg: Config) -> None:
     codex = common.read_codex()
     claude = common.read_claude()
     copilot = common.read_copilot()
+    from .providers import read_kilo
+
+    kilo = read_kilo()
     if cfg.json_output:
         obj = {
             "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
             "codex": common.json_for_provider(codex, "codex"),
             "claude": common.json_for_provider(claude, "claude"),
             "copilot": common.json_for_copilot(copilot, cfg.show_copilot_credits),
+            "kilo": _kilo_to_json(kilo),
         }
         print(json.dumps(obj, separators=(",", ":")))
         return
@@ -654,10 +768,41 @@ def render_once(cfg: Config) -> None:
     else:
         rows.extend(unavailable_rows("Claude"))
     rows.extend(copilot_rows(cfg, copilot))
+    rows.extend(kilo_rows(cfg, _kilo_to_json(kilo)))
     if not cfg.no_header:
         print_dashboard_header(cfg)
         print_table_header(cfg)
     print_usage_rows(cfg, rows)
+
+
+def _kilo_to_json(snap: Any) -> dict[str, Any]:
+    """Project a Kilo ProviderSnapshot into a JSON-friendly dict."""
+    scopes: list[dict[str, Any]] = []
+    for scope in getattr(snap, "scopes", []) or []:
+        scopes.append(
+            {
+                "name": scope.name,
+                "kind": scope.kind,
+                "ready": scope.ready,
+                "reason": scope.reason,
+                "remaining_percent": scope.remaining_percent,
+                "remaining_amount": scope.remaining_amount,
+                "total_amount": scope.total_amount,
+                "currency": scope.currency,
+                "reset_epoch": scope.reset_epoch,
+                "resets_at": scope.resets_at,
+                "label": scope.label,
+                "source": scope.source,
+            }
+        )
+    return {
+        "provider": snap.provider,
+        "available": snap.available,
+        "reason": snap.reason,
+        "source": snap.source,
+        "selected_model": snap.selected_model,
+        "scopes": scopes,
+    }
 
 
 def statusline_mode() -> None:

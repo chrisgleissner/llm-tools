@@ -1092,19 +1092,26 @@ def validate_retry_delays(value: str) -> None:
 
 
 def validate_tool_window(tool: str, window: str) -> None:
-    if window not in {"auto", "5h", "weekly", "monthly"}:
-        err(f"invalid --window: {window}")
-        raise SystemExit(2)
-    valid = {
-        "codex": {"auto", "5h", "weekly"},
-        "claude": {"auto", "5h", "weekly"},
-        "copilot": {"auto", "monthly"},
-    }
-    if window not in valid.get(tool, set()):
+    """Deprecated alias for :func:`validate_tool_scope`."""
+    validate_tool_scope(tool, window)
+
+
+def validate_tool_scope(tool: str, scope: str) -> None:
+    from .capacity import validate_scope, valid_scopes_for_provider
+
+    try:
+        validate_scope(tool, scope)
+    except ValueError as exc:
+        err(str(exc))
+        raise SystemExit(2) from exc
+    allowed = valid_scopes_for_provider(tool)
+    if scope not in allowed:
         if tool == "copilot":
-            err(f"--window {window} is not valid for copilot (use auto or monthly)")
+            err(f"--scope {scope} is not valid for copilot (use one of: {', '.join(sorted(allowed))})")
+        elif tool == "kilo":
+            err(f"--scope {scope} is not valid for kilo (use one of: {', '.join(sorted(allowed))})")
         else:
-            err(f"--window {window} is not valid for {tool} (use auto, 5h, or weekly)")
+            err(f"--scope {scope} is not valid for {tool} (use one of: {', '.join(sorted(allowed))})")
         raise SystemExit(2)
 
 
@@ -1220,6 +1227,14 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
 
 
 def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Build a JSON-friendly snapshot for ``tool``.
+
+    The legacy wire format (e.g. ``five_hour``, ``week``, ``monthly``) is
+    preserved for Codex/Claude/Copilot so existing tests, JSON consumers, and
+    the ``--prefix usage`` renderer keep working. Kilo is represented through
+    ``scopes`` (its new generic form); the legacy keys are absent because
+    Kilo has no session windows.
+    """
     env = env or os.environ
     injected = env.get("LLM_SCHEDULER_USAGE_JSON")
     if injected:
@@ -1233,73 +1248,262 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
         return json_for_provider(read_claude(env), "claude")
     if tool == "copilot":
         return json_for_copilot(read_copilot(env), False)
+    if tool == "kilo":
+        from .providers import read_kilo
+        from .capacity import CapacityScope
+
+        snap = read_kilo(env)
+        return {
+            "provider": snap.provider,
+            "available": snap.available,
+            "reason": snap.reason,
+            "source": snap.source,
+            "selected_model": snap.selected_model,
+            "scopes": [_scope_to_dict(s) for s in snap.scopes],
+        }
     return {"provider": tool, "available": False, "reason": "unsupported-tool"}
 
 
-def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_interval: str, snapshot: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, Any]:
-    env = env or os.environ
+def _scope_to_dict(scope: Any) -> dict[str, Any]:
+    if not hasattr(scope, "name"):
+        return scope if isinstance(scope, dict) else {}
+    return {
+        "name": scope.name,
+        "kind": scope.kind,
+        "ready": scope.ready,
+        "reason": scope.reason,
+        "remaining_percent": scope.remaining_percent,
+        "reset_epoch": scope.reset_epoch,
+        "resets_at": scope.resets_at,
+        "remaining_amount": scope.remaining_amount,
+        "total_amount": scope.total_amount,
+        "currency": scope.currency,
+        "label": scope.label,
+        "source": scope.source,
+    }
+
+
+def _legacy_snapshot_to_scopes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate a legacy ``five_hour``/``week``/``monthly`` snapshot into
+    the generic scope dictionaries that :func:`capacity.decide` consumes.
+
+    Lives in ``common`` rather than ``capacity`` to keep the new abstraction
+    free of provider-specific keys; this function is the only place the
+    translation happens.
+    """
+    scopes: list[dict[str, Any]] = []
+    for name, key in (("5h", "five_hour"), ("weekly", "week")):
+        window = snapshot.get(key)
+        if not isinstance(window, dict):
+            continue
+        reset = window.get("resets_at")
+        reset_epoch = parse_epoch(reset)
+        rem = num(window.get("remaining"))
+        scopes.append(
+            {
+                "name": name,
+                "kind": "reset_window",
+                "ready": rem is not None and rem > 0,
+                "reason": "",
+                "remaining_percent": rem,
+                "reset_epoch": reset_epoch,
+                "resets_at": reset,
+                "source": snapshot.get("source", ""),
+            }
+        )
+    monthly = snapshot.get("monthly")
+    if isinstance(monthly, dict):
+        rem = num(monthly.get("remaining"))
+        reset_epoch = copilot_monthly_reset_epoch()
+        scopes.append(
+            {
+                "name": "monthly",
+                "kind": "reset_window",
+                "ready": rem is not None and rem > 0,
+                "reason": "",
+                "remaining_percent": rem,
+                "reset_epoch": reset_epoch,
+                "resets_at": str(reset_epoch) if reset_epoch is not None else None,
+                "source": snapshot.get("source", ""),
+            }
+        )
+    return scopes
+
+
+def _decision_scopes(snapshot: dict[str, Any], tool: str) -> list[dict[str, Any]]:
+    """Return the decision-ready scope dicts for ``tool``."""
+    if tool == "kilo":
+        existing = snapshot.get("scopes")
+        if isinstance(existing, list) and existing and isinstance(existing[0], dict) and "kind" in existing[0]:
+            return existing
+    return _legacy_snapshot_to_scopes(snapshot)
+
+
+def _scope_filtered(scopes: list[dict[str, Any]], requested: str) -> list[dict[str, Any]]:
+    if requested == "auto":
+        return scopes
+    return [s for s in scopes if s.get("name") == requested]
+
+
+def decide_with_scopes(
+    tool: str,
+    scope: str,
+    min_remaining_percent: float,
+    min_remaining_amount: float,
+    poll_interval: int,
+    scopes: list[dict[str, Any]],
+    *,
+    cli_present: bool = True,
+    snapshot_available: bool = True,
+    snapshot_reason: str = "",
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Decide for ``tool`` against the given pre-built scope dicts.
+
+    Thin compatibility shim over :func:`llm_tools.capacity.decide` that keeps
+    the existing public JSON shape (``tool``/``usable``/``reason``/
+    ``wait_until``/``windows``/``exhausted``) so every consumer keeps
+    working unchanged.
+    """
+    from .capacity import decide, CapacityScope, ProviderSnapshot, SCOPE_AUTO
+
     now = now_epoch(env)
-    poll = int(poll_interval)
-    minimum = float(min_remaining)
+    poll = max(1, int(poll_interval))
 
-    def win(name: str, obj: Any) -> dict[str, Any] | None:
-        if not isinstance(obj, dict):
-            return None
-        reset = obj.get("resets_at")
-        return {
-            "name": name,
-            "remaining": num(obj.get("remaining")),
-            "resets_at": reset,
-            "reset_epoch": parse_epoch(reset),
-        }
-
-    if tool == "copilot":
-        if window in {"auto", "monthly"}:
-            reset = copilot_monthly_reset_epoch(env)
-            monthly = snapshot.get("monthly") if isinstance(snapshot, dict) else None
-            windows = [
-                {
-                    "name": "monthly",
-                    "remaining": num(monthly.get("remaining")) if isinstance(monthly, dict) else None,
-                    "resets_at": str(reset) if reset is not None else None,
-                    "reset_epoch": reset,
-                }
-            ]
-        else:
-            windows = []
-    elif window == "auto":
-        windows = [x for x in (win("5h", snapshot.get("five_hour")), win("weekly", snapshot.get("week"))) if x is not None]
-    elif window == "5h":
-        windows = [x for x in (win("5h", snapshot.get("five_hour")),) if x is not None]
-    elif window == "weekly":
-        windows = [x for x in (win("weekly", snapshot.get("week")),) if x is not None]
-    else:
-        windows = []
-    known = [w for w in windows if w.get("remaining") is not None]
-    exhausted = [
-        w
-        for w in known
-        if w["remaining"] is not None
-        and w["remaining"] <= minimum
-        and (w.get("reset_epoch") is None or int(w["reset_epoch"]) > now)
-    ]
-    future_resets = [int(w["reset_epoch"]) for w in exhausted if w.get("reset_epoch") is not None and int(w["reset_epoch"]) > now]
-    if snapshot.get("available") is False:
-        return {"tool": tool, "usable": False, "reason": snapshot.get("reason", "unavailable"), "wait_until": now + poll, "windows": windows}
-    if not windows:
-        return {"tool": tool, "usable": False, "reason": "unsupported-window", "wait_until": now + poll, "windows": windows}
-    if not known:
-        return {"tool": tool, "usable": False, "reason": "inconclusive-usage", "wait_until": now + poll, "windows": windows}
-    if exhausted:
+    if not snapshot_available and not scopes:
         return {
             "tool": tool,
             "usable": False,
-            "reason": "rate-limited",
-            "wait_until": max(future_resets) if future_resets else now + poll,
-            "windows": windows,
-            "exhausted": exhausted,
+            "reason": snapshot_reason or "unavailable",
+            "wait_until": now + poll,
+            "windows": [],
         }
-    return {"tool": tool, "usable": True, "reason": "usable", "wait_until": None, "windows": windows}
+    if not cli_present:
+        return {
+            "tool": tool,
+            "usable": False,
+            "reason": "missing-cli",
+            "wait_until": now + poll,
+            "windows": _windows_from_dicts(scopes),
+        }
+
+    if scope == SCOPE_AUTO:
+        chosen = list(scopes)
+    else:
+        chosen = [s for s in scopes if s.get("name") == scope]
+
+    typed_scopes = [_dict_to_scope(s) for s in chosen]
+    snap = ProviderSnapshot(
+        provider=tool,
+        available=bool(snapshot_available),
+        reason=str(snapshot_reason),
+        scopes=typed_scopes,
+    )
+    decision = decide(
+        snap,
+        scope,
+        min_remaining_percent,
+        min_remaining_amount,
+        poll,
+        cli_present=cli_present,
+        env=env,
+    )
+    return _decision_to_legacy(decision, scopes, tool)
+
+
+def _dict_to_scope(d: dict[str, Any]) -> Any:
+    from .capacity import CapacityScope
+
+    return CapacityScope(
+        name=str(d.get("name", "")),
+        kind=str(d.get("kind", "reset_window")),
+        ready=bool(d.get("ready", True)),
+        reason=str(d.get("reason", "")),
+        remaining_percent=d.get("remaining_percent"),
+        reset_epoch=d.get("reset_epoch"),
+        resets_at=d.get("resets_at"),
+        remaining_amount=d.get("remaining_amount"),
+        total_amount=d.get("total_amount"),
+        currency=d.get("currency"),
+        label=d.get("label"),
+        source=str(d.get("source", "")),
+    )
+
+
+def _windows_from_dicts(scopes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": s.get("name"),
+            "kind": s.get("kind"),
+            "remaining": s.get("remaining_percent"),
+            "remaining_amount": s.get("remaining_amount"),
+            "currency": s.get("currency"),
+            "resets_at": s.get("resets_at"),
+            "reset_epoch": s.get("reset_epoch"),
+            "source": s.get("source", ""),
+        }
+        for s in scopes
+    ]
+
+
+def _decision_to_legacy(decision: Any, original_scopes: list[dict[str, Any]], tool: str) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "tool": tool,
+        "usable": decision.usable,
+        "reason": decision.reason,
+        "wait_until": decision.wait_until,
+        "windows": _windows_from_dicts(original_scopes),
+    }
+    if decision.exhausted:
+        out["exhausted"] = [
+            {
+                "name": s.name,
+                "kind": s.kind,
+                "remaining": s.remaining_percent,
+                "remaining_amount": s.remaining_amount,
+                "reset_epoch": s.reset_epoch,
+            }
+            for s in decision.exhausted
+        ]
+    return out
+
+
+def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_interval: str, snapshot: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Decide whether ``tool`` is usable under the requested ``window``.
+
+    Implementation is a thin compatibility shim over
+    :func:`llm_tools.capacity.decide`: it translates the legacy
+    ``window``/``snapshot`` shape into generic scope dicts, calls the
+    generic decider, and re-shapes the result to keep the existing public
+    JSON (``windows``, ``usable``, ``reason``, ``wait_until``,
+    ``exhausted``) stable for every consumer (scheduler, ralph, tests).
+    """
+    env = env or os.environ
+    poll = max(1, int(poll_interval))
+    min_percent = float(min_remaining)
+    min_amount = float(min_remaining)
+    try:
+        from .providers import kilo_min_balance
+
+        if tool == "kilo":
+            min_amount = kilo_min_balance(env)
+    except Exception:
+        pass
+
+    scopes = _scope_filtered(_decision_scopes(snapshot, tool), window)
+
+    return decide_with_scopes(
+        tool,
+        window,
+        min_percent,
+        min_amount,
+        poll,
+        scopes,
+        cli_present=True,
+        snapshot_available=bool(snapshot.get("available", True)),
+        snapshot_reason=str(snapshot.get("reason", "")),
+        env=env,
+    )
 
 
 def argv_to_command_line(argv: Sequence[str]) -> str:
@@ -1548,17 +1752,26 @@ def output_is_retryable(status: int, output: str, attached: bool = False, trust_
 # the marker entirely (no brackets).
 LINE_PREFIX_FIELDS = ("time", "tool", "usage")
 
-# Short labels for the windows shown by the "usage" prefix field.
-USAGE_PREFIX_WINDOW_LABELS = {"weekly": "week", "monthly": "month"}
+# Short labels for the scopes shown by the "usage" prefix field.
+USAGE_PREFIX_WINDOW_LABELS = {
+    "weekly": "week",
+    "monthly": "month",
+    "balance": "bal",
+    "budget": "bud",
+    "ungated": "free",
+    "byok": "byok",
+    "local": "local",
+}
 
 
 def usage_prefix_text(tool: str, env: dict[str, str] | None = None) -> str:
     """Remaining-percentage summary for the "usage" prefix field.
 
-    Renders e.g. ``5h=10% week=30%`` for the tool's current windows. Returns an
-    empty string when no window remaining is known. This shells out to the
-    provider usage source, so callers must cache it (see UsagePrefixCache)
-    instead of calling it per line.
+    Renders e.g. ``5h=10% week=30%`` for the tool's current scopes, or
+    ``bal=£12.40`` / ``bud=62%`` for Kilo. Returns an empty string when no
+    scope has a usable remaining value. This shells out to the provider
+    usage source, so callers must cache it (see UsagePrefixCache) instead
+    of calling it per line.
     """
     snapshot = usage_snapshot_for_tool(tool, env)
     decision = usage_decision_for_tool(tool, "auto", "1", "60", snapshot, env)
@@ -1569,11 +1782,26 @@ def usage_prefix_text(tool: str, env: dict[str, str] | None = None) -> str:
     for window in windows:
         if not isinstance(window, dict):
             continue
+        name = str(window.get("name", "?"))
+        label = USAGE_PREFIX_WINDOW_LABELS.get(name, name)
+        kind = window.get("kind") or "reset_window"
+        if kind == "balance":
+            amount = window.get("remaining_amount")
+            if amount is None:
+                continue
+            currency = window.get("currency") or ""
+            if currency:
+                parts.append(f"{label}={currency}{fmt_number(amount)}")
+            else:
+                parts.append(f"{label}={fmt_number(amount)}")
+            continue
+        if kind == "ungated":
+            text = window.get("label") or name
+            parts.append(f"{label}={text}")
+            continue
         remaining = window.get("remaining")
         if remaining is None:
             continue
-        name = str(window.get("name", "?"))
-        label = USAGE_PREFIX_WINDOW_LABELS.get(name, name)
         parts.append(f"{label}={fmt_pct(remaining)}%")
     return " ".join(parts)
 

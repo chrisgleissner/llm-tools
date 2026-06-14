@@ -68,3 +68,34 @@ llm-scheduler worklog
 - Fixed scheduler reset parsing for Claude API timestamps with fractional seconds and `+00:00` offset.
 - Added regression coverage for `--suspend-until-ready` timer arming and Claude offset reset parsing.
 - Dry-ran requested Claude 5h handover schedule; reset derived as epoch `1780438801` / local `2026-06-02 23:20:01`.
+
+## 2026-06-14 — Kilo Code CLI & capacity scope refactor
+
+- Created `PLANS.md` for adding Kilo Code CLI as a first-class provider and
+  replacing the narrow `window` abstraction with a generic `capacity scope`
+  abstraction (reset_window, balance, budget, ungated, unknown).
+- Baseline: `pytest -q` passes (91 tests), coverage 86%.
+- Files changed: TBD (work in progress).
+- Tests run: TBD.
+- Failures: TBD.
+- Fixes: TBD.
+- Remaining risks: TBD.
+### Progress checkpoint (Kilo + capacity-scope refactor, working state)
+
+- Created `llm_tools/capacity.py` with the generic `ProviderId`,
+  `CapacityKind`, `CapacityScope`, `ProviderSnapshot`, and `UsageDecision`
+  dataclasses plus `decide`, `validate_scope`, `scope_pace`,
+  `is_undetermined_reason`, `effective_scopes` helpers.
+- Created `llm_tools/providers/kilo.py` with the Kilo Code CLI adapter:
+  `kilo stats` parser + env-var fallback (`LLM_USAGE_KILO_*`), the
+  `read_kilo` snapshot reader, and `kilo_command_argv` for
+  attached/headless launches.
+- Replaced the legacy `--window` flag with `--scope` in `llm-scheduler`
+  and `ralph-robin`; `--window` is still accepted as a deprecated alias.
+- Updated `llm-usage` table column from "Window" to "Scope" and added
+  Kilo rows (`balance`, `budget`, `byok/local/ungated`).
+- Updated `validate_tool_window` → `validate_tool_scope`; `RalphConfig`
+  and `SchedulerConfig` now carry a `scope` field.
+- Tests: 154 pass (added 25 capacity tests, 26 Kilo tests, 12 Ralph-Kilo
+  tests).
+- Coverage: 86% (above 85% gate).

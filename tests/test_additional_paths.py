@@ -148,7 +148,7 @@ def test_usage_table_snapshot_has_guidance_and_no_old_dial(capsys: pytest.Captur
     assert "\n\nBars: █ available · ░ spent" in out
     assert "Bars: █ available · ░ spent" in out
     assert "Guidance:" in out
-    assert "Tool       Ready   Window    Remaining" in out
+    assert "Tool       Ready   Scope     Remaining" in out
     assert "Codex      yes     5h         84% ████████░░" in out
     assert "                   weekly     33% ███░░░░░░░   ↓ conserve" in out
     assert "Claude     no      5h          0% ░░░░░░░░░░   × empty" in out
@@ -1174,8 +1174,8 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert common.estimate_remaining_time_from_log("p", "w", "bad", env) == "-"
     common.log_usage_sample("p", "w", "-", env)
 
-    assert common.usage_decision_for_tool("copilot", "weekly", "1", "60", {}, env)["reason"] == "unsupported-window"
-    assert common.usage_decision_for_tool("codex", "monthly", "1", "60", {"available": True}, env)["reason"] == "unsupported-window"
+    assert common.usage_decision_for_tool("copilot", "weekly", "1", "60", {}, env)["reason"] == "unsupported-scope"
+    assert common.usage_decision_for_tool("codex", "monthly", "1", "60", {"available": True}, env)["reason"] == "unsupported-scope"
     assert common.usage_decision_for_tool("codex", "5h", "1", "60", {"available": True, "five_hour": {"resets_at": 2000}}, env)["reason"] == "inconclusive-usage"
     assert common.usage_snapshot_for_tool("unknown", env)["reason"] == "unsupported-tool"
     assert common.output_is_retryable(130, "", attached=True) is False

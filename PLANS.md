@@ -1,113 +1,145 @@
-# Python Migration Plan
+# Kilo Code CLI & Capacity Scope Refactor — Plan
 
-## Current Understanding
+## Current Objective
 
-This repository provides three Linux CLI tools for local LLM provider usage and orchestration:
+Add Kilo Code CLI as a first-class provider for `llm-usage`, `llm-scheduler`, and
+`ralph-robin`, and refactor the narrow "window" abstraction into an extensible
+"capacity scope" abstraction that natively models:
 
-- `llm-usage`: renders provider quota/usage information in table, JSON, watch, and Claude statusline modes.
-- `llm-scheduler`: waits until a selected provider appears usable, then launches the provider CLI with prompt handling, retry, logging, optional tmux, and optional wake/suspend behavior.
-- `ralph-robin`: rotates across configured providers and delegates launch/wait behavior to `llm-scheduler`.
-- `llm_tools/common.py`: shared Python helper library for provider readers, normalization, cache paths, time formatting, prompt/argv helpers, subprocess execution, and JSON conversion.
+* reset-bound quota scopes (`5h`, `weekly`, `monthly`),
+* non-reset balance scopes (Kilo funding),
+* optional budget scopes (Kilo monthly budget pacing),
+* ungated/BYOK/local scopes (Kilo `byok` / `local` / `ungated`),
+* unknown/inconclusive states.
 
-The requested end state is Python-only for the three tools and shared helper library, with all visible behavior preserved.
+This is a clean replacement. Backwards compatibility is not a goal; the old
+`--window` flag and the `Window` column header are removed.
 
-## Inventory
+## Assumptions
 
-Repository files discovered:
+* Tests can be updated freely. No external consumers depend on the old CLI.
+* Deterministic env vars (`LLM_USAGE_KILO_*`, `LLM_USAGE_KILO_MODE`,
+  `LLM_SCHEDULER_USAGE_JSON`, fake provider commands) are sufficient to test all
+  Kilo behavior.
+* The Kilo CLI binary may not be present in CI; we never require it.
+* We may add a new module `llm_tools/capacity.py` for the generic
+  provider/capacity abstraction, and `llm_tools/providers/kilo.py` for the Kilo
+  reader. The current file layout keeps everything in `llm_tools/common.py` for
+  small modules; a new module is justified because the abstraction is
+  load-bearing.
+* AGENTS.md and the README will be updated to reflect the new model and Kilo
+  environment variables.
 
-- Executables: `llm-usage`, `llm-scheduler`, `ralph-robin`
-- Shared helper: `llm_tools/common.py`
-- Test suite: `tests/`
-- User docs: `README.md`
-- Internal instructions: `AGENTS.md`
-- Planning artifacts: `PLANS.md`, `WORKLOG.md`
-- CI: `.github/workflows/test.yml`, Ubuntu, Python 3.11, installs package plus pytest/coverage, runs coverage-enforced tests.
-- Packaging: `pyproject.toml` with console scripts for `llm-usage`, `llm-scheduler`, and `ralph-robin`.
-- Public command files are Python entry scripts that allow direct checkout usage.
+## Architecture Decisions
 
-## Observable Behaviours To Preserve
+1. **New module `llm_tools/capacity.py`** defines generic
+   `ProviderId`, `CapacityKind`, `CapacityScope`, `ProviderSnapshot`, and
+   `UsageDecision` dataclasses + helpers. No provider-specific code in this
+   module.
+2. **Provider adapters** live alongside the existing readers
+   (`read_codex`, `read_claude`, `read_copilot`, `read_kilo`). Each adapter
+   returns a `ProviderSnapshot`.
+3. **Kilo reader** `read_kilo` tries `kilo stats` output (if the binary
+   exists), then falls back to environment variables. A new
+   `llm_tools/providers/kilo.py` keeps the parser isolated.
+4. **`--scope` flag** replaces `--window` everywhere. Valid scopes:
+   `auto`, `5h`, `weekly`, `monthly`, `balance`, `budget`, `byok`, `ungated`.
+   `auto` is provider-specific (see Implementation).
+5. **Kilo command construction**:
+   * Attached/interactive: `kilo run <prompt>` (in `--cwd`).
+   * Headless/autonomous: `kilo run --auto <prompt>`.
+   * We rely on `--cwd` to set the working directory, consistent with codex/copilot.
+6. **Decision rules** live in `capacity.py`:
+   * `reset_window`: behaves like today's `usage_decision_for_tool` for
+     reset-bound providers.
+   * `balance`: usable if `remaining_amount >= min_amount`; otherwise
+     `insufficient-balance` with `wait_until = now + poll`.
+   * `budget`: usable if `remaining_percent >= min_remaining`; otherwise
+     `budget-exhausted` with `wait_until = reset_epoch` when known, else
+     `now + poll`.
+   * `ungated`: usable when the CLI is present; no reset data needed.
+   * `unknown`/inconclusive: bounded polling.
+7. **Ralph selection** uses `pace` from `CapacityScope` (computed for budget
+   and reset_window scopes). Balance/ungated scopes are usable but not
+   pace-rankable; they are used as fallbacks.
 
-- CLI names, option names, defaults, validation, usage/help output, exit statuses, stdout/stderr split, and ordering.
-- Provider reader behavior for Codex, Claude Code/API/cache/statusline/local data, and GitHub Copilot.
-- Cache locations and migration from legacy cache directories.
-- JSON top-level keys and unavailable shapes.
-- Table layout, color behavior, missing-value rendering, remaining-time estimation, and source display.
-- Scheduler prompt loading, prompt file permissions, logs, run directory layout, provider command construction, retry decisions, attached/headless behavior, tmux behavior, wake/suspend behavior, and signal handling.
-- Ralph Robin provider rotation, state file behavior, logging, delegation to scheduler, and exact provider stdout passthrough.
-- Environment variables documented in `AGENTS.md` and any additional variables discovered in code.
+## Ordered Task List
 
-Discovery details:
+- [x] Inspect current code, tests, and docs.
+- [x] Create `PLANS.md` (this file) and `WORKLOG.md` first entry.
+- [x] Add `llm_tools/capacity.py` with generic dataclasses + helpers.
+- [x] Add `llm_tools/providers/__init__.py` and `llm_tools/providers/kilo.py`
+  with the Kilo reader.
+- [x] Wire Kilo into `read_*` family: `read_kilo` returning a snapshot.
+- [x] Add `usage_snapshot_for_tool` and `usage_decision_for_tool` support for
+  `kilo` and new scope types.
+- [x] Replace `--window` with `--scope` in `llm-scheduler` and `ralph-robin`.
+- [x] Update `validate_tool_window` → `validate_tool_scope`.
+- [x] Update `UsageRow.window` field to `scope` (rename) and the table column
+  from `Window` to `Scope`.
+- [x] Add Kilo command construction in `provider_default_argv` /
+  `highlight_provider_text`.
+- [x] Update Ralph selection to consider pace-rankable vs usable-but-not-rankable
+  providers.
+- [x] Update Ralph runtime context wording.
+- [x] Update `usage_prefix_text` to use new fields.
+- [x] Update JSON top-level to include `kilo` (kept stable: `generated_at`,
+  `codex`, `claude`, `copilot`, `kilo`).
+- [x] Update `AGENTS.md` and `README.md`.
+- [x] Add tests for Kilo, capacity decisions, scope validation, scheduler
+  command construction, Ralph selection.
+- [x] Run full test suite and ensure ≥85% coverage.
 
-- Direct provider commands: `codex`, `claude`, `copilot`, `github-copilot`.
-- External commands used by the Python implementation where relevant: provider CLIs (`codex`, `claude`, `copilot`/`github-copilot`), `date` fallback parsing/formatting, `script` for attached terminal mode, `tmux`, `systemd-run`, `systemctl`, `rtcwake`, and `sync`.
-- Environment variables read include: `XDG_CACHE_HOME`, `HOME`, `PATH`, `TERM`, `LLM_USAGE_NO_COLOR`, `LLM_USAGE_SHOW_SOURCE`, `LLM_USAGE_SHOW_REMAINING_TIME`, `LLM_USAGE_SHOW_CODEX_SPARK`, `LLM_USAGE_NOW_EPOCH`, `LLM_USAGE_MAX_FILES`, `LLM_USAGE_TAIL_LINES`, `LLM_USAGE_LOG_TAIL_LINES`, `LLM_USAGE_REMAINING_TIME_STALE_MULTIPLIER`, `LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS`, `LLM_USAGE_DISABLE_COPILOT`, `LLM_USAGE_COPILOT_TIMEOUT`, `LLM_USAGE_COPILOT_CAPTURE_TEXT`, `LLM_USAGE_COPILOT_CAPTURE_CMD`, `LLM_USAGE_COPILOT_CACHE_TTL`, `LLM_USAGE_COPILOT_REFRESH_WAIT`, `LLM_USAGE_COPILOT_CWD`, `LLM_USAGE_COPILOT_CAPTURE_CWD`, `LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS`, `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS`, `LLM_SCHEDULER_NO_STREAM`, `LLM_SCHEDULER_HEADLESS`, `LLM_SCHEDULER_USAGE_JSON`, `LLM_SCHEDULER_NO_ACTUAL_SUSPEND`, `LLM_SCHEDULER_PTY_TIMEOUT`, `LLM_SCHEDULER_IDLE_TIMEOUT`, `LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT`, `LLM_SCHEDULER_TMUX_TIMEOUT`, `LLM_SCHEDULER_WAKE_MIN_LEAD`, `LLM_SCHEDULER_SUSPEND_MIN_LEAD`.
-- Files read: Codex JSONL under `~/.codex/sessions`, Claude credentials/cache/status/project JSONL, Copilot cache, prompt files, run-dir prompt copy/state/log files.
-- Files written: usage log/cache files under `llm-tools/llm-usage`, scheduler run logs/events/prompt/attempt status/output files, Ralph Robin run logs/state, latest symlinks, Copilot refresh lock/cache temp files.
-- Stdout behavior: `llm-usage` table/JSON/statusline/watch frames; `llm-scheduler` dry-run/success/scheduled lines plus streamed child output unless suppressed; `ralph-robin` selection/log notices plus streamed scheduler/provider output.
-- Stderr behavior: validation errors, scheduler autonomy abort/failure lines, suspend scheduling fallback warnings, Ralph Robin autonomy-blocked/failure lines.
+## Progress State
 
-## Contract-Test Matrix
+* Current: planning complete; about to start implementation.
+* Blockers: none.
 
-Tests will be Python `pytest` black-box tests against the public CLI names. They will run first against the current Bash implementation, then against the Python implementation.
+## Test Plan
 
-- `llm-usage`: help/usage, invalid options, JSON validity, table output, color disabling, statusline stdin/cache, provider unavailable paths, Codex/Claude/Copilot fixture parsing, source and remaining-time flags.
-- `llm-scheduler`: help/usage, missing/invalid args, invalid tool/window combinations, prompt and prompt-file handling including spaces/empty/large files, dry-run command construction, usage injection, rate-limited waits bounded by test knobs, provider stdout/stderr routing, provider non-zero handling, retry/no-retry decisions, logs and run-dir creation, headless interruption paths where practical.
-- `ralph-robin`: help/usage, provider selection/rotation with fake usage, delegation command construction, state/log handling, failure rotation, and byte-for-byte stdout passthrough for plain text, multiline, no trailing newline, ANSI, UTF-8, stderr progress, and non-zero after partial stdout.
+* `tests/test_capacity.py` — generic abstraction unit tests.
+* `tests/test_kilo.py` — Kilo reader, command construction, env-var-only mode.
+* Update `tests/test_contracts.py` and `tests/test_additional_paths.py`:
+  - Drop `--window` references; use `--scope`.
+  - Add Kilo contract paths.
+  - Add Kilo scheduling decisions.
+  - Add Ralph selection with mixed reset-bound and Kilo providers.
+* Keep using `LLM_SCHEDULER_USAGE_JSON` for the scheduler-side decisions
+  where useful.
+* Run `pytest -q` and `coverage run -m pytest && coverage combine && coverage
+  report --fail-under=85`.
 
-## Migration Phases
+## Documentation Plan
 
-- [x] Phase 1: Discovery of current implementation, docs, tests, CI, external commands, environment variables, files, stdout/stderr behavior.
-- [x] Phase 2: Add black-box pytest contract tests for visible behavior.
-- [x] Phase 3: Introduce Python project structure, packaging, and shared modules.
-- [x] Phase 4: Port helper/tool slices and keep tests green.
-- [x] Phase 5: Preserve executable names through packaging entry points and Python direct-run scripts.
-- [x] Phase 6: Add coverage measurement and quality gates with at least 80 percent coverage.
-- [x] Phase 7: Remove obsolete Bash implementations/helper library and stale references.
+* `README.md`:
+  - Replace `Window` references with `Scope`.
+  - Add Kilo row to the providers table.
+  - Add a "Capacity scope model" section explaining the four kinds.
+  - Add Kilo setup + env vars section.
+  - Add scheduler / ralph examples for Kilo.
+  - Note that Kilo is not forced into a fake session window.
+* `AGENTS.md`:
+  - Update Hard Invariants / Provider Notes.
+  - Add Kilo environment variables.
+  - Mention the new abstraction.
+* `WORKLOG.md`:
+  - Append a timestamped section for this refactor.
 
-## Coverage Plan
+## Open Questions
 
-- Use `coverage.py` through `pytest-cov` or direct `coverage run -m pytest`.
-- Measure only the new Python package/modules, excluding tests and trivial wrapper glue if appropriate.
-- Add focused unit tests for parser/config/provider helpers and contract tests for CLI-visible behavior.
-- Enforce `--cov-fail-under=80`.
+* None blocking; all scope/value decisions are pinned by the task description.
 
-## CI Plan
+## Final Completion Checklist
 
-- GitHub Actions uses Python 3.11, installs the package and pytest/coverage, runs `coverage run -m pytest`, combines subprocess coverage data, and enforces `coverage report --fail-under=80`.
-
-## Risks And Mitigations
-
-- Large Bash behavior surface: mitigate with black-box tests before porting and incremental slices.
-- PTY/attached terminal semantics: keep subprocess/PTY code isolated and tested with fake CLIs.
-- Exact stdout passthrough for `ralph-robin`: use byte-level tests and avoid text transformations on provider stdout.
-- Time, wake, and suspend behavior: isolate system interactions behind functions with deterministic test hooks.
-- Provider parsing variability: preserve fixture behavior from existing tests and add targeted tests before changing parsers.
-
-## Current Task List
-
-- [x] Create/update `PLANS.md` for the Python migration.
-- [x] Append migration notes to `WORKLOG.md`.
-- [x] Complete discovery and update this plan with concrete findings.
-- [x] Add pytest contract harness and fixtures.
-- [x] Confirmed tests exercise visible behavior with fake providers.
-- [x] Implement Python package and entry points.
-- [x] Port shared helper logic.
-- [x] Port `llm-usage`.
-- [x] Port `llm-scheduler`.
-- [x] Port `ralph-robin`.
-- [x] Remove obsolete Bash tool/helper implementations.
-- [x] Update docs and CI.
-- [x] Run full validation and record results.
-
-## Explicit Termination Criteria
-
-This task is complete only when:
-
-- `PLANS.md` and `WORKLOG.md` are accurate.
-- The three public tool names invoke Python implementations.
-- No Bash implementation remains for the tools or shared helper library.
-- Deterministic tests pass without live provider credentials.
-- Coverage over the Python implementation is at least 80 percent.
-- CI enforces tests and coverage.
-- User-facing docs/help/output do not mention the implementation transition.
-- No intentional visible-behavior deviations remain, or any unavoidable deviation is documented in `WORKLOG.md`.
+* [x] `kilo` accepted in `--tools`, `--tool`, and `validate_tool_scope`.
+* [x] Kilo can be launched by `llm-scheduler` (attached + headless).
+* [x] `ralph-robin --tools` includes `kilo`.
+* [x] `llm-usage` table uses `Scope` column header.
+* [x] Capacity scope abstraction in `llm_tools/capacity.py`.
+* [x] Codex/Claude/Copilot still work via the new abstraction.
+* [x] Kilo balance, budget, and BYOK/local/ungated behavior covered.
+* [x] Tests cover Kilo command construction, scope validation, capacity
+      decisions, Kilo balance decisions, Kilo budget pacing, Ralph selection.
+* [x] README + AGENTS.md explain the new model + Kilo.
+* [x] All relevant tests pass; coverage ≥85%.
+* [x] `PLANS.md` and `WORKLOG.md` updated with evidence.
