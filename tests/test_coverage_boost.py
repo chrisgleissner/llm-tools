@@ -224,6 +224,11 @@ def test_provider_default_argv_kilo_and_opencode_cwd_handling() -> None:
     attached_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work", attached=True)
     assert scheduler.provider_default_argv(attached_opencode, "prompt") == ["opencode"]
 
+    headless_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work")
+    assert scheduler.provider_default_argv(headless_opencode, "prompt") == [
+        "opencode", "run", "--dir", "/tmp/work", "prompt",
+    ]
+
 
 # --------------------------------------------------------------------------- #
 # ralph_robin: duration parsing
