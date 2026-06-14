@@ -567,15 +567,14 @@ def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None 
 
 
 def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
-    env = env or os.environ
-    root = Path.home() / ".codex" / "sessions"
-    line = latest_matching_line(root, lambda o: get_path(o, (("rate_limits",), ("rateLimits",), ("rateLimits", "rateLimits"), ("msg", "rate_limits"), ("msg", "rateLimits"), ("payload", "rate_limits"), ("payload", "rateLimits"))) is not None, env)
-    if not line:
-        return None
-    return freshen_provider_windows(normalize_codex_obj(json.loads(line), "~/.codex/sessions"), env)
+    from .providers import codex as _codex_provider
+
+    return _codex_provider.read_codex(env)
 
 
-def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
+    """Internal Claude API read; lives in common so provider adapters stay
+    cyclic-free."""
     env = env or os.environ
     cache = usage_cache_dir(env) / "claude-usage-api.json"
     cred = Path.home() / ".claude" / ".credentials.json"
@@ -610,6 +609,10 @@ def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
         except (OSError, json.JSONDecodeError):
             return None
     return None
+
+
+def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    return _read_claude_api_raw(env)
 
 
 def read_claude(env: dict[str, str] | None = None) -> dict[str, Any] | None:
