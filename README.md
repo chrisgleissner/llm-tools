@@ -61,7 +61,7 @@ command -v ralph-robin
 Each [release](https://github.com/chrisgleissner/llm-tools/releases) ships a wheel ZIP archive. You can install the wheel directly:
 
 ```bash
-pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.2.3/llm_tools-0.2.3-py3-none-any.whl
+pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.3.0/llm_tools-0.3.0-py3-none-any.whl
 ```
 
 ### Install from a Local Checkout
