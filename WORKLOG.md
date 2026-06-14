@@ -99,3 +99,39 @@ llm-scheduler worklog
 - Tests: 154 pass (added 25 capacity tests, 26 Kilo tests, 12 Ralph-Kilo
   tests).
 - Coverage: 86% (above 85% gate).
+
+### Provider refactor (kilo, codex, claude, copilot all in llm_tools/providers/)
+
+- Every provider now lives in its own module under
+  `llm_tools/providers/`. Adding a new provider is a 5-step recipe
+  (read() snapshot, re-export, PROVIDER_SCOPES, default argv, --tool
+  membership).
+- Codex: `providers/codex.py` (read_codex + read() snapshot).
+- Claude: `providers/claude.py` (read_claude / read_claude_api
+  delegations + read() snapshot).
+- Copilot: `providers/copilot.py` (read_copilot / read_copilot_live
+  delegations + read() snapshot).
+- Kilo: `providers/kilo.py` (read_kilo + read alias + read()
+  snapshot).
+- llm_tools/common.py keeps the legacy read_codex / read_claude_api
+  / read_claude / read_copilot functions as thin shims that delegate
+  to the provider modules; Claude's API OAuth/cache mechanics live
+  in common to keep the readers free of provider indirection.
+- llm_tools/usage.py: render_once now uses snapshot-based
+  read_<name>_snapshot for Claude/Copilot; Codex keeps the legacy
+  read_codex JSON shape (the rows array carries the codex-spark
+  row, which the test contract pins).
+- Tests: 160 pass (added 6 in tests/test_providers.py).
+- Coverage: 85% (gate met).
+- README.md and AGENTS.md updated to document the new model.
+
+### End-to-end manual checks
+
+- `llm-usage` with `LLM_USAGE_KILO_BALANCE=12.40 GBP` + budget env
+  shows Kilo balance/budget rows in the table.
+- `llm-scheduler --tool kilo --scope byok --dry-run` resolves the
+  byok ungated scope and emits a `usage_decision` event.
+- `llm-scheduler --tool kilo --scope balance --dry-run` resolves
+  the balance scope and emits a `usage_decision` event.
+- `ralph-robin --tools kilo --max-iterations 1` selects kilo, runs
+  the provider, and stops cleanly.

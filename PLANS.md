@@ -141,5 +141,25 @@ This is a clean replacement. Backwards compatibility is not a goal; the old
 * [x] Tests cover Kilo command construction, scope validation, capacity
       decisions, Kilo balance decisions, Kilo budget pacing, Ralph selection.
 * [x] README + AGENTS.md explain the new model + Kilo.
-* [x] All relevant tests pass; coverage ≥85%.
+* [x] All relevant tests pass; coverage ≥85% (160 tests, 85% coverage).
 * [x] `PLANS.md` and `WORKLOG.md` updated with evidence.
+* [x] All four providers (kilo, codex, claude, copilot) factored into
+      dedicated `llm_tools/providers/<name>.py` modules with a
+      consistent `read(env) -> ProviderSnapshot` contract.
+* [x] `llm_tools/providers/__init__.py` documents the 5-step recipe for
+      adding a new provider.
+
+## Evidence
+
+* `python -m pytest -q` → 160 passed in ~55s.
+* `coverage run -m pytest && coverage combine && coverage report
+  --fail-under=85` → 85% total coverage.
+* `llm-usage` with Kilo env vars renders balance/budget rows in the
+  table; `--json` includes a `kilo` key with `scopes` for the
+  generic ProviderSnapshot.
+* `llm-scheduler --tool kilo --scope byok --dry-run` resolves the
+  byok ungated scope.
+* `llm-scheduler --tool kilo --scope balance --dry-run` resolves the
+  balance scope with the configured minimum.
+* `ralph-robin --tools kilo --max-iterations 1` selects Kilo via
+  the generic selector and runs the provider cleanly.
