@@ -709,14 +709,17 @@ def test_estimate_remaining_time_survives_resets_and_gaps(env: dict[str, str]) -
         encoding="utf-8",
     )
     now_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18000)}
-    # reset at +7200 is skipped, 2h gap at the end exceeds max_gap: 20% over 7200s remains
+    # The +10 jump at +7200 (90->100) is a reset: it anchors to the current
+    # window, dropping the earlier burn. The trailing 2h gap exceeds max_gap, so
+    # only the post-reset 10% over 3600s counts -> 50% lasts 5h.
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env) == "5h"
     stale_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18601)}
     assert common.estimate_remaining_time_from_log("p", "w", 50, stale_env) == "-"
     assert common.estimate_remaining_time_from_log("p", "w", 50, stale_env | {"LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "0"}) == "5h"
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_LOOKBACK_SECONDS": "60"}) == "-"
-    # disabling the gap filter also counts the trailing 2h decrease: 30% over 14400s
-    assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_GAP_SECONDS": "0"}) == "6h 40m"
+    # Disabling the gap filter also counts the post-reset trailing 2h decrease:
+    # 20% over 10800s within the anchored window -> 50% lasts 7h 30m.
+    assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_GAP_SECONDS": "0"}) == "7h 30m"
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "bad"}) == "5h"
 
 

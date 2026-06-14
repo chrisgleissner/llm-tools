@@ -1452,8 +1452,8 @@ def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: A
     except ValueError:
         min_span_fraction = 0.02
     try:
-        # A jump up in remaining larger than this (percentage points) is a window
-        # reset, not jitter -- it marks the start of the current window.
+        # A jump up in remaining of at least this many percentage points is a
+        # window reset, not jitter -- it marks the start of the current window.
         reset_threshold = float(env.get("LLM_USAGE_REMAINING_TIME_RESET_THRESHOLD", "10") or "10")
     except ValueError:
         reset_threshold = 10.0
@@ -1484,13 +1484,15 @@ def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: A
     if max_stale > 0 and now - samples[-1][0] > max_stale:
         return None
     # Anchor to the CURRENT window: drop everything up to and including the most
-    # recent reset (remaining jumping up by more than jitter). Burn from earlier
-    # windows -- and the transient glitches that cluster around an exhausted one
-    # -- must not pollute this window's velocity, or a few old spikes pin the ETA
-    # to a wildly short, "stuck" value that idle time can no longer dilute.
+    # recent reset (remaining jumping up by at least reset_threshold). Burn from
+    # earlier windows -- and the transient glitches that cluster around an
+    # exhausted one -- must not pollute this window's velocity, or a few old
+    # spikes pin the ETA to a wildly short, "stuck" value that idle time can no
+    # longer dilute. The same threshold gates the burn loop below, so a jump is
+    # classified identically whether it anchors or merely interrupts a burn.
     anchor = 0
     for i in range(1, len(samples)):
-        if samples[i][1] - samples[i - 1][1] > reset_threshold:
+        if samples[i][1] - samples[i - 1][1] >= reset_threshold:
             anchor = i
     samples = samples[anchor:]
     if len(samples) < 2:
@@ -1512,14 +1514,17 @@ def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: A
     for ts, value in samples:
         if prev_ts is not None:
             dt = ts - prev_ts
-            # Increases are window resets and gaps longer than max_gap may hide a
-            # reset; skip those intervals entirely. Otherwise count the elapsed
-            # time (so idle stretches dilute the rate) but drop the "burn" of a
-            # physically impossible spike -- a drop that would drain the whole
-            # window in under min_drain_seconds is a transient bad reading.
-            if dt > 0 and (max_gap <= 0 or dt <= max_gap) and value <= prev_rem:
+            rise = value - prev_rem
+            # A rise of at least reset_threshold is a window reset (same boundary
+            # as the anchor above), and a gap longer than max_gap may hide one;
+            # skip those intervals entirely. Otherwise count the elapsed time --
+            # so idle stretches AND minor upward jitter both dilute the rate
+            # rather than silently dropping their seconds -- and add a real drop's
+            # burn, unless the drop is steep enough to drain the whole window in
+            # under min_drain_seconds (a physically impossible, transient reading).
+            if dt > 0 and (max_gap <= 0 or dt <= max_gap) and rise < reset_threshold:
                 drop = prev_rem - value
-                if not (drop > 0 and dt / drop * 100.0 < min_drain_seconds):
+                if drop > 0 and not (dt / drop * 100.0 < min_drain_seconds):
                     total_reduction += drop
                 total_seconds += dt
         prev_ts = ts

@@ -186,6 +186,8 @@ providers     = ["claude", "codex"]
 # Which capacity check to use. One of:
 # auto | 5h | weekly | monthly | balance | budget | byok | ungated
 scope         = "auto"
+# Minimum quota left before a provider is considered usable.
+min_remaining = 1
 
 [providers.claude]
 # Run `claude --model sonnet`; only run while Sonnet has capacity.
@@ -194,6 +196,9 @@ model          = "sonnet"
 #   false -> skip claude and switch to the next provider
 #   true  -> keep claude and let it pick another model
 allow_fallback = false
+# Optional: override [defaults].scope / min_remaining for just this provider.
+#scope          = "weekly"
+#min_remaining  = 5
 
 [providers.codex]
 model          = "spark"

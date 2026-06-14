@@ -946,7 +946,7 @@ def suspend_until_available(
         if remaining <= 0:
             return False
         wait_until = min(wait_until, now + int(remaining))
-    common.log_event(logs, "all_blocked_suspend", {"reason": reason, "wait_seconds": max(0, wait_until - now), "wait_until": target})
+    common.log_event(logs, "all_blocked_suspend", {"reason": reason, "wait_seconds": max(0, wait_until - now), "wait_until": wait_until})
     status_line(f"all configured providers blocked ({reason}); suspending {wait_msg}", level="warn")
     # Wall-clock poll so the wait still ends on time if the machine is suspended
     # (e.g. a closed lid) while we idle -- time.sleep alone freezes across that.
