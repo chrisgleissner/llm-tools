@@ -25,5 +25,9 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          # Only attach the build artifacts. Do NOT regenerate release notes:
+          # releases are drafted in the GitHub UI with auto-generated notes,
+          # and this workflow runs on the resulting tag push. Re-generating
+          # here would append a second copy of the notes to the existing
+          # release body (the duplication bug).
           files: dist/*
-          generate_release_notes: true
