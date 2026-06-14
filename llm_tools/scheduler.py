@@ -416,7 +416,11 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
     if cfg.provider == "kilo":
         return ["kilo", "run", "--auto", prompt]
     if cfg.provider == "opencode":
-        return ["opencode", "run", *m, "-C", cfg.cwd, prompt]
+        # opencode uses `--dir` (not `-C`) for the working directory. We do not
+        # inject any permission-bypassing flag: whether a headless run may act
+        # without prompting is governed by the user's own OpenCode `permission`
+        # config, not by this framework.
+        return ["opencode", "run", *m, "--dir", cfg.cwd, prompt]
     if cfg.provider == "minimax":
         return ["mmx", "run", "--auto", "-C", cfg.cwd, prompt]
     return ["copilot", *m, "-C", cfg.cwd, "--prompt", prompt]

@@ -265,7 +265,7 @@ def test_opencode_command_argv_attached() -> None:
 
 def test_opencode_command_argv_headless() -> None:
     argv = opencode_command_argv(cfg_attached=False, cwd="/tmp/work", prompt="hello world")
-    assert argv == ["opencode", "run", "-C", "/tmp/work", "hello world"]
+    assert argv == ["opencode", "run", "--dir", "/tmp/work", "hello world"]
 
 
 # --- Scheduler: OpenCode end-to-end ------------------------------------------
@@ -362,7 +362,7 @@ def test_scheduler_opencode_byok_launches_with_headless_command(
             "--scope",
             "byok",
             "--command-template",
-            "opencode run -C $PWD {prompt}",
+            "opencode run --dir $PWD {prompt}",
             "--log-dir",
             str(Path(env["HOME"]) / "logs"),
         ],
