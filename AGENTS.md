@@ -141,6 +141,7 @@ Missing CLI with no env-var fallback is `reason="missing-cli"`. The provider is 
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
 * Fresh mode on an interactive terminal runs the provider CLI in its normal interactive form on a PTY wired directly to that terminal via `script(1)` (`resolve_attach_mode`, `ATTACHED=1`): output, stdin, resizes, and Ctrl-C must behave exactly as a direct CLI launch. Headless fresh mode (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`) keeps the non-interactive provider commands and streams the child output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`. Both paths write the ANSI-cleaned copy to `attempt-N.out`. Attached runs never retry on a clean exit or user cancel (130/143) and skip the rate-limit phrase grep, since interactive screen content can legitimately mention rate limits. Headless runs must abort with status `75` when a blocking prompt UI is detected, when question-like output stalls, or when there is no output progress past `LLM_SCHEDULER_IDLE_TIMEOUT`; `ralph-robin` must treat status `75` as a reason to re-evaluate rotation, not as a final failure after the first provider. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
 * Ralph must prepend provider-aware runtime context before launching a selected provider. That context must identify the selected provider, list latest usage decisions, and override stale provider-specific handoff/scheduler instructions in the original prompt so Codex does not hand off merely because Claude is exhausted, and vice versa.
+* Every provider is actively refreshed on read; `stale-usage` is a bug to display except for a known authentication or CLI-startup problem. Codex refreshes via the `codex app-server` JSON-RPC `account/rateLimits/read` method (live, turn-free), then a cached payload, then the local `~/.codex/sessions` JSONL. A missing `codex` binary reports `missing-cli`; absent `~/.codex/auth.json` credentials report `not-authenticated`. Mirror this contract for any new provider: prefer a live query, fall back to cache/local, and surface an auth/startup reason rather than old numbers.
 
 ## Environment knobs
 
@@ -155,6 +156,11 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_TAIL_LINES`
 * `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` (seconds before active/unknown Codex/Claude local snapshots are reported as stale; capped at 60; non-positive/invalid values fall back to 60)
 * `LLM_USAGE_PROVIDER_PARALLELISM` (provider reader fan-out concurrency for `llm-usage`; default is CPU cores)
+* `LLM_USAGE_NO_PROGRESS` (set to `1` to suppress the ephemeral stderr refresh spinner; it is also auto-suppressed when stderr is not a TTY)
+* `LLM_USAGE_CODEX_TIMEOUT` (seconds to wait for the `codex app-server` rate-limit handshake; default 15)
+* `LLM_USAGE_DISABLE_CODEX_APP_SERVER` (set to `1` to skip the live Codex app-server refresh and use only the cache/local fallback; used by tests for hermetic runs)
+* `LLM_USAGE_CODEX_APP_SERVER_CMD` (override the `codex app-server` command, e.g. a fake server in tests)
+* `LLM_USAGE_CODEX_RATE_LIMITS_JSON` (inject a raw `account/rateLimits/read` payload, bypassing the subprocess; used by tests)
 * `LLM_USAGE_LOG_TAIL_LINES`
 * `LLM_USAGE_REMAINING_TIME_STALE_MULTIPLIER`
 * `LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS`

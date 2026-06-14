@@ -23,7 +23,7 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 | `llm-scheduler` | Run one prompt through one selected provider once that provider has usable capacity.             |
 | `ralph-robin`   | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
 
-<img src="./docs/img/llm-usage3.png" alt="LLM Usage"/>
+<img src="./docs/img/llm-usage4.png" alt="LLM Usage"/>
 
 ## Install
 
@@ -634,7 +634,7 @@ Child scheduler logs are written under each Ralph run's `scheduler/` subdirector
 
 | Provider       | Source                                                                      |
 | -------------- | --------------------------------------------------------------------------- |
-| Codex          | Local JSONL under `~/.codex/sessions`.                                      |
+| Codex          | Live `codex app-server` rate limits, then cache, then local `~/.codex/sessions` JSONL. |
 | Claude Code    | OAuth usage API/cache with automatic OAuth token refresh, then statusline cache, then local project JSONL fallback. |
 | GitHub Copilot | Local Copilot CLI footer captured through a bounded PTY helper.             |
 | Kilo Code      | `kilo stats`, then Kilo environment variables.                              |
@@ -644,11 +644,34 @@ Child scheduler logs are written under each Ralph run's `scheduler/` subdirector
 `--provider-parallelism` or `LLM_USAGE_PROVIDER_PARALLELISM`; the default is
 the number of CPU cores.
 
-Local Codex/Claude snapshots are considered stale after
-`LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` seconds (default `60`) while they still
-claim an active or unknown reset window. Stale snapshots render as unavailable
-instead of exposing old percentages. The override is capped at 60 seconds;
-non-positive or invalid values fall back to 60.
+### How refreshing works
+
+Every provider is **actively refreshed** on each run — `llm-usage` never just
+echoes a session log left behind the last time you used a CLI. Each reader asks
+the provider for current numbers and only falls back if that fails:
+
+| Provider       | Active refresh → fallback                                                   |
+| -------------- | --------------------------------------------------------------------------- |
+| Codex          | `codex app-server` (live, turn-free) → last cached payload → local session JSONL |
+| Claude Code    | OAuth usage API (auto-refreshing the token) → API cache → statusline cache → project JSONL |
+| GitHub Copilot | Background PTY footer capture → cached capture                              |
+| Kilo / MiniMax / OpenCode | `kilo stats` / `mmx quota show` / `opencode stats` → environment variables |
+
+A provider only reports `stale-usage` if it cannot be refreshed for a **known
+authentication or CLI-startup reason** — e.g. Codex shows `not-authenticated`
+(no `~/.codex/auth.json` credentials) or `missing-cli` (the `codex` binary is
+not on `PATH`). When the CLI is installed and signed in, you always see live
+data.
+
+The local-snapshot fallbacks (Codex/Claude session files) are still treated as
+stale after `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` seconds (default `60`, capped at
+60) while they claim an active window, so a brief network blip degrades to
+"unavailable" rather than to a misleadingly old percentage.
+
+While readers are in flight, `llm-usage` shows a small spinner on `stderr` that
+erases itself once the table is ready. It is shown only when `stderr` is an
+interactive terminal, so pipes, `--json` consumers, and batch scripts stay
+byte-clean. Disable it with `LLM_USAGE_NO_PROGRESS=1`.
 
 ### GitHub Copilot Notes
 

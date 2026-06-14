@@ -243,6 +243,81 @@ def test_codex_api_falls_back_to_fresh_cache_on_transient_failure(env: dict[str,
     assert raw["source"] == "codex app-server (cached)"
 
 
+FAKE_APP_SERVER_OK = """#!/usr/bin/env python3
+import sys, json
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(msg, dict) and msg.get("id") == 2:
+        print(json.dumps({"id": 2, "result": {"rateLimits": {"limitId": "codex", "planType": "pro",
+            "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 5000},
+            "secondary": {"usedPercent": 10, "windowDurationMins": 10080, "resetsAt": 9000}}}}))
+        sys.stdout.flush()
+        break
+"""
+
+FAKE_APP_SERVER_AUTH_ERROR = """#!/usr/bin/env python3
+import sys, json
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(msg, dict) and msg.get("id") == 2:
+        print(json.dumps({"id": 2, "error": {"code": -32000, "message": "please login first"}}))
+        sys.stdout.flush()
+        break
+"""
+
+
+def _seed_codex_auth(home: Path) -> None:
+    auth = home / ".codex" / "auth.json"
+    auth.parent.mkdir(parents=True, exist_ok=True)
+    auth.write_text('{"auth_mode":"chatgpt","tokens":{"access_token":"tok"}}', encoding="utf-8")
+
+
+def _codex_live_env(env: dict[str, str], fake_bin: Path, server_cmd: str) -> dict[str, str]:
+    from .conftest import write_exe
+
+    write_exe(fake_bin / "codex", "#!/usr/bin/env bash\nexit 0\n")
+    live_env = {k: v for k, v in env.items() if k != "LLM_USAGE_DISABLE_CODEX_APP_SERVER"}
+    live_env["LLM_USAGE_CODEX_APP_SERVER_CMD"] = server_cmd
+    return live_env
+
+
+def test_codex_app_server_subprocess_success(env: dict[str, str], fake_bin: Path) -> None:
+    """Drive the real JSON-RPC handshake against a fake app-server binary."""
+    from .conftest import write_exe
+
+    home = Path(env["HOME"])
+    _seed_codex_auth(home)
+    server = write_exe(fake_bin / "fake-appserver-ok", FAKE_APP_SERVER_OK)
+    live_env = _codex_live_env(env, fake_bin, str(server))
+    raw = common.read_codex_api(live_env)
+    assert raw is not None
+    assert raw.get("available") is not False
+    assert raw["source"] == "codex app-server"
+    assert raw["five_hour"]["used"] == 42.0
+    # A successful live read is cached for the transient-failure fallback.
+    assert (common.usage_cache_dir(live_env) / "codex-usage-api.json").is_file()
+
+
+def test_codex_app_server_subprocess_auth_error(env: dict[str, str], fake_bin: Path) -> None:
+    """A JSON-RPC auth error from the app-server maps to not-authenticated."""
+    from .conftest import write_exe
+
+    home = Path(env["HOME"])
+    _seed_codex_auth(home)
+    server = write_exe(fake_bin / "fake-appserver-auth", FAKE_APP_SERVER_AUTH_ERROR)
+    live_env = _codex_live_env(env, fake_bin, str(server))
+    api = common.read_codex_api(live_env)
+    assert api is not None
+    assert api["available"] is False
+    assert api["reason"] == "not-authenticated"
+
+
 def test_claude_snapshot_unavailable_when_no_data(env: dict[str, str], monkeypatch) -> None:
     monkeypatch.setenv("HOME", str(env["HOME"]))
     env["LLM_USAGE_NOW_EPOCH"] = "1000"

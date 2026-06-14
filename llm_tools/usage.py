@@ -18,6 +18,7 @@ from .capacity import ProviderSnapshot
 
 APP_NAME = "llm-usage"
 TOOL_COL_WIDTH = 8
+MODEL_COL_WIDTH = 7
 TABLE_GAP_WIDTH = 3
 SOURCE_COL_WIDTH = 18
 PROGRESS_BAR_WIDTH = 10
@@ -100,6 +101,10 @@ class UsageRow:
     reset: Any
     source: str
     remaining_time: str = "-"
+    # Per-model label (e.g. "Sonnet", "Spark"). Empty for a provider's
+    # aggregate rows; populated for model-specific sub-rows so the table can
+    # render a dedicated Model column under the provider section.
+    model: str = ""
     # Optional secondary fields for non-percent scopes (Kilo balance/ungated).
     amount: float | None = None
     currency: str | None = None
@@ -442,14 +447,11 @@ def rule(width: int, gap: bool = False, char: str = "-") -> str:
     return char * width + (" " * TABLE_GAP_WIDTH if gap else "")
 
 
-def format_tool_name(name: str) -> str:
-    if name == "GPT-5.3-Codex-Spark" or ("GPT-5.3" in name and "Codex" in name and "Spark" in name):
-        return "GPT-5.3 Spark"
-    return name
-
-
-def table_columns(cfg: Config) -> list[tuple[str, int]]:
-    cols = [("Tool", TOOL_COL_WIDTH), ("Ready", 5), ("Scope", 7), ("Remaining", REMAINING_COL_WIDTH)]
+def table_columns(cfg: Config, show_model: bool = False) -> list[tuple[str, int]]:
+    cols = [("Tool", TOOL_COL_WIDTH)]
+    if show_model:
+        cols.append(("Model", MODEL_COL_WIDTH))
+    cols += [("Ready", 5), ("Scope", 7), ("Remaining", REMAINING_COL_WIDTH)]
     if cfg.show_daily_budget:
         cols.append(("Guidance", GUIDANCE_COL_WIDTH))
     if cfg.show_remaining_time:
@@ -473,8 +475,8 @@ def print_dashboard_header(cfg: Config) -> None:
         print()
 
 
-def print_table_header(cfg: Config) -> None:
-    cols = table_columns(cfg)
+def print_table_header(cfg: Config, show_model: bool = False) -> None:
+    cols = table_columns(cfg, show_model)
     head, rule_parts = [], []
     last = len(cols) - 1
     line = "─" if cfg.symbols_enabled else "-"
@@ -489,8 +491,8 @@ def print_table_header(cfg: Config) -> None:
     print("".join(rule_parts))
 
 
-def table_fixed_width(cfg: Config) -> int:
-    cols = table_columns(cfg)
+def table_fixed_width(cfg: Config, show_model: bool = False) -> int:
+    cols = table_columns(cfg, show_model)
     width = sum(col_width for _, col_width in cols)
     width += TABLE_GAP_WIDTH * (len(cols) - 1)
     if cfg.show_source:
@@ -528,10 +530,10 @@ def row_left_text(remaining: float | None, fallback: str = "-") -> str:
     return common.fmt_pct(remaining) + "%"
 
 
-def row_from_used(cfg: Config, provider: str, window: str, used: Any, reset: Any, source: str, display_provider: str | None = None) -> UsageRow:
+def row_from_used(cfg: Config, provider: str, window: str, used: Any, reset: Any, source: str, display_provider: str | None = None, model: str = "") -> UsageRow:
     remaining = common.remaining_from_used(used)
     remaining_time = common.estimate_remaining_time_from_log(provider, window, remaining) if cfg.show_remaining_time else "-"
-    return UsageRow(display_provider or provider, window, remaining, row_left_text(remaining), reset, source, remaining_time)
+    return UsageRow(display_provider or provider, window, remaining, row_left_text(remaining), reset, source, remaining_time, model=model)
 
 
 def unavailable_rows(provider: str) -> list[UsageRow]:
@@ -555,9 +557,10 @@ def print_value_row(cfg: Config, provider: str, window: str, remaining: str, rem
     print_usage_rows(cfg, [row])
 
 
-def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: str) -> dict[str, str]:
+def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: str, display_model: str = "") -> dict[str, str]:
     values = {
         "Tool": display_provider,
+        "Model": display_model,
         "Ready": ready_text,
         "Scope": row.scope,
         "Remaining": render_remaining(row.left_text, cfg),
@@ -569,16 +572,25 @@ def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: st
 
 
 def print_usage_rows(cfg: Config, rows: list[UsageRow]) -> None:
-    cols = table_columns(cfg)
+    show_model = any(row.model for row in rows)
+    cols = table_columns(cfg, show_model)
     last = len(cols) - 1
     previous_provider = ""
+    previous_model = ""
     for row in rows:
-        if previous_provider and row.provider != previous_provider:
+        first_of_provider = row.provider != previous_provider
+        if previous_provider and first_of_provider:
             print()
-        display_provider = row.provider if row.provider != previous_provider else ""
+        display_provider = row.provider if first_of_provider else ""
         ready_text = render_ready(1 if tool_ready(rows, row.provider) else 0, cfg) if display_provider else ""
+        if first_of_provider:
+            previous_model = ""
+        # Show the model label only on the first row of each model sub-block so
+        # the column stays uncluttered when a model spans several scope rows.
+        display_model = row.model if (row.model and row.model != previous_model) else ""
         previous_provider = row.provider
-        values = row_values(cfg, row, display_provider, ready_text)
+        previous_model = row.model
+        values = row_values(cfg, row, display_provider, ready_text, display_model)
         parts = []
         for idx, (label, width) in enumerate(cols):
             gap = idx != last or cfg.show_source
@@ -600,6 +612,45 @@ def log_and_print_row(cfg: Config, provider: str, window: str, used: Any, reset:
 
 def print_unavailable_rows(cfg: Config, provider: str) -> None:
     print_usage_rows(cfg, unavailable_rows(provider))
+
+
+def claude_rows(cfg: Config, claude_snap: Any) -> list[UsageRow]:
+    """Render Claude into aggregate 5h/weekly rows plus any per-model weekly rows.
+
+    Anthropic exposes per-model weekly limits (e.g. Sonnet-only) in addition to
+    the aggregate window. Those are surfaced as extra rows under the same Claude
+    section with the model named in the Model column. They are display-only and
+    do not affect scheduler gating (see :class:`ProviderSnapshot.model_scopes`).
+    """
+    if not getattr(claude_snap, "available", False):
+        return provider_unavailable_rows(
+            "Claude",
+            getattr(claude_snap, "source", ""),
+            getattr(claude_snap, "reason", "") or "no-local-data",
+        )
+    legacy = _legacy_claude(claude_snap) or {}
+    source = legacy.get("source", "")
+    five_used = (legacy.get("five_hour") or {}).get("used")
+    week_used = (legacy.get("week") or {}).get("used")
+    common.log_usage_sample("Claude", "5h", common.remaining_from_used(five_used))
+    common.log_usage_sample("Claude", "weekly", common.remaining_from_used(week_used))
+    rows = [
+        row_from_used(cfg, "Claude", "5h", five_used, (legacy.get("five_hour") or {}).get("resets_at"), source),
+        row_from_used(cfg, "Claude", "weekly", week_used, (legacy.get("week") or {}).get("resets_at"), source),
+    ]
+    for scope in getattr(claude_snap, "model_scopes", None) or []:
+        model = str((getattr(scope, "extras", None) or {}).get("model") or "")
+        if not model:
+            continue
+        rem = scope.remaining_percent
+        used = (100.0 - rem) if rem is not None else None
+        common.log_usage_sample(f"Claude {model}", scope.name, rem)
+        rows.append(row_from_used(cfg, f"Claude {model}", scope.name, used, scope.resets_at, scope.source or source, "Claude", model=model))
+    return rows
+
+
+def print_claude_rows(cfg: Config, claude_snap: Any) -> None:
+    print_usage_rows(cfg, claude_rows(cfg, claude_snap))
 
 
 def codex_rows(cfg: Config, codex_json: dict[str, Any] | None) -> list[UsageRow]:
@@ -627,14 +678,17 @@ def codex_rows(cfg: Config, codex_json: dict[str, Any] | None) -> list[UsageRow]
         is_spark = key == "codex-spark" or "spark" in provider.lower()
         if is_spark and not cfg.show_codex_spark:
             continue
-        display_provider = format_tool_name(provider)
+        # All Codex models live under the same "Codex" provider section; the
+        # specific model (e.g. Spark) is surfaced via the Model column instead
+        # of overflowing the Tool column with a long combined name.
+        model = "Spark" if is_spark else ""
         source = row.get("source") or codex_json.get("source", "")
         five_used = (row.get("five_hour") or {}).get("used")
         week_used = (row.get("week") or {}).get("used")
         common.log_usage_sample(provider, "5h", common.remaining_from_used(five_used))
         common.log_usage_sample(provider, "weekly", common.remaining_from_used(week_used))
-        out.append(row_from_used(cfg, provider, "5h", five_used, (row.get("five_hour") or {}).get("resets_at"), source, display_provider))
-        out.append(row_from_used(cfg, provider, "weekly", week_used, (row.get("week") or {}).get("resets_at"), source, display_provider))
+        out.append(row_from_used(cfg, provider, "5h", five_used, (row.get("five_hour") or {}).get("resets_at"), source, "Codex", model=model))
+        out.append(row_from_used(cfg, provider, "weekly", week_used, (row.get("week") or {}).get("resets_at"), source, "Codex", model=model))
     return out
 
 
@@ -1160,27 +1214,16 @@ def render_once(cfg: Config) -> None:
         }
         print(json.dumps(obj, separators=(",", ":")))
         return
-    if claude_snap.available:
-        legacy = _legacy_claude(claude_snap)
-        source = legacy.get("source", "")
-        five_used = (legacy.get("five_hour") or {}).get("used")
-        week_used = (legacy.get("week") or {}).get("used")
-        common.log_usage_sample("Claude", "5h", common.remaining_from_used(five_used))
-        common.log_usage_sample("Claude", "weekly", common.remaining_from_used(week_used))
-        rows = [
-            row_from_used(cfg, "Claude", "5h", five_used, (legacy.get("five_hour") or {}).get("resets_at"), source),
-            row_from_used(cfg, "Claude", "weekly", week_used, (legacy.get("week") or {}).get("resets_at"), source),
-        ]
-    else:
-        rows = provider_unavailable_rows("Claude", claude_snap.source, claude_snap.reason or "no-local-data")
+    rows = claude_rows(cfg, claude_snap)
     rows.extend(codex_rows(cfg, codex_legacy))
     rows.extend(copilot_rows(cfg, _legacy_copilot(copilot_snap, False)))
     rows.extend(kilo_rows(cfg, _kilo_to_json(kilo_snap)))
     rows.extend(minimax_rows(cfg, _minimax_to_json(minimax_snap)))
     rows.extend(opencode_rows(cfg, _opencode_to_json(opencode_snap)))
+    show_model = any(row.model for row in rows)
     if not cfg.no_header:
         print_dashboard_header(cfg)
-        print_table_header(cfg)
+        print_table_header(cfg, show_model)
     print_usage_rows(cfg, rows)
 
 

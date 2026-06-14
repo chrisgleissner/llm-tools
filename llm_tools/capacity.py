@@ -151,6 +151,11 @@ class ProviderSnapshot:
     source: str = ""
     selected_model: str | None = None
     scopes: list[CapacityScope] = field(default_factory=list)
+    # Display-only per-model scopes (e.g. Claude's Sonnet-only weekly limit).
+    # These are intentionally NOT consulted by ``decide()``: a model-specific
+    # limit must never gate the whole provider. They exist purely so the usage
+    # table can surface per-model rate limits alongside the aggregate window.
+    model_scopes: list[CapacityScope] = field(default_factory=list)
 
 
 @dataclass

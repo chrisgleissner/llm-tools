@@ -77,11 +77,34 @@ def read(env: dict[str, str] | None = None) -> ProviderSnapshot:
                 source=source,
             )
         )
+    # Per-model weekly limits (Sonnet/Opus/Haiku) are display-only: they are
+    # carried in ``model_scopes`` so the usage table can show them, but they
+    # never participate in scheduler/rotation decisions.
+    model_scopes: list[CapacityScope] = []
+    for entry in raw.get("model_weeks") or []:
+        if not isinstance(entry, dict):
+            continue
+        week = entry.get("week")
+        if not isinstance(week, dict):
+            continue
+        reset = week.get("resets_at")
+        model_scopes.append(
+            CapacityScope(
+                name="weekly",
+                kind=CapacityKind.RESET_WINDOW,
+                remaining_percent=common.remaining_from_used(week.get("used")),
+                reset_epoch=common.parse_epoch(reset),
+                resets_at=reset,
+                source=source,
+                extras={"model": str(entry.get("model") or "")},
+            )
+        )
     return ProviderSnapshot(
         provider=PROVIDER_CLAUDE,
         available=bool(scopes),
         source=source,
         scopes=scopes,
+        model_scopes=model_scopes,
     )
 
 

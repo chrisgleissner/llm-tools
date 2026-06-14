@@ -104,7 +104,11 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     table = run_cmd(["./llm-usage", "--show-source"], env)
     assert table.returncode == 0
     assert "Codex" in table.stdout
-    assert "GPT-5.3 Spark" in table.stdout
+    # Codex Spark is now a model sub-row under the Codex section: the provider
+    # column stays "Codex" and the model name appears in a dedicated Model column.
+    assert "Model" in table.stdout
+    assert "Spark" in table.stdout
+    assert "GPT-5.3 Spark" not in table.stdout
     assert "Copilot" in table.stdout
     assert "38%" in table.stdout
     assert "copilot cli" in table.stdout
@@ -122,7 +126,7 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     assert "closed" not in table.stdout
     assert "Use" not in table.stdout.splitlines()[4]
     hidden = run_cmd(["./llm-usage", "--hide-codex-spark"], env)
-    assert "GPT-5.3 Spark" not in hidden.stdout
+    assert "Spark" not in hidden.stdout
     status = subprocess.run(
         ["./llm-usage", "--statusline"],
         cwd=ROOT,

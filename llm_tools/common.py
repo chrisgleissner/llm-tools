@@ -491,6 +491,15 @@ def normalize_codex_obj(obj: Any, source: str) -> dict[str, Any] | None:
     }
 
 
+# Anthropic per-model weekly buckets we surface as their own display rows.
+# Order controls the order the model rows appear under the Claude section.
+CLAUDE_MODEL_WINDOW_KEYS: tuple[tuple[str, str], ...] = (
+    ("seven_day_sonnet", "Sonnet"),
+    ("seven_day_opus", "Opus"),
+    ("seven_day_haiku", "Haiku"),
+)
+
+
 def normalize_claude_obj(obj: Any, source: str) -> dict[str, Any] | None:
     rl = get_path(
         obj,
@@ -506,6 +515,8 @@ def normalize_claude_obj(obj: Any, source: str) -> dict[str, Any] | None:
             "five_hour": obj.get("five_hour"),
             "seven_day": obj.get("seven_day"),
             "seven_day_sonnet": obj.get("seven_day_sonnet"),
+            "seven_day_opus": obj.get("seven_day_opus"),
+            "seven_day_haiku": obj.get("seven_day_haiku"),
             "extra_usage": obj.get("extra_usage"),
         }
     if not isinstance(rl, dict):
@@ -513,13 +524,27 @@ def normalize_claude_obj(obj: Any, source: str) -> dict[str, Any] | None:
     primary = rl.get("five_hour") or rl.get("fiveHour") or rl.get("primary")
     secondary = rl.get("seven_day") or rl.get("sevenDay") or rl.get("weekly") or rl.get("secondary")
     percent_keys = ("used_percentage", "usedPercent", "used_percent", "utilization")
-    return {
+    out: dict[str, Any] = {
         "provider": "claude",
         "source": source,
         "plan": None,
         "five_hour": window_from(primary, 300, percent_keys) if isinstance(primary, dict) else None,
         "week": window_from(secondary, 10080, percent_keys) if isinstance(secondary, dict) else None,
     }
+    # Per-model weekly limits (Anthropic exposes Sonnet/Opus/Haiku as their own
+    # `seven_day_<model>` buckets alongside the aggregate `seven_day`). These are
+    # display-only; the scheduler still gates on the aggregate window.
+    model_weeks: list[dict[str, Any]] = []
+    for src_key, label in CLAUDE_MODEL_WINDOW_KEYS:
+        raw_model = rl.get(src_key)
+        if not isinstance(raw_model, dict):
+            continue
+        parsed = window_from(raw_model, 10080, percent_keys)
+        if parsed:
+            model_weeks.append({"model": label, "week": parsed})
+    if model_weeks:
+        out["model_weeks"] = model_weeks
+    return out
 
 
 def freshen_window(window: Any, now: int) -> Any:
@@ -551,6 +576,11 @@ def freshen_provider_windows(obj: Any, env: dict[str, str] | None = None) -> Any
     for key in ("five_hour", "week"):
         if key in obj:
             obj[key] = freshen_window(obj.get(key), now)
+    model_weeks = obj.get("model_weeks")
+    if isinstance(model_weeks, list):
+        for entry in model_weeks:
+            if isinstance(entry, dict) and "week" in entry:
+                entry["week"] = freshen_window(entry.get("week"), now)
     rows = obj.get("rows")
     if isinstance(rows, list):
         for row in rows:

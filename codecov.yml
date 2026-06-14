@@ -1,0 +1,23 @@
+# Codecov configuration.
+#
+# The CI `test` job already enforces the hard line/branch gate via
+# `coverage report --fail-under=85` (coverage.py, which gives partial
+# branches partial credit). Codecov computes coverage more strictly --
+# it counts every partial branch as a miss -- so the same suite reports a
+# few points lower here than coverage.py does. These targets express the
+# project policy in Codecov's stricter terms and tolerate the small,
+# environment-dependent jitter in branch counting.
+coverage:
+  status:
+    project:
+      default:
+        target: auto      # never regress meaningfully against the base
+        threshold: 1%
+    patch:
+      default:
+        target: 80%       # new/changed code must be well covered
+        threshold: 1%
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true
