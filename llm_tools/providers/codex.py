@@ -44,8 +44,21 @@ def freshen_windows(obj: Any, env: dict[str, str] | None = None) -> Any:
     return common.freshen_provider_windows(obj, env)
 
 
+def read_codex_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    return common.read_codex_api(env)
+
+
 def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = env or common_env_default()
+    # Active refresh first: the Codex app-server returns live, turn-free rate
+    # limits, so a snapshot is never stale while the CLI is installed and
+    # authenticated. Auth / startup problems surface their own reason; a
+    # transient failure (None) falls through to the local session logs.
+    api = read_codex_api(env)
+    if isinstance(api, dict):
+        if api.get("available") is False:
+            return api
+        return freshen_windows(api, env)
     root = common.home_dir(env) / ".codex" / "sessions"
     record = common.latest_matching_record(
         root,
@@ -142,4 +155,4 @@ def common_env_default() -> dict[str, str]:
     return dict(os.environ)
 
 
-__all__ = ["PROVIDER_CODEX", "normalize", "read", "read_codex", "freshen_windows"]
+__all__ = ["PROVIDER_CODEX", "normalize", "read", "read_codex", "read_codex_api", "freshen_windows"]

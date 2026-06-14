@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -35,6 +36,11 @@ CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
 CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
 CLAUDE_OAUTH_USER_AGENT = "claude-code/2.1.177"
+# Codex exposes live, turn-free rate limits through its app-server JSON-RPC
+# protocol (`account/rateLimits/read`). This is the active-refresh path that
+# keeps `llm-usage` from ever falling back to a stale on-disk session snapshot
+# while the CLI is installed and authenticated.
+DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS = 15
 
 
 def err(message: str) -> None:
@@ -664,6 +670,217 @@ def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     from .providers import codex as _codex_provider
 
     return _codex_provider.read_codex(env)
+
+
+def codex_cli(env: dict[str, str] | None = None) -> str | None:
+    env = env or os.environ
+    return shutil.which("codex", path=env.get("PATH"))
+
+
+def _codex_has_auth(env: dict[str, str]) -> bool:
+    """True when Codex has usable credentials on disk.
+
+    Mirrors the Claude OAuth pre-check: if there is no API key and no stored
+    ChatGPT token, the app-server cannot answer and we should report
+    ``not-authenticated`` rather than silently degrading to a stale snapshot.
+    """
+    auth = home_dir(env) / ".codex" / "auth.json"
+    try:
+        data = json.loads(auth.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("OPENAI_API_KEY") or "").strip():
+        return True
+    tokens = data.get("tokens")
+    if isinstance(tokens, dict):
+        return any(str(tokens.get(k) or "").strip() for k in ("access_token", "id_token", "refresh_token"))
+    return False
+
+
+def _codex_app_server_timeout(env: dict[str, str]) -> float:
+    raw = env.get("LLM_USAGE_CODEX_TIMEOUT", str(DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS))
+    try:
+        value = float(raw or DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS)
+    except ValueError:
+        return float(DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS)
+    return value if value > 0 else float(DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS)
+
+
+def _terminate_app_server(proc: "subprocess.Popen[str]") -> None:
+    try:
+        if proc.stdin and not proc.stdin.closed:
+            proc.stdin.close()
+    except OSError:
+        pass
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _codex_app_server_rate_limits(env: dict[str, str]) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch live Codex rate limits via the app-server JSON-RPC protocol.
+
+    Returns ``(result, reason)`` where ``result`` is the raw
+    ``account/rateLimits/read`` payload on success and ``reason`` describes a
+    non-transient failure (``missing-cli`` / ``not-authenticated``). A
+    transient failure (timeout, crash, network) returns ``(None, None)`` so the
+    caller can fall back to the most recent on-disk snapshot.
+    """
+    injected = env.get("LLM_USAGE_CODEX_RATE_LIMITS_JSON")
+    if injected is not None:
+        try:
+            obj = json.loads(injected)
+        except json.JSONDecodeError:
+            return None, None
+        return (obj, None) if isinstance(obj, dict) else (None, None)
+    if env.get("LLM_USAGE_DISABLE_CODEX_APP_SERVER") == "1":
+        return None, None
+    cli = codex_cli(env)
+    if not cli:
+        return None, "missing-cli"
+    if not _codex_has_auth(env):
+        return None, "not-authenticated"
+    override = env.get("LLM_USAGE_CODEX_APP_SERVER_CMD")
+    argv = shlex.split(override) if override else [cli, "app-server"]
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        return None, None
+
+    result: dict[str, Any] = {}
+    flags = {"auth": False}
+    done = threading.Event()
+
+    def reader() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == 2:
+                    payload = msg.get("result")
+                    if isinstance(payload, dict):
+                        result.update(payload)
+                    elif "error" in msg:
+                        text = json.dumps(msg.get("error") or {}).lower()
+                        if any(t in text for t in ("auth", "login", "401", "unauthor", "credential")):
+                            flags["auth"] = True
+                    done.set()
+                    return
+        except (OSError, ValueError):
+            pass
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "llm-tools", "version": "0.1.0"}}}) + "\n")
+        proc.stdin.write(json.dumps({"method": "initialized"}) + "\n")
+        proc.stdin.write(json.dumps({"id": 2, "method": "account/rateLimits/read", "params": None}) + "\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    done.wait(timeout=_codex_app_server_timeout(env))
+    _terminate_app_server(proc)
+    if result:
+        return result, None
+    if flags["auth"]:
+        return None, "not-authenticated"
+    return None, None
+
+
+def codex_rate_limits_to_wire(result: dict[str, Any] | None, source: str) -> dict[str, Any] | None:
+    """Translate an app-server ``account/rateLimits/read`` payload into the
+    legacy Codex wire format (``five_hour`` / ``week`` / ``rows``).
+
+    The payload carries a backward-compatible single bucket in ``rateLimits``
+    plus a per-``limit_id`` view in ``rateLimitsByLimitId`` (where the Spark
+    model shows up as its own bucket). We fold the Spark bucket back under a
+    ``spark`` key so :func:`normalize_codex_obj` produces the same
+    ``codex`` / ``codex-spark`` rows the rest of the codebase expects.
+    """
+    if not isinstance(result, dict):
+        return None
+    bucket = result.get("rateLimits")
+    by_id = result.get("rateLimitsByLimitId")
+    rl: dict[str, Any] = {}
+    if isinstance(bucket, dict):
+        rl.update(bucket)
+    if isinstance(by_id, dict):
+        if not rl and isinstance(by_id.get("codex"), dict):
+            rl.update(by_id["codex"])
+        for limit_id, sub in by_id.items():
+            if not isinstance(sub, dict):
+                continue
+            name = str(sub.get("limitName") or "").lower()
+            if "spark" in name or "spark" in str(limit_id).lower():
+                rl["spark"] = sub
+                break
+    if not rl:
+        return None
+    return normalize_codex_obj({"rate_limits": rl}, source)
+
+
+def read_codex_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Active Codex refresh via the app-server, with a cached fallback.
+
+    On success the live payload is cached to ``codex-usage-api.json`` and the
+    normalized snapshot is returned. A known authentication or CLI startup
+    problem returns an ``available=False`` snapshot carrying that reason (so the
+    caller surfaces it instead of stale data). A transient failure returns the
+    cached payload when it is still fresh, otherwise ``None`` so the caller can
+    fall back to the local Codex session logs.
+    """
+    env = env or os.environ
+    cache = usage_cache_dir(env) / "codex-usage-api.json"
+    result, reason = _codex_app_server_rate_limits(env)
+    if result is not None:
+        norm = codex_rate_limits_to_wire(result, "codex app-server")
+        if norm:
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+            return norm
+    if reason in ("missing-cli", "not-authenticated"):
+        return {"provider": "codex", "source": "codex app-server", "available": False, "reason": reason}
+    if cache.is_file() and cache.stat().st_size > 0:
+        try:
+            mtime = int(cache.stat().st_mtime)
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            norm = codex_rate_limits_to_wire(cached, "codex app-server (cached)")
+            if norm and stale_if_local_snapshot("codex", norm, "codex app-server (cached)", mtime, env) is norm:
+                return norm
+        except (OSError, json.JSONDecodeError):
+            pass
+    return None
 
 
 def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
