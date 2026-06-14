@@ -205,7 +205,7 @@ model          = "spark"
 allow_fallback = false
 
 [ralph]                                # ralph-robin-only settings (override [defaults] above)
-# One example key — see config.toml.example for the full list:
+# One example key — see config.example.toml for the full list:
 providers      = ["claude", "codex", "kilo"]
 
 [scheduler]                            # llm-scheduler-only settings (override [defaults] above)
@@ -213,7 +213,7 @@ providers      = ["claude", "codex", "kilo"]
 provider       = "claude"
 ```
 
-A complete template with every supported key (all commented out) is shipped at `config.toml.example` in this repository. Copy it to one of the locations above and uncomment the lines you want to set.
+A complete template with every supported key (all commented out) is shipped at [config.example.toml](./config.example.toml) in this repository. Copy it to one of the locations above and uncomment the lines you want to set.
 
 When `model` is set, `llm-scheduler` and `ralph-robin` call the provider with `--model NAME` and only run while that model still has capacity. With `allow_fallback = false` (the default), the tool treats the provider as unavailable once that model's limit is used up and switches to the next provider. With `allow_fallback = true`, the tool keeps trying the provider but drops the model setting and lets the provider's CLI pick a different model. Pass `--model NAME` on the command line to override the file for a single run.
 
