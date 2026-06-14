@@ -29,7 +29,7 @@ in its normal interactive form attached directly to that terminal: output,
 key input, window resizes, and Ctrl-C behave exactly as if the CLI had been
 started directly in the shell. Without a terminal (pipes, cron, systemd
 resume) or with --headless, the non-interactive form (claude --print,
-codex exec, copilot --prompt, kilo run --auto, opencode run, mmx run --auto)
+codex exec, copilot --prompt, kilo run --dir, opencode run, mmx run --auto)
 runs on a captured PTY instead.
 
 Examples:
