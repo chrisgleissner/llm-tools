@@ -27,6 +27,7 @@ from urllib.request import Request, urlopen
 
 AUTONOMY_ABORT_STATUS = 75
 TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
+DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
 
 
 def err(message: str) -> None:
@@ -35,13 +36,13 @@ def err(message: str) -> None:
 
 def cache_root(env: dict[str, str] | None = None) -> Path:
     env = env or os.environ
-    base = env.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    base = env.get("XDG_CACHE_HOME") or str(home_dir(env) / ".cache")
     return Path(base) / "llm-tools"
 
 
 def migrate_legacy_cache_dirs(env: dict[str, str] | None = None) -> None:
     env = env or os.environ
-    legacy_root = Path(env.get("XDG_CACHE_HOME") or str(Path.home() / ".cache"))
+    legacy_root = Path(env.get("XDG_CACHE_HOME") or str(home_dir(env) / ".cache"))
     root = cache_root(env)
     for name in ("llm-usage", "llm-scheduler", "ralph-robin"):
         old = legacy_root / name
@@ -56,6 +57,11 @@ def migrate_legacy_cache_dirs(env: dict[str, str] | None = None) -> None:
 
 def usage_cache_dir(env: dict[str, str] | None = None) -> Path:
     return cache_root(env) / "llm-usage"
+
+
+def home_dir(env: dict[str, str] | None = None) -> Path:
+    env = env or os.environ
+    return Path(env.get("HOME") or str(Path.home()))
 
 
 def scheduler_log_dir(env: dict[str, str] | None = None) -> Path:
@@ -542,7 +548,82 @@ def freshen_provider_windows(obj: Any, env: dict[str, str] | None = None) -> Any
     return obj
 
 
-def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None = None) -> str | None:
+def local_snapshot_max_age(env: dict[str, str] | None = None) -> int:
+    env = env or os.environ
+    raw = env.get("LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE", str(DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS))
+    try:
+        parsed = int(float(raw or str(DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS)))
+    except ValueError:
+        return DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS
+    if parsed <= 0:
+        return DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS
+    return min(DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS, parsed)
+
+
+def local_snapshot_is_stale(source_mtime: int | None, env: dict[str, str] | None = None) -> bool:
+    if source_mtime is None:
+        return False
+    max_age = local_snapshot_max_age(env)
+    return now_epoch(env) - source_mtime > max_age
+
+
+def provider_snapshot_requires_fresh_source(obj: Any, env: dict[str, str] | None = None) -> bool:
+    """Return true when a local snapshot still claims an active/unknown window.
+
+    If every reset-bound window already elapsed, the old sample can be safely
+    freshened to full quota. Otherwise, an old local file may materially
+    under/over-report current usage and should not be displayed as current data.
+    """
+    if not isinstance(obj, dict):
+        return False
+    now = now_epoch(env)
+
+    def active_or_unknown(window: Any) -> bool:
+        if not isinstance(window, dict):
+            return False
+        epoch = parse_epoch(window.get("resets_at"))
+        return epoch is None or epoch > now
+
+    for key in ("five_hour", "week"):
+        if active_or_unknown(obj.get(key)):
+            return True
+    rows = obj.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("five_hour", "week"):
+                if active_or_unknown(row.get(key)):
+                    return True
+    return False
+
+
+def stale_usage_provider(provider: str, source: str, source_mtime: int | None, env: dict[str, str] | None = None) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "source": source,
+        "available": False,
+        "reason": "stale-usage",
+        "source_mtime": source_mtime,
+        "stale_after_seconds": local_snapshot_max_age(env),
+    }
+
+
+def stale_if_local_snapshot(
+    provider: str,
+    obj: dict[str, Any] | None,
+    source: str,
+    source_mtime: int | None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    if obj is None:
+        return None
+    if local_snapshot_is_stale(source_mtime, env) and provider_snapshot_requires_fresh_source(obj, env):
+        return stale_usage_provider(provider, source, source_mtime, env)
+    return obj
+
+
+def latest_matching_record(root: Path, predicate: Any, env: dict[str, str] | None = None) -> tuple[str, Path, int] | None:
     env = env or os.environ
     if not root.is_dir():
         return None
@@ -556,14 +637,20 @@ def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None 
     files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
     for path in files[:max_files]:
         try:
+            mtime = int(path.stat().st_mtime)
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail_lines:]
         except OSError:
             continue
         for line in reversed(lines):
             obj = read_json_text(line)
             if obj is not None and predicate(obj):
-                return line
+                return line, path, mtime
     return None
+
+
+def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None = None) -> str | None:
+    record = latest_matching_record(root, predicate, env)
+    return record[0] if record else None
 
 
 def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -577,7 +664,7 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
     cyclic-free."""
     env = env or os.environ
     cache = usage_cache_dir(env) / "claude-usage-api.json"
-    cred = Path.home() / ".claude" / ".credentials.json"
+    cred = home_dir(env) / ".claude" / ".credentials.json"
     token = ""
     try:
         token = json.loads(cred.read_text(encoding="utf-8")).get("claudeAiOauth", {}).get("accessToken", "")
@@ -605,7 +692,11 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
             pass
     if cache.is_file() and cache.stat().st_size > 0:
         try:
-            return normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
+            mtime = int(cache.stat().st_mtime)
+            norm = normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
+            if stale_if_local_snapshot("claude", norm, str(cache), mtime, env) is not norm:
+                return None
+            return norm
         except (OSError, json.JSONDecodeError):
             return None
     return None
@@ -625,18 +716,31 @@ def _read_claude_raw(env: dict[str, str]) -> dict[str, Any] | None:
     if api:
         return api
     status_cache = usage_cache_dir(env) / "claude-status.json"
+    last_stale: dict[str, Any] | None = None
     if status_cache.is_file() and status_cache.stat().st_size > 0:
         try:
-            norm = normalize_claude_obj(json.loads(status_cache.read_text(encoding="utf-8")), str(status_cache))
+            mtime = int(status_cache.stat().st_mtime)
+            source = str(status_cache)
+            norm = normalize_claude_obj(json.loads(status_cache.read_text(encoding="utf-8")), source)
             if norm:
-                return norm
+                stale = stale_if_local_snapshot("claude", norm, source, mtime, env)
+                if stale is not norm:
+                    last_stale = stale
+                else:
+                    return norm
         except (OSError, json.JSONDecodeError):
             pass
-    root = Path.home() / ".claude" / "projects"
-    line = latest_matching_line(root, lambda o: get_path(o, (("rate_limits",), ("rateLimits",), ("message", "rate_limits"), ("message", "rateLimits"))) is not None, env)
-    if not line:
-        return None
-    return normalize_claude_obj(json.loads(line), "~/.claude/projects")
+    root = home_dir(env) / ".claude" / "projects"
+    record = latest_matching_record(root, lambda o: get_path(o, (("rate_limits",), ("rateLimits",), ("message", "rate_limits"), ("message", "rateLimits"))) is not None, env)
+    if not record:
+        return last_stale
+    line, _path, mtime = record
+    source = "~/.claude/projects"
+    norm = normalize_claude_obj(json.loads(line), source)
+    stale = stale_if_local_snapshot("claude", norm, source, mtime, env)
+    if stale is not norm:
+        return stale
+    return norm
 
 
 def find_copilot_cli() -> str | None:
@@ -903,6 +1007,9 @@ def json_for_provider(provider_json: dict[str, Any] | None, provider: str) -> di
     if not provider_json:
         return {"provider": provider, "available": False}
     out = dict(provider_json)
+    if out.get("available") is False:
+        out.setdefault("provider", provider)
+        return out
     if isinstance(out.get("rows"), list) and out["rows"]:
         rows = []
         codex_row = None

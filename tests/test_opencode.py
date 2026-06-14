@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -346,7 +347,7 @@ def test_scheduler_opencode_byok_launches_with_headless_command(
     env: dict[str, str], fake_bin: Path
 ) -> None:
     fake = fake_bin / "opencode"
-    fake.write_text("#!/usr/bin/env python3\nprint('hi from opencode')\n", encoding="utf-8")
+    fake.write_text(f"#!{sys.executable}\nprint('hi from opencode')\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     env["PATH"] = str(fake_bin)
     env["LLM_USAGE_OPENCODE_MODE"] = "byok"

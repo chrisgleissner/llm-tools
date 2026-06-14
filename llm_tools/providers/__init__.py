@@ -37,6 +37,7 @@ from .copilot import (
     read_copilot_live,
 )
 from .kilo import (
+    PROVIDER_KILO,
     KILO_MODES,
     kilo_cli,
     kilo_command_argv,
@@ -47,12 +48,14 @@ from .kilo import (
     read_kilo,
 )
 from .minimax import (
+    PROVIDER_MINIMAX,
     minimax_cli,
     minimax_command_argv,
     minimax_model,
     read_minimax,
 )
 from .opencode import (
+    PROVIDER_OPENCODE,
     OPENCODE_MODES,
     opencode_cli,
     opencode_command_argv,
@@ -70,6 +73,7 @@ __all__ = [
     "PROVIDER_CLAUDE",
     "PROVIDER_CODEX",
     "PROVIDER_COPILOT",
+    "PROVIDER_KILO",
     "PROVIDER_MINIMAX",
     "PROVIDER_OPENCODE",
     "claude",
@@ -107,4 +111,3 @@ __all__ = [
     "read_minimax",
     "read_opencode",
 ]
-

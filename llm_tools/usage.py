@@ -6,11 +6,13 @@ import shutil
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from . import common
+from .capacity import ProviderSnapshot
 
 
 APP_NAME = "llm-usage"
@@ -53,6 +55,8 @@ Options:
   --statusline        Read Claude Code statusline JSON from stdin, cache it, print compact line.
   --log-only          Sample providers and append to the usage log without printing a table.
   --no-header         Omit table header.
+  --provider-parallelism N
+                      Number of provider readers to run concurrently (default: CPU cores).
   -h, --help          Show this help.
 """
 
@@ -70,6 +74,7 @@ class Config:
         self.show_remaining_time = env.get("LLM_USAGE_SHOW_REMAINING_TIME", "0") != "0"
         self.show_daily_budget = env.get("LLM_USAGE_SHOW_DAILY_BUDGET", "1") != "0"
         self.show_codex_spark = env.get("LLM_USAGE_SHOW_CODEX_SPARK", "1") != "0"
+        self.provider_parallelism = provider_parallelism(env)
         self.symbols_enabled = env.get("LLM_TOOLS_NO_SYMBOLS", "0") != "1"
         self.color_enabled = sys.stdout.isatty() and not env.get("LLM_USAGE_NO_COLOR") and env.get("TERM") != "dumb"
         self.terminal_width = terminal_width(env)
@@ -153,6 +158,15 @@ def parse_args(argv: list[str]) -> Config:
         elif arg == "--no-header":
             cfg.no_header = True
             i += 1
+        elif arg == "--provider-parallelism":
+            if i + 1 >= len(argv):
+                common.err("--provider-parallelism requires N")
+                raise SystemExit(2)
+            if not common.is_integer(argv[i + 1]) or int(argv[i + 1]) < 1:
+                common.err("--provider-parallelism must be a positive integer")
+                raise SystemExit(2)
+            cfg.provider_parallelism = int(argv[i + 1])
+            i += 2
         elif arg in ("-h", "--help"):
             print(USAGE, end="")
             raise SystemExit(0)
@@ -167,6 +181,19 @@ def parse_args(argv: list[str]) -> Config:
         common.err("--watch requires numeric seconds")
         raise SystemExit(2)
     return cfg
+
+
+def provider_parallelism(env: dict[str, str] | None = None) -> int:
+    env = env or os.environ
+    default = max(1, os.cpu_count() or 1)
+    raw = env.get("LLM_USAGE_PROVIDER_PARALLELISM", "")
+    if raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def re_int(value: str, allow_negative: bool = False) -> bool:
@@ -503,6 +530,13 @@ def unavailable_rows(provider: str) -> list[UsageRow]:
     ]
 
 
+def provider_unavailable_rows(provider: str, source: str, reason: str) -> list[UsageRow]:
+    return [
+        UsageRow(provider, "5h", None, reason or "-", None, source or "no local data"),
+        UsageRow(provider, "weekly", None, reason or "-", None, source or "no local data"),
+    ]
+
+
 def print_value_row(cfg: Config, provider: str, window: str, remaining: str, remaining_time: str, reset_text: str, time_to_reset: str, source: str, daily_value: float | None = None) -> None:
     rem = common.num(remaining.rstrip("%")) if isinstance(remaining, str) and remaining.endswith("%") else None
     reset = None if time_to_reset == "-" else reset_text
@@ -560,6 +594,8 @@ def print_unavailable_rows(cfg: Config, provider: str) -> None:
 def codex_rows(cfg: Config, codex_json: dict[str, Any] | None) -> list[UsageRow]:
     if not codex_json:
         return unavailable_rows("Codex")
+    if codex_json.get("available") is False:
+        return provider_unavailable_rows("Codex", codex_json.get("source", ""), codex_json.get("reason", "unavailable"))
     rows = codex_json.get("rows") if isinstance(codex_json.get("rows"), list) else []
     if not rows:
         source = codex_json.get("source", "")
@@ -925,7 +961,18 @@ def print_minimax_rows(cfg: Config, minimax_json: dict[str, Any] | None) -> None
     print_usage_rows(cfg, minimax_rows(cfg, minimax_json))
 
 
-def render_once(cfg: Config) -> None:
+def unavailable_snapshot(provider: str, source: str, reason: str = "reader-error") -> ProviderSnapshot:
+    return ProviderSnapshot(provider=provider, available=False, reason=reason, source=source)
+
+
+def read_provider(name: str, reader: Any, fallback: Any) -> Any:
+    try:
+        return reader()
+    except Exception:
+        return fallback() if callable(fallback) else fallback
+
+
+def read_all_provider_data(cfg: Config) -> dict[str, Any]:
     from .providers import (
         read_claude_snapshot,
         read_copilot_snapshot,
@@ -934,17 +981,68 @@ def render_once(cfg: Config) -> None:
         read_opencode,
     )
 
-    codex_legacy = common.read_codex()
-    claude_snap = read_claude_snapshot()
-    copilot_snap = read_copilot_snapshot()
-    kilo_snap = read_kilo()
-    opencode_snap = read_opencode()
-    minimax_snap = read_minimax()
+    readers: dict[str, tuple[Any, Any]] = {
+        "codex": (
+            common.read_codex,
+            lambda: {"provider": "codex", "available": False, "reason": "reader-error", "source": "~/.codex/sessions"},
+        ),
+        "claude": (
+            read_claude_snapshot,
+            lambda: unavailable_snapshot("claude", "claude reader"),
+        ),
+        "copilot": (
+            read_copilot_snapshot,
+            lambda: unavailable_snapshot("copilot", "copilot cli"),
+        ),
+        "kilo": (
+            read_kilo,
+            lambda: unavailable_snapshot("kilo", "kilo cli"),
+        ),
+        "opencode": (
+            read_opencode,
+            lambda: unavailable_snapshot("opencode", "opencode cli"),
+        ),
+        "minimax": (
+            read_minimax,
+            lambda: unavailable_snapshot("minimax", "mmx cli"),
+        ),
+    }
+    if cfg.provider_parallelism <= 1:
+        return {name: read_provider(name, reader, fallback) for name, (reader, fallback) in readers.items()}
+    out: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=cfg.provider_parallelism) as pool:
+        futures = {
+            name: pool.submit(read_provider, name, reader, fallback)
+            for name, (reader, fallback) in readers.items()
+        }
+        for name in readers:
+            out[name] = futures[name].result()
+    return out
+
+
+def render_once(cfg: Config) -> None:
+    provider_data = read_all_provider_data(cfg)
+    codex_legacy = provider_data["codex"]
+    claude_snap = provider_data["claude"]
+    copilot_snap = provider_data["copilot"]
+    kilo_snap = provider_data["kilo"]
+    opencode_snap = provider_data["opencode"]
+    minimax_snap = provider_data["minimax"]
     if cfg.json_output:
+        claude_json = (
+            common.json_for_provider(_legacy_claude(claude_snap), "claude")
+            if claude_snap.available
+            else {
+                "provider": "claude",
+                "available": False,
+                "reason": claude_snap.reason,
+                "source": claude_snap.source,
+            }
+        )
         obj = {
             "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
             "codex": common.json_for_provider(codex_legacy, "codex"),
-            "claude": common.json_for_provider(_legacy_claude(claude_snap), "claude"),
+            "claude": claude_json,
             "copilot": _legacy_copilot(copilot_snap, cfg.show_copilot_credits),
             "kilo": _kilo_to_json(kilo_snap),
             "opencode": _opencode_to_json(opencode_snap),
@@ -964,7 +1062,7 @@ def render_once(cfg: Config) -> None:
             row_from_used(cfg, "Claude", "weekly", week_used, (legacy.get("week") or {}).get("resets_at"), source),
         ]
     else:
-        rows = list(unavailable_rows("Claude"))
+        rows = provider_unavailable_rows("Claude", claude_snap.source, claude_snap.reason or "no-local-data")
     rows.extend(codex_rows(cfg, codex_legacy))
     rows.extend(copilot_rows(cfg, _legacy_copilot(copilot_snap, False)))
     rows.extend(kilo_rows(cfg, _kilo_to_json(kilo_snap)))

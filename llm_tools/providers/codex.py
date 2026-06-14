@@ -11,7 +11,6 @@ and ``LLM_USAGE_TAIL_LINES`` to keep the hot path fast.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 from .. import common
@@ -47,8 +46,8 @@ def freshen_windows(obj: Any, env: dict[str, str] | None = None) -> Any:
 
 def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = env or common_env_default()
-    root = Path.home() / ".codex" / "sessions"
-    line = common.latest_matching_line(
+    root = common.home_dir(env) / ".codex" / "sessions"
+    record = common.latest_matching_record(
         root,
         lambda o: common.get_path(
             o,
@@ -65,9 +64,15 @@ def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
         is not None,
         env,
     )
-    if not line:
+    if not record:
         return None
-    return freshen_windows(normalize(json.loads(line), "~/.codex/sessions"), env)
+    line, _path, mtime = record
+    source = "~/.codex/sessions"
+    normalized = normalize(json.loads(line), source)
+    stale = common.stale_if_local_snapshot(PROVIDER_CODEX, normalized, source, mtime, env)
+    if stale is not normalized:
+        return stale
+    return freshen_windows(normalized, env)
 
 
 def read(env: dict[str, str] | None = None) -> ProviderSnapshot:
@@ -86,6 +91,13 @@ def read(env: dict[str, str] | None = None) -> ProviderSnapshot:
             available=False,
             reason="no-local-data",
             source="~/.codex/sessions",
+        )
+    if raw.get("available") is False:
+        return ProviderSnapshot(
+            provider=PROVIDER_CODEX,
+            available=False,
+            reason=str(raw.get("reason") or "unavailable"),
+            source=str(raw.get("source") or "~/.codex/sessions"),
         )
     source = raw.get("source", "~/.codex/sessions")
     rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []

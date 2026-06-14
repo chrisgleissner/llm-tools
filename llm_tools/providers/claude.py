@@ -51,6 +51,13 @@ def read(env: dict[str, str] | None = None) -> ProviderSnapshot:
             reason="no-local-data",
             source="~/.claude/projects",
         )
+    if raw.get("available") is False:
+        return ProviderSnapshot(
+            provider=PROVIDER_CLAUDE,
+            available=False,
+            reason=str(raw.get("reason") or "unavailable"),
+            source=str(raw.get("source") or "~/.claude/projects"),
+        )
     source = raw.get("source", "claude api")
     scopes: list[CapacityScope] = []
     for name, key in (("5h", "five_hour"), ("weekly", "week")):

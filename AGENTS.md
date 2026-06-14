@@ -153,6 +153,8 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_NOW_EPOCH`
 * `LLM_USAGE_MAX_FILES`
 * `LLM_USAGE_TAIL_LINES`
+* `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` (seconds before active/unknown Codex/Claude local snapshots are reported as stale; capped at 60; non-positive/invalid values fall back to 60)
+* `LLM_USAGE_PROVIDER_PARALLELISM` (provider reader fan-out concurrency for `llm-usage`; default is CPU cores)
 * `LLM_USAGE_LOG_TAIL_LINES`
 * `LLM_USAGE_REMAINING_TIME_STALE_MULTIPLIER`
 * `LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS`
