@@ -7,13 +7,37 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue)](https://github.com/chrisgleissner/llm-tools/releases)
 
-Small command-line tools for keeping local LLM CLIs productive, observable, and usable across rate-limit windows. They run on Linux and macOS; the wake/suspend features are Linux-only (see [Requirements](#requirements)).
+Small command-line tools for keeping local LLM CLIs productive, observable, and usable across rate-limit and capacity scopes. They run on Linux and macOS; the wake/suspend features are Linux-only (see [Requirements](#requirements)).
+
+## Capacity scope model
+
+`llm-tools` calls every quota/quota-like constraint a **scope**. A scope is
+a single, named capacity measure that one provider exposes. The four scope
+kinds model every supported provider without special-casing:
+
+| Kind            | Resets? | Example                                    | Providers    |
+| --------------- | ------- | ------------------------------------------ | ------------ |
+| `reset_window`  | yes     | `5h`, `weekly`, `monthly`                  | Codex, Claude, Copilot |
+| `balance`       | no      | Kilo credit balance, GBP/USD/credits      | Kilo         |
+| `budget`        | yes     | Kilo monthly spend budget                 | Kilo         |
+| `ungated`       | n/a     | BYOK / local / `kilo ungated`              | Kilo         |
+
+Kilo Code CLI is the reason this model exists: its governing constraints
+are funded balance, an optional monthly budget, or a BYOK/local mode.
+Kilo is **not** forced into a fake session window.
+
+`llm-usage` shows every scope as a table row. `--scope` (replacing the
+legacy `--window`) selects which scope to gate on. Per-tool allow-lists:
+
+* `codex`, `claude`: `auto | 5h | weekly`
+* `copilot`: `auto | monthly`
+* `kilo`: `auto | balance | budget | byok | ungated`
 
 ## What Each Tool Is For
 
 | Tool            | Use it when you want to...                                                                                  |
 | --------------- | ----------------------------------------------------------------------------------------------------------- |
-| `llm-usage`     | See remaining local usage for Codex, Claude Code, and GitHub Copilot before starting work.                  |
+| `llm-usage`     | See remaining local capacity per scope for Codex, Claude Code, GitHub Copilot, and Kilo before starting work. |
 | `llm-scheduler` | Submit one prompt to one selected CLI as soon as that CLI has usable capacity.                              |
 | `ralph-robin`   | Keep autonomous work moving by rotating across configured CLIs instead of stopping at the first rate limit. |
 
@@ -28,14 +52,35 @@ These tools drive the official command-line clients of the supported LLM provide
 | OpenAI Codex   | `codex`                | [github.com/openai/codex](https://github.com/openai/codex) - `npm install -g @openai/codex`           |
 | Claude Code    | `claude`               | [claude.com/product/claude-code](https://www.claude.com/product/claude-code) - `npm install -g @anthropic-ai/claude-code` |
 | GitHub Copilot | `copilot`              | [github.com/github/copilot-cli](https://github.com/github/copilot-cli) - `npm install -g @github/copilot` |
+| Kilo Code CLI  | `kilo`                 | [kilo.ai](https://kilo.ai) - `npm install -g @kilocode/cli`                                            |
 
-After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`) so it has a usable local session.
+After installing, authenticate each CLI once (e.g. `codex`, `claude`, `copilot`, `kilo`) so it has a usable local session.
 
 **You do not need all of them.** Every tool works with whatever subset of provider CLIs is installed and authenticated:
 
 * `llm-usage` shows `unavailable` for any provider it cannot read and still reports the rest.
 * `llm-scheduler` only needs the one provider you target with `--tool`.
 * `ralph-robin` skips providers it cannot use and rotates across the ones that are available (its default rotation is `claude,codex`; narrow or widen it with `--tools`).
+
+### Kilo Code CLI setup
+
+Kilo is configured primarily through environment variables, so it can be
+driven from CI or a Ralph rotation without touching local state:
+
+| Variable                          | Purpose                                                                                   |
+| --------------------------------- | ----------------------------------------------------------------------------------------- |
+| `LLM_USAGE_KILO_MODE`             | `gateway` (default), `budget`, `byok`, `local`, `ungated`                                |
+| `LLM_USAGE_KILO_BALANCE`          | Remaining credit balance (number; required for `balance` scope)                          |
+| `LLM_USAGE_KILO_CURRENCY`         | Currency/unit label (e.g. `GBP`, `USD`, `credits`)                                       |
+| `LLM_USAGE_KILO_MIN_BALANCE`      | Minimum remaining balance to consider Kilo usable (default `1`)                           |
+| `LLM_USAGE_KILO_MONTHLY_BUDGET`   | Total budget for the month (enables `budget` scope)                                       |
+| `LLM_USAGE_KILO_MONTHLY_SPENT`    | Amount already spent this budget period                                                    |
+| `LLM_USAGE_KILO_MONTHLY_RESET_DAY`| Day of month the budget resets (default `1`)                                              |
+
+When the `kilo` binary is on `PATH`, `llm-usage` and `llm-scheduler` also
+try `kilo stats` first (JSON or text) and fall back to the env-vars above
+when it is missing or unparseable. `--scope auto` prefers `budget` when
+configured, otherwise `balance`, otherwise `ungated`.
 
 ## Install
 
@@ -91,6 +136,7 @@ Or run the tools straight from a checkout without installing:
 ```bash
 llm-usage --watch 60
 llm-scheduler --tool codex --prompt-file task.md
+llm-scheduler --tool kilo --prompt-file task.md
 ralph-robin --prompt-file task.md
 ```
 
@@ -114,16 +160,17 @@ llm-usage --show-source
 llm-usage --statusline
 ```
 
-By default, it shows all supported providers:
+By default, it shows all supported providers (one row per **scope**, not
+per provider):
 
 ```text
 LLM Usage · 13:03
 
 Bars: █ available · ░ spent
-Guidance: 5h rows forecast runout; weekly/monthly rows compare remaining quota to time left.
+Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.
           ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve
 
-Tool       Ready   Window    Remaining         Guidance              Resets in
+Tool       Ready   Scope     Remaining         Guidance              Resets in
 ────────   ─────   ───────   ───────────────   ───────────────────   ──────────
 Codex      yes     5h        90% █████████░    ✓ lasts until reset   4h 34m
                    weekly    34% ███░░░░░░░    ↓ conserve            5d 2h
@@ -132,16 +179,18 @@ Claude     no      5h         0% ░░░░░░░░░░    × empty     
                    weekly    91% █████████░    ↑ headroom            5d
 
 Copilot    yes     monthly   36% ████░░░░░░    ↓ conserve            17d 11h
+
+Kilo       yes     balance   £12.40            ✓ funded              -
+                   budget    62% ██████░░░░    ↑ headroom            17d 4h
 ```
 
-The table is meant to answer four questions quickly:
+The table answers four questions quickly:
 
-- **Ready** - `yes` means every blocking quota window for that tool has usable capacity now; `no` means at least one blocking window must reset.
-- **Guidance** - `5h` rows forecast whether current burn lasts until reset; weekly and monthly rows compare remaining quota to a linear budget pace.
-- **Remaining** - remaining quota, with the exact percentage before the bar.
-- **Resets in** - relative reset time first, so near-term recovery is easy to scan.
-
-Short and long windows can disagree. For example, a 5h row may last until reset while a weekly row says `↓ conserve`; treat the slower long-window row as the limiting constraint.
+- **Ready** - `yes` means every blocking scope for that tool has usable capacity now; `no` means at least one scope must reset.
+- **Scope** - the capacity measure (`5h` / `weekly` / `monthly` / `balance` / `budget` / `byok` / `local` / `ungated`).
+- **Guidance** - `5h` rows forecast whether current burn lasts until reset; weekly/monthly/budget rows compare remaining quota to a linear budget pace.
+- **Remaining** - remaining quota, balance, or `unmetered`/`byok`/`local` for ungated scopes.
+- **Resets in** - relative reset time first, so near-term recovery is easy to scan. `-` for non-reset scopes.
 
 Options:
 
@@ -169,17 +218,18 @@ It is best for delayed launches, rate-limit-aware retries, tmux launches, wake s
 llm-scheduler --tool codex --prompt-file task.md
 llm-scheduler --tool claude --prompt "Continue the work in this repo until CI is green"
 llm-scheduler --tool copilot --prompt-file task.md --retry-delays 60,180,600
+llm-scheduler --tool kilo --prompt-file task.md
 llm-scheduler --tool codex --prompt-file task.md --at "23:05"
 llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
 llm-scheduler --tool codex --prompt-file task.md --wake
-llm-scheduler --tool claude --prompt-file task.md --window 5h --suspend-until-ready
+llm-scheduler --tool claude --prompt-file task.md --scope 5h --suspend-until-ready
 llm-scheduler --tool codex --prompt-file task.md --dry-run
 ```
 
 Required form:
 
 ```bash
-llm-scheduler --tool codex|claude|copilot (--prompt TEXT | --prompt-file FILE) [options]
+llm-scheduler --tool codex|claude|copilot|kilo (--prompt TEXT | --prompt-file FILE) [options]
 ```
 
 Behavior:
@@ -195,8 +245,8 @@ Options:
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--at TIME`                           | Delay launch until a `date -d` compatible local time.                                                                                        |
 | `--not-before TIME`                   | Do not launch before a `date -d` compatible local time.                                                                                      |
-| `--window auto\|5h\|weekly\|monthly`  | Select usage windows. `auto` checks known Codex and Claude limiting windows plus Copilot monthly usage.                                      |
-| `--min-remaining PERCENT`             | Minimum remaining capacity required to launch. Default: `1`.                                                                                 |
+| `--scope auto\|5h\|weekly\|monthly\|balance\|budget\|byok\|ungated` | Capacity scope to gate on (default: `auto`). See "Capacity scope model" for per-tool allow-lists. |
+| `--min-remaining PERCENT`             | Minimum remaining capacity required to launch. Default: `1`. For Kilo `balance` this is compared against the amount in `LLM_USAGE_KILO_BALANCE`. |
 | `--poll-interval SECONDS`             | Usage polling interval. Default: `60`.                                                                                                       |
 | `--max-unavailable-wait SECONDS`      | Maximum wait when usage cannot be measured. Default: `900`; `0` waits forever. Known rate limits with real reset times still wait for reset. |
 | `--retry-delays LIST`                 | Retry delays. Default: `60,180,600`.                                                                                                         |
@@ -219,10 +269,10 @@ Options:
 
 Default provider commands:
 
-| Mode        | Codex                          | Claude Code                                              | GitHub Copilot                       |
-| ----------- | ------------------------------ | -------------------------------------------------------- | ------------------------------------ |
-| Interactive | `codex -C <cwd> <prompt>`      | `claude <prompt>`                                        | `copilot -C <cwd> -i <prompt>`       |
-| Headless    | `codex exec -C <cwd> <prompt>` | `claude --print <prompt>`                                | `copilot -C <cwd> --prompt <prompt>` |
+| Mode        | Codex                          | Claude Code                                              | GitHub Copilot                       | Kilo Code CLI                          |
+| ----------- | ------------------------------ | -------------------------------------------------------- | ------------------------------------ | -------------------------------------- |
+| Interactive | `codex -C <cwd> <prompt>`      | `claude <prompt>`                                        | `copilot -C <cwd> -i <prompt>`       | `kilo run <prompt>` (uses `--cwd`)     |
+| Headless    | `codex exec -C <cwd> <prompt>` | `claude --print <prompt>`                                | `copilot -C <cwd> --prompt <prompt>` | `kilo run --auto <prompt>` (uses `--cwd`) |
 
 The default Claude adapter relies on your local Claude Code permission settings. To override Claude Code settings for one scheduler run:
 
@@ -243,7 +293,7 @@ When Ralph selects Claude Code through the built-in adapter, it uses Claude's `s
 ```bash
 ralph-robin --prompt-file task.md
 ralph-robin --prompt "Continue until tests pass"
-ralph-robin --tools claude,codex,copilot --prompt-file task.md
+ralph-robin --tools claude,codex,copilot,kilo --prompt-file task.md
 ralph-robin --prompt-file task.md --tmux llm-work
 ralph-robin --prompt-file task.md --dry-run
 ```
@@ -272,14 +322,15 @@ Options:
 
 | Option               | Purpose                                                                                                    |
 | -------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `--tools LIST`       | Set comma-separated rotation. Values: `claude`, `codex`, `copilot`.                                        |
+| `--tools LIST`       | Set comma-separated rotation. Values: `claude`, `codex`, `copilot`, `kilo`.                                 |
 | `--prompt TEXT`      | Prompt text passed to the selected provider.                                                               |
 | `--prompt-file FILE` | Prompt file passed to the selected provider.                                                               |
-| `--even-burn`        | Spread work to burn each provider's weekly quota down evenly (see Behavior below). Enabled by default.      |
+| `--scope auto\|5h\|weekly\|monthly\|balance\|budget\|byok\|ungated` | Capacity scope to gate on (default: `auto`). See "Capacity scope model" for per-tool allow-lists. |
+| `--even-burn`        | Spread work to burn each provider's quota down evenly (see Behavior below). Enabled by default.             |
 | `--no-even-burn`     | Keep using the current provider until it is exhausted.                                                      |
 | `--max-iterations N` | Stop after `N` successful increments. Default `0` means no iteration cap; use `1` for single-shot. |
 | `--max-duration D`   | Stop once `D` of wall-clock time elapses (e.g. `24h`, `90m`, `30s`, or seconds). Default `24h`; `0` disables. Whichever of `--max-iterations`/`--max-duration` is hit first wins. |
-| `--prefix LIST`      | Comma-separated fields stamped on each relayed provider line, rendered inside `[ ]` in order. Fields: `time` (`HH:MM:SS`), `tool` (provider name), `usage` (remaining per window, e.g. `5h=10% week=30%`). Default `time,tool`; use `none` (or empty) to turn it off entirely. |
+| `--prefix LIST`      | Comma-separated fields stamped on each relayed provider line, rendered inside `[ ]` in order. Fields: `time` (`HH:MM:SS`), `tool` (provider name), `usage` (remaining per scope). Default `time,tool`; use `none` (or empty) to turn it off entirely. |
 | `--prefix-usage-interval S` | Refresh interval (seconds) for the cached `usage` prefix field. Default `15`; `0` refreshes every line. |
 | `--state-file FILE`  | Store current provider index. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`. |
 | `--log-dir DIR`      | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.            |
@@ -287,7 +338,7 @@ Options:
 Passed through to `llm-scheduler`:
 
 ```text
---window
+--scope
 --min-remaining
 --poll-interval
 --max-unavailable-wait
@@ -306,9 +357,9 @@ Passed through to `llm-scheduler`:
 Behavior:
 
 * Defaults to autonomous headless launches, even from an interactive terminal.
-* Defaults to even burn-down: when multiple providers are ready now, selects the provider with the highest remaining *daily* capacity - weekly remaining % ÷ days until weekly reset (e.g. 80% with 4 days left is 20%/day). This spreads each weekly quota evenly across the days until it resets without idling on a provider that is currently rate-limited while another provider is ready. A provider with an unknown or stale weekly reset is assumed to have a full week, so it is still ranked rather than skipped.
-* Loops persistently: after each provider finishes an increment, Ralph re-evaluates usage, re-selects a provider, and submits the prompt again - so a long task is handed back and forth (e.g. Claude → ralph-robin → Claude). It does **not** stop when every provider is blocked: it owns the suspend decision and waits for the rotation to recover. The loop ends only on a non-recoverable failure, a degenerate instant-success streak, or once `--max-duration` / `--max-iterations` is reached.
-* When **all** providers are rate-limited, Ralph suspends the computer with an RTC wake-up timer set to the **earliest** provider window renewal across the whole rotation, then on wake resumes its *own* loop and re-evaluates which provider to use. (When suspend infrastructure is unavailable, the lead time is too short, or `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1`/`--dry-run` is set, it falls back to an in-process wait.) This is distinct from `llm-scheduler --suspend-until-ready`, which wakes into a single configured provider; Ralph wakes back into cross-provider rotation.
+* Defaults to even burn-down: when several providers are ready, the rotator prefers the one with the highest remaining capacity per day. Reset-window (`weekly`) and budget scopes are both pace-rankable; balance and ungated scopes are usable but not pace-rankable. Kilo's `budget` scope participates in even-burn alongside Codex/Claude `weekly`. A provider with an unknown or stale reset is assumed to have a full week, so it is still ranked rather than skipped.
+* Loops persistently: after each provider finishes an increment, Ralph re-evaluates capacity, re-selects a provider, and submits the prompt again - so a long task is handed back and forth (e.g. Claude → ralph-robin → Claude). It does **not** stop when every provider is blocked: it owns the suspend decision and waits for the rotation to recover. The loop ends only on a non-recoverable failure, a degenerate instant-success streak, or once `--max-duration` / `--max-iterations` is reached.
+* When **all** providers are blocked, Ralph suspends the computer with an RTC wake-up timer set to the **earliest** known reset across the whole rotation, then on wake resumes its *own* loop and re-evaluates which provider to use. (When suspend infrastructure is unavailable, the lead time is too short, or `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1`/`--dry-run` is set, it falls back to an in-process wait.) This is distinct from `llm-scheduler --suspend-until-ready`, which wakes into a single configured provider; Ralph wakes back into cross-provider rotation.
 * Streams provider output without injected labels.
 * Highlights status lines, diffs, commands, warnings, and errors on interactive terminals.
 * Disables colors for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
@@ -436,6 +487,29 @@ llm-scheduler --wake-test
 * Provider local data formats and CLI syntax can change.
 * Copilot AI credits are parsed when requested, but scheduler gating currently uses monthly remaining usage.
 
+## Adding a new provider
+
+`llm-tools` is built around a small provider-adapter contract. To add a
+new CLI (say `acme-cli`):
+
+1. Add `llm_tools/providers/acme.py` with a `read(env) -> ProviderSnapshot`:
+   the snapshot carries zero or more `CapacityScope` objects whose
+   `kind` is one of `reset_window`, `balance`, `budget`, `ungated`, or
+   `unknown`.
+2. Re-export the module from `llm_tools/providers/__init__.py`.
+3. Register the new provider in
+   `llm_tools/capacity.PROVIDER_SCOPES` (`PROVIDER_SCOPES["acme"] = {SCOPE_AUTO, ...}`).
+4. Add a default launch command under
+   `llm_tools.scheduler.provider_default_argv` (attached + headless
+   paths) and (optionally) a highlighting pattern in
+   `scheduler.highlight_provider_text`.
+5. Add `--tool` and `--tools` membership in the relevant `parse_args`
+   / `parse_tools` validators in `scheduler.py` and `ralph_robin.py`.
+
+The generic decision logic in `llm_tools/capacity.decide` then
+automatically handles the new provider's scopes, and `llm-usage` /
+`llm-scheduler` / `ralph-robin` all pick it up.
+
 ## Tests
 
 ```bash
@@ -445,7 +519,7 @@ coverage combine
 coverage report --fail-under=85
 ```
 
-Tests use fixtures and mock commands. They do not require real Codex, Claude, Copilot, credentials, network access, or the user’s real home directory.
+Tests use fixtures and mock commands. They do not require real Codex, Claude, Copilot, Kilo, credentials, network access, or the user's real home directory.
 
 For manual end-to-end checks, run the examples above against installed providers without the test fixture environment.
 
