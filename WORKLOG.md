@@ -69,6 +69,45 @@ llm-scheduler worklog
 - Added regression coverage for `--suspend-until-ready` timer arming and Claude offset reset parsing.
 - Dry-ran requested Claude 5h handover schedule; reset derived as epoch `1780438801` / local `2026-06-02 23:20:01`.
 
+## 2026-06-14 — Config file + model-aware gating tests
+
+- Picked up from the interrupted prior LLM. State at start: 269 tests
+  pass, total coverage 83% (gate `--fail-under=85` failing because
+  `llm_tools/config.py` at 37% was added without tests).
+- Added `tests/test_config.py` (28 tests) covering the full config-file
+  lifecycle: `config_path` resolution, `load_config` mtime cache,
+  TOML parse failures, every `_validate` branch (unknown sections,
+  default/ralph/scheduler/provider unknown keys, type errors),
+  `provider_policy` defaults, `merged_tool_config` precedence, and
+  the `_as_str` helper. Brings `llm_tools/config.py` from 37% → 98%.
+- Added `tests/test_config_integration.py` (10 tests) exercising
+  `ralph_robin.apply_config`, `ralph_robin.resolve_policies`, and
+  `scheduler.apply_config` end-to-end with TOML files. Verifies
+  explicit-CLI-wins precedence, the unsupported-model warning, and
+  per-provider routing policy application.
+- Added `tests/test_usage_prefix.py` (21 tests) for
+  `common.usage_prefix_text` and the `_decision_scopes` /
+  `_scope_filtered` / `_legacy_snapshot_to_scopes` helpers. Covers
+  reset_window, balance (with and without currency), and ungated
+  rendering.
+- Added `tests/test_common_helpers.py` (34 tests) for small helpers
+  not otherwise exercised: `migrate_legacy_cache_dirs`,
+  `require_cmd`, `parse_epoch` edge cases, `fmt_reset` /
+  `format_local_epoch` / `fmt_duration` / `time_until` /
+  `fmt_number`, `num` / `is_number` / `is_integer`, and
+  `copilot_monthly_window_days` / `copilot_monthly_reset_epoch`
+  December and January branches.
+- Manual smoke: `XDG_CONFIG_HOME=/tmp/cfgtest llm-usage --json`
+  resolves the new config file without error;
+  `llm-scheduler --provider claude --prompt x --dry-run` reads the
+  per-provider `model` and `scope` from the config and emits the
+  expected dry-run output.
+- Final: 362 tests pass; total coverage 86% (gate passes comfortably).
+- Files changed: `tests/test_config.py` (new, 28 tests),
+  `tests/test_config_integration.py` (new, 10 tests),
+  `tests/test_usage_prefix.py` (new, 21 tests),
+  `tests/test_common_helpers.py` (new, 34 tests).
+
 ## 2026-06-14 — Kilo Code CLI & capacity scope refactor
 
 - Created `PLANS.md` for adding Kilo Code CLI as a first-class provider and

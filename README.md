@@ -163,6 +163,62 @@ Per-provider scope allow-lists:
 | Kilo Code      | `auto`, `balance`, `budget`, `byok`, `ungated` |
 | OpenCode       | `auto`, `balance`, `budget`, `byok`, `ungated` |
 
+## Configuration File
+
+For shared settings across `llm-usage`, `llm-scheduler`, and `ralph-robin`, drop a TOML file at one of these locations (first match wins):
+
+1. `$LLM_TOOLS_CONFIG` (explicit path)
+2. `$XDG_CONFIG_HOME/llm-tools/config.toml`
+3. `~/.config/llm-tools/config.toml`
+
+A missing file is fine - the tools just use their built-in defaults. Parsed with the standard library's `tomllib` (Python 3.11+), so no extra dependency.
+
+**What wins when settings overlap:** built-in defaults < config file < CLI flags. A flag you pass on the command line always beats the same key in the file.
+
+The main thing the file lets you set is which model each provider should run, and what to do when that model's limit is used up:
+
+```toml
+# ~/.config/llm-tools/config.toml
+
+[defaults]
+# Order ralph-robin tries providers when --providers isn't given.
+providers     = ["claude", "codex"]
+# Which capacity check to use. One of:
+# auto | 5h | weekly | monthly | balance | budget | byok | ungated
+scope         = "auto"
+# Minimum quota left before a provider is considered usable.
+min_remaining = 1
+
+[providers.claude]
+# Run `claude --model sonnet`; only run while Sonnet has capacity.
+model          = "sonnet"
+# What to do when Sonnet's limit is used up:
+#   false -> skip claude and switch to the next provider
+#   true  -> keep claude and let it pick another model
+allow_fallback = false
+# Optional: override the default scope or minimum just for this provider.
+scope          = "weekly"
+min_remaining  = 5
+
+[providers.codex]
+model          = "spark"
+allow_fallback = false
+
+[ralph]                                # ralph-robin-only settings (override [defaults] above)
+# One example key — see config.toml.example for the full list:
+providers      = ["claude", "codex", "kilo"]
+
+[scheduler]                            # llm-scheduler-only settings (override [defaults] above)
+# One example key — see config.toml.example for the full list:
+provider       = "claude"
+```
+
+A complete template with every supported key (all commented out) is shipped at `config.toml.example` in this repository. Copy it to one of the locations above and uncomment the lines you want to set.
+
+When `model` is set, `llm-scheduler` and `ralph-robin` call the provider with `--model NAME` and only run while that model still has capacity. With `allow_fallback = false` (the default), the tool treats the provider as unavailable once that model's limit is used up and switches to the next provider. With `allow_fallback = true`, the tool keeps trying the provider but drops the model setting and lets the provider's CLI pick a different model. Pass `--model NAME` on the command line to override the file for a single run.
+
+Unknown sections or keys are rejected at load time so typos surface immediately.
+
 ## `llm-usage`
 
 Use `llm-usage` before starting work, in status lines, or in scripts that need a compact view of local LLM capacity.
@@ -205,7 +261,7 @@ Kilo                 yes     balance   £12.40            ✓ funded            
 The `Model` column only appears when a provider reports model-specific limits.
 These sub-rows sit under their provider's section: Codex surfaces its `Spark`
 model, and Claude surfaces per-model weekly limits (e.g. `Sonnet`) alongside the
-aggregate window. Model rows are informational — they are shown for visibility
+aggregate window. Model rows are informational - they are shown for visibility
 but do not gate scheduling, which always uses the provider's aggregate scopes.
 
 How to read the table:
@@ -656,7 +712,7 @@ the number of CPU cores.
 
 ### How refreshing works
 
-Every provider is **actively refreshed** on each run — `llm-usage` never just
+Every provider is **actively refreshed** on each run - `llm-usage` never just
 echoes a session log left behind the last time you used a CLI. Each reader asks
 the provider for current numbers and only falls back if that fails:
 
@@ -668,7 +724,7 @@ the provider for current numbers and only falls back if that fails:
 | Kilo / MiniMax / OpenCode | `kilo stats` / `mmx quota show` / `opencode stats` → environment variables |
 
 A provider only reports `stale-usage` if it cannot be refreshed for a **known
-authentication or CLI-startup reason** — e.g. Codex shows `not-authenticated`
+authentication or CLI-startup reason** - e.g. Codex shows `not-authenticated`
 (no `~/.codex/auth.json` credentials) or `missing-cli` (the `codex` binary is
 not on `PATH`). When the CLI is installed and signed in, you always see live
 data.
@@ -681,7 +737,7 @@ stale after `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` seconds (default `60`, capped at
 While readers are in flight, `llm-usage` shows a small spinner that erases
 itself once the table is ready. In `--watch` mode it docks to the right of the
 clock in the header (`LLM Usage · 14:29  ⠙ refreshing usage 3/6`) and the frame
-redraws in place — no full-screen wipe, so the dashboard updates without a
+redraws in place - no full-screen wipe, so the dashboard updates without a
 flash. It uses only the most portable cursor sequences (`ESC[H`, `ESC[K`,
 `ESC[r;cH`, and `ESC 7`/`ESC 8` save-restore), so it renders correctly under
 tmux, GNU screen, and a raw telnet PTY. Outside `--watch`, the spinner sits on

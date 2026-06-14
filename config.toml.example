@@ -1,0 +1,100 @@
+# llm-tools example configuration
+# -------------------------------
+#
+# Copy this file to one of these locations (first match wins):
+#
+#   $LLM_TOOLS_CONFIG                        (explicit path override)
+#   $XDG_CONFIG_HOME/llm-tools/config.toml
+#   ~/.config/llm-tools/config.toml
+#
+# Every key below is commented out, so the tools use their built-in defaults.
+# Uncomment a line (delete the leading "# ") and edit it to apply that
+# setting. Precedence: built-in defaults < this file < CLI flags.
+#
+# Run `<tool> --help` (e.g. `ralph-robin --help`) to see the value each
+# flag expects (numbers, durations like "24h", comma-separated lists, etc.).
+
+
+# ---------------------------------------------------------------------------
+# Shared defaults applied to all three tools. Each tool can override these
+# keys in its own [ralph] or [scheduler] table below.
+# ---------------------------------------------------------------------------
+
+[defaults]
+# Order ralph-robin tries providers when --providers isn't given.
+#providers     = ["claude", "codex"]
+# Which capacity check to use. One of:
+# auto | 5h | weekly | monthly | balance | budget | byok | ungated
+#scope         = "auto"
+# Minimum quota left before a provider is considered usable.
+#min_remaining = 1
+
+
+# ---------------------------------------------------------------------------
+# Per-provider routing policy. The main thing this lets you set is which
+# model a provider should run, and what to do when that model's limit is
+# used up (via allow_fallback).
+# ---------------------------------------------------------------------------
+
+[providers.claude]
+# Run `claude --model sonnet`; only run while Sonnet has capacity.
+#model          = "sonnet"
+# What to do when Sonnet's limit is used up:
+#  false -> skip claude and switch to the next provider
+#  true  -> keep claude and let it pick another model
+#allow_fallback = false
+# Optional: override [defaults].scope / [defaults].min_remaining just here.
+#scope          = "weekly"
+#min_remaining  = 5
+
+[providers.codex]
+#model          = "spark"
+#allow_fallback = false
+
+[providers.copilot]
+#model          = "..."
+#allow_fallback = false
+
+[providers.kilo]
+#model          = "..."
+#allow_fallback = false
+
+[providers.opencode]
+#model          = "..."
+#allow_fallback = false
+
+[providers.minimax]
+#model          = "..."
+#allow_fallback = false
+
+
+# ---------------------------------------------------------------------------
+# ralph-robin-only settings. Override [defaults] above.
+# ---------------------------------------------------------------------------
+
+[ralph]
+#providers             = ["claude", "codex", "kilo"]
+#scope                 = "auto"
+#min_remaining         = 1
+#poll_interval         = 60
+#max_unavailable_wait  = 1800
+#retry_delays          = [60, 300, 900]
+#even_burn             = true
+#max_iterations        = 50
+#max_duration          = "24h"
+#min_iteration_seconds = 30
+#prefix                = true
+#prefix_usage_interval = 5
+
+
+# ---------------------------------------------------------------------------
+# llm-scheduler-only settings. Override [defaults] above.
+# ---------------------------------------------------------------------------
+
+[scheduler]
+#provider              = "claude"
+#scope                 = "auto"
+#min_remaining         = 1
+#poll_interval         = 60
+#max_unavailable_wait  = 1800
+#retry_delays          = [60, 300, 900]
