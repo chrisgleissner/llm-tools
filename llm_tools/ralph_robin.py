@@ -172,6 +172,38 @@ def sleep_seconds(seconds: float) -> None:
         time.sleep(seconds)
 
 
+def suspend_wait_chunk_seconds() -> float:
+    """Max length of a single sleep while waiting out a suspend window.
+
+    Bounded so the wall clock is re-checked soon after the machine resumes; also
+    overridable (mainly for tests) via LLM_RALPH_WAIT_POLL_SECONDS.
+    """
+    raw = os.environ.get("LLM_RALPH_WAIT_POLL_SECONDS", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    return value if value > 0 else 15.0
+
+
+def wait_until_epoch(target_epoch: int) -> None:
+    """Block until the wall clock reaches target_epoch, polling in short chunks.
+
+    This must survive a system suspend that happens during the wait. time.sleep()
+    counts CLOCK_MONOTONIC, which the kernel freezes while suspended, so a single
+    sleep would keep running for its full duration *after* the machine resumes
+    (the renewal would pass unnoticed and the loop would hang). Re-reading the
+    wall clock between bounded chunks ends the wait as soon as real time catches
+    up to the target, no matter how long the machine was actually asleep.
+    """
+    chunk = suspend_wait_chunk_seconds()
+    while True:
+        remaining = target_epoch - common.now_epoch()
+        if remaining <= 0:
+            return
+        sleep_seconds(min(float(remaining), chunk))
+
+
 def color_enabled() -> bool:
     return bool(
         sys.stderr.isatty()
@@ -904,19 +936,21 @@ def suspend_until_available(
     target = soonest_wait_until(selection)
     now = common.now_epoch()
     if target is not None:
-        wait_s: float = max(0, target - now)
+        wait_until = target
         wait_msg = f"until {common.format_local_epoch(target)} (epoch {target})"
     else:
-        wait_s = float(int(cfg.poll_interval))
-        wait_msg = f"{int(wait_s)}s before retrying"
+        wait_until = now + int(cfg.poll_interval)
+        wait_msg = f"{int(cfg.poll_interval)}s before retrying"
     if max_duration:
         remaining = max_duration - (monotonic() - start_monotonic)
         if remaining <= 0:
             return False
-        wait_s = min(wait_s, remaining)
-    common.log_event(logs, "all_blocked_suspend", {"reason": reason, "wait_seconds": int(wait_s), "wait_until": target})
+        wait_until = min(wait_until, now + int(remaining))
+    common.log_event(logs, "all_blocked_suspend", {"reason": reason, "wait_seconds": max(0, wait_until - now), "wait_until": wait_until})
     status_line(f"all configured providers blocked ({reason}); suspending {wait_msg}", level="warn")
-    sleep_seconds(wait_s)
+    # Wall-clock poll so the wait still ends on time if the machine is suspended
+    # (e.g. a closed lid) while we idle -- time.sleep alone freezes across that.
+    wait_until_epoch(wait_until)
     return True
 
 
@@ -991,11 +1025,13 @@ def suspend_machine_until(
         level="warn",
     )
     rtc_suspend(logs, target_epoch)
-    # Guarantee we do not return before the renewal even if real suspend was
-    # unavailable or inhibited (a no-op systemctl suspend must not busy-loop).
-    remaining = target_epoch - common.now_epoch()
-    if remaining > 0:
-        sleep_seconds(remaining)
+    # Guarantee we do not return before the renewal. `systemctl suspend` returns
+    # asynchronously (often before the machine is actually down), and time.sleep
+    # counts CLOCK_MONOTONIC, which freezes across suspend -- so a single sleep
+    # would keep counting awake-seconds *after* the RTC wake and hang for the
+    # full window. Poll the wall clock instead so we resume right at renewal,
+    # whether the machine really suspended or the fallback wait was used.
+    wait_until_epoch(target_epoch)
     return True
 
 
