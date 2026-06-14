@@ -849,7 +849,6 @@ If a child process tries to run `llm-scheduler --suspend-until-ready` while Ralp
 
 * Linux or macOS.
 * Python 3.11 or newer.
-* Optional: `copilot` or `github-copilot` for Copilot usage capture.
 * Optional: `tmux` for tmux mode.
 * Optional: `systemd-run` or `rtcwake` for wake support.
 
