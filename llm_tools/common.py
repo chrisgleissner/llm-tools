@@ -22,12 +22,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
 AUTONOMY_ABORT_STATUS = 75
 TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
 DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
+CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
+CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
+CLAUDE_OAUTH_USER_AGENT = "claude-code/2.1.177"
 
 
 def err(message: str) -> None:
@@ -665,31 +672,33 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
     env = env or os.environ
     cache = usage_cache_dir(env) / "claude-usage-api.json"
     cred = home_dir(env) / ".claude" / ".credentials.json"
-    token = ""
+    cred_data: dict[str, Any] = {}
     try:
-        token = json.loads(cred.read_text(encoding="utf-8")).get("claudeAiOauth", {}).get("accessToken", "")
+        parsed = json.loads(cred.read_text(encoding="utf-8"))
+        if isinstance(parsed, dict):
+            cred_data = parsed
     except OSError:
         pass
     except json.JSONDecodeError:
         pass
+    oauth = cred_data.get("claudeAiOauth")
+    token = oauth.get("accessToken", "") if isinstance(oauth, dict) else ""
     if token:
-        req = Request(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-                "anthropic-beta": "oauth-2025-04-20",
-            },
-        )
-        try:
-            with urlopen(req, timeout=20) as resp:
-                text = resp.read().decode("utf-8", "replace")
+        text, unauthorized = _fetch_claude_oauth_usage_text(token)
+        if text:
+            return _cache_claude_usage_response(cache, text)
+        if unauthorized:
+            refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+            if refreshed:
+                text, _ = _fetch_claude_oauth_usage_text(refreshed)
+                if text:
+                    return _cache_claude_usage_response(cache, text)
+    elif isinstance(oauth, dict) and oauth.get("refreshToken"):
+        refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+        if refreshed:
+            text, _ = _fetch_claude_oauth_usage_text(refreshed)
             if text:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-                return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
-        except Exception:
-            pass
+                return _cache_claude_usage_response(cache, text)
     if cache.is_file() and cache.stat().st_size > 0:
         try:
             mtime = int(cache.stat().st_mtime)
@@ -700,6 +709,81 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
         except (OSError, json.JSONDecodeError):
             return None
     return None
+
+
+def _fetch_claude_oauth_usage_text(access_token: str) -> tuple[str | None, bool]:
+    req = Request(
+        CLAUDE_OAUTH_USAGE_URL,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "anthropic-beta": CLAUDE_OAUTH_BETA,
+            "User-Agent": CLAUDE_OAUTH_USER_AGENT,
+        },
+    )
+    try:
+        with urlopen(req, timeout=20) as resp:
+            return resp.read().decode("utf-8", "replace"), False
+    except HTTPError as exc:
+        return None, exc.code in {400, 401}
+    except Exception:
+        return None, False
+
+
+def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+    return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
+
+
+def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any]) -> str | None:
+    oauth = cred_data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    refresh_token = str(oauth.get("refreshToken") or "").strip()
+    if not refresh_token:
+        return None
+    payload = urlencode(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": CLAUDE_OAUTH_CLIENT_ID,
+        }
+    ).encode("utf-8")
+    req = Request(
+        CLAUDE_OAUTH_TOKEN_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": CLAUDE_OAUTH_USER_AGENT,
+        },
+    )
+    try:
+        with urlopen(req, timeout=20) as resp:
+            raw = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    access_token = str(raw.get("access_token") or "").strip()
+    if not access_token:
+        return None
+    oauth["accessToken"] = access_token
+    next_refresh = str(raw.get("refresh_token") or "").strip()
+    if next_refresh:
+        oauth["refreshToken"] = next_refresh
+    expires_in = num(raw.get("expires_in"))
+    if expires_in is not None and expires_in > 0:
+        oauth["expiresAt"] = int((time.time() + expires_in) * 1000)
+    try:
+        cred_path.parent.mkdir(parents=True, exist_ok=True)
+        cred_path.write_text(json.dumps(cred_data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return access_token
 
 
 def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:

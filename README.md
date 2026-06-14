@@ -635,7 +635,7 @@ Child scheduler logs are written under each Ralph run's `scheduler/` subdirector
 | Provider       | Source                                                                      |
 | -------------- | --------------------------------------------------------------------------- |
 | Codex          | Local JSONL under `~/.codex/sessions`.                                      |
-| Claude Code    | OAuth usage API/cache, statusline cache, then local project JSONL fallback. |
+| Claude Code    | OAuth usage API/cache with automatic OAuth token refresh, then statusline cache, then local project JSONL fallback. |
 | GitHub Copilot | Local Copilot CLI footer captured through a bounded PTY helper.             |
 | Kilo Code      | `kilo stats`, then Kilo environment variables.                              |
 | MiniMax        | `mmx quota show --output json`, then MiniMax environment variables.         |
