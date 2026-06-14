@@ -1451,6 +1451,18 @@ def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: A
         min_span_fraction = float(env.get("LLM_USAGE_REMAINING_TIME_MIN_SPAN_FRACTION", "0.02") or "0.02")
     except ValueError:
         min_span_fraction = 0.02
+    try:
+        # A jump up in remaining larger than this (percentage points) is a window
+        # reset, not jitter -- it marks the start of the current window.
+        reset_threshold = float(env.get("LLM_USAGE_REMAINING_TIME_RESET_THRESHOLD", "10") or "10")
+    except ValueError:
+        reset_threshold = 10.0
+    try:
+        # A drop steep enough to drain the entire window in less than this many
+        # seconds is physically impossible -- treat it as a transient bad reading.
+        min_drain_seconds = float(env.get("LLM_USAGE_REMAINING_TIME_MIN_DRAIN_SECONDS", "60") or "60")
+    except ValueError:
+        min_drain_seconds = 60.0
     now = now_epoch(env)
     cutoff = now - lookback
     samples: list[tuple[int, float]] = []
@@ -1471,6 +1483,18 @@ def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: A
         return None
     if max_stale > 0 and now - samples[-1][0] > max_stale:
         return None
+    # Anchor to the CURRENT window: drop everything up to and including the most
+    # recent reset (remaining jumping up by more than jitter). Burn from earlier
+    # windows -- and the transient glitches that cluster around an exhausted one
+    # -- must not pollute this window's velocity, or a few old spikes pin the ETA
+    # to a wildly short, "stuck" value that idle time can no longer dilute.
+    anchor = 0
+    for i in range(1, len(samples)):
+        if samples[i][1] - samples[i - 1][1] > reset_threshold:
+            anchor = i
+    samples = samples[anchor:]
+    if len(samples) < 2:
+        return None
     # Refuse to extrapolate a window-scale ETA from a sliver of history: a single
     # coarse step (e.g. a stale reading jumping to the current value) would
     # otherwise be read as a sustained burn rate and produce a wildly short
@@ -1489,9 +1513,14 @@ def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: A
         if prev_ts is not None:
             dt = ts - prev_ts
             # Increases are window resets and gaps longer than max_gap may hide a
-            # reset; skip those intervals but keep the burn accumulated so far.
+            # reset; skip those intervals entirely. Otherwise count the elapsed
+            # time (so idle stretches dilute the rate) but drop the "burn" of a
+            # physically impossible spike -- a drop that would drain the whole
+            # window in under min_drain_seconds is a transient bad reading.
             if dt > 0 and (max_gap <= 0 or dt <= max_gap) and value <= prev_rem:
-                total_reduction += prev_rem - value
+                drop = prev_rem - value
+                if not (drop > 0 and dt / drop * 100.0 < min_drain_seconds):
+                    total_reduction += drop
                 total_seconds += dt
         prev_ts = ts
         prev_rem = value

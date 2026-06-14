@@ -186,8 +186,6 @@ providers     = ["claude", "codex"]
 # Which capacity check to use. One of:
 # auto | 5h | weekly | monthly | balance | budget | byok | ungated
 scope         = "auto"
-# Minimum quota left before a provider is considered usable.
-min_remaining = 1
 
 [providers.claude]
 # Run `claude --model sonnet`; only run while Sonnet has capacity.
@@ -196,9 +194,6 @@ model          = "sonnet"
 #   false -> skip claude and switch to the next provider
 #   true  -> keep claude and let it pick another model
 allow_fallback = false
-# Optional: override the default scope or minimum just for this provider.
-scope          = "weekly"
-min_remaining  = 5
 
 [providers.codex]
 model          = "spark"
@@ -209,7 +204,7 @@ allow_fallback = false
 providers      = ["claude", "codex", "kilo"]
 
 [scheduler]                            # llm-scheduler-only settings (override [defaults] above)
-# One example key — see config.toml.example for the full list:
+# One example key — see config.example.toml for the full list:
 provider       = "claude"
 ```
 

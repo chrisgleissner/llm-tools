@@ -759,6 +759,53 @@ def test_estimate_remaining_time_requires_minimum_span_for_real_windows(env: dic
     assert common.estimate_remaining_time_from_log("Codex", "weekly", 49, short_env) != "-"
 
 
+def test_estimate_anchors_to_current_window(env: dict[str, str]) -> None:
+    # The reported bug: burn from PRIOR 5h windows leaked into the current
+    # window's velocity, pinning "empty in Xm" to a wildly short, stuck value.
+    # Anchoring to the most recent reset must confine the estimate to the burn
+    # actually observed in the current window.
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    base = 1_000_000
+    rows = [(base, 100), (base + 600, 20)]  # prior window: heavy burn, then exhausted
+    # Reset back to ~full, then a gentle ~1pp/min burn (99 -> 82 over 17 min).
+    rows += [(base + 4000 + i * 60, 99 - i) for i in range(18)]
+    now = rows[-1][0]
+    (cache / "llm-usage.log").write_text(
+        "".join(f'{{"ts":{ts},"provider":"Claude","window":"5h","remaining":{rem}}}\n' for ts, rem in rows),
+        encoding="utf-8",
+    )
+    now_env = env | {"LLM_USAGE_NOW_EPOCH": str(now)}
+    secs = common.estimate_remaining_seconds_from_log("Claude", "5h", 82, now_env)
+    # Current window only: 17pp over 1020s -> 82pp lasts ~1h22m. Counting the
+    # leaked prior burn would collapse this to ~22m.
+    assert secs is not None and 3600 < secs < 18000
+
+
+def test_estimate_ignores_impossible_drain_spikes(env: dict[str, str]) -> None:
+    # A single reading that "drains" most of the window in seconds is physically
+    # impossible (a transient bad sample). It must not dominate the velocity even
+    # when it is inside the current window and never recovers above threshold.
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    base = 1_000_000
+    rows = [(base, 99), (base + 30, 20)]  # 79pp "drained" in 30s -> impossible
+    rows += [(base + 30 + i * 300, 20 - i) for i in range(1, 8)]  # gentle 20 -> 13
+    now = rows[-1][0]
+    (cache / "llm-usage.log").write_text(
+        "".join(f'{{"ts":{ts},"provider":"Claude","window":"5h","remaining":{rem}}}\n' for ts, rem in rows),
+        encoding="utf-8",
+    )
+    now_env = env | {"LLM_USAGE_NOW_EPOCH": str(now)}
+    secs = common.estimate_remaining_seconds_from_log("Claude", "5h", 13, now_env)
+    # Only the gentle 7pp/2100s burn should count (~1h+); the spike would force ~5m.
+    assert secs is not None and secs > 3600
+    # Lowering the guard below the spike's drain time lets it back in -> tiny ETA.
+    leaky = now_env | {"LLM_USAGE_REMAINING_TIME_MIN_DRAIN_SECONDS": "1"}
+    leaked = common.estimate_remaining_seconds_from_log("Claude", "5h", 13, leaky)
+    assert leaked is not None and leaked < secs
+
+
 def test_prune_usage_log(env: dict[str, str]) -> None:
     cache = common.usage_cache_dir(env)
     cache.mkdir(parents=True, exist_ok=True)
@@ -1064,8 +1111,16 @@ def test_ralph_suspends_when_all_blocked_then_continues(monkeypatch: pytest.Monk
         _usable_selection(),  # provider free again after the wait
     ]
     monkeypatch.setattr(ralph_robin, "select_provider", lambda cfg, logs, ci, sk: selections.pop(0))
+    # One chunk covers the whole wait here; the stub advances the wall clock so
+    # wait_until_epoch's poll loop terminates (in production time.time() does).
+    monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "100000")
     slept: list[float] = []
-    monkeypatch.setattr(ralph_robin, "sleep_seconds", lambda s: slept.append(s))
+
+    def fake_sleep(s: float) -> None:
+        slept.append(s)
+        monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", str(100 + int(sum(slept))))
+
+    monkeypatch.setattr(ralph_robin, "sleep_seconds", fake_sleep)
     monkeypatch.setattr(ralph_robin, "run_scheduler_inline", lambda scfg: 0)
 
     rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "1", "--max-duration", "0"))
@@ -1096,8 +1151,16 @@ def test_ralph_suspends_machine_until_earliest_renewal(monkeypatch: pytest.Monke
         _usable_selection(),  # rotation recovers after the wake
     ]
     monkeypatch.setattr(ralph_robin, "select_provider", lambda cfg, logs, ci, sk: selections.pop(0))
+    # One chunk covers the whole wait here; the stub advances the wall clock so
+    # wait_until_epoch's poll loop terminates (in production time.time() does).
+    monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "100000")
     slept: list[float] = []
-    monkeypatch.setattr(ralph_robin, "sleep_seconds", lambda s: slept.append(s))
+
+    def fake_sleep(s: float) -> None:
+        slept.append(s)
+        monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", str(100 + int(sum(slept))))
+
+    monkeypatch.setattr(ralph_robin, "sleep_seconds", fake_sleep)
     monkeypatch.setattr(ralph_robin, "run_scheduler_inline", lambda scfg: 0)
 
     rc = ralph_robin.main(_ralph_main_argv(tmp_path, "--max-iterations", "1", "--max-duration", "0", "--min-iteration-seconds", "0"))

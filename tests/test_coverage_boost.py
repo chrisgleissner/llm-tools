@@ -299,45 +299,97 @@ def test_rtc_suspend_skips(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     assert ralph_robin.rtc_suspend(logs, 1010) is False
 
 
+def _wall_clock_sleep(monkeypatch: pytest.MonkeyPatch, now: dict[str, int]) -> list[float]:
+    """Make now_epoch() track a fake wall clock that each sleep advances."""
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now["t"] += int(round(seconds))
+
+    monkeypatch.setattr(common, "now_epoch", lambda env=None: now["t"])
+    monkeypatch.setattr(ralph_robin, "sleep_seconds", fake_sleep)
+    return sleeps
+
+
 def test_suspend_machine_until(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = ralph_robin.RalphConfig()
     logs = _logs(tmp_path)
     monkeypatch.setattr(ralph_robin, "rtc_suspend", lambda *a, **k: False)
-    sleeps: list[float] = []
-    monkeypatch.setattr(ralph_robin, "sleep_seconds", lambda s: sleeps.append(s))
-    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "5")
+    now = {"t": 1000}
+    sleeps = _wall_clock_sleep(monkeypatch, now)
 
     # Budget already exhausted -> stop the loop.
     monkeypatch.setattr(ralph_robin, "monotonic", lambda: 1000.0)
     assert ralph_robin.suspend_machine_until(cfg, logs, 2000, start_monotonic=0.0, max_duration=10) is False
 
-    # Wait clamped to the remaining budget, then in-process sleep covers the gap.
+    # Wait clamped to the remaining budget, then chunked wall-clock wait covers it.
     monkeypatch.setattr(ralph_robin, "monotonic", lambda: 0.0)
+    now["t"] = 1000
+    sleeps.clear()
     assert ralph_robin.suspend_machine_until(cfg, logs, 5000, start_monotonic=0.0, max_duration=10) is True
-    assert sleeps and sleeps[-1] == 10
+    assert sum(sleeps) == 10 and max(sleeps) <= 5
 
-    # No duration cap: sleep until the full renewal target.
+    # No duration cap: wall clock advances in <=chunk steps up to the renewal.
+    now["t"] = 1000
     sleeps.clear()
     assert ralph_robin.suspend_machine_until(cfg, logs, 1030, start_monotonic=0.0, max_duration=0) is True
-    assert sleeps[-1] == 30
+    assert sum(sleeps) == 30 and max(sleeps) <= 5
+
+
+def test_suspend_machine_until_survives_suspend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The renewal wait must end at wake-up, not keep counting a frozen clock.
+
+    Models the real failure: `systemctl suspend` returns with the full window
+    still ahead, so the wait begins for ~2h; the machine then suspends mid-sleep
+    and the RTC alarm wakes it at renewal, jumping the wall clock past the target.
+    With the old single time.sleep this hung for the whole window after wake-up.
+    """
+    cfg = ralph_robin.RalphConfig()
+    logs = _logs(tmp_path)
+    monkeypatch.setattr(ralph_robin, "rtc_suspend", lambda *a, **k: True)
+    monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "15")
+    now = {"t": 1000}
+    target = now["t"] + 7200  # renewal ~2h out, as in the reported run
+    sleeps: list[float] = []
+    suspended = {"done": False}
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if not suspended["done"]:
+            # Machine suspends during this chunk; RTC wakes it at renewal, so the
+            # wall clock leaps past the target while this sleep barely advanced.
+            suspended["done"] = True
+            now["t"] = target + 3
+        else:
+            now["t"] += int(round(seconds))
+
+    monkeypatch.setattr(common, "now_epoch", lambda env=None: now["t"])
+    monkeypatch.setattr(ralph_robin, "sleep_seconds", fake_sleep)
+
+    assert ralph_robin.suspend_machine_until(cfg, logs, target, start_monotonic=0.0, max_duration=0) is True
+    # One bounded chunk, then the wall-clock check sees renewal and returns.
+    assert len(sleeps) == 1 and sleeps[0] <= 15
 
 
 def test_suspend_until_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg = ralph_robin.RalphConfig()
     logs = _logs(tmp_path)
-    sleeps: list[float] = []
-    monkeypatch.setattr(ralph_robin, "sleep_seconds", lambda s: sleeps.append(s))
-    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "5")
+    now = {"t": 1000}
+    sleeps = _wall_clock_sleep(monkeypatch, now)
 
-    # Known reset target: sleep until it.
+    # Known reset target: wait until it, in bounded chunks.
     selection = {"decisions": [{"wait_until": 1090}]}
     assert ralph_robin.suspend_until_available(cfg, logs, selection, 0.0, 0, "rate-limited") is True
-    assert sleeps[-1] == 90
+    assert sum(sleeps) == 90 and max(sleeps) <= 5
 
     # No known reset: fall back to one poll interval.
+    now["t"] = 1000
     sleeps.clear()
     assert ralph_robin.suspend_until_available(cfg, logs, {"decisions": []}, 0.0, 0, "unknown") is True
-    assert sleeps[-1] == float(int(cfg.poll_interval))
+    assert sum(sleeps) == float(int(cfg.poll_interval)) and max(sleeps) <= 5
 
     # Budget exhausted -> stop the loop.
     monkeypatch.setattr(ralph_robin, "monotonic", lambda: 1000.0)
