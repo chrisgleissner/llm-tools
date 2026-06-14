@@ -41,6 +41,11 @@ def env(tmp_path: Path) -> dict[str, str]:
             "PYTHONPATH": os.pathsep.join(p for p in (str(ROOT), COVERAGE_SITE) if p),
             "COVERAGE_PROCESS_START": str(ROOT / "pyproject.toml"),
             "LLM_USAGE_COPILOT_CACHE_TTL": "0",
+            # Keep Codex hermetic: never spawn the real `codex app-server` (which
+            # would hit the live account). Tests that exercise the active-refresh
+            # path inject a payload via LLM_USAGE_CODEX_RATE_LIMITS_JSON, which
+            # takes precedence over this switch.
+            "LLM_USAGE_DISABLE_CODEX_APP_SERVER": "1",
             "LLM_SCHEDULER_HEADLESS": "1",
         }
     )

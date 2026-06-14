@@ -17,16 +17,30 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
 AUTONOMY_ABORT_STATUS = 75
 TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
+DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
+CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
+CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
+CLAUDE_OAUTH_USER_AGENT = "claude-code/2.1.177"
+# Codex exposes live, turn-free rate limits through its app-server JSON-RPC
+# protocol (`account/rateLimits/read`). This is the active-refresh path that
+# keeps `llm-usage` from ever falling back to a stale on-disk session snapshot
+# while the CLI is installed and authenticated.
+DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS = 15
 
 
 def err(message: str) -> None:
@@ -35,13 +49,13 @@ def err(message: str) -> None:
 
 def cache_root(env: dict[str, str] | None = None) -> Path:
     env = env or os.environ
-    base = env.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    base = env.get("XDG_CACHE_HOME") or str(home_dir(env) / ".cache")
     return Path(base) / "llm-tools"
 
 
 def migrate_legacy_cache_dirs(env: dict[str, str] | None = None) -> None:
     env = env or os.environ
-    legacy_root = Path(env.get("XDG_CACHE_HOME") or str(Path.home() / ".cache"))
+    legacy_root = Path(env.get("XDG_CACHE_HOME") or str(home_dir(env) / ".cache"))
     root = cache_root(env)
     for name in ("llm-usage", "llm-scheduler", "ralph-robin"):
         old = legacy_root / name
@@ -56,6 +70,11 @@ def migrate_legacy_cache_dirs(env: dict[str, str] | None = None) -> None:
 
 def usage_cache_dir(env: dict[str, str] | None = None) -> Path:
     return cache_root(env) / "llm-usage"
+
+
+def home_dir(env: dict[str, str] | None = None) -> Path:
+    env = env or os.environ
+    return Path(env.get("HOME") or str(Path.home()))
 
 
 def scheduler_log_dir(env: dict[str, str] | None = None) -> Path:
@@ -542,7 +561,82 @@ def freshen_provider_windows(obj: Any, env: dict[str, str] | None = None) -> Any
     return obj
 
 
-def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None = None) -> str | None:
+def local_snapshot_max_age(env: dict[str, str] | None = None) -> int:
+    env = env or os.environ
+    raw = env.get("LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE", str(DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS))
+    try:
+        parsed = int(float(raw or str(DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS)))
+    except ValueError:
+        return DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS
+    if parsed <= 0:
+        return DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS
+    return min(DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS, parsed)
+
+
+def local_snapshot_is_stale(source_mtime: int | None, env: dict[str, str] | None = None) -> bool:
+    if source_mtime is None:
+        return False
+    max_age = local_snapshot_max_age(env)
+    return now_epoch(env) - source_mtime > max_age
+
+
+def provider_snapshot_requires_fresh_source(obj: Any, env: dict[str, str] | None = None) -> bool:
+    """Return true when a local snapshot still claims an active/unknown window.
+
+    If every reset-bound window already elapsed, the old sample can be safely
+    freshened to full quota. Otherwise, an old local file may materially
+    under/over-report current usage and should not be displayed as current data.
+    """
+    if not isinstance(obj, dict):
+        return False
+    now = now_epoch(env)
+
+    def active_or_unknown(window: Any) -> bool:
+        if not isinstance(window, dict):
+            return False
+        epoch = parse_epoch(window.get("resets_at"))
+        return epoch is None or epoch > now
+
+    for key in ("five_hour", "week"):
+        if active_or_unknown(obj.get(key)):
+            return True
+    rows = obj.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("five_hour", "week"):
+                if active_or_unknown(row.get(key)):
+                    return True
+    return False
+
+
+def stale_usage_provider(provider: str, source: str, source_mtime: int | None, env: dict[str, str] | None = None) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "source": source,
+        "available": False,
+        "reason": "stale-usage",
+        "source_mtime": source_mtime,
+        "stale_after_seconds": local_snapshot_max_age(env),
+    }
+
+
+def stale_if_local_snapshot(
+    provider: str,
+    obj: dict[str, Any] | None,
+    source: str,
+    source_mtime: int | None,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    if obj is None:
+        return None
+    if local_snapshot_is_stale(source_mtime, env) and provider_snapshot_requires_fresh_source(obj, env):
+        return stale_usage_provider(provider, source, source_mtime, env)
+    return obj
+
+
+def latest_matching_record(root: Path, predicate: Any, env: dict[str, str] | None = None) -> tuple[str, Path, int] | None:
     env = env or os.environ
     if not root.is_dir():
         return None
@@ -556,60 +650,361 @@ def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None 
     files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
     for path in files[:max_files]:
         try:
+            mtime = int(path.stat().st_mtime)
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail_lines:]
         except OSError:
             continue
         for line in reversed(lines):
             obj = read_json_text(line)
             if obj is not None and predicate(obj):
-                return line
+                return line, path, mtime
     return None
 
 
+def latest_matching_line(root: Path, predicate: Any, env: dict[str, str] | None = None) -> str | None:
+    record = latest_matching_record(root, predicate, env)
+    return record[0] if record else None
+
+
 def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    from .providers import codex as _codex_provider
+
+    return _codex_provider.read_codex(env)
+
+
+def codex_cli(env: dict[str, str] | None = None) -> str | None:
     env = env or os.environ
-    root = Path.home() / ".codex" / "sessions"
-    line = latest_matching_line(root, lambda o: get_path(o, (("rate_limits",), ("rateLimits",), ("rateLimits", "rateLimits"), ("msg", "rate_limits"), ("msg", "rateLimits"), ("payload", "rate_limits"), ("payload", "rateLimits"))) is not None, env)
-    if not line:
+    return shutil.which("codex", path=env.get("PATH"))
+
+
+def _codex_has_auth(env: dict[str, str]) -> bool:
+    """True when Codex has usable credentials on disk.
+
+    Mirrors the Claude OAuth pre-check: if there is no API key and no stored
+    ChatGPT token, the app-server cannot answer and we should report
+    ``not-authenticated`` rather than silently degrading to a stale snapshot.
+    """
+    auth = home_dir(env) / ".codex" / "auth.json"
+    try:
+        data = json.loads(auth.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("OPENAI_API_KEY") or "").strip():
+        return True
+    tokens = data.get("tokens")
+    if isinstance(tokens, dict):
+        return any(str(tokens.get(k) or "").strip() for k in ("access_token", "id_token", "refresh_token"))
+    return False
+
+
+def _codex_app_server_timeout(env: dict[str, str]) -> float:
+    raw = env.get("LLM_USAGE_CODEX_TIMEOUT", str(DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS))
+    try:
+        value = float(raw or DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS)
+    except ValueError:
+        return float(DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS)
+    return value if value > 0 else float(DEFAULT_CODEX_APP_SERVER_TIMEOUT_SECONDS)
+
+
+def _terminate_app_server(proc: "subprocess.Popen[str]") -> None:
+    try:
+        if proc.stdin and not proc.stdin.closed:
+            proc.stdin.close()
+    except OSError:
+        pass
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _codex_app_server_rate_limits(env: dict[str, str]) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch live Codex rate limits via the app-server JSON-RPC protocol.
+
+    Returns ``(result, reason)`` where ``result`` is the raw
+    ``account/rateLimits/read`` payload on success and ``reason`` describes a
+    non-transient failure (``missing-cli`` / ``not-authenticated``). A
+    transient failure (timeout, crash, network) returns ``(None, None)`` so the
+    caller can fall back to the most recent on-disk snapshot.
+    """
+    injected = env.get("LLM_USAGE_CODEX_RATE_LIMITS_JSON")
+    if injected is not None:
+        try:
+            obj = json.loads(injected)
+        except json.JSONDecodeError:
+            return None, None
+        return (obj, None) if isinstance(obj, dict) else (None, None)
+    if env.get("LLM_USAGE_DISABLE_CODEX_APP_SERVER") == "1":
+        return None, None
+    cli = codex_cli(env)
+    if not cli:
+        return None, "missing-cli"
+    if not _codex_has_auth(env):
+        return None, "not-authenticated"
+    override = env.get("LLM_USAGE_CODEX_APP_SERVER_CMD")
+    argv = shlex.split(override) if override else [cli, "app-server"]
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        return None, None
+
+    result: dict[str, Any] = {}
+    flags = {"auth": False}
+    done = threading.Event()
+
+    def reader() -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == 2:
+                    payload = msg.get("result")
+                    if isinstance(payload, dict):
+                        result.update(payload)
+                    elif "error" in msg:
+                        text = json.dumps(msg.get("error") or {}).lower()
+                        if any(t in text for t in ("auth", "login", "401", "unauthor", "credential")):
+                            flags["auth"] = True
+                    done.set()
+                    return
+        except (OSError, ValueError):
+            pass
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "llm-tools", "version": "0.1.0"}}}) + "\n")
+        proc.stdin.write(json.dumps({"method": "initialized"}) + "\n")
+        proc.stdin.write(json.dumps({"id": 2, "method": "account/rateLimits/read", "params": None}) + "\n")
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+    done.wait(timeout=_codex_app_server_timeout(env))
+    _terminate_app_server(proc)
+    if result:
+        return result, None
+    if flags["auth"]:
+        return None, "not-authenticated"
+    return None, None
+
+
+def codex_rate_limits_to_wire(result: dict[str, Any] | None, source: str) -> dict[str, Any] | None:
+    """Translate an app-server ``account/rateLimits/read`` payload into the
+    legacy Codex wire format (``five_hour`` / ``week`` / ``rows``).
+
+    The payload carries a backward-compatible single bucket in ``rateLimits``
+    plus a per-``limit_id`` view in ``rateLimitsByLimitId`` (where the Spark
+    model shows up as its own bucket). We fold the Spark bucket back under a
+    ``spark`` key so :func:`normalize_codex_obj` produces the same
+    ``codex`` / ``codex-spark`` rows the rest of the codebase expects.
+    """
+    if not isinstance(result, dict):
         return None
-    return freshen_provider_windows(normalize_codex_obj(json.loads(line), "~/.codex/sessions"), env)
+    bucket = result.get("rateLimits")
+    by_id = result.get("rateLimitsByLimitId")
+    rl: dict[str, Any] = {}
+    if isinstance(bucket, dict):
+        rl.update(bucket)
+    if isinstance(by_id, dict):
+        if not rl and isinstance(by_id.get("codex"), dict):
+            rl.update(by_id["codex"])
+        for limit_id, sub in by_id.items():
+            if not isinstance(sub, dict):
+                continue
+            name = str(sub.get("limitName") or "").lower()
+            if "spark" in name or "spark" in str(limit_id).lower():
+                rl["spark"] = sub
+                break
+    if not rl:
+        return None
+    return normalize_codex_obj({"rate_limits": rl}, source)
 
 
-def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+def read_codex_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Active Codex refresh via the app-server, with a cached fallback.
+
+    On success the live payload is cached to ``codex-usage-api.json`` and the
+    normalized snapshot is returned. A known authentication or CLI startup
+    problem returns an ``available=False`` snapshot carrying that reason (so the
+    caller surfaces it instead of stale data). A transient failure returns the
+    cached payload when it is still fresh, otherwise ``None`` so the caller can
+    fall back to the local Codex session logs.
+    """
+    env = env or os.environ
+    cache = usage_cache_dir(env) / "codex-usage-api.json"
+    result, reason = _codex_app_server_rate_limits(env)
+    if result is not None:
+        norm = codex_rate_limits_to_wire(result, "codex app-server")
+        if norm:
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+            return norm
+    if reason in ("missing-cli", "not-authenticated"):
+        return {"provider": "codex", "source": "codex app-server", "available": False, "reason": reason}
+    if cache.is_file() and cache.stat().st_size > 0:
+        try:
+            mtime = int(cache.stat().st_mtime)
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+            norm = codex_rate_limits_to_wire(cached, "codex app-server (cached)")
+            if norm and stale_if_local_snapshot("codex", norm, "codex app-server (cached)", mtime, env) is norm:
+                return norm
+        except (OSError, json.JSONDecodeError):
+            pass
+    return None
+
+
+def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
+    """Internal Claude API read; lives in common so provider adapters stay
+    cyclic-free."""
     env = env or os.environ
     cache = usage_cache_dir(env) / "claude-usage-api.json"
-    cred = Path.home() / ".claude" / ".credentials.json"
-    token = ""
+    cred = home_dir(env) / ".claude" / ".credentials.json"
+    cred_data: dict[str, Any] = {}
     try:
-        token = json.loads(cred.read_text(encoding="utf-8")).get("claudeAiOauth", {}).get("accessToken", "")
+        parsed = json.loads(cred.read_text(encoding="utf-8"))
+        if isinstance(parsed, dict):
+            cred_data = parsed
     except OSError:
         pass
     except json.JSONDecodeError:
         pass
+    oauth = cred_data.get("claudeAiOauth")
+    token = oauth.get("accessToken", "") if isinstance(oauth, dict) else ""
     if token:
-        req = Request(
-            "https://api.anthropic.com/api/oauth/usage",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-                "anthropic-beta": "oauth-2025-04-20",
-            },
-        )
-        try:
-            with urlopen(req, timeout=20) as resp:
-                text = resp.read().decode("utf-8", "replace")
+        text, unauthorized = _fetch_claude_oauth_usage_text(token)
+        if text:
+            return _cache_claude_usage_response(cache, text)
+        if unauthorized:
+            refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+            if refreshed:
+                text, _ = _fetch_claude_oauth_usage_text(refreshed)
+                if text:
+                    return _cache_claude_usage_response(cache, text)
+    elif isinstance(oauth, dict) and oauth.get("refreshToken"):
+        refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+        if refreshed:
+            text, _ = _fetch_claude_oauth_usage_text(refreshed)
             if text:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
-                return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
-        except Exception:
-            pass
+                return _cache_claude_usage_response(cache, text)
     if cache.is_file() and cache.stat().st_size > 0:
         try:
-            return normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
+            mtime = int(cache.stat().st_mtime)
+            norm = normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
+            if stale_if_local_snapshot("claude", norm, str(cache), mtime, env) is not norm:
+                return None
+            return norm
         except (OSError, json.JSONDecodeError):
             return None
     return None
+
+
+def _fetch_claude_oauth_usage_text(access_token: str) -> tuple[str | None, bool]:
+    req = Request(
+        CLAUDE_OAUTH_USAGE_URL,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "anthropic-beta": CLAUDE_OAUTH_BETA,
+            "User-Agent": CLAUDE_OAUTH_USER_AGENT,
+        },
+    )
+    try:
+        with urlopen(req, timeout=20) as resp:
+            return resp.read().decode("utf-8", "replace"), False
+    except HTTPError as exc:
+        return None, exc.code in {400, 401}
+    except Exception:
+        return None, False
+
+
+def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+    return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
+
+
+def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any]) -> str | None:
+    oauth = cred_data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    refresh_token = str(oauth.get("refreshToken") or "").strip()
+    if not refresh_token:
+        return None
+    payload = urlencode(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": CLAUDE_OAUTH_CLIENT_ID,
+        }
+    ).encode("utf-8")
+    req = Request(
+        CLAUDE_OAUTH_TOKEN_URL,
+        data=payload,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": CLAUDE_OAUTH_USER_AGENT,
+        },
+    )
+    try:
+        with urlopen(req, timeout=20) as resp:
+            raw = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    access_token = str(raw.get("access_token") or "").strip()
+    if not access_token:
+        return None
+    oauth["accessToken"] = access_token
+    next_refresh = str(raw.get("refresh_token") or "").strip()
+    if next_refresh:
+        oauth["refreshToken"] = next_refresh
+    expires_in = num(raw.get("expires_in"))
+    if expires_in is not None and expires_in > 0:
+        oauth["expiresAt"] = int((time.time() + expires_in) * 1000)
+    try:
+        cred_path.parent.mkdir(parents=True, exist_ok=True)
+        cred_path.write_text(json.dumps(cred_data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return access_token
+
+
+def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    return _read_claude_api_raw(env)
 
 
 def read_claude(env: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -622,18 +1017,31 @@ def _read_claude_raw(env: dict[str, str]) -> dict[str, Any] | None:
     if api:
         return api
     status_cache = usage_cache_dir(env) / "claude-status.json"
+    last_stale: dict[str, Any] | None = None
     if status_cache.is_file() and status_cache.stat().st_size > 0:
         try:
-            norm = normalize_claude_obj(json.loads(status_cache.read_text(encoding="utf-8")), str(status_cache))
+            mtime = int(status_cache.stat().st_mtime)
+            source = str(status_cache)
+            norm = normalize_claude_obj(json.loads(status_cache.read_text(encoding="utf-8")), source)
             if norm:
-                return norm
+                stale = stale_if_local_snapshot("claude", norm, source, mtime, env)
+                if stale is not norm:
+                    last_stale = stale
+                else:
+                    return norm
         except (OSError, json.JSONDecodeError):
             pass
-    root = Path.home() / ".claude" / "projects"
-    line = latest_matching_line(root, lambda o: get_path(o, (("rate_limits",), ("rateLimits",), ("message", "rate_limits"), ("message", "rateLimits"))) is not None, env)
-    if not line:
-        return None
-    return normalize_claude_obj(json.loads(line), "~/.claude/projects")
+    root = home_dir(env) / ".claude" / "projects"
+    record = latest_matching_record(root, lambda o: get_path(o, (("rate_limits",), ("rateLimits",), ("message", "rate_limits"), ("message", "rateLimits"))) is not None, env)
+    if not record:
+        return last_stale
+    line, _path, mtime = record
+    source = "~/.claude/projects"
+    norm = normalize_claude_obj(json.loads(line), source)
+    stale = stale_if_local_snapshot("claude", norm, source, mtime, env)
+    if stale is not norm:
+        return stale
+    return norm
 
 
 def find_copilot_cli() -> str | None:
@@ -900,6 +1308,9 @@ def json_for_provider(provider_json: dict[str, Any] | None, provider: str) -> di
     if not provider_json:
         return {"provider": provider, "available": False}
     out = dict(provider_json)
+    if out.get("available") is False:
+        out.setdefault("provider", provider)
+        return out
     if isinstance(out.get("rows"), list) and out["rows"]:
         rows = []
         codex_row = None
@@ -1092,19 +1503,28 @@ def validate_retry_delays(value: str) -> None:
 
 
 def validate_tool_window(tool: str, window: str) -> None:
-    if window not in {"auto", "5h", "weekly", "monthly"}:
-        err(f"invalid --window: {window}")
-        raise SystemExit(2)
-    valid = {
-        "codex": {"auto", "5h", "weekly"},
-        "claude": {"auto", "5h", "weekly"},
-        "copilot": {"auto", "monthly"},
-    }
-    if window not in valid.get(tool, set()):
+    """Deprecated alias for :func:`validate_tool_scope`."""
+    validate_tool_scope(tool, window)
+
+
+def validate_tool_scope(tool: str, scope: str) -> None:
+    from .capacity import validate_scope, valid_scopes_for_provider
+
+    try:
+        validate_scope(tool, scope)
+    except ValueError as exc:
+        err(str(exc))
+        raise SystemExit(2) from exc
+    allowed = valid_scopes_for_provider(tool)
+    if scope not in allowed:
         if tool == "copilot":
-            err(f"--window {window} is not valid for copilot (use auto or monthly)")
+            err(f"--scope {scope} is not valid for copilot (use one of: {', '.join(sorted(allowed))})")
+        elif tool == "kilo":
+            err(f"--scope {scope} is not valid for kilo (use one of: {', '.join(sorted(allowed))})")
+        elif tool == "minimax":
+            err(f"--scope {scope} is not valid for minimax (use one of: {', '.join(sorted(allowed))})")
         else:
-            err(f"--window {window} is not valid for {tool} (use auto, 5h, or weekly)")
+            err(f"--scope {scope} is not valid for {tool} (use one of: {', '.join(sorted(allowed))})")
         raise SystemExit(2)
 
 
@@ -1220,6 +1640,14 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
 
 
 def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Build a JSON-friendly snapshot for ``tool``.
+
+    The legacy wire format (e.g. ``five_hour``, ``week``, ``monthly``) is
+    preserved for Codex/Claude/Copilot so existing tests, JSON consumers, and
+    the ``--prefix usage`` renderer keep working. Kilo is represented through
+    ``scopes`` (its new generic form); the legacy keys are absent because
+    Kilo has no session windows.
+    """
     env = env or os.environ
     injected = env.get("LLM_SCHEDULER_USAGE_JSON")
     if injected:
@@ -1233,73 +1661,299 @@ def usage_snapshot_for_tool(tool: str, env: dict[str, str] | None = None) -> dic
         return json_for_provider(read_claude(env), "claude")
     if tool == "copilot":
         return json_for_copilot(read_copilot(env), False)
+    if tool == "kilo":
+        snap = _kilo_snapshot(env)
+        return {
+            "provider": snap.provider,
+            "available": snap.available,
+            "reason": snap.reason,
+            "source": snap.source,
+            "selected_model": snap.selected_model,
+            "scopes": [_scope_to_dict(s) for s in snap.scopes],
+        }
+    if tool == "opencode":
+        snap = _opencode_snapshot(env)
+        return {
+            "provider": snap.provider,
+            "available": snap.available,
+            "reason": snap.reason,
+            "source": snap.source,
+            "selected_model": snap.selected_model,
+            "scopes": [_scope_to_dict(s) for s in snap.scopes],
+        }
+    if tool == "minimax":
+        snap = _minimax_snapshot(env)
+        return {
+            "provider": snap.provider,
+            "available": snap.available,
+            "reason": snap.reason,
+            "source": snap.source,
+            "selected_model": snap.selected_model,
+            "scopes": [_scope_to_dict(s) for s in snap.scopes],
+        }
     return {"provider": tool, "available": False, "reason": "unsupported-tool"}
 
 
-def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_interval: str, snapshot: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, Any]:
-    env = env or os.environ
+def _kilo_snapshot(env: dict[str, str] | None):
+    from .providers import read_kilo
+
+    return read_kilo(env)
+
+
+def _opencode_snapshot(env: dict[str, str] | None):
+    from .providers import read_opencode
+
+    return read_opencode(env)
+
+
+def _minimax_snapshot(env: dict[str, str] | None):
+    from .providers import read_minimax
+
+    return read_minimax(env)
+
+
+def _scope_to_dict(scope: Any) -> dict[str, Any]:
+    if not hasattr(scope, "name"):
+        return scope if isinstance(scope, dict) else {}
+    return {
+        "name": scope.name,
+        "kind": scope.kind,
+        "ready": scope.ready,
+        "reason": scope.reason,
+        "remaining_percent": scope.remaining_percent,
+        "reset_epoch": scope.reset_epoch,
+        "resets_at": scope.resets_at,
+        "remaining_amount": scope.remaining_amount,
+        "total_amount": scope.total_amount,
+        "currency": scope.currency,
+        "label": scope.label,
+        "source": scope.source,
+    }
+
+
+def _legacy_snapshot_to_scopes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate a legacy ``five_hour``/``week``/``monthly`` snapshot into
+    the generic scope dictionaries that :func:`capacity.decide` consumes.
+
+    Lives in ``common`` rather than ``capacity`` to keep the new abstraction
+    free of provider-specific keys; this function is the only place the
+    translation happens.
+    """
+    scopes: list[dict[str, Any]] = []
+    for name, key in (("5h", "five_hour"), ("weekly", "week")):
+        window = snapshot.get(key)
+        if not isinstance(window, dict):
+            continue
+        reset = window.get("resets_at")
+        reset_epoch = parse_epoch(reset)
+        rem = num(window.get("remaining"))
+        scopes.append(
+            {
+                "name": name,
+                "kind": "reset_window",
+                "ready": rem is not None and rem > 0,
+                "reason": "",
+                "remaining_percent": rem,
+                "reset_epoch": reset_epoch,
+                "resets_at": reset,
+                "source": snapshot.get("source", ""),
+            }
+        )
+    monthly = snapshot.get("monthly")
+    if isinstance(monthly, dict):
+        rem = num(monthly.get("remaining"))
+        reset_epoch = copilot_monthly_reset_epoch()
+        scopes.append(
+            {
+                "name": "monthly",
+                "kind": "reset_window",
+                "ready": rem is not None and rem > 0,
+                "reason": "",
+                "remaining_percent": rem,
+                "reset_epoch": reset_epoch,
+                "resets_at": str(reset_epoch) if reset_epoch is not None else None,
+                "source": snapshot.get("source", ""),
+            }
+        )
+    return scopes
+
+
+def _decision_scopes(snapshot: dict[str, Any], tool: str) -> list[dict[str, Any]]:
+    """Return the decision-ready scope dicts for ``tool``."""
+    if tool in ("kilo", "opencode", "minimax"):
+        existing = snapshot.get("scopes")
+        if isinstance(existing, list) and existing and isinstance(existing[0], dict) and "kind" in existing[0]:
+            return existing
+    return _legacy_snapshot_to_scopes(snapshot)
+
+
+def _scope_filtered(scopes: list[dict[str, Any]], requested: str) -> list[dict[str, Any]]:
+    if requested == "auto":
+        return scopes
+    return [s for s in scopes if s.get("name") == requested]
+
+
+def decide_with_scopes(
+    tool: str,
+    scope: str,
+    min_remaining_percent: float,
+    min_remaining_amount: float,
+    poll_interval: int,
+    scopes: list[dict[str, Any]],
+    *,
+    cli_present: bool = True,
+    snapshot_available: bool = True,
+    snapshot_reason: str = "",
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Decide for ``tool`` against the given pre-built scope dicts.
+
+    Thin compatibility shim over :func:`llm_tools.capacity.decide` that keeps
+    the existing public JSON shape (``tool``/``usable``/``reason``/
+    ``wait_until``/``windows``/``exhausted``) so every consumer keeps
+    working unchanged.
+    """
+    from .capacity import decide, CapacityScope, ProviderSnapshot, SCOPE_AUTO
+
     now = now_epoch(env)
-    poll = int(poll_interval)
-    minimum = float(min_remaining)
+    poll = max(1, int(poll_interval))
 
-    def win(name: str, obj: Any) -> dict[str, Any] | None:
-        if not isinstance(obj, dict):
-            return None
-        reset = obj.get("resets_at")
-        return {
-            "name": name,
-            "remaining": num(obj.get("remaining")),
-            "resets_at": reset,
-            "reset_epoch": parse_epoch(reset),
-        }
-
-    if tool == "copilot":
-        if window in {"auto", "monthly"}:
-            reset = copilot_monthly_reset_epoch(env)
-            monthly = snapshot.get("monthly") if isinstance(snapshot, dict) else None
-            windows = [
-                {
-                    "name": "monthly",
-                    "remaining": num(monthly.get("remaining")) if isinstance(monthly, dict) else None,
-                    "resets_at": str(reset) if reset is not None else None,
-                    "reset_epoch": reset,
-                }
-            ]
-        else:
-            windows = []
-    elif window == "auto":
-        windows = [x for x in (win("5h", snapshot.get("five_hour")), win("weekly", snapshot.get("week"))) if x is not None]
-    elif window == "5h":
-        windows = [x for x in (win("5h", snapshot.get("five_hour")),) if x is not None]
-    elif window == "weekly":
-        windows = [x for x in (win("weekly", snapshot.get("week")),) if x is not None]
-    else:
-        windows = []
-    known = [w for w in windows if w.get("remaining") is not None]
-    exhausted = [
-        w
-        for w in known
-        if w["remaining"] is not None
-        and w["remaining"] <= minimum
-        and (w.get("reset_epoch") is None or int(w["reset_epoch"]) > now)
-    ]
-    future_resets = [int(w["reset_epoch"]) for w in exhausted if w.get("reset_epoch") is not None and int(w["reset_epoch"]) > now]
-    if snapshot.get("available") is False:
-        return {"tool": tool, "usable": False, "reason": snapshot.get("reason", "unavailable"), "wait_until": now + poll, "windows": windows}
-    if not windows:
-        return {"tool": tool, "usable": False, "reason": "unsupported-window", "wait_until": now + poll, "windows": windows}
-    if not known:
-        return {"tool": tool, "usable": False, "reason": "inconclusive-usage", "wait_until": now + poll, "windows": windows}
-    if exhausted:
+    if not snapshot_available and not scopes:
         return {
             "tool": tool,
             "usable": False,
-            "reason": "rate-limited",
-            "wait_until": max(future_resets) if future_resets else now + poll,
-            "windows": windows,
-            "exhausted": exhausted,
+            "reason": snapshot_reason or "unavailable",
+            "wait_until": now + poll,
+            "windows": [],
         }
-    return {"tool": tool, "usable": True, "reason": "usable", "wait_until": None, "windows": windows}
+    if not cli_present:
+        return {
+            "tool": tool,
+            "usable": False,
+            "reason": "missing-cli",
+            "wait_until": now + poll,
+            "windows": _windows_from_dicts(scopes),
+        }
+
+    if scope == SCOPE_AUTO:
+        chosen = list(scopes)
+    else:
+        chosen = [s for s in scopes if s.get("name") == scope]
+
+    typed_scopes = [_dict_to_scope(s) for s in chosen]
+    snap = ProviderSnapshot(
+        provider=tool,
+        available=bool(snapshot_available),
+        reason=str(snapshot_reason),
+        scopes=typed_scopes,
+    )
+    decision = decide(
+        snap,
+        scope,
+        min_remaining_percent,
+        min_remaining_amount,
+        poll,
+        cli_present=cli_present,
+        env=env,
+    )
+    return _decision_to_legacy(decision, scopes, tool)
+
+
+def _dict_to_scope(d: dict[str, Any]) -> Any:
+    from .capacity import CapacityScope
+
+    return CapacityScope(
+        name=str(d.get("name", "")),
+        kind=str(d.get("kind", "reset_window")),
+        ready=bool(d.get("ready", True)),
+        reason=str(d.get("reason", "")),
+        remaining_percent=d.get("remaining_percent"),
+        reset_epoch=d.get("reset_epoch"),
+        resets_at=d.get("resets_at"),
+        remaining_amount=d.get("remaining_amount"),
+        total_amount=d.get("total_amount"),
+        currency=d.get("currency"),
+        label=d.get("label"),
+        source=str(d.get("source", "")),
+    )
+
+
+def _windows_from_dicts(scopes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": s.get("name"),
+            "kind": s.get("kind"),
+            "remaining": s.get("remaining_percent"),
+            "remaining_amount": s.get("remaining_amount"),
+            "currency": s.get("currency"),
+            "resets_at": s.get("resets_at"),
+            "reset_epoch": s.get("reset_epoch"),
+            "source": s.get("source", ""),
+        }
+        for s in scopes
+    ]
+
+
+def _decision_to_legacy(decision: Any, original_scopes: list[dict[str, Any]], tool: str) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "tool": tool,
+        "usable": decision.usable,
+        "reason": decision.reason,
+        "wait_until": decision.wait_until,
+        "windows": _windows_from_dicts(original_scopes),
+    }
+    if decision.exhausted:
+        out["exhausted"] = [
+            {
+                "name": s.name,
+                "kind": s.kind,
+                "remaining": s.remaining_percent,
+                "remaining_amount": s.remaining_amount,
+                "reset_epoch": s.reset_epoch,
+            }
+            for s in decision.exhausted
+        ]
+    return out
+
+
+def usage_decision_for_tool(tool: str, window: str, min_remaining: str, poll_interval: str, snapshot: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Decide whether ``tool`` is usable under the requested ``window``.
+
+    Implementation is a thin compatibility shim over
+    :func:`llm_tools.capacity.decide`: it translates the legacy
+    ``window``/``snapshot`` shape into generic scope dicts, calls the
+    generic decider, and re-shapes the result to keep the existing public
+    JSON (``windows``, ``usable``, ``reason``, ``wait_until``,
+    ``exhausted``) stable for every consumer (scheduler, ralph, tests).
+    """
+    env = env or os.environ
+    poll = max(1, int(poll_interval))
+    min_percent = float(min_remaining)
+    min_amount = float(min_remaining)
+    try:
+        from .providers import kilo_min_balance, opencode_min_balance
+
+        if tool == "kilo":
+            min_amount = kilo_min_balance(env)
+        elif tool == "opencode":
+            min_amount = opencode_min_balance(env)
+    except Exception:
+        pass
+
+    scopes = _scope_filtered(_decision_scopes(snapshot, tool), window)
+
+    return decide_with_scopes(
+        tool,
+        window,
+        min_percent,
+        min_amount,
+        poll,
+        scopes,
+        cli_present=True,
+        snapshot_available=bool(snapshot.get("available", True)),
+        snapshot_reason=str(snapshot.get("reason", "")),
+        env=env,
+    )
 
 
 def argv_to_command_line(argv: Sequence[str]) -> str:
@@ -1548,17 +2202,26 @@ def output_is_retryable(status: int, output: str, attached: bool = False, trust_
 # the marker entirely (no brackets).
 LINE_PREFIX_FIELDS = ("time", "tool", "usage")
 
-# Short labels for the windows shown by the "usage" prefix field.
-USAGE_PREFIX_WINDOW_LABELS = {"weekly": "week", "monthly": "month"}
+# Short labels for the scopes shown by the "usage" prefix field.
+USAGE_PREFIX_WINDOW_LABELS = {
+    "weekly": "week",
+    "monthly": "month",
+    "balance": "bal",
+    "budget": "bud",
+    "ungated": "free",
+    "byok": "byok",
+    "local": "local",
+}
 
 
 def usage_prefix_text(tool: str, env: dict[str, str] | None = None) -> str:
     """Remaining-percentage summary for the "usage" prefix field.
 
-    Renders e.g. ``5h=10% week=30%`` for the tool's current windows. Returns an
-    empty string when no window remaining is known. This shells out to the
-    provider usage source, so callers must cache it (see UsagePrefixCache)
-    instead of calling it per line.
+    Renders e.g. ``5h=10% week=30%`` for the tool's current scopes, or
+    ``bal=£12.40`` / ``bud=62%`` for Kilo. Returns an empty string when no
+    scope has a usable remaining value. This shells out to the provider
+    usage source, so callers must cache it (see UsagePrefixCache) instead
+    of calling it per line.
     """
     snapshot = usage_snapshot_for_tool(tool, env)
     decision = usage_decision_for_tool(tool, "auto", "1", "60", snapshot, env)
@@ -1569,11 +2232,26 @@ def usage_prefix_text(tool: str, env: dict[str, str] | None = None) -> str:
     for window in windows:
         if not isinstance(window, dict):
             continue
+        name = str(window.get("name", "?"))
+        label = USAGE_PREFIX_WINDOW_LABELS.get(name, name)
+        kind = window.get("kind") or "reset_window"
+        if kind == "balance":
+            amount = window.get("remaining_amount")
+            if amount is None:
+                continue
+            currency = window.get("currency") or ""
+            if currency:
+                parts.append(f"{label}={currency}{fmt_number(amount)}")
+            else:
+                parts.append(f"{label}={fmt_number(amount)}")
+            continue
+        if kind == "ungated":
+            text = window.get("label") or name
+            parts.append(f"{label}={text}")
+            continue
         remaining = window.get("remaining")
         if remaining is None:
             continue
-        name = str(window.get("name", "?"))
-        label = USAGE_PREFIX_WINDOW_LABELS.get(name, name)
         parts.append(f"{label}={fmt_pct(remaining)}%")
     return " ".join(parts)
 

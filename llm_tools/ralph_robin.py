@@ -26,13 +26,14 @@ FAST_SUCCESS_ABORT_STREAK = 5
 HARD_FAIL_ABORT_STREAK = 6
 
 
-USAGE = """Usage: ralph-robin (--prompt TEXT | --prompt-file FILE) [options]
+USAGE = """Usage: ralph-robin
+  ralph-robin (-p TEXT | -f FILE) [options]
 
 Round-robin prompt submission across local LLM CLIs. By default it prefers the
-provider with the highest remaining daily capacity (weekly remaining broken down
-over the days until weekly reset) among providers that are currently usable, so
-weekly quotas burn down more evenly without idling on a rate-limited provider.
-Disable this with
+provider with the highest remaining daily capacity (reset-window or budget
+remaining broken down over the days until reset) among providers that are
+currently usable, so weekly/budget quotas burn down more evenly without
+idling on a rate-limited provider. Disable this with
 --no-even-burn to keep using the current provider until it is exhausted.
 
 ralph-robin runs a persistent loop and owns the orchestration: it picks a
@@ -54,68 +55,46 @@ rotation. Use llm-scheduler directly for an attached interactive run.
 Examples:
   ralph-robin --prompt-file task.md
   ralph-robin --prompt "Continue until tests pass"
-  ralph-robin --tools claude,codex,copilot --prompt-file task.md
+  ralph-robin --tools claude,codex,copilot,kilo,opencode,minimax --prompt-file task.md
   ralph-robin --prompt-file task.md --tmux llm-work
   ralph-robin --prompt-file task.md --dry-run
 
 Options:
-  --tools LIST                Comma-separated tools in rotation (default: claude,codex).
-                              Values: codex, claude, copilot.
-  --prompt TEXT               Prompt text.
-  --prompt-file FILE          Read prompt from FILE, preserving content.
-  --window auto|5h|weekly|monthly  Usage window to gate on (default: auto).
-  --min-remaining PERCENT     Minimum required remaining percentage (default: 1).
-  --poll-interval SECONDS     Poll interval passed to llm-scheduler (default: 60).
-  --max-unavailable-wait SECONDS  Bound inconclusive usage waits before optimistic
-                              launch (default: 900; 0 waits forever).
-  --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
-  --no-retry                  Disable retries after failed submission.
-  --even-burn                 Prefer the tool with the highest remaining daily
-                              capacity, i.e. weekly remaining divided by the days
-                              until weekly reset (default).
-  --no-even-burn              Keep using the current provider until exhausted.
-  --max-iterations N          Stop after N successful increments (default: 0,
-                              meaning no iteration limit).
-  --max-duration DURATION     Stop once this much wall-clock time has elapsed,
-                              e.g. 24h, 90m, 30s, or bare seconds (default: 24h;
-                              0 means no time limit). The loop stops when either
-                              --max-iterations or --max-duration is reached.
-  --min-iteration-seconds N   Floor on how fast successive increments may run
-                              (default: 5; 0 disables). Paces the loop so a
-                              provider that exits instantly cannot spin, and
-                              aborts if it keeps returning instant successes
-                              without doing real work.
-  --prefix LIST               Comma-separated fields to stamp on each relayed
-                              provider line, rendered inside [ ] in the given
-                              order (default: time,tool -> "[19:13:39 codex] ").
-                              Fields: time (HH:MM:SS), tool (provider name),
-                              usage (remaining per window, e.g.
-                              "5h=10% week=30%"). Use "none" (or an empty value)
-                              to turn the prefix off entirely, brackets included.
-  --prefix-usage-interval SECONDS
-                              Refresh interval for the cached "usage" prefix
-                              field (default: 15; 0 refreshes every line). Only
-                              relevant when "usage" is in --prefix.
-  --cwd DIR                   Working directory for the target CLI (default: current directory).
-  --fresh                     Launch a fresh CLI process through llm-scheduler (default).
-  --headless                  Always use the non-interactive provider command
-                              and captured PTY, even on a terminal.
-  --tmux SESSION[:WINDOW]     Execute through tmux via llm-scheduler.
-  --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
-  --auto-confirm              Acknowledge only known safe prompts (default).
-  --no-auto-confirm           Disable automatic prompt acknowledgement.
-  --headless-idle-timeout SECONDS
-                              Abort headless runs with no output progress
-                              (default: LLM_SCHEDULER_IDLE_TIMEOUT or 600; 0 disables).
-  --headless-question-timeout SECONDS
-                              Abort headless runs that ask a question then stop
-                              making progress (default: LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT or 30; 0 disables).
-  --log-dir DIR               Log directory (default: ~/.cache/llm-tools/ralph-robin/logs).
-  --state-file FILE           Rotation state file (default: ~/.cache/llm-tools/ralph-robin/state.json).
-  --wake                      Pass best-effort wake scheduling to llm-scheduler.
-  --suspend-until-ready       Suspend even for the selected tool's own wait gates.
-  --dry-run                   Resolve rotation and usage state without submitting.
-  -h, --help                  Show this help.
+  -t, --tools LIST                         Tools in rotation (default: claude,codex).
+  -p, --prompt TEXT                        Prompt text.
+  -f, --prompt-file FILE                   Read prompt from FILE, preserving content.
+  -s, --scope SCOPE                        Capacity scope to gate on (default: auto).
+  -W, --window SCOPE                       Deprecated alias for --scope.
+  -m, --min-remaining PERCENT              Minimum required remaining percentage (default: 1).
+  -i, --poll-interval SECONDS              Poll interval passed to llm-scheduler (default: 60).
+  -u, --max-unavailable-wait SECONDS       Bound inconclusive usage waits before optimistic launch.
+  -r, --retry-delays LIST                  Comma-separated retry delays (default: 60,180,600).
+  -R, --no-retry                           Disable retries after failed submission.
+  -e, --even-burn                          Prefer highest remaining daily capacity (default).
+  -E, --no-even-burn                       Keep using current provider until exhausted.
+  -n, --max-iterations N                   Stop after N successful increments (0 means no limit).
+  -D, --max-duration DURATION              Stop after duration like 24h, 90m, 30s (default: 24h).
+  -I, --min-iteration-seconds N            Floor on successive increment runtime (default: 5).
+  -P, --prefix LIST                        Prefix relayed lines with fields: time, tool, usage.
+  -X, --prefix-usage-interval SECONDS      Refresh interval for cached prefix usage field.
+  -C, --cwd DIR                            Working directory for target CLI.
+  -F, --fresh                              Launch a fresh CLI process through llm-scheduler.
+  -H, --headless                           Use non-interactive provider command on captured PTY.
+  -T, --tmux SESSION[:WINDOW]              Execute through tmux via llm-scheduler.
+  -g, --command-template TEMPLATE          Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
+  -y, --auto-confirm                       Acknowledge only known safe prompts (default).
+  -Y, --no-auto-confirm                    Disable automatic prompt acknowledgement.
+  -q, --headless-idle-timeout SECONDS      Abort headless runs with no output progress (0 disables).
+  -Q, --headless-question-timeout SECONDS  Abort headless runs that ask a question then stall.
+  -L, --log-dir DIR                        Log directory.
+  -S, --state-file FILE                    Rotation state file.
+  -k, --wake                               Pass best-effort wake scheduling to llm-scheduler.
+  -U, --suspend-until-ready                Suspend even for selected tool wait gates.
+  -d, --dry-run                            Resolve rotation and usage state without submitting.
+  -h, --help                               Show this help.
+
+Tools: codex, claude, copilot, kilo, opencode, minimax.
+Scopes: auto, 5h, weekly, monthly, balance, budget, byok, ungated.
 """
 
 
@@ -126,7 +105,7 @@ class RalphConfig:
     prompt_text: str = ""
     prompt_file: str = ""
     prompt_source: str = ""
-    window: str = "auto"
+    scope: str = "auto"
     min_remaining: str = "1"
     poll_interval: str = "60"
     max_unavailable_wait: str = "900"
@@ -216,13 +195,31 @@ def decision_summary(decision: dict[str, Any]) -> str:
         for window in windows:
             if not isinstance(window, dict):
                 continue
-            remaining = window.get("remaining")
             name = window.get("name", "?")
+            kind = window.get("kind") or "reset_window"
+            if kind == "balance":
+                amount = window.get("remaining_amount")
+                currency = window.get("currency") or ""
+                if amount is not None:
+                    if currency:
+                        parts.append(f"{name} {currency}{common.fmt_number(amount)} left")
+                    else:
+                        parts.append(f"{name} {common.fmt_number(amount)} left")
+                continue
+            if kind == "ungated":
+                text = window.get("label") or name
+                parts.append(f"{name} {text}")
+                continue
+            remaining = window.get("remaining")
             if isinstance(remaining, (int, float)):
                 parts.append(f"{name} {common.fmt_pct(remaining)}% left")
     wait_until = decision.get("wait_until")
     if reason == "rate-limited" and isinstance(wait_until, int):
         parts.append(f"until {common.format_local_epoch(wait_until)}")
+    elif reason == "budget-exhausted" and isinstance(wait_until, int):
+        parts.append(f"reset at {common.format_local_epoch(wait_until)}")
+    elif reason == "insufficient-balance":
+        parts.append("add balance")
     detail = ", ".join(parts) if parts else "-"
     return f"{reason} ({detail})"
 
@@ -256,13 +253,13 @@ def ralph_runtime_context(cfg: RalphConfig, selected_tool: str, selection: dict[
     decision_text = "\n".join(summaries) if summaries else "- unavailable"
     return (
         "RALPH ROBIN RUNTIME CONTEXT\n"
-        "This block is injected by ralph-robin and takes precedence for scheduling, handoff, and session-window decisions.\n"
+        "This block is injected by ralph-robin and takes precedence for scheduling, handoff, and capacity decisions.\n"
         f"- Current selected provider: {selected_tool}\n"
         f"- Configured provider rotation: {', '.join(cfg.tools)}\n"
         "- Treat any original prompt instruction to check or schedule a different provider as stale unless Ralph's latest decisions show the current provider is unusable.\n"
-        f"- For stop thresholds such as session window, credits, capacity, or below 25%, evaluate the current selected provider ({selected_tool}), not a previously-used provider named in the prompt.\n"
+        f"- For stop thresholds such as session window, credits, balance, budget, or below 25%, evaluate the current selected provider ({selected_tool}) and its current scopes (balance, budget, ungated, or reset window), not a previously-used provider named in the prompt.\n"
         "- Do not run provider-specific llm-scheduler --suspend-until-ready commands from the original prompt while the current selected provider is usable; Ralph owns cross-provider rotation and suspend decisions.\n"
-        "- Latest Ralph usage decisions:\n"
+        "- Latest Ralph capacity decisions:\n"
         f"{decision_text}\n"
         "END RALPH ROBIN RUNTIME CONTEXT\n"
     )
@@ -278,7 +275,7 @@ def parse_tools(raw: str) -> list[str]:
         tool = trim(part)
         if not tool:
             continue
-        if tool not in {"codex", "claude", "copilot"}:
+        if tool not in {"codex", "claude", "copilot", "kilo", "opencode", "minimax"}:
             common.err(f"invalid tool in --tools: {tool}")
             raise SystemExit(2)
         tools.append(tool)
@@ -328,79 +325,79 @@ def parse_args(argv: list[str]) -> RalphConfig:
             i += 2
             return value
 
-        if arg == "--tools":
+        if arg in ("-t", "--tools"):
             cfg.tools_spec = need_value("--tools requires a value")
-        elif arg == "--prompt":
+        elif arg in ("-p", "--prompt"):
             cfg.prompt_text = need_value("--prompt requires text")
             cfg.prompt_source = "inline"
-        elif arg == "--prompt-file":
+        elif arg in ("-f", "--prompt-file"):
             cfg.prompt_file = need_value("--prompt-file requires a file")
             cfg.prompt_source = f"file:{cfg.prompt_file}"
-        elif arg == "--window":
-            cfg.window = need_value("--window requires a value")
-        elif arg == "--min-remaining":
+        elif arg in ("-s", "--scope", "-W", "--window"):  # --window is a deprecated alias for --scope
+            cfg.scope = need_value("--scope requires a value")
+        elif arg in ("-m", "--min-remaining"):
             cfg.min_remaining = need_value("--min-remaining requires a value")
-        elif arg == "--poll-interval":
+        elif arg in ("-i", "--poll-interval"):
             cfg.poll_interval = need_value("--poll-interval requires seconds")
-        elif arg == "--max-unavailable-wait":
+        elif arg in ("-u", "--max-unavailable-wait"):
             cfg.max_unavailable_wait = need_value("--max-unavailable-wait requires seconds")
-        elif arg == "--retry-delays":
+        elif arg in ("-r", "--retry-delays"):
             cfg.retry_delays = need_value("--retry-delays requires a list")
-        elif arg == "--no-retry":
+        elif arg in ("-R", "--no-retry"):
             cfg.retry_delays = ""
             i += 1
-        elif arg == "--even-burn":
+        elif arg in ("-e", "--even-burn"):
             cfg.even_burn = True
             i += 1
-        elif arg == "--no-even-burn":
+        elif arg in ("-E", "--no-even-burn"):
             cfg.even_burn = False
             i += 1
-        elif arg == "--max-iterations":
+        elif arg in ("-n", "--max-iterations"):
             cfg.max_iterations = need_value("--max-iterations requires a count")
-        elif arg == "--max-duration":
+        elif arg in ("-D", "--max-duration"):
             cfg.max_duration = need_value("--max-duration requires a duration")
-        elif arg == "--min-iteration-seconds":
+        elif arg in ("-I", "--min-iteration-seconds"):
             cfg.min_iteration_seconds = need_value("--min-iteration-seconds requires seconds")
-        elif arg == "--prefix":
+        elif arg in ("-P", "--prefix"):
             cfg.prefix_spec = need_value("--prefix requires a value")
-        elif arg == "--prefix-usage-interval":
+        elif arg in ("-X", "--prefix-usage-interval"):
             cfg.prefix_usage_interval = need_value("--prefix-usage-interval requires seconds")
-        elif arg == "--cwd":
+        elif arg in ("-C", "--cwd"):
             cfg.cwd = need_value("--cwd requires a directory")
-        elif arg == "--fresh":
+        elif arg in ("-F", "--fresh"):
             cfg.exec_mode = "fresh"
             cfg.tmux_target = ""
             i += 1
-        elif arg == "--headless":
+        elif arg in ("-H", "--headless"):
             cfg.headless = True
             i += 1
-        elif arg == "--tmux":
+        elif arg in ("-T", "--tmux"):
             cfg.exec_mode = "tmux"
             cfg.tmux_target = need_value("--tmux requires SESSION[:WINDOW]")
-        elif arg == "--command-template":
+        elif arg in ("-g", "--command-template"):
             cfg.command_template = need_value("--command-template requires a template")
-        elif arg == "--auto-confirm":
+        elif arg in ("-y", "--auto-confirm"):
             cfg.auto_confirm = True
             i += 1
-        elif arg == "--no-auto-confirm":
+        elif arg in ("-Y", "--no-auto-confirm"):
             cfg.auto_confirm = False
             i += 1
-        elif arg == "--headless-idle-timeout":
+        elif arg in ("-q", "--headless-idle-timeout"):
             os.environ["LLM_SCHEDULER_IDLE_TIMEOUT"] = need_value("--headless-idle-timeout requires seconds")
-        elif arg == "--headless-question-timeout":
+        elif arg in ("-Q", "--headless-question-timeout"):
             os.environ["LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT"] = need_value("--headless-question-timeout requires seconds")
-        elif arg == "--log-dir":
+        elif arg in ("-L", "--log-dir"):
             cfg.log_dir = Path(need_value("--log-dir requires a directory"))
-        elif arg == "--state-file":
+        elif arg in ("-S", "--state-file"):
             cfg.state_file = Path(need_value("--state-file requires a file"))
-        elif arg == "--wake":
+        elif arg in ("-k", "--wake"):
             cfg.wake = True
             i += 1
-        elif arg == "--suspend-until-ready":
+        elif arg in ("-U", "--suspend-until-ready"):
             cfg.suspend_until_ready = True
             cfg.wake = True
             i += 1
-        elif arg == "--dry-run":
+        elif arg in ("-d", "--dry-run"):
             cfg.dry_run = True
             i += 1
         elif arg in ("-h", "--help"):
@@ -417,7 +414,7 @@ def validate_args(cfg: RalphConfig) -> None:
     cfg.tools = parse_tools(cfg.tools_spec)
     common.validate_prompt_args(cfg.prompt_text, cfg.prompt_file)
     for tool in cfg.tools:
-        common.validate_tool_window(tool, cfg.window)
+        common.validate_tool_scope(tool, cfg.scope)
     common.validate_gate_args(cfg.cwd, cfg.min_remaining, cfg.poll_interval, cfg.max_unavailable_wait, cfg.retry_delays)
     if not common.is_integer(cfg.max_iterations) or int(cfg.max_iterations) < 0:
         common.err("--max-iterations must be a non-negative integer")
@@ -444,7 +441,7 @@ def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
     return {
         "tools_spec": cfg.tools_spec,
         "tools": cfg.tools,
-        "window": cfg.window,
+        "scope": cfg.scope,
         "min_remaining": float(cfg.min_remaining),
         "poll_interval": int(cfg.poll_interval),
         "max_unavailable_wait": int(cfg.max_unavailable_wait),
@@ -515,34 +512,51 @@ def rotation_order_indices(length: int, current_index: int) -> list[int]:
 WEEKLY_WINDOW_DAYS = common.REMAINING_TIME_WINDOW_SECONDS["weekly"] / 86400.0
 
 
-def remaining_daily_capacity(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
-    """Weekly remaining percentage broken down over the days until weekly reset.
+def _scope_pace_remaining(window: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
+    """Remaining-per-day for a single decision-window dict.
 
-    e.g. 80% remaining with 4 days until reset yields 20% remaining per day.
-    A higher value means more headroom to spend each day, so even-burn prefers
-    it. When the weekly reset time is unknown or already elapsed (stale data),
-    fall back to a full weekly window so even-burn can still rank the provider
-    instead of silently abandoning the comparison. Returns None only when the
-    weekly remaining percentage itself is unavailable.
+    Mirrors :func:`llm_tools.capacity.scope_pace` but consumes the legacy
+    ``window`` shape (``name``, ``remaining``, ``reset_epoch``, ``kind``)
+    produced by :func:`llm_tools.common.usage_decision_for_tool`. Reset
+    windows and budget scopes are both rankable; balance and ungated are
+    not.
     """
+    kind = window.get("kind") or "reset_window"
+    if kind in ("balance", "ungated", "unknown"):
+        return None
+    rem = window.get("remaining")
+    if not isinstance(rem, (int, float)):
+        return None
     env = env or os.environ
+    reset_epoch = window.get("reset_epoch")
+    if isinstance(reset_epoch, int) and reset_epoch > common.now_epoch(env):
+        days = max((reset_epoch - common.now_epoch(env)) / 86400.0, 1.0)
+    else:
+        days = 7.0
+    return float(rem) / days
+
+
+def remaining_daily_capacity(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
+    """Highest remaining-per-day across the decision's pace-rankable scopes.
+
+    Reset-window and budget scopes are ranked. A provider that only exposes
+    balance/ungated scopes returns ``None`` so even-burn falls back to a
+    plain rotation. This replaces the old "weekly window only" logic so
+    Kilo's budget scope can participate in even-burn when it is configured.
+    """
     windows = decision.get("windows")
     if not isinstance(windows, list):
         return None
+    best: float | None = None
     for window in windows:
-        if not isinstance(window, dict) or window.get("name") != "weekly":
+        if not isinstance(window, dict):
             continue
-        remaining = window.get("remaining")
-        if not isinstance(remaining, (int, float)):
-            return None
-        reset_epoch = window.get("reset_epoch")
-        days_until_reset = WEEKLY_WINDOW_DAYS
-        if isinstance(reset_epoch, int):
-            seconds_until_reset = reset_epoch - common.now_epoch(env)
-            if seconds_until_reset > 0:
-                days_until_reset = seconds_until_reset / 86400.0
-        return float(remaining) / days_until_reset
-    return None
+        score = _scope_pace_remaining(window, env)
+        if score is None:
+            continue
+        if best is None or score > best:
+            best = score
+    return best
 
 
 def weekly_window_exhausted(decision: dict[str, Any]) -> bool:
@@ -552,10 +566,25 @@ def weekly_window_exhausted(decision: dict[str, Any]) -> bool:
     return any(isinstance(window, dict) and window.get("name") == "weekly" for window in exhausted)
 
 
+def decision_has_blocked_scope(decision: dict[str, Any], scope_name: str) -> bool:
+    exhausted = decision.get("exhausted")
+    if not isinstance(exhausted, list):
+        return False
+    return any(isinstance(window, dict) and window.get("name") == scope_name for window in exhausted)
+
+
 def even_burn_candidate(decision: dict[str, Any]) -> bool:
     if decision.get("usable") is True:
         return True
-    return decision.get("reason") == "rate-limited" and not weekly_window_exhausted(decision)
+    # A rate-limited or budget-exhausted decision can still be ranked
+    # against the rest of the rotation by how much budget/weekly percent
+    # remains per day, so even-burn can prefer the gentler provider.
+    reason = decision.get("reason")
+    if reason == "rate-limited" and not weekly_window_exhausted(decision):
+        return True
+    if reason == "budget-exhausted" and not decision_has_blocked_scope(decision, "budget"):
+        return True
+    return False
 
 
 def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_index: int, skipped: set[str]) -> int | None:
@@ -588,7 +617,7 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
     decisions: list[dict[str, Any]] = []
     for tool in cfg.tools:
         snapshot = common.usage_snapshot_for_tool(tool)
-        decision = common.usage_decision_for_tool(tool, cfg.window, cfg.min_remaining, cfg.poll_interval, snapshot)
+        decision = common.usage_decision_for_tool(tool, cfg.scope, cfg.min_remaining, cfg.poll_interval, snapshot)
         decisions.append(decision)
         common.log_event(logs, "usage_snapshot", {"tool": tool, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
@@ -614,7 +643,8 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
         fallback = (current_index + i) % len(cfg.tools)
         if cfg.tools[fallback] in skipped:
             continue
-        if decisions[fallback].get("reason") != "rate-limited":
+        reason = decisions[fallback].get("reason")
+        if reason not in ("rate-limited", "budget-exhausted", "insufficient-balance"):
             return {
                 "index": fallback,
                 "tool": cfg.tools[fallback],
@@ -625,15 +655,16 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
             }
 
     active_decisions = [(i, decision) for i, decision in enumerate(decisions) if cfg.tools[i] not in skipped]
-    all_active_rate_limited = bool(active_decisions) and all(
-        decision.get("reason") == "rate-limited" and isinstance(decision.get("wait_until"), int)
+    blocked_reasons = {"rate-limited", "budget-exhausted", "insufficient-balance"}
+    all_active_blocked = bool(active_decisions) and all(
+        decision.get("reason") in blocked_reasons and isinstance(decision.get("wait_until"), int)
         for _i, decision in active_decisions
     )
     best_index = -1
     best_wait: int | None = None
     for i, decision in active_decisions:
         wait_until = decision.get("wait_until")
-        if decision.get("reason") == "rate-limited" and isinstance(wait_until, int):
+        if decision.get("reason") in blocked_reasons and isinstance(wait_until, int):
             if best_wait is None or wait_until < best_wait:
                 best_wait = wait_until
                 best_index = i
@@ -649,7 +680,7 @@ def select_tool(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skip
         "index": best_index,
         "tool": cfg.tools[best_index],
         "rotation_reason": "all-unusable",
-        "all_rate_limited": all_active_rate_limited and best_wait is not None,
+        "all_rate_limited": all_active_blocked and best_wait is not None,
         "decision": decisions[best_index],
         "decisions": decisions,
     }
@@ -660,7 +691,7 @@ def scheduler_config_for(cfg: RalphConfig, selected_tool: str, logs: common.RunL
         tool=selected_tool,
         prompt_text=provider_prompt,
         prompt_source=f"ralph-runtime:{selected_tool}",
-        window=cfg.window,
+        scope=cfg.scope,
         min_remaining=cfg.min_remaining,
         poll_interval=cfg.poll_interval,
         max_unavailable_wait=cfg.max_unavailable_wait,

@@ -33,10 +33,61 @@ def seed_provider_data(env: dict[str, str]) -> None:
 def test_usage_help_and_validation(env: dict[str, str]) -> None:
     help_result = run_cmd(["./llm-usage", "--help"], env)
     assert help_result.returncode == 0
-    assert "Usage: llm-usage" in help_result.stdout
+    assert "Usage:" in help_result.stdout
+    assert "llm-usage [options]" in help_result.stdout
+    assert "-j, --json" in help_result.stdout
+    assert "-p, --provider-parallelism" in help_result.stdout
     bad = run_cmd(["./llm-usage", "--watch", "abc"], env)
     assert bad.returncode == 2
     assert "watch requires numeric seconds" in bad.stderr
+
+
+def test_short_cli_aliases(env: dict[str, str]) -> None:
+    seed_provider_data(env)
+    env["LLM_USAGE_DISABLE_COPILOT"] = "1"
+    usage_short = run_cmd(["./llm-usage", "-j", "-p", "1", "-S", "-R"], env)
+    assert usage_short.returncode == 0, usage_short.stderr
+    assert json.loads(usage_short.stdout)["codex"]["available"] is True
+
+    sched_short = run_cmd(
+        [
+            "./llm-scheduler",
+            "-t",
+            "codex",
+            "-p",
+            "x",
+            "-s",
+            "5h",
+            "-e",
+            "true",
+            "-d",
+            "-L",
+            str(Path(env["HOME"]) / "sched-logs"),
+        ],
+        env,
+    )
+    assert sched_short.returncode == 0, sched_short.stderr
+
+    ralph_short = run_cmd(
+        [
+            "./ralph-robin",
+            "-t",
+            "codex",
+            "-p",
+            "x",
+            "-g",
+            "true",
+            "-d",
+            "-n",
+            "1",
+            "-S",
+            str(Path(env["HOME"]) / "ralph-state.json"),
+            "-L",
+            str(Path(env["HOME"]) / "ralph-logs"),
+        ],
+        env,
+    )
+    assert ralph_short.returncode == 0, ralph_short.stderr
 
 
 def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
@@ -45,7 +96,7 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     js = run_cmd(["./llm-usage", "--json", "--show-copilot-credits"], env)
     assert js.returncode == 0, js.stderr
     data = json.loads(js.stdout)
-    assert set(data) == {"generated_at", "codex", "claude", "copilot"}
+    assert set(data) == {"generated_at", "codex", "claude", "copilot", "kilo", "opencode", "minimax"}
     assert data["codex"]["rows"][1]["key"] == "codex-spark"
     assert data["copilot"]["monthly"]["used"] == 62
     assert data["copilot"]["monthly"]["remaining"] == 38
@@ -64,7 +115,10 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     assert "Resets in" in table.stdout
     assert "Pace" not in table.stdout
     assert "Pace / Gate" not in table.stdout
-    assert "open" not in table.stdout
+    # "opencode" is allowed; the legacy assertion is that the table never
+    # uses the standalone words "open" or "closed" (left over from a
+    # removed dial UI).
+    assert not re.search(r"\bopen\b", table.stdout, re.IGNORECASE)
     assert "closed" not in table.stdout
     assert "Use" not in table.stdout.splitlines()[4]
     hidden = run_cmd(["./llm-usage", "--hide-codex-spark"], env)

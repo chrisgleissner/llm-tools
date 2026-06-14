@@ -214,6 +214,17 @@ def test_is_undetermined_reason_and_sleep_until(monkeypatch: pytest.MonkeyPatch)
     assert slept == [30]
 
 
+def test_provider_default_argv_kilo_and_opencode_cwd_handling() -> None:
+    attached_kilo = scheduler.SchedulerConfig(tool="kilo", cwd="/tmp/work", attached=True)
+    assert scheduler.provider_default_argv(attached_kilo, "prompt") == ["kilo", "run", "prompt"]
+
+    headless_kilo = scheduler.SchedulerConfig(tool="kilo", cwd="/tmp/work")
+    assert scheduler.provider_default_argv(headless_kilo, "prompt") == ["kilo", "run", "--auto", "prompt"]
+
+    attached_opencode = scheduler.SchedulerConfig(tool="opencode", cwd="/tmp/work", attached=True)
+    assert scheduler.provider_default_argv(attached_opencode, "prompt") == ["opencode"]
+
+
 # --------------------------------------------------------------------------- #
 # ralph_robin: duration parsing
 # --------------------------------------------------------------------------- #

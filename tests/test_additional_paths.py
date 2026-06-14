@@ -5,6 +5,7 @@ import io
 import os
 import subprocess
 import sys
+from urllib.error import HTTPError
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,70 @@ def test_usage_main_inprocess_and_render_helpers(env: dict[str, str], monkeypatc
     usage.print_unavailable_rows(cfg, "Missing")
     out = capsys.readouterr().out
     assert "Missing" in out
+
+
+def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "expired-token",
+                    "refreshToken": "refresh-token",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests: list[tuple[str, bytes | None, str | None]] = []
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def read(self) -> bytes:
+            return self._text.encode("utf-8")
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        url = req.full_url
+        data = req.data
+        auth = req.headers.get("Authorization")
+        requests.append((url, data, auth))
+        if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer expired-token":
+            raise HTTPError(url, 401, "unauthorized", hdrs=None, fp=None)
+        if url == common.CLAUDE_OAUTH_TOKEN_URL:
+            body = (data or b"").decode("utf-8")
+            assert "grant_type=refresh_token" in body
+            assert "refresh_token=refresh-token" in body
+            assert f"client_id={common.CLAUDE_OAUTH_CLIENT_ID.replace(':', '%3A').replace('/', '%2F')}" in body
+            return FakeResponse('{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}')
+        if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer fresh-token":
+            return FakeResponse(
+                '{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":"2026-06-14T18:00:00Z"},'
+                '"seven_day":{"used_percentage":34,"resets_at":"2026-06-20T18:00:00Z"}}}'
+            )
+        raise AssertionError(f"unexpected request: {url} auth={auth!r}")
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude_api(env)
+    assert data is not None
+    assert data["five_hour"]["used"] == 12
+    saved = json.loads(cred.read_text(encoding="utf-8"))
+    assert saved["claudeAiOauth"]["accessToken"] == "fresh-token"
+    assert saved["claudeAiOauth"]["refreshToken"] == "fresh-refresh"
+    assert [item[0] for item in requests] == [
+        common.CLAUDE_OAUTH_USAGE_URL,
+        common.CLAUDE_OAUTH_TOKEN_URL,
+        common.CLAUDE_OAUTH_USAGE_URL,
+    ]
 
 
 def test_usage_dashboard_ready_guidance_and_reset(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -148,7 +213,7 @@ def test_usage_table_snapshot_has_guidance_and_no_old_dial(capsys: pytest.Captur
     assert "\n\nBars: █ available · ░ spent" in out
     assert "Bars: █ available · ░ spent" in out
     assert "Guidance:" in out
-    assert "Tool       Ready   Window    Remaining" in out
+    assert "Tool       Ready   Scope     Remaining" in out
     assert "Codex      yes     5h         84% ████████░░" in out
     assert "                   weekly     33% ███░░░░░░░   ↓ conserve" in out
     assert "Claude     no      5h          0% ░░░░░░░░░░   × empty" in out
@@ -518,6 +583,9 @@ def test_parser_option_coverage(tmp_path: Path) -> None:
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude"), "p") == ["claude", "--print", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="claude", claude_stream_json=True), "p") == ["claude", "--print", "--output-format", "stream-json", "--verbose", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="copilot", cwd="/c", attached=True), "p") == ["copilot", "-C", "/c", "-i", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="kilo", cwd="/c", attached=True), "p") == ["kilo", "run", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="kilo", cwd="/c"), "p") == ["kilo", "run", "--auto", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(tool="opencode", cwd="/c", attached=True), "p") == ["opencode"]
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="codex")).startswith("Codex")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="claude")).startswith("Claude")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(tool="copilot")).startswith("GitHub")
@@ -1174,8 +1242,8 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert common.estimate_remaining_time_from_log("p", "w", "bad", env) == "-"
     common.log_usage_sample("p", "w", "-", env)
 
-    assert common.usage_decision_for_tool("copilot", "weekly", "1", "60", {}, env)["reason"] == "unsupported-window"
-    assert common.usage_decision_for_tool("codex", "monthly", "1", "60", {"available": True}, env)["reason"] == "unsupported-window"
+    assert common.usage_decision_for_tool("copilot", "weekly", "1", "60", {}, env)["reason"] == "unsupported-scope"
+    assert common.usage_decision_for_tool("codex", "monthly", "1", "60", {"available": True}, env)["reason"] == "unsupported-scope"
     assert common.usage_decision_for_tool("codex", "5h", "1", "60", {"available": True, "five_hour": {"resets_at": 2000}}, env)["reason"] == "inconclusive-usage"
     assert common.usage_snapshot_for_tool("unknown", env)["reason"] == "unsupported-tool"
     assert common.output_is_retryable(130, "", attached=True) is False
