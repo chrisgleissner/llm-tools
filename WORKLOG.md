@@ -68,3 +68,138 @@ llm-scheduler worklog
 - Fixed scheduler reset parsing for Claude API timestamps with fractional seconds and `+00:00` offset.
 - Added regression coverage for `--suspend-until-ready` timer arming and Claude offset reset parsing.
 - Dry-ran requested Claude 5h handover schedule; reset derived as epoch `1780438801` / local `2026-06-02 23:20:01`.
+
+## 2026-06-14 — Config file + model-aware gating tests
+
+- Picked up from the interrupted prior LLM. State at start: 269 tests
+  pass, total coverage 83% (gate `--fail-under=85` failing because
+  `llm_tools/config.py` at 37% was added without tests).
+- Added `tests/test_config.py` (28 tests) covering the full config-file
+  lifecycle: `config_path` resolution, `load_config` mtime cache,
+  TOML parse failures, every `_validate` branch (unknown sections,
+  default/ralph/scheduler/provider unknown keys, type errors),
+  `provider_policy` defaults, `merged_tool_config` precedence, and
+  the `_as_str` helper. Brings `llm_tools/config.py` from 37% → 98%.
+- Added `tests/test_config_integration.py` (10 tests) exercising
+  `ralph_robin.apply_config`, `ralph_robin.resolve_policies`, and
+  `scheduler.apply_config` end-to-end with TOML files. Verifies
+  explicit-CLI-wins precedence, the unsupported-model warning, and
+  per-provider routing policy application.
+- Added `tests/test_usage_prefix.py` (21 tests) for
+  `common.usage_prefix_text` and the `_decision_scopes` /
+  `_scope_filtered` / `_legacy_snapshot_to_scopes` helpers. Covers
+  reset_window, balance (with and without currency), and ungated
+  rendering.
+- Added `tests/test_common_helpers.py` (34 tests) for small helpers
+  not otherwise exercised: `migrate_legacy_cache_dirs`,
+  `require_cmd`, `parse_epoch` edge cases, `fmt_reset` /
+  `format_local_epoch` / `fmt_duration` / `time_until` /
+  `fmt_number`, `num` / `is_number` / `is_integer`, and
+  `copilot_monthly_window_days` / `copilot_monthly_reset_epoch`
+  December and January branches.
+- Manual smoke: `XDG_CONFIG_HOME=/tmp/cfgtest llm-usage --json`
+  resolves the new config file without error;
+  `llm-scheduler --provider claude --prompt x --dry-run` reads the
+  per-provider `model` and `scope` from the config and emits the
+  expected dry-run output.
+- Final: 362 tests pass; total coverage 86% (gate passes comfortably).
+- Files changed: `tests/test_config.py` (new, 28 tests),
+  `tests/test_config_integration.py` (new, 10 tests),
+  `tests/test_usage_prefix.py` (new, 21 tests),
+  `tests/test_common_helpers.py` (new, 34 tests).
+
+## 2026-06-14 — Kilo Code CLI & capacity scope refactor
+
+- Created `PLANS.md` for adding Kilo Code CLI as a first-class provider and
+  replacing the narrow `window` abstraction with a generic `capacity scope`
+  abstraction (reset_window, balance, budget, ungated, unknown).
+- Baseline: `pytest -q` passes (91 tests), coverage 86%.
+- Files changed: TBD (work in progress).
+- Tests run: TBD.
+- Failures: TBD.
+- Fixes: TBD.
+- Remaining risks: TBD.
+### Progress checkpoint (Kilo + capacity-scope refactor, working state)
+
+- Created `llm_tools/capacity.py` with the generic `ProviderId`,
+  `CapacityKind`, `CapacityScope`, `ProviderSnapshot`, and `UsageDecision`
+  dataclasses plus `decide`, `validate_scope`, `scope_pace`,
+  `is_undetermined_reason`, `effective_scopes` helpers.
+- Created `llm_tools/providers/kilo.py` with the Kilo Code CLI adapter:
+  `kilo stats` parser + env-var fallback (`LLM_USAGE_KILO_*`), the
+  `read_kilo` snapshot reader, and `kilo_command_argv` for
+  attached/headless launches.
+- Replaced the legacy `--window` flag with `--scope` in `llm-scheduler`
+  and `ralph-robin`; `--window` is still accepted as a deprecated alias.
+- Updated `llm-usage` table column from "Window" to "Scope" and added
+  Kilo rows (`balance`, `budget`, `byok/local/ungated`).
+- Updated `validate_tool_window` → `validate_tool_scope`; `RalphConfig`
+  and `SchedulerConfig` now carry a `scope` field.
+- Tests: 154 pass (added 25 capacity tests, 26 Kilo tests, 12 Ralph-Kilo
+  tests).
+- Coverage: 86% (above 85% gate).
+
+### Provider refactor (kilo, codex, claude, copilot all in llm_tools/providers/)
+
+- Every provider now lives in its own module under
+  `llm_tools/providers/`. Adding a new provider is a 5-step recipe
+  (read() snapshot, re-export, PROVIDER_SCOPES, default argv, --tool
+  membership).
+- Codex: `providers/codex.py` (read_codex + read() snapshot).
+- Claude: `providers/claude.py` (read_claude / read_claude_api
+  delegations + read() snapshot).
+- Copilot: `providers/copilot.py` (read_copilot / read_copilot_live
+  delegations + read() snapshot).
+- Kilo: `providers/kilo.py` (read_kilo + read alias + read()
+  snapshot).
+- llm_tools/common.py keeps the legacy read_codex / read_claude_api
+  / read_claude / read_copilot functions as thin shims that delegate
+  to the provider modules; Claude's API OAuth/cache mechanics live
+  in common to keep the readers free of provider indirection.
+- llm_tools/usage.py: render_once now uses snapshot-based
+  read_<name>_snapshot for Claude/Copilot; Codex keeps the legacy
+  read_codex JSON shape (the rows array carries the codex-spark
+  row, which the test contract pins).
+- Tests: 160 pass (added 6 in tests/test_providers.py).
+- Coverage: 85% (gate met).
+- README.md and AGENTS.md updated to document the new model.
+
+### End-to-end manual checks
+
+- `llm-usage` with `LLM_USAGE_KILO_BALANCE=12.40 GBP` + budget env
+  shows Kilo balance/budget rows in the table.
+- `llm-scheduler --tool kilo --scope byok --dry-run` resolves the
+  byok ungated scope and emits a `usage_decision` event.
+- `llm-scheduler --tool kilo --scope balance --dry-run` resolves
+  the balance scope and emits a `usage_decision` event.
+- `ralph-robin --tools kilo --max-iterations 1` selects kilo, runs
+  the provider, and stops cleanly.
+
+## 2026-06-14 — OpenCode support added + handover prompt
+
+- Added `llm_tools/providers/opencode.py` as a Kilo-shaped adapter for
+  the OpenCode CLI (`opencode stats` JSON + text + env-var fallback,
+  same `read()` / `read_opencode()` / `command_argv` contract).
+- Wired OpenCode into `llm_tools/capacity.py` (PROVIDER_OPENCODE +
+  allow-list), `llm_tools/common.py` (snapshot shim), `usage.py`
+  (opencode_rows + JSON), `scheduler.py` (--tool opencode, default
+  argv), `ralph_robin.py` (--tools opencode), and `providers/__init__.py`.
+- Added 26 tests in `tests/test_opencode.py`. 2 still fail on
+  `PATH=/var/empty` + gateway+balance: the reader returns
+  `missing-cli` because the binary is required to launch in any mode.
+  This mirrors the Kilo behavior (kilo's test happens to pass because
+  the host has a real kilo on PATH). To be fixed in the adversarial
+  review.
+- Created `REVIEW_PROMPT.md` (handover to a fresh opencode session
+  for the adversarial review). 187 lines. Tells the new session to
+  start with an adversarial review focused on modularity, consistency,
+  and lack of bugs across the Kilo+OpenCode addition; fix what it
+  finds; do not commit unless asked; ≥85% coverage gate.
+- Configured `~/.config/opencode/opencode.jsonc` to default
+  `model = minimax-coding-plan/MiniMax-M3` (provider id matches the
+  existing `auth.json` entry `minimax-coding-plan`). Smoke test:
+  `opencode run --model minimax-coding-plan/MiniMax-M3 "Reply with
+  exactly one word: ok"` returned `ok`.
+- Tests so far: 160 pass; the 26 new opencode tests have 2 failures
+  (PATH=/var/empty + gateway+balance). Coverage: TBD; gate is
+  `--fail-under=85`.

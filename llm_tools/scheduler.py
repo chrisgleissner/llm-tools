@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from . import common
+from . import config as toolconfig
 
 
 APP_NAME = "llm-scheduler"
 
 
-USAGE = """Usage: llm-scheduler --tool codex|claude|copilot (--prompt TEXT | --prompt-file FILE) [options]
+USAGE = """Usage: llm-scheduler
+  llm-scheduler -P PROVIDER (-p TEXT | -f FILE) [options]
 
 Submit a prompt to a local LLM CLI as soon as shared llm-usage data says it is usable.
 
@@ -27,68 +29,74 @@ in its normal interactive form attached directly to that terminal: output,
 key input, window resizes, and Ctrl-C behave exactly as if the CLI had been
 started directly in the shell. Without a terminal (pipes, cron, systemd
 resume) or with --headless, the non-interactive form (claude --print,
-codex exec, copilot --prompt) runs on a captured PTY instead.
+codex exec, copilot --prompt, kilo run --auto, opencode run, mmx run --auto)
+runs on a captured PTY instead.
 
 Examples:
-  llm-scheduler --tool codex --prompt-file task.md
-  llm-scheduler --tool claude --prompt "Continue the work in this repo until CI is green"
-  llm-scheduler --tool copilot --prompt-file task.md --retry-delays 60,180,600
-  llm-scheduler --tool codex --prompt-file task.md --at "23:05"
-  llm-scheduler --tool codex --prompt-file task.md --tmux llm-work
-  llm-scheduler --tool codex --prompt-file task.md --wake
-  llm-scheduler --tool claude --prompt-file task.md --window 5h --suspend-until-ready
-  llm-scheduler --tool codex --prompt-file task.md --dry-run
+  llm-scheduler --provider codex --prompt-file task.md
+  llm-scheduler --provider claude --prompt "Continue the work in this repo until CI is green"
+  llm-scheduler --provider copilot --prompt-file task.md --retry-delays 60,180,600
+  llm-scheduler --provider kilo --prompt-file task.md
+  llm-scheduler --provider opencode --prompt-file task.md
+  llm-scheduler --provider minimax --prompt-file task.md
+  llm-scheduler --provider codex --prompt-file task.md --at "23:05"
+  llm-scheduler --provider codex --prompt-file task.md --tmux llm-work
+  llm-scheduler --provider codex --prompt-file task.md --wake
+  llm-scheduler --provider claude --prompt-file task.md --scope 5h --suspend-until-ready
+  llm-scheduler --provider codex --prompt-file task.md --dry-run
 
 Options:
-  --tool TOOL                 codex, claude, or copilot.
-  --prompt TEXT               Prompt text.
-  --prompt-file FILE          Read prompt from FILE, preserving content.
-  --at TIME, --not-before TIME  Do not submit before date -d compatible local time.
-  --window auto|5h|weekly|monthly  Usage window to gate on (default: auto).
-  --min-remaining PERCENT     Minimum required remaining percentage (default: 1).
-  --poll-interval SECONDS     Poll interval when reset data is unavailable (default: 60).
-  --max-unavailable-wait SECONDS  Max time to keep polling while usage data cannot be
-                              measured (no network, transient API failure, inconclusive
-                              data) before launching optimistically and letting the tool's
-                              own rate-limit handling and --retry-delays take over.
-                              0 waits forever (default: 900). Does not apply to a known
-                              rate-limit reset, which always waits for the real reset time.
-  --retry-delays LIST         Comma-separated retry delays (default: 60,180,600).
-  --no-retry                  Disable retries after failed submission.
-  --cwd DIR                   Working directory for the target CLI (default: current directory).
-  --fresh                     Launch a fresh CLI process (default).
-  --headless                  Always use the non-interactive provider command
-                              and captured PTY, even on a terminal.
-  --tmux SESSION[:WINDOW]     Execute via tmux instead of foreground process.
-  --command-template TEMPLATE Override provider command; placeholders: {tool}, {prompt}, {prompt_file}, {cwd}.
-  --auto-confirm              Acknowledge only known safe prompts (default).
-  --no-auto-confirm           Disable automatic prompt acknowledgement.
-  --headless-idle-timeout SECONDS
-                              Abort headless runs with no output progress
-                              (default: LLM_SCHEDULER_IDLE_TIMEOUT or 600; 0 disables).
-  --headless-question-timeout SECONDS
-                              Abort headless runs that ask a question then stop
-                              making progress (default: LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT or 30; 0 disables).
-  --log-dir DIR               Log directory (default: ~/.cache/llm-tools/llm-scheduler/logs).
-  --run-dir DIR               Reuse/write one specific run directory.
-  --dry-run                   Resolve state and command plan without submitting.
-  --wake                      Best-effort wake scheduling diagnostics/logging.
-  --suspend-until-ready       Arm a wake timer for the next reset/not-before time,
-                              suspend now, and run this scheduler after wake.
-  --wake-test                 Print wake capability diagnostics and exit.
-  -h, --help                  Show this help.
+  -P, --provider PROVIDER                 Provider: codex, claude, copilot, kilo, opencode, minimax.
+  -M, --model MODEL                       Pin the provider model (overrides the config file policy).
+  -p, --prompt TEXT                       Prompt text.
+  -f, --prompt-file FILE                  Read prompt from FILE, preserving content.
+  -a, --at TIME                           Do not submit before date-compatible local time.
+  -a, --not-before TIME                   Alias for --at.
+  -s, --scope SCOPE                       Capacity scope to gate on (default: auto).
+  -W, --window SCOPE                      Deprecated alias for --scope.
+  -m, --min-remaining PERCENT             Minimum required remaining percentage (default: 1).
+  -i, --poll-interval SECONDS             Poll interval when reset data is unavailable (default: 60).
+  -u, --max-unavailable-wait SECONDS      Max inconclusive-data wait before optimistic launch (default: 900; 0 forever).
+  -r, --retry-delays LIST                 Comma-separated retry delays (default: 60,180,600).
+  -R, --no-retry                          Disable retries after failed submission.
+  -C, --cwd DIR                           Working directory for the target CLI (default: current directory).
+  -F, --fresh                             Launch a fresh CLI process (default).
+  -H, --headless                          Always use non-interactive provider command on a captured PTY.
+  -T, --tmux SESSION[:WINDOW]             Execute via tmux instead of foreground process.
+  -e, --command-template TEMPLATE         Override provider command; placeholders: {provider}, {prompt}, {prompt_file}, {cwd}.
+  -y, --auto-confirm                      Acknowledge only known safe prompts (default).
+  -Y, --no-auto-confirm                   Disable automatic prompt acknowledgement.
+  -I, --headless-idle-timeout SECONDS     Abort headless runs with no output progress (0 disables).
+  -Q, --headless-question-timeout SECONDS Abort headless runs that ask a question then stall (0 disables).
+  -L, --log-dir DIR                       Log directory.
+  -O, --run-dir DIR                       Reuse/write one specific run directory.
+  -d, --dry-run                           Resolve state and command plan without submitting.
+  -k, --wake                              Best-effort wake scheduling diagnostics/logging.
+  -U, --suspend-until-ready               Suspend until the next reset/not-before time.
+  -x, --wake-test                         Print wake capability diagnostics and exit.
+  -h, --help                              Show this help.
+
+Scopes:
+  codex/claude/minimax: auto, 5h, weekly
+  copilot:              auto, monthly
+  kilo/opencode:        auto, balance, budget, byok, ungated
 """
 
 
 @dataclass
 class SchedulerConfig:
-    tool: str = ""
+    provider: str = ""
     prompt_text: str = ""
     prompt_file: str = ""
     prompt_source: str = ""
     at_time: str = ""
     not_before_epoch: int | None = None
-    window: str = "auto"
+    # Pinned model the provider CLI runs (via --model), and whether to fall back
+    # to another model when this one's rate limit is exhausted. Both resolved
+    # from the shared config file's per-provider policy (CLI --model wins).
+    model: str = ""
+    allow_fallback: bool = False
+    scope: str = "auto"
     min_remaining: str = "1"
     poll_interval: str = "60"
     max_unavailable_wait: str = "900"
@@ -111,12 +119,15 @@ class SchedulerConfig:
     exact_stdout: bool = False
     claude_stream_json: bool = False
     ralph_robin_active: bool = False
-    ralph_robin_tools: str = ""
+    ralph_robin_providers: str = ""
     # Ordered fields stamped on each relayed provider line (see
     # common.LINE_PREFIX_FIELDS). Empty disables the marker entirely.
     output_prefix_fields: list[str] = field(default_factory=list)
     # Seconds between refreshes of the "usage" prefix field (cached in between).
     output_prefix_usage_ttl: float = 15.0
+    # CLI flags the user passed explicitly, so config-file values never clobber
+    # them (precedence: built-in defaults < config file < CLI flags).
+    explicit: set[str] = field(default_factory=set)
 
 
 def parse_args(argv: list[str]) -> SchedulerConfig:
@@ -133,68 +144,78 @@ def parse_args(argv: list[str]) -> SchedulerConfig:
             i += 2
             return value
 
-        if arg == "--tool":
-            cfg.tool = need_value("--tool requires a value")
-        elif arg == "--prompt":
+        if arg in ("-P", "--provider"):
+            cfg.provider = need_value("--provider requires a value")
+            cfg.explicit.add("provider")
+        elif arg in ("-p", "--prompt"):
             cfg.prompt_text = need_value("--prompt requires text")
             cfg.prompt_source = "inline"
-        elif arg == "--prompt-file":
+        elif arg in ("-f", "--prompt-file"):
             cfg.prompt_file = need_value("--prompt-file requires a file")
             cfg.prompt_source = f"file:{cfg.prompt_file}"
-        elif arg in ("--at", "--not-before"):
+        elif arg in ("-a", "--at", "--not-before"):
             cfg.at_time = need_value(f"{arg} requires a time")
-        elif arg == "--window":
-            cfg.window = need_value("--window requires a value")
-        elif arg == "--min-remaining":
+        elif arg in ("-M", "--model"):
+            cfg.model = need_value("--model requires a value")
+            cfg.explicit.add("model")
+        elif arg in ("-s", "--scope", "-W", "--window"):  # --window is a deprecated alias for --scope
+            cfg.scope = need_value("--scope requires a value")
+            cfg.explicit.add("scope")
+        elif arg in ("-m", "--min-remaining"):
             cfg.min_remaining = need_value("--min-remaining requires a value")
-        elif arg == "--poll-interval":
+            cfg.explicit.add("min_remaining")
+        elif arg in ("-i", "--poll-interval"):
             cfg.poll_interval = need_value("--poll-interval requires seconds")
-        elif arg == "--max-unavailable-wait":
+            cfg.explicit.add("poll_interval")
+        elif arg in ("-u", "--max-unavailable-wait"):
             cfg.max_unavailable_wait = need_value("--max-unavailable-wait requires seconds")
-        elif arg == "--retry-delays":
+            cfg.explicit.add("max_unavailable_wait")
+        elif arg in ("-r", "--retry-delays"):
             cfg.retry_delays = need_value("--retry-delays requires a list")
-        elif arg == "--no-retry":
+            cfg.explicit.add("retry_delays")
+        elif arg in ("-R", "--no-retry"):
             cfg.retry_delays = ""
+            cfg.explicit.add("retry_delays")
             i += 1
-        elif arg == "--cwd":
+        elif arg in ("-C", "--cwd"):
             cfg.cwd = need_value("--cwd requires a directory")
-        elif arg == "--fresh":
+        elif arg in ("-F", "--fresh"):
             cfg.exec_mode = "fresh"
             cfg.tmux_target = ""
             i += 1
-        elif arg == "--headless":
+        elif arg in ("-H", "--headless"):
             cfg.headless = True
             i += 1
-        elif arg == "--tmux":
+        elif arg in ("-T", "--tmux"):
             cfg.exec_mode = "tmux"
             cfg.tmux_target = need_value("--tmux requires SESSION[:WINDOW]")
-        elif arg == "--command-template":
+        elif arg in ("-e", "--command-template"):
             cfg.command_template = need_value("--command-template requires a template")
-        elif arg == "--auto-confirm":
+        elif arg in ("-y", "--auto-confirm"):
             cfg.auto_confirm = True
             i += 1
-        elif arg == "--no-auto-confirm":
+        elif arg in ("-Y", "--no-auto-confirm"):
             cfg.auto_confirm = False
             i += 1
-        elif arg == "--headless-idle-timeout":
+        elif arg in ("-I", "--headless-idle-timeout"):
             os.environ["LLM_SCHEDULER_IDLE_TIMEOUT"] = need_value("--headless-idle-timeout requires seconds")
-        elif arg == "--headless-question-timeout":
+        elif arg in ("-Q", "--headless-question-timeout"):
             os.environ["LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT"] = need_value("--headless-question-timeout requires seconds")
-        elif arg == "--log-dir":
+        elif arg in ("-L", "--log-dir"):
             cfg.log_dir = Path(need_value("--log-dir requires a directory"))
-        elif arg == "--run-dir":
+        elif arg in ("-O", "--run-dir"):
             cfg.run_dir = Path(need_value("--run-dir requires a directory"))
-        elif arg == "--dry-run":
+        elif arg in ("-d", "--dry-run"):
             cfg.dry_run = True
             i += 1
-        elif arg == "--wake":
+        elif arg in ("-k", "--wake"):
             cfg.wake = True
             i += 1
-        elif arg == "--suspend-until-ready":
+        elif arg in ("-U", "--suspend-until-ready"):
             cfg.suspend_until_ready = True
             cfg.wake = True
             i += 1
-        elif arg == "--wake-test":
+        elif arg in ("-x", "--wake-test"):
             cfg.wake_test = True
             i += 1
         elif arg in ("-h", "--help"):
@@ -230,14 +251,14 @@ def parse_date_d(text: str) -> int | None:
 def validate_args(cfg: SchedulerConfig) -> None:
     if cfg.wake_test:
         return
-    if cfg.tool not in {"codex", "claude", "copilot"}:
-        if not cfg.tool:
-            common.err("--tool is required")
+    if cfg.provider not in {"codex", "claude", "copilot", "kilo", "opencode", "minimax"}:
+        if not cfg.provider:
+            common.err("--provider is required")
         else:
-            common.err(f"invalid --tool: {cfg.tool}")
+            common.err(f"invalid --provider: {cfg.provider}")
         raise SystemExit(2)
     common.validate_prompt_args(cfg.prompt_text, cfg.prompt_file)
-    common.validate_tool_window(cfg.tool, cfg.window)
+    common.validate_provider_scope(cfg.provider, cfg.scope)
     common.validate_gate_args(cfg.cwd, cfg.min_remaining, cfg.poll_interval, cfg.max_unavailable_wait, cfg.retry_delays)
     if not common.is_integer(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600")):
         common.err("LLM_SCHEDULER_IDLE_TIMEOUT must be integer seconds")
@@ -274,8 +295,10 @@ def resolve_attach_mode(cfg: SchedulerConfig) -> None:
 
 def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
     return {
-        "tool": cfg.tool,
-        "window": cfg.window,
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "allow_fallback": cfg.allow_fallback,
+        "scope": cfg.scope,
         "min_remaining": float(cfg.min_remaining),
         "poll_interval": int(cfg.poll_interval),
         "max_unavailable_wait": int(cfg.max_unavailable_wait),
@@ -295,7 +318,7 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "suspend_until_ready": cfg.suspend_until_ready,
         "claude_stream_json": cfg.claude_stream_json,
         "ralph_robin_active": cfg.ralph_robin_active,
-        "ralph_robin_tools": cfg.ralph_robin_tools,
+        "ralph_robin_providers": cfg.ralph_robin_providers,
         "output_prefix_fields": list(cfg.output_prefix_fields),
         "output_prefix_usage_ttl": cfg.output_prefix_usage_ttl,
     }
@@ -306,9 +329,9 @@ def provider_env(cfg: SchedulerConfig) -> dict[str, str] | None:
         return None
     env = os.environ.copy()
     env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] = "1"
-    env["LLM_TOOLS_RALPH_ROBIN_SELECTED_TOOL"] = cfg.tool
-    if cfg.ralph_robin_tools:
-        env["LLM_TOOLS_RALPH_ROBIN_TOOLS"] = cfg.ralph_robin_tools
+    env["LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER"] = cfg.provider
+    if cfg.ralph_robin_providers:
+        env["LLM_TOOLS_RALPH_ROBIN_PROVIDERS"] = cfg.ralph_robin_providers
     env.setdefault("LLM_TOOLS_RALPH_ROBIN_SCHEDULER", "guarded")
     return env
 
@@ -341,7 +364,7 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
             role = "diff_remove"
         elif re.search(r"\b(tool call|function call|exec_command|apply_patch|running command|command:)\b", stripped, re.I):
             role = "tool"
-        elif re.match(r"^(\$|>|python\b|pytest\b|git\b|gh\b|./|llm-|codex\b|claude\b|copilot\b|bash\b|make\b|npm\b|pnpm\b)", stripped):
+        elif re.match(r"^(\$|>|python\b|pytest\b|git\b|gh\b|./|llm-|codex\b|claude\b|copilot\b|kilo\b|opencode\b|minimax\b|mmx\b|bash\b|make\b|npm\b|pnpm\b)", stripped):
             role = "command"
         elif re.search(r"\b(error|failed|failure|rate[- ]limit|autonomous abort|blocked)\b", stripped, re.I):
             role = "error"
@@ -357,36 +380,67 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
     return "".join(out).encode("utf-8", "replace")
 
 
+# Providers whose CLI accepts a `--model NAME` flag we can splice into the
+# default command. Kilo and MiniMax select their model through config/env, not
+# a launch flag, so a pinned model there is ignored (with a warning in main).
+MODEL_FLAG_PROVIDERS = frozenset({"claude", "codex", "copilot", "opencode"})
+
+
+def provider_model_flags(provider: str, model: str) -> list[str]:
+    """The `--model` tokens to inject for ``provider``, or empty when unsupported."""
+    if model and provider in MODEL_FLAG_PROVIDERS:
+        return ["--model", model]
+    return []
+
+
 def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
+    m = provider_model_flags(cfg.provider, cfg.model)
     if cfg.attached:
-        if cfg.tool == "codex":
-            return ["codex", "-C", cfg.cwd, prompt]
-        if cfg.tool == "claude":
-            return ["claude", prompt]
-        return ["copilot", "-C", cfg.cwd, "-i", prompt]
-    if cfg.tool == "codex":
-        return ["codex", "exec", "-C", cfg.cwd, prompt]
-    if cfg.tool == "claude":
+        if cfg.provider == "codex":
+            return ["codex", *m, "-C", cfg.cwd, prompt]
+        if cfg.provider == "claude":
+            return ["claude", *m, prompt]
+        if cfg.provider == "kilo":
+            return ["kilo", "run", prompt]
+        if cfg.provider == "opencode":
+            return ["opencode", *m]
+        if cfg.provider == "minimax":
+            return ["mmx"]
+        return ["copilot", *m, "-C", cfg.cwd, "-i", prompt]
+    if cfg.provider == "codex":
+        return ["codex", "exec", *m, "-C", cfg.cwd, prompt]
+    if cfg.provider == "claude":
         if cfg.claude_stream_json:
-            return ["claude", "--print", "--output-format", "stream-json", "--verbose", prompt]
-        return ["claude", "--print", prompt]
-    return ["copilot", "-C", cfg.cwd, "--prompt", prompt]
+            return ["claude", "--print", "--output-format", "stream-json", "--verbose", *m, prompt]
+        return ["claude", "--print", *m, prompt]
+    if cfg.provider == "kilo":
+        return ["kilo", "run", "--auto", prompt]
+    if cfg.provider == "opencode":
+        return ["opencode", "run", *m, "-C", cfg.cwd, prompt]
+    if cfg.provider == "minimax":
+        return ["mmx", "run", "--auto", "-C", cfg.cwd, prompt]
+    return ["copilot", *m, "-C", cfg.cwd, "--prompt", prompt]
 
 
 def command_argv(cfg: SchedulerConfig, logs: common.RunLogs, prompt: str) -> list[str]:
     if cfg.command_template:
-        return common.template_argv(cfg.command_template, tool=cfg.tool, prompt=prompt, prompt_file=logs.run_dir / "prompt.txt", cwd=cfg.cwd)
+        return common.template_argv(cfg.command_template, provider=cfg.provider, prompt=prompt, prompt_file=logs.run_dir / "prompt.txt", cwd=cfg.cwd)
     return provider_default_argv(cfg, prompt)
 
 
 def scheduler_model_description(cfg: SchedulerConfig) -> str:
     if cfg.command_template:
         return "from command template"
+    if cfg.model:
+        return f"{cfg.provider} model {cfg.model}"
     return {
         "codex": "Codex CLI default/configured model",
         "claude": "Claude Code default/configured model",
         "copilot": "GitHub Copilot CLI default/configured model",
-    }[cfg.tool]
+        "kilo": "Kilo Code CLI default/configured model",
+        "opencode": "OpenCode CLI default/configured model",
+        "minimax": "MiniMax default/configured model",
+    }[cfg.provider]
 
 
 def print_wake_test() -> None:
@@ -419,12 +473,12 @@ def scheduler_resume_argv(cfg: SchedulerConfig, logs: common.RunLogs) -> list[st
     script = str(Path(__file__).resolve().parent.parent / "llm-scheduler")
     args = [
         script,
-        "--tool",
-        cfg.tool,
+        "--provider",
+        cfg.provider,
         "--prompt-file",
         str(logs.run_dir / "prompt.txt"),
-        "--window",
-        cfg.window,
+        "--scope",
+        cfg.scope,
         "--min-remaining",
         cfg.min_remaining,
         "--poll-interval",
@@ -471,7 +525,7 @@ def schedule_resume_and_suspend(cfg: SchedulerConfig, logs: common.RunLogs, targ
         common.log_text(logs, f"suspend-until-ready lead={lead}s < min_lead={min_lead}s; falling back to in-process wait")
         common.log_event(logs, "suspend_schedule_failed", {"reason": "insufficient-lead", "lead": lead, "min_lead": min_lead})
         return False
-    unit = f"llm-scheduler-resume-{cfg.tool}-{int(time.time())}"
+    unit = f"llm-scheduler-resume-{cfg.provider}-{int(time.time())}"
     argv = scheduler_resume_argv(cfg, logs)
     command_line = common.argv_to_command_line(argv)
     common.log_text(logs, f"suspend-until-ready scheduling unit={unit} target={target_epoch} reason={reason}")
@@ -531,7 +585,7 @@ def print_pre_suspend_confirmation(cfg: SchedulerConfig, logs: common.RunLogs, t
     print("suspend-until-ready armed")
     print(f"  wake/run at: {common.format_local_epoch(target_epoch)} (epoch {target_epoch})")
     print(f"  reason: {reason}")
-    print(f"  tool: {cfg.tool}")
+    print(f"  provider: {cfg.provider}")
     print(f"  model: {scheduler_model_description(cfg)}")
     print(f"  prompt: {prompt_display}")
     print(f"  directory: {cfg.cwd}")
@@ -570,9 +624,17 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
             if cfg.dry_run:
                 return
             sleep_until(not_before)
-        snapshot = common.usage_snapshot_for_tool(cfg.tool)
+        snapshot = common.usage_snapshot_for_provider(cfg.provider)
         common.log_event(logs, "usage_snapshot", snapshot)
-        decision = common.usage_decision_for_tool(cfg.tool, cfg.window, cfg.min_remaining, cfg.poll_interval, snapshot)
+        decision = common.usage_decision_for_provider(
+            cfg.provider,
+            cfg.scope,
+            cfg.min_remaining,
+            cfg.poll_interval,
+            snapshot,
+            model=cfg.model or None,
+            allow_fallback=cfg.allow_fallback,
+        )
         common.log_event(logs, "usage_decision", decision)
         reason = str(decision.get("reason"))
         common.log_text(logs, f"usage decision: {reason}")
@@ -783,8 +845,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
-    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
-    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
+    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
+    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
     renderer = ClaudeStreamRenderer()
     stdout_buffer = b""
     combined_parts: list[bytes] = []
@@ -904,8 +966,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
-    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
-    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.tool, usage_ttl=cfg.output_prefix_usage_ttl)
+    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
+    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
     stdout_parts: list[bytes] = []
     combined_parts: list[bytes] = []
     start = time.time()
@@ -1063,18 +1125,60 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     return 1 if common.output_is_retryable(status, output, cfg.attached, trust_clean_exit=cfg.ralph_robin_active) else 0
 
 
+# Config keys (merged defaults + [scheduler]) that map to a string cfg field.
+_SCHEDULER_CONFIG_FIELDS = ("scope", "min_remaining", "poll_interval", "max_unavailable_wait", "retry_delays")
+
+
+def _coerce_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(v) for v in value)
+    return str(value)
+
+
+def apply_config(cfg: SchedulerConfig, env: dict[str, str] | None = None) -> None:
+    """Fill config-file values for any flag the user did not pass explicitly.
+
+    Precedence: built-in defaults < config file < CLI flags. The per-provider
+    routing policy supplies the pinned ``model`` and ``allow_fallback``.
+    """
+    conf = toolconfig.load_config(env)
+    if not conf:
+        return
+    tool = toolconfig.merged_tool_config(conf, "scheduler")
+    if not cfg.provider and tool.get("provider"):
+        cfg.provider = str(tool["provider"])
+    for key in _SCHEDULER_CONFIG_FIELDS:
+        if key not in cfg.explicit and tool.get(key) is not None:
+            setattr(cfg, key, _coerce_scalar(tool[key]))
+    if cfg.provider:
+        policy = toolconfig.provider_policy(conf, cfg.provider)
+        cfg.allow_fallback = policy.allow_fallback
+        if "model" not in cfg.explicit and policy.model:
+            cfg.model = policy.model
+        if "scope" not in cfg.explicit and policy.scope:
+            cfg.scope = policy.scope
+        if "min_remaining" not in cfg.explicit and policy.min_remaining:
+            cfg.min_remaining = policy.min_remaining
+        if cfg.model and cfg.provider not in MODEL_FLAG_PROVIDERS:
+            common.err(f"warning: model pinning is not supported for provider '{cfg.provider}'; ignoring model={cfg.model}")
+            cfg.model = ""
+
+
 def main(argv: list[str] | None = None) -> int:
     common.migrate_legacy_cache_dirs()
     cfg = parse_args(list(sys.argv[1:] if argv is None else argv))
+    apply_config(cfg)
     validate_args(cfg)
     if cfg.wake_test:
         print_wake_test()
         return 0
     resolve_attach_mode(cfg)
-    logs = common.setup_run_logs(cfg.log_dir, cfg.tool or "wake", cfg.tool or "", cfg.run_dir)
+    logs = common.setup_run_logs(cfg.log_dir, cfg.provider or "wake", cfg.provider or "", cfg.run_dir)
     prompt, prompt_sha = common.load_prompt(cfg.prompt_text, cfg.prompt_file, logs)
     cfg.prompt_text = prompt
-    common.log_text(logs, f"start provider={cfg.tool} cwd={cfg.cwd} attached={1 if cfg.attached else 0}")
+    common.log_text(logs, f"start provider={cfg.provider} cwd={cfg.cwd} attached={1 if cfg.attached else 0}")
     common.log_event(logs, "start", safe_args_json(cfg))
     common.log_event(logs, "prompt", {"source": cfg.prompt_source, "sha256": prompt_sha, "prompt": prompt})
     wait_until_usable(cfg, logs)

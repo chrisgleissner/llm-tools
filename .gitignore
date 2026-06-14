@@ -5,6 +5,7 @@ __pycache__/
 .coverage
 .coverage.*
 coverage.xml
+.venv-coverage/
 htmlcov/
 .pytest_cache/
 .mypy_cache/
