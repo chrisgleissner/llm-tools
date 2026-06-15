@@ -410,10 +410,16 @@ llm-scheduler --provider codex --prompt-file task.md --dry-run
 
 ### Default Provider Commands
 
-| Mode        | Codex                          | Claude Code               | GitHub Copilot                       | Kilo Code                                |
-| ----------- | ------------------------------ | ------------------------- | ------------------------------------ | ---------------------------------------- |
-| Interactive | `codex -C <cwd> <prompt>`      | `claude <prompt>`         | `copilot -C <cwd> -i <prompt>`       | `kilo run <prompt>` using `--cwd`        |
-| Headless    | `codex exec -C <cwd> <prompt>` | `claude --print <prompt>` | `copilot -C <cwd> --prompt <prompt>` | `kilo run --dir <cwd> <prompt>`          |
+| Provider       | Interactive                    | Headless                             |
+| -------------- | ------------------------------ | ------------------------------------ |
+| Codex          | `codex -C <cwd> <prompt>`      | `codex exec -C <cwd> <prompt>`       |
+| Claude Code    | `claude <prompt>`              | `claude --print <prompt>`            |
+| GitHub Copilot | `copilot -C <cwd> -i <prompt>` | `copilot -C <cwd> --prompt <prompt>` |
+| Kilo Code      | `kilo run <prompt>`            | `kilo run --dir <cwd> <prompt>`      |
+| OpenCode       | `opencode`                     | `opencode run --dir <cwd> <prompt>`  |
+| MiniMax        | `mmx`                          | `mmx run --auto -C <cwd> <prompt>`   |
+
+Interactive Kilo Code, OpenCode, and MiniMax take no working-directory flag — they inherit it from the launching process (the scheduler sets the subprocess `cwd`). Headless Kilo Code and OpenCode inject no permission-bypassing flag; whether an autonomous run may act without prompting is governed by each tool's own permission config.
 
 The default Claude adapter uses your local Claude Code permission settings. To override Claude Code settings for one scheduler run:
 
