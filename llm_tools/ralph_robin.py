@@ -680,7 +680,8 @@ def current_index_from_state(cfg: RalphConfig) -> int:
             index = 0
     else:
         index = 0
-    return index if 0 <= index < len(cfg.providers) else 0
+    rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
+    return index if 0 <= index < rotation_size else 0
 
 
 def save_state(cfg: RalphConfig, selected_index: int, selected_provider: str) -> None:
@@ -1561,14 +1562,16 @@ def main(argv: list[str] | None = None) -> int:
             common.log_text(logs, f"scheduler autonomy-abort for provider={selected_provider}; re-evaluating rotation")
             common.log_event(logs, "provider_autonomy_abort", {"provider": selected_provider, "index": selected_index})
             status_line(f"{selected_provider} blocked autonomously; re-evaluating rotation", level="warn")
-            skipped.add(selected_provider)
-            if len(skipped) >= len(cfg.providers):
+            # In route mode skipped tracks route ids; in provider mode, provider names.
+            skipped.add(selected_route_id if selected_route_id else selected_provider)
+            rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
+            if len(skipped) >= rotation_size:
                 # All providers aborted this pass. Do not stop: wait and retry.
                 if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-autonomy-abort"):
                     return stop_timed_out()
                 skipped = set()
                 continue
-            current_index = (selected_index + 1) % len(cfg.providers)
+            current_index = (selected_index + 1) % max(rotation_size, 1)
             continue
         # A non-zero, non-abort exit is a hard provider failure (crash, broken
         # CLI, exhausted submission retries). For a persistent loop this must not
@@ -1583,14 +1586,15 @@ def main(argv: list[str] | None = None) -> int:
             common.log_event(logs, "final", {"status": "failed", "exit_code": status, "reason": "hard-fail-streak", "streak": hard_fail_streak})
             status_line(f"{hard_fail_streak} provider failures in a row with no progress; stopping", level="error")
             return status
-        skipped.add(selected_provider)
-        if len(skipped) >= len(cfg.providers):
+        skipped.add(selected_route_id if selected_route_id else selected_provider)
+        rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
+        if len(skipped) >= rotation_size:
             # Every provider hard-failed this pass. Do not stop: wait and retry.
             if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-failed"):
                 return stop_timed_out()
             skipped = set()
             continue
-        current_index = (selected_index + 1) % len(cfg.providers)
+        current_index = (selected_index + 1) % max(rotation_size, 1)
         continue
 
 

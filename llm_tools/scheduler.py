@@ -1198,8 +1198,10 @@ def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, outp
     hint in the output (``retry-after``, ``retry in Xm``, ``reset in
     Xh``); when no hint is present we use the route's
     :func:`routes.default_backoff_seconds`. A successful run clears
-    the block via :func:`clear_route_runtime_block`; both helpers are
-    no-ops when the route is not an opaque route.
+    the block via :func:`clear_route_runtime_block`. Blocks are
+    recorded for any route id, but only opaque routes consult the
+    block ledger in their decision path — for non-opaque routes the
+    block file exists but has no effect on scheduling.
     """
     from . import routes
 

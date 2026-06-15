@@ -650,7 +650,9 @@ def fit_columns(
     labels = {label: label for label, _ in base_cols}
     widths = {label: max(width, visible_len(label)) for label, width in base_cols}
     # Track the natural cell width so trim floors never drop below it.
-    cell_widths: dict[str, int] = {label: widths[label] for label in widths}
+    # Start at 0 so the floor reflects actual cell content, not the initial
+    # column width, allowing trimming when the base width exceeds cell content.
+    cell_widths: dict[str, int] = {label: 0 for label in widths}
     for row in rows_text:
         for label, current in cell_widths.items():
             value = row.get(label, "")
@@ -660,7 +662,7 @@ def fit_columns(
                 widths[label] = natural
     if terminal_width > 0:
         n = len(base_cols) + (1 if has_source else 0)
-        reserved = n * TABLE_GAP_WIDTH
+        reserved = (n - 1) * TABLE_GAP_WIDTH
         total = sum(widths.values()) + reserved
         if total > terminal_width:
             overflow = total - terminal_width

@@ -171,6 +171,9 @@ def read_local_block(route_id: str, env: dict[str, str] | None = None) -> dict[s
         return None
     if not isinstance(raw, dict):
         return None
+    blocked_until = raw.get("blocked_until")
+    if isinstance(blocked_until, (int, float)) and int(blocked_until) <= common.now_epoch():
+        return None
     return raw
 
 
