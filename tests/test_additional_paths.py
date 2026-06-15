@@ -175,6 +175,9 @@ def test_usage_session_guidance_forecasts_runout(env: dict[str, str]) -> None:
 
     assert usage.classify_session_guidance("Codex", "5h", 0, 3600, env).text == "× empty"
     assert usage.classify_session_guidance("Codex", "5h", 20, 3600, env).text == "· no rate data"
+    # A missing measurement (unavailable provider) is "no rate data", not an
+    # exhausted window. "× empty" must stay reserved for a genuinely spent quota.
+    assert usage.classify_session_guidance("MiniMax", "5h", None, None, env).text == "· no rate data"
 
     log.write_text(
         '{"ts":1000,"provider":"Codex","window":"5h","remaining":20}\n'
@@ -1327,15 +1330,17 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     fresh_env = env | {"XDG_CACHE_HOME": str(tmp_path / "fresh-xdg"), "LLM_USAGE_COPILOT_CACHE_TTL": "999", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}
     assert common.read_copilot(fresh_env)["reason"] == "refresh-pending"
     assert fake_proc
-    monkeypatch.setattr(common.subprocess, "Popen", original_popen)
     (cache_dir / "copilot-refresh.lock").mkdir(exist_ok=True)
     os.utime(cache_dir / "copilot-refresh.lock", (1, 1))
     (cache_dir / "copilot-usage.json").write_text('{"provider":"copilot","monthly":{"remaining":2}}', encoding="utf-8")
     os.utime(cache_dir / "copilot-usage.json", (1, 1))
-    # The on-disk snapshot is far past its TTL: it must NOT be served as current.
-    # With no wait budget the refresh cannot land in time, so we report that a
-    # refresh is in flight rather than display stale numbers.
-    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "1", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["reason"] == "refresh-pending"
+    # An ancient lock (dead refresh) plus a stale-but-real snapshot: the refresh
+    # cannot land within a zero wait budget, so we serve the most recent monthly
+    # figure ("usage on start") instead of dropping to unavailable. The
+    # background refresh (stubbed here) keeps it current for the next run.
+    served = common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "1", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})
+    assert served["monthly"]["remaining"] == 2
+    monkeypatch.setattr(common.subprocess, "Popen", original_popen)
 
     log = cache_dir / "llm-usage.log"
     log.write_text(

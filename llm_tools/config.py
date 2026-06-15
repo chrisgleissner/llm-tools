@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,7 @@ from .capacity import ALL_PROVIDERS
 
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
-_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler"})
+_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes"})
 _DEFAULTS_KEYS = frozenset({"providers", "scope", "min_remaining"})
 _PROVIDER_KEYS = frozenset({"model", "allow_fallback", "scope", "min_remaining", "capacity_provider"})
 # Tool sections accept any key a CLI flag maps to; validation of individual
@@ -64,6 +64,7 @@ _PROVIDER_KEYS = frozenset({"model", "allow_fallback", "scope", "min_remaining",
 _RALPH_KEYS = frozenset(
     {
         "providers",
+        "routes",
         "scope",
         "min_remaining",
         "poll_interval",
@@ -87,6 +88,39 @@ _SCHEDULER_KEYS = frozenset(
         "retry_delays",
     }
 )
+
+# Route table. Each ``[routes.<id>]`` block has at most these top-level
+# keys. ``capacity`` and ``cost`` are themselves tables with their own
+# allow-lists below.
+_ROUTE_KEYS = frozenset({"provider", "model", "allow_fallback", "capacity", "cost"})
+_CAPACITY_POLICY_KEYS = frozenset({"policy", "scope", "label", "provider"})
+_COST_POLICY_KEYS = frozenset({"policy", "amount", "currency", "period"})
+
+# Recognised capacity / cost policy values. The actual canonical lists
+# live in ``llm_tools.routes`` to keep the policy vocabulary in one
+# place; ``config`` imports them for validation so a typo is caught
+# at load time, not at first launch.
+_CAPACITY_POLICIES: tuple[str, ...] = (
+    "provider",
+    "provider_model",
+    "delegate",
+    "opaque",
+    "ungated",
+    "balance",
+    "budget",
+)
+_COST_POLICIES: tuple[str, ...] = (
+    "included",
+    "fixed_subscription",
+    "metered_balance",
+    "metered_budget",
+    "free",
+    "external",
+    "unknown",
+)
+
+
+# --- Dataclasses -------------------------------------------------------------
 
 
 @dataclass
@@ -113,6 +147,61 @@ class ProviderPolicy:
     scope: str | None = None
     min_remaining: str | None = None
     capacity_provider: str | None = None
+
+
+@dataclass
+class CapacityPolicyConfig:
+    """Route-level capacity policy.
+
+    ``policy`` is one of the strings in
+    :data:`llm_tools.routes.CAPACITY_POLICIES`. ``scope``, ``label``,
+    and ``provider`` are policy-specific metadata:
+    ``delegate`` requires ``provider``; ``opaque`` optionally
+    overrides ``scope`` (default ``subscription``) and ``label``.
+    """
+
+    policy: str = "provider"
+    scope: str | None = None
+    label: str | None = None
+    provider: str | None = None
+
+
+@dataclass
+class CostPolicyConfig:
+    """Route-level cost policy.
+
+    ``policy`` is one of the strings in
+    :data:`llm_tools.routes.COST_POLICIES`. ``amount``, ``currency``,
+    and ``period`` are display-only metadata: they NEVER influence
+    readiness.
+    """
+
+    policy: str = "unknown"
+    amount: float | None = None
+    currency: str | None = None
+    period: str | None = None
+
+
+@dataclass
+class RoutePolicy:
+    """Resolved routing policy for a single schedulable route.
+
+    A route is the unit Ralph Robin rotates over when one provider
+    can serve several underlying models with different capacity and
+    cost semantics. ``route_id`` is the stable user-facing identifier
+    (the table key in ``[routes.<id>]``). ``provider`` is the launch
+    CLI; ``model`` is the model pin (None means "let the provider
+    pick"). ``allow_fallback`` mirrors the legacy
+    :class:`ProviderPolicy` semantics. ``capacity`` and ``cost`` are
+    the route-level policy objects.
+    """
+
+    route_id: str
+    provider: str
+    model: str | None = None
+    allow_fallback: bool = False
+    capacity: CapacityPolicyConfig = field(default_factory=CapacityPolicyConfig)  # type: ignore[assignment]
+    cost: CostPolicyConfig = field(default_factory=CostPolicyConfig)  # type: ignore[assignment]
 
 
 def config_path(env: dict[str, str] | None = None) -> Path:
@@ -179,6 +268,7 @@ def _validate(raw: Any) -> dict[str, Any]:
             if "allow_fallback" in policy and not isinstance(policy["allow_fallback"], bool):
                 _fail(f"providers.{name}.allow_fallback must be true or false")
         _validate_capacity_providers(providers)
+    _validate_routes(raw.get("routes"), providers or {})
     return raw
 
 
@@ -215,6 +305,103 @@ def _validate_section(section: Any, name: str, allowed: frozenset[str]) -> None:
         _fail(f"{name}: unknown key(s): {', '.join(sorted(unknown))} (allowed: {', '.join(sorted(allowed))})")
 
 
+def _validate_routes(routes: Any, providers: dict[str, Any]) -> None:
+    """Validate the ``[routes.<id>]`` table.
+
+    Each route must declare a known provider. The ``capacity`` /
+    ``cost`` sub-tables are validated against the canonical policy
+    vocabularies in :mod:`llm_tools.routes`. A ``delegate`` capacity
+    policy must name a target; self-delegation and chains are
+    rejected. A conflicting legacy ``capacity_provider`` plus a route's
+    ``capacity.policy = "opaque"`` (which would mean "we have truth
+    AND we have no truth") is rejected.
+    """
+    if routes is None:
+        return
+    if not isinstance(routes, dict):
+        _fail("'routes' must be a table of route id to policy")
+    for route_id, route_block in routes.items():
+        if not isinstance(route_block, dict):
+            _fail(f"routes.{route_id} must be a table")
+        unknown_keys = set(route_block) - _ROUTE_KEYS
+        if unknown_keys:
+            _fail(f"routes.{route_id}: unknown key(s): {', '.join(sorted(unknown_keys))}")
+        provider = route_block.get("provider")
+        if not provider:
+            _fail(f"routes.{route_id}: 'provider' is required")
+        if not isinstance(provider, str) or provider not in ALL_PROVIDERS:
+            _fail(
+                f"routes.{route_id}: unknown provider {provider!r} "
+                f"(known: {', '.join(ALL_PROVIDERS)})"
+            )
+        model = route_block.get("model")
+        if model is not None and not isinstance(model, str):
+            _fail(f"routes.{route_id}.model must be a string when set")
+        if "allow_fallback" in route_block and not isinstance(route_block["allow_fallback"], bool):
+            _fail(f"routes.{route_id}.allow_fallback must be true or false")
+
+        capacity_block = route_block.get("capacity") or {}
+        if not isinstance(capacity_block, dict):
+            _fail(f"routes.{route_id}.capacity must be a table")
+        capacity_unknown = set(capacity_block) - _CAPACITY_POLICY_KEYS
+        if capacity_unknown:
+            _fail(
+                f"routes.{route_id}.capacity: unknown key(s): {', '.join(sorted(capacity_unknown))}"
+            )
+        cap_policy = capacity_block.get("policy", "provider")
+        if cap_policy not in _CAPACITY_POLICIES:
+            _fail(
+                f"routes.{route_id}.capacity.policy {cap_policy!r} is not a known "
+                f"capacity policy (known: {', '.join(_CAPACITY_POLICIES)})"
+            )
+        if cap_policy == "delegate":
+            target = capacity_block.get("provider")
+            if not target:
+                _fail(
+                    f"routes.{route_id}.capacity.policy = 'delegate' requires "
+                    f"'capacity.provider' to name a known provider"
+                )
+            if target not in ALL_PROVIDERS:
+                _fail(
+                    f"routes.{route_id}.capacity.provider {target!r} must be a known provider"
+                )
+            if target == provider:
+                _fail(
+                    f"routes.{route_id}.capacity.provider cannot reference its own provider"
+                )
+            target_route = routes.get(target) if isinstance(routes.get(target), dict) else None
+            if target_route and isinstance(target_route.get("capacity"), dict):
+                if target_route["capacity"].get("policy") == "delegate":
+                    _fail(
+                        f"routes.{route_id}.capacity.provider points at '{target}', "
+                        f"which itself delegates; capacity links must be a single hop"
+                    )
+
+        cost_block = route_block.get("cost") or {}
+        if not isinstance(cost_block, dict):
+            _fail(f"routes.{route_id}.cost must be a table")
+        cost_unknown = set(cost_block) - _COST_POLICY_KEYS
+        if cost_unknown:
+            _fail(
+                f"routes.{route_id}.cost: unknown key(s): {', '.join(sorted(cost_unknown))}"
+            )
+        cost_policy = cost_block.get("policy", "unknown")
+        if cost_policy not in _COST_POLICIES:
+            _fail(
+                f"routes.{route_id}.cost.policy {cost_policy!r} is not a known "
+                f"cost policy (known: {', '.join(_COST_POLICIES)})"
+            )
+
+        if cap_policy == "opaque":
+            legacy = providers.get(provider) or {}
+            if legacy.get("capacity_provider"):
+                _fail(
+                    f"routes.{route_id} sets capacity.policy = 'opaque' but "
+                    f"providers.{provider}.capacity_provider is also set; "
+                    f"choose one source of truth"
+                )
+
+
 def provider_policy(cfg: dict[str, Any], provider: str) -> ProviderPolicy:
     """Resolve the routing policy for ``provider`` from a loaded config dict."""
     block = (cfg.get("providers") or {}).get(provider) or {}
@@ -227,6 +414,84 @@ def provider_policy(cfg: dict[str, Any], provider: str) -> ProviderPolicy:
         scope=str(scope) if scope is not None else None,
         min_remaining=_as_str(block.get("min_remaining")),
         capacity_provider=str(capacity_provider) if capacity_provider is not None else None,
+    )
+
+
+def route_policy(cfg: dict[str, Any], route_id: str) -> RoutePolicy | None:
+    """Resolve a single :class:`RoutePolicy` from a loaded config dict.
+
+    Returns ``None`` when ``route_id`` is not declared under
+    ``[routes.<id>]``. Callers that require a route should treat
+    ``None`` as a configuration error and exit.
+    """
+    if not cfg:
+        return None
+    routes = cfg.get("routes") or {}
+    block = routes.get(route_id) if isinstance(routes, dict) else None
+    if not isinstance(block, dict):
+        return None
+    return _route_from_block(str(route_id), block)
+
+
+def parse_routes(cfg: dict[str, Any]) -> dict[str, RoutePolicy]:
+    """Parse every ``[routes.<id>]`` entry into :class:`RoutePolicy`.
+
+    The result is keyed by ``route_id`` and preserves declaration order
+    when iterated (Python 3.7+). The parser is silent about order: it
+    validates every entry, then returns. Unknown / invalid routes are
+    rejected at :func:`load_config` time.
+    """
+    if not cfg:
+        return {}
+    raw = cfg.get("routes") or {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, RoutePolicy] = {}
+    for route_id, block in raw.items():
+        if not isinstance(block, dict):
+            continue
+        out[str(route_id)] = _route_from_block(str(route_id), block)
+    return out
+
+
+def _route_from_block(route_id: str, block: dict[str, Any]) -> RoutePolicy:
+    provider = str(block.get("provider") or "")
+    model = block.get("model")
+    capacity_block = block.get("capacity") or {}
+    cost_block = block.get("cost") or {}
+    capacity = CapacityPolicyConfig(
+        policy=str(capacity_block.get("policy", "provider")),
+        scope=_as_str(capacity_block.get("scope")),
+        label=_as_str(capacity_block.get("label")),
+        provider=_as_str(capacity_block.get("provider")),
+    )
+    cost_policy = str(cost_block.get("policy", "unknown"))
+    amount_raw = cost_block.get("amount")
+    amount: float | None
+    if amount_raw is None or amount_raw == "":
+        amount = None
+    elif isinstance(amount_raw, bool):
+        amount = None
+    elif isinstance(amount_raw, (int, float)):
+        amount = float(amount_raw)
+    else:
+        try:
+            amount = float(str(amount_raw))
+        except ValueError:
+            amount = None
+    cost = CostPolicyConfig(
+        policy=cost_policy,
+        amount=amount,
+        currency=_as_str(cost_block.get("currency")),
+        period=_as_str(cost_block.get("period")),
+    )
+    return RoutePolicy(
+        route_id=route_id,
+        provider=provider,
+        model=str(model) if model is not None else None,
+        allow_fallback=bool(block.get("allow_fallback", False)),
+        capacity=capacity,
+        cost=cost,
     )
 
 
@@ -252,9 +517,14 @@ def _as_str(value: Any) -> str | None:
 
 
 __all__ = [
+    "CapacityPolicyConfig",
+    "CostPolicyConfig",
     "ProviderPolicy",
+    "RoutePolicy",
     "config_path",
     "load_config",
     "merged_tool_config",
+    "parse_routes",
     "provider_policy",
+    "route_policy",
 ]

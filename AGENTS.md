@@ -82,12 +82,14 @@ Prefer changing the smallest relevant function surface. Preserve existing functi
 * Keep color disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 * Ralph/scheduler highlighting should default to a readable green/blue/teal palette that works on typical dark and light terminals. Keep colors centralized in `common.ANSI_COLOR_ROLES` and configurable through `LLM_TOOLS_COLOR_<ROLE>` rather than hard-coding ANSI codes at call sites.
 * Ralph/scheduler live output may use compact UTF-8 symbols to distinguish status, command, tool-call, stderr, diff hunk, and error blocks. Keep symbols centralized in `common.UTF_SYMBOL_ROLES`, configurable through `LLM_TOOLS_SYMBOL_<ROLE>`, and suppressible with `LLM_TOOLS_NO_SYMBOLS=1`.
-* Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `minimax`.
+* Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `minimax`. A top-level `routes` key is added when at least one `[routes.<id>]` is configured; the existing provider keys remain unchanged.
 * Keep Copilot unavailable shape explicit: `available:false`, with `reason` when known.
 * Keep option semantics stable: `--show-source`, `--hide-source`, `--show-remaining-time`, `--hide-remaining-time`, `--show-codex-spark`, `--hide-codex-spark`, `--show-copilot-credits`.
 * The `--scope` flag replaces the legacy `--window` flag. `--window` is accepted as a deprecated alias and should not appear as the primary documented interface.
-* Scope names (current): `auto`, `5h`, `weekly`, `monthly`, `balance`, `budget`, `byok`, `ungated`. Provider-specific allow-lists live in `capacity.PROVIDER_SCOPES`.
-* Capacity kinds (generic, in `llm_tools/capacity.py`): `reset_window`, `balance`, `budget`, `ungated`, `unknown`. Generic scheduler/rotation code must reason about kinds, not provider-specific window names.
+* Scope names (current): `auto`, `5h`, `weekly`, `monthly`, `balance`, `budget`, `byok`, `ungated`, `subscription`. Provider-specific allow-lists live in `capacity.PROVIDER_SCOPES`. The `subscription` scope is a route-only display name; it does not appear in the per-provider allow-lists.
+* Capacity kinds (generic, in `llm_tools/capacity.py`): `reset_window`, `balance`, `budget`, `ungated`, `unknown`, `opaque`. Generic scheduler/rotation code must reason about kinds, not provider-specific window names. The `opaque` kind describes capacity that exists but cannot be measured before launch; the readiness gate is "CLI present + no local runtime block", never a percent threshold.
+* Do not model Kilo as opaque globally. Only specific Kilo routes may be opaque.
+* Route-level capacity policies (`llm_tools/routes.py`): `provider`, `provider_model`, `delegate`, `opaque`, `ungated`, `balance`, `budget`. Cost policy never affects readiness.
 * Keep Codex Spark matching by key `codex-spark` or name containing `spark`.
 * Remaining-time estimation must return `-` when confidence is insufficient.
 * Do not log secrets, tokens, credential files, or raw sensitive provider payloads.
@@ -120,6 +122,16 @@ Tests should use the env-var fallback path (`LLM_USAGE_KILO_*`) and `LLM_USAGE_C
 * `LLM_USAGE_KILO_MONTHLY_RESET_DAY` — day of month the budget resets (default 1).
 
 Missing CLI in BYOK/local/ungated mode is `reason="missing-cli"`. Missing data in gateway mode is `reason="inconclusive-usage"`. Kilo is not forced into a fake session window; its only scope is `balance`, `budget`, or `ungated`.
+
+### Route model
+
+When the same provider can serve several underlying models with different capacity and cost semantics (e.g. Kilo selling `minimax-m3` as a prepaid gateway subscription), use a route (`[routes.<id>]` in the config) instead of a plain provider. Routes are resolved by `llm_tools/routes.resolve_routes`. An explicit `[ralph].routes` list puts `ralph-robin` into route mode; in its absence the legacy provider rotation is used.
+
+* `capacity.policy = "opaque"` → `name="subscription"`, `kind="opaque"`, no percent / reset. The route is ready when the launch CLI is on `PATH` and there is no local block; the table reads `Remaining = prepaid $20/mo`, `Guidance = ✓ usable`, `Resets in = -`.
+* `capacity.policy = "delegate"` is the route-level successor to the legacy `providers.<x>.capacity_provider` setting. The provider-level setting still works (it is mapped to an implicit route with `capacity.policy = "delegate"`).
+* Cost policy is display metadata only: `included`, `fixed_subscription`, `metered_balance`, `metered_budget`, `free`, `external`, `unknown`. It never affects readiness.
+* Local blocks for opaque routes live under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks/<route_id>.json` (override with `LLM_TOOLS_LOCAL_BLOCK_DIR`). One corrupt or missing file is treated as "no block" so a one-off bad write cannot break the orchestrator.
+* `llm-usage` renders a route row prefixed with `route:<route_id>` in the Provider column and the model name in the Model column when the Model column is enabled. No progress bar is rendered for opaque / fixed-subscription rows.
 
 ### MiniMax
 
@@ -177,6 +189,8 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_LIVE_FETCH_RETRIES` (extra attempts for active-refresh network reads before falling back; default 2; tests pin 0)
 * `LLM_USAGE_LIVE_FETCH_RETRY_DELAY` (seconds between live-fetch retries; default 0.5)
 * `LLM_TOOLS_NO_INHIBIT` (set to `1` to skip the logind idle inhibitor `ralph-robin`/soak hold during a run; tests set this)
+* `LLM_TOOLS_LOCAL_BLOCK_DIR` (override the per-route local block directory; default `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks`)
+* `LLM_TOOLS_LOCAL_BLOCK_BACKOFF` (default backoff in seconds for an opaque route runtime block when no `retry-after` hint is present; default 300)
 * `LLM_TOOLS_RTC_WAKEALARM` (override the RTC wakealarm sysfs path; default `/sys/class/rtc/rtc0/wakealarm`; mainly tests)
 * `LLM_TOOLS_WATCHDOG_DEVICE` (watchdog device path for `--watchdog`; default `/dev/watchdog`)
 * `LLM_TOOLS_NO_WATCHDOG` (set to `1` to make `--watchdog` a no-op even when a device exists)

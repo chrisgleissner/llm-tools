@@ -65,6 +65,7 @@ SCOPE_BALANCE = "balance"
 SCOPE_BUDGET = "budget"
 SCOPE_BYOK = "byok"
 SCOPE_UNGATED = "ungated"
+SCOPE_SUBSCRIPTION = "subscription"
 
 ALL_SCOPES: tuple[str, ...] = (
     SCOPE_AUTO,
@@ -75,6 +76,7 @@ ALL_SCOPES: tuple[str, ...] = (
     SCOPE_BUDGET,
     SCOPE_BYOK,
     SCOPE_UNGATED,
+    SCOPE_SUBSCRIPTION,
 )
 
 # Scopes each provider natively supports (plus `auto`).
@@ -97,6 +99,7 @@ class CapacityKind:
     BUDGET = "budget"
     UNGATED = "ungated"
     UNKNOWN = "unknown"
+    OPAQUE = "opaque"
 
 
 ALL_KINDS: tuple[str, ...] = (
@@ -105,6 +108,7 @@ ALL_KINDS: tuple[str, ...] = (
     CapacityKind.BUDGET,
     CapacityKind.UNGATED,
     CapacityKind.UNKNOWN,
+    CapacityKind.OPAQUE,
 )
 
 
@@ -344,6 +348,13 @@ def _scope_blocked(
         return False, "", None
     if scope.kind == CapacityKind.UNKNOWN:
         return True, "inconclusive-usage", None
+    if scope.kind == CapacityKind.OPAQUE:
+        # Opaque capacity is never percent-gated. It is either ready (CLI
+        # present, no local block) or the caller is expected to consult an
+        # external block ledger; this function only returns the local
+        # snapshot view, so it never marks an opaque scope blocked on its
+        # own. The route layer records / clears blocks separately.
+        return False, "", None
     if scope.kind == CapacityKind.RESET_WINDOW:
         rem = scope.remaining_percent
         if rem is None:
@@ -391,6 +402,11 @@ def _combined_block_reason(blocked: Iterable[CapacityScope]) -> str:
         return "budget-exhausted"
     if kinds == {CapacityKind.BALANCE}:
         return "insufficient-balance"
+    if kinds == {CapacityKind.OPAQUE}:
+        # Opaque-only blocking is always a local runtime block; the caller is
+        # expected to have already recorded it. Fall through to the generic
+        # "blocked" word rather than inventing a quota-specific reason.
+        return "blocked"
     # Mixed blocking kinds: report the most specific one first.
     order = [
         CapacityKind.BALANCE,
@@ -418,7 +434,7 @@ def scope_pace(scope: CapacityScope, now: int) -> float | None:
     remaining percent by the days until reset. A scope whose reset is
     already past is treated as a full window.
     """
-    if scope.kind in (CapacityKind.BALANCE, CapacityKind.UNGATED, CapacityKind.UNKNOWN):
+    if scope.kind in (CapacityKind.BALANCE, CapacityKind.UNGATED, CapacityKind.UNKNOWN, CapacityKind.OPAQUE):
         return None
     rem = scope.remaining_percent
     if rem is None:
