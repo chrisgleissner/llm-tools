@@ -19,9 +19,10 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 
 | Command         | Use it when you want to...                                                                       |
 | --------------- | ------------------------------------------------------------------------------------------------ |
-| `llm-usage`     | Check remaining LLM capacity before starting work.                                               |
-| `llm-scheduler` | Run one prompt through one selected provider once that provider has usable capacity.             |
-| `ralph-robin`   | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
+| `llm-usage`      | Check remaining LLM capacity before starting work.                                               |
+| `llm-scheduler`  | Run one prompt through one selected provider once that provider has usable capacity.             |
+| `ralph-robin`    | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
+| `llm-sleep-soak` | Prove suspend/resume is reliable on this machine before trusting unattended overnight runs.      |
 
 <img src="./docs/img/llm-usage4.png" alt="LLM Usage"/>
 
@@ -135,7 +136,7 @@ You do not need every provider CLI installed.
 
 * `llm-usage` reports unavailable providers as `unavailable` and still shows the rest.
 * `llm-scheduler` only needs the provider selected with `--provider`.
-* `ralph-robin` skips unavailable providers and rotates across the usable ones. Its default rotation is `claude,codex`; use `--providers` to change it.
+* `ralph-robin` skips unavailable providers and rotates across the usable ones. Its default rotation is `claude,codex,opencode`; use `--providers` to change it.
 
 ## Capacity Scopes
 
@@ -182,7 +183,7 @@ The main thing the file lets you set is which model each provider should run, an
 
 [defaults]
 # Order ralph-robin tries providers when --providers isn't given.
-providers     = ["claude", "codex"]
+providers     = ["claude", "codex", "opencode"]
 # Which capacity check to use. One of:
 # auto | 5h | weekly | monthly | balance | budget | byok | ungated
 scope         = "auto"
@@ -204,6 +205,15 @@ allow_fallback = false
 model          = "spark"
 allow_fallback = false
 
+[providers.opencode]
+# Tie opencode's availability/capacity to another provider's usage windows
+# instead of its own. Use it when the opencode CLI is configured to run another
+# provider's model (e.g. the MiniMax API), so opencode's own balance is
+# irrelevant. ralph-robin then only routes to opencode while minimax has
+# capacity, ranks even-burn on minimax's remaining, and suspends on minimax's
+# reset — while still launching the opencode CLI.
+capacity_provider = "minimax"
+
 [ralph]                                # ralph-robin-only settings (override [defaults] above)
 # One example key — see config.example.toml for the full list:
 providers      = ["claude", "codex", "kilo"]
@@ -216,6 +226,8 @@ provider       = "claude"
 A complete template with every supported key (all commented out) is shipped at [config.example.toml](./config.example.toml) in this repository. Copy it to one of the locations above and uncomment the lines you want to set.
 
 When `model` is set, `llm-scheduler` and `ralph-robin` call the provider with `--model NAME` and only run while that model still has capacity. With `allow_fallback = false` (the default), the tool treats the provider as unavailable once that model's limit is used up and switches to the next provider. With `allow_fallback = true`, the tool keeps trying the provider but drops the model setting and lets the provider's CLI pick a different model. Pass `--model NAME` on the command line to override the file for a single run.
+
+`capacity_provider` ties one provider's gating to another provider's usage windows. It is generic: any provider may borrow any other provider's windows (a single hop — a provider cannot reference itself or a provider that itself delegates). The borrowing provider's own CLI is still the one launched; only the availability/capacity reading is delegated. The motivating case is a CLI configured to run a different provider's model — for example OpenCode pointed at the MiniMax API, where OpenCode's own balance says nothing about whether a run will succeed. With `capacity_provider = "minimax"`, `ralph-robin` only routes to OpenCode while MiniMax has capacity, ranks even-burn on MiniMax's remaining-per-day, and suspends until MiniMax's reset; the scope you gate on (e.g. `5h`, `weekly`) is then validated against MiniMax's windows rather than OpenCode's.
 
 Unknown sections or keys are rejected at load time so typos surface immediately.
 
@@ -399,10 +411,16 @@ llm-scheduler --provider codex --prompt-file task.md --dry-run
 
 ### Default Provider Commands
 
-| Mode        | Codex                          | Claude Code               | GitHub Copilot                       | Kilo Code                                |
-| ----------- | ------------------------------ | ------------------------- | ------------------------------------ | ---------------------------------------- |
-| Interactive | `codex -C <cwd> <prompt>`      | `claude <prompt>`         | `copilot -C <cwd> -i <prompt>`       | `kilo run <prompt>` using `--cwd`        |
-| Headless    | `codex exec -C <cwd> <prompt>` | `claude --print <prompt>` | `copilot -C <cwd> --prompt <prompt>` | `kilo run --auto <prompt>` using `--cwd` |
+| Provider       | Interactive                    | Headless                             |
+| -------------- | ------------------------------ | ------------------------------------ |
+| Codex          | `codex -C <cwd> <prompt>`      | `codex exec -C <cwd> <prompt>`       |
+| Claude Code    | `claude <prompt>`              | `claude --print <prompt>`            |
+| GitHub Copilot | `copilot -C <cwd> -i <prompt>` | `copilot -C <cwd> --prompt <prompt>` |
+| Kilo Code      | `kilo run <prompt>`            | `kilo run --dir <cwd> <prompt>`      |
+| OpenCode       | `opencode`                     | `opencode run --dir <cwd> <prompt>`  |
+| MiniMax        | `mmx`                          | `mmx run --auto -C <cwd> <prompt>`   |
+
+Interactive Kilo Code, OpenCode, and MiniMax take no working-directory flag — they inherit it from the launching process (the scheduler sets the subprocess `cwd`). Headless Kilo Code and OpenCode inject no permission-bypassing flag; whether an autonomous run may act without prompting is governed by each tool's own permission config.
 
 The default Claude adapter uses your local Claude Code permission settings. To override Claude Code settings for one scheduler run:
 
@@ -495,6 +513,7 @@ ralph-robin --prompt-file task.md --prefix none
 | `-L`, `--log-dir DIR`                                               | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.                                                               |
 | `-k`, `--wake`                                                      | Pass best-effort wake scheduling to `llm-scheduler`.                                                                                                          |
 | `-U`, `--suspend-until-ready`                                       | Suspend even for the selected provider's own wait gates.                                                                                                     |
+| `--watchdog`                                                       | Arm a hardware watchdog across each machine suspend so a wedged resume reboots instead of hanging. See [Reliable sleep/wake](#reliable-sleepwake).            |
 | `-d`, `--dry-run`                                                   | Resolve rotation and usage state without submitting.                                                                                                          |
 | `-h`, `--help`                                                      | Show help.                                                                                                                                                    |
 
@@ -577,7 +596,7 @@ If a provider exits with a scheduler autonomy abort, `ralph-robin` skips that pr
 
 When all providers are blocked, Ralph sets an RTC wake-up timer for the earliest known reset across the whole rotation, then resumes its own loop after wake.
 
-If suspend infrastructure is unavailable, the lead time is too short, `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` is set, or `--dry-run` is used, Ralph falls back to an in-process wait.
+If suspend infrastructure is unavailable, the lead time is too short, `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` is set, or `--dry-run` is used, Ralph falls back to an in-process wait (the machine stays awake — always correct, it just forgoes power saving).
 
 This is different from:
 
@@ -586,6 +605,39 @@ llm-scheduler --suspend-until-ready
 ```
 
 That scheduler mode wakes into one selected provider. Ralph wakes back into cross-provider rotation.
+
+### Reliable sleep/wake
+
+An overnight Ralph run waits out provider reset windows by suspending the whole machine. That is only safe if the box reliably resumes, and only sensible if nothing *else* suspends it underneath the run. Ralph handles both, simply and portably.
+
+**It defers your OS auto-suspend while it works.** Most desktops auto-suspend after some idle period (for example KDE PowerDevil, GNOME, or `logind`'s `IdleAction`). That idle timer does not know a headless job is busy, so it can suspend the machine mid-iteration — with no wake armed, leaving it asleep until you touch it (and then possibly hanging on a flaky resume). For its whole run Ralph holds a logind **`idle` inhibitor** (`systemd-inhibit --what=idle`) so the OS will not auto-suspend out from under it. An `idle` inhibitor does **not** block an explicit suspend, so Ralph still controls its own deliberate, RTC-armed suspends. You do not have to change your auto-suspend settings.
+
+> You can still keep your normal auto-suspend timeout. If you prefer the belt-and-braces approach, set it longer than a typical Ralph session — but that is brittle for long runs, which is exactly why Ralph inhibits idle instead of relying on it.
+
+**Its own suspends are verified and recorded:**
+
+* **A wake is always armed before suspending.** Ralph never suspends without first arming an RTC wake (via `rtcwake -m no` when it can, otherwise a `systemd-run --user` `WakeSystem=true` timer). If it cannot arm one, it does not suspend — it waits awake instead.
+* **Wakes are verified by behaviour.** After resume, Ralph checks how far the wall clock landed from the target. A wake that fires far from target (or not at all) is treated as unreliable, and Ralph stays awake for the rest of that run rather than risk repeating a bad cycle.
+* **Suspend churn is capped.** A minimum awake interval between suspends and an optional per-run cap stop flaky suspend/resume hardware from being cycled dozens of times unattended.
+* **A durable ledger survives a wedged resume.** Ralph writes an fsync'd marker before each suspend and another after resume. If a resume ever wedges the machine and it is hard-reset, the unfinished cycle is still on disk — Ralph (and the soak tool) warn about it on the next start.
+* **`--watchdog` (opt-in) recovers a wedged resume.** With `--watchdog`, Ralph arms a hardware watchdog across each suspend so a hung resume reboots the machine instead of hanging. This needs a usable `/dev/watchdog` whose timer keeps counting across S3 (a TCO/iTCO or IPMI watchdog, or `RuntimeWatchdogSec=` in `systemd-system.conf`); without one it is a logged no-op.
+
+**Portability.** The suspend backend is feature-detected, not distro-specific: it works across systemd-based Linux and degrades to an awake wait where the tools are missing. The design is modular so a future macOS backend (`caffeinate` / `pmset schedule wake`) can be added without changing how Ralph uses it.
+
+Tuning knobs: `LLM_TOOLS_NO_INHIBIT`, `LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE`, `LLM_RALPH_MIN_AWAKE_SECONDS`, `LLM_RALPH_MAX_SUSPENDS`, `LLM_SCHEDULER_SUSPEND_MIN_LEAD`, `LLM_TOOLS_WATCHDOG_DEVICE`. Run `llm-scheduler --wake-test` to see what the current host supports.
+
+### `llm-sleep-soak` — prove sleep/wake is reliable
+
+Before trusting unattended overnight runs, soak-test the exact suspend/wake path on your hardware:
+
+```bash
+llm-sleep-soak --cycles 50 --period 90s        # 50 real suspend/wake cycles
+llm-sleep-soak --cycles 20 --period 2m --watchdog --json
+```
+
+Each cycle suspends the machine, wakes it via the same verified RTC path Ralph uses, measures the wake drift, scrapes the kernel log for resume errors, and records the cycle in the durable ledger. It prints a `PASS`/`FAIL` summary and exits non-zero if any cycle resumed late or logged a resume error — or if an earlier run left a cycle unfinished (the fingerprint of a past wedged resume).
+
+This is a **real-hardware test**: it genuinely suspends the machine and therefore cannot run in CI. Run it when the machine is otherwise idle. `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` runs the whole loop in simulation (no real sleep) if you just want to see the flow.
 
 ## Provider Setup Details
 

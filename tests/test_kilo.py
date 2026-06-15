@@ -275,7 +275,7 @@ def test_kilo_command_argv_attached() -> None:
 
 def test_kilo_command_argv_headless() -> None:
     argv = kilo_command_argv(cfg_attached=False, cwd="/tmp/work", prompt="hello world")
-    assert argv == ["kilo", "run", "--auto", "hello world"]
+    assert argv == ["kilo", "run", "--dir", "/tmp/work", "hello world"]
 
 
 # --- Scheduler: Kilo end-to-end ------------------------------------------------

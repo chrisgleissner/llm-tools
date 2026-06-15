@@ -219,10 +219,17 @@ def test_provider_default_argv_kilo_and_opencode_cwd_handling() -> None:
     assert scheduler.provider_default_argv(attached_kilo, "prompt") == ["kilo", "run", "prompt"]
 
     headless_kilo = scheduler.SchedulerConfig(provider="kilo", cwd="/tmp/work")
-    assert scheduler.provider_default_argv(headless_kilo, "prompt") == ["kilo", "run", "--auto", "prompt"]
+    assert scheduler.provider_default_argv(headless_kilo, "prompt") == [
+        "kilo", "run", "--dir", "/tmp/work", "prompt",
+    ]
 
     attached_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work", attached=True)
     assert scheduler.provider_default_argv(attached_opencode, "prompt") == ["opencode"]
+
+    headless_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work")
+    assert scheduler.provider_default_argv(headless_opencode, "prompt") == [
+        "opencode", "run", "--dir", "/tmp/work", "prompt",
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -284,19 +291,28 @@ def _logs(tmp_path: Path) -> common.RunLogs:
     return common.setup_run_logs(tmp_path / "logs", "test")
 
 
-def test_rtc_suspend_skips(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    logs = _logs(tmp_path)
-    monkeypatch.delenv("LLM_SCHEDULER_NO_ACTUAL_SUSPEND", raising=False)
+def test_suspend_block_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_RALPH_MIN_AWAKE_SECONDS", "60")
+    monkeypatch.delenv("LLM_RALPH_MAX_SUSPENDS", raising=False)
+    monkeypatch.setattr(ralph_robin, "monotonic", lambda: 1000.0)
 
-    # Missing systemd tooling -> no suspend.
-    monkeypatch.setattr(common, "have_cmd", lambda name: False)
-    assert ralph_robin.rtc_suspend(logs, 999999999999) is False
+    # Fresh state: nothing blocks a suspend.
+    assert ralph_robin.suspend_block_reason(ralph_robin.SuspendState()) == ""
 
-    # systemd present but the target is too soon to bother arming a timer.
-    monkeypatch.setattr(common, "have_cmd", lambda name: True)
-    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
-    monkeypatch.setenv("LLM_SCHEDULER_SUSPEND_MIN_LEAD", "120")
-    assert ralph_robin.rtc_suspend(logs, 1010) is False
+    # Fail-safe latch after an unreliable wake: stay awake from here on.
+    disabled = ralph_robin.SuspendState(disabled=True, disabled_reason="unreliable-wake(drift=900s)")
+    assert "unreliable-wake" in ralph_robin.suspend_block_reason(disabled)
+
+    # Min-awake guard: we resumed too recently to suspend again.
+    just_woke = ralph_robin.SuspendState(last_resume_monotonic=990.0)  # 10s ago < 60s
+    assert ralph_robin.suspend_block_reason(just_woke).startswith("min-awake")
+    long_awake = ralph_robin.SuspendState(last_resume_monotonic=900.0)  # 100s ago
+    assert ralph_robin.suspend_block_reason(long_awake) == ""
+
+    # Per-run cap.
+    monkeypatch.setenv("LLM_RALPH_MAX_SUSPENDS", "2")
+    assert ralph_robin.suspend_block_reason(ralph_robin.SuspendState(suspends=2)).startswith("max-suspends")
+    assert ralph_robin.suspend_block_reason(ralph_robin.SuspendState(suspends=1)) == ""
 
 
 def _wall_clock_sleep(monkeypatch: pytest.MonkeyPatch, now: dict[str, int]) -> list[float]:
@@ -312,65 +328,61 @@ def _wall_clock_sleep(monkeypatch: pytest.MonkeyPatch, now: dict[str, int]) -> l
     return sleeps
 
 
-def test_suspend_machine_until(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_suspend_machine_until_awake_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """When suspend_with_wake does not actually suspend (backend unavailable /
+    simulated), the loop falls back to a bounded wall-clock wait that ends on time."""
     cfg = ralph_robin.RalphConfig()
     logs = _logs(tmp_path)
-    monkeypatch.setattr(ralph_robin, "rtc_suspend", lambda *a, **k: False)
+    state = ralph_robin.SuspendState()
+    # suspend_with_wake reports "not suspended" (e.g. simulated) -> awake fallback.
+    monkeypatch.setattr(
+        common, "suspend_with_wake",
+        lambda *a, **k: common.SuspendOutcome(False, None, int(a[0]), None, True, "simulated", "simulated"),
+    )
     monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "5")
     now = {"t": 1000}
     sleeps = _wall_clock_sleep(monkeypatch, now)
 
     # Budget already exhausted -> stop the loop.
     monkeypatch.setattr(ralph_robin, "monotonic", lambda: 1000.0)
-    assert ralph_robin.suspend_machine_until(cfg, logs, 2000, start_monotonic=0.0, max_duration=10) is False
+    assert ralph_robin.suspend_machine_until(cfg, logs, 2000, 0.0, 10, state) is False
 
     # Wait clamped to the remaining budget, then chunked wall-clock wait covers it.
     monkeypatch.setattr(ralph_robin, "monotonic", lambda: 0.0)
     now["t"] = 1000
     sleeps.clear()
-    assert ralph_robin.suspend_machine_until(cfg, logs, 5000, start_monotonic=0.0, max_duration=10) is True
+    assert ralph_robin.suspend_machine_until(cfg, logs, 5000, 0.0, 10, state) is True
     assert sum(sleeps) == 10 and max(sleeps) <= 5
 
     # No duration cap: wall clock advances in <=chunk steps up to the renewal.
     now["t"] = 1000
     sleeps.clear()
-    assert ralph_robin.suspend_machine_until(cfg, logs, 1030, start_monotonic=0.0, max_duration=0) is True
+    assert ralph_robin.suspend_machine_until(cfg, logs, 1030, 0.0, 0, state) is True
     assert sum(sleeps) == 30 and max(sleeps) <= 5
 
 
-def test_suspend_machine_until_survives_suspend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The renewal wait must end at wake-up, not keep counting a frozen clock.
-
-    Models the real failure: `systemctl suspend` returns with the full window
-    still ahead, so the wait begins for ~2h; the machine then suspends mid-sleep
-    and the RTC alarm wakes it at renewal, jumping the wall clock past the target.
-    With the old single time.sleep this hung for the whole window after wake-up.
-    """
+def test_suspend_machine_until_unreliable_wake_latches_awake(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """An unreliable wake disables further suspends for the rest of the run."""
     cfg = ralph_robin.RalphConfig()
     logs = _logs(tmp_path)
-    monkeypatch.setattr(ralph_robin, "rtc_suspend", lambda *a, **k: True)
-    monkeypatch.setenv("LLM_RALPH_WAIT_POLL_SECONDS", "15")
-    now = {"t": 1000}
-    target = now["t"] + 7200  # renewal ~2h out, as in the reported run
-    sleeps: list[float] = []
-    suspended = {"done": False}
+    state = ralph_robin.SuspendState()
+    calls: list[int] = []
 
-    def fake_sleep(seconds: float) -> None:
-        sleeps.append(seconds)
-        if not suspended["done"]:
-            # Machine suspends during this chunk; RTC wakes it at renewal, so the
-            # wall clock leaps past the target while this sleep barely advanced.
-            suspended["done"] = True
-            now["t"] = target + 3
-        else:
-            now["t"] += int(round(seconds))
+    def fake_suspend(target_epoch: int, **kwargs: object) -> common.SuspendOutcome:
+        calls.append(target_epoch)
+        # Woke 900s after target: the RTC wake clearly misbehaved.
+        return common.SuspendOutcome(True, target_epoch + 900, target_epoch, 900, False, "systemd-timer", "ok")
 
-    monkeypatch.setattr(common, "now_epoch", lambda env=None: now["t"])
-    monkeypatch.setattr(ralph_robin, "sleep_seconds", fake_sleep)
+    monkeypatch.setattr(common, "suspend_with_wake", fake_suspend)
+    monkeypatch.setattr(ralph_robin, "wait_until_epoch", lambda target: None)
+    monkeypatch.setattr(common, "now_epoch", lambda env=None: 1000)
+    monkeypatch.setattr(ralph_robin, "monotonic", lambda: 0.0)
 
-    assert ralph_robin.suspend_machine_until(cfg, logs, target, start_monotonic=0.0, max_duration=0) is True
-    # One bounded chunk, then the wall-clock check sees renewal and returns.
-    assert len(sleeps) == 1 and sleeps[0] <= 15
+    assert ralph_robin.suspend_machine_until(cfg, logs, 5000, 0.0, 0, state) is True
+    assert state.suspends == 1 and state.disabled is True and "unreliable-wake" in state.disabled_reason
+    # Next time we must stay awake (no second real suspend attempt).
+    assert ralph_robin.suspend_machine_until(cfg, logs, 9000, 0.0, 0, state) is True
+    assert calls == [5000]  # suspend_with_wake was not called the second time
 
 
 def test_suspend_until_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -394,6 +406,62 @@ def test_suspend_until_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     # Budget exhausted -> stop the loop.
     monkeypatch.setattr(ralph_robin, "monotonic", lambda: 1000.0)
     assert ralph_robin.suspend_until_available(cfg, logs, selection, 0.0, 10, "rate-limited") is False
+
+
+def test_suspend_machine_until_reliable_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg = ralph_robin.RalphConfig()
+    logs = _logs(tmp_path)
+    state = ralph_robin.SuspendState()
+    monkeypatch.setattr(
+        common, "suspend_with_wake",
+        lambda target, **k: common.SuspendOutcome(True, target, target, 0, True, "systemd-timer", "ok"),
+    )
+    monkeypatch.setattr(common, "now_epoch", lambda env=None: 1000)
+    monkeypatch.setattr(ralph_robin, "monotonic", lambda: 5.0)
+    assert ralph_robin.suspend_machine_until(cfg, logs, 5000, 0.0, 0, state) is True
+    assert state.suspends == 1 and state.disabled is False and state.last_resume_monotonic == 5.0
+
+
+def test_guard_against_auto_suspend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    logs = _logs(tmp_path)
+    calls = {"acquire": 0}
+
+    class FakeInhibitor:
+        def __init__(self, *a: object, **k: object) -> None:
+            pass
+
+        def acquire(self) -> bool:
+            calls["acquire"] += 1
+            return False
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(common, "IdleSuspendInhibitor", FakeInhibitor)
+    # dry-run leaves machine power state untouched (no acquire).
+    ralph_robin.guard_against_auto_suspend(ralph_robin.RalphConfig(dry_run=True), logs)
+    assert calls["acquire"] == 0
+    # a real run attempts to take the idle inhibitor.
+    ralph_robin.guard_against_auto_suspend(ralph_robin.RalphConfig(dry_run=False), logs)
+    assert calls["acquire"] == 1
+
+
+def test_report_prior_suspend_failures(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    logs = _logs(tmp_path)
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(common, "suspend_ledger_path", lambda env=None: ledger)
+    # No ledger yet -> no-op.
+    ralph_robin.report_prior_suspend_failures(logs)
+    # A start with no done is a prior wedged/aborted cycle -> warns without raising.
+    common.ledger_record_start(ledger, "c1", 2000, {"XDG_CACHE_HOME": str(tmp_path)})
+    ralph_robin.report_prior_suspend_failures(logs)
+    assert ledger.exists()
+
+
+def test_ralph_watchdog_flag() -> None:
+    cfg = ralph_robin.parse_args(["--prompt", "x", "--watchdog"])
+    assert cfg.watchdog is True
+    assert ralph_robin.RalphConfig().watchdog is False
 
 
 # --------------------------------------------------------------------------- #

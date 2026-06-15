@@ -474,16 +474,22 @@ def read_opencode(env: dict[str, str] | None = None) -> ProviderSnapshot:
 def opencode_command_argv(cfg_attached: bool, cwd: str, prompt: str) -> list[str]:
     """Build the default argv for launching OpenCode.
 
-    Attached/interactive: ``opencode -C <cwd>`` (or no -C, the opencode
-    CLI defaults to the current directory).
-    Headless/autonomous: ``opencode run <prompt>`` with ``-C <cwd>`` so
-    the agent works in the configured directory.
+    Attached/interactive: ``opencode`` picks up the cwd from the launching
+    process (the root command has no ``--dir`` flag), so we set it via the
+    subprocess cwd.
+    Headless/autonomous: ``opencode run --dir <cwd> <prompt>`` so the agent
+    works in the configured directory.
+
+    We deliberately do not inject any permission-bypassing flag. Whether a
+    headless run may act without prompting is left entirely to the user's own
+    OpenCode config (its ``permission`` settings); the framework never elevates
+    privileges on the user's behalf.
     """
     if cfg_attached:
         # Interactive TUI mode: opencode picks up the cwd from the
         # process, but we set it explicitly via the subprocess cwd.
         return ["opencode"]
-    return ["opencode", "run", "-C", cwd, prompt]
+    return ["opencode", "run", "--dir", cwd, prompt]
 
 
 __all__ = [

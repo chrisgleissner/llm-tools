@@ -6,13 +6,14 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 
 * `llm-usage` — show local usage/quota for each provider.
 * `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a scope reset).
-* `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`.
+* `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`. Holds an OS idle inhibitor for the whole run so a desktop idle timer cannot suspend the machine mid-work, and when every provider is rate-limited it sleeps the machine itself via a verified RTC wake (see Suspend/wake reliability below).
+* `llm-sleep-soak` — repeatedly suspend and wake the machine using the exact production suspend path to prove sleep/resume is reliable on this hardware. Real-hardware test; cannot run in CI.
 * `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, usage decisions, PTY capture, wake diagnostics, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
 * `llm_tools/capacity.py` — generic `ProviderId`, `CapacityKind`, `CapacityScope`, `ProviderSnapshot`, and `UsageDecision` dataclasses plus the `decide`/`validate_scope`/`scope_pace` helpers. All provider-specific reader code lives outside this module.
 * `llm_tools/providers/kilo.py` — Kilo Code CLI adapter (parser for `kilo stats` output, env-var fallback, command construction).
 * `llm_tools/providers/minimax.py` — MiniMax adapter (parser for `mmx quota show --output json` output, env-var fallback, command construction).
-* Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
-* Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`.
+* Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/sleep_soak.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
+* Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`, `llm-sleep-soak`.
 * Regression tests: `tests/` with pytest and fake provider commands.
 * Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_minimax.py`, `tests/test_ralph_kilo.py`.
 * Project/package config: `pyproject.toml`.
@@ -26,13 +27,15 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`
 * Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`
 * Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`
+* Suspend cycle ledger (durable, fsync'd; shared by ralph-robin and the soak): `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/suspend-ledger.jsonl`
+* Sleep-soak run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-sleep-soak/logs`
 
 Keep these as dependency-light Python CLIs sharing helper modules: no daemon, server, database, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `llm_tools/common.py` and `llm_tools/capacity.py`, not duplicated across CLIs or provider adapters.
 
 ## Fast checks
 
 ```bash
-chmod +x llm-usage llm-scheduler ralph-robin
+chmod +x llm-usage llm-scheduler ralph-robin llm-sleep-soak
 ./llm-usage
 ./llm-usage --json
 ./llm-usage --show-source --show-remaining-time
@@ -42,6 +45,7 @@ chmod +x llm-usage llm-scheduler ralph-robin
 ./llm-scheduler --provider codex --prompt x --dry-run --command-template true
 ./llm-scheduler --wake-test
 ./ralph-robin --prompt x --dry-run --command-template true
+LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1 ./llm-sleep-soak --cycles 2 --period 5s --gap 0   # simulated; real runs actually suspend
 python -m pytest -q
 coverage run -m pytest && coverage combine && coverage report --fail-under=85
 ```
@@ -63,6 +67,8 @@ printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":10}}}' | ./llm-usa
 * Time/reset formatting: `now_epoch`, `parse_epoch`, `fmt_reset`, `fmt_duration`, `time_until`
 * Scheduler gates and launch: `usage_decision_for_tool`, `wait_until_usable`, `schedule_resume_and_suspend`, `command_argv`, `submit_once`, `run_fresh_headless`, `run_fresh_exact_stdout`, `run_tmux`
 * Ralph Robin rotation: `select_tool`, `scheduler_config_for`, `run_scheduler_inline`, state helpers, status/highlight helpers
+* Suspend/wake reliability (`common.py`): `power_backend`, `IdleSuspendInhibitor`, `arm_rtc_wake`, `read_rtc_wakealarm`, `Watchdog`, `suspend_with_wake`, `wall_clock_wait_until`, ledger helpers (`ledger_record_start`/`ledger_record_done`/`incomplete_suspend_cycles`); ralph wiring: `guard_against_auto_suspend`, `report_prior_suspend_failures`, `SuspendState`, `suspend_block_reason`, `suspend_machine_until`
+* Sleep soak: `llm_tools/sleep_soak.py` (`run_cycle`, `summarize`, `scrape_resume_errors`, `main`)
 
 Prefer changing the smallest relevant function surface. Preserve existing function boundaries unless a helper clearly reduces duplication or risk.
 
@@ -141,7 +147,20 @@ Missing CLI with no env-var fallback is `reason="missing-cli"`. The provider is 
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
 * Fresh mode on an interactive terminal runs the provider CLI in its normal interactive form on a PTY wired directly to that terminal via `script(1)` (`resolve_attach_mode`, `ATTACHED=1`): output, stdin, resizes, and Ctrl-C must behave exactly as a direct CLI launch. Headless fresh mode (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`) keeps the non-interactive provider commands and streams the child output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`. Both paths write the ANSI-cleaned copy to `attempt-N.out`. Attached runs never retry on a clean exit or user cancel (130/143) and skip the rate-limit phrase grep, since interactive screen content can legitimately mention rate limits. Headless runs must abort with status `75` when a blocking prompt UI is detected, when question-like output stalls, or when there is no output progress past `LLM_SCHEDULER_IDLE_TIMEOUT`; `ralph-robin` must treat status `75` as a reason to re-evaluate rotation, not as a final failure after the first provider. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
 * Ralph must prepend provider-aware runtime context before launching a selected provider. That context must identify the selected provider, list latest usage decisions, and override stale provider-specific handoff/scheduler instructions in the original prompt so Codex does not hand off merely because Claude is exhausted, and vice versa.
-* Every provider is actively refreshed on read; `stale-usage` is a bug to display except for a known authentication or CLI-startup problem. Codex refreshes via the `codex app-server` JSON-RPC `account/rateLimits/read` method (live, turn-free), then a cached payload, then the local `~/.codex/sessions` JSONL. A missing `codex` binary reports `missing-cli`; absent `~/.codex/auth.json` credentials report `not-authenticated`. Mirror this contract for any new provider: prefer a live query, fall back to cache/local, and surface an auth/startup reason rather than old numbers.
+* Every provider is actively refreshed on read; `stale-usage` is a bug to display except for a known authentication or CLI-startup problem. Caches are bounded by a freshness window (TTL); never display a snapshot past its TTL — refresh it first (the Copilot reader waits for the in-flight capture rather than serving a stale snapshot and refreshing "for next time"). Active network refreshes retry a bounded number of times (`LLM_USAGE_LIVE_FETCH_RETRIES`) so a transient blip (e.g. a network stack still settling right after resume) does not degrade to `stale-usage`.
+* Burn-rate / remaining-time estimation despikes isolated single-sample outliers before anchoring to the current window. A lone bad reading and its recovery must not be mistaken for a window reset (which would discard real history and surface a spurious `no rate data`). `no rate data` is correct only when there is genuinely no consumption to forecast (e.g. a window sitting at 100%) or the scope has no time-based pace (balance/ungated).
+
+## Suspend/wake reliability
+
+`ralph-robin` and `llm-sleep-soak` share one hardened suspend path, `common.suspend_with_wake`, behind a feature-detected backend seam (`common.power_backend`; `systemd` today). Keep this portable: detect capabilities with `have_cmd`, never branch on distro strings, and degrade to an in-process wall-clock wait (machine stays awake) when a capability is missing. A future macOS backend should implement the same primitives (`caffeinate`, `pmset schedule wake`) without touching callers.
+
+* Hold a logind `idle` inhibitor (`common.IdleSuspendInhibitor`, via `systemd-inhibit --what=idle`) for the whole run so a desktop idle timer (KDE PowerDevil, GNOME, logind `IdleAction`) cannot suspend the machine mid-work with no wake armed. An `idle` inhibitor must NOT block an explicit `systemctl suspend`, so the orchestrator keeps control of its own deliberate suspends. The lock is pipe-backed so it releases on process exit/crash; `LLM_TOOLS_NO_INHIBIT=1` disables it (tests set this).
+* Never suspend without a wake armed. Arm via `rtcwake -m no` when privileged (verifiable by reading back `/sys/class/rtc/rtc0/wakealarm`), else a `systemd-run --user` `WakeSystem=true` timer. If arming fails, do not suspend — fall back to an awake wait.
+* Verify wakes by behaviour: after resume, compare the wall clock to the target (`LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE`). A wake that lands far from target is unreliable; ralph latches to awake-only for the rest of the run rather than risk repeating it.
+* Cap churn: a minimum awake interval between suspends (`LLM_RALPH_MIN_AWAKE_SECONDS`) and an optional per-run cap (`LLM_RALPH_MAX_SUSPENDS`) keep flaky hardware from being cycled repeatedly while unattended.
+* Durable ledger: write a fsync'd `suspend_start` before `systemctl suspend` and a `suspend_done` after resume. A start with no done is the fingerprint of a wedged resume from a prior boot; both tools report it on startup.
+* `--watchdog` is opt-in recovery for a wedged resume (arm a hardware watchdog across suspend so a hang reboots the box). It needs a usable `/dev/watchdog` and a watchdog that keeps counting across S3; absent that it is a logged no-op. Document the limitation, never hard-fail.
+* `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` simulates a perfect cycle (no real sleep) so the orchestration is testable; tests must never actually suspend the host. Codex refreshes via the `codex app-server` JSON-RPC `account/rateLimits/read` method (live, turn-free), then a cached payload, then the local `~/.codex/sessions` JSONL. A missing `codex` binary reports `missing-cli`; absent `~/.codex/auth.json` credentials report `not-authenticated`. Mirror this contract for any new provider: prefer a live query, fall back to cache/local, and surface an auth/startup reason rather than old numbers.
 
 ## Environment knobs
 
@@ -155,6 +174,17 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_MAX_FILES`
 * `LLM_USAGE_TAIL_LINES`
 * `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` (seconds before active/unknown Codex/Claude local snapshots are reported as stale; capped at 60; non-positive/invalid values fall back to 60)
+* `LLM_USAGE_LIVE_FETCH_RETRIES` (extra attempts for active-refresh network reads before falling back; default 2; tests pin 0)
+* `LLM_USAGE_LIVE_FETCH_RETRY_DELAY` (seconds between live-fetch retries; default 0.5)
+* `LLM_TOOLS_NO_INHIBIT` (set to `1` to skip the logind idle inhibitor `ralph-robin`/soak hold during a run; tests set this)
+* `LLM_TOOLS_RTC_WAKEALARM` (override the RTC wakealarm sysfs path; default `/sys/class/rtc/rtc0/wakealarm`; mainly tests)
+* `LLM_TOOLS_WATCHDOG_DEVICE` (watchdog device path for `--watchdog`; default `/dev/watchdog`)
+* `LLM_TOOLS_NO_WATCHDOG` (set to `1` to make `--watchdog` a no-op even when a device exists)
+* `LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE` (seconds a wake may land from target and still count as reliable; default 90, floored at 5)
+* `LLM_TOOLS_WAIT_POLL_SECONDS` (wall-clock poll chunk for `common.wall_clock_wait_until`; default 30)
+* `LLM_RALPH_MIN_AWAKE_SECONDS` (minimum awake time between machine suspends; default 60)
+* `LLM_RALPH_MAX_SUSPENDS` (max machine suspends per run; default 0 = unlimited)
+* `LLM_SCHEDULER_SUSPEND_MIN_LEAD` (minimum lead before arming a wake / suspending; default 120)
 * `LLM_USAGE_PROVIDER_PARALLELISM` (provider reader fan-out concurrency for `llm-usage`; default is CPU cores)
 * `LLM_USAGE_NO_PROGRESS` (set to `1` to suppress the ephemeral stderr refresh spinner; it is also auto-suppressed when stderr is not a TTY)
 * `LLM_USAGE_CODEX_TIMEOUT` (seconds to wait for the `codex app-server` rate-limit handshake; default 15)

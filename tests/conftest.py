@@ -25,6 +25,17 @@ def local_command_args(args: list[str]) -> list[str]:
     return [sys.executable, *args]
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_power_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch real machine power state from the test suite.
+
+    ``LLM_TOOLS_NO_INHIBIT`` stops any in-process ``ralph_robin.main`` test from
+    spawning a real ``systemd-inhibit`` helper. Tests that specifically exercise
+    inhibitor/suspend behaviour override these explicitly.
+    """
+    monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
+
+
 @pytest.fixture()
 def env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
@@ -34,6 +45,14 @@ def env(tmp_path: Path) -> dict[str, str]:
     (home / ".codex" / "sessions").mkdir(parents=True)
     (home / ".claude" / "projects").mkdir(parents=True)
     out = os.environ.copy()
+    # Keep the fixture hermetic when the suite itself runs inside a ralph-robin
+    # session: ralph-robin exports LLM_TOOLS_RALPH_ROBIN_* guard vars into the
+    # ambient environment, and copying them here would leak into every CLI
+    # subprocess — tripping the "--suspend-until-ready is disabled inside an
+    # active ralph-robin provider run" guard and forcing providers down the
+    # unavailable/sleep path. Tests that exercise those vars set them explicitly.
+    for key in [k for k in out if k.startswith("LLM_TOOLS_RALPH_ROBIN_")]:
+        del out[key]
     out.update(
         {
             "HOME": str(home),
@@ -46,6 +65,13 @@ def env(tmp_path: Path) -> dict[str, str]:
             # path inject a payload via LLM_USAGE_CODEX_RATE_LIMITS_JSON, which
             # takes precedence over this switch.
             "LLM_USAGE_DISABLE_CODEX_APP_SERVER": "1",
+            # Active-refresh reads are single-shot under test: retries only matter
+            # against a live network and would add real sleeps to failure-path
+            # tests. Cases that assert retry behaviour set this explicitly.
+            "LLM_USAGE_LIVE_FETCH_RETRIES": "0",
+            # Never spawn a real systemd-inhibit helper from in-process or
+            # subprocess test runs; inhibitor behaviour is covered explicitly.
+            "LLM_TOOLS_NO_INHIBIT": "1",
             "LLM_SCHEDULER_HEADLESS": "1",
         }
     )

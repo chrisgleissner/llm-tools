@@ -22,7 +22,8 @@
 
 [defaults]
 # Order ralph-robin tries providers when --providers isn't given.
-#providers     = ["claude", "codex"]
+# Built-in default: ["claude", "codex", "opencode"].
+#providers     = ["claude", "codex", "opencode"]
 # Which capacity check to use. One of:
 # auto | 5h | weekly | monthly | balance | budget | byok | ungated
 #scope         = "auto"
@@ -34,6 +35,14 @@
 # Per-provider routing policy. The main thing this lets you set is which
 # model a provider should run, and what to do when that model's limit is
 # used up (via allow_fallback).
+#
+# capacity_provider ties a provider's availability/capacity to ANOTHER
+# provider's usage windows (5h / weekly / monthly / balance / ...), while still
+# launching this provider's own CLI. Use it when the CLI is configured to run a
+# different provider's model, so its own quota is irrelevant. It is generic:
+# any provider may borrow any other provider's windows (one hop, no self / no
+# chains). Example: OpenCode pointed at the MiniMax API -> see
+# [providers.opencode] below.
 # ---------------------------------------------------------------------------
 
 [providers.claude]
@@ -62,6 +71,10 @@
 [providers.opencode]
 #model          = "..."
 #allow_fallback = false
+# Gate/rank/suspend opencode on minimax's real 5h/weekly windows instead of
+# opencode's own balance — for when opencode runs the MiniMax model. ralph-robin
+# then only routes to opencode while minimax has capacity.
+#capacity_provider = "minimax"
 
 [providers.minimax]
 #model          = "..."

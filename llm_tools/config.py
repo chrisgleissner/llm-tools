@@ -58,7 +58,7 @@ from .capacity import ALL_PROVIDERS
 # immediately instead of being silently ignored.
 _TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler"})
 _DEFAULTS_KEYS = frozenset({"providers", "scope", "min_remaining"})
-_PROVIDER_KEYS = frozenset({"model", "allow_fallback", "scope", "min_remaining"})
+_PROVIDER_KEYS = frozenset({"model", "allow_fallback", "scope", "min_remaining", "capacity_provider"})
 # Tool sections accept any key a CLI flag maps to; validation of individual
 # values happens in the existing validate_args paths once they are applied.
 _RALPH_KEYS = frozenset(
@@ -98,12 +98,21 @@ class ProviderPolicy:
     model's own limit is exhausted: ``False`` (default) treats the provider as
     unusable so callers rotate away; ``True`` lets the provider stay usable via
     its aggregate window with the model pin dropped.
+
+    ``capacity_provider`` ties this provider's *availability and capacity* to a
+    different provider's usage windows (5h / weekly / monthly / balance / …)
+    while still launching this provider's own CLI. Use it when the CLI is
+    configured to run another provider's model (e.g. OpenCode pointed at the
+    MiniMax API): set ``capacity_provider = "minimax"`` so ralph/scheduler gate,
+    rank, and suspend on MiniMax's real windows instead of OpenCode's own
+    (often irrelevant) balance.
     """
 
     model: str | None = None
     allow_fallback: bool = False
     scope: str | None = None
     min_remaining: str | None = None
+    capacity_provider: str | None = None
 
 
 def config_path(env: dict[str, str] | None = None) -> Path:
@@ -169,7 +178,31 @@ def _validate(raw: Any) -> dict[str, Any]:
                 _fail(f"providers.{name}: unknown key(s): {', '.join(sorted(unknown_keys))}")
             if "allow_fallback" in policy and not isinstance(policy["allow_fallback"], bool):
                 _fail(f"providers.{name}.allow_fallback must be true or false")
+        _validate_capacity_providers(providers)
     return raw
+
+
+def _validate_capacity_providers(providers: dict[str, Any]) -> None:
+    """Validate every ``capacity_provider`` reference in the providers table.
+
+    A reference must name a known provider, must not point at itself, and must
+    not point at a provider that itself delegates (capacity links are one hop,
+    never chained), so the resolved capacity source is always unambiguous.
+    """
+    for name, policy in providers.items():
+        target = policy.get("capacity_provider")
+        if target is None:
+            continue
+        if not isinstance(target, str) or target not in ALL_PROVIDERS:
+            _fail(f"providers.{name}.capacity_provider must be a known provider (known: {', '.join(ALL_PROVIDERS)})")
+        if target == name:
+            _fail(f"providers.{name}.capacity_provider cannot reference itself")
+        target_policy = providers.get(target) or {}
+        if target_policy.get("capacity_provider") is not None:
+            _fail(
+                f"providers.{name}.capacity_provider points at '{target}', which itself "
+                f"sets capacity_provider; capacity links must be a single hop"
+            )
 
 
 def _validate_section(section: Any, name: str, allowed: frozenset[str]) -> None:
@@ -187,11 +220,13 @@ def provider_policy(cfg: dict[str, Any], provider: str) -> ProviderPolicy:
     block = (cfg.get("providers") or {}).get(provider) or {}
     model = block.get("model")
     scope = block.get("scope")
+    capacity_provider = block.get("capacity_provider")
     return ProviderPolicy(
         model=str(model) if model is not None else None,
         allow_fallback=bool(block.get("allow_fallback", False)),
         scope=str(scope) if scope is not None else None,
         min_remaining=_as_str(block.get("min_remaining")),
+        capacity_provider=str(capacity_provider) if capacity_provider is not None else None,
     )
 
 

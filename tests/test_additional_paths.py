@@ -398,19 +398,19 @@ def test_ralph_validation_dry_run_rotation_and_autonomy(env: dict[str, str], fak
     assert run_cmd(["./ralph-robin", "--providers", "bad", "--prompt", "x"], env).returncode == 2
     usage_json = '{"claude":{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}'
     dry = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {provider}", "--dry-run", "--state-file", str(tmp_path / "s.json"), "--log-dir", str(tmp_path / "logs")],
+        ["./ralph-robin", "--providers", "claude,codex", "--prompt", "x", "--command-template", "provider-mock {provider}", "--dry-run", "--state-file", str(tmp_path / "s.json"), "--log-dir", str(tmp_path / "logs")],
         env | {"LLM_USAGE_NOW_EPOCH": "1780430000", "LLM_SCHEDULER_USAGE_JSON": usage_json},
     )
     assert dry.returncode == 0
     assert "dry-run" in dry.stderr
     run = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s2.json"), "--log-dir", str(tmp_path / "logs2"), "--no-retry", "--max-iterations", "1"],
+        ["./ralph-robin", "--providers", "claude,codex", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s2.json"), "--log-dir", str(tmp_path / "logs2"), "--no-retry", "--max-iterations", "1"],
         env | {"LLM_USAGE_NOW_EPOCH": "1780430000", "LLM_SCHEDULER_USAGE_JSON": usage_json},
     )
     assert run.returncode == 0
     assert json.loads((tmp_path / "s2.json").read_text())["current_provider"] == "codex"
     blocked = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s3.json"), "--log-dir", str(tmp_path / "logs3"), "--no-retry", "--max-duration", "3"],
+        ["./ralph-robin", "--providers", "claude,codex", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s3.json"), "--log-dir", str(tmp_path / "logs3"), "--no-retry", "--max-duration", "3"],
         env | {"LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}', "PROVIDER_MODE": "blocking"},
     )
     assert blocked.returncode == common.AUTONOMY_ABORT_STATUS
@@ -584,7 +584,7 @@ def test_parser_option_coverage(tmp_path: Path) -> None:
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="claude", claude_stream_json=True), "p") == ["claude", "--print", "--output-format", "stream-json", "--verbose", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="copilot", cwd="/c", attached=True), "p") == ["copilot", "-C", "/c", "-i", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c", attached=True), "p") == ["kilo", "run", "p"]
-    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c"), "p") == ["kilo", "run", "--auto", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c"), "p") == ["kilo", "run", "--dir", "/c", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="opencode", cwd="/c", attached=True), "p") == ["opencode"]
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(provider="codex")).startswith("Codex")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(provider="claude")).startswith("Claude")
@@ -697,21 +697,28 @@ def test_estimate_remaining_time_survives_resets_and_gaps(env: dict[str, str]) -
     cache = common.usage_cache_dir(env)
     cache.mkdir(parents=True, exist_ok=True)
     base = 1_000_000
+    # A genuine, SUSTAINED reset: remaining declines gradually, jumps back to 100,
+    # then stays high before declining again. (Realistic -- a real window reset
+    # restores full quota and you do not burn 10% in one sample interval right
+    # after it. A lone 90->100->90 blip is noise and is despiked, see the
+    # dedicated despike test.)
     rows = [
         (base, 100),
-        (base + 3600, 90),
-        (base + 7200, 100),
-        (base + 10800, 90),
-        (base + 18000, 80),
+        (base + 1800, 95),
+        (base + 3600, 90),       # old window burn (dropped once we anchor to the reset)
+        (base + 7200, 100),      # RESET
+        (base + 8000, 98),       # stays high -> confirms a real reset, not a spike
+        (base + 10800, 90),      # post-reset burn: 100 -> 90 over 3600s
+        (base + 18000, 80),      # a further 10% after a 2h gap
     ]
     (cache / "llm-usage.log").write_text(
         "".join(f'{{"ts":{ts},"provider":"p","window":"w","remaining":{rem}}}\n' for ts, rem in rows),
         encoding="utf-8",
     )
     now_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18000)}
-    # The +10 jump at +7200 (90->100) is a reset: it anchors to the current
-    # window, dropping the earlier burn. The trailing 2h gap exceeds max_gap, so
-    # only the post-reset 10% over 3600s counts -> 50% lasts 5h.
+    # The jump at +7200 (90->100) anchors to the current window, dropping the
+    # earlier burn. The trailing 2h gap exceeds max_gap, so only the post-reset
+    # 10% over 3600s counts -> 50% lasts 5h.
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env) == "5h"
     stale_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18601)}
     assert common.estimate_remaining_time_from_log("p", "w", 50, stale_env) == "-"
@@ -721,6 +728,34 @@ def test_estimate_remaining_time_survives_resets_and_gaps(env: dict[str, str]) -
     # 20% over 10800s within the anchored window -> 50% lasts 7h 30m.
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_GAP_SECONDS": "0"}) == "7h 30m"
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "bad"}) == "5h"
+
+
+def test_estimate_remaining_time_despikes_transient_outliers(env: dict[str, str]) -> None:
+    """A lone bad reading (a momentary stale/alternate value) must not blow away
+    the burn-rate history. Its recovery looks like a window reset, which would
+    anchor to the last ~minute and report a spurious 'no rate data'."""
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    base = 1_000_000
+    # Smooth 5h decline 100 -> 84 over ~16 min, with two isolated 72 dips that
+    # immediately recover to ~85 -- exactly the real-log pattern.
+    rows: list[tuple[int, float]] = []
+    rem = 100.0
+    for i in range(32):
+        ts = base + i * 30
+        if i in (20, 26):
+            rows.append((ts, 72.0))  # transient outlier
+        else:
+            rows.append((ts, rem))
+            rem -= 0.5
+    log = cache / "llm-usage.log"
+    log.write_text(
+        "".join(f'{{"ts":{ts},"provider":"Claude","window":"5h","remaining":{r}}}\n' for ts, r in rows),
+        encoding="utf-8",
+    )
+    now_env = env | {"LLM_USAGE_NOW_EPOCH": str(rows[-1][0])}
+    # Despiked -> the full ~16 min of decline drives a real forecast, not "-".
+    assert common.estimate_remaining_time_from_log("Claude", "5h", rows[-1][1], now_env) not in ("-", "1m")
 
 
 def test_estimate_remaining_time_requires_minimum_span_for_real_windows(env: dict[str, str]) -> None:
@@ -866,14 +901,15 @@ def test_copilot_refresh_module(env: dict[str, str], tmp_path: Path, monkeypatch
 
 
 def test_copilot_refresh_wait_budget_cold_start_is_long(env: dict[str, str]) -> None:
-    # Warm cache: short wait so we serve the stale value quickly.
-    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 1.0
-    # Cold start: wait long enough for the first capture (timeout + margin).
+    # Stale-or-missing cache both wait long enough for the capture to land so we
+    # never serve a value past its TTL (the warm-cache "serve stale quickly" path
+    # is gone -- it was the source of partially-stale usage).
+    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 12.0
     assert common.copilot_refresh_wait_budget(env, cache_present=False) == 12.0
     assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_TIMEOUT": "4"}, cache_present=False) == 6.0
     # Explicit override always wins, including the 0 used by other tests.
     assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}, cache_present=False) == 0.0
-    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 1.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 12.0
 
 
 def test_copilot_cold_start_returns_refreshed_data(env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -929,7 +965,7 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     assert json.loads(cfg.state_file.read_text() or "{}").get("current_index") == 9
 
     logs = common.setup_run_logs(tmp_path / "logs", "r")
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: {"available": False, "reason": "missing-cli"})
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: {"available": False, "reason": "missing-cli"})
     sel = ralph_robin.select_provider(cfg, logs, 0, {"claude", "codex"})
     assert sel["rotation_reason"] == "all-skipped"
     sel2 = ralph_robin.select_provider(cfg, logs, 0, set())
@@ -940,7 +976,7 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
         "claude": {"available": True, "five_hour": {"remaining": 0, "resets_at": 2000}, "week": {"remaining": 50}},
         "codex": {"available": True},
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
     sel3 = ralph_robin.select_provider(cfg, logs, 0, set())
     assert sel3["provider"] == "codex"
@@ -967,7 +1003,7 @@ def test_ralph_even_burn_prefers_highest_remaining_daily_capacity(monkeypatch: p
             "week": {"remaining": 50, "resets_at": 1000 + (2 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     selected = ralph_robin.select_provider(cfg, logs, 0, set())
     assert selected["provider"] == "codex"
@@ -998,7 +1034,7 @@ def test_ralph_even_burn_prefers_higher_remaining_when_resets_align(monkeypatch:
             "week": {"remaining": 47, "resets_at": 1000 + (6 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     # current_index points at codex; even-burn must still advance to claude.
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
@@ -1025,7 +1061,7 @@ def test_ralph_even_burn_handles_unknown_weekly_reset(monkeypatch: pytest.Monkey
             "week": {"remaining": 47, "resets_at": 1000 + (6 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     # 81% / 7d ~= 11.6%/day beats 47% / 6d ~= 7.8%/day.
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
@@ -1189,7 +1225,7 @@ def test_ralph_even_burn_prefers_ready_provider_over_blocked_higher_weekly_headr
             "week": {"remaining": 50, "resets_at": 1000 + (6 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
     assert selected["provider"] == "codex"
@@ -1296,7 +1332,10 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     os.utime(cache_dir / "copilot-refresh.lock", (1, 1))
     (cache_dir / "copilot-usage.json").write_text('{"provider":"copilot","monthly":{"remaining":2}}', encoding="utf-8")
     os.utime(cache_dir / "copilot-usage.json", (1, 1))
-    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "1", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["monthly"]["remaining"] == 2
+    # The on-disk snapshot is far past its TTL: it must NOT be served as current.
+    # With no wait budget the refresh cannot land in time, so we report that a
+    # refresh is in flight rather than display stale numbers.
+    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "1", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["reason"] == "refresh-pending"
 
     log = cache_dir / "llm-usage.log"
     log.write_text(
@@ -1391,3 +1430,58 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     usage.print_copilot_rows(ucfg, None)
     out = capsys.readouterr().out
     assert "Codex" in out and "Copilot" in out
+
+
+def test_usage_snapshot_and_decision_no_delegation_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_snapshot(provider: str, env=None):
+        calls["snapshot_provider"] = provider
+        return {"provider": provider, "available": True}
+
+    def fake_decision(provider, window, min_remaining, poll_interval, snapshot, env=None, *, model=None, allow_fallback=True):
+        calls["decision_provider"] = provider
+        calls["model"] = model
+        calls["allow_fallback"] = allow_fallback
+        return {"provider": provider, "usable": True, "reason": "usable"}
+
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", fake_snapshot)
+    monkeypatch.setattr(common, "usage_decision_for_provider", fake_decision)
+
+    snap, dec = common.usage_snapshot_and_decision("claude", None, "auto", "1", "60", model="sonnet", allow_fallback=False)
+    assert calls["snapshot_provider"] == "claude"
+    assert calls["decision_provider"] == "claude"
+    # No delegation: the pinned model and allow_fallback flow straight through.
+    assert calls["model"] == "sonnet"
+    assert calls["allow_fallback"] is False
+    assert dec["provider"] == "claude"
+    assert "capacity_provider" not in dec
+
+
+def test_usage_snapshot_and_decision_delegates_to_capacity_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_snapshot(provider: str, env=None):
+        calls["snapshot_provider"] = provider
+        return {"provider": provider, "available": True}
+
+    def fake_decision(provider, window, min_remaining, poll_interval, snapshot, env=None, *, model=None, allow_fallback=True):
+        calls["decision_provider"] = provider
+        calls["model"] = model
+        calls["allow_fallback"] = allow_fallback
+        return {"provider": provider, "usable": True, "reason": "usable", "windows": [{"name": "5h"}]}
+
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", fake_snapshot)
+    monkeypatch.setattr(common, "usage_decision_for_provider", fake_decision)
+
+    snap, dec = common.usage_snapshot_and_decision("opencode", "minimax", "auto", "1", "60", model="ignored", allow_fallback=False)
+    # Capacity is read from minimax...
+    assert calls["snapshot_provider"] == "minimax"
+    assert calls["decision_provider"] == "minimax"
+    # ...gated purely on minimax's aggregate windows (requesting model ignored).
+    assert calls["model"] is None
+    assert calls["allow_fallback"] is True
+    # ...but relabelled back to the provider whose CLI actually runs.
+    assert dec["provider"] == "opencode"
+    assert dec["capacity_provider"] == "minimax"
+    assert dec["windows"] == [{"name": "5h"}]

@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+from llm_tools.sleep_soak import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
