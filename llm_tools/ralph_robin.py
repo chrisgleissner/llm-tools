@@ -104,6 +104,12 @@ Scopes: auto, 5h, weekly, monthly, balance, budget, byok, ungated.
 class RalphConfig:
     providers_spec: str = "claude,codex,opencode"
     providers: list[str] = field(default_factory=list)
+    # Route mode. When ``routes`` is non-empty, ``ralph-robin`` rotates
+    # over RoutePolicy entries (parsed from the config) instead of
+    # provider names. The legacy ``providers`` field is then empty.
+    routes_spec: str = ""
+    routes: list[str] = field(default_factory=list)
+    route_policies: dict[str, toolconfig.RoutePolicy] = field(default_factory=dict)
     prompt_text: str = ""
     prompt_file: str = ""
     prompt_source: str = ""
@@ -326,6 +332,24 @@ def parse_providers(raw: str) -> list[str]:
     return providers
 
 
+def parse_routes_spec(raw: str) -> list[str]:
+    """Parse the ``--routes`` value into a list of route ids.
+
+    Returns an empty list for empty / off-style tokens; a non-empty
+    list preserves order and de-duplicates while keeping the first
+    occurrence.
+    """
+    raw = (raw or "").strip()
+    if not raw or raw.lower() in {"none", "off"}:
+        return []
+    out: list[str] = []
+    for part in raw.split(","):
+        rid = trim(part)
+        if rid and rid not in out:
+            out.append(rid)
+    return out
+
+
 # Tokens that disable the per-line prefix entirely (no fields, no brackets).
 PREFIX_OFF_TOKENS = {"none", "off"}
 
@@ -369,6 +393,9 @@ def parse_args(argv: list[str]) -> RalphConfig:
         if arg in ("-P", "--providers"):
             cfg.providers_spec = need_value("--providers requires a value")
             cfg.explicit.add("providers")
+        elif arg in ("--routes"):
+            cfg.routes_spec = need_value("--routes requires a value")
+            cfg.explicit.add("routes")
         elif arg in ("-p", "--prompt"):
             cfg.prompt_text = need_value("--prompt requires text")
             cfg.prompt_source = "inline"
@@ -471,6 +498,7 @@ def parse_args(argv: list[str]) -> RalphConfig:
 # Config keys (merged [defaults] + [ralph]) mapped to (RalphConfig attr, kind).
 _RALPH_CONFIG_FIELDS: dict[str, tuple[str, str]] = {
     "providers": ("providers_spec", "list"),
+    "routes": ("routes_spec", "list"),
     "scope": ("scope", "str"),
     "min_remaining": ("min_remaining", "str"),
     "poll_interval": ("poll_interval", "str"),
@@ -523,14 +551,38 @@ def resolve_policies(cfg: RalphConfig, conf: dict[str, Any]) -> None:
 
 def validate_args(cfg: RalphConfig) -> None:
     cfg.providers = parse_providers(cfg.providers_spec)
+    cfg.routes = parse_routes_spec(cfg.routes_spec)
     common.validate_prompt_args(cfg.prompt_text, cfg.prompt_file)
     # The scope must be valid for whichever provider's windows are actually read:
     # a provider with capacity_provider set is gated on that other provider's
     # scopes (e.g. opencode->minimax makes 5h/weekly valid for the opencode slot).
     conf = toolconfig.load_config()
-    for provider in cfg.providers:
-        capacity_provider = toolconfig.provider_policy(conf, provider).capacity_provider or provider
-        common.validate_provider_scope(capacity_provider, cfg.scope)
+    if cfg.routes:
+        from .routes import resolve_routes
+        routes = resolve_routes(conf)
+        cfg.route_policies = {r.route_id: r for r in routes}
+        if cfg.routes and not cfg.route_policies:
+            common.err(
+                f"--routes {cfg.routes_spec!r} references route ids that are not declared under [routes.<id>]"
+            )
+            raise SystemExit(2)
+        # The selected scope must be valid for the launch provider each
+        # route is bound to. Most routes default to "auto", which is
+        # always valid; only flag a hard mismatch.
+        for rid in cfg.routes:
+            route = cfg.route_policies.get(rid)
+            if route is None:
+                common.err(f"--routes references unknown route id: {rid!r}")
+                raise SystemExit(2)
+            try:
+                common.validate_provider_scope(route.provider, cfg.scope)
+            except SystemExit:
+                if cfg.scope != "auto":
+                    raise
+    else:
+        for provider in cfg.providers:
+            capacity_provider = toolconfig.provider_policy(conf, provider).capacity_provider or provider
+            common.validate_provider_scope(capacity_provider, cfg.scope)
     common.validate_gate_args(cfg.cwd, cfg.min_remaining, cfg.poll_interval, cfg.max_unavailable_wait, cfg.retry_delays)
     if not common.is_integer(cfg.max_iterations) or int(cfg.max_iterations) < 0:
         common.err("--max-iterations must be a non-negative integer")
@@ -706,32 +758,250 @@ def even_burn_candidate(decision: dict[str, Any]) -> bool:
 
 
 def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_index: int, skipped: set[str]) -> int | None:
-    ranked_indices = [
-        i
-        for i, decision in enumerate(decisions)
-        if even_burn_candidate(decision) and cfg.providers[i] not in skipped
-    ]
-    if len(ranked_indices) < 2:
+    # Build the rankable set from candidates whose decision carries a
+    # numeric daily-capacity score. An unrankable-but-usable route
+    # (opaque, ungated, balance-only) is intentionally excluded: it
+    # cannot anchor even-burn, but it does NOT collapse the ranking
+    # for the rest of the rotation. The previous implementation
+    # short-circuited this whole function to ``None`` whenever a
+    # single unrankable candidate existed, leaving every other
+    # rankable candidate with no even-burn decision at all — that
+    # was the rank-collapse bug fixed in the route model work.
+    rankable: list[int] = []
+    for i, decision in enumerate(decisions):
+        if cfg.providers[i] in skipped:
+            continue
+        if remaining_daily_capacity(decision) is None:
+            continue
+        if not even_burn_candidate(decision):
+            continue
+        rankable.append(i)
+    if len(rankable) < 2:
         return None
-    ready_indices = [i for i in ranked_indices if decisions[i].get("usable") is True]
-    candidate_indices = ready_indices if ready_indices else ranked_indices
-    if len(candidate_indices) < 2:
+    ready = [i for i in rankable if decisions[i].get("usable") is True]
+    # Need at least two *ready* rankable candidates to make an
+    # even-burn choice. With only one ready rankable candidate the
+    # caller falls through to the "current-usable" branch and stays
+    # on the ready provider (the original behaviour the test suite
+    # pins: a single ready rankable beats a blocked higher-headroom
+    # peer).
+    if len(ready) < 2:
         return None
     scored: list[tuple[float, int, int, int]] = []
     rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(cfg.providers), current_index))}
-    for i in candidate_indices:
+    for i in ready:
         score = remaining_daily_capacity(decisions[i])
         if score is None:
-            return None
-        # When several providers are ready, tie-break toward the one that is
-        # usable right now and closest in the configured rotation.
+            continue
         usable = 1 if decisions[i].get("usable") is True else 0
         scored.append((score, usable, -rotation_rank[i], i))
+    if not scored:
+        return None
     scored.sort(reverse=True)
-    return scored[0][3] if scored else None
+    return scored[0][3]
+
+
+# --- Route-mode selection -----------------------------------------------------
+
+
+def _route_decision_for_index(cfg: RalphConfig, route_id: str) -> dict[str, Any]:
+    """Build a single route's decision dict in the same shape
+    :func:`select_provider` consumes for providers.
+
+    The decision's ``provider`` field is the launch provider; the
+    route id is exposed via ``route``. ``windows`` mirrors the per-scope
+    list that the provider decision path produces so
+    :func:`remaining_daily_capacity` keeps working for any rankable
+    scopes.
+    """
+    from .routes import usage_snapshot_and_decision_for_route
+
+    route = cfg.route_policies.get(route_id)
+    if route is None:
+        return {
+            "route": route_id,
+            "provider": "",
+            "usable": False,
+            "reason": "unknown-route",
+            "wait_until": common.now_epoch() + max(1, int(cfg.poll_interval)),
+            "windows": [],
+        }
+    snapshot, decision = usage_snapshot_and_decision_for_route(
+        route,
+        cfg.scope,
+        cfg.min_remaining,
+        cfg.poll_interval,
+        allow_fallback=route.allow_fallback,
+    )
+    out = dict(decision)
+    out["route"] = route_id
+    out["selected_model"] = route.model or snapshot.get("selected_model")
+    out["route_snapshot"] = snapshot
+    return out
+
+
+def _route_remaining_daily_capacity(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
+    """Best-effort daily capacity score for a route decision.
+
+    Routes whose only scope is opaque / ungated / balance return
+    ``None`` so even-burn falls back to the rotation logic. Routes
+    that mix opaque with a rankable budget / reset-window scope use
+    the rankable score.
+    """
+    windows = decision.get("windows")
+    if not isinstance(windows, list):
+        return None
+    best: float | None = None
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        score = _scope_pace_remaining(window, env)
+        if score is None:
+            continue
+        if best is None or score > best:
+            best = score
+    return best
+
+
+def _even_burn_route_index(
+    decisions: list[dict[str, Any]],
+    route_ids: list[str],
+    current_index: int,
+    skipped: set[str],
+) -> int | None:
+    """Even-burn ranking over route decisions.
+
+    Mirrors :func:`even_burn_index`: only ready rankable routes compete,
+    so the existing test-suite guarantee that a single ready rankable
+    beats a blocked higher-headroom peer is preserved. An unrankable
+    ready route (opaque, ungated) is excluded from the rankable set
+    here too — it cannot anchor even-burn but it does NOT collapse
+    ranking for the rest of the rotation (the rank-collapse fix).
+    Returns the index of the best candidate, or ``None`` when fewer
+    than two ready rankable candidates exist.
+    """
+    rankable: list[int] = []
+    for i, rid in enumerate(route_ids):
+        if rid in skipped:
+            continue
+        if _route_remaining_daily_capacity(decisions[i]) is None:
+            continue
+        rankable.append(i)
+    if len(rankable) < 2:
+        return None
+    ready = [i for i in rankable if decisions[i].get("usable") is True]
+    if len(ready) < 2:
+        return None
+    rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(route_ids), current_index))}
+    scored: list[tuple[float, int, int, int]] = []
+    for i in ready:
+        score = _route_remaining_daily_capacity(decisions[i])
+        if score is None:
+            continue
+        usable = 1 if decisions[i].get("usable") is True else 0
+        scored.append((score, usable, -rotation_rank[i], i))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    return scored[0][3]
+
+
+def select_route(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skipped: set[str]) -> dict[str, Any]:
+    """Route-mode selection. Mirrors :func:`select_provider` but iterates
+    over configured routes.
+
+    The decision log is enriched with ``route`` and ``selected_model``
+    keys so downstream rendering and runtime-context injection know
+    what was actually chosen. Each route is resolved through
+    :func:`_route_decision_for_index` which routes opaque / delegate /
+    provider / provider_model / balance / budget / ungated capacity
+    policies through the same plumbing as provider mode.
+    """
+    route_ids = list(cfg.routes)
+    decisions: list[dict[str, Any]] = []
+    for rid in route_ids:
+        decision = _route_decision_for_index(cfg, rid)
+        decisions.append(decision)
+        common.log_event(logs, "route_decision", decision)
+    if cfg.even_burn:
+        balanced = _even_burn_route_index(decisions, route_ids, current_index, skipped)
+        if balanced is not None:
+            return {
+                "index": balanced,
+                "route": route_ids[balanced],
+                "provider": decisions[balanced].get("provider", ""),
+                "rotation_reason": "even-burn",
+                "all_rate_limited": False,
+                "decision": decisions[balanced],
+                "decisions": decisions,
+            }
+    # 1. Current route still usable.
+    if 0 <= current_index < len(route_ids) and decisions[current_index].get("usable") is True and route_ids[current_index] not in skipped:
+        return {
+            "index": current_index,
+            "route": route_ids[current_index],
+            "provider": decisions[current_index].get("provider", ""),
+            "rotation_reason": "current-usable",
+            "all_rate_limited": False,
+            "decision": decisions[current_index],
+            "decisions": decisions,
+        }
+    # 2. Advance in rotation order to the next usable route.
+    for i in range(1, len(route_ids)):
+        nxt = (current_index + i) % len(route_ids)
+        if decisions[nxt].get("usable") is True and route_ids[nxt] not in skipped:
+            return {
+                "index": nxt,
+                "route": route_ids[nxt],
+                "provider": decisions[nxt].get("provider", ""),
+                "rotation_reason": "advanced-to-usable",
+                "all_rate_limited": False,
+                "decision": decisions[nxt],
+                "decisions": decisions,
+            }
+    # 3. No usable route. Pick the soonest blocked-but-recoverable
+    #    route (waiting until its wait_until), or fall back to the
+    #    first non-skipped route as a last resort.
+    active = [(i, d) for i, d in enumerate(decisions) if route_ids[i] not in skipped]
+    blocked_reasons = {"rate-limited", "budget-exhausted", "insufficient-balance", "blocked", "missing-cli"}
+    best_index = -1
+    best_wait: int | None = None
+    for i, d in active:
+        wait_until = d.get("wait_until")
+        if d.get("reason") in blocked_reasons and isinstance(wait_until, int):
+            if best_wait is None or wait_until < best_wait:
+                best_wait = wait_until
+                best_index = i
+    if best_index == -1:
+        for i in range(len(route_ids)):
+            fallback = (current_index + i) % len(route_ids)
+            if route_ids[fallback] not in skipped:
+                best_index = fallback
+                break
+    if best_index == -1:
+        return {
+            "index": -1,
+            "route": "",
+            "provider": "",
+            "rotation_reason": "all-skipped",
+            "all_rate_limited": False,
+            "decision": {"usable": False, "reason": "all-skipped"},
+            "decisions": decisions,
+        }
+    return {
+        "index": best_index,
+        "route": route_ids[best_index],
+        "provider": decisions[best_index].get("provider", ""),
+        "rotation_reason": "all-unusable",
+        "all_rate_limited": bool(best_wait is not None),
+        "decision": decisions[best_index],
+        "decisions": decisions,
+    }
 
 
 def select_provider(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skipped: set[str]) -> dict[str, Any]:
+    if cfg.routes:
+        return select_route(cfg, logs, current_index, skipped)
     decisions: list[dict[str, Any]] = []
     for provider in cfg.providers:
         policy = cfg.policies.get(provider)

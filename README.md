@@ -150,6 +150,7 @@ A scope is one capacity measure exposed by one provider. For example, Codex and 
 | `balance`      | no      | Kilo credit balance, GBP/USD/credits | Kilo, OpenCode                  |
 | `budget`       | yes     | Monthly spend budget                 | Kilo, OpenCode                  |
 | `ungated`      | n/a     | BYOK, local, ungated mode            | Kilo, OpenCode                  |
+| `opaque`       | n/a     | Prepaid gateway subscription         | configured via routes           |
 
 `llm-usage` shows one row per scope. `llm-scheduler` and `ralph-robin` can gate on a specific scope with `--scope`.
 
@@ -163,6 +164,61 @@ Per-provider scope allow-lists:
 | GitHub Copilot | `auto`, `monthly`                              |
 | Kilo Code      | `auto`, `balance`, `budget`, `byok`, `ungated` |
 | OpenCode       | `auto`, `balance`, `budget`, `byok`, `ungated` |
+
+`opaque` is for capacity that exists but cannot be measured before launch — most commonly a prepaid subscription on a gateway. It is selected by an explicit route (`[routes.<id>]` with `capacity.policy = "opaque"`); see [Route Mode](#route-mode) below. The canonical scope name is `subscription` so the table reads naturally when the cost is a fixed periodic charge.
+
+## Route Mode
+
+The default rotation is over **providers** (`[providers.*]`, `--providers`). When the same provider can serve several underlying models with different capacity and cost semantics, you also have access to a **route** rotation (`[ralph].routes`, `[routes.<route_id>]`). A route binds a launch provider, a model, a capacity policy, and a cost policy into a single schedulable unit.
+
+A route is shaped like this:
+
+```toml
+[ralph]
+# When this list is present, ralph-robin rotates over routes in this
+# order. In its absence the legacy provider rotation is used.
+routes = ["kilo-minimax-m3"]
+
+[routes.kilo-minimax-m3]
+provider     = "kilo"
+model        = "minimax-m3"
+allow_fallback = false
+
+[routes.kilo-minimax-m3.capacity]
+# Capacity policies:
+#   provider        - read the provider's own snapshot (default)
+#   provider_model  - same, but model-aware (claude / codex have model-specific buckets)
+#   delegate        - launch this route's provider, read capacity from another provider
+#   opaque          - capacity exists but cannot be measured before launch
+#   ungated         - usable when the launch CLI is present
+#   balance         - read the provider's balance scope
+#   budget          - read the provider's budget scope
+policy = "opaque"
+scope  = "subscription"     # display name; defaults to "subscription"
+label  = "MiniMax M3 via Kilo"
+
+[routes.kilo-minimax-m3.cost]
+# Cost policies (display only; never affect readiness):
+#   included, fixed_subscription, metered_balance, metered_budget,
+#   free, external, unknown
+policy   = "fixed_subscription"
+amount   = 20
+currency = "USD"
+period   = "monthly"
+```
+
+`llm-usage` then renders:
+
+```
+Provider   Model       Ready   Scope          Remaining         Guidance              Resets in
+Kilo       MiniMax M3  yes     subscription   prepaid USD20/mo   ✓ usable              -
+```
+
+`opaque` rows never display a percentage, balance, or reset time. `prepaid USD20/mo` is the cost text; routes without a `fixed_subscription` cost render as `not metered`. There is never a progress bar on these rows.
+
+`delegate` is the route-level successor to the legacy `providers.<x>.capacity_provider` setting. The provider-level setting still works (it is mapped to an implicit route with `capacity.policy = "delegate"`), so existing configs do not need to migrate.
+
+The orchestrator's runtime context and prompt injection include the selected `route_id` and launch provider, so a handoff-style prompt does not stale-route to a different provider.
 
 ## Configuration File
 
@@ -665,6 +721,39 @@ With `--scope auto`, Kilo prefers:
 2. `balance`, when configured
 3. `ungated`
 
+#### Gateway-backed models via routes (Kilo + MiniMax M3)
+
+When Kilo sells a model from another provider (e.g. `minimax-m3` purchased through the Kilo gateway), the entitlement lives behind the Kilo gateway: the direct `mmx quota show` reads the user's *direct* MiniMax account, not the Kilo-purchased subscription, so it is the wrong truth source. Model the route as `opaque`:
+
+```toml
+[ralph]
+routes = ["kilo-minimax-m3"]
+
+[routes.kilo-minimax-m3]
+provider = "kilo"
+model    = "minimax-m3"
+[routes.kilo-minimax-m3.capacity]
+policy = "opaque"
+scope  = "subscription"
+label  = "MiniMax M3 via Kilo"
+[routes.kilo-minimax-m3.cost]
+policy   = "fixed_subscription"
+amount   = 20
+currency = "USD"
+period   = "monthly"
+```
+
+`llm-usage` then renders:
+
+```
+Provider   Model       Ready   Scope          Remaining         Guidance   Resets in
+Kilo       MiniMax M3  yes     subscription   prepaid USD20/mo   ✓ usable   -
+```
+
+The route is usable whenever the Kilo CLI is on `PATH` and no local runtime block is recorded. If a Kilo run returns a real retryable error (e.g. `HTTP 429`, `quota exceeded`), the scheduler records a local block under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks/<id>.json` so Ralph stops selecting the route until the retry window passes. A successful run clears the block.
+
+The legacy `providers.<x>.capacity_provider = "<y>"` setting is for the *truthful* delegation case (the configured CLI runs another provider's model and that provider's windows truthfully describe the capacity). Use `routes.<id>.capacity.policy = "opaque"` when no such truth source exists.
+
 ### MiniMax
 
 MiniMax quota is read from the local `mmx` CLI first. Environment variables are available as a fallback for tests and controlled environments.
@@ -815,7 +904,11 @@ Set this variable to skip the settings write:
 LLM_USAGE_COPILOT_NO_SETTINGS_WRITE=1
 ```
 
-Copilot capture is cached with `LLM_USAGE_COPILOT_CACHE_TTL`.
+Copilot capture is cached with `LLM_USAGE_COPILOT_CACHE_TTL`. The PTY footer
+capture is slow and occasionally flaky, so when a refresh cannot complete within
+its wait budget, `llm-usage` shows the most recent monthly figure ("usage on
+start") and refreshes it in the background for the next run, rather than dropping
+to `unavailable`.
 
 Default:
 

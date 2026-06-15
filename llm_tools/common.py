@@ -1289,6 +1289,29 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
             return None
         return data if isinstance(data, dict) else None
 
+    def last_known_good() -> dict[str, Any] | None:
+        """A cached snapshot that carries real usage numbers, regardless of age.
+
+        Copilot's only data source is a slow, occasionally-flaky PTY capture, so
+        a refresh can miss its wait budget (or be blocked by a dead lock). When
+        that happens we still want to show the most recent monthly figure on
+        start rather than drop to ``unavailable`` -- the spawned background
+        refresh keeps the number current for the next run. Snapshots that merely
+        record a failure (``available: false``) are not "good" and are skipped.
+        """
+        if not cache.is_file() or cache.stat().st_size <= 0:
+            return None
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict) or data.get("available") is False:
+            return None
+        monthly = data.get("monthly")
+        has_monthly = isinstance(monthly, dict) and monthly.get("remaining") is not None
+        has_credits = data.get("ai_credits") is not None
+        return data if (has_monthly or has_credits) else None
+
     bypass = (
         "LLM_USAGE_COPILOT_CAPTURE_TEXT" in env
         or bool(env.get("LLM_USAGE_COPILOT_CAPTURE_CMD"))
@@ -1309,7 +1332,7 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
         refresh_started = True
     except FileExistsError:
         try:
-            stale_after = int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 30
+            stale_after = int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 5
             if int(time.time()) - int(lock.stat().st_mtime) > stale_after:
                 lock.rmdir()
                 lock.mkdir()
@@ -1359,6 +1382,9 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
         except OSError:
             pass
         return live
+    good = last_known_good()
+    if good is not None:
+        return good
     return {"provider": "copilot", "source": "copilot cli", "available": False, "reason": "refresh-pending"}
 
 

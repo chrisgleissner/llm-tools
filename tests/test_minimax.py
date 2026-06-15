@@ -456,6 +456,37 @@ def test_usage_table_renders_minimax_unavailable(env: dict[str, str], capsys, mo
     assert "unavailable" in out
 
 
+def test_usage_table_collapses_inconclusive_to_unavailable(capsys) -> None:
+    """An ``inconclusive-usage`` reason (e.g. MiniMax with no token plan) is
+    shown as the short ``unavailable`` in the table, not the internal code.
+    The internal reason still flows through for scheduler gating."""
+    cfg = usage.Config()
+    cfg.color_enabled = False
+    cfg.no_header = True
+    minimax_json = {
+        "provider": PROVIDER_MINIMAX,
+        "available": False,
+        "reason": "inconclusive-usage",
+        "source": "mmx cli",
+        "scopes": [],
+    }
+    usage.print_minimax_rows(cfg, minimax_json)
+    out = capsys.readouterr().out
+    assert "MiniMax" in out
+    assert "unavailable" in out
+    assert "inconclusive-usage" not in out
+    # The exhausted-quota marker must not appear for an unmeasured provider.
+    assert "× empty" not in out
+
+
+def test_display_remaining_maps_reason_codes_but_keeps_real_values() -> None:
+    for reason in ("inconclusive-usage", "missing-cli", "refresh-pending", "reader-error"):
+        assert usage.display_remaining(reason) == "unavailable"
+    # Percentages, balances, and unmetered states pass through untouched.
+    for value in ("82%", "spent $19.1", "£12.40", "byok", "ungated", "-"):
+        assert usage.display_remaining(value) == value
+
+
 # --- JSON contract ------------------------------------------------------------
 
 

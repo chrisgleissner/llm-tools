@@ -28,6 +28,114 @@ GUIDANCE_COL_WIDTH = 19
 RESET_COL_WIDTH = 10
 GUIDANCE_TOLERANCE_PP = 5.0
 
+# Internal reason codes that mean "we could not measure usage right now". They
+# are useful for the scheduler/capacity gating (see capacity.is_undetermined_reason)
+# but read as jargon and overflow the Remaining column in the table, so the
+# display layer collapses them to a single short word. Meaningful states such as
+# balances, byok/local/ungated, or descriptive blocking reasons (rate-limited,
+# budget-exhausted, insufficient-balance) are intentionally left untouched.
+UNAVAILABLE_DISPLAY_REASONS = frozenset(
+    {
+        "inconclusive-usage",
+        "missing-cli",
+        "not-authenticated",
+        "refresh-pending",
+        "reader-error",
+        "capture-error",
+        "format-changed",
+        "trust-prompt",
+        "timeout",
+        "no-local-data",
+        "no local data",
+        "unknown",
+    }
+)
+
+# Opaque subscription rows display their fixed-subscription cost in
+# the Remaining column instead of a percent / progress bar. The label
+# is "prepaid $20/mo" for the most common prepaid shape; more elaborate
+# cost shapes (e.g. multiple periods / currencies) are accepted but
+# fall back to a generic "prepaid" prefix.
+_FIXED_SUBSCRIPTION_PERIOD_LABELS = {
+    "monthly": "mo",
+    "yearly": "yr",
+    "annual": "yr",
+    "weekly": "wk",
+    "daily": "day",
+}
+
+
+def format_fixed_subscription(cost: dict[str, Any] | None) -> str:
+    """Render the Remaining-cell text for a ``fixed_subscription`` route."""
+    if not isinstance(cost, dict):
+        return "prepaid"
+    amount = cost.get("amount")
+    currency = cost.get("currency")
+    period = str(cost.get("period") or "").strip().lower()
+    suffix = _FIXED_SUBSCRIPTION_PERIOD_LABELS.get(period, period or "mo")
+
+    def _fmt_amount(value: Any) -> str:
+        if isinstance(value, bool):
+            return str(value)
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            # Show integers without a trailing .0 so "$20/mo" reads
+            # naturally; keep precision for genuinely fractional values.
+            if value.is_integer():
+                return str(int(value))
+            return f"{value:g}"
+        return str(value)
+
+    text = _fmt_amount(amount)
+    if amount is None:
+        body = "prepaid"
+    elif currency:
+        body = f"prepaid {currency}{text}"
+    else:
+        body = f"prepaid {text}"
+    if not period:
+        return body
+    return f"{body}/{suffix}"
+
+
+def format_opaque_remaining(scope: dict[str, Any] | None) -> str:
+    """Render the Remaining-cell text for an opaque route.
+
+    * Fixed-subscription cost -> "prepaid $20/mo".
+    * Anything else            -> "not metered".
+
+    The opaque row never displays a percentage, balance, or progress
+    bar; the rest of the renderer must consult ``row.kind == "opaque"``
+    and skip those branches.
+    """
+    if scope is None:
+        return "not metered"
+    cost = scope.get("extras", {}).get("cost_policy") if isinstance(scope.get("extras"), dict) else None
+    if cost == "fixed_subscription":
+        # The full cost object is attached on the snapshot, not the
+        # scope extras. Renderers pass it explicitly via the ``row``
+        # extras; fall back to scope currency when only the currency
+        # is known.
+        return format_fixed_subscription(
+            {
+                "amount": scope.get("extras", {}).get("cost_amount") if isinstance(scope.get("extras"), dict) else None,
+                "currency": scope.get("extras", {}).get("cost_currency") if isinstance(scope.get("extras"), dict) else None,
+                "period": scope.get("extras", {}).get("cost_period") if isinstance(scope.get("extras"), dict) else None,
+            }
+        )
+    return "not metered"
+
+
+def display_remaining(value: str) -> str:
+    """Map an internal "couldn't measure" reason code to ``unavailable``.
+
+    Percentages, balances, and unmetered states pass through unchanged.
+    """
+    if value in UNAVAILABLE_DISPLAY_REASONS:
+        return "unavailable"
+    return value
+
 
 USAGE = """Usage: llm-usage
   llm-usage [options]
@@ -276,8 +384,10 @@ def render_remaining(value: str, cfg: Config) -> str:
     """Render the remaining percentage first, then a compact bar.
 
     Example: `82% ████████░░`. Non-numeric values ("-", "unavailable",
-    "unknown") are passed through unchanged.
+    "unknown") are passed through unchanged. Internal "couldn't measure"
+    reason codes are collapsed to ``unavailable`` so the column stays short.
     """
+    value = display_remaining(value)
     if value in {"-", "unavailable", "unknown", ""} or not value.endswith("%"):
         return value
     try:
@@ -344,7 +454,11 @@ def classify_budget_guidance(window: str, remaining: Any, reset: Any, env: dict[
 
 def classify_session_guidance(provider: str, window: str, remaining: Any, reset: Any, env: dict[str, str] | None = None) -> GuidanceInfo:
     rem = common.num(remaining)
-    if rem is None or rem <= 0:
+    if rem is None:
+        # No measurement at all (e.g. an unavailable provider) is not the same
+        # as an exhausted window; "× empty" would wrongly imply quota was spent.
+        return GuidanceInfo("· no rate data", "unknown")
+    if rem <= 0:
         return GuidanceInfo("× empty", "empty")
     epoch = common.parse_epoch(reset)
     if epoch is None:
@@ -441,6 +555,98 @@ def visible_len(text: str) -> int:
 def cell(width: int, text: str, gap: bool = False) -> str:
     pad = max(0, width - visible_len(text))
     return text + (" " * pad) + (" " * TABLE_GAP_WIDTH if gap else "")
+
+
+def cell_clipped(width: int, text: str, gap: bool = False) -> str:
+    """Render a cell that NEVER overflows its declared width.
+
+    Overflowing text is clipped with a trailing "…" so the next column
+    starts on the expected boundary. Used after dynamic width sizing
+    so a long Provider (e.g. ``route:kilo-minimax-m3``) can no longer
+    bleed into the Model column when the table is forced into a
+    narrow terminal.
+    """
+    text = text or ""
+    vlen = visible_len(text)
+    if vlen <= width:
+        return text + (" " * (width - vlen)) + (" " * TABLE_GAP_WIDTH if gap else "")
+    if width <= 1:
+        return "…" * width + (" " * TABLE_GAP_WIDTH if gap else "")
+    # Keep the visible head of the text and replace the tail with "…".
+    chars: list[str] = []
+    used = 0
+    for ch in text:
+        w = 2 if unicodedata_width_wide(ch) else 1
+        if used + w > width - 1:
+            break
+        chars.append(ch)
+        used += w
+    chars.append("…")
+    return "".join(chars) + (" " * (width - visible_len("".join(chars)))) + (" " * TABLE_GAP_WIDTH if gap else "")
+
+
+def unicodedata_width_wide(ch: str) -> bool:
+    import unicodedata
+    return unicodedata.east_asian_width(ch) in {"F", "W"}
+
+
+def fit_columns(
+    base_cols: list[tuple[str, int]],
+    rows_text: list[dict[str, str]],
+    terminal_width: int,
+    has_source: bool,
+) -> list[tuple[str, int]]:
+    """Widen each column to fit the longest cell (or its label), then
+    scale the non-essential columns down when the table would overflow
+    the terminal. Order: widen first (no clipping), then trim the
+    columns whose content is least load-bearing until the table fits.
+
+    The trim floor for each column is the *longest cell seen so far*,
+    not the label. That keeps things like ``weekly`` or
+    ``subscription`` readable as long as the data is present, and
+    only clips the trailing chars from longer cells (e.g. a long
+    Guidance sentence) when the table is forced into a narrow
+    terminal.
+    """
+    if not base_cols:
+        return base_cols
+    labels = {label: label for label, _ in base_cols}
+    widths = {label: max(width, visible_len(label)) for label, width in base_cols}
+    # Track the natural cell width so trim floors never drop below it.
+    cell_widths: dict[str, int] = {label: widths[label] for label in widths}
+    for row in rows_text:
+        for label, current in cell_widths.items():
+            value = row.get(label, "")
+            natural = visible_len(value)
+            cell_widths[label] = max(current, natural)
+            if natural > widths[label]:
+                widths[label] = natural
+    if terminal_width > 0:
+        n = len(base_cols) + (1 if has_source else 0)
+        reserved = n * TABLE_GAP_WIDTH
+        total = sum(widths.values()) + reserved
+        if total > terminal_width:
+            overflow = total - terminal_width
+            # Trim columns in priority order: Remaining Time first, then
+            # Guidance, Resets in, Model, Scope. Never trim Provider /
+            # Ready / Remaining below their natural content width. Scope
+            # is the last to be trimmed because real cells are short
+            # ("5h" / "weekly" / "subscription") and we do not want a
+            # well-known window name to be clipped.
+            trim_order = ["Remaining Time", "Guidance", "Resets in", "Model", "Scope"]
+            for label in trim_order:
+                if overflow <= 0:
+                    break
+                if label not in widths:
+                    continue
+                floor = max(visible_len(labels.get(label, label)), cell_widths.get(label, 0))
+                can_give = widths[label] - floor
+                if can_give <= 0:
+                    continue
+                give = min(can_give, overflow)
+                widths[label] -= give
+                overflow -= give
+    return [(label, widths[label]) for label, _ in base_cols]
 
 
 def rule(width: int, gap: bool = False, char: str = "-") -> str:
@@ -558,13 +764,31 @@ def print_value_row(cfg: Config, provider: str, window: str, remaining: str, rem
 
 
 def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: str, display_model: str = "") -> dict[str, str]:
+    # Opaque rows carry their own short label ("✓ usable" / "! retry
+    # in Xm") so they do not flow through the standard guidance
+    # pipeline (which would emit "no rate data" for a row with no
+    # remaining percent / reset). The "ready" state is encoded on
+    # the row: ``remaining = 1.0`` means ready, ``None`` means
+    # blocked, with the retry hint derived from ``reset``.
+    if row.kind == "opaque":
+        if row.remaining is not None:
+            guidance = "✓ usable"
+        else:
+            wait_until = row.reset if isinstance(row.reset, int) else None
+            if isinstance(wait_until, int):
+                minutes = max(1, (wait_until - common.now_epoch()) // 60)
+                guidance = f"! retry in {int(minutes)}m"
+            else:
+                guidance = "! blocked"
+    else:
+        guidance = render_guidance(row.provider, row.scope, row.remaining, row.reset, cfg)
     values = {
         "Provider": display_provider,
         "Model": display_model,
         "Ready": ready_text,
         "Scope": row.scope,
         "Remaining": render_remaining(row.left_text, cfg),
-        "Guidance": render_guidance(row.provider, row.scope, row.remaining, row.reset, cfg),
+        "Guidance": guidance,
         "Remaining Time": row.remaining_time,
         "Resets in": format_reset(row.reset, cfg),
     }
@@ -573,28 +797,40 @@ def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: st
 
 def print_usage_rows(cfg: Config, rows: list[UsageRow]) -> None:
     show_model = any(row.model for row in rows)
-    cols = table_columns(cfg, show_model)
-    last = len(cols) - 1
+    base_cols = table_columns(cfg, show_model)
+    # First pass: build the display values so the column widths can be
+    # computed against the actual cell text. Doing this in a separate
+    # pass keeps a long Provider (e.g. ``route:kilo-minimax-m3``) from
+    # bleeding into the Model column when the terminal is narrow.
     previous_provider = ""
     previous_model = ""
+    rendered: list[tuple[UsageRow, dict[str, str], bool]] = []
+    rows_text: list[dict[str, str]] = []
     for row in rows:
         first_of_provider = row.provider != previous_provider
-        if previous_provider and first_of_provider:
-            print()
-        display_provider = row.provider if first_of_provider else ""
-        ready_text = render_ready(1 if provider_ready(rows, row.provider) else 0, cfg) if display_provider else ""
         if first_of_provider:
             previous_model = ""
+        display_provider = row.provider if first_of_provider else ""
+        ready_text = render_ready(1 if provider_ready(rows, row.provider) else 0, cfg) if display_provider else ""
         # Show the model label only on the first row of each model sub-block so
         # the column stays uncluttered when a model spans several scope rows.
         display_model = row.model if (row.model and row.model != previous_model) else ""
         previous_provider = row.provider
         previous_model = row.model
         values = row_values(cfg, row, display_provider, ready_text, display_model)
+        rendered.append((row, values, first_of_provider))
+        rows_text.append(values)
+    cols = fit_columns(base_cols, rows_text, cfg.terminal_width, has_source=cfg.show_source)
+    last = len(cols) - 1
+    emitted_blank = True
+    for row, values, first_of_provider in rendered:
+        if first_of_provider and not emitted_blank:
+            print()
+        emitted_blank = False
         parts = []
         for idx, (label, width) in enumerate(cols):
             gap = idx != last or cfg.show_source
-            parts.append(cell(width, values.get(label, ""), gap))
+            parts.append(cell_clipped(width, values.get(label, ""), gap))
         if cfg.show_source:
             parts.append(row.source or "-")
         print("".join(parts))
@@ -1234,6 +1470,20 @@ def _emit_json(cfg: Config, provider_data: dict[str, Any]) -> None:
         "opencode": _opencode_to_json(provider_data["opencode"]),
         "minimax": _minimax_to_json(provider_data["minimax"]),
     }
+    # Route mode is opt-in: the ``routes`` key only appears when at
+    # least one route is configured. Existing JSON consumers keep
+    # working unchanged when the route table is empty. A misconfigured
+    # route table is fatal: surface the config error to the user
+    # rather than silently dropping the routes section.
+    try:
+        routes = route_decision_summary()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        common.err(f"routes: failed to render configured routes: {exc}")
+        routes = []
+    if routes:
+        obj["routes"] = routes
     print(json.dumps(obj, separators=(",", ":")))
 
 
@@ -1244,8 +1494,141 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
     rows.extend(kilo_rows(cfg, _kilo_to_json(provider_data["kilo"])))
     rows.extend(minimax_rows(cfg, _minimax_to_json(provider_data["minimax"])))
     rows.extend(opencode_rows(cfg, _opencode_to_json(provider_data["opencode"])))
+    # Route rows are appended in their declared config order so the
+    # caller controls grouping. They sit beneath the per-provider
+    # aggregate rows; an empty / unconfigured route table is a
+    # no-op. A misconfigured route table is fatal: the config
+    # loader surfaces the parse error at startup and we want the
+    # same hard fail in the table renderer.
+    try:
+        rows.extend(route_rows(cfg))
+    except FileNotFoundError:
+        pass
     show_model = any(row.model for row in rows)
     return rows, show_model
+
+
+def route_rows(cfg: Config) -> list[UsageRow]:
+    """Render configured routes (from ``[routes.<id>]``) as table rows.
+
+    Returns an empty list when no routes are configured or when the
+    config file is missing. Each row uses the route id as the
+    ``Provider`` column value so users can distinguish multiple
+    routes that share a launch provider (e.g. two Kilo routes with
+    different models).
+    """
+    from . import config as toolconfig
+    from .routes import usage_snapshot_and_decision_for_route
+
+    try:
+        conf = toolconfig.load_config()
+    except (OSError, FileNotFoundError):
+        return []
+    routes = toolconfig.parse_routes(conf)
+    if not routes:
+        return []
+    out: list[UsageRow] = []
+    for route_id, route in routes.items():
+        try:
+            snapshot, decision = usage_snapshot_and_decision_for_route(
+                route, "auto", "1", "60"
+            )
+        except Exception:
+            continue
+        scope = (snapshot.get("scopes") or [{}])[0] if isinstance(snapshot, dict) else {}
+        ready = bool(decision.get("usable"))
+        cost_obj = snapshot.get("cost") or {}
+        cost_policy = cost_obj.get("policy") if isinstance(cost_obj, dict) else None
+        kind = str(scope.get("kind") or "")
+        if kind == "opaque" and cost_policy == "fixed_subscription":
+            left_text = format_fixed_subscription(cost_obj if isinstance(cost_obj, dict) else None)
+        elif kind == "opaque":
+            left_text = "not metered"
+        elif ready:
+            rem = scope.get("remaining_percent")
+            if isinstance(rem, (int, float)):
+                left_text = row_left_text(float(rem))
+            else:
+                left_text = "usable"
+        else:
+            left_text = display_remaining(str(decision.get("reason") or "blocked"))
+        # Guidance text. Opaque rows show ✓ usable; blocked opaque rows
+        # show the retry-after hint; everything else falls back to the
+        # standard guidance.
+        if kind == "opaque" and ready:
+            guidance_text = "✓ usable"
+        elif kind == "opaque" and not ready:
+            wait_until = decision.get("wait_until")
+            if isinstance(wait_until, int):
+                minutes = max(1, (wait_until - common.now_epoch()) // 60)
+                guidance_text = f"! retry in {int(minutes)}m"
+            else:
+                guidance_text = "! blocked"
+        else:
+            guidance_text = render_guidance(
+                route.provider,
+                str(scope.get("name") or ""),
+                scope.get("remaining_percent"),
+                scope.get("reset_epoch"),
+                cfg,
+            )
+        extras = scope.get("extras") if isinstance(scope, dict) else None
+        model_label = ""
+        if isinstance(extras, dict) and extras.get("model"):
+            model_label = str(extras.get("model"))
+        elif route.model:
+            model_label = route.model
+        out.append(
+            UsageRow(
+                provider=f"route:{route_id}",
+                scope=str(scope.get("name") or route.capacity.scope or "subscription"),
+                remaining=1.0 if ready else None,
+                left_text=left_text,
+                reset=scope.get("reset_epoch") if isinstance(scope, dict) else None,
+                source=str(snapshot.get("source") or "config:route"),
+                remaining_time="-",
+                model=model_label,
+                amount=(cost_obj.get("amount") if isinstance(cost_obj, dict) else None),
+                currency=(cost_obj.get("currency") if isinstance(cost_obj, dict) else None),
+                kind=kind,
+                label=str(scope.get("label") or "") if isinstance(scope, dict) else "",
+            )
+        )
+    return out
+
+
+def route_decision_summary() -> list[dict[str, Any]]:
+    """Project the current route config into a JSON-friendly list.
+
+    Each entry contains ``route``, ``provider``, ``selected_model``,
+    ``available``, ``reason``, ``source``, ``scopes``, and ``cost``.
+    Returns an empty list when no routes are configured.
+    """
+    from . import config as toolconfig
+    from .routes import route_to_json, usage_snapshot_and_decision_for_route
+
+    # A bad config (e.g. unknown capacity policy) must be fatal: the
+    # config loader already calls ``_fail`` which raises SystemExit(2)
+    # with a descriptive message. We deliberately re-raise it so the
+    # bad config shows up in the user's terminal, not in a silently
+    # dropped routes section.
+    try:
+        conf = toolconfig.load_config()
+    except (OSError, FileNotFoundError):
+        return []
+    routes = toolconfig.parse_routes(conf)
+    if not routes:
+        return []
+    out: list[dict[str, Any]] = []
+    for route_id, route in routes.items():
+        try:
+            snapshot, _decision = usage_snapshot_and_decision_for_route(
+                route, "auto", "1", "60"
+            )
+        except Exception:
+            continue
+        out.append(route_to_json(snapshot))
+    return out
 
 
 def _capture(fn: Any) -> list[str]:

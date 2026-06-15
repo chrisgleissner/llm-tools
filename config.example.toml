@@ -82,6 +82,61 @@
 
 
 # ---------------------------------------------------------------------------
+# Route mode (optional).
+#
+# A *route* is a schedulable launch path: a CLI provider, a model, a
+# capacity policy, and a cost policy. The default rotation is over
+# providers; this block opts ralph-robin into rotating over route ids
+# instead. In the absence of [ralph].routes the legacy provider
+# rotation is used, so existing configs do not need to migrate.
+# ---------------------------------------------------------------------------
+
+[ralph]
+# Order ralph-robin tries routes when --routes isn't given.
+#routes        = ["kilo-minimax-m3"]
+#providers     = ["claude", "codex", "kilo"]
+
+# A route is shaped like:
+#
+#   [routes.<route_id>]
+#   provider = "<launch cli>"          # required
+#   model    = "<model pin>"          # optional
+#   allow_fallback = false
+#
+#   [routes.<route_id>.capacity]
+#   policy  = "opaque"                # provider | provider_model | delegate
+#                                     # | opaque | ungated | balance | budget
+#   scope   = "subscription"          # displayed scope name
+#   label   = "MiniMax M3 via Kilo"   # displayed label
+#   # provider = "<delegate target>"  # required when policy = "delegate"
+#
+#   [routes.<route_id>.cost]
+#   policy   = "fixed_subscription"   # display only — never affects readiness
+#   amount   = 20
+#   currency = "USD"
+#   period   = "monthly"
+#
+# Motivating example: Kilo sells MiniMax M3 as a prepaid $20/mo
+# subscription. The direct `mmx quota show` reads the user's *direct*
+# MiniMax account, not the Kilo-purchased subscription, so it is the
+# wrong truth source. Model the route as `opaque` so the table shows
+# `prepaid $20/mo` and ralph does not rank on a missing window.
+#
+#   [routes.kilo-minimax-m3]
+#   provider = "kilo"
+#   model    = "minimax-m3"
+#   [routes.kilo-minimax-m3.capacity]
+#   policy = "opaque"
+#   scope  = "subscription"
+#   label  = "MiniMax M3 via Kilo"
+#   [routes.kilo-minimax-m3.cost]
+#   policy   = "fixed_subscription"
+#   amount   = 20
+#   currency = "USD"
+#   period   = "monthly"
+
+
+# ---------------------------------------------------------------------------
 # ralph-robin-only settings. Override [defaults] above.
 # ---------------------------------------------------------------------------
 

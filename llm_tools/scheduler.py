@@ -100,6 +100,14 @@ class SchedulerConfig:
     # ``provider``'s own (e.g. opencode running the minimax model). The
     # ``provider`` CLI is still the one launched.
     capacity_provider: str = ""
+    # Optional inherited route id (set by ``ralph-robin`` when a route
+    # is selected). When present, the scheduler uses
+    # ``llm_tools.routes.usage_snapshot_and_decision_for_route`` to gate
+    # on the route's capacity / cost policy instead of the legacy
+    # provider-only decision. The launch CLI is still resolved from
+    # the route's ``provider`` and the model pin from ``route.model``.
+    # Never set by the public CLI; set internally by ralph.
+    route_id: str = ""
     scope: str = "auto"
     min_remaining: str = "1"
     poll_interval: str = "60"
@@ -621,6 +629,43 @@ def sleep_until(target: int) -> None:
         time.sleep(seconds)
 
 
+def _route_or_provider_decision(cfg: SchedulerConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Snapshot + decision for ``cfg``, honouring an inherited route id.
+
+    When ``cfg.route_id`` is set, the scheduler uses the route-level
+    decision helper so an opaque / delegate / fixed-subscription
+    route can be gated on its real capacity policy. Otherwise the
+    legacy provider decision path is used (no behaviour change for
+    existing callers).
+    """
+    if cfg.route_id:
+        from .routes import usage_snapshot_and_decision_for_route
+
+        try:
+            conf = toolconfig.load_config()
+        except (OSError, SystemExit):
+            conf = {}
+        route = toolconfig.route_policy(conf, cfg.route_id)
+        if route is not None:
+            return usage_snapshot_and_decision_for_route(
+                route,
+                cfg.scope,
+                cfg.min_remaining,
+                cfg.poll_interval,
+                model=cfg.model or None,
+                allow_fallback=cfg.allow_fallback,
+            )
+    return common.usage_snapshot_and_decision(
+        cfg.provider,
+        cfg.capacity_provider or None,
+        cfg.scope,
+        cfg.min_remaining,
+        cfg.poll_interval,
+        model=cfg.model or None,
+        allow_fallback=cfg.allow_fallback,
+    )
+
+
 def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
     undetermined_since: int | None = None
     not_before = cfg.not_before_epoch if cfg.not_before_epoch is not None else common.now_epoch()
@@ -639,15 +684,7 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
             if cfg.dry_run:
                 return
             sleep_until(not_before)
-        snapshot, decision = common.usage_snapshot_and_decision(
-            cfg.provider,
-            cfg.capacity_provider or None,
-            cfg.scope,
-            cfg.min_remaining,
-            cfg.poll_interval,
-            model=cfg.model or None,
-            allow_fallback=cfg.allow_fallback,
-        )
+        snapshot, decision = _route_or_provider_decision(cfg)
         common.log_event(logs, "usage_snapshot", snapshot)
         common.log_event(logs, "usage_decision", decision)
         reason = str(decision.get("reason"))
@@ -1136,7 +1173,88 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     if status == common.AUTONOMY_ABORT_STATUS:
         common.log_event(logs, "autonomy_abort", {"attempt": attempt, "output": output})
         return common.AUTONOMY_ABORT_STATUS
-    return 1 if common.output_is_retryable(status, output, cfg.attached, trust_clean_exit=cfg.ralph_robin_active) else 0
+    retryable = common.output_is_retryable(status, output, cfg.attached, trust_clean_exit=cfg.ralph_robin_active)
+    # A clean exit on a route is a real successful increment; the
+    # route's local block (if any) is no longer needed.
+    if status == 0 and cfg.route_id:
+        clear_route_runtime_block(cfg.route_id)
+    # When the route is opaque, a real provider-runtime failure is the
+    # only signal we get. Record a local block so the orchestrator
+    # (ralph) stops selecting the route until the retry window passes.
+    if retryable and cfg.route_id:
+        _record_route_runtime_block(cfg, logs, output)
+    return 1 if retryable else 0
+
+
+def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, output: str) -> None:
+    """Persist a local block for ``cfg.route_id`` when the provider
+    returned a retryable runtime failure.
+
+    The block's ``blocked_until`` is computed from a parseable retry
+    hint in the output (``retry-after``, ``retry in Xm``, ``reset in
+    Xh``); when no hint is present we use the route's
+    :func:`routes.default_backoff_seconds`. A successful run clears
+    the block via :func:`clear_route_runtime_block`; both helpers are
+    no-ops when the route is not an opaque route.
+    """
+    from . import routes
+
+    retry_after = _parse_retry_after_seconds(output)
+    backoff = routes.default_backoff_seconds()
+    blocked_until = common.now_epoch() + (retry_after if retry_after is not None else backoff)
+    routes.record_local_block(
+        cfg.route_id,
+        reason="runtime-failure",
+        blocked_until=blocked_until,
+        last_message=output[:2000],
+        backoff_seconds=backoff,
+    )
+    common.log_event(
+        logs,
+        "route_runtime_block",
+        {
+            "route": cfg.route_id,
+            "blocked_until": blocked_until,
+            "reason": "runtime-failure",
+        },
+    )
+
+
+_RETRY_HINT_RE = re.compile(
+    r"\bretry[- ]after[: ]+(\d+)\s*(s|sec|seconds|m|min|minutes|h|hr|hours)?",
+    re.I,
+)
+
+
+def _parse_retry_after_seconds(output: str) -> int | None:
+    """Best-effort parse of a retry hint from provider output.
+
+    Looks for ``retry-after: 60s`` / ``retry after 5 minutes`` style
+    phrases and returns the implied seconds. Returns ``None`` when
+    no hint is present.
+    """
+    if not output:
+        return None
+    match = _RETRY_HINT_RE.search(output)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    unit = (match.group(2) or "s").lower()
+    if unit.startswith("m"):
+        return value * 60
+    if unit.startswith("h"):
+        return value * 3600
+    return value
+
+
+def clear_route_runtime_block(route_id: str) -> None:
+    """Drop the local block for ``route_id`` after a successful run."""
+    from . import routes
+
+    routes.clear_local_block(route_id)
 
 
 # Config keys (merged defaults + [scheduler]) that map to a string cfg field.

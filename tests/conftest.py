@@ -53,28 +53,38 @@ def env(tmp_path: Path) -> dict[str, str]:
     # unavailable/sleep path. Tests that exercise those vars set them explicitly.
     for key in [k for k in out if k.startswith("LLM_TOOLS_RALPH_ROBIN_")]:
         del out[key]
-    out.update(
-        {
-            "HOME": str(home),
-            "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
-            "PYTHONPATH": os.pathsep.join(p for p in (str(ROOT), COVERAGE_SITE) if p),
-            "COVERAGE_PROCESS_START": str(ROOT / "pyproject.toml"),
-            "LLM_USAGE_COPILOT_CACHE_TTL": "0",
-            # Keep Codex hermetic: never spawn the real `codex app-server` (which
-            # would hit the live account). Tests that exercise the active-refresh
-            # path inject a payload via LLM_USAGE_CODEX_RATE_LIMITS_JSON, which
-            # takes precedence over this switch.
-            "LLM_USAGE_DISABLE_CODEX_APP_SERVER": "1",
-            # Active-refresh reads are single-shot under test: retries only matter
-            # against a live network and would add real sleeps to failure-path
-            # tests. Cases that assert retry behaviour set this explicitly.
-            "LLM_USAGE_LIVE_FETCH_RETRIES": "0",
-            # Never spawn a real systemd-inhibit helper from in-process or
-            # subprocess test runs; inhibitor behaviour is covered explicitly.
-            "LLM_TOOLS_NO_INHIBIT": "1",
-            "LLM_SCHEDULER_HEADLESS": "1",
-        }
-    )
+    extras: dict[str, str] = {
+        "HOME": str(home),
+        "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
+        "LLM_USAGE_COPILOT_CACHE_TTL": "0",
+        # Keep Codex hermetic: never spawn the real `codex app-server` (which
+        # would hit the live account). Tests that exercise the active-refresh
+        # path inject a payload via LLM_USAGE_CODEX_RATE_LIMITS_JSON, which
+        # takes precedence over this switch.
+        "LLM_USAGE_DISABLE_CODEX_APP_SERVER": "1",
+        # Active-refresh reads are single-shot under test: retries only matter
+        # against a live network and would add real sleeps to failure-path
+        # tests. Cases that assert retry behaviour set this explicitly.
+        "LLM_USAGE_LIVE_FETCH_RETRIES": "0",
+        # Never spawn a real systemd-inhibit helper from in-process or
+        # subprocess test runs; inhibitor behaviour is covered explicitly.
+        "LLM_TOOLS_NO_INHIBIT": "1",
+        "LLM_SCHEDULER_HEADLESS": "1",
+    }
+    # Only enable coverage instrumentation on CLI subprocesses when the
+    # current process is already being measured (``coverage run -m
+    # pytest`` sets ``COVERAGE_PROCESS_START`` and the parent coverage
+    # instance is active). Without this guard every subprocess pays
+    # ~150ms of coverage.startup() that produces a .coverage.pid file
+    # the parent will then drop on the floor, slowing the suite by
+    # tens of seconds for no measurement benefit. We also leave
+    # ``COVERAGE_SITE`` on PYTHONPATH so the subprocess can import
+    # coverage if the parent is measuring.
+    if out.get("COVERAGE_PROCESS_START"):
+        extras["COVERAGE_PROCESS_START"] = out["COVERAGE_PROCESS_START"]
+    out.update(extras)
+    if COVERAGE_SITE and COVERAGE_SITE not in out.get("PYTHONPATH", ""):
+        out["PYTHONPATH"] = os.pathsep.join(p for p in (str(ROOT), COVERAGE_SITE) if p)
     return out
 
 

@@ -1,5 +1,81 @@
 llm-scheduler worklog
 
+2026-06-15 (route model): Route-level capacity and cost modeling.
+- New `llm_tools/routes.py` with `RoutePolicy`, `CapacityPolicyConfig`,
+  `CostPolicyConfig`, the `usage_snapshot_and_decision_for_route`
+  helper, the local block ledger, and the JSON projection. Config
+  parser extended with `[routes.<id>]` (capacity / cost sub-tables),
+  `[ralph].routes`, and strict validation (unknown provider /
+  capacity policy / cost policy / self-delegation / chains / the
+  capacity_provider + opaque conflict are all hard errors).
+- New `kind = "opaque"`, `SCOPE_SUBSCRIPTION = "subscription"`,
+  and seven capacity policies (`provider`, `provider_model`,
+  `delegate`, `opaque`, `ungated`, `balance`, `budget`) plus seven
+  cost policies (`included`, `fixed_subscription`, `metered_balance`,
+  `metered_budget`, `free`, `external`, `unknown`). Opaque capacity
+  is never percent-gated; it gates on CLI presence + a local block.
+- `llm-usage` renders opaque subscription rows as
+  `Remaining = prepaid $20/mo`, `Guidance = ✓ usable`, `Resets in = -`,
+  with no progress bar. JSON output adds a `routes` key only when
+  routes are configured; existing provider keys are unchanged.
+- `ralph-robin` got a route mode (`--routes` / `[ralph].routes`).
+  `select_route` mirrors `select_provider` and rotates over route
+  ids. Even-burn was fixed so one unrankable-but-usable route no
+  longer collapses ranking for the rest of the rotation
+  (`rankable` set now excludes routes without a numeric daily
+  capacity score, but a *ready* unrankable route does not
+  short-circuit the whole function to `None`). The new
+  `_even_burn_route_index` mirrors the same fix for routes.
+- `llm-scheduler` got a private `cfg.route_id` knob and a
+  `_route_or_provider_decision` helper so ralph can pass a route
+  through. The public CLI is unchanged: `--provider` still works,
+  and a missing route id keeps the legacy decision path.
+- Local runtime block for opaque routes: `llm-scheduler` parses a
+  retry-after hint from provider output, records a block under
+  `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks/<id>.json`,
+  and clears it on a successful run. The file is robust to
+  corruption; a corrupt file is "no block" rather than an error.
+- `cell()` gained a `cell_clipped` variant for overflow safety and
+  `fit_columns()` widens the Provider column to fit a long
+  `route:<id>` (e.g. `route:kilo-minimax-m3`) without bleeding into
+  the Model column.
+- `conftest.py` now only sets `COVERAGE_PROCESS_START` on the
+  subprocess env when the parent process is already being measured
+  (i.e. `coverage run -m pytest`). Plain `pytest` runs no longer
+  pay the ~150ms coverage.process_startup cost per CLI invocation,
+  cutting the suite from 92s to 80s even with 39 new route tests.
+- Tests: 39 new in `tests/test_routes.py` covering config parse /
+  validation, opaque decision, local block storage, JSON output,
+  `llm-usage` rendering, the new `cell_clipped` / `fit_columns`
+  helpers, the `format_fixed_subscription` cost label, and ralph
+  selection. The legacy
+  `test_ralph_even_burn_prefers_ready_provider_over_blocked_higher_weekly_headroom`
+  case still passes (one ready rankable wins, even-burn returns
+  None, fall through to current-usable).
+- Coverage: 451 tests pass, total coverage 85% (`coverage report
+  --fail-under=85`). Per-file: capacity 100%, config 96%, routes
+  88%, scheduler 85%, ralph 83%, usage 82%, providers 92-94%.
+
+2026-06-15 (later): Usage shows on start for every supported provider.
+- MiniMax with no active token plan returned `inconclusive-usage`, an internal
+  reason code that read as jargon and overflowed the 15-char Remaining column.
+  The display layer now collapses the undetermined-reason family
+  (`inconclusive-usage`, `missing-cli`, `refresh-pending`, `reader-error`, …) to a
+  single short `unavailable` via `usage.display_remaining`, applied at the
+  `render_remaining` chokepoint so every provider and the column-width math stay
+  consistent. The internal reason is unchanged in `--json` and in the
+  scheduler/capacity gating (`is_undetermined_reason`).
+- `classify_session_guidance` no longer prints `× empty` when remaining is `None`
+  (unmeasured). An unavailable provider is not an exhausted window, so it now
+  shows `· no rate data`; `× empty` stays reserved for a genuinely spent quota.
+- Copilot reliability: refined Issue 1 below. We still wait the full budget for a
+  fresh PTY capture, but the final fallback now serves the most recent monthly
+  figure (last-known-good) instead of `refresh-pending` → `unavailable`, so a
+  slow/flaky/blocked capture still "shows usage on start" while the background
+  refresh keeps it current for the next run. Also dropped the stale-lock reclaim
+  threshold from `timeout+30` to `timeout+5` so a dead refresh no longer blocks
+  new refreshes for ~40s. (Confirmed direction with the maintainer.)
+
 2026-06-15: Never-stale usage, reliable sleep/wake + soak test, burn-rate despike.
 - Issue 1 (stale usage): `llm-usage` could display a Copilot snapshot already past
   its TTL — the warm-cache path waited ~1s for the background refresh and served the
