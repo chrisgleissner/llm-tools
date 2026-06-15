@@ -641,6 +641,8 @@ def _setup_route_config(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("LLM_TOOLS_CONFIG", "")
     monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    import os as _os
+    monkeypatch.setenv("PATH", f"{fake_bin}{_os.pathsep}{_os.environ.get('PATH', '')}")
     config._cache.clear()
     (tmp_path / "xdg" / "llm-tools").mkdir(parents=True, exist_ok=True)
     (tmp_path / "xdg" / "llm-tools" / "config.toml").write_text(
@@ -870,6 +872,7 @@ def test_ralph_select_route_opaque_is_eligible_but_not_rankable(
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    monkeypatch.setenv("PATH", env["PATH"])
     config._cache.clear()
     cfg = ralph_robin.RalphConfig(routes_spec="kilo-minimax-m3,kilo-minimax-other", routes=["kilo-minimax-m3", "kilo-minimax-other"], dry_run=True, even_burn=True)
     cfg.route_policies = config.parse_routes(config.load_config())
@@ -1072,6 +1075,7 @@ def test_scheduler_route_decision_uses_route_when_route_id_set(
         encoding="utf-8",
     )
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    monkeypatch.setenv("PATH", env["PATH"])
     config._cache.clear()
     scfg = scheduler.SchedulerConfig(
         provider="kilo",
