@@ -19,6 +19,23 @@ except Exception:
     COVERAGE_SITE = ""
 
 
+def _parent_under_coverage() -> bool:
+    """True when this test process is itself being measured by ``coverage``.
+
+    ``coverage run -m pytest`` (how CI invokes the suite) does *not* export
+    ``COVERAGE_PROCESS_START`` into the environment, so sniffing env vars can't
+    tell us whether measurement is active. The reliable signal is a live
+    Coverage instance, which ``Coverage.current()`` returns (and which is
+    ``None`` under a plain ``pytest`` run).
+    """
+    try:
+        import coverage
+
+        return coverage.Coverage.current() is not None
+    except Exception:
+        return False
+
+
 def local_command_args(args: list[str]) -> list[str]:
     if not args or args[0] not in LOCAL_COMMANDS:
         return args
@@ -71,17 +88,19 @@ def env(tmp_path: Path) -> dict[str, str]:
         "LLM_TOOLS_NO_INHIBIT": "1",
         "LLM_SCHEDULER_HEADLESS": "1",
     }
-    # Only enable coverage instrumentation on CLI subprocesses when the
-    # current process is already being measured (``coverage run -m
-    # pytest`` sets ``COVERAGE_PROCESS_START`` and the parent coverage
-    # instance is active). Without this guard every subprocess pays
-    # ~150ms of coverage.startup() that produces a .coverage.pid file
-    # the parent will then drop on the floor, slowing the suite by
-    # tens of seconds for no measurement benefit. We also leave
-    # ``COVERAGE_SITE`` on PYTHONPATH so the subprocess can import
-    # coverage if the parent is measuring.
-    if out.get("COVERAGE_PROCESS_START"):
-        extras["COVERAGE_PROCESS_START"] = out["COVERAGE_PROCESS_START"]
+    # Only enable coverage instrumentation on CLI subprocesses when the parent
+    # test process is itself being measured (``coverage run -m pytest``).
+    # Without this guard every subprocess pays ~150ms of coverage.startup()
+    # that produces a .coverage.pid file the parent will then drop on the
+    # floor, slowing the suite by tens of seconds for no measurement benefit.
+    # ``coverage run`` does not export ``COVERAGE_PROCESS_START`` itself, so we
+    # detect the live parent Coverage instance and point subprocesses at the
+    # project config; their ``coverage.process_startup()`` hook (via the
+    # installed .pth / sitecustomize) only starts measuring when that var is
+    # set. ``COVERAGE_SITE`` stays on PYTHONPATH so the subprocess can import
+    # coverage.
+    if _parent_under_coverage():
+        extras["COVERAGE_PROCESS_START"] = str(ROOT / "pyproject.toml")
     out.update(extras)
     if COVERAGE_SITE and COVERAGE_SITE not in out.get("PYTHONPATH", ""):
         out["PYTHONPATH"] = os.pathsep.join(p for p in (str(ROOT), COVERAGE_SITE) if p)
