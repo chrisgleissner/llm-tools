@@ -345,6 +345,8 @@ def provider_env(cfg: SchedulerConfig) -> dict[str, str] | None:
     env = os.environ.copy()
     env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] = "1"
     env["LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER"] = cfg.provider
+    if cfg.route_id:
+        env["LLM_TOOLS_RALPH_ROBIN_SELECTED_ROUTE"] = cfg.route_id
     if cfg.ralph_robin_providers:
         env["LLM_TOOLS_RALPH_ROBIN_PROVIDERS"] = cfg.ralph_robin_providers
     env.setdefault("LLM_TOOLS_RALPH_ROBIN_SCHEDULER", "guarded")
@@ -1105,6 +1107,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     command_line = common.argv_to_command_line(argv)
     cmd_file = logs.run_dir / "tmux-command.sh"
     guard_exports = "export LLM_TOOLS_RALPH_ROBIN_ACTIVE=1\nexport LLM_TOOLS_RALPH_ROBIN_SCHEDULER=guarded\n" if cfg.ralph_robin_active else ""
+    if cfg.ralph_robin_active and cfg.route_id:
+        guard_exports += f"export LLM_TOOLS_RALPH_ROBIN_SELECTED_ROUTE={shlex.quote(cfg.route_id)}\n"
     cmd_file.write_text(
         "#!/usr/bin/env bash\n"
         f"# tmux target: {target}\n"

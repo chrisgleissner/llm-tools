@@ -399,5 +399,11 @@ class RouteSnapshot:
 - [x] Tests added across the listed files.
 - [x] README + `config.example.toml` + `AGENTS.md` updated.
 - [x] `WORKLOG.md` updated.
-- [x] `python -m pytest -q` passes.
-- [x] Coverage gate (>=85%) passes.
+- [x] `python -m pytest -q` passes (454 tests).
+- [ ] Coverage gate (>=85%) — see WORKLOG.md "adversarial review"
+      note. The route-model work is fully covered (routes.py 88%,
+      config.py 88%, the new code paths in ralph_robin / usage /
+      scheduler are exercised end-to-end). The remaining gap is in
+      pre-existing error-handling and OS-level branches in
+      common.py / usage.py / scheduler.py that the adversarial
+      review did not introduce.

@@ -280,11 +280,16 @@ def print_usage_summary(selection: dict[str, Any]) -> None:
         if not isinstance(item, dict):
             continue
         provider = str(item.get("provider", "?"))
+        # In route mode the route id is the user-facing unit; the
+        # provider is just the launch CLI. Show the route id when set
+        # so the live status line ties back to the configured route.
+        rid = item.get("route")
+        label = f"{rid} ({provider})" if isinstance(rid, str) and rid else provider
         summary = decision_summary(item)
         if item.get("usable") is True:
-            rendered.append(f"{style(provider, 'ok')}: {summary}")
+            rendered.append(f"{style(label, 'ok')}: {summary}")
         elif item.get("reason") == "rate-limited":
-            rendered.append(f"{style(provider, 'error')}: {summary}")
+            rendered.append(f"{style(label, 'error')}: {summary}")
         else:
             rendered.append(f"{style(provider, 'warn')}: {summary}")
     status_line("usage " + " | ".join(rendered), level="dim")
@@ -296,13 +301,26 @@ def ralph_runtime_context(cfg: RalphConfig, selected_provider: str, selection: d
     if isinstance(decisions, list):
         for item in decisions:
             if isinstance(item, dict):
-                summaries.append(f"- {item.get('provider', '?')}: {decision_summary(item)}")
+                rid = item.get("route") or ""
+                if rid and rid in getattr(cfg, "route_policies", {}):
+                    label = f"{rid} (provider={item.get('provider', '?')})"
+                else:
+                    label = str(item.get("provider", "?"))
+                summaries.append(f"- {label}: {decision_summary(item)}")
     decision_text = "\n".join(summaries) if summaries else "- unavailable"
+    selected_route = ""
+    if isinstance(selection, dict):
+        rid = selection.get("route")
+        if isinstance(rid, str) and rid and rid in getattr(cfg, "route_policies", {}):
+            selected_route = rid
+    rotation_text = ", ".join(cfg.routes) if cfg.routes else ", ".join(cfg.providers)
+    route_line = f"- Current selected route: {selected_route}\n" if selected_route else ""
     return (
         "RALPH ROBIN RUNTIME CONTEXT\n"
         "This block is injected by ralph-robin and takes precedence for scheduling, handoff, and capacity decisions.\n"
         f"- Current selected provider: {selected_provider}\n"
-        f"- Configured provider rotation: {', '.join(cfg.providers)}\n"
+        f"{route_line}"
+        f"- Configured provider rotation: {rotation_text}\n"
         "- Treat any original prompt instruction to check or schedule a different provider as stale unless Ralph's latest decisions show the current provider is unusable.\n"
         f"- For stop thresholds such as session window, credits, balance, budget, or below 25%, evaluate the current selected provider ({selected_provider}) and its current scopes (balance, budget, ungated, or reset window), not a previously-used provider named in the prompt.\n"
         "- Do not run provider-specific llm-scheduler --suspend-until-ready commands from the original prompt while the current selected provider is usable; Ralph owns cross-provider rotation and suspend decisions.\n"
@@ -558,14 +576,26 @@ def validate_args(cfg: RalphConfig) -> None:
     # scopes (e.g. opencode->minimax makes 5h/weekly valid for the opencode slot).
     conf = toolconfig.load_config()
     if cfg.routes:
+        # --routes overrides any [ralph].routes. The declared ids must
+        # all resolve via ``[routes.<id>]`` in the config file; anything
+        # else is a hard error so a typo in a CLI flag never silently
+        # picks an unrelated implicit route.
+        from . import routes as _routes
+
+        cfg.route_policies = {}
+        for rid in cfg.routes:
+            policy = _routes.route_policy(conf, rid)
+            if policy is None:
+                common.err(f"--routes references unknown route id: {rid!r}")
+                raise SystemExit(2)
+            cfg.route_policies[rid] = policy
+        # Also resolve any [ralph].routes that the config carries so a
+        # user who set both flags gets the union (the --routes flag
+        # wins on order, and any config-only routes are appended).
         from .routes import resolve_routes
-        routes = resolve_routes(conf)
-        cfg.route_policies = {r.route_id: r for r in routes}
-        if cfg.routes and not cfg.route_policies:
-            common.err(
-                f"--routes {cfg.routes_spec!r} references route ids that are not declared under [routes.<id>]"
-            )
-            raise SystemExit(2)
+
+        for policy in resolve_routes(conf):
+            cfg.route_policies.setdefault(policy.route_id, policy)
         # The selected scope must be valid for the launch provider each
         # route is bound to. Most routes default to "auto", which is
         # always valid; only flag a hard mismatch.
@@ -1098,15 +1128,31 @@ def effective_model_for(cfg: RalphConfig, provider: str, decision: dict[str, Any
     return policy.model
 
 
-def scheduler_config_for(cfg: RalphConfig, selected_provider: str, logs: common.RunLogs, provider_prompt: str, iteration: int, model: str = "") -> scheduler.SchedulerConfig:
+def scheduler_config_for(
+    cfg: RalphConfig,
+    selected_provider: str,
+    logs: common.RunLogs,
+    provider_prompt: str,
+    iteration: int,
+    model: str = "",
+    route_id: str = "",
+) -> scheduler.SchedulerConfig:
     policy = cfg.policies.get(selected_provider)
+    if route_id and route_id in cfg.route_policies:
+        route = cfg.route_policies[route_id]
+        cap_provider = route.provider if route.capacity.policy == "provider" else (route.capacity.provider or "")
+        allow_fallback = bool(route.allow_fallback)
+    else:
+        cap_provider = (policy.capacity_provider or "") if policy else ""
+        allow_fallback = policy.allow_fallback if policy else False
     return scheduler.SchedulerConfig(
         provider=selected_provider,
         model=model,
-        allow_fallback=policy.allow_fallback if policy else False,
-        capacity_provider=(policy.capacity_provider or "") if policy else "",
+        allow_fallback=allow_fallback,
+        capacity_provider=cap_provider,
         prompt_text=provider_prompt,
         prompt_source=f"ralph-runtime:{selected_provider}",
+        route_id=route_id,
         scope=cfg.scope,
         min_remaining=cfg.min_remaining,
         poll_interval=cfg.poll_interval,
@@ -1441,8 +1487,15 @@ def main(argv: list[str] | None = None) -> int:
         reason = str(selection.get("rotation_reason"))
         all_rate_limited = bool(selection.get("all_rate_limited"))
         selected_model = effective_model_for(cfg, selected_provider, selection.get("decision") or {})
+        selected_route_id = ""
+        if isinstance(selection, dict):
+            rid = selection.get("route")
+            if isinstance(rid, str) and rid:
+                selected_route_id = rid
         provider_label = f"{selected_provider}[{selected_model}]" if selected_model else selected_provider
-        common.log_text(logs, f"selected provider={selected_provider} model={selected_model or '-'} reason={reason} all_rate_limited={str(all_rate_limited).lower()}")
+        if selected_route_id and selected_route_id != selected_provider:
+            provider_label = f"{selected_route_id} ({provider_label})"
+        common.log_text(logs, f"selected route={selected_route_id or '-'} provider={selected_provider} model={selected_model or '-'} reason={reason} all_rate_limited={str(all_rate_limited).lower()}")
         print_usage_summary(selection)
         level = "warn" if all_rate_limited else "ok"
         status_line(f"selected {provider_label} ({reason})", level=level)
@@ -1468,7 +1521,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         provider_prompt = provider_prompt_for(cfg, selected_provider, selection, prompt)
         iteration += 1
-        scfg = scheduler_config_for(cfg, selected_provider, logs, provider_prompt, iteration, model=selected_model)
+        selected_route_id = str(selection.get("route") or "")
+        scfg = scheduler_config_for(cfg, selected_provider, logs, provider_prompt, iteration, model=selected_model, route_id=selected_route_id)
         common.log_event(logs, "scheduler_command", {"argv": ["llm-scheduler", "--provider", selected_provider, *(["--model", selected_model] if selected_model else [])], "iteration": iteration, "run_dir": str(scfg.run_dir)})
         iter_start = monotonic()
         status = run_scheduler_inline(scfg)

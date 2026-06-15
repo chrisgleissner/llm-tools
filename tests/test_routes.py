@@ -583,7 +583,7 @@ def test_fit_columns_widens_provider_for_long_route_label() -> None:
             "Model": "minimax-m3",
             "Ready": "yes",
             "Scope": "subscription",
-            "Remaining": "prepaid USD20/mo",
+            "Remaining": "prepaid $20/mo",
             "Guidance": "✓ usable",
             "Resets in": "-",
         }
@@ -598,8 +598,15 @@ def test_format_fixed_subscription_renders_natural_currency() -> None:
     from llm_tools.usage import format_fixed_subscription
 
     assert format_fixed_subscription({}) == "prepaid"
-    assert format_fixed_subscription({"amount": 20, "currency": "USD", "period": "monthly"}) == "prepaid USD20/mo"
-    assert format_fixed_subscription({"amount": 5.5, "currency": "USD", "period": "monthly"}) == "prepaid USD5.5/mo"
+    # Common ISO 4217 codes render as their display symbol so the
+    # canonical "prepaid $20/mo" / "prepaid €15/mo" read naturally.
+    assert format_fixed_subscription({"amount": 20, "currency": "USD", "period": "monthly"}) == "prepaid $20/mo"
+    assert format_fixed_subscription({"amount": 5.5, "currency": "USD", "period": "monthly"}) == "prepaid $5.5/mo"
+    assert format_fixed_subscription({"amount": 15, "currency": "EUR", "period": "monthly"}) == "prepaid €15/mo"
+    assert format_fixed_subscription({"amount": 100, "currency": "JPY", "period": "yearly"}) == "prepaid ¥100/yr"
+    # Unknown ISO codes fall through unchanged so an internal credit
+    # unit never silently disappears.
+    assert format_fixed_subscription({"amount": 7, "currency": "CREDITS", "period": "monthly"}) == "prepaid CREDITS7/mo"
     # Period is preserved even when amount is missing.
     assert format_fixed_subscription({"period": "yearly"}) == "prepaid/yr"
 
@@ -667,7 +674,7 @@ def test_route_rendering_fixed_subscription(
     row = rows[0]
     assert row.provider == "route:kilo-minimax-m3"
     assert row.scope == "subscription"
-    assert row.left_text == "prepaid USD20/mo"
+    assert row.left_text == "prepaid $20/mo"
     assert row.kind == "opaque"
     # No progress bar (the bar is only emitted for "%" values).
     assert "█" not in row.left_text and "░" not in row.left_text
@@ -1109,3 +1116,196 @@ def test_even_burn_does_not_collapse_with_unrankable(
     # the caller falls through to current-usable. The opaque route
     # must not affect the result.
     assert ralph_robin.even_burn_index(cfg, decisions, current_index=0, skipped=set()) is None
+
+
+# --- Adversarial review: route_id propagation + runtime context ---------------
+
+
+def test_ralph_runtime_context_mentions_route_id() -> None:
+    from llm_tools import ralph_robin as rr
+
+    cfg = rr.RalphConfig(
+        providers=["kilo"],
+        routes=["kilo-minimax-m3"],
+        even_burn=False,
+        scope="auto",
+    )
+    cfg.route_policies = {
+        "kilo-minimax-m3": RoutePolicy(
+            route_id="kilo-minimax-m3",
+            provider="kilo",
+            model="minimax-m3",
+            capacity=CapacityPolicyConfig(
+                policy="opaque",
+                scope="subscription",
+                label="MiniMax M3 via Kilo",
+            ),
+            cost=CostPolicyConfig(
+                policy="fixed_subscription",
+                amount=20,
+                currency="USD",
+                period="monthly",
+            ),
+        )
+    }
+    selection = {
+        "index": 0,
+        "route": "kilo-minimax-m3",
+        "provider": "kilo",
+        "decisions": [
+            {
+                "route": "kilo-minimax-m3",
+                "provider": "kilo",
+                "usable": True,
+                "reason": "usable",
+                "windows": [],
+            }
+        ],
+    }
+    context = rr.ralph_runtime_context(cfg, "kilo", selection)
+    assert "Current selected route: kilo-minimax-m3" in context
+    assert "kilo-minimax-m3 (provider=kilo)" in context
+
+
+def test_scheduler_config_for_threads_route_id(
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, fake_bin: Path
+) -> None:
+    """ralph-robin's scheduler_config_for must propagate the route_id so
+    llm-scheduler's local block ledger and route-aware decision are
+    actually invoked for the selected route.
+    """
+    fake = fake_bin / "kilo"
+    fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    cfg_dir = tmp_path / "xdg"
+    (cfg_dir / "llm-tools").mkdir(parents=True)
+    (cfg_dir / "llm-tools" / "config.toml").write_text(
+        textwrap.dedent(
+            """
+            [routes.kilo-minimax-m3]
+            provider = "kilo"
+            model = "minimax-m3"
+            [routes.kilo-minimax-m3.capacity]
+            policy = "opaque"
+            [routes.kilo-minimax-m3.cost]
+            policy = "fixed_subscription"
+            amount = 20
+            currency = "USD"
+            period = "monthly"
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    config._cache.clear()
+    cfg = ralph_robin.RalphConfig(
+        providers=["kilo"],
+        routes=["kilo-minimax-m3"],
+        even_burn=False,
+        scope="auto",
+    )
+    cfg.route_policies = config.parse_routes(config.load_config())
+    logs = common.setup_run_logs(tmp_path, "sc")
+    scfg = ralph_robin.scheduler_config_for(
+        cfg,
+        "kilo",
+        logs,
+        "prompt",
+        iteration=1,
+        model="minimax-m3",
+        route_id="kilo-minimax-m3",
+    )
+    assert scfg.route_id == "kilo-minimax-m3"
+    # And the provider_env / guard_exports plumbing must expose it to
+    # any nested llm-scheduler invocation.
+    env = scheduler.provider_env(scfg)
+    assert env is not None
+    assert env.get("LLM_TOOLS_RALPH_ROBIN_SELECTED_ROUTE") == "kilo-minimax-m3"
+
+
+def test_format_fixed_subscription_no_period_omits_suffix() -> None:
+    from llm_tools.usage import format_fixed_subscription
+
+    # Missing period omits the "/<suffix>" so the renderer does not invent
+    # a period label. A user who knows the period is expected to set it.
+    assert format_fixed_subscription({"amount": 20, "currency": "USD"}) == "prepaid $20"
+    assert format_fixed_subscription({"amount": 20}) == "prepaid 20"
+
+
+def test_format_opaque_remaining_routes_by_cost_policy() -> None:
+    from llm_tools.usage import format_opaque_remaining
+
+    # None / empty scope -> not metered.
+    assert format_opaque_remaining(None) == "not metered"
+    # Opaque scope with no cost policy -> not metered.
+    assert format_opaque_remaining({"name": "subscription", "kind": "opaque", "extras": {}}) == "not metered"
+    # Opaque scope with fixed_subscription cost policy -> "prepaid $20/mo".
+    assert (
+        format_opaque_remaining(
+            {
+                "name": "subscription",
+                "kind": "opaque",
+                "extras": {
+                    "cost_policy": "fixed_subscription",
+                    "cost_amount": 20,
+                    "cost_currency": "USD",
+                    "cost_period": "monthly",
+                },
+            }
+        )
+        == "prepaid $20/mo"
+    )
+
+
+def test_ralph_routes_flag_resolves_even_without_ralph_routes_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--routes should resolve route ids directly from ``[routes.<id>]``
+    even when ``[ralph].routes`` is absent. A typo in a CLI flag is a
+    hard error, never a silent fall-back to an implicit provider route.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    (tmp_path / "xdg" / "llm-tools").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "xdg" / "llm-tools" / "config.toml").write_text(
+        textwrap.dedent(
+            """
+            [routes.kilo-minimax-m3]
+            provider = "kilo"
+            model = "minimax-m3"
+            [routes.kilo-minimax-m3.capacity]
+            policy = "opaque"
+            [routes.kilo-minimax-m3.cost]
+            policy = "fixed_subscription"
+            amount = 20
+            currency = "USD"
+            period = "monthly"
+            """
+        ),
+        encoding="utf-8",
+    )
+    config._cache.clear()
+    cfg = ralph_robin.RalphConfig(
+        routes_spec="kilo-minimax-m3",
+        routes=["kilo-minimax-m3"],
+        providers=[],
+        even_burn=False,
+        scope="auto",
+        dry_run=True,
+        prompt_text="test",
+    )
+    ralph_robin.validate_args(cfg)
+    assert "kilo-minimax-m3" in cfg.route_policies
+    assert cfg.route_policies["kilo-minimax-m3"].provider == "kilo"
+    # A typo in --routes is a hard error, not a silent default.
+    bad = ralph_robin.RalphConfig(
+        routes_spec="typo-route",
+        routes=["typo-route"],
+        providers=[],
+        even_burn=False,
+        scope="auto",
+        dry_run=True,
+        prompt_text="test",
+    )
+    with pytest.raises(SystemExit):
+        ralph_robin.validate_args(bad)

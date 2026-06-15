@@ -64,9 +64,40 @@ _FIXED_SUBSCRIPTION_PERIOD_LABELS = {
     "daily": "day",
 }
 
+# ISO 4217 -> display symbol for the common prepaid currencies. Unknown
+# codes fall through and render as the code itself so an unsupported
+# currency never silently disappears.
+_CURRENCY_SYMBOLS: dict[str, str] = {
+    "USD": "$",
+    "CAD": "C$",
+    "AUD": "A$",
+    "NZD": "NZ$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+    "CNY": "¥",
+    "KRW": "₩",
+    "INR": "₹",
+    "BRL": "R$",
+    "MXN": "MX$",
+    "CHF": "CHF",
+    "SEK": "kr",
+    "NOK": "kr",
+    "DKK": "kr",
+    "PLN": "zł",
+    "ZAR": "R",
+    "SGD": "S$",
+    "HKD": "HK$",
+}
+
 
 def format_fixed_subscription(cost: dict[str, Any] | None) -> str:
-    """Render the Remaining-cell text for a ``fixed_subscription`` route."""
+    """Render the Remaining-cell text for a ``fixed_subscription`` route.
+
+    Examples: ``prepaid $20/mo``, ``prepaid €15/mo``, ``prepaid JPY1500/mo``.
+    Unknown ISO codes pass through unchanged (e.g. ``prepaid XYZ20/mo``) so
+    a currency the renderer does not recognise never silently disappears.
+    """
     if not isinstance(cost, dict):
         return "prepaid"
     amount = cost.get("amount")
@@ -91,7 +122,14 @@ def format_fixed_subscription(cost: dict[str, Any] | None) -> str:
     if amount is None:
         body = "prepaid"
     elif currency:
-        body = f"prepaid {currency}{text}"
+        # Render the common ISO currencies as their symbols so the
+        # canonical "$20/mo" / "€15/mo" read naturally. Unknown codes
+        # (e.g. an internal credit unit) fall through to the raw code.
+        symbol = _CURRENCY_SYMBOLS.get(str(currency).upper())
+        if symbol and symbol != str(currency).upper():
+            body = f"prepaid {symbol}{text}"
+        else:
+            body = f"prepaid {currency}{text}"
     else:
         body = f"prepaid {text}"
     if not period:
@@ -102,26 +140,25 @@ def format_fixed_subscription(cost: dict[str, Any] | None) -> str:
 def format_opaque_remaining(scope: dict[str, Any] | None) -> str:
     """Render the Remaining-cell text for an opaque route.
 
-    * Fixed-subscription cost -> "prepaid $20/mo".
-    * Anything else            -> "not metered".
+    * Fixed-subscription cost -> ``prepaid $20/mo``.
+    * Anything else            -> ``not metered``.
 
     The opaque row never displays a percentage, balance, or progress
     bar; the rest of the renderer must consult ``row.kind == "opaque"``
-    and skip those branches.
+    and skip those branches. The cost object is read from the scope's
+    ``extras`` so a single opaque row carries everything the renderer
+    needs without a second lookup.
     """
-    if scope is None:
+    if not isinstance(scope, dict):
         return "not metered"
-    cost = scope.get("extras", {}).get("cost_policy") if isinstance(scope.get("extras"), dict) else None
-    if cost == "fixed_subscription":
-        # The full cost object is attached on the snapshot, not the
-        # scope extras. Renderers pass it explicitly via the ``row``
-        # extras; fall back to scope currency when only the currency
-        # is known.
+    extras = scope.get("extras") if isinstance(scope.get("extras"), dict) else {}
+    cost_policy = extras.get("cost_policy")
+    if cost_policy == "fixed_subscription":
         return format_fixed_subscription(
             {
-                "amount": scope.get("extras", {}).get("cost_amount") if isinstance(scope.get("extras"), dict) else None,
-                "currency": scope.get("extras", {}).get("cost_currency") if isinstance(scope.get("extras"), dict) else None,
-                "period": scope.get("extras", {}).get("cost_period") if isinstance(scope.get("extras"), dict) else None,
+                "amount": extras.get("cost_amount"),
+                "currency": extras.get("cost_currency"),
+                "period": extras.get("cost_period"),
             }
         )
     return "not metered"

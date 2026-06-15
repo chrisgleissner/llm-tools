@@ -204,32 +204,6 @@ class RoutePolicy:
     cost: CostPolicyConfig = field(default_factory=CostPolicyConfig)  # type: ignore[assignment]
 
 
-@dataclass
-class ProviderPolicy:
-    """Resolved routing policy for a single provider.
-
-    ``model`` pins the model the provider CLI runs (and the rate-limit bucket
-    ralph/scheduler gate on). ``allow_fallback`` controls what happens when that
-    model's own limit is exhausted: ``False`` (default) treats the provider as
-    unusable so callers rotate away; ``True`` lets the provider stay usable via
-    its aggregate window with the model pin dropped.
-
-    ``capacity_provider`` ties this provider's *availability and capacity* to a
-    different provider's usage windows (5h / weekly / monthly / balance / …)
-    while still launching this provider's own CLI. Use it when the CLI is
-    configured to run another provider's model (e.g. OpenCode pointed at the
-    MiniMax API): set ``capacity_provider = "minimax"`` so ralph/scheduler gate,
-    rank, and suspend on MiniMax's real windows instead of OpenCode's own
-    (often irrelevant) balance.
-    """
-
-    model: str | None = None
-    allow_fallback: bool = False
-    scope: str | None = None
-    min_remaining: str | None = None
-    capacity_provider: str | None = None
-
-
 def config_path(env: dict[str, str] | None = None) -> Path:
     env = env or os.environ
     explicit = env.get("LLM_TOOLS_CONFIG")
