@@ -260,6 +260,89 @@ def test_route_unknown_key_fails(
         config.load_config()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        # 'routes' itself is not a table.
+        "routes = 5\n",
+        # A route entry is a scalar instead of a table.
+        "[routes]\nkilo-minimax-m3 = 5\n",
+        # model must be a string when set.
+        '[routes.r]\nprovider = "kilo"\nmodel = 5\n',
+        # allow_fallback must be a bool.
+        '[routes.r]\nprovider = "kilo"\nallow_fallback = "yes"\n',
+        # capacity must be a table.
+        '[routes.r]\nprovider = "kilo"\ncapacity = 5\n',
+        # capacity has an unknown key.
+        '[routes.r]\nprovider = "kilo"\n[routes.r.capacity]\nbogus = 1\n',
+        # cost must be a table.
+        '[routes.r]\nprovider = "kilo"\ncost = 5\n',
+        # cost has an unknown key.
+        '[routes.r]\nprovider = "kilo"\n[routes.r.cost]\nbogus = 1\n',
+    ],
+)
+def test_route_schema_type_errors_fail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(os.environ, tmp_path / "xdg" / "llm-tools" / "config.toml", body)
+    with pytest.raises(SystemExit):
+        config.load_config()
+
+
+def test_route_delegate_single_hop_chain_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ``a`` delegates to ``kilo`` (a known provider that is also a route id),
+    # and that route itself delegates -- capacity links must be a single hop.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        """
+        [routes.a]
+        provider = "opencode"
+        [routes.a.capacity]
+        policy = "delegate"
+        provider = "kilo"
+
+        [routes.kilo]
+        provider = "minimax"
+        [routes.kilo.capacity]
+        policy = "delegate"
+        provider = "claude"
+        """,
+    )
+    with pytest.raises(SystemExit):
+        config.load_config()
+
+
+def test_route_policy_none_for_empty_cfg() -> None:
+    assert config.route_policy({}, "kilo-minimax-m3") is None
+
+
+def test_parse_routes_ignores_non_table_routes() -> None:
+    # 'routes' is not a table at all -> no routes.
+    assert config.parse_routes({"routes": 5}) == {}
+    # A route entry is a scalar -> skipped silently.
+    assert config.parse_routes({"routes": {"r": 5}}) == {}
+
+
+def test_route_cost_amount_coercion() -> None:
+    def amount(raw: object) -> float | None:
+        cfg = {"routes": {"r": {"provider": "kilo", "cost": {"amount": raw}}}}
+        return config.parse_routes(cfg)["r"].cost.amount
+
+    assert amount(True) is None  # bools never count as a numeric amount
+    assert amount("not-a-number") is None  # non-numeric string falls back to None
+    assert amount("12.5") == 12.5  # numeric string is coerced
+    assert amount(7) == 7.0  # plain int is coerced to float
+    assert amount(None) is None
+    assert amount("") is None
+
+
 # --- Resolution: explicit vs implicit routes --------------------------------
 
 
@@ -627,6 +710,102 @@ def test_corrupt_block_file_does_not_crash(
     )
     # Corrupt file -> treat as no block, opaque route is usable.
     assert dec["usable"] is True
+
+
+def test_read_local_block_lifecycle(tmp_path: Path) -> None:
+    block_dir = tmp_path / "blocks"
+    env = {"LLM_TOOLS_LOCAL_BLOCK_DIR": str(block_dir)}
+
+    # No file yet -> no block, and clearing a missing block reports nothing.
+    assert routes.read_local_block("r", env=env) is None
+    assert routes.is_locally_blocked("r", env=env) is False
+    assert routes.clear_local_block("r", env=env) is False
+
+    # An active (future) block is read back and reported as blocked.
+    routes.record_local_block(
+        "r", reason="rate-limited", blocked_until=common.now_epoch() + 600, env=env
+    )
+    assert routes.is_locally_blocked("r", env=env) is True
+
+    # An expired block is treated as cleared without an explicit clear call --
+    # this is the regression guard for the read_local_block() expiry fix.
+    routes.record_local_block(
+        "r", reason="rate-limited", blocked_until=common.now_epoch() - 1, env=env
+    )
+    assert routes.read_local_block("r", env=env) is None
+
+    # Clearing the (still-present) file now reports that it existed.
+    assert routes.clear_local_block("r", env=env) is True
+
+
+def test_read_local_block_non_dict_payload(tmp_path: Path) -> None:
+    block_dir = tmp_path / "blocks"
+    block_dir.mkdir(parents=True, exist_ok=True)
+    env = {"LLM_TOOLS_LOCAL_BLOCK_DIR": str(block_dir)}
+    # Valid JSON that is not an object -> ignored, not a block.
+    (block_dir / "r.json").write_text("[1, 2, 3]", encoding="utf-8")
+    assert routes.read_local_block("r", env=env) is None
+
+
+def test_resolve_routes_skips_non_string_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        """
+        [ralph]
+        routes = [5, "kilo-minimax-m3"]
+
+        [routes.kilo-minimax-m3]
+        provider = "kilo"
+        model = "minimax-m3"
+        [routes.kilo-minimax-m3.capacity]
+        policy = "opaque"
+        """,
+    )
+    cfg = config.load_config()
+    resolved = routes.resolve_routes(cfg)
+    # The non-string entry is dropped; only the named route survives.
+    assert [r.route_id for r in resolved] == ["kilo-minimax-m3"]
+
+
+def test_unsupported_capacity_policy_is_unusable(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    # A RoutePolicy with a policy that escaped validation falls through to the
+    # defensive "unsupported-policy" branch instead of crashing.
+    env["LLM_TOOLS_LOCAL_BLOCK_DIR"] = str(tmp_path / "blocks")
+    route = RoutePolicy(
+        route_id="weird",
+        provider="kilo",
+        model="minimax-m3",
+        capacity=CapacityPolicyConfig(policy="fictional"),
+        cost=CostPolicyConfig(policy="unknown"),
+    )
+    snap, dec = routes.usage_snapshot_and_decision_for_route(
+        route, "auto", "1", "60", env=env
+    )
+    assert dec["usable"] is False
+    assert dec["reason"] == "unsupported-policy:fictional"
+    assert snap["available"] is False
+
+
+def test_route_to_json_skips_non_dict_scopes() -> None:
+    snapshot = {
+        "route": "r",
+        "provider": "kilo",
+        "selected_model": "minimax-m3",
+        "available": True,
+        "reason": "usable",
+        "source": "config:route:r",
+        "scopes": ["not-a-dict", {"name": "subscription", "kind": "opaque"}],
+        "cost": {},
+    }
+    proj = routes.route_to_json(snapshot)
+    assert [s["name"] for s in proj["scopes"]] == ["subscription"]
 
 
 # --- llm-usage opaque rendering ----------------------------------------------
