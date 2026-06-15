@@ -1,5 +1,51 @@
 llm-scheduler worklog
 
+2026-06-15: Never-stale usage, reliable sleep/wake + soak test, burn-rate despike.
+- Issue 1 (stale usage): `llm-usage` could display a Copilot snapshot already past
+  its TTL — the warm-cache path waited ~1s for the background refresh and served the
+  old value while refreshing "for next time", so infrequent runs always showed stale
+  Copilot. Fixed `copilot_refresh_wait_budget` to wait for the in-flight capture in
+  all stale/missing cases (returns early as soon as fresh data lands), and the final
+  fallback now refuses to serve a snapshot past TTL (reports `refresh-pending`
+  instead). Added a bounded retry to the Claude OAuth live fetch
+  (`LLM_USAGE_LIVE_FETCH_RETRIES`, default 2) so a transient post-resume network blip
+  no longer degrades Claude to `stale-usage`.
+- Issue 2 (overnight hang): root cause from the journal — the nightly ralph-robin run
+  suspended the workstation at 02:30 and never resumed (boot ended at the suspend
+  entry; next entry was a cold boot at 07:56). Two tool-side contributors fixed:
+  (a) KDE PowerDevil's `[AC][SuspendSession] idleTime=7200000` (120 min) auto-suspends
+  the box mid-work with no wake armed; ralph-robin now holds a logind `idle` inhibitor
+  (`systemd-inhibit --what=idle`, pipe-backed so it releases on exit) for the whole
+  run — an `idle` inhibitor does not block ralph's own explicit suspend.
+  (b) ralph's own suspend is now hardened via a shared `common.suspend_with_wake`
+  behind a feature-detected backend seam (`power_backend`): never suspend without an
+  armed wake, verify wakes by post-resume drift, cap churn
+  (`LLM_RALPH_MIN_AWAKE_SECONDS` / `LLM_RALPH_MAX_SUSPENDS`), latch to awake-only after
+  an unreliable wake, write a durable fsync'd suspend ledger (a start with no done =
+  a prior wedged resume, surfaced on startup), and an opt-in `--watchdog` to reboot a
+  wedged resume. Note: ralph still suspends by default when all providers are
+  rate-limited (unchanged), but only via this hardened path.
+- New `llm-sleep-soak` tool + `llm-sleep-soak` launcher + pyproject entry point:
+  repeatedly suspends/wakes via the production path, measures drift, scrapes journald
+  resume errors, uses the ledger, prints PASS/FAIL. Real-hardware test (cannot run in
+  CI); `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` simulates the loop. Portable (systemd now;
+  modular seam for a future macOS caffeinate/pmset backend).
+- Issue 3 (`no rate data`): burn-rate estimator mis-anchored. The usage log mixed in
+  rare transient outlier readings (e.g. Claude 5h reading 72% momentarily among 85%);
+  the recovery (72->85, +13pp) was read as a window reset, discarding all history and
+  leaving <min_span -> spurious `no rate data` for a provider that was actively
+  burning. Added isolated single-sample despiking before anchoring. Claude 5h now
+  forecasts again; rows still showing `no rate data` (Codex/Spark at 100%, balance
+  scopes) are correct — there is genuinely nothing to forecast.
+- Tests: new `tests/test_suspend_reliability.py` (33 cases for the suspend core +
+  soak), ralph suspend tests rewritten for the new design, despike regression test,
+  Copilot never-stale contract updates. Autouse hermetic fixture sets
+  `LLM_TOOLS_NO_INHIBIT=1` so no test spawns a real inhibitor or suspends the host.
+- Validation: `python -m pytest -q` passes; `coverage … --fail-under=85` -> 86%.
+  Live: `llm-usage` shows Claude 5h `! empty in 2h 32m` (was `no rate data`);
+  `llm-scheduler --wake-test` reports the new backend diagnostics; soak runs clean in
+  simulation.
+
 2026-06-12: Started Python-only migration task.
 - Replaced the previous scheduler-specific `PLANS.md` with the required migration plan.
 - Current next step: discovery of current Bash tools, helper library, tests, docs, CI, external invocations, environment variables, file I/O, and visible stdout/stderr behavior before changing implementation behavior.

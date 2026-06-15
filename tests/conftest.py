@@ -25,6 +25,17 @@ def local_command_args(args: list[str]) -> list[str]:
     return [sys.executable, *args]
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_power_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never touch real machine power state from the test suite.
+
+    ``LLM_TOOLS_NO_INHIBIT`` stops any in-process ``ralph_robin.main`` test from
+    spawning a real ``systemd-inhibit`` helper. Tests that specifically exercise
+    inhibitor/suspend behaviour override these explicitly.
+    """
+    monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
+
+
 @pytest.fixture()
 def env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
@@ -54,6 +65,13 @@ def env(tmp_path: Path) -> dict[str, str]:
             # path inject a payload via LLM_USAGE_CODEX_RATE_LIMITS_JSON, which
             # takes precedence over this switch.
             "LLM_USAGE_DISABLE_CODEX_APP_SERVER": "1",
+            # Active-refresh reads are single-shot under test: retries only matter
+            # against a live network and would add real sleeps to failure-path
+            # tests. Cases that assert retry behaviour set this explicitly.
+            "LLM_USAGE_LIVE_FETCH_RETRIES": "0",
+            # Never spawn a real systemd-inhibit helper from in-process or
+            # subprocess test runs; inhibitor behaviour is covered explicitly.
+            "LLM_TOOLS_NO_INHIBIT": "1",
             "LLM_SCHEDULER_HEADLESS": "1",
         }
     )

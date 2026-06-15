@@ -697,21 +697,28 @@ def test_estimate_remaining_time_survives_resets_and_gaps(env: dict[str, str]) -
     cache = common.usage_cache_dir(env)
     cache.mkdir(parents=True, exist_ok=True)
     base = 1_000_000
+    # A genuine, SUSTAINED reset: remaining declines gradually, jumps back to 100,
+    # then stays high before declining again. (Realistic -- a real window reset
+    # restores full quota and you do not burn 10% in one sample interval right
+    # after it. A lone 90->100->90 blip is noise and is despiked, see the
+    # dedicated despike test.)
     rows = [
         (base, 100),
-        (base + 3600, 90),
-        (base + 7200, 100),
-        (base + 10800, 90),
-        (base + 18000, 80),
+        (base + 1800, 95),
+        (base + 3600, 90),       # old window burn (dropped once we anchor to the reset)
+        (base + 7200, 100),      # RESET
+        (base + 8000, 98),       # stays high -> confirms a real reset, not a spike
+        (base + 10800, 90),      # post-reset burn: 100 -> 90 over 3600s
+        (base + 18000, 80),      # a further 10% after a 2h gap
     ]
     (cache / "llm-usage.log").write_text(
         "".join(f'{{"ts":{ts},"provider":"p","window":"w","remaining":{rem}}}\n' for ts, rem in rows),
         encoding="utf-8",
     )
     now_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18000)}
-    # The +10 jump at +7200 (90->100) is a reset: it anchors to the current
-    # window, dropping the earlier burn. The trailing 2h gap exceeds max_gap, so
-    # only the post-reset 10% over 3600s counts -> 50% lasts 5h.
+    # The jump at +7200 (90->100) anchors to the current window, dropping the
+    # earlier burn. The trailing 2h gap exceeds max_gap, so only the post-reset
+    # 10% over 3600s counts -> 50% lasts 5h.
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env) == "5h"
     stale_env = env | {"LLM_USAGE_NOW_EPOCH": str(base + 18601)}
     assert common.estimate_remaining_time_from_log("p", "w", 50, stale_env) == "-"
@@ -721,6 +728,34 @@ def test_estimate_remaining_time_survives_resets_and_gaps(env: dict[str, str]) -
     # 20% over 10800s within the anchored window -> 50% lasts 7h 30m.
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_GAP_SECONDS": "0"}) == "7h 30m"
     assert common.estimate_remaining_time_from_log("p", "w", 50, now_env | {"LLM_USAGE_REMAINING_TIME_MAX_STALE_SECONDS": "bad"}) == "5h"
+
+
+def test_estimate_remaining_time_despikes_transient_outliers(env: dict[str, str]) -> None:
+    """A lone bad reading (a momentary stale/alternate value) must not blow away
+    the burn-rate history. Its recovery looks like a window reset, which would
+    anchor to the last ~minute and report a spurious 'no rate data'."""
+    cache = common.usage_cache_dir(env)
+    cache.mkdir(parents=True, exist_ok=True)
+    base = 1_000_000
+    # Smooth 5h decline 100 -> 84 over ~16 min, with two isolated 72 dips that
+    # immediately recover to ~85 -- exactly the real-log pattern.
+    rows: list[tuple[int, float]] = []
+    rem = 100.0
+    for i in range(32):
+        ts = base + i * 30
+        if i in (20, 26):
+            rows.append((ts, 72.0))  # transient outlier
+        else:
+            rows.append((ts, rem))
+            rem -= 0.5
+    log = cache / "llm-usage.log"
+    log.write_text(
+        "".join(f'{{"ts":{ts},"provider":"Claude","window":"5h","remaining":{r}}}\n' for ts, r in rows),
+        encoding="utf-8",
+    )
+    now_env = env | {"LLM_USAGE_NOW_EPOCH": str(rows[-1][0])}
+    # Despiked -> the full ~16 min of decline drives a real forecast, not "-".
+    assert common.estimate_remaining_time_from_log("Claude", "5h", rows[-1][1], now_env) not in ("-", "1m")
 
 
 def test_estimate_remaining_time_requires_minimum_span_for_real_windows(env: dict[str, str]) -> None:
@@ -866,14 +901,15 @@ def test_copilot_refresh_module(env: dict[str, str], tmp_path: Path, monkeypatch
 
 
 def test_copilot_refresh_wait_budget_cold_start_is_long(env: dict[str, str]) -> None:
-    # Warm cache: short wait so we serve the stale value quickly.
-    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 1.0
-    # Cold start: wait long enough for the first capture (timeout + margin).
+    # Stale-or-missing cache both wait long enough for the capture to land so we
+    # never serve a value past its TTL (the warm-cache "serve stale quickly" path
+    # is gone -- it was the source of partially-stale usage).
+    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 12.0
     assert common.copilot_refresh_wait_budget(env, cache_present=False) == 12.0
     assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_TIMEOUT": "4"}, cache_present=False) == 6.0
     # Explicit override always wins, including the 0 used by other tests.
     assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}, cache_present=False) == 0.0
-    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 1.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 12.0
 
 
 def test_copilot_cold_start_returns_refreshed_data(env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1296,7 +1332,10 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     os.utime(cache_dir / "copilot-refresh.lock", (1, 1))
     (cache_dir / "copilot-usage.json").write_text('{"provider":"copilot","monthly":{"remaining":2}}', encoding="utf-8")
     os.utime(cache_dir / "copilot-usage.json", (1, 1))
-    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "1", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["monthly"]["remaining"] == 2
+    # The on-disk snapshot is far past its TTL: it must NOT be served as current.
+    # With no wait budget the refresh cannot land in time, so we report that a
+    # refresh is in flight rather than display stale numbers.
+    assert common.read_copilot(env | {"LLM_USAGE_COPILOT_CACHE_TTL": "1", "LLM_USAGE_COPILOT_REFRESH_WAIT": "0"})["reason"] == "refresh-pending"
 
     log = cache_dir / "llm-usage.log"
     log.write_text(

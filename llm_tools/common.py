@@ -89,6 +89,10 @@ def ralph_state_file(env: dict[str, str] | None = None) -> Path:
     return cache_root(env) / "ralph-robin" / "state.json"
 
 
+def soak_log_dir(env: dict[str, str] | None = None) -> Path:
+    return cache_root(env) / "llm-sleep-soak" / "logs"
+
+
 def have_cmd(name: str) -> bool:
     return shutil.which(name) is not None
 
@@ -931,19 +935,19 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
     oauth = cred_data.get("claudeAiOauth")
     token = oauth.get("accessToken", "") if isinstance(oauth, dict) else ""
     if token:
-        text, unauthorized = _fetch_claude_oauth_usage_text(token)
+        text, unauthorized = _fetch_claude_oauth_usage_text(token, env)
         if text:
             return _cache_claude_usage_response(cache, text)
         if unauthorized:
             refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
             if refreshed:
-                text, _ = _fetch_claude_oauth_usage_text(refreshed)
+                text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
                 if text:
                     return _cache_claude_usage_response(cache, text)
     elif isinstance(oauth, dict) and oauth.get("refreshToken"):
         refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
         if refreshed:
-            text, _ = _fetch_claude_oauth_usage_text(refreshed)
+            text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
             if text:
                 return _cache_claude_usage_response(cache, text)
     if cache.is_file() and cache.stat().st_size > 0:
@@ -958,7 +962,28 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
     return None
 
 
-def _fetch_claude_oauth_usage_text(access_token: str) -> tuple[str | None, bool]:
+def live_fetch_retry_plan(env: dict[str, str] | None = None) -> tuple[int, float]:
+    """(attempts, delay_seconds) for active-refresh network reads.
+
+    Active refresh is what keeps usage fresh; a single transient failure (e.g. a
+    network stack still settling right after a resume from suspend) must not
+    immediately degrade a provider to a stale on-disk snapshot. A couple of
+    bounded retries turn most of those blips into fresh data. Tests pin
+    ``LLM_USAGE_LIVE_FETCH_RETRIES=0`` to stay single-shot and hermetic.
+    """
+    env = env or os.environ
+    try:
+        attempts = max(1, int(env.get("LLM_USAGE_LIVE_FETCH_RETRIES", "2") or "2") + 1)
+    except ValueError:
+        attempts = 3
+    try:
+        delay = max(0.0, float(env.get("LLM_USAGE_LIVE_FETCH_RETRY_DELAY", "0.5") or "0.5"))
+    except ValueError:
+        delay = 0.5
+    return attempts, delay
+
+
+def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None = None) -> tuple[str | None, bool]:
     req = Request(
         CLAUDE_OAUTH_USAGE_URL,
         headers={
@@ -968,13 +993,19 @@ def _fetch_claude_oauth_usage_text(access_token: str) -> tuple[str | None, bool]
             "User-Agent": CLAUDE_OAUTH_USER_AGENT,
         },
     )
-    try:
-        with urlopen(req, timeout=20) as resp:
-            return resp.read().decode("utf-8", "replace"), False
-    except HTTPError as exc:
-        return None, exc.code in {400, 401}
-    except Exception:
-        return None, False
+    attempts, delay = live_fetch_retry_plan(env)
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=20) as resp:
+                return resp.read().decode("utf-8", "replace"), False
+        except HTTPError as exc:
+            # 400/401 are authoritative (bad/expired token): do not retry, let the
+            # caller refresh the OAuth token instead.
+            return None, exc.code in {400, 401}
+        except Exception:
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
+    return None, False
 
 
 def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:
@@ -1214,16 +1245,16 @@ def read_copilot_live(env: dict[str, str] | None = None) -> dict[str, Any]:
 
 
 def copilot_refresh_wait_budget(env: dict[str, str], cache_present: bool) -> float:
-    if cache_present:
-        # Warm cache: a stale entry is already on disk, so keep the wait short and
-        # serve the previous value while the background refresh catches up.
-        default = "1"
-    else:
-        # Cold start (e.g. right after install): no cache exists yet, so a short
-        # wait would always fall through to "refresh-pending" and show nothing
-        # until a later invocation. Wait long enough for the first background
-        # capture to land so usage appears on the very first run.
-        default = str(int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 2)
+    # We only reach this path when the cache is stale or missing (a fresh cache
+    # returns earlier). In both cases the goal is the same: refresh and show
+    # CURRENT data, never a snapshot already past its TTL. So wait long enough
+    # for the in-flight capture to land. The wait loop returns as soon as a fresh
+    # snapshot appears, so a fast capture still returns fast; only a slow capture
+    # pays the full budget. ``cache_present`` is retained for call-site clarity
+    # but no longer shortens the wait -- a warm-but-stale cache used to wait ~1s
+    # and serve the old value, which is exactly the staleness we are removing.
+    _ = cache_present
+    default = str(int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 2)
     raw = env.get("LLM_USAGE_COPILOT_REFRESH_WAIT", default) or default
     try:
         return max(0.0, float(raw))
@@ -1309,7 +1340,12 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
         if not lock.exists():
             break
         time.sleep(0.05)
-    if cache.is_file() and cache.stat().st_size > 0:
+    # Only serve a snapshot that is still within its freshness window. A cache
+    # already past TTL is stale and must not be shown -- the whole point of the
+    # wait above was to let the refresh land current data. If it did not, fall
+    # through to a synchronous live capture (below) or report refresh-pending,
+    # rather than displaying numbers the caller would mistake for current.
+    if cache.is_file() and cache.stat().st_size > 0 and int(time.time()) - int(cache.stat().st_mtime) <= ttl:
         cached = cached_result()
         if cached is not None:
             return cached
@@ -1483,6 +1519,24 @@ def estimate_remaining_seconds_from_log(provider: str, window: str, remaining: A
         return None
     if max_stale > 0 and now - samples[-1][0] > max_stale:
         return None
+    # Reject isolated single-sample spikes: a reading that jumps away from BOTH
+    # neighbours by at least reset_threshold and straight back (a V or inverted-V).
+    # These are transient bad readings -- a momentarily stale or alternate-source
+    # value mixed into the log -- and must not be mistaken for a window reset
+    # (whose recovery would otherwise anchor here and discard all real history,
+    # leaving too little span to estimate -> a spurious "no rate data"), nor
+    # counted as real burn/recovery. A genuine reset rises and STAYS high, and a
+    # sustained steep drop keeps dropping, so neither is removed here.
+    if len(samples) >= 3:
+        despiked: list[tuple[int, float]] = [samples[0]]
+        for i in range(1, len(samples) - 1):
+            prev_v, cur_v, next_v = samples[i - 1][1], samples[i][1], samples[i + 1][1]
+            down_spike = prev_v - cur_v >= reset_threshold and next_v - cur_v >= reset_threshold
+            up_spike = cur_v - prev_v >= reset_threshold and cur_v - next_v >= reset_threshold
+            if not (down_spike or up_spike):
+                despiked.append(samples[i])
+        despiked.append(samples[-1])
+        samples = despiked
     # Anchor to the CURRENT window: drop everything up to and including the most
     # recent reset (remaining jumping up by at least reset_threshold). Burn from
     # earlier windows -- and the transient glitches that cluster around an
@@ -2623,8 +2677,508 @@ def wake_diagnostics() -> dict[str, Any]:
         state = proc.stdout.strip()
         user_systemd = state or "unknown"
     return {
+        "backend": power_backend(),
         "systemd_run": have_cmd("systemd-run"),
+        "systemd_inhibit": have_cmd("systemd-inhibit"),
         "rtcwake": have_cmd("rtcwake"),
+        "rtc_wakealarm": str(rtc_wakealarm_path()),
+        "rtc_wakealarm_readable": read_rtc_wakealarm() is not None or rtc_wakealarm_path().exists(),
+        "watchdog_device": watchdog_device_path() if watchdog_available() else None,
         "user_systemd": user_systemd,
         "note": "wake is best effort and depends on firmware, kernel, RTC, and systemd support",
     }
+
+
+# ============================================================================
+# Suspend / wake reliability (portable, feature-detected seam)
+# ============================================================================
+#
+# Power management is OS-specific, so everything here is written against a small
+# capability-detected backend. The *policy* (idle inhibition, RTC-armed suspend,
+# wake verification by drift, the durable cycle ledger, the watchdog safety net)
+# is platform-agnostic; only the handful of `_systemd_*` primitives shell out to
+# Linux tools. A future macOS backend (`caffeinate` / `pmset schedule wake`) can
+# be added by implementing the same primitives without touching any caller.
+#
+# On a host missing the required tools every helper degrades to "unavailable"
+# and the caller falls back to an in-process wall-clock wait: the machine simply
+# stays awake. That is always correct -- it only forgoes the power saving.
+
+
+def power_backend(env: dict[str, str] | None = None) -> str:
+    """Name of the active power backend: ``systemd``, or ``none``.
+
+    Detected by capability, never by distro string, so it works across all
+    systemd-based Linux. (macOS would report a future ``darwin`` backend.)
+    """
+    if have_cmd("systemctl") and have_cmd("systemd-run"):
+        return "systemd"
+    return "none"
+
+
+def rtc_wakealarm_path(env: dict[str, str] | None = None) -> Path:
+    override = (env or os.environ).get("LLM_TOOLS_RTC_WAKEALARM")
+    return Path(override) if override else Path("/sys/class/rtc/rtc0/wakealarm")
+
+
+def read_rtc_wakealarm(env: dict[str, str] | None = None) -> int | None:
+    """The RTC wake alarm epoch currently programmed, or None if unset/unreadable.
+
+    systemd programs this from a ``WakeSystem=true`` timer just before the kernel
+    enters sleep and clears it on resume, so a non-empty value mid-flight is the
+    ground-truth confirmation that a wake is actually armed.
+    """
+    try:
+        raw = rtc_wakealarm_path(env).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def suspend_drift_tolerance(env: dict[str, str] | None = None) -> int:
+    """How far from target a wake may land and still count as reliable (seconds)."""
+    raw = (env or os.environ).get("LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE", "90") or "90"
+    try:
+        return max(5, int(float(raw)))
+    except ValueError:
+        return 90
+
+
+class IdleSuspendInhibitor:
+    """Hold a logind ``idle`` inhibitor for the life of this process.
+
+    Why: a desktop idle timer (e.g. KDE PowerDevil's AC auto-suspend, GNOME, or
+    logind ``IdleAction``) will suspend the machine after N minutes of no input,
+    *even while a headless job is busy working*, with no RTC wake armed -- the
+    box then sleeps until someone touches it. Holding an ``idle`` inhibitor stops
+    that automatic action. Crucially an ``idle`` inhibitor does NOT block an
+    explicit ``systemctl suspend``, so the orchestrator keeps full control of its
+    own deliberate, RTC-armed suspends.
+
+    The lock is tied to a pipe owned by this process: if we exit or crash, the
+    pipe closes, the helper sees EOF and exits, and logind drops the lock. No
+    leaked inhibitor outlives the run.
+
+    Portability: uses ``systemd-inhibit`` (present on essentially all systemd
+    Linux). Absent that, acquisition is a no-op and the caller is told, so it can
+    warn the user that auto-suspend may interrupt the run.
+    """
+
+    def __init__(self, who: str, why: str, env: dict[str, str] | None = None) -> None:
+        self.who = who
+        self.why = why
+        # Honor an explicitly passed dict (even an empty one) so tests are not
+        # silently handed the ambient os.environ.
+        self.env = env if env is not None else os.environ
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._wfd: int | None = None
+
+    def acquire(self) -> bool:
+        if self.env.get("LLM_TOOLS_NO_INHIBIT", "0") == "1":
+            return False
+        if not have_cmd("systemd-inhibit"):
+            return False
+        try:
+            read_fd, write_fd = os.pipe()
+        except OSError:
+            return False
+        try:
+            self._proc = subprocess.Popen(
+                [
+                    "systemd-inhibit",
+                    "--what=idle",
+                    f"--who={self.who}",
+                    f"--why={self.why}",
+                    "--mode=block",
+                    "cat",
+                ],
+                stdin=read_fd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            os.close(read_fd)
+            os.close(write_fd)
+            self._proc = None
+            return False
+        os.close(read_fd)
+        self._wfd = write_fd
+        return True
+
+    def release(self) -> None:
+        if self._wfd is not None:
+            try:
+                os.close(self._wfd)
+            except OSError:
+                pass
+            self._wfd = None
+        if self._proc is not None:
+            try:
+                self._proc.wait(timeout=2)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
+
+    def __enter__(self) -> "IdleSuspendInhibitor":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        # Belt and suspenders: drop the lock if the holder is garbage-collected
+        # without an explicit release (the pipe also releases it on process exit).
+        try:
+            self.release()
+        except Exception:
+            pass
+
+
+def watchdog_device_path(env: dict[str, str] | None = None) -> str:
+    return (env or os.environ).get("LLM_TOOLS_WATCHDOG_DEVICE", "/dev/watchdog")
+
+
+def watchdog_available(env: dict[str, str] | None = None) -> bool:
+    try:
+        return Path(watchdog_device_path(env)).exists()
+    except OSError:
+        return False
+
+
+# Linux watchdog ioctls (see <linux/watchdog.h>): set the bite timeout and ping.
+_WDIOC_KEEPALIVE = 0x80045705
+_WDIOC_SETTIMEOUT = 0xC0045706
+
+
+class Watchdog:
+    """Best-effort hardware-watchdog safety net for a wedged resume.
+
+    Opt-in recovery for the worst case: the kernel comes back from suspend but
+    hangs in device resume (a classic GPU/USB failure mode), leaving the box on
+    but dead. A hardware watchdog that is armed and then *not* petted will reset
+    the machine, so an unattended run can recover on the next boot instead of
+    hanging until someone walks over.
+
+    Limitations (documented, not hidden): this needs a usable ``/dev/watchdog``,
+    and whether the device keeps counting across S3 is driver/firmware specific.
+    Many soft watchdogs are stopped on suspend; a TCO/iTCO or IPMI watchdog, or
+    ``RuntimeWatchdogSec=`` in ``systemd-system.conf``, is the reliable backing.
+    Absent a device this is a logged no-op -- never a hard failure.
+    """
+
+    def __init__(self, env: dict[str, str] | None = None) -> None:
+        self.env = env or os.environ
+        self._fd: int | None = None
+
+    def arm(self, timeout_seconds: int) -> bool:
+        if self.env.get("LLM_TOOLS_NO_WATCHDOG", "0") == "1":
+            return False
+        device = watchdog_device_path(self.env)
+        try:
+            self._fd = os.open(device, os.O_WRONLY)
+        except OSError:
+            self._fd = None
+            return False
+        try:
+            fcntl.ioctl(self._fd, _WDIOC_SETTIMEOUT, struct.pack("i", int(timeout_seconds)))
+        except OSError:
+            # Fake/soft devices (and tests) may not support the ioctl; the
+            # open succeeded, so treat it as armed and rely on keepalive/close.
+            pass
+        return True
+
+    def keepalive(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            fcntl.ioctl(self._fd, _WDIOC_KEEPALIVE, struct.pack("i", 0))
+        except OSError:
+            try:
+                os.write(self._fd, b"\0")
+            except OSError:
+                pass
+
+    def disarm(self) -> None:
+        """Cleanly stop the watchdog: writing the magic 'V' before close tells
+        the driver not to bite after we let go of the device."""
+        if self._fd is None:
+            return
+        try:
+            os.write(self._fd, b"V")
+        except OSError:
+            pass
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        self._fd = None
+
+
+def suspend_ledger_path(env: dict[str, str] | None = None) -> Path:
+    return cache_root(env) / "ralph-robin" / "suspend-ledger.jsonl"
+
+
+def _append_ledger(path: Path, record: dict[str, Any]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        pass
+
+
+def ledger_record_start(path: Path, cycle_id: str, target_epoch: int, env: dict[str, str] | None = None, **extra: Any) -> None:
+    """Durably record (with fsync) that a suspend cycle is starting.
+
+    Written *before* `systemctl suspend` so that if the resume wedges the machine
+    and it is hard-reset, the next boot still finds a start with no matching
+    ``done`` -- ground truth that a cycle failed to resume.
+    """
+    record = {"event": "suspend_start", "cycle_id": cycle_id, "target_epoch": int(target_epoch), "started_epoch": now_epoch(env)}
+    record.update(extra)
+    _append_ledger(path, record)
+
+
+def ledger_record_done(path: Path, cycle_id: str, woke_epoch: int, reliable: bool, env: dict[str, str] | None = None, **extra: Any) -> None:
+    record = {"event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": int(woke_epoch), "reliable": bool(reliable)}
+    record.update(extra)
+    _append_ledger(path, record)
+
+
+def incomplete_suspend_cycles(path: Path) -> list[dict[str, Any]]:
+    """Suspend cycles with a start but no matching done -- i.e. a resume that
+    never completed (a wedged/hard-reset cycle from a prior boot, or one in
+    flight). Used on startup to surface a past failed wake to the user."""
+    starts: dict[str, dict[str, Any]] = {}
+    done: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        obj = read_json_text(line)
+        if not isinstance(obj, dict):
+            continue
+        cid = str(obj.get("cycle_id") or "")
+        if not cid:
+            continue
+        if obj.get("event") == "suspend_start":
+            starts[cid] = obj
+        elif obj.get("event") == "suspend_done":
+            done.add(cid)
+    return [rec for cid, rec in starts.items() if cid not in done]
+
+
+def trim_ledger(path: Path, keep: int = 200) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) <= keep:
+        return
+    try:
+        path.write_text("\n".join(lines[-keep:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+@dataclass
+class WakeArm:
+    armed: bool
+    method: str            # "rtcwake" | "systemd-timer" | "none"
+    confirmed: bool        # RTC wakealarm read back at/near target
+    unit: str = ""
+    detail: str = ""
+
+
+def arm_rtc_wake(target_epoch: int, who: str, env: dict[str, str] | None = None) -> WakeArm:
+    """Arm an RTC alarm to wake the machine at ``target_epoch``.
+
+    Order of preference:
+      1. ``rtcwake -m no`` -- programs the alarm without suspending, and the
+         result is *verifiable* by reading back the RTC wakealarm. Needs the
+         privilege to touch the RTC, so it usually only works as root.
+      2. A ``systemd-run --user`` transient timer with ``WakeSystem=true`` -- the
+         unprivileged path systemd uses to program the alarm at suspend time.
+         Proven to wake real hardware, but not verifiable until suspend.
+
+    ``confirmed`` is True only when the alarm can be read back from sysfs, which
+    is the strongest guarantee a wake will fire.
+    """
+    env = env or os.environ
+    now = now_epoch(env)
+    tolerance = suspend_drift_tolerance(env)
+
+    if have_cmd("rtcwake"):
+        proc = subprocess.run(
+            ["rtcwake", "-m", "no", "-t", str(int(target_epoch))],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+        )
+        if proc.returncode == 0:
+            alarm = read_rtc_wakealarm(env)
+            confirmed = alarm is not None and abs(alarm - target_epoch) <= tolerance
+            if confirmed or alarm is not None:
+                return WakeArm(True, "rtcwake", confirmed, detail=proc.stdout.strip())
+
+    if power_backend(env) == "systemd":
+        unit = f"{who}-wake-{int(time.time())}"
+        proc = subprocess.run(
+            ["systemd-run", "--user", f"--unit={unit}", f"--on-calendar=@{int(target_epoch)}", "--timer-property=WakeSystem=true", "/bin/true"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+        )
+        if proc.returncode == 0:
+            active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", f"{unit}.timer"], check=False)
+            if active.returncode == 0:
+                # systemd only programs the RTC at suspend time, so it is not yet
+                # confirmable here; the post-resume drift check is the verification.
+                _ = now
+                return WakeArm(True, "systemd-timer", False, unit=unit, detail=proc.stdout.strip())
+        return WakeArm(False, "none", False, detail=proc.stdout.strip())
+
+    return WakeArm(False, "none", False)
+
+
+def disarm_rtc_wake(arm: WakeArm, env: dict[str, str] | None = None) -> None:
+    """Cancel a wake we armed but no longer need (e.g. suspend was skipped)."""
+    if arm.method == "systemd-timer" and arm.unit and have_cmd("systemctl"):
+        subprocess.run(["systemctl", "--user", "stop", f"{arm.unit}.timer"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    elif arm.method == "rtcwake" and have_cmd("rtcwake"):
+        subprocess.run(["rtcwake", "-m", "disable"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+@dataclass
+class SuspendOutcome:
+    suspended: bool          # the machine was (or would have been) put to sleep
+    woke_epoch: int | None   # wall clock observed after resume
+    target_epoch: int
+    drift_seconds: int | None
+    reliable: bool           # woke within tolerance of target (wake verified by behaviour)
+    method: str              # how the wake was armed
+    reason: str              # "ok" | "missing-backend" | "insufficient-lead" | "arm-failed" | "simulated"
+
+
+def wall_clock_wait_until(target_epoch: int, env: dict[str, str] | None = None) -> None:
+    """Wait until wall-clock time reaches ``target_epoch``, in bounded chunks.
+
+    ``time.sleep`` counts CLOCK_MONOTONIC, which the kernel freezes across
+    suspend, so a single long sleep would keep counting *awake* seconds after a
+    resume and overshoot. Re-checking the wall clock between short chunks ends
+    the wait as soon as real time catches up -- right at the RTC wake -- no
+    matter how long the machine was actually asleep.
+    """
+    raw = (env or os.environ).get("LLM_TOOLS_WAIT_POLL_SECONDS", "30") or "30"
+    try:
+        chunk = max(1.0, float(raw))
+    except ValueError:
+        chunk = 30.0
+    while True:
+        remaining = target_epoch - now_epoch(env)
+        if remaining <= 0:
+            return
+        time.sleep(min(float(remaining), chunk))
+
+
+def suspend_with_wake(
+    target_epoch: int,
+    *,
+    who: str,
+    logs: "RunLogs | None" = None,
+    min_lead: int | None = None,
+    watchdog: bool = False,
+    cycle_id: str | None = None,
+    env: dict[str, str] | None = None,
+) -> SuspendOutcome:
+    """Suspend the machine now and reliably wake it at ``target_epoch``.
+
+    The full hardened cycle, shared by ralph-robin and the soak test:
+
+      arm + verify RTC wake -> durable ledger start -> (optional watchdog) ->
+      sync -> systemctl suspend -> wall-clock wait to target -> measure drift ->
+      ledger done.
+
+    Returns a :class:`SuspendOutcome`. When the backend is unavailable, the lead
+    is too short, or arming fails, ``suspended`` is False and the caller falls
+    back to an in-process wait (machine stays awake). ``LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1``
+    simulates a perfect cycle so the orchestration is testable without sleeping
+    the host.
+    """
+    env = env or os.environ
+    now = now_epoch(env)
+    cycle_id = cycle_id or f"{who}-{int(time.time() * 1000)}-{os.getpid()}"
+    ledger = suspend_ledger_path(env)
+    lead = int(target_epoch) - now
+    floor = min_lead if min_lead is not None else int(env.get("LLM_SCHEDULER_SUSPEND_MIN_LEAD", "120") or "120")
+
+    def _log(event: str, data: dict[str, Any]) -> None:
+        if logs is not None:
+            log_event(logs, event, data)
+
+    if env.get("LLM_SCHEDULER_NO_ACTUAL_SUSPEND", "0") == "1":
+        _log("suspend_simulated", {"cycle_id": cycle_id, "target_epoch": int(target_epoch)})
+        return SuspendOutcome(False, target_epoch, int(target_epoch), 0, True, "simulated", "simulated")
+
+    if power_backend(env) == "none":
+        _log("suspend_skipped", {"cycle_id": cycle_id, "reason": "missing-backend"})
+        return SuspendOutcome(False, None, int(target_epoch), None, False, "none", "missing-backend")
+
+    if lead < floor:
+        _log("suspend_skipped", {"cycle_id": cycle_id, "reason": "insufficient-lead", "lead": lead, "min_lead": floor})
+        return SuspendOutcome(False, None, int(target_epoch), None, False, "none", "insufficient-lead")
+
+    arm = arm_rtc_wake(target_epoch, who, env)
+    _log("wake_armed", {"cycle_id": cycle_id, "armed": arm.armed, "method": arm.method, "confirmed": arm.confirmed, "unit": arm.unit, "target_epoch": int(target_epoch)})
+    if not arm.armed:
+        # Never suspend with no wake armed -- that is exactly how a box ends up
+        # asleep until someone touches it. Fall back to an awake wait instead.
+        _log("suspend_skipped", {"cycle_id": cycle_id, "reason": "arm-failed"})
+        return SuspendOutcome(False, None, int(target_epoch), None, False, arm.method, "arm-failed")
+
+    dog: Watchdog | None = None
+    if watchdog:
+        dog = Watchdog(env)
+        # Span the WHOLE expected sleep plus a resume margin. We cannot pet the
+        # watchdog while suspended, so on hardware whose watchdog keeps counting
+        # across S3 a short timeout would wrongly reboot a perfectly healthy long
+        # suspend. Spanning the sleep means it only bites when the resume itself
+        # runs long (wedged). (Many watchdogs instead stop across suspend and
+        # resume counting on wake, where any reasonable timeout also works. The
+        # ioctl is best-effort: a device that cannot accept this timeout keeps its
+        # own default.)
+        margin = suspend_drift_tolerance(env) * 4
+        armed_ok = dog.arm(max(60, lead + margin))
+        _log("watchdog", {"cycle_id": cycle_id, "armed": armed_ok, "device": watchdog_device_path(env), "timeout": max(60, lead + margin)})
+        if not armed_ok:
+            dog = None
+
+    ledger_record_start(ledger, cycle_id, int(target_epoch), env, who=who, method=arm.method, confirmed=arm.confirmed, watchdog=bool(dog))
+    _log("suspend_request", {"cycle_id": cycle_id, "method": arm.method, "target_epoch": int(target_epoch)})
+
+    subprocess.run(["sync"], check=False)
+    subprocess.run(["systemctl", "suspend"], check=False)
+
+    # systemctl suspend returns asynchronously; poll the wall clock so we proceed
+    # exactly when real time reaches the target (the RTC wake), not before.
+    wall_clock_wait_until(int(target_epoch), env)
+    if dog is not None:
+        dog.keepalive()
+        dog.disarm()
+
+    woke = now_epoch(env)
+    drift = woke - int(target_epoch)
+    reliable = abs(drift) <= suspend_drift_tolerance(env)
+    ledger_record_done(ledger, cycle_id, woke, reliable, env, drift_seconds=drift, method=arm.method)
+    trim_ledger(ledger)
+    _log("suspend_resumed", {"cycle_id": cycle_id, "woke_epoch": woke, "drift_seconds": drift, "reliable": reliable, "method": arm.method})
+    return SuspendOutcome(True, woke, int(target_epoch), drift, reliable, arm.method, "ok")

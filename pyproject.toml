@@ -14,6 +14,7 @@ license = {text = "Apache-2.0"}
 llm-usage = "llm_tools.usage:main"
 llm-scheduler = "llm_tools.scheduler:main"
 ralph-robin = "llm_tools.ralph_robin:main"
+llm-sleep-soak = "llm_tools.sleep_soak:main"
 
 [tool.setuptools.packages.find]
 include = ["llm_tools*"]

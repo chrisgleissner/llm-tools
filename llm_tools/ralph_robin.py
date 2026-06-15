@@ -91,6 +91,7 @@ Options:
   -S, --state-file FILE                    Rotation state file.
   -k, --wake                               Pass best-effort wake scheduling to llm-scheduler.
   -U, --suspend-until-ready                Suspend even for selected provider wait gates.
+      --watchdog                           Arm a hardware watchdog across suspend to recover a wedged resume.
   -d, --dry-run                            Resolve rotation and usage state without submitting.
   -h, --help                               Show this help.
 
@@ -121,6 +122,7 @@ class RalphConfig:
     state_file: Path = field(default_factory=common.ralph_state_file)
     wake: bool = False
     suspend_until_ready: bool = False
+    watchdog: bool = False
     dry_run: bool = False
     even_burn: bool = True
     max_iterations: str = "0"
@@ -450,6 +452,9 @@ def parse_args(argv: list[str]) -> RalphConfig:
             cfg.suspend_until_ready = True
             cfg.wake = True
             i += 1
+        elif arg == "--watchdog":
+            cfg.watchdog = True
+            i += 1
         elif arg in ("-d", "--dry-run"):
             cfg.dry_run = True
             i += 1
@@ -571,6 +576,7 @@ def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
         "dry_run": cfg.dry_run,
         "wake": cfg.wake,
         "suspend_until_ready": cfg.suspend_until_ready,
+        "watchdog": cfg.watchdog,
         "even_burn": cfg.even_burn,
         "max_iterations": int(cfg.max_iterations),
         "max_duration_seconds": parse_duration(cfg.max_duration) or 0,
@@ -960,46 +966,50 @@ def suspend_until_available(
     return True
 
 
-def rtc_suspend(logs: common.RunLogs, target_epoch: int) -> bool:
-    """Suspend the computer with an RTC wake-up timer set to target_epoch.
+@dataclass
+class SuspendState:
+    """Machine-suspend churn tracking for one ralph-robin run.
 
-    Returns True only if the machine was actually suspended (and has since
-    resumed). Returns False — so the caller falls back to an in-process wait —
-    when suspend infrastructure is missing, the lead time is too short, or
-    suspension is disabled for testing/dry-run.
+    Flaky suspend/resume hardware must not be hit repeatedly while nobody is
+    watching: once a wake comes back unreliable (or the backend cannot arm a
+    wake at all) we stop suspending and wait awake for the rest of the run --
+    staying on is always safe, hanging is not.
     """
-    if os.environ.get("LLM_SCHEDULER_NO_ACTUAL_SUSPEND", "0") == "1":
-        common.log_event(logs, "rtc_suspend_skipped", {"reason": "env", "target_epoch": target_epoch})
-        return False
-    if not (common.have_cmd("systemd-run") and common.have_cmd("systemctl")):
-        common.log_event(logs, "rtc_suspend_skipped", {"reason": "missing-systemd", "target_epoch": target_epoch})
-        return False
-    min_lead = int(os.environ.get("LLM_SCHEDULER_SUSPEND_MIN_LEAD", "120") or "120")
-    if target_epoch - common.now_epoch() < min_lead:
-        common.log_event(logs, "rtc_suspend_skipped", {"reason": "insufficient-lead", "target_epoch": target_epoch, "min_lead": min_lead})
-        return False
-    unit = f"ralph-robin-wake-{int(time.time())}"
-    # A no-op command whose only purpose is the WakeSystem=true RTC alarm; the
-    # orchestrator itself resumes in-process when systemctl suspend returns.
-    proc = subprocess.run(
-        [
-            "systemd-run", "--user", f"--unit={unit}",
-            f"--on-calendar=@{target_epoch}", "--timer-property=WakeSystem=true",
-            "/bin/true",
-        ],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
-    )
-    common.log_event(logs, "rtc_suspend_schedule", {"unit": unit, "status": proc.returncode, "output": proc.stdout, "target_epoch": target_epoch})
-    if proc.returncode != 0:
-        return False
-    active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", f"{unit}.timer"], check=False)
-    if active.returncode != 0:
-        common.log_event(logs, "rtc_suspend_skipped", {"reason": "timer-not-active", "unit": unit})
-        return False
-    common.log_event(logs, "rtc_suspend", {"unit": unit, "target_epoch": target_epoch})
-    subprocess.run(["sync"], check=False)
-    subprocess.run(["systemctl", "suspend"], check=False)
-    return True
+    suspends: int = 0
+    last_resume_monotonic: float | None = None
+    disabled: bool = False
+    disabled_reason: str = ""
+
+
+def min_awake_seconds() -> int:
+    raw = os.environ.get("LLM_RALPH_MIN_AWAKE_SECONDS", "60") or "60"
+    try:
+        return max(0, int(float(raw)))
+    except ValueError:
+        return 60
+
+
+def max_suspends_per_run() -> int:
+    raw = os.environ.get("LLM_RALPH_MAX_SUSPENDS", "0") or "0"
+    try:
+        return max(0, int(float(raw)))  # 0 == unlimited
+    except ValueError:
+        return 0
+
+
+def suspend_block_reason(state: SuspendState) -> str:
+    """Why we should wait awake instead of suspending right now (empty = suspend)."""
+    if state.disabled:
+        return state.disabled_reason or "suspend-disabled"
+    cap = max_suspends_per_run()
+    if cap and state.suspends >= cap:
+        return f"max-suspends-reached({cap})"
+    min_awake = min_awake_seconds()
+    if state.last_resume_monotonic is not None and min_awake:
+        awake = monotonic() - state.last_resume_monotonic
+        if awake < min_awake:
+            return f"min-awake({int(awake)}s<{min_awake}s)"
+    return ""
 
 
 def suspend_machine_until(
@@ -1008,13 +1018,17 @@ def suspend_machine_until(
     target_epoch: int,
     start_monotonic: float,
     max_duration: int,
+    state: SuspendState,
 ) -> bool:
-    """Suspend until target_epoch (the earliest provider renewal), then resume.
+    """Wait out the earliest provider renewal, suspending the machine when it is
+    safe to and waiting awake otherwise.
 
-    Ralph owns this cross-provider suspend: it sleeps the whole machine via an
-    RTC wake-up timer and, on resume, continues its own rotation loop. Falls back
-    to an in-process wait when real suspend is unavailable. Returns True when the
-    loop should continue, or False when the --max-duration budget is exhausted.
+    Ralph owns this cross-provider sleep: when every provider is rate-limited it
+    sleeps the whole machine via a verified RTC wake (see
+    :func:`common.suspend_with_wake`) and, on resume, continues its rotation. It
+    falls back to an in-process wall-clock wait whenever suspend is unavailable,
+    churn caps say "stay awake", or a previous wake proved unreliable. Returns
+    True when the loop should continue, or False when --max-duration is spent.
     """
     now = common.now_epoch()
     wait_s: float = max(0, target_epoch - now)
@@ -1026,19 +1040,77 @@ def suspend_machine_until(
             wait_s = remaining
             target_epoch = now + int(remaining)
     common.log_event(logs, "suspend_until_renewal", {"target_epoch": target_epoch, "wait_seconds": int(wait_s)})
+
+    block = suspend_block_reason(state)
+    if block:
+        status_line(
+            f"all providers rate-limited; staying awake ({block}) until earliest renewal {common.format_local_epoch(target_epoch)}",
+            level="warn",
+        )
+        common.log_event(logs, "suspend_deferred_awake", {"reason": block, "target_epoch": target_epoch})
+        wait_until_epoch(target_epoch)
+        return True
+
     status_line(
         f"all providers rate-limited; suspending until earliest renewal {common.format_local_epoch(target_epoch)} (epoch {target_epoch})",
         level="warn",
     )
-    rtc_suspend(logs, target_epoch)
-    # Guarantee we do not return before the renewal. `systemctl suspend` returns
-    # asynchronously (often before the machine is actually down), and time.sleep
-    # counts CLOCK_MONOTONIC, which freezes across suspend -- so a single sleep
-    # would keep counting awake-seconds *after* the RTC wake and hang for the
-    # full window. Poll the wall clock instead so we resume right at renewal,
-    # whether the machine really suspended or the fallback wait was used.
-    wait_until_epoch(target_epoch)
+    outcome = common.suspend_with_wake(target_epoch, who="ralph-robin", logs=logs, watchdog=cfg.watchdog)
+    if outcome.suspended:
+        state.suspends += 1
+        state.last_resume_monotonic = monotonic()
+        if not outcome.reliable:
+            state.disabled = True
+            state.disabled_reason = f"unreliable-wake(drift={outcome.drift_seconds}s)"
+            status_line("wake came back unreliable; staying awake for the rest of this run", level="warn")
+            common.log_event(logs, "suspend_unreliable", {"drift_seconds": outcome.drift_seconds, "method": outcome.method})
+    else:
+        # Never sleep with no guaranteed wake: fall back to an awake wait. If the
+        # backend simply cannot arm a wake here, disable further suspends too.
+        common.log_event(logs, "suspend_fallback_awake", {"reason": outcome.reason})
+        if outcome.reason in ("arm-failed", "missing-backend"):
+            state.disabled = True
+            state.disabled_reason = outcome.reason
+        wait_until_epoch(target_epoch)
     return True
+
+
+def guard_against_auto_suspend(cfg: RalphConfig, logs: common.RunLogs) -> common.IdleSuspendInhibitor:
+    """Hold an OS idle inhibitor for the whole run so a desktop idle timer (KDE
+    PowerDevil, GNOME, logind ``IdleAction``) cannot suspend the machine out from
+    under an active session with no wake armed. An ``idle`` inhibitor still lets
+    ralph's own deliberate ``systemctl suspend`` through, so it keeps full control
+    of when the box actually sleeps. Warns when the inhibitor cannot be taken."""
+    inhibitor = common.IdleSuspendInhibitor("ralph-robin", "autonomous ralph-robin session in progress", os.environ)
+    if cfg.dry_run:
+        return inhibitor
+    acquired = inhibitor.acquire()
+    common.log_event(logs, "idle_inhibit", {"acquired": acquired, "backend": common.power_backend()})
+    if acquired:
+        status_line("holding OS idle inhibitor; auto-suspend deferred while working", level="dim")
+    elif os.environ.get("LLM_TOOLS_NO_INHIBIT", "0") != "1":
+        status_line(
+            "could not inhibit OS auto-suspend (no systemd-inhibit); a desktop idle "
+            "auto-suspend could interrupt this run mid-work -- extend or disable it for long sessions",
+            level="warn",
+        )
+    return inhibitor
+
+
+def report_prior_suspend_failures(logs: common.RunLogs) -> None:
+    """Surface any earlier suspend cycle that recorded a start but never a resume
+    -- the durable fingerprint of a wake that wedged the machine on a prior boot."""
+    incomplete = common.incomplete_suspend_cycles(common.suspend_ledger_path())
+    if not incomplete:
+        return
+    common.log_event(logs, "prior_suspend_failures", {"count": len(incomplete), "cycles": incomplete[-5:]})
+    newest = max((int(c.get("started_epoch", 0)) for c in incomplete), default=0)
+    status_line(
+        f"warning: {len(incomplete)} earlier suspend cycle(s) never recorded a resume "
+        f"(latest {common.format_local_epoch(newest)}); a wake may have wedged the machine before. "
+        "Consider --watchdog, or longer reset windows so the machine suspends less often.",
+        level="warn",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1056,6 +1128,11 @@ def main(argv: list[str] | None = None) -> int:
     common.log_event(logs, "prompt", {"source": cfg.prompt_source, "sha256": prompt_sha, "prompt": prompt})
     current_index = current_index_from_state(cfg)
     status_line(f"logs: {logs.run_dir}", level="dim")
+    suspend_state = SuspendState()
+    report_prior_suspend_failures(logs)
+    # Held for the whole run; the pipe-backed lock auto-releases on process exit.
+    inhibitor = guard_against_auto_suspend(cfg, logs)
+    _ = inhibitor  # keep referenced so the inhibitor is not dropped mid-run
     skipped: set[str] = set()
     max_iterations = int(cfg.max_iterations)
     max_duration = parse_duration(cfg.max_duration) or 0
@@ -1110,7 +1187,7 @@ def main(argv: list[str] | None = None) -> int:
                 common.log_event(logs, "final", {"status": "dry-run"})
                 print("dry-run: no prompt submitted", file=sys.stderr)
                 return 0
-            if not suspend_machine_until(cfg, logs, target, start_monotonic, max_duration):
+            if not suspend_machine_until(cfg, logs, target, start_monotonic, max_duration, suspend_state):
                 return stop_timed_out()
             skipped = set()
             continue

@@ -19,9 +19,10 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 
 | Command         | Use it when you want to...                                                                       |
 | --------------- | ------------------------------------------------------------------------------------------------ |
-| `llm-usage`     | Check remaining LLM capacity before starting work.                                               |
-| `llm-scheduler` | Run one prompt through one selected provider once that provider has usable capacity.             |
-| `ralph-robin`   | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
+| `llm-usage`      | Check remaining LLM capacity before starting work.                                               |
+| `llm-scheduler`  | Run one prompt through one selected provider once that provider has usable capacity.             |
+| `ralph-robin`    | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
+| `llm-sleep-soak` | Prove suspend/resume is reliable on this machine before trusting unattended overnight runs.      |
 
 <img src="./docs/img/llm-usage4.png" alt="LLM Usage"/>
 
@@ -512,6 +513,7 @@ ralph-robin --prompt-file task.md --prefix none
 | `-L`, `--log-dir DIR`                                               | Set Ralph log directory. Default: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`.                                                               |
 | `-k`, `--wake`                                                      | Pass best-effort wake scheduling to `llm-scheduler`.                                                                                                          |
 | `-U`, `--suspend-until-ready`                                       | Suspend even for the selected provider's own wait gates.                                                                                                     |
+| `--watchdog`                                                       | Arm a hardware watchdog across each machine suspend so a wedged resume reboots instead of hanging. See [Reliable sleep/wake](#reliable-sleepwake).            |
 | `-d`, `--dry-run`                                                   | Resolve rotation and usage state without submitting.                                                                                                          |
 | `-h`, `--help`                                                      | Show help.                                                                                                                                                    |
 
@@ -594,7 +596,7 @@ If a provider exits with a scheduler autonomy abort, `ralph-robin` skips that pr
 
 When all providers are blocked, Ralph sets an RTC wake-up timer for the earliest known reset across the whole rotation, then resumes its own loop after wake.
 
-If suspend infrastructure is unavailable, the lead time is too short, `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` is set, or `--dry-run` is used, Ralph falls back to an in-process wait.
+If suspend infrastructure is unavailable, the lead time is too short, `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` is set, or `--dry-run` is used, Ralph falls back to an in-process wait (the machine stays awake — always correct, it just forgoes power saving).
 
 This is different from:
 
@@ -603,6 +605,39 @@ llm-scheduler --suspend-until-ready
 ```
 
 That scheduler mode wakes into one selected provider. Ralph wakes back into cross-provider rotation.
+
+### Reliable sleep/wake
+
+An overnight Ralph run waits out provider reset windows by suspending the whole machine. That is only safe if the box reliably resumes, and only sensible if nothing *else* suspends it underneath the run. Ralph handles both, simply and portably.
+
+**It defers your OS auto-suspend while it works.** Most desktops auto-suspend after some idle period (for example KDE PowerDevil, GNOME, or `logind`'s `IdleAction`). That idle timer does not know a headless job is busy, so it can suspend the machine mid-iteration — with no wake armed, leaving it asleep until you touch it (and then possibly hanging on a flaky resume). For its whole run Ralph holds a logind **`idle` inhibitor** (`systemd-inhibit --what=idle`) so the OS will not auto-suspend out from under it. An `idle` inhibitor does **not** block an explicit suspend, so Ralph still controls its own deliberate, RTC-armed suspends. You do not have to change your auto-suspend settings.
+
+> You can still keep your normal auto-suspend timeout. If you prefer the belt-and-braces approach, set it longer than a typical Ralph session — but that is brittle for long runs, which is exactly why Ralph inhibits idle instead of relying on it.
+
+**Its own suspends are verified and recorded:**
+
+* **A wake is always armed before suspending.** Ralph never suspends without first arming an RTC wake (via `rtcwake -m no` when it can, otherwise a `systemd-run --user` `WakeSystem=true` timer). If it cannot arm one, it does not suspend — it waits awake instead.
+* **Wakes are verified by behaviour.** After resume, Ralph checks how far the wall clock landed from the target. A wake that fires far from target (or not at all) is treated as unreliable, and Ralph stays awake for the rest of that run rather than risk repeating a bad cycle.
+* **Suspend churn is capped.** A minimum awake interval between suspends and an optional per-run cap stop flaky suspend/resume hardware from being cycled dozens of times unattended.
+* **A durable ledger survives a wedged resume.** Ralph writes an fsync'd marker before each suspend and another after resume. If a resume ever wedges the machine and it is hard-reset, the unfinished cycle is still on disk — Ralph (and the soak tool) warn about it on the next start.
+* **`--watchdog` (opt-in) recovers a wedged resume.** With `--watchdog`, Ralph arms a hardware watchdog across each suspend so a hung resume reboots the machine instead of hanging. This needs a usable `/dev/watchdog` whose timer keeps counting across S3 (a TCO/iTCO or IPMI watchdog, or `RuntimeWatchdogSec=` in `systemd-system.conf`); without one it is a logged no-op.
+
+**Portability.** The suspend backend is feature-detected, not distro-specific: it works across systemd-based Linux and degrades to an awake wait where the tools are missing. The design is modular so a future macOS backend (`caffeinate` / `pmset schedule wake`) can be added without changing how Ralph uses it.
+
+Tuning knobs: `LLM_TOOLS_NO_INHIBIT`, `LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE`, `LLM_RALPH_MIN_AWAKE_SECONDS`, `LLM_RALPH_MAX_SUSPENDS`, `LLM_SCHEDULER_SUSPEND_MIN_LEAD`, `LLM_TOOLS_WATCHDOG_DEVICE`. Run `llm-scheduler --wake-test` to see what the current host supports.
+
+### `llm-sleep-soak` — prove sleep/wake is reliable
+
+Before trusting unattended overnight runs, soak-test the exact suspend/wake path on your hardware:
+
+```bash
+llm-sleep-soak --cycles 50 --period 90s        # 50 real suspend/wake cycles
+llm-sleep-soak --cycles 20 --period 2m --watchdog --json
+```
+
+Each cycle suspends the machine, wakes it via the same verified RTC path Ralph uses, measures the wake drift, scrapes the kernel log for resume errors, and records the cycle in the durable ledger. It prints a `PASS`/`FAIL` summary and exits non-zero if any cycle resumed late or logged a resume error — or if an earlier run left a cycle unfinished (the fingerprint of a past wedged resume).
+
+This is a **real-hardware test**: it genuinely suspends the machine and therefore cannot run in CI. Run it when the machine is otherwise idle. `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` runs the whole loop in simulation (no real sleep) if you just want to see the flow.
 
 ## Provider Setup Details
 
