@@ -1703,6 +1703,12 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
     return text, digest
 
 
+# Providers recognised as top-level keys of a per-provider
+# ``LLM_SCHEDULER_USAGE_JSON`` map. Mirrors the set accepted by
+# ``--provider`` validation in the scheduler/ralph-robin CLIs.
+KNOWN_PROVIDERS = frozenset({"codex", "claude", "copilot", "kilo", "opencode", "minimax"})
+
+
 def usage_snapshot_for_provider(provider: str, env: dict[str, str] | None = None) -> dict[str, Any]:
     """Build a JSON-friendly snapshot for ``provider``.
 
@@ -1718,6 +1724,22 @@ def usage_snapshot_for_provider(provider: str, env: dict[str, str] | None = None
         raw = json.loads(injected)
         if isinstance(raw, dict) and provider in raw:
             return raw[provider]
+        # ``LLM_SCHEDULER_USAGE_JSON`` comes in two shapes: a per-provider map
+        # keyed by provider name (e.g. ``{"claude": {...}, "codex": {...}}``)
+        # used by ralph-robin's multi-provider tests, or a single flat snapshot
+        # (e.g. ``{"available": true, "five_hour": {...}}``) that applies to
+        # whichever provider is requested. Only when ``raw`` is a per-provider
+        # map that omits this provider do we report "no data": returning the
+        # whole map there would feed another provider's data into the decision
+        # logic and can produce a bogus future ``wait_until`` that hangs callers
+        # in a sleep loop. A flat snapshot must still be returned as-is.
+        if isinstance(raw, dict) and any(key in KNOWN_PROVIDERS for key in raw):
+            return {
+                "provider": provider,
+                "available": False,
+                "reason": "no-data",
+                "scopes": [],
+            }
         return raw
     if provider == "codex":
         return json_for_provider(read_codex(env), "codex")

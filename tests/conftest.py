@@ -34,6 +34,14 @@ def env(tmp_path: Path) -> dict[str, str]:
     (home / ".codex" / "sessions").mkdir(parents=True)
     (home / ".claude" / "projects").mkdir(parents=True)
     out = os.environ.copy()
+    # Keep the fixture hermetic when the suite itself runs inside a ralph-robin
+    # session: ralph-robin exports LLM_TOOLS_RALPH_ROBIN_* guard vars into the
+    # ambient environment, and copying them here would leak into every CLI
+    # subprocess — tripping the "--suspend-until-ready is disabled inside an
+    # active ralph-robin provider run" guard and forcing providers down the
+    # unavailable/sleep path. Tests that exercise those vars set them explicitly.
+    for key in [k for k in out if k.startswith("LLM_TOOLS_RALPH_ROBIN_")]:
+        del out[key]
     out.update(
         {
             "HOME": str(home),

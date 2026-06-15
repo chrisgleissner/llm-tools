@@ -398,19 +398,19 @@ def test_ralph_validation_dry_run_rotation_and_autonomy(env: dict[str, str], fak
     assert run_cmd(["./ralph-robin", "--providers", "bad", "--prompt", "x"], env).returncode == 2
     usage_json = '{"claude":{"available":true,"five_hour":{"remaining":0,"resets_at":1780441200},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}'
     dry = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {provider}", "--dry-run", "--state-file", str(tmp_path / "s.json"), "--log-dir", str(tmp_path / "logs")],
+        ["./ralph-robin", "--providers", "claude,codex", "--prompt", "x", "--command-template", "provider-mock {provider}", "--dry-run", "--state-file", str(tmp_path / "s.json"), "--log-dir", str(tmp_path / "logs")],
         env | {"LLM_USAGE_NOW_EPOCH": "1780430000", "LLM_SCHEDULER_USAGE_JSON": usage_json},
     )
     assert dry.returncode == 0
     assert "dry-run" in dry.stderr
     run = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s2.json"), "--log-dir", str(tmp_path / "logs2"), "--no-retry", "--max-iterations", "1"],
+        ["./ralph-robin", "--providers", "claude,codex", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s2.json"), "--log-dir", str(tmp_path / "logs2"), "--no-retry", "--max-iterations", "1"],
         env | {"LLM_USAGE_NOW_EPOCH": "1780430000", "LLM_SCHEDULER_USAGE_JSON": usage_json},
     )
     assert run.returncode == 0
     assert json.loads((tmp_path / "s2.json").read_text())["current_provider"] == "codex"
     blocked = run_cmd(
-        ["./ralph-robin", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s3.json"), "--log-dir", str(tmp_path / "logs3"), "--no-retry", "--max-duration", "3"],
+        ["./ralph-robin", "--providers", "claude,codex", "--prompt", "x", "--command-template", "provider-mock {provider}", "--state-file", str(tmp_path / "s3.json"), "--log-dir", str(tmp_path / "logs3"), "--no-retry", "--max-duration", "3"],
         env | {"LLM_SCHEDULER_USAGE_JSON": '{"claude":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}},"codex":{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}}', "PROVIDER_MODE": "blocking"},
     )
     assert blocked.returncode == common.AUTONOMY_ABORT_STATUS
@@ -929,7 +929,7 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     assert json.loads(cfg.state_file.read_text() or "{}").get("current_index") == 9
 
     logs = common.setup_run_logs(tmp_path / "logs", "r")
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: {"available": False, "reason": "missing-cli"})
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: {"available": False, "reason": "missing-cli"})
     sel = ralph_robin.select_provider(cfg, logs, 0, {"claude", "codex"})
     assert sel["rotation_reason"] == "all-skipped"
     sel2 = ralph_robin.select_provider(cfg, logs, 0, set())
@@ -940,7 +940,7 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
         "claude": {"available": True, "five_hour": {"remaining": 0, "resets_at": 2000}, "week": {"remaining": 50}},
         "codex": {"available": True},
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
     sel3 = ralph_robin.select_provider(cfg, logs, 0, set())
     assert sel3["provider"] == "codex"
@@ -967,7 +967,7 @@ def test_ralph_even_burn_prefers_highest_remaining_daily_capacity(monkeypatch: p
             "week": {"remaining": 50, "resets_at": 1000 + (2 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     selected = ralph_robin.select_provider(cfg, logs, 0, set())
     assert selected["provider"] == "codex"
@@ -998,7 +998,7 @@ def test_ralph_even_burn_prefers_higher_remaining_when_resets_align(monkeypatch:
             "week": {"remaining": 47, "resets_at": 1000 + (6 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     # current_index points at codex; even-burn must still advance to claude.
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
@@ -1025,7 +1025,7 @@ def test_ralph_even_burn_handles_unknown_weekly_reset(monkeypatch: pytest.Monkey
             "week": {"remaining": 47, "resets_at": 1000 + (6 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     # 81% / 7d ~= 11.6%/day beats 47% / 6d ~= 7.8%/day.
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
@@ -1189,7 +1189,7 @@ def test_ralph_even_burn_prefers_ready_provider_over_blocked_higher_weekly_headr
             "week": {"remaining": 50, "resets_at": 1000 + (6 * 86400)},
         },
     }
-    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider: snapshots[provider])
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
     assert selected["provider"] == "codex"
