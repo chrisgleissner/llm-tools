@@ -628,7 +628,7 @@ COPILOT_USAGE_PAYLOAD = json.dumps(
 
 
 def _addon_env(env: dict[str, str], **extra: str) -> dict[str, str]:
-    out = {k: v for k, v in env.items() if k != "LLM_USAGE_DISABLE_COPILOT_ADDON"}
+    out = {k: v for k, v in env.items() if k not in ("LLM_USAGE_DISABLE_COPILOT_ADDON", "LLM_USAGE_DISABLE_COPILOT_MONTHLY")}
     out["LLM_USAGE_NOW_EPOCH"] = _ADDON_NOW
     out.update(extra)
     return out
@@ -771,6 +771,16 @@ def test_render_spent_mixed_currency_shows_plain_amount() -> None:
     cfg.budget_currency = "$"
     # A £ amount has no comparable $ budget -> no bar, just the left amount.
     assert usage.render_spent(12.4, "£", cfg) == "£12.4"
+
+
+def test_render_spent_missing_currency_uses_budget_currency() -> None:
+    cfg = _no_color_cfg()
+    cfg.monthly_budget = 50.0
+    cfg.budget_currency = "€"
+    # Missing spend currency is treated as the configured budget currency, so
+    # the amount and guidance do not mix "$" with a non-dollar budget.
+    assert usage.render_spent(12.4, None, cfg) == " €12.4 ██░░░░░░░░"
+    assert usage.spend_guidance(12.4, None, cfg) == "24.8% of €50"
 
 
 def test_spend_guidance_shows_share_of_budget() -> None:

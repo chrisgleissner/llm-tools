@@ -154,6 +154,78 @@ def _epoch_seconds(value_ms: int | None) -> int | None:
     return int(value_ms)
 
 
+# Sentinel returned by ``_run_minimax_quota`` when the CLI itself succeeded
+# (exit 0, valid JSON) but the payload is an error envelope rather than a
+# ``model_remains`` array. Surfacing this as a distinct reason lets
+# ``read_minimax`` distinguish "we couldn't measure" from "the user's account
+# has no plan / no token" so the dashboard can tell the user something useful
+# instead of the generic ``inconclusive-usage``.
+MINIMAX_ERROR_PAYLOAD = "__minimax_error_payload__"
+
+
+def _classify_minimax_error(message: str) -> str:
+    """Map a MiniMax error message string to a stable reason code.
+
+    The CLI returns error envelopes shaped like
+    ``{"error": {"code": 1, "message": "API error: no active token plan subscription (HTTP 200)"}}``.
+    The string is freeform but the meaningful substrings (auth, plan,
+    network) are stable enough across releases to drive a small lookup.
+    Unknown messages fall back to ``quota-error`` so the renderer still
+    surfaces "we tried, the service said no" rather than a generic
+    ``inconclusive-usage``.
+    """
+    text = (message or "").lower()
+    if "no active token" in text or "no active plan" in text or "subscription" in text or "plan" in text and "subscription" in text:
+        return "subscription-required"
+    if "auth" in text or "token" in text or "login" in text or "credential" in text:
+        return "not-authenticated"
+    if "rate" in text or "limit" in text or "429" in text or "throttle" in text:
+        return "rate-limited"
+    if "timeout" in text or "network" in text or "connection" in text or "econn" in text or "unreachable" in text:
+        return "network-error"
+    return "quota-error"
+
+
+def _extract_minimax_error_reason(payload: Any) -> str | None:
+    """Return a stable reason code when ``payload`` is a MiniMax error envelope.
+
+    The CLI returns ``{"error": {"code": N, "message": "..."}}`` when the
+    underlying API call failed (auth, subscription, etc). Anything else
+    (a real ``model_remains`` payload) returns ``None`` and the caller falls
+    through to the normal parser.
+    """
+    if not isinstance(payload, dict):
+        return None
+    err = payload.get("error")
+    if not isinstance(err, dict):
+        return None
+    message = str(err.get("message") or "")
+    return _classify_minimax_error(message)
+
+
+def _json_payload_from_streams(stdout: str, stderr: str) -> Any | None:
+    """Parse the first valid JSON payload from the CLI streams.
+
+    ``mmx quota`` uses stdout for successful quota payloads and stderr for
+    error envelopes. Some CLI versions also emit human warnings on stderr
+    during otherwise successful runs, so concatenating the streams can corrupt
+    perfectly valid stdout JSON. Try each stream independently first; the
+    combined fallback exists only for odd wrappers that split a JSON object.
+    """
+    candidates = [stdout.strip(), stderr.strip()]
+    both = (stdout + stderr).strip()
+    if both and both not in candidates:
+        candidates.append(both)
+    for text in candidates:
+        if not text:
+            continue
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _run_minimax_quota(env: dict[str, str]) -> dict[str, Any] | None:
     cli = minimax_cli(env)
     if not cli:
@@ -163,19 +235,28 @@ def _run_minimax_quota(env: dict[str, str]) -> dict[str, Any] | None:
         proc = subprocess.run(
             [cli, "quota", "show", "--output", "json"],
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             text=True,
             timeout=int(env.get("LLM_USAGE_MINIMAX_TIMEOUT", str(DEFAULT_MINIMAX_TIMEOUT)) or str(DEFAULT_MINIMAX_TIMEOUT)),
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if proc.returncode != 0 or not proc.stdout:
+    # The mmx CLI writes the JSON ``model_remains`` payload to stdout on
+    # success, but it writes the error envelope ``{"error": {...}}`` to
+    # stderr (and exits non-zero) when the underlying API rejects the request.
+    # Parse streams independently so stderr warnings do not corrupt valid
+    # stdout JSON.
+    payload = _json_payload_from_streams(proc.stdout or "", proc.stderr or "")
+    if payload is None:
         return None
-    text = proc.stdout.strip()
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
+    reason = _extract_minimax_error_reason(payload)
+    if reason is not None:
+        return {MINIMAX_ERROR_PAYLOAD: True, "reason": reason, "message": str((payload.get("error") or {}).get("message") or "")}
+    if proc.returncode != 0:
+        # Non-zero exit with a JSON payload that isn't the documented
+        # error envelope shape — treat it as a generic failure so the
+        # caller can still show a reason instead of ``unavailable``.
         return None
     return _parse_minimax_payload(payload, model)
 
@@ -240,7 +321,13 @@ def read_minimax(env: dict[str, str] | None = None) -> ProviderSnapshot:
     weekly_percent: float | None = None
     weekly_reset: int | None = None
     source_parts: list[str] = []
-    if stats is not None:
+    cli_error_reason: str | None = None
+    if isinstance(stats, dict) and stats.get(MINIMAX_ERROR_PAYLOAD) is True:
+        # The CLI returned an error envelope (auth/plan/network). Capture the
+        # reason so we can surface it below; the env fallback may still rescue
+        # the read into a usable snapshot, so we don't bail out immediately.
+        cli_error_reason = str(stats.get("reason") or "quota-error")
+    elif stats is not None:
         source_parts.append("mmx quota")
         if stats.get("interval_percent") is not None:
             interval_percent = stats["interval_percent"]
@@ -281,6 +368,16 @@ def read_minimax(env: dict[str, str] | None = None) -> ProviderSnapshot:
         source,
     )
     if not scopes:
+        # Prefer the CLI's own error reason when it returned an error
+        # envelope — that is a more informative "why" than the catch-all
+        # ``inconclusive-usage`` or the binary ``missing-cli``.
+        if cli_error_reason is not None and cli is not None:
+            return ProviderSnapshot(
+                provider=PROVIDER_MINIMAX,
+                available=False,
+                reason=cli_error_reason,
+                source="mmx cli",
+            )
         return ProviderSnapshot(
             provider=PROVIDER_MINIMAX,
             available=False,

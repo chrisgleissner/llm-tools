@@ -98,6 +98,15 @@ llm-usage
 llm-usage --watch 60
 ```
 
+Keep a continuous low-overhead sampler running for instant client reports and
+burn-down history:
+
+```bash
+llm-usage --service-install
+llm-usage --service-status
+llm-usage --service-stop
+```
+
 Run a prompt once a specific provider is ready:
 
 ```bash
@@ -356,6 +365,22 @@ or `GITHUB_TOKEN`, otherwise `gh auth token`); no Copilot-specific credential is
 required. With no token available the row is simply omitted. The row is
 informational and never affects `Ready`.
 
+The Copilot CLI footer shape has changed across releases — pre-1.0.57 printed
+`Plan: N% used` / `Monthly: N% used` (the *used* percentage), 1.0.57+ render
+`Remaining reqs.: N%` (the *remaining* percentage), and 1.0.63+ also dropped
+the colon on the `AI Credits` line. The dashboard recognises all of these
+shapes. The new CLI (>1.0.57) no longer surfaces a *monthly* figure at all in
+its footer, so the reader falls back to GitHub's
+`/users/{login}/settings/billing/premium_request/usage` endpoint, which always
+reports the current month's per-model premium request count. The reader
+sums that against your plan's monthly allowance (300 for Pro, 1500 for Pro+,
+1000 for Enterprise, etc.) to draw the quota bar — overriding the plan via
+`LLM_USAGE_COPILOT_PLAN` or pinning the allowance directly with
+`LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE` is supported. Note: the
+year+month-only query for the *current* month silently returns an empty
+result; the reader therefore asks one day at a time so a day with usage
+recorded shows up immediately rather than being hidden until month-end.
+
 How to read the table:
 
 | Column      | Meaning                                                                                                                                            |
@@ -398,6 +423,14 @@ appears as a plain `Total` row.
 | `-t`, `--statusline`     | Read Claude Code statusline JSON from stdin and cache it.                                               |
 | `-l`, `--log-only`       | Sample providers and append to the usage log without printing a table.                                  |
 | `-n`, `--no-header`      | Omit the table header.                                                                                  |
+| `--no-service`           | Read providers directly instead of using the local `llm-usage` service.                                 |
+| `--service-install`      | Install and start the continuous sampler with the native user service manager.                          |
+| `--service-uninstall`    | Stop and remove the installed continuous sampler.                                                       |
+| `--service-start`        | Start the installed continuous sampler.                                                                |
+| `--service-stop`         | Stop the installed continuous sampler.                                                                 |
+| `--service-status`       | Show whether the local sampler is running.                                                             |
+| `--service-run`          | Run the sampler in the foreground, useful for supervisors or debugging.                                 |
+| `--service-interval SECONDS` | Continuous sampler refresh interval; default: `60`.                                                |
 | `-h`, `--help`           | Show help.                                                                                              |
 
 ## `llm-scheduler`
@@ -826,6 +859,7 @@ Directory layout:
 
 ```text
 llm-tools/llm-usage/                 Usage caches and llm-usage.log
+llm-tools/llm-usage/service/         Local service latest snapshot, history JSONL, logs
 llm-tools/llm-scheduler/logs/        Per-run scheduler logs
 llm-tools/ralph-robin/               Ralph state and logs
 ```
@@ -910,6 +944,31 @@ stale after `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` seconds (default `60`, capped at
 60) while they claim an active window, so a brief network blip degrades to
 "unavailable" rather than to a misleadingly old percentage.
 
+### Local Service
+
+By default, a one-shot `llm-usage` client first asks the local Unix-socket
+service for a snapshot. If no continuous service is running, it starts the same
+sampler ephemerally, reads one snapshot, asks it to shut down, and falls back to
+direct provider reads if the service cannot start. This keeps the default user
+experience as a single CLI while using the same protocol future clients can use.
+
+For instant reports and continuous burn-down history, install the sampler as a
+native user service:
+
+```bash
+llm-usage --service-install
+llm-usage --service-status
+llm-usage --service-uninstall
+```
+
+On Linux this writes and enables a `systemd --user` unit. On macOS it writes and
+loads a launchd LaunchAgent. The service is local-only: it listens on a
+Unix-domain socket under `${XDG_RUNTIME_DIR:-/tmp/llm-tools-$UID}`, writes
+`latest.json` under the `llm-usage` cache directory, and appends samples to
+`history.jsonl`. It has no HTTP listener, database, telemetry, or extra runtime
+dependency. Use `--no-service` for an explicit direct read, or `--service-run`
+to run the foreground process under a custom supervisor.
+
 While readers are in flight, `llm-usage` shows a small spinner that erases
 itself once the table is ready. In `--watch` mode it docks to the right of the
 clock in the header (`LLM Usage · 14:29  ⠙ refreshing usage 3/6`) and the frame
@@ -955,6 +1014,39 @@ Force synchronous capture:
 
 ```bash
 LLM_USAGE_COPILOT_CACHE_TTL=0
+```
+
+### Copilot monthly allowance override
+
+The GitHub `premium_request/usage` fallback computes the monthly quota bar
+from the user's plan. Override the plan or pin the allowance explicitly:
+
+```bash
+# Resolve as Pro+ (1500 requests / month) instead of the default Pro
+LLM_USAGE_COPILOT_PLAN=pro_plus
+
+# Or pin a custom allowance for an enterprise / custom contract
+LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE=5000
+```
+
+The cached `premium_request/usage` figure is reused across runs (default
+TTL 600s):
+
+```bash
+LLM_USAGE_COPILOT_MONTHLY_TTL=600
+```
+
+Disable only the monthly GitHub fallback, without hiding the add-on spend row:
+
+```bash
+LLM_USAGE_DISABLE_COPILOT_MONTHLY=1
+```
+
+Tests can pin a frozen "current month" so the reader takes the cheap
+year+month path instead of fanning out 30 day-level requests:
+
+```bash
+LLM_USAGE_COPILOT_PREMIUM_REQUEST_MONTH_OVERRIDE=2026-05
 ```
 
 ## Wake Support

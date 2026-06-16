@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import common
-from .capacity import ProviderSnapshot
+from .capacity import CapacityKind, ProviderSnapshot
 
 
 APP_NAME = "llm-usage"
@@ -48,6 +48,15 @@ UNAVAILABLE_DISPLAY_REASONS = frozenset(
         "no-local-data",
         "no local data",
         "unknown",
+        # MiniMax (and any future provider) error-envelope reasons: the
+        # underlying service said "no" in a specific way. The display still
+        # collapses them to a single short word so the column stays narrow,
+        # but the underlying code stays machine-readable for the JSON view
+        # and the scheduler's gating logic.
+        "subscription-required",
+        "quota-error",
+        "network-error",
+        "rate-limited",
     }
 )
 
@@ -205,6 +214,14 @@ Options:
   -l, --log-only                           Sample providers and append to the usage log only.
   -n, --no-header                          Omit table header.
   -p, --provider-parallelism N             Provider readers to run concurrently (default: CPU cores).
+  --no-service                             Read providers directly instead of using the local service.
+  --service-install                        Install and start the continuous background sampler.
+  --service-uninstall                      Stop and remove the installed background sampler.
+  --service-start                          Start the installed background sampler.
+  --service-stop                           Stop the installed background sampler.
+  --service-status                         Show background sampler status.
+  --service-run                            Run the background sampler in the foreground.
+  --service-interval SECONDS               Continuous sampler refresh interval (default: 60).
   -h, --help                               Show this help.
 """
 
@@ -236,6 +253,9 @@ class Config:
         )
         self.terminal_width = terminal_width(env)
         self.monthly_budget, self.budget_currency = _load_monthly_budget(env)
+        self.use_service = env.get("LLM_USAGE_NO_SERVICE", "0") != "1"
+        self.service_action = ""
+        self.service_interval = env.get("LLM_USAGE_SERVICE_INTERVAL", "60")
 
 
 def _load_monthly_budget(env: "dict[str, str]") -> "tuple[float | None, str]":
@@ -244,8 +264,8 @@ def _load_monthly_budget(env: "dict[str, str]") -> "tuple[float | None, str]":
     Env (``LLM_USAGE_MONTHLY_BUDGET`` / ``LLM_USAGE_BUDGET_CURRENCY``) wins over
     the ``[budget]`` config table so a quick override needs no file edit. A
     missing/invalid amount yields ``None`` (spend rows then show the amount with
-    no bar). The config read is best-effort: a broken config never breaks the
-    usage table.
+    no bar). Missing config files and unexpected read errors are ignored, but
+    config parse/validation errors remain fatal so users see the broken config.
     """
     raw = env.get("LLM_USAGE_MONTHLY_BUDGET")
     currency = env.get("LLM_USAGE_BUDGET_CURRENCY")
@@ -365,6 +385,42 @@ def parse_args(argv: list[str]) -> Config:
                 common.err(f"{arg} must be a positive integer")
                 raise SystemExit(2)
             cfg.provider_parallelism = int(argv[i + 1])
+            i += 2
+        elif arg == "--no-service":
+            cfg.use_service = False
+            i += 1
+        elif arg in ("--service-run", "--service-foreground"):
+            cfg.service_action = "run"
+            cfg.use_service = False
+            i += 1
+        elif arg == "--service-install":
+            cfg.service_action = "install"
+            cfg.use_service = False
+            i += 1
+        elif arg == "--service-uninstall":
+            cfg.service_action = "uninstall"
+            cfg.use_service = False
+            i += 1
+        elif arg == "--service-start":
+            cfg.service_action = "start"
+            cfg.use_service = False
+            i += 1
+        elif arg == "--service-stop":
+            cfg.service_action = "stop"
+            cfg.use_service = False
+            i += 1
+        elif arg == "--service-status":
+            cfg.service_action = "status"
+            cfg.use_service = False
+            i += 1
+        elif arg == "--service-interval":
+            if i + 1 >= len(argv):
+                common.err(f"{arg} requires SECONDS")
+                raise SystemExit(2)
+            if not common.is_integer(argv[i + 1]) or int(argv[i + 1]) < 5:
+                common.err(f"{arg} must be at least 5 seconds")
+                raise SystemExit(2)
+            cfg.service_interval = argv[i + 1]
             i += 2
         elif arg in ("-h", "--help"):
             print(USAGE, end="")
@@ -492,9 +548,10 @@ def render_spent(amount: float | None, currency: str | None, cfg: Config) -> str
     """
     if amount is None:
         return "-"
-    amount_text = format_amount(amount, currency)
     budget = cfg.monthly_budget
-    same_currency = budget is not None and (not currency or currency == cfg.budget_currency)
+    display_currency = currency or (cfg.budget_currency if budget is not None else "$")
+    amount_text = format_amount(amount, display_currency)
+    same_currency = budget is not None and display_currency == cfg.budget_currency
     if not same_currency:
         # No comparable budget to draw a bar against: show just the amount,
         # left-positioned like the percentage cells (no right-aligned "spent").
@@ -949,7 +1006,8 @@ def spend_guidance(amount: float | None, currency: str | None, cfg: Config) -> s
     blank (calm design) rather than carrying a repeated placeholder.
     """
     budget = cfg.monthly_budget
-    same_currency = amount is not None and budget is not None and (not currency or currency == cfg.budget_currency)
+    display_currency = currency or cfg.budget_currency
+    same_currency = amount is not None and budget is not None and display_currency == cfg.budget_currency
     if not same_currency:
         return ""
     consumed = 0.0 if budget <= 0 else amount / budget * 100.0
@@ -1443,6 +1501,150 @@ def unavailable_snapshot(provider: str, source: str, reason: str = "reader-error
     return ProviderSnapshot(provider=provider, available=False, reason=reason, source=source)
 
 
+def scope_to_json(scope: Any) -> dict[str, Any]:
+    return {
+        "name": getattr(scope, "name", ""),
+        "kind": getattr(scope, "kind", ""),
+        "ready": getattr(scope, "ready", True),
+        "reason": getattr(scope, "reason", ""),
+        "remaining_percent": getattr(scope, "remaining_percent", None),
+        "reset_epoch": getattr(scope, "reset_epoch", None),
+        "resets_at": getattr(scope, "resets_at", None),
+        "remaining_amount": getattr(scope, "remaining_amount", None),
+        "total_amount": getattr(scope, "total_amount", None),
+        "currency": getattr(scope, "currency", None),
+        "label": getattr(scope, "label", None),
+        "source": getattr(scope, "source", ""),
+        "extras": dict(getattr(scope, "extras", {}) or {}),
+    }
+
+
+def scope_from_json(obj: Any) -> Any:
+    from .capacity import CapacityScope
+
+    if not isinstance(obj, dict):
+        return CapacityScope(name="", kind=CapacityKind.UNKNOWN)
+    return CapacityScope(
+        name=str(obj.get("name") or ""),
+        kind=str(obj.get("kind") or CapacityKind.UNKNOWN),
+        ready=bool(obj.get("ready", True)),
+        reason=str(obj.get("reason") or ""),
+        remaining_percent=obj.get("remaining_percent"),
+        reset_epoch=obj.get("reset_epoch"),
+        resets_at=obj.get("resets_at"),
+        remaining_amount=obj.get("remaining_amount"),
+        total_amount=obj.get("total_amount"),
+        currency=obj.get("currency"),
+        label=obj.get("label"),
+        source=str(obj.get("source") or ""),
+        extras=dict(obj.get("extras") or {}) if isinstance(obj.get("extras"), dict) else {},
+    )
+
+
+def snapshot_to_json(snap: Any) -> dict[str, Any]:
+    if not hasattr(snap, "provider"):
+        return dict(snap) if isinstance(snap, dict) else {}
+    return {
+        "provider": snap.provider,
+        "available": snap.available,
+        "reason": snap.reason,
+        "source": snap.source,
+        "selected_model": snap.selected_model,
+        "scopes": [scope_to_json(s) for s in getattr(snap, "scopes", []) or []],
+        "model_scopes": [scope_to_json(s) for s in getattr(snap, "model_scopes", []) or []],
+    }
+
+
+def snapshot_from_json(obj: Any) -> ProviderSnapshot:
+    if not isinstance(obj, dict):
+        return ProviderSnapshot(provider="", available=False, reason="reader-error")
+    return ProviderSnapshot(
+        provider=str(obj.get("provider") or ""),
+        available=bool(obj.get("available", False)),
+        reason=str(obj.get("reason") or ""),
+        source=str(obj.get("source") or ""),
+        selected_model=obj.get("selected_model"),
+        scopes=[scope_from_json(s) for s in obj.get("scopes") or []],
+        model_scopes=[scope_from_json(s) for s in obj.get("model_scopes") or []],
+    )
+
+
+def service_payload_from_provider_data(cfg: Config, provider_data: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Serialize a provider-data read for the local usage service."""
+    env = env or os.environ
+    return {
+        "schema": 1,
+        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
+        "generated_at_epoch": common.now_epoch(env),
+        "providers": {
+            "codex": provider_data.get("codex") or {"provider": "codex", "available": False},
+            "claude": snapshot_to_json(provider_data.get("claude")),
+            "copilot": snapshot_to_json(provider_data.get("copilot")),
+            "kilo": snapshot_to_json(provider_data.get("kilo")),
+            "opencode": snapshot_to_json(provider_data.get("opencode")),
+            "minimax": snapshot_to_json(provider_data.get("minimax")),
+        },
+    }
+
+
+def provider_data_from_service_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    providers = payload.get("providers")
+    if not isinstance(providers, dict):
+        return None
+    return {
+        "codex": providers.get("codex") if isinstance(providers.get("codex"), dict) else None,
+        "claude": snapshot_from_json(providers.get("claude")),
+        "copilot": snapshot_from_json(providers.get("copilot")),
+        "kilo": snapshot_from_json(providers.get("kilo")),
+        "opencode": snapshot_from_json(providers.get("opencode")),
+        "minimax": snapshot_from_json(providers.get("minimax")),
+    }
+
+
+def log_samples_from_provider_data(provider_data: dict[str, Any]) -> None:
+    """Append burn-rate samples from an already-fetched provider snapshot set.
+
+    The background service uses this instead of the table builder so continuous
+    sampling does not re-enter route rendering or perform a second provider read
+    merely to keep ``Remaining Time`` history warm.
+    """
+    claude_snap = provider_data.get("claude")
+    if getattr(claude_snap, "available", False):
+        legacy = _legacy_claude(claude_snap) or {}
+        common.log_usage_sample("Claude", "5h", common.remaining_from_used((legacy.get("five_hour") or {}).get("used")))
+        common.log_usage_sample("Claude", "weekly", common.remaining_from_used((legacy.get("week") or {}).get("used")))
+        for scope in getattr(claude_snap, "model_scopes", None) or []:
+            model = str((getattr(scope, "extras", None) or {}).get("model") or "")
+            if model:
+                common.log_usage_sample(f"Claude {model}", scope.name, scope.remaining_percent)
+
+    codex_json = provider_data.get("codex") if isinstance(provider_data.get("codex"), dict) else None
+    if codex_json and codex_json.get("available") is not False:
+        rows = codex_json.get("rows") if isinstance(codex_json.get("rows"), list) else []
+        if rows:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                provider = row.get("name", "Codex")
+                common.log_usage_sample(provider, "5h", common.remaining_from_used((row.get("five_hour") or {}).get("used")))
+                common.log_usage_sample(provider, "weekly", common.remaining_from_used((row.get("week") or {}).get("used")))
+        else:
+            common.log_usage_sample("Codex", "5h", common.remaining_from_used((codex_json.get("five_hour") or {}).get("used")))
+            common.log_usage_sample("Codex", "weekly", common.remaining_from_used((codex_json.get("week") or {}).get("used")))
+
+    copilot_snap = provider_data.get("copilot")
+    if getattr(copilot_snap, "available", False):
+        monthly = next((s for s in getattr(copilot_snap, "scopes", []) or [] if s.name == "monthly"), None)
+        if monthly is not None and monthly.remaining_percent is not None:
+            common.log_usage_sample("copilot", "monthly", monthly.remaining_percent)
+
+    minimax_snap = provider_data.get("minimax")
+    if getattr(minimax_snap, "available", False):
+        for scope in getattr(minimax_snap, "scopes", []) or []:
+            if scope.kind == CapacityKind.RESET_WINDOW:
+                common.log_usage_sample(MINIMAX_DISPLAY_NAME, scope.name, scope.remaining_percent)
+
+
 class ProgressReporter:
     """Ephemeral, single-line progress feedback for slow provider reads.
 
@@ -1626,7 +1828,7 @@ def _fetch_provider_data(cfg: Config, anchor: tuple[int, int] | None = None) -> 
         progress.stop()
 
 
-def _emit_json(cfg: Config, provider_data: dict[str, Any]) -> None:
+def json_object_from_provider_data(cfg: Config, provider_data: dict[str, Any], generated_at: str | None = None) -> dict[str, Any]:
     claude_snap = provider_data["claude"]
     claude_json = (
         common.json_for_provider(_legacy_claude(claude_snap), "claude")
@@ -1639,7 +1841,7 @@ def _emit_json(cfg: Config, provider_data: dict[str, Any]) -> None:
         }
     )
     obj = {
-        "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
+        "generated_at": generated_at or datetime.now(timezone.utc).astimezone().isoformat(),
         "codex": common.json_for_provider(provider_data["codex"], "codex"),
         "claude": claude_json,
         "copilot": _legacy_copilot(provider_data["copilot"], cfg.show_copilot_credits),
@@ -1661,7 +1863,46 @@ def _emit_json(cfg: Config, provider_data: dict[str, Any]) -> None:
         routes = []
     if routes:
         obj["routes"] = routes
+    return obj
+
+
+def _emit_json(cfg: Config, provider_data: dict[str, Any], generated_at: str | None = None) -> None:
+    obj = json_object_from_provider_data(cfg, provider_data, generated_at)
     print(json.dumps(obj, separators=(",", ":")))
+
+
+def render_from_provider_data(cfg: Config, provider_data: dict[str, Any], generated_at: str | None = None) -> None:
+    if cfg.json_output:
+        _emit_json(cfg, provider_data, generated_at)
+        return
+    rows, show_model = _build_usage_rows(cfg, provider_data)
+    if not cfg.no_header:
+        print_dashboard_header(cfg)
+        print_table_header(cfg, show_model)
+    print_usage_rows(cfg, rows)
+
+
+def render_from_service_payload(cfg: Config, payload: dict[str, Any]) -> bool:
+    provider_data = provider_data_from_service_payload(payload)
+    if provider_data is None:
+        return False
+    generated_at = payload.get("generated_at")
+    render_from_provider_data(cfg, provider_data, generated_at if isinstance(generated_at, str) else None)
+    return True
+
+
+def render_once_via_service(cfg: Config) -> bool:
+    if not cfg.use_service:
+        return False
+    try:
+        from . import usage_service
+
+        payload = usage_service.request_snapshot(env=os.environ, start_ephemeral=True)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return render_from_service_payload(cfg, payload)
 
 
 def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[Any], bool]:
@@ -1705,11 +1946,11 @@ def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
     several providers and losing track, this sums their add-on spend into one
     figure. It is shown whenever there is any spend to total, so the overall
     monetary picture is always visible. When a budget is configured (``[budget]``
-    in config, or ``LLM_USAGE_MONTHLY_BUDGET``) the row also draws a progress bar
-    filling toward — and visibly past — that limit, coloured green→red, with a
-    month-end reset. Only spend in the budget currency is summed (mixed-currency
-    rows are left out of the total). Labelled ``Budget`` when a budget exists,
-    else ``Total``.
+    in config, or ``LLM_USAGE_MONTHLY_BUDGET``) the row also draws a capped
+    progress bar filling toward that limit, coloured green→red, with the
+    guidance text carrying any overage (for example ``137% of $20``). Only spend
+    in the budget currency is summed (mixed-currency rows are left out of the
+    total). Labelled ``Budget`` when a budget exists, else ``Total``.
     """
     matched = [
         float(row.amount)
@@ -1874,14 +2115,7 @@ def _capture(fn: Any) -> list[str]:
 
 def render_once(cfg: Config) -> None:
     provider_data = _fetch_provider_data(cfg)
-    if cfg.json_output:
-        _emit_json(cfg, provider_data)
-        return
-    rows, show_model = _build_usage_rows(cfg, provider_data)
-    if not cfg.no_header:
-        print_dashboard_header(cfg)
-        print_table_header(cfg, show_model)
-    print_usage_rows(cfg, rows)
+    render_from_provider_data(cfg, provider_data)
 
 
 def render_watch_frame(cfg: Config) -> None:
@@ -2001,7 +2235,7 @@ def _legacy_copilot(snap: Any, show_credits: bool) -> dict[str, Any] | None:
         used = max(0.0, min(100.0, 100.0 - monthly.remaining_percent))
         out["monthly"] = {"used": used, "remaining": monthly.remaining_percent}
     addon = next(
-        (s for s in getattr(snap, "model_scopes", None) or [] if s.name == "balance" and s.kind == "balance"),
+        (s for s in getattr(snap, "model_scopes", None) or [] if s.name == "balance" and s.kind == CapacityKind.BALANCE),
         None,
     )
     if addon is not None and addon.remaining_amount is not None:
@@ -2010,6 +2244,13 @@ def _legacy_copilot(snap: Any, show_credits: bool) -> dict[str, Any] | None:
             "currency": addon.currency or "$",
             "source": addon.source or "github billing",
         }
+    if show_credits:
+        credit = next(
+            (s for s in getattr(snap, "model_scopes", None) or [] if s.name == "ai-credits"),
+            None,
+        )
+        if credit is not None and credit.remaining_amount is not None:
+            out["ai_credits"] = {"used": credit.remaining_amount, "source": credit.source or "copilot cli"}
     return out
 
 
@@ -2147,10 +2388,55 @@ def log_once(cfg: Config) -> None:
     common.prune_usage_log()
 
 
+def _service_interval(cfg: Config) -> int:
+    try:
+        return max(5, int(float(cfg.service_interval)))
+    except ValueError:
+        return 60
+
+
+def handle_service_action(cfg: Config) -> int:
+    from . import usage_service
+
+    action = cfg.service_action
+    interval = _service_interval(cfg)
+    if action == "run":
+        return usage_service.run_service(interval=interval, ephemeral=False, env=os.environ)
+    if action == "install":
+        rc = usage_service.install_service(interval, os.environ)
+        if rc == 0:
+            print(f"llm-usage service installed; socket: {usage_service.socket_path(os.environ)}")
+        return rc
+    if action == "uninstall":
+        rc = usage_service.uninstall_service(os.environ)
+        if rc == 0:
+            print("llm-usage service uninstalled")
+        return rc
+    if action == "start":
+        return usage_service.start_service(os.environ)
+    if action == "stop":
+        return usage_service.stop_service(os.environ)
+    if action == "status":
+        status = usage_service.running_status(os.environ)
+        if cfg.json_output:
+            print(json.dumps(status, separators=(",", ":")))
+        elif status.get("running"):
+            generated = status.get("generated_at_epoch")
+            generated_text = f", latest sample {common.fmt_reset(generated)}" if generated else ""
+            print(f"llm-usage service running (pid {status.get('pid')}, socket {status.get('socket')}{generated_text})")
+        else:
+            print(f"llm-usage service not running (socket {status.get('socket')})")
+        return 0
+    common.err(f"unknown service action: {action}")
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     common.migrate_legacy_cache_dirs()
     cfg = parse_args(list(sys.argv[1:] if argv is None else argv))
     common.usage_cache_dir().mkdir(parents=True, exist_ok=True)
+    if cfg.service_action:
+        return handle_service_action(cfg)
     if cfg.statusline_mode:
         statusline_mode()
         return 0
@@ -2170,7 +2456,8 @@ def main(argv: list[str] | None = None) -> int:
             render_watch_frame(cfg)
             time.sleep(float(cfg.watch_interval))
     else:
-        render_once(cfg)
+        if not render_once_via_service(cfg):
+            render_once(cfg)
     return 0
 
 

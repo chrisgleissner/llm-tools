@@ -165,6 +165,49 @@ def test_read_minimax_parses_quota_show_json(env: dict[str, str], fake_bin: Path
     assert "mmx quota" in (snap.source or "")
 
 
+def test_read_minimax_parses_stdout_json_with_stderr_warning(env: dict[str, str], fake_bin: Path) -> None:
+    fake = fake_bin / "mmx"
+    payload = {
+        "model_remains": [
+            {
+                "model_name": "general",
+                "current_interval_remaining_percent": 44,
+                "current_weekly_remaining_percent": 88,
+            }
+        ]
+    }
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "sys.stdout.write(json.dumps(" + json.dumps(payload) + "))\n"
+        "sys.stderr.write('warning: using cached auth\\n')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    snap = read_minimax(env)
+    assert snap.available is True
+    by_name = {s.name: s for s in snap.scopes}
+    assert by_name[SCOPE_5H].remaining_percent == 44.0
+    assert by_name[SCOPE_WEEKLY].remaining_percent == 88.0
+
+
+def test_read_minimax_classifies_stderr_error_envelope(env: dict[str, str], fake_bin: Path) -> None:
+    fake = fake_bin / "mmx"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "sys.stderr.write(json.dumps({'error': {'code': 1, 'message': 'please login first'}}))\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    snap = read_minimax(env)
+    assert snap.available is False
+    assert snap.reason == "not-authenticated"
+
+
 def test_read_minimax_ignores_non_matching_model(env: dict[str, str], fake_bin: Path) -> None:
     fake = fake_bin / "mmx"
     # CLI returns only a "video" row; the "general" model is missing.
