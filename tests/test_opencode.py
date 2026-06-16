@@ -543,7 +543,9 @@ def test_usage_table_renders_opencode_spent(env: dict[str, str], capsys, monkeyp
         usage.print_opencode_rows(cfg, json_obj)
     out = buf.getvalue()
     assert "OpenCode" in out
-    assert "spent $0" in out
+    # Spend rows read "spend  $0" (scope label + left-aligned amount).
+    assert "spend" in out
+    assert "$0" in out
     # A spent-cost row from an available snapshot means the provider is ready.
     assert "yes" in out
 

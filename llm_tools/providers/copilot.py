@@ -56,11 +56,30 @@ def read(env: dict[str, str] | None = None) -> ProviderSnapshot:
             source=raw.get("source", "copilot cli"),
         )
     ]
+    # Additional ("add-on") usage is the dollar amount spent beyond the included
+    # credit allowance. The Copilot CLI cannot report it, so it comes from the
+    # GitHub billing API and is carried as a display-only balance scope (in
+    # model_scopes, never consulted by the scheduler) so it surfaces as a second
+    # "spent $X" row without ever gating provider readiness.
+    model_scopes: list[CapacityScope] = []
+    addon = common.read_copilot_addon(env)
+    if isinstance(addon, dict) and common.num(addon.get("spent")) is not None:
+        model_scopes.append(
+            CapacityScope(
+                name="balance",
+                kind=CapacityKind.BALANCE,
+                remaining_amount=float(common.num(addon.get("spent"))),
+                currency=str(addon.get("currency") or "$"),
+                source=str(addon.get("source") or "github billing"),
+                extras={"spent": True},
+            )
+        )
     return ProviderSnapshot(
         provider=PROVIDER_COPILOT,
         available=bool(scopes),
         source=raw.get("source", "copilot cli"),
         scopes=scopes,
+        model_scopes=model_scopes,
     )
 
 

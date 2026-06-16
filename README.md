@@ -305,8 +305,9 @@ Default output shows all supported providers, with one row per capacity scope:
 ```text
 LLM Usage · 13:03
 
-Bars: █ available · ░ spent
+Bars: quota rows █ available · ░ spent   ·   $ rows █ spent · ░ budget left
 Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.
+          $ rows show spend as a share of the overall monthly budget (green low · red at/over).
           ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve
 
 Provider   Model     Ready   Scope     Remaining         Guidance              Resets in
@@ -321,10 +322,25 @@ Claude               no      5h         0% ░░░░░░░░░░    × 
            Sonnet            weekly   100% ██████████    ↑ headroom            5d
 
 Copilot              yes     monthly   36% ████░░░░░░    ↓ conserve            17d 11h
+                             spend     $0.0 ░░░░░░░░░░    0% of $50
 
-Kilo                 yes     balance   £12.40            ✓ funded              -
-                             budget    62% ██████░░░░    ↑ headroom            17d 4h
+Kilo                 yes     spend    $12.4 ██░░░░░░░░    24.8% of $50
+
+OpenCode             yes     spend     $4.3 █░░░░░░░░░    8.5% of $50
+
+Budget               yes     monthly  $16.7 ███░░░░░░░    33.5% of $50          14d 17h
 ```
+
+Cost is shown the same way as quota: the amount sits on the left, followed by a
+bar — never a right-aligned `spent $X`. A `spend` row (distinct from a funded
+`balance`) reports money already spent this cycle; with an overall monthly
+budget configured the bar fills with how much of that budget the spend consumes
+(green when low, red at or over budget), and the trailing `Budget` row totals
+every provider's spend against the cap (filling past it, in red, if you exceed
+it). Without a budget the rows show just the amount and the total appears as a
+plain `Total` row. Cells with nothing to report (a `spend`/`balance` scope has
+no reset; a full window has no runout forecast) are left blank rather than
+padded with placeholder dashes — only a genuine read failure shows `unavailable`.
 
 The `Model` column only appears when a provider reports model-specific limits.
 These sub-rows sit under their provider's section: Codex surfaces its `Spark`
@@ -332,16 +348,35 @@ model, and Claude surfaces per-model weekly limits (e.g. `Sonnet`) alongside the
 aggregate window. Model rows are informational - they are shown for visibility
 but do not gate scheduling, which always uses the provider's aggregate scopes.
 
+Copilot shows a second `spend` row with the additional ("add-on") usage spent
+this billing cycle — the dollars billed beyond your included credit allowance.
+The Copilot CLI does not expose this, so it is read from the GitHub billing API
+using a GitHub token already on your machine (`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
+or `GITHUB_TOKEN`, otherwise `gh auth token`); no Copilot-specific credential is
+required. With no token available the row is simply omitted. The row is
+informational and never affects `Ready`.
+
 How to read the table:
 
 | Column      | Meaning                                                                                                                                            |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Model`     | The specific model a row reports on (e.g. `Spark`, `Sonnet`). Blank for a provider's aggregate rows. Only shown when model-specific data exists.   |
 | `Ready`     | `yes` means every blocking scope for that provider has usable capacity now. `no` means at least one scope must reset or recover.                   |
-| `Scope`     | The capacity measure, such as `5h`, `weekly`, `monthly`, `balance`, or `budget`.                                                                   |
-| `Remaining` | Remaining percentage, balance, or an unmetered state such as `byok`, `local`, or `ungated`.                                                        |
-| `Guidance`  | For `5h`, whether current burn should last until reset. For weekly, monthly, and budget scopes, whether usage is ahead of or behind a linear pace. |
-| `Resets in` | Relative reset time. Non-reset scopes show `-`.                                                                                                    |
+| `Scope`     | The capacity measure, such as `5h`, `weekly`, `monthly`, `balance`, `budget`, or `spend` (money spent this cycle).                                  |
+| `Remaining` | Remaining percentage, a `$` spend (with a bar when `[budget]` is set), a balance, or an unmetered state such as `byok`, `local`, or `ungated`.      |
+| `Guidance`  | For `5h`, whether current burn should last until reset. For weekly/monthly/budget scopes, pace vs. a linear target. For `$` rows, share of budget. |
+| `Resets in` | Relative reset time. Blank when the scope does not reset (`spend`/`balance`/`ungated`).                                                             |
+
+Empty cells are intentional (calm design): a cell is left blank when it has
+nothing to report (a non-resetting scope, a window with no runout forecast).
+Only a real read failure is called out, as `unavailable`.
+
+Set an overall monthly spend budget in `[budget]` (see `config.example.toml`,
+or the `LLM_USAGE_MONTHLY_BUDGET` / `LLM_USAGE_BUDGET_CURRENCY` env overrides) to
+turn every `spend` figure into a coloured progress bar against that one cap, plus
+a `Budget` row totalling all providers' spend (filling past the cap, in red, if
+you exceed it). Without a budget, `spend` rows show just the amount and the total
+appears as a plain `Total` row.
 
 ### `llm-usage` Options
 

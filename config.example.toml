@@ -32,6 +32,23 @@
 
 
 # ---------------------------------------------------------------------------
+# Overall monthly spend budget for llm-usage. When set, every provider's
+# add-on / pay-as-you-go cost (the "spend" rows) is drawn as a coloured progress
+# bar against this single budget, and a summary "Budget" row totals them so you
+# can see at a glance how much of your self-imposed monthly cap is gone (and by
+# how much you have blown past it) -- instead of piecemeal funding providers and
+# losing track. Only spend in the budget currency is counted. Without a budget,
+# spend rows just show the amount and the total appears as a plain "Total" row.
+# Env overrides: LLM_USAGE_MONTHLY_BUDGET, LLM_USAGE_BUDGET_CURRENCY.
+# ---------------------------------------------------------------------------
+[budget]
+# The monthly ceiling all add-on spend is measured against (a positive number).
+#monthly  = 50
+# Display symbol for the budget amount. Built-in default: "$".
+#currency = "$"
+
+
+# ---------------------------------------------------------------------------
 # Per-provider routing policy. The main thing this lets you set is which
 # model a provider should run, and what to do when that model's limit is
 # used up (via allow_fallback).

@@ -213,8 +213,8 @@ def test_usage_table_snapshot_has_guidance_and_no_old_dial(capsys: pytest.Captur
     out = capsys.readouterr().out
 
     assert out.startswith("LLM Usage · ")
-    assert "\n\nBars: █ available · ░ spent" in out
-    assert "Bars: █ available · ░ spent" in out
+    assert "\n\nBars: quota rows █ available · ░ spent" in out
+    assert "$ rows █ spent · ░ budget left" in out
     assert "Guidance:" in out
     assert "Provider   Ready   Scope     Remaining" in out
     assert "Codex      yes     5h         84% ████████░░" in out
@@ -1416,7 +1416,7 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert common.daily_budget_percent(None, 2000, at1000) is None
     assert common.daily_budget_percent(50, None, at1000) is None
     assert common.daily_budget_percent(50, 900, at1000) is None  # reset already passed
-    assert usage.render_daily_budget(None, plain) == "· no rate data"
+    assert usage.render_daily_budget(None, plain) == ""  # calm: no forecast -> blank
     assert usage.render_daily_budget(60, plain, 50) == "↑ headroom"
     assert usage.render_daily_budget(50, plain, 50) == "= on pace"
     assert usage.render_daily_budget(40, plain, 50) == "↓ conserve"
@@ -1428,7 +1428,7 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert usage.render_gate(0, plain) == "no"
     assert usage.render_gate(1, ucfg) == "yes"
     assert usage.render_gate(0, ucfg).startswith("\x1b[1;31m")
-    assert usage.render_pace_or_gate("5h", 94, plain) == "· no rate data"
+    assert usage.render_pace_or_gate("5h", 94, plain) == ""  # calm: no reset -> blank
     assert usage.is_short_window("5h") is True
     assert usage.is_budget_window("weekly") is True
     usage.print_codex_rows(ucfg, {"source": "src", "five_hour": {"used": 10}, "week": {"used": 20}})

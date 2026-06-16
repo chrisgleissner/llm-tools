@@ -50,6 +50,20 @@ def read_codex_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
 
 def read_codex(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = env or common_env_default()
+    # While the app-server is reachable on our own (CLI installed +
+    # authenticated), a ``stale-usage`` result means the live read failed
+    # transiently — most often the network stack still settling right after a
+    # resume from suspend. Re-drive the read with bounded backoff so we never
+    # surface stale data while a live path exists. See
+    # :func:`common.recover_stale_with_live_retry`.
+    return common.recover_stale_with_live_retry(
+        lambda: _read_codex_once(env),
+        common.codex_live_available(env),
+        env,
+    )
+
+
+def _read_codex_once(env: dict[str, str]) -> dict[str, Any] | None:
     # Active refresh first: the Codex app-server returns live, turn-free rate
     # limits, so a snapshot is never stale while the CLI is installed and
     # authenticated. Auth / startup problems surface their own reason; a

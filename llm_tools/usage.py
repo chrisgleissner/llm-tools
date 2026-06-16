@@ -235,6 +235,41 @@ class Config:
             and env.get("LLM_USAGE_NO_PROGRESS", "0") != "1"
         )
         self.terminal_width = terminal_width(env)
+        self.monthly_budget, self.budget_currency = _load_monthly_budget(env)
+
+
+def _load_monthly_budget(env: "dict[str, str]") -> "tuple[float | None, str]":
+    """Resolve the overall monthly spend budget and its currency.
+
+    Env (``LLM_USAGE_MONTHLY_BUDGET`` / ``LLM_USAGE_BUDGET_CURRENCY``) wins over
+    the ``[budget]`` config table so a quick override needs no file edit. A
+    missing/invalid amount yields ``None`` (spend rows then show the amount with
+    no bar). The config read is best-effort: a broken config never breaks the
+    usage table.
+    """
+    raw = env.get("LLM_USAGE_MONTHLY_BUDGET")
+    currency = env.get("LLM_USAGE_BUDGET_CURRENCY")
+    amount: float | None = None
+    if raw is not None and raw.strip():
+        try:
+            parsed = float(raw)
+            amount = parsed if parsed > 0 else None
+        except ValueError:
+            amount = None
+    if amount is None or not currency:
+        try:
+            from . import config as toolconfig
+
+            cfg_amount, cfg_currency = toolconfig.monthly_budget(toolconfig.load_config(env))
+            if amount is None:
+                amount = cfg_amount
+            if not currency:
+                currency = cfg_currency
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+    return amount, (currency or "$")
 
 
 @dataclass
@@ -255,6 +290,9 @@ class UsageRow:
     currency: str | None = None
     kind: str | None = None
     label: str | None = None
+    # True for monetary "spent" rows (observed cost), so the renderer shows the
+    # amount with a budget progress bar instead of a remaining-quota bar.
+    spent: bool = False
 
 
 @dataclass
@@ -417,6 +455,59 @@ def progress_bar(integer: int, width: int = PROGRESS_BAR_WIDTH) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def spend_color_code(consumed_percent: float) -> str:
+    """Colour a spend figure by how much of the budget it consumes.
+
+    Inverse of :func:`percent_color_code` (which colours *remaining* quota):
+    here more consumption is worse, so green is low spend and red is at/over
+    budget.
+    """
+    if consumed_percent >= 90:
+        return "0;31"  # red: at or over budget
+    if consumed_percent >= 70:
+        return "0;33"  # yellow: getting close
+    return "0;32"  # green: comfortable
+
+
+def format_amount(amount: float | None, currency: str | None) -> str:
+    """Currency amount with the symbol on the left, e.g. ``$27.4``."""
+    if amount is None:
+        return "-"
+    return f"{currency or '$'}{common.fmt_number(amount)}"
+
+
+SPENT_AMOUNT_WIDTH = 6
+
+
+def render_spent(amount: float | None, currency: str | None, cfg: Config) -> str:
+    """Render a monetary spend cell consistently with the percentage cells.
+
+    The amount always sits on the left (mirroring ``89% ████░`` rows) — never
+    after a ``spent`` prefix — so cost and quota cells line up the same way.
+    When an overall monthly budget is configured, a progress bar follows showing
+    how much of that budget this spend consumes: ``█`` is spent, ``░`` is budget
+    left (the opposite fill of quota rows, because here a fuller bar means *more*
+    money gone), coloured green (low) → red (at/over budget). Without a budget
+    there is no denominator, so just the left-aligned amount is shown.
+    """
+    if amount is None:
+        return "-"
+    amount_text = format_amount(amount, currency)
+    budget = cfg.monthly_budget
+    same_currency = budget is not None and (not currency or currency == cfg.budget_currency)
+    if not same_currency:
+        # No comparable budget to draw a bar against: show just the amount,
+        # left-positioned like the percentage cells (no right-aligned "spent").
+        return amount_text
+    consumed = 0.0 if budget <= 0 else max(0.0, amount / budget * 100.0)
+    filled = max(0, min(PROGRESS_BAR_WIDTH, int(round(min(100.0, consumed) / 100 * PROGRESS_BAR_WIDTH))))
+    bar = "█" * filled + "░" * (PROGRESS_BAR_WIDTH - filled)
+    text = f"{amount_text.rjust(SPENT_AMOUNT_WIDTH)} {bar}"
+    if not cfg.color_enabled:
+        return text
+    return f"\033[{spend_color_code(consumed)}m{text}\033[0m"
+
+
 def render_remaining(value: str, cfg: Config) -> str:
     """Render the remaining percentage first, then a compact bar.
 
@@ -521,6 +612,12 @@ def classify_guidance(provider: str, window: str, remaining: Any, reset: Any, en
 
 
 def render_guidance_info(info: GuidanceInfo, cfg: Config) -> str:
+    # Calm design: a row with no forecastable rate has nothing to advise, so we
+    # leave the Guidance cell blank rather than printing a placeholder ("· no
+    # rate data") the eye has to read and dismiss. A real "couldn't measure"
+    # state is surfaced in the Remaining column ("unavailable"), not here.
+    if info.severity == "unknown":
+        return ""
     text = info.text
     if not cfg.color_enabled:
         return text
@@ -714,8 +811,9 @@ def print_dashboard_header(cfg: Config) -> None:
     print(f"LLM Usage {title_separator(cfg)} {stamp}")
     print()
     if cfg.show_daily_budget:
-        print("Bars: █ available · ░ spent")
+        print("Bars: quota rows █ available · ░ spent   ·   $ rows █ spent · ░ budget left")
         print("Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.")
+        print("          $ rows show spend as a share of the overall monthly budget (green low · red at/over).")
         print("          ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve")
         print()
 
@@ -757,7 +855,9 @@ def print_provider_separator(cfg: Config, label: str, leading_blank: bool = True
 def format_reset(reset: Any, cfg: Config) -> str:
     epoch = common.parse_epoch(reset)
     if epoch is None:
-        return "-"
+        # Calm design: a scope that does not reset (balance/spent/ungated) leaves
+        # this cell blank instead of a "-" the eye must parse as "not applicable".
+        return ""
     total = max(0, epoch - common.now_epoch())
     days, rem = divmod(total, 86400)
     hours, rem = divmod(rem, 3600)
@@ -819,19 +919,44 @@ def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: st
                 guidance = f"! retry in {int(minutes)}m"
             else:
                 guidance = "! blocked"
+    elif row.spent:
+        guidance = spend_guidance(row.amount, row.currency, cfg)
     else:
         guidance = render_guidance(row.provider, row.scope, row.remaining, row.reset, cfg)
+    remaining_cell = render_spent(row.amount, row.currency, cfg) if row.spent else render_remaining(row.left_text, cfg)
+    # Calm design: collapse "not applicable" markers ("-") to blank so only
+    # real values draw the eye. "unavailable" is intentionally preserved
+    # (it is information, not an empty cell).
+    remaining_time = "" if row.remaining_time in ("-", None) else row.remaining_time
     values = {
         "Provider": display_provider,
         "Model": display_model,
         "Ready": ready_text,
         "Scope": row.scope,
-        "Remaining": render_remaining(row.left_text, cfg),
+        "Remaining": remaining_cell,
         "Guidance": guidance,
-        "Remaining Time": row.remaining_time,
+        "Remaining Time": remaining_time,
         "Resets in": format_reset(row.reset, cfg),
     }
     return values
+
+
+def spend_guidance(amount: float | None, currency: str | None, cfg: Config) -> str:
+    """Guidance text for a spend row: its share of the overall monthly budget.
+
+    Shows e.g. ``55% of $50`` so the bar has a precise denominator alongside it.
+    With no comparable budget there is nothing to advise, so the cell is left
+    blank (calm design) rather than carrying a repeated placeholder.
+    """
+    budget = cfg.monthly_budget
+    same_currency = amount is not None and budget is not None and (not currency or currency == cfg.budget_currency)
+    if not same_currency:
+        return ""
+    consumed = 0.0 if budget <= 0 else amount / budget * 100.0
+    text = f"{common.fmt_number(consumed)}% of {cfg.budget_currency}{common.fmt_number(budget)}"
+    if not cfg.color_enabled:
+        return text
+    return f"\033[{spend_color_code(consumed)}m{text}\033[0m"
 
 
 def print_usage_rows(cfg: Config, rows: list[UsageRow]) -> None:
@@ -995,6 +1120,29 @@ def copilot_rows(cfg: Config, copilot_json: dict[str, Any] | None) -> list[Usage
         common.log_usage_sample("copilot", "monthly", remaining)
     remaining_time = common.estimate_remaining_time_from_log("copilot", "monthly", monthly_remaining) if cfg.show_remaining_time else ""
     rows = [UsageRow("Copilot", "monthly", remaining, monthly_text, reset_epoch, source, remaining_time or "-")]
+    # Additional ("add-on") usage: the dollar spend beyond the included credit
+    # allowance, rendered as a "spend $X" row (scope "spend", distinct from a
+    # funded "balance") consistent with Kilo/OpenCode. remaining=1.0 keeps it
+    # informational (never gates Ready).
+    addon = copilot_json.get("add_on") if isinstance(copilot_json.get("add_on"), dict) else None
+    if addon is not None and common.num(addon.get("spent")) is not None:
+        amount = common.num(addon.get("spent"))
+        currency = addon.get("currency") or "$"
+        rows.append(
+            UsageRow(
+                "Copilot",
+                "spend",
+                1.0,
+                format_amount(amount, currency),
+                None,
+                addon.get("source") or source,
+                "-",
+                amount=amount,
+                currency=currency,
+                kind="balance",
+                spent=True,
+            )
+        )
     if cfg.show_copilot_credits:
         ai = copilot_json.get("ai_credits") if isinstance(copilot_json.get("ai_credits"), dict) else {}
         ai_text = common.fmt_pct(ai.get("used")) if ai.get("used") is not None else "unknown"
@@ -1054,8 +1202,9 @@ def kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> list[UsageRow]:
             amount = scope.get("remaining_amount")
             currency = scope.get("currency")
             extras = scope.get("extras") or {}
-            if extras.get("spent") and amount is not None:
-                text = format_spent(amount, currency)
+            is_spent = bool(extras.get("spent") and amount is not None)
+            if is_spent:
+                text = format_amount(amount, currency)
                 # Spent-cost rows are informational; the provider is ready when
                 # the snapshot says the CLI is present and functional.
                 row_remaining: float | None = 1.0 if kilo_json.get("available") else None
@@ -1065,7 +1214,7 @@ def kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> list[UsageRow]:
             rows.append(
                 UsageRow(
                     "Kilo",
-                    "balance",
+                    "spend" if is_spent else "balance",
                     row_remaining,
                     text,
                     None,
@@ -1074,6 +1223,7 @@ def kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> list[UsageRow]:
                     amount=amount,
                     currency=currency,
                     kind=kind,
+                    spent=is_spent,
                 )
             )
             continue
@@ -1114,20 +1264,6 @@ def format_balance(amount: float | None, currency: str | None) -> str:
     if currency:
         return f"{currency}{text}"
     return text
-
-
-def format_spent(amount: float | None, currency: str | None) -> str:
-    """Format a "spent" amount: ``spent $5.96``.
-
-    Used by Kilo/OpenCode stats to surface the cost we observed when
-    the user has not configured a balance, so the table does not
-    degrade to ``inconclusive-usage`` once the parser can read the CLI
-    output.
-    """
-    base = format_balance(amount, currency)
-    if base == "-":
-        return "-"
-    return f"spent {base}"
 
 
 def print_kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> None:
@@ -1179,8 +1315,9 @@ def opencode_rows(cfg: Config, opencode_json: dict[str, Any] | None) -> list[Usa
             amount = scope.get("remaining_amount")
             currency = scope.get("currency")
             extras = scope.get("extras") or {}
-            if extras.get("spent") and amount is not None:
-                text = format_spent(amount, currency)
+            is_spent = bool(extras.get("spent") and amount is not None)
+            if is_spent:
+                text = format_amount(amount, currency)
                 # Spent-cost rows are informational; the provider is ready when
                 # the snapshot says the CLI is present and functional.
                 row_remaining: float | None = 1.0 if opencode_json.get("available") else None
@@ -1190,7 +1327,7 @@ def opencode_rows(cfg: Config, opencode_json: dict[str, Any] | None) -> list[Usa
             rows.append(
                 UsageRow(
                     "OpenCode",
-                    "balance",
+                    "spend" if is_spent else "balance",
                     row_remaining,
                     text,
                     None,
@@ -1199,6 +1336,7 @@ def opencode_rows(cfg: Config, opencode_json: dict[str, Any] | None) -> list[Usa
                     amount=amount,
                     currency=currency,
                     kind=kind,
+                    spent=is_spent,
                 )
             )
             continue
@@ -1543,8 +1681,58 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
         rows.extend(route_rows(cfg))
     except FileNotFoundError:
         pass
+    budget_row = budget_total_row(cfg, rows)
+    if budget_row is not None:
+        rows.append(budget_row)
     show_model = any(row.model for row in rows)
     return rows, show_model
+
+
+def _next_month_epoch(env: "dict[str, str] | None" = None) -> int:
+    """Epoch of the next calendar month start (UTC) -- the monthly budget reset."""
+    now = datetime.fromtimestamp(common.now_epoch(env), tz=timezone.utc)
+    if now.month == 12:
+        nxt = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        nxt = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int(nxt.timestamp())
+
+
+def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
+    """A single bottom row totalling every provider's monthly spend.
+
+    It keeps a self-imposed monthly budget honest: instead of piecemeal funding
+    several providers and losing track, this sums their add-on spend into one
+    figure. It is shown whenever there is any spend to total, so the overall
+    monetary picture is always visible. When a budget is configured (``[budget]``
+    in config, or ``LLM_USAGE_MONTHLY_BUDGET``) the row also draws a progress bar
+    filling toward — and visibly past — that limit, coloured green→red, with a
+    month-end reset. Only spend in the budget currency is summed (mixed-currency
+    rows are left out of the total). Labelled ``Budget`` when a budget exists,
+    else ``Total``.
+    """
+    matched = [
+        float(row.amount)
+        for row in rows
+        if row.spent and row.amount is not None and not (row.currency and row.currency != cfg.budget_currency)
+    ]
+    if not matched:
+        return None
+    total = round(sum(matched), 2)
+    has_budget = cfg.monthly_budget is not None
+    return UsageRow(
+        provider="Budget" if has_budget else "Total",
+        scope="monthly",
+        remaining=1.0,
+        left_text=format_amount(total, cfg.budget_currency),
+        reset=_next_month_epoch() if has_budget else None,
+        source="config budget" if has_budget else "spend total",
+        remaining_time="-",
+        amount=total,
+        currency=cfg.budget_currency,
+        kind="balance",
+        spent=True,
+    )
 
 
 def route_rows(cfg: Config) -> list[UsageRow]:
@@ -1812,6 +2000,16 @@ def _legacy_copilot(snap: Any, show_credits: bool) -> dict[str, Any] | None:
     if monthly is not None and monthly.remaining_percent is not None:
         used = max(0.0, min(100.0, 100.0 - monthly.remaining_percent))
         out["monthly"] = {"used": used, "remaining": monthly.remaining_percent}
+    addon = next(
+        (s for s in getattr(snap, "model_scopes", None) or [] if s.name == "balance" and s.kind == "balance"),
+        None,
+    )
+    if addon is not None and addon.remaining_amount is not None:
+        out["add_on"] = {
+            "spent": addon.remaining_amount,
+            "currency": addon.currency or "$",
+            "source": addon.source or "github billing",
+        }
     return out
 
 

@@ -74,6 +74,10 @@ def env(tmp_path: Path) -> dict[str, str]:
         "HOME": str(home),
         "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
         "LLM_USAGE_COPILOT_CACHE_TTL": "0",
+        # Keep the Copilot add-on (GitHub billing) reader hermetic: never read an
+        # ambient GH_TOKEN or shell out to `gh auth token`. Tests that exercise
+        # the add-on inject a usage payload via LLM_USAGE_COPILOT_ADDON_USAGE_JSON.
+        "LLM_USAGE_DISABLE_COPILOT_ADDON": "1",
         # Keep Codex hermetic: never spawn the real `codex app-server` (which
         # would hit the live account). Tests that exercise the active-refresh
         # path inject a payload via LLM_USAGE_CODEX_RATE_LIMITS_JSON, which

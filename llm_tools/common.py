@@ -670,6 +670,97 @@ def stale_if_local_snapshot(
     return obj
 
 
+def is_stale_usage_result(obj: Any) -> bool:
+    """True when a provider read degraded to the ``stale-usage`` marker."""
+    return isinstance(obj, dict) and obj.get("available") is False and obj.get("reason") == "stale-usage"
+
+
+def stale_recovery_schedule(env: dict[str, str] | None = None) -> list[float]:
+    """Backoff delays (seconds) for re-driving a live read that would otherwise
+    surface ``stale-usage``.
+
+    Returns an empty schedule when active-refresh retries are globally disabled
+    (``LLM_USAGE_LIVE_FETCH_RETRIES=0`` — the value the test-suite pins) so
+    failure-path tests never sleep. Otherwise a bounded exponential backoff: it
+    bridges the network-settling window after a resume-from-suspend (the common
+    cause of a transient live-fetch failure) without stalling the watch loop
+    indefinitely when a provider is genuinely offline.
+    """
+    env = env or os.environ
+    try:
+        base_retries = int(env.get("LLM_USAGE_LIVE_FETCH_RETRIES", "2") or "2")
+    except ValueError:
+        base_retries = 2
+    if base_retries <= 0:
+        return []
+    try:
+        attempts = max(0, int(env.get("LLM_USAGE_STALE_RECOVERY_ATTEMPTS", "4") or "4"))
+    except ValueError:
+        attempts = 4
+    try:
+        base_delay = max(0.0, float(env.get("LLM_USAGE_STALE_RECOVERY_DELAY", "0.5") or "0.5"))
+    except ValueError:
+        base_delay = 0.5
+    try:
+        max_delay = max(0.0, float(env.get("LLM_USAGE_STALE_RECOVERY_MAX_DELAY", "4.0") or "4.0"))
+    except ValueError:
+        max_delay = 4.0
+    schedule: list[float] = []
+    delay = base_delay
+    for _ in range(attempts):
+        schedule.append(min(delay, max_delay))
+        delay *= 2
+    return schedule
+
+
+def recover_stale_with_live_retry(
+    read_fn: "Any",
+    live_available: bool,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Re-run ``read_fn`` with bounded backoff while it yields ``stale-usage``.
+
+    A ``stale-usage`` result means the on-disk snapshot is too old to trust *and*
+    the proactive live read failed on this attempt. As long as a live
+    acquisition path exists (credentials / CLI present), surfacing stale data to
+    the user is the wrong outcome — the whole point of the tool is to obtain
+    current usage proactively. So we keep re-driving the live read, giving a
+    transient outage (typically the network stack still settling right after a
+    resume from suspend) time to clear before we ever fall back to stale data.
+
+    The retry budget is bounded two ways — a maximum attempt count
+    (:func:`stale_recovery_schedule`) and a wall-clock deadline
+    (``LLM_USAGE_STALE_RECOVERY_MAX_WAIT``, since each re-drive carries its own
+    network timeout) — so a provider that is genuinely unreachable still returns
+    promptly without stalling the watch loop, and ``stale-usage`` only reaches
+    the user under truly exceptional circumstances. When no live path exists, the
+    first (stale) result is returned immediately.
+    """
+    env = env or os.environ
+    result = read_fn()
+    if not live_available or not is_stale_usage_result(result):
+        return result
+    deadline = time.monotonic() + _stale_recovery_max_wait(env)
+    for delay in stale_recovery_schedule(env):
+        if time.monotonic() >= deadline:
+            break
+        if delay > 0:
+            time.sleep(delay)
+        result = read_fn()
+        if not is_stale_usage_result(result):
+            return result
+    return result
+
+
+def _stale_recovery_max_wait(env: dict[str, str] | None = None) -> float:
+    env = env or os.environ
+    try:
+        value = float(env.get("LLM_USAGE_STALE_RECOVERY_MAX_WAIT", "20") or "20")
+    except ValueError:
+        return 20.0
+    return value if value > 0 else 20.0
+
+
 def latest_matching_record(root: Path, predicate: Any, env: dict[str, str] | None = None) -> tuple[str, Path, int] | None:
     env = env or os.environ
     if not root.is_dir():
@@ -731,6 +822,23 @@ def _codex_has_auth(env: dict[str, str]) -> bool:
     if isinstance(tokens, dict):
         return any(str(tokens.get(k) or "").strip() for k in ("access_token", "id_token", "refresh_token"))
     return False
+
+
+def codex_live_available(env: dict[str, str] | None = None) -> bool:
+    """True when a live Codex rate-limit read can be attempted.
+
+    Used to decide whether a ``stale-usage`` result is worth retrying: when the
+    app-server can be reached on our own (CLI installed + authenticated, or a
+    test payload is injected) a transient failure should be re-driven rather
+    than surfaced as stale data. When the app-server is disabled or
+    unauthenticated there is nothing to retry.
+    """
+    env = env or os.environ
+    if env.get("LLM_USAGE_CODEX_RATE_LIMITS_JSON") is not None:
+        return True
+    if env.get("LLM_USAGE_DISABLE_CODEX_APP_SERVER") == "1":
+        return False
+    return bool(codex_cli(env)) and _codex_has_auth(env)
 
 
 def _codex_app_server_timeout(env: dict[str, str]) -> float:
@@ -939,13 +1047,13 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
         if text:
             return _cache_claude_usage_response(cache, text)
         if unauthorized:
-            refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+            refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
             if refreshed:
                 text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
                 if text:
                     return _cache_claude_usage_response(cache, text)
     elif isinstance(oauth, dict) and oauth.get("refreshToken"):
-        refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+        refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
         if refreshed:
             text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
             if text:
@@ -1016,7 +1124,7 @@ def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | Non
     return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
 
 
-def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any]) -> str | None:
+def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any], env: dict[str, str] | None = None) -> str | None:
     oauth = cred_data.get("claudeAiOauth")
     if not isinstance(oauth, dict):
         return None
@@ -1039,11 +1147,26 @@ def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any
             "User-Agent": CLAUDE_OAUTH_USER_AGENT,
         },
     )
-    try:
-        with urlopen(req, timeout=20) as resp:
-            raw = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception:
-        return None
+    # The refresh POST is the critical step after a long suspend (the access
+    # token has usually expired by then). It must be at least as resilient as
+    # the usage fetch itself: a single transient failure here previously forced
+    # a degrade to the stale on-disk cache. A 4xx is authoritative (the refresh
+    # token is bad) and is not retried.
+    attempts, delay = live_fetch_retry_plan(env)
+    raw: Any = None
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=20) as resp:
+                raw = json.loads(resp.read().decode("utf-8", "replace"))
+            break
+        except HTTPError as exc:
+            if 400 <= exc.code < 500:
+                return None
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
+        except Exception:
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
     if not isinstance(raw, dict):
         return None
     access_token = str(raw.get("access_token") or "").strip()
@@ -1068,9 +1191,35 @@ def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     return _read_claude_api_raw(env)
 
 
+def _claude_has_auth(env: dict[str, str] | None = None) -> bool:
+    """True when Claude has OAuth credentials that can drive a live usage fetch.
+
+    Mirrors :func:`_codex_has_auth`: a present access *or* refresh token means
+    the OAuth usage endpoint is reachable on our own (we can refresh an expired
+    access token), so a transient failure must be retried rather than degraded
+    to a stale snapshot. No credentials means the live path is genuinely
+    unavailable and there is nothing to retry.
+    """
+    env = env or os.environ
+    cred = home_dir(env) / ".claude" / ".credentials.json"
+    try:
+        data = json.loads(cred.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    if not isinstance(oauth, dict):
+        return False
+    return bool(str(oauth.get("accessToken") or "").strip() or str(oauth.get("refreshToken") or "").strip())
+
+
 def read_claude(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = env or os.environ
-    return freshen_provider_windows(_read_claude_raw(env), env)
+    live_available = _claude_has_auth(env)
+    return recover_stale_with_live_retry(
+        lambda: freshen_provider_windows(_read_claude_raw(env), env),
+        live_available,
+        env,
+    )
 
 
 def _read_claude_raw(env: dict[str, str]) -> dict[str, Any] | None:
@@ -1386,6 +1535,181 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
     if good is not None:
         return good
     return {"provider": "copilot", "source": "copilot cli", "available": False, "reason": "refresh-pending"}
+
+
+# --- Copilot additional-usage ($) via the GitHub billing API ------------------
+#
+# The Copilot CLI surfaces only the *included* credit allowance (its footer
+# ``Plan: N% used``); it has no view of the "Additional usage" monetary spend
+# shown on github.com/settings/billing/ai_usage. That figure lives only in
+# GitHub's billing REST API, so we read it there with whatever GitHub token is
+# already on the box -- the same token precedence the Copilot CLI itself
+# documents (``COPILOT_GITHUB_TOKEN`` > ``GH_TOKEN`` > ``GITHUB_TOKEN``), then
+# ``gh auth token`` as a fallback. No new credential ever has to be configured
+# for llm-usage; when no token is reachable the add-on figure is simply omitted.
+GITHUB_API_BASE = "https://api.github.com"
+
+
+def _github_token(env: dict[str, str] | None = None) -> str | None:
+    env = env or os.environ
+    for key in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        value = str(env.get(key) or "").strip()
+        if value:
+            return value
+    gh = shutil.which("gh", path=env.get("PATH"))
+    if not gh:
+        return None
+    try:
+        proc = subprocess.run(
+            [gh, "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    token = (proc.stdout or "").strip()
+    return token if proc.returncode == 0 and token else None
+
+
+def _github_api_get(path: str, token: str, env: dict[str, str] | None = None) -> Any:
+    url = path if path.startswith("http") else f"{GITHUB_API_BASE}{path}"
+    req = Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "llm-tools-usage",
+        },
+    )
+    attempts, delay = live_fetch_retry_plan(env)
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode("utf-8", "replace"))
+        except HTTPError as exc:
+            # 4xx (bad/again-scoped token, missing user) is authoritative.
+            if 400 <= exc.code < 500:
+                return None
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
+        except Exception:
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
+    return None
+
+
+def _copilot_addon_spent_from_usage(payload: Any, env: dict[str, str] | None = None) -> float | None:
+    """Sum the current calendar month's Copilot *net* spend from a GitHub
+    billing ``usage`` payload.
+
+    GitHub reports the included allowance as a fully discounted line
+    (``grossAmount == discountAmount``, ``netAmount == 0``); ``netAmount`` is the
+    money charged *beyond* the allowance -- exactly the "Additional usage" figure.
+    Items are month-bucketed, so we keep only the current month to mirror the
+    web UI's per-cycle view.
+    """
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("usageItems")
+    if not isinstance(items, list):
+        return None
+    now = datetime.fromtimestamp(now_epoch(env), tz=timezone.utc)
+    total = 0.0
+    found = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("product") or "").lower() != "copilot":
+            continue
+        date = str(item.get("date") or "")
+        # date is e.g. "2026-06-01T00:00:00Z"; keep the current month only.
+        if len(date) >= 7:
+            if date[:4] != f"{now.year:04d}" or date[5:7] != f"{now.month:02d}":
+                continue
+        net = num(item.get("netAmount"))
+        if net is None:
+            continue
+        total += float(net)
+        found = True
+    if not found:
+        return None
+    return round(total, 2)
+
+
+def _copilot_addon_cache_payload(cache: Path) -> dict[str, Any] | None:
+    if not cache.is_file() or cache.stat().st_size <= 0:
+        return None
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict) and num(data.get("spent")) is not None:
+        return {"spent": float(num(data.get("spent"))), "currency": data.get("currency") or "$", "source": data.get("source") or "github billing (cached)"}
+    return None
+
+
+def read_copilot_addon(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Best-effort Copilot additional-usage ($) from the GitHub billing API.
+
+    Returns ``{"spent": float, "currency": "$", "source": str}`` or ``None`` when
+    the figure cannot be obtained (no token, network failure with no prior
+    cache, billing API without Copilot items). The result is cached with a TTL;
+    a transient failure degrades to the last cached value rather than dropping
+    the figure, since monthly billing totals change slowly. This never blocks
+    Copilot's primary (included-credit) reading: it is additive and isolated.
+    """
+    env = env or os.environ
+    if env.get("LLM_USAGE_DISABLE_COPILOT_ADDON") == "1":
+        return None
+    # Test/diagnostic injection: a usage payload bypasses all network access.
+    injected = env.get("LLM_USAGE_COPILOT_ADDON_USAGE_JSON")
+    if injected is not None:
+        spent = _copilot_addon_spent_from_usage(injected, env)
+        return None if spent is None else {"spent": spent, "currency": "$", "source": "github billing"}
+    cache = usage_cache_dir(env) / "copilot-addon.json"
+    try:
+        ttl = int(env.get("LLM_USAGE_COPILOT_ADDON_TTL", "900") or "900")
+    except ValueError:
+        ttl = 900
+    if cache.is_file() and cache.stat().st_size > 0 and int(time.time()) - int(cache.stat().st_mtime) <= ttl:
+        cached = _copilot_addon_cache_payload(cache)
+        if cached is not None:
+            return cached
+    token = _github_token(env)
+    if not token:
+        return _copilot_addon_cache_payload(cache)
+    login = str(env.get("LLM_USAGE_COPILOT_ADDON_LOGIN") or "").strip()
+    if not login:
+        user = _github_api_get("/user", token, env)
+        login = str((user or {}).get("login") or "").strip() if isinstance(user, dict) else ""
+    if not login:
+        return _copilot_addon_cache_payload(cache)
+    now = datetime.fromtimestamp(now_epoch(env), tz=timezone.utc)
+    payload = _github_api_get(
+        f"/users/{login}/settings/billing/usage?year={now.year}&month={now.month}",
+        token,
+        env,
+    )
+    spent = _copilot_addon_spent_from_usage(payload, env)
+    if spent is None:
+        return _copilot_addon_cache_payload(cache)
+    result = {"spent": spent, "currency": "$", "source": "github billing"}
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n", encoding="utf-8")
+        tmp.replace(cache)
+    except OSError:
+        pass
+    return result
 
 
 def decorate_window(window: dict[str, Any] | None) -> dict[str, Any] | None:
