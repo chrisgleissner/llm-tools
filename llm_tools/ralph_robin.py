@@ -798,8 +798,10 @@ def _scope_pace_remaining(window: dict[str, Any], env: dict[str, str] | None = N
     reset_epoch = window.get("reset_epoch")
     if isinstance(reset_epoch, int) and reset_epoch > common.now_epoch(env):
         days_left = max((reset_epoch - common.now_epoch(env)) / 86400.0, 0.0)
-        name = window.get("name", "")
-        total_days = _SCOPE_PERIOD_DAYS.get(name)
+        name = str(window.get("name") or "")
+        total_days = (
+            common.copilot_monthly_window_days(env) if name == "monthly" else _SCOPE_PERIOD_DAYS.get(name)
+        )
         if total_days is not None and total_days > 0:
             return float(rem) - days_left / total_days * 100.0
         return float(rem) / max(days_left, 1.0)
