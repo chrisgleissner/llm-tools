@@ -1150,6 +1150,90 @@ def test_ralph_select_route_even_burn_with_one_opaque_and_two_rankable(
     assert selection["route"] == "codex-route"
 
 
+def test_ralph_mixed_capacity_routes_fairly_include_opaque_kilo_minimax(
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, fake_bin: Path
+) -> None:
+    """Claude/Codex expose capacity; Kilo MiniMax M3 is opaque yes/no.
+
+    The opaque route must receive a normal turn without pretending it has a
+    weekly/budget score. Among the measurable routes, even-burn still breaks
+    ties by remaining daily capacity.
+    """
+    fake = fake_bin / "kilo"
+    fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    cfg_dir = tmp_path / "xdg"
+    (cfg_dir / "llm-tools").mkdir(parents=True)
+    (cfg_dir / "llm-tools" / "config.toml").write_text(
+        textwrap.dedent(
+            """
+            [ralph]
+            routes = ["claude-route", "codex-route", "kilo-minimax-m3"]
+
+            [routes.claude-route]
+            provider = "claude"
+            [routes.claude-route.capacity]
+            policy = "provider"
+
+            [routes.codex-route]
+            provider = "codex"
+            [routes.codex-route.capacity]
+            policy = "provider"
+
+            [routes.kilo-minimax-m3]
+            provider = "kilo"
+            model = "minimax-m3"
+            [routes.kilo-minimax-m3.capacity]
+            policy = "opaque"
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    config._cache.clear()
+    cfg = ralph_robin.RalphConfig(
+        routes_spec="claude-route,codex-route,kilo-minimax-m3",
+        routes=["claude-route", "codex-route", "kilo-minimax-m3"],
+        dry_run=True,
+        even_burn=True,
+        scope="auto",
+    )
+    cfg.route_policies = config.parse_routes(config.load_config())
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    monkeypatch.setenv("LLM_SCHEDULER_USAGE_JSON", json.dumps({
+        "claude": {
+            "provider": "claude",
+            "available": True,
+            "source": "test",
+            "five_hour": {"remaining": 50, "resets_at": 2000},
+            "week": {"remaining": 50, "resets_at": 1000 + 6 * 86400},
+        },
+        "codex": {
+            "provider": "codex",
+            "available": True,
+            "source": "test",
+            "five_hour": {"remaining": 90, "resets_at": 2000},
+            "week": {"remaining": 90, "resets_at": 1000 + 6 * 86400},
+        },
+    }))
+    logs = common.setup_run_logs(tmp_path, "r")
+    counts = {"claude-route": 0, "codex-route": 0, "kilo-minimax-m3": 0}
+
+    first = ralph_robin.select_route(cfg, logs, current_index=0, skipped=set(), completed_counts=counts)
+    assert first["route"] == "codex-route"
+    assert first["rotation_reason"] == "fair-rotation"
+
+    counts["codex-route"] += 1
+    second = ralph_robin.select_route(cfg, logs, current_index=1, skipped=set(), completed_counts=counts)
+    assert second["route"] == "kilo-minimax-m3"
+    assert second["rotation_reason"] == "fair-rotation"
+
+    counts["kilo-minimax-m3"] += 1
+    third = ralph_robin.select_route(cfg, logs, current_index=2, skipped=set(), completed_counts=counts)
+    assert third["route"] == "claude-route"
+    assert third["rotation_reason"] == "fair-rotation"
+
+
 def test_ralph_select_route_two_kilo_routes_are_distinct(
     tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, fake_bin: Path
 ) -> None:

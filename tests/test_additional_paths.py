@@ -1570,6 +1570,13 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     assert ralph_robin.current_index_from_state(cfg) == 0
     cfg.state_file.write_text('{"providers_spec":"other","current_index":9}', encoding="utf-8")
     assert ralph_robin.current_index_from_state(cfg) == 0
+    cfg.dry_run = False
+    ralph_robin.save_state(cfg, 1, "codex", {"claude": 2, "codex": 3})
+    assert ralph_robin.completed_counts_from_state(cfg) == {"claude": 2, "codex": 3}
+    saved_state = json.loads(cfg.state_file.read_text() or "{}")
+    assert saved_state["rotation_spec"] == "claude,codex"
+    assert saved_state["completed_counts"] == {"claude": 2, "codex": 3}
+    cfg.state_file.write_text('{"providers_spec":"claude,codex","current_index":9}', encoding="utf-8")
     cfg.dry_run = True
     ralph_robin.save_state(cfg, 1, "codex")
     assert json.loads(cfg.state_file.read_text() or "{}").get("current_index") == 9

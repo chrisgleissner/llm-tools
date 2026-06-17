@@ -672,7 +672,12 @@ def current_index_from_state(cfg: RalphConfig) -> int:
     if cfg.state_file.is_file() and cfg.state_file.stat().st_size > 0:
         try:
             obj = json.loads(cfg.state_file.read_text(encoding="utf-8"))
-            if obj.get("providers_spec") == cfg.providers_spec:
+            expected = rotation_state_spec(cfg)
+            legacy_expected = cfg.providers_spec
+            actual = obj.get("rotation_spec")
+            if not isinstance(actual, str):
+                actual = obj.get("providers_spec")
+            if actual == expected or (not cfg.routes and actual == legacy_expected):
                 index = int(obj.get("current_index", 0))
             else:
                 index = 0
@@ -684,7 +689,49 @@ def current_index_from_state(cfg: RalphConfig) -> int:
     return index if 0 <= index < rotation_size else 0
 
 
-def save_state(cfg: RalphConfig, selected_index: int, selected_provider: str) -> None:
+def rotation_keys(cfg: RalphConfig) -> list[str]:
+    return list(cfg.routes) if cfg.routes else list(cfg.providers)
+
+
+def rotation_state_spec(cfg: RalphConfig) -> str:
+    if cfg.routes:
+        return cfg.routes_spec or ",".join(cfg.routes)
+    return cfg.providers_spec
+
+
+def completed_counts_from_state(cfg: RalphConfig) -> dict[str, int]:
+    keys = rotation_keys(cfg)
+    counts = {key: 0 for key in keys}
+    if not cfg.state_file.is_file() or cfg.state_file.stat().st_size <= 0:
+        return counts
+    try:
+        obj = json.loads(cfg.state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return counts
+    expected = rotation_state_spec(cfg)
+    actual = obj.get("rotation_spec")
+    if not isinstance(actual, str):
+        actual = obj.get("providers_spec")
+    if actual != expected and (cfg.routes or actual != cfg.providers_spec):
+        return counts
+    raw = obj.get("completed_counts")
+    if not isinstance(raw, dict):
+        return counts
+    for key in keys:
+        try:
+            value = int(raw.get(key, 0))
+        except (TypeError, ValueError):
+            value = 0
+        counts[key] = max(0, value)
+    return counts
+
+
+def save_state(
+    cfg: RalphConfig,
+    selected_index: int,
+    selected_provider: str,
+    completed_counts: dict[str, int] | None = None,
+) -> None:
     if cfg.dry_run:
         return
     cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -695,10 +742,15 @@ def save_state(cfg: RalphConfig, selected_index: int, selected_provider: str) ->
     obj = {
         "providers_spec": cfg.providers_spec,
         "providers": cfg.providers,
+        "routes_spec": cfg.routes_spec,
+        "routes": cfg.routes,
+        "rotation_spec": rotation_state_spec(cfg),
         "current_provider": selected_provider,
         "current_index": selected_index,
         "updated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).astimezone().isoformat(),
     }
+    if completed_counts is not None:
+        obj["completed_counts"] = {key: int(max(0, completed_counts.get(key, 0))) for key in rotation_keys(cfg)}
     cfg.state_file.write_text(json.dumps(obj, separators=(",", ":")) + "\n", encoding="utf-8")
     try:
         cfg.state_file.chmod(0o600)
@@ -832,6 +884,73 @@ def even_burn_index(cfg: RalphConfig, decisions: list[dict[str, Any]], current_i
     return scored[0][3]
 
 
+def _count_for(completed_counts: dict[str, int] | None, key: str) -> int:
+    if not completed_counts:
+        return 0
+    try:
+        return max(0, int(completed_counts.get(key, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def mixed_capacity_fair_index(
+    decisions: list[dict[str, Any]],
+    keys: list[str],
+    current_index: int,
+    skipped: set[str],
+    completed_counts: dict[str, int] | None,
+    capacity_fn: Any,
+) -> int | None:
+    """Fair selector for rotations that mix measurable and opaque capacity.
+
+    Reset-window/budget providers can be ranked by remaining daily capacity.
+    Opaque/ungated providers cannot, but they are still real providers that
+    should receive turns while they are usable. For mixed rotations, select
+    among the least-completed usable candidates first; when that cohort contains
+    multiple measurable candidates, use the existing even-burn score as the
+    tie-break. This keeps opaque routes from starving without inventing a fake
+    quota for them.
+    """
+    if not decisions or not keys:
+        return None
+    usable: list[int] = []
+    rankable: set[int] = set()
+    unrankable: set[int] = set()
+    for i, key in enumerate(keys):
+        if key in skipped:
+            continue
+        if i >= len(decisions) or decisions[i].get("usable") is not True:
+            continue
+        usable.append(i)
+        if capacity_fn(decisions[i]) is None:
+            unrankable.add(i)
+        else:
+            rankable.add(i)
+    if not rankable or not unrankable:
+        return None
+
+    min_count = min(_count_for(completed_counts, keys[i]) for i in usable)
+    tied = [i for i in usable if _count_for(completed_counts, keys[i]) == min_count]
+    tied_rankable = [i for i in tied if i in rankable]
+    if len(tied_rankable) >= 2:
+        rotation_rank = {idx: rank for rank, idx in enumerate(rotation_order_indices(len(keys), current_index))}
+        scored: list[tuple[float, int, int]] = []
+        for i in tied_rankable:
+            score = capacity_fn(decisions[i])
+            if score is None:
+                continue
+            scored.append((score, -rotation_rank[i], i))
+        if scored:
+            scored.sort(reverse=True)
+            return scored[0][2]
+
+    tied_set = set(tied)
+    for i in rotation_order_indices(len(keys), current_index):
+        if i in tied_set:
+            return i
+    return tied[0] if tied else None
+
+
 # --- Route-mode selection -----------------------------------------------------
 
 
@@ -937,7 +1056,13 @@ def _even_burn_route_index(
     return scored[0][3]
 
 
-def select_route(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skipped: set[str]) -> dict[str, Any]:
+def select_route(
+    cfg: RalphConfig,
+    logs: common.RunLogs,
+    current_index: int,
+    skipped: set[str],
+    completed_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
     """Route-mode selection. Mirrors :func:`select_provider` but iterates
     over configured routes.
 
@@ -955,6 +1080,24 @@ def select_route(cfg: RalphConfig, logs: common.RunLogs, current_index: int, ski
         decisions.append(decision)
         common.log_event(logs, "route_decision", decision)
     if cfg.even_burn:
+        fair = mixed_capacity_fair_index(
+            decisions,
+            route_ids,
+            current_index,
+            skipped,
+            completed_counts,
+            _route_remaining_daily_capacity,
+        )
+        if fair is not None:
+            return {
+                "index": fair,
+                "route": route_ids[fair],
+                "provider": decisions[fair].get("provider", ""),
+                "rotation_reason": "fair-rotation",
+                "all_rate_limited": False,
+                "decision": decisions[fair],
+                "decisions": decisions,
+            }
         balanced = _even_burn_route_index(decisions, route_ids, current_index, skipped)
         if balanced is not None:
             return {
@@ -1030,9 +1173,15 @@ def select_route(cfg: RalphConfig, logs: common.RunLogs, current_index: int, ski
     }
 
 
-def select_provider(cfg: RalphConfig, logs: common.RunLogs, current_index: int, skipped: set[str]) -> dict[str, Any]:
+def select_provider(
+    cfg: RalphConfig,
+    logs: common.RunLogs,
+    current_index: int,
+    skipped: set[str],
+    completed_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
     if cfg.routes:
-        return select_route(cfg, logs, current_index, skipped)
+        return select_route(cfg, logs, current_index, skipped, completed_counts)
     decisions: list[dict[str, Any]] = []
     for provider in cfg.providers:
         policy = cfg.policies.get(provider)
@@ -1050,6 +1199,23 @@ def select_provider(cfg: RalphConfig, logs: common.RunLogs, current_index: int, 
         common.log_event(logs, "usage_snapshot", {"provider": provider, "capacity_provider": capacity_provider, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
     if cfg.even_burn:
+        fair_index = mixed_capacity_fair_index(
+            decisions,
+            cfg.providers,
+            current_index,
+            skipped,
+            completed_counts,
+            remaining_daily_capacity,
+        )
+        if fair_index is not None:
+            return {
+                "index": fair_index,
+                "provider": cfg.providers[fair_index],
+                "rotation_reason": "fair-rotation",
+                "all_rate_limited": False,
+                "decision": decisions[fair_index],
+                "decisions": decisions,
+            }
         balanced_index = even_burn_index(cfg, decisions, current_index, skipped)
         if balanced_index is not None:
             return {
@@ -1444,6 +1610,7 @@ def main(argv: list[str] | None = None) -> int:
     common.log_event(logs, "start", safe_args_json(cfg))
     common.log_event(logs, "prompt", {"source": cfg.prompt_source, "sha256": prompt_sha, "prompt": prompt})
     current_index = current_index_from_state(cfg)
+    completed_counts = completed_counts_from_state(cfg)
     status_line(f"logs: {logs.run_dir}", level="dim")
     suspend_state = SuspendState()
     report_prior_suspend_failures(logs)
@@ -1474,8 +1641,8 @@ def main(argv: list[str] | None = None) -> int:
     while True:
         if out_of_time():
             return stop_timed_out()
-        common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index})
-        selection = select_provider(cfg, logs, current_index, skipped)
+        common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index, "completed_counts": completed_counts})
+        selection = select_provider(cfg, logs, current_index, skipped, completed_counts)
         common.log_event(logs, "selection", {**selection, "skipped": sorted(skipped)})
         selected_index = int(selection.get("index", -1))
         selected_provider = str(selection.get("provider", ""))
@@ -1506,7 +1673,7 @@ def main(argv: list[str] | None = None) -> int:
             # resume this loop and re-evaluate which provider to use. Do not run a
             # provider or count this as an increment.
             target = soonest_wait_until(selection) or (common.now_epoch() + int(cfg.poll_interval))
-            save_state(cfg, selected_index, selected_provider)
+            save_state(cfg, selected_index, selected_provider, completed_counts)
             if cfg.dry_run:
                 common.log_event(logs, "final", {"status": "dry-run"})
                 print("dry-run: no prompt submitted", file=sys.stderr)
@@ -1515,7 +1682,7 @@ def main(argv: list[str] | None = None) -> int:
                 return stop_timed_out()
             skipped = set()
             continue
-        save_state(cfg, selected_index, selected_provider)
+        save_state(cfg, selected_index, selected_provider, completed_counts)
         if cfg.dry_run:
             common.log_event(logs, "final", {"status": "dry-run"})
             print("dry-run: no prompt submitted", file=sys.stderr)
@@ -1532,6 +1699,10 @@ def main(argv: list[str] | None = None) -> int:
         if status == 0:
             completed += 1
             hard_fail_streak = 0
+            completed_key = selected_route_id if selected_route_id else selected_provider
+            if completed_key:
+                completed_counts[completed_key] = _count_for(completed_counts, completed_key) + 1
+                save_state(cfg, selected_index, selected_provider, completed_counts)
             common.log_event(logs, "iteration_complete", {"provider": selected_provider, "index": selected_index, "completed": completed, "seconds": round(iter_seconds, 3)})
             if max_iterations and completed >= max_iterations:
                 common.log_event(logs, "final", {"status": "success", "completed": completed})
