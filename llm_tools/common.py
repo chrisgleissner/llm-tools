@@ -31,6 +31,7 @@ from urllib.request import Request, urlopen
 AUTONOMY_ABORT_STATUS = 75
 TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
 DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
+DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS = 300
 CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
@@ -670,6 +671,33 @@ def stale_if_local_snapshot(
     return obj
 
 
+def claude_rate_limit_cache_max_age(env: dict[str, str] | None = None) -> int:
+    env = env or os.environ
+    raw = env.get("LLM_USAGE_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE", str(DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS))
+    try:
+        parsed = int(float(raw or str(DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS)))
+    except ValueError:
+        return DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS
+    if parsed <= 0:
+        return DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS
+    return parsed
+
+
+def _read_claude_usage_cache(cache: Path, env: dict[str, str], max_age: int) -> dict[str, Any] | None:
+    try:
+        if not cache.is_file() or cache.stat().st_size <= 0:
+            return None
+        mtime = int(cache.stat().st_mtime)
+        norm = normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if norm is None:
+        return None
+    if provider_snapshot_requires_fresh_source(norm, env) and now_epoch(env) - mtime > max_age:
+        return None
+    return norm
+
+
 def is_stale_usage_result(obj: Any) -> bool:
     """True when a provider read degraded to the ``stale-usage`` marker."""
     return isinstance(obj, dict) and obj.get("available") is False and obj.get("reason") == "stale-usage"
@@ -1042,32 +1070,41 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
         pass
     oauth = cred_data.get("claudeAiOauth")
     token = oauth.get("accessToken", "") if isinstance(oauth, dict) else ""
+    has_oauth_token = bool(
+        isinstance(oauth, dict)
+        and (str(oauth.get("accessToken") or "").strip() or str(oauth.get("refreshToken") or "").strip())
+    )
+    if has_oauth_token and _claude_oauth_rate_limit_active(env):
+        cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env))
+        if cached is not None:
+            return cached
+        return _claude_rate_limited_provider()
     if token:
-        text, unauthorized = _fetch_claude_oauth_usage_text(token, env)
-        if text:
-            return _cache_claude_usage_response(cache, text)
-        if unauthorized:
+        result = _fetch_claude_oauth_usage_result(token, env)
+        if result.text:
+            _clear_claude_oauth_rate_limit(env)
+            return _cache_claude_usage_response(cache, result.text)
+        if result.rate_limited:
+            return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
+        if result.unauthorized:
             refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
             if refreshed:
-                text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
-                if text:
-                    return _cache_claude_usage_response(cache, text)
+                result = _fetch_claude_oauth_usage_result(refreshed, env)
+                if result.text:
+                    _clear_claude_oauth_rate_limit(env)
+                    return _cache_claude_usage_response(cache, result.text)
+                if result.rate_limited:
+                    return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
     elif isinstance(oauth, dict) and oauth.get("refreshToken"):
         refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
         if refreshed:
-            text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
-            if text:
-                return _cache_claude_usage_response(cache, text)
-    if cache.is_file() and cache.stat().st_size > 0:
-        try:
-            mtime = int(cache.stat().st_mtime)
-            norm = normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
-            if stale_if_local_snapshot("claude", norm, str(cache), mtime, env) is not norm:
-                return None
-            return norm
-        except (OSError, json.JSONDecodeError):
-            return None
-    return None
+            result = _fetch_claude_oauth_usage_result(refreshed, env)
+            if result.text:
+                _clear_claude_oauth_rate_limit(env)
+                return _cache_claude_usage_response(cache, result.text)
+            if result.rate_limited:
+                return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
+    return _read_claude_usage_cache(cache, env, local_snapshot_max_age(env))
 
 
 def live_fetch_retry_plan(env: dict[str, str] | None = None) -> tuple[int, float]:
@@ -1123,7 +1160,71 @@ def _retry_after_seconds(exc: HTTPError, env: dict[str, str], fallback: float) -
     return max(0.0, min(wait, live_fetch_retry_max_delay(env)))
 
 
-def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None = None) -> tuple[str | None, bool]:
+@dataclass
+class ClaudeOAuthUsageFetchResult:
+    text: str | None = None
+    unauthorized: bool = False
+    rate_limited: bool = False
+    retry_after_seconds: float | None = None
+
+
+def _claude_oauth_rate_limit_path(env: dict[str, str]) -> Path:
+    return usage_cache_dir(env) / "claude-usage-api-rate-limit.json"
+
+
+def _claude_oauth_rate_limit_active(env: dict[str, str]) -> bool:
+    path = _claude_oauth_rate_limit_path(env)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    until = num(data.get("next_allowed_epoch")) if isinstance(data, dict) else None
+    return until is not None and until > now_epoch(env)
+
+
+def _record_claude_oauth_rate_limit(env: dict[str, str], retry_after_seconds: float | None) -> None:
+    wait = retry_after_seconds if retry_after_seconds is not None else live_fetch_retry_max_delay(env)
+    payload = {
+        "recorded_at_epoch": now_epoch(env),
+        "next_allowed_epoch": now_epoch(env) + max(0.0, wait),
+    }
+    path = _claude_oauth_rate_limit_path(env)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_claude_oauth_rate_limit(env: dict[str, str]) -> None:
+    try:
+        _claude_oauth_rate_limit_path(env).unlink()
+    except OSError:
+        pass
+
+
+def _claude_rate_limited_provider() -> dict[str, Any]:
+    return {
+        "provider": "claude",
+        "source": CLAUDE_OAUTH_USAGE_URL,
+        "available": False,
+        "reason": "rate-limited",
+    }
+
+
+def _claude_rate_limit_fallback(
+    cache: Path,
+    env: dict[str, str],
+    retry_after_seconds: float | None,
+) -> dict[str, Any]:
+    _record_claude_oauth_rate_limit(env, retry_after_seconds)
+    cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env))
+    if cached is not None:
+        return cached
+    return _claude_rate_limited_provider()
+
+
+def _fetch_claude_oauth_usage_result(access_token: str, env: dict[str, str] | None = None) -> ClaudeOAuthUsageFetchResult:
     env = env or os.environ
     req = Request(
         CLAUDE_OAUTH_USAGE_URL,
@@ -1148,27 +1249,27 @@ def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None
     while True:
         try:
             with urlopen(req, timeout=20) as resp:
-                return resp.read().decode("utf-8", "replace"), False
+                return ClaudeOAuthUsageFetchResult(text=resp.read().decode("utf-8", "replace"))
         except HTTPError as exc:
             # 400/401 are authoritative (bad/expired token): do not retry, let the
             # caller refresh the OAuth token instead.
             if exc.code in {400, 401}:
-                return None, True
+                return ClaudeOAuthUsageFetchResult(unauthorized=True)
             if exc.code == 429:
+                wait = _retry_after_seconds(exc, env, delay)
                 # Honour Retry-After exactly once. Burning the quick
                 # network-retry budget on a 429 is pointless (0.5s later it is
                 # still rate-limited) and only adds load to an endpoint that
                 # already asked us to back off, so give up after the one wait.
                 if rate_limit_retry_used:
-                    return None, False
+                    return ClaudeOAuthUsageFetchResult(rate_limited=True, retry_after_seconds=wait)
                 rate_limit_retry_used = True
-                wait = _retry_after_seconds(exc, env, delay)
                 if wait:
                     time.sleep(wait)
                 continue
             if 400 <= exc.code < 500:
                 # Any other 4xx is a client error that will not change on retry.
-                return None, False
+                return ClaudeOAuthUsageFetchResult()
             # 5xx is a transient server error: fall through to the bounded
             # network-retry budget below.
         except Exception:
@@ -1180,7 +1281,12 @@ def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None
             if delay:
                 time.sleep(delay)
             continue
-        return None, False
+        return ClaudeOAuthUsageFetchResult()
+
+
+def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None = None) -> tuple[str | None, bool]:
+    result = _fetch_claude_oauth_usage_result(access_token, env)
+    return result.text, result.unauthorized
 
 
 def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:

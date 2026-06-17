@@ -433,6 +433,36 @@ def test_usage_service_request_snapshot_branches(env: dict[str, str], monkeypatc
     assert proc.terminated is True
 
 
+def test_usage_service_request_snapshot_reuses_recent_disk_snapshot(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live_env = env | {"LLM_USAGE_NOW_EPOCH": "1000", "LLM_USAGE_SERVICE_INTERVAL": "60"}
+    provider_data = {
+        "codex": {"provider": "codex", "available": True, "source": "cache", "five_hour": {"used": 11}},
+        "claude": usage.unavailable_snapshot("claude", "claude api"),
+        "copilot": usage.unavailable_snapshot("copilot", "copilot cli"),
+        "kilo": usage.unavailable_snapshot("kilo", "kilo cli"),
+        "opencode": usage.unavailable_snapshot("opencode", "opencode cli"),
+        "minimax": usage.unavailable_snapshot("minimax", "mmx cli"),
+    }
+    payload = usage.service_payload_from_provider_data(usage.Config(), provider_data, live_env)
+    payload["generated_at_epoch"] = 980
+    usage_service._atomic_json_write(usage_service.latest_path(live_env), payload)
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        usage_service,
+        "start_ephemeral_service",
+        lambda *_args, **_kwargs: pytest.fail("recent disk snapshot should be reused"),
+    )
+
+    assert usage_service.request_snapshot(env=live_env) == payload
+
+    payload["generated_at_epoch"] = 900
+    usage_service._atomic_json_write(usage_service.latest_path(live_env), payload)
+    monkeypatch.setattr(usage_service, "start_ephemeral_service", lambda *_args, **_kwargs: None)
+    assert usage_service.request_snapshot(env=live_env) is None
+
+
 def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
     cred.parent.mkdir(parents=True, exist_ok=True)
@@ -606,6 +636,77 @@ def test_claude_oauth_usage_rate_limit_single_shot_when_retries_disabled(
     assert calls["n"] == 1
     assert text is None
     assert unauthorized is False
+
+
+def test_claude_oauth_rate_limit_serves_bounded_api_cache(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live_env = env | {
+        "LLM_USAGE_NOW_EPOCH": "1000",
+        "LLM_USAGE_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE": "300",
+    }
+    cred = Path(live_env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}), encoding="utf-8")
+    cache = common.usage_cache_dir(live_env) / "claude-usage-api.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        '{"rate_limits":{"five_hour":{"used_percentage":20,"resets_at":"2026-06-18T00:00:00Z"}}}',
+        encoding="utf-8",
+    )
+    os.utime(cache, (880, 880))
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude_api(live_env)
+    assert data is not None
+    assert data["five_hour"]["used"] == 20
+    assert calls["n"] == 1
+
+    data = common.read_claude_api(live_env)
+    assert data is not None
+    assert data["five_hour"]["used"] == 20
+    assert calls["n"] == 1
+
+
+def test_claude_oauth_rate_limit_does_not_fall_back_to_stale_project_data(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live_env = env | {
+        "LLM_USAGE_NOW_EPOCH": "1000",
+        "LLM_USAGE_LIVE_FETCH_RETRIES": "2",
+        "LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "0",
+        "LLM_USAGE_STALE_RECOVERY_DELAY": "0",
+    }
+    cred = Path(live_env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}), encoding="utf-8")
+    project = Path(live_env["HOME"]) / ".claude" / "projects" / "r.jsonl"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(
+        '{"message":{"rateLimits":{"fiveHour":{"usedPercent":6,"resetsAt":"2026-06-18T00:00:00Z"}}}}\n',
+        encoding="utf-8",
+    )
+    os.utime(project, (800, 800))
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude(live_env)
+    assert data == {
+        "provider": "claude",
+        "source": common.CLAUDE_OAUTH_USAGE_URL,
+        "available": False,
+        "reason": "rate-limited",
+    }
+    assert calls["n"] == 2
 
 
 def test_usage_dashboard_ready_guidance_and_reset(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

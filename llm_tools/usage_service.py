@@ -344,6 +344,29 @@ def _request(sock: Path, request: dict[str, Any], timeout: float = SOCKET_TIMEOU
     return data if isinstance(data, dict) else None
 
 
+def _cached_latest_snapshot(env: dict[str, str], max_age: int) -> dict[str, Any] | None:
+    path = latest_path(env)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    generated = common.num(payload.get("generated_at_epoch"))
+    if generated is None or common.now_epoch(env) - int(generated) > max_age:
+        return None
+    try:
+        from . import usage
+
+        if not usage.service_payload_matches_environment(payload, env):
+            return None
+        if usage.provider_data_from_service_payload(payload) is None:
+            return None
+    except Exception:
+        return None
+    return payload
+
+
 def request_snapshot(
     *,
     env: dict[str, str] | None = None,
@@ -357,6 +380,9 @@ def request_snapshot(
         return resp["snapshot"]
     if not start_ephemeral:
         return None
+    cached = _cached_latest_snapshot(env, _parse_interval(env.get("LLM_USAGE_SERVICE_INTERVAL")))
+    if cached is not None:
+        return cached
     proc = start_ephemeral_service(env, timeout=timeout)
     if proc is None:
         return None
