@@ -1091,7 +1091,40 @@ def live_fetch_retry_plan(env: dict[str, str] | None = None) -> tuple[int, float
     return attempts, delay
 
 
+def live_fetch_retry_max_delay(env: dict[str, str] | None = None) -> float:
+    """Cap (seconds) on a server-requested ``Retry-After`` back-off.
+
+    A 429 carries a ``Retry-After`` (the Claude OAuth usage endpoint asks for
+    ~8s); honouring it on the same invocation turns a transient rate-limit into
+    a fresh read instead of a silent degrade to ``unavailable``. The cap keeps a
+    pathological ``Retry-After`` from hanging the tool. ``0`` disables the wait
+    (tests pin it so the rate-limit path stays instant and hermetic).
+    """
+    env = env or os.environ
+    try:
+        return max(0.0, float(env.get("LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY", "10") or "10"))
+    except ValueError:
+        return 10.0
+
+
+def _retry_after_seconds(exc: HTTPError, env: dict[str, str], fallback: float) -> float:
+    """Seconds to wait before retrying a 429, from ``Retry-After`` (capped)."""
+    raw = None
+    try:
+        raw = exc.headers.get("Retry-After")
+    except AttributeError:
+        raw = None
+    wait = fallback
+    if raw:
+        try:
+            wait = float(str(raw).strip())
+        except (TypeError, ValueError):
+            wait = fallback
+    return max(0.0, min(wait, live_fetch_retry_max_delay(env)))
+
+
 def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None = None) -> tuple[str | None, bool]:
+    env = env or os.environ
     req = Request(
         CLAUDE_OAUTH_USAGE_URL,
         headers={
@@ -1102,18 +1135,52 @@ def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None
         },
     )
     attempts, delay = live_fetch_retry_plan(env)
-    for attempt in range(attempts):
+    # A rate-limit (429) is transient and authoritative about *when* to retry, so
+    # it gets one extra honoured-``Retry-After`` attempt on top of the network
+    # budget rather than being lumped in with bad-token 4xx. Without this a 429
+    # used to degrade straight to the ~/.claude/projects fallback (which reports
+    # ``unavailable``), so any second read inside the endpoint's ~8s window made
+    # Claude usage vanish from the dashboard. When retries are globally disabled
+    # (``LLM_USAGE_LIVE_FETCH_RETRIES=0``, the test pin) the budget is 1 and the
+    # rate-limit retry is suppressed too, so the path stays single-shot.
+    rate_limit_retry_used = attempts <= 1
+    attempt = 0
+    while True:
         try:
             with urlopen(req, timeout=20) as resp:
                 return resp.read().decode("utf-8", "replace"), False
         except HTTPError as exc:
             # 400/401 are authoritative (bad/expired token): do not retry, let the
             # caller refresh the OAuth token instead.
-            return None, exc.code in {400, 401}
+            if exc.code in {400, 401}:
+                return None, True
+            if exc.code == 429:
+                # Honour Retry-After exactly once. Burning the quick
+                # network-retry budget on a 429 is pointless (0.5s later it is
+                # still rate-limited) and only adds load to an endpoint that
+                # already asked us to back off, so give up after the one wait.
+                if rate_limit_retry_used:
+                    return None, False
+                rate_limit_retry_used = True
+                wait = _retry_after_seconds(exc, env, delay)
+                if wait:
+                    time.sleep(wait)
+                continue
+            if 400 <= exc.code < 500:
+                # Any other 4xx is a client error that will not change on retry.
+                return None, False
+            # 5xx is a transient server error: fall through to the bounded
+            # network-retry budget below.
         except Exception:
-            if attempt + 1 < attempts and delay:
+            pass
+        attempt += 1
+        if attempt < attempts:
+            # Retry whenever budget remains; the delay only gates the sleep so
+            # tests can pin it to 0 and still exercise the retry path.
+            if delay:
                 time.sleep(delay)
-    return None, False
+            continue
+        return None, False
 
 
 def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:
@@ -1473,7 +1540,28 @@ def copilot_refresh_wait_budget(env: dict[str, str], cache_present: bool) -> flo
     # but no longer shortens the wait -- a warm-but-stale cache used to wait ~1s
     # and serve the old value, which is exactly the staleness we are removing.
     _ = cache_present
-    default = str(int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 2)
+    try:
+        timeout = int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10")
+    except ValueError:
+        timeout = 10
+    # The detached refresh first runs the PTY capture (up to
+    # ``LLM_USAGE_COPILOT_TIMEOUT`` -- and on the new Copilot CLI, which no longer
+    # prints the ``Plan: N% used`` footer, that capture *always* burns the full
+    # timeout) and only THEN runs the GitHub ``premium_request/usage`` fallback
+    # that actually supplies the monthly figure. Under ``llm-usage``'s parallel
+    # provider fan-out the GitHub leg competes for CPU/network, so the old
+    # ``timeout + 2`` budget landed right on the boundary: the very first (cold)
+    # run routinely gave up a beat before the refresh wrote the cache, dropping
+    # the monthly bar *and* the add-on ``spend`` row (which is gated on
+    # availability) and skewing the budget total. Size the budget to cover the
+    # billing fallback so the cold run waits for real data. The wait loop returns
+    # as soon as the cache lands (or the refresh lock clears), so this only moves
+    # the give-up threshold -- it does not slow the happy path.
+    try:
+        fallback = int(env.get("LLM_USAGE_COPILOT_BILLING_FALLBACK_BUDGET", "8") or "8")
+    except ValueError:
+        fallback = 8
+    default = str(timeout + max(0, fallback))
     raw = env.get("LLM_USAGE_COPILOT_REFRESH_WAIT", default) or default
     try:
         return max(0.0, float(raw))

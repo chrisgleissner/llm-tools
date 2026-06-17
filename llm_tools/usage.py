@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -1569,13 +1570,57 @@ def snapshot_from_json(obj: Any) -> ProviderSnapshot:
     )
 
 
+_SERVICE_ENV_KEYS = {
+    "HOME",
+    "PATH",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "COPILOT_HOME",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "COPILOT_GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+}
+
+_SERVICE_ENV_PREFIXES = (
+    "LLM_USAGE_",
+    "CODEX_",
+    "CLAUDE_",
+    "COPILOT_",
+    "KILO_",
+    "OPENCODE_",
+    "MINIMAX_",
+    "MMX_",
+)
+
+
+def service_environment_fingerprint(env: dict[str, str] | None = None) -> str:
+    """Hash the provider-affecting environment for service/client parity checks."""
+    if env is None:
+        env = os.environ
+    relevant = {
+        key: str(value)
+        for key, value in env.items()
+        if key in _SERVICE_ENV_KEYS or any(key.startswith(prefix) for prefix in _SERVICE_ENV_PREFIXES)
+    }
+    encoded = json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def service_payload_from_provider_data(cfg: Config, provider_data: dict[str, Any], env: dict[str, str] | None = None) -> dict[str, Any]:
     """Serialize a provider-data read for the local usage service."""
-    env = env or os.environ
+    if env is None:
+        env = os.environ
     return {
         "schema": 1,
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
         "generated_at_epoch": common.now_epoch(env),
+        "environment_fingerprint": service_environment_fingerprint(env),
         "providers": {
             "codex": provider_data.get("codex") or {"provider": "codex", "available": False},
             "claude": snapshot_to_json(provider_data.get("claude")),
@@ -1599,6 +1644,11 @@ def provider_data_from_service_payload(payload: dict[str, Any]) -> dict[str, Any
         "opencode": snapshot_from_json(providers.get("opencode")),
         "minimax": snapshot_from_json(providers.get("minimax")),
     }
+
+
+def service_payload_matches_environment(payload: dict[str, Any], env: dict[str, str] | None = None) -> bool:
+    fingerprint = payload.get("environment_fingerprint")
+    return isinstance(fingerprint, str) and fingerprint == service_environment_fingerprint(env)
 
 
 def log_samples_from_provider_data(provider_data: dict[str, Any]) -> None:
@@ -1891,18 +1941,40 @@ def render_from_service_payload(cfg: Config, payload: dict[str, Any]) -> bool:
     return True
 
 
-def render_once_via_service(cfg: Config) -> bool:
+def _provider_data_via_service(cfg: Config) -> tuple[dict[str, Any], str | None] | None:
     if not cfg.use_service:
-        return False
+        return None
     try:
         from . import usage_service
 
         payload = usage_service.request_snapshot(env=os.environ, start_ephemeral=True)
     except Exception:
-        return False
+        return None
     if not isinstance(payload, dict):
+        return None
+    if not service_payload_matches_environment(payload, os.environ):
+        return None
+    provider_data = provider_data_from_service_payload(payload)
+    if provider_data is None:
+        return None
+    generated_at = payload.get("generated_at")
+    return provider_data, generated_at if isinstance(generated_at, str) else None
+
+
+def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None) -> tuple[dict[str, Any], str | None]:
+    service_data = _provider_data_via_service(cfg)
+    if service_data is not None:
+        return service_data
+    return _fetch_provider_data(cfg, anchor=anchor), None
+
+
+def render_once_via_service(cfg: Config) -> bool:
+    service_data = _provider_data_via_service(cfg)
+    if service_data is None:
         return False
-    return render_from_service_payload(cfg, payload)
+    provider_data, generated_at = service_data
+    render_from_provider_data(cfg, provider_data, generated_at)
+    return True
 
 
 def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[Any], bool]:
@@ -2137,11 +2209,11 @@ def render_watch_frame(cfg: Config) -> None:
     # header to anchor to. Anything else (piped output, JSON, --no-header) falls
     # back to the simple clear-and-redraw path.
     if not is_tty or cfg.json_output or cfg.no_header:
-        provider_data = _fetch_provider_data(cfg)
+        provider_data, generated_at = _render_data_for_frame(cfg)
         if is_tty:
             out.write("\033[2J\033[H")
         if cfg.json_output:
-            _emit_json(cfg, provider_data)
+            _emit_json(cfg, provider_data, generated_at)
         else:
             rows, show_model = _build_usage_rows(cfg, provider_data)
             if not cfg.no_header:
@@ -2160,7 +2232,7 @@ def render_watch_frame(cfg: Config) -> None:
 
     # 2. Dock the spinner one column past the header's first line (the clock).
     spinner_col = len(header_lines[0]) + 2
-    provider_data = _fetch_provider_data(cfg, anchor=(1, spinner_col))
+    provider_data, _generated_at = _render_data_for_frame(cfg, anchor=(1, spinner_col))
 
     # 3. The data is in — fill in the table beneath the header, clearing each
     #    line, then erase any rows left over from a previous, taller frame.
@@ -2444,17 +2516,25 @@ def main(argv: list[str] | None = None) -> int:
         cfg.json_output = False
         cfg.show_remaining_time = False
         if cfg.watch_interval != "0":
-            while True:
-                log_once(cfg)
-                time.sleep(float(cfg.watch_interval))
+            try:
+                while True:
+                    log_once(cfg)
+                    time.sleep(float(cfg.watch_interval))
+            except KeyboardInterrupt:
+                return 130
         log_once(cfg)
         return 0
     if cfg.watch_interval != "0":
-        if sys.stdout.isatty():
-            print("\033[2J\033[H", end="")  # one clean wipe before the first redraw-in-place frame
-        while True:
-            render_watch_frame(cfg)
-            time.sleep(float(cfg.watch_interval))
+        try:
+            if sys.stdout.isatty():
+                print("\033[2J\033[H", end="")  # one clean wipe before the first redraw-in-place frame
+            while True:
+                render_watch_frame(cfg)
+                time.sleep(float(cfg.watch_interval))
+        except KeyboardInterrupt:
+            if sys.stdout.isatty():
+                print()
+            return 130
     else:
         if not render_once_via_service(cfg):
             render_once(cfg)

@@ -62,6 +62,15 @@ def test_usage_main_inprocess_and_render_helpers(env: dict[str, str], monkeypatc
     assert "Missing" in out
 
 
+def test_usage_watch_interrupt_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupt(_cfg: usage.Config) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(usage, "render_watch_frame", interrupt)
+    monkeypatch.setattr(usage.sys.stdout, "isatty", lambda: False, raising=False)
+    assert usage.main(["--watch", "1", "--no-service"]) == 130
+
+
 def test_usage_service_snapshot_roundtrip(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = usage.Config()
     provider_data = {
@@ -132,6 +141,9 @@ def test_usage_service_snapshot_roundtrip(env: dict[str, str], monkeypatch: pyte
         ),
     }
     payload = usage.service_payload_from_provider_data(cfg, provider_data, env)
+    assert payload["environment_fingerprint"] == usage.service_environment_fingerprint(env)
+    assert usage.service_payload_matches_environment(payload, env) is True
+    assert usage.service_payload_matches_environment({"providers": {}}, env) is False
     restored = usage.provider_data_from_service_payload(payload)
     assert restored is not None
     assert restored["copilot"].available is True
@@ -147,6 +159,60 @@ def test_usage_service_snapshot_roundtrip(env: dict[str, str], monkeypatch: pyte
     assert ("Codex", "weekly", 70.0) in calls
     assert ("copilot", "monthly", 75.0) in calls
     assert ("MiniMax", "5h", 55.0) in calls
+
+
+def test_watch_frame_uses_service_snapshot(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.delenv("LLM_USAGE_NO_SERVICE", raising=False)
+    cfg = usage.Config()
+    cfg.json_output = True
+    provider_data = {
+        "codex": {
+            "provider": "codex",
+            "available": True,
+            "source": "service",
+            "five_hour": {"used": 25.0},
+            "week": {"used": 50.0},
+        },
+        "claude": usage.unavailable_snapshot("claude", "service"),
+        "copilot": usage.unavailable_snapshot("copilot", "service"),
+        "kilo": usage.unavailable_snapshot("kilo", "service"),
+        "opencode": usage.unavailable_snapshot("opencode", "service"),
+        "minimax": usage.unavailable_snapshot("minimax", "service"),
+    }
+    payload = usage.service_payload_from_provider_data(cfg, provider_data)
+    payload["generated_at"] = "2026-06-16T22:37:00+01:00"
+    monkeypatch.setattr(usage_service, "request_snapshot", lambda **_kwargs: payload)
+    monkeypatch.setattr(usage, "_fetch_provider_data", lambda *_args, **_kwargs: pytest.fail("watch bypassed service"))
+
+    assert usage.render_once_via_service(cfg) is True
+    once = json.loads(capsys.readouterr().out)
+    usage.render_watch_frame(cfg)
+    watch = json.loads(capsys.readouterr().out)
+    assert watch == once
+    assert watch["generated_at"] == "2026-06-16T22:37:00+01:00"
+    assert watch["codex"]["available"] is True
+
+
+def test_service_snapshot_rejected_when_environment_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LLM_USAGE_NO_SERVICE", raising=False)
+    cfg = usage.Config()
+    provider_data = {
+        "codex": {"provider": "codex", "available": False, "reason": "missing-cli", "source": "service"},
+        "claude": usage.unavailable_snapshot("claude", "service"),
+        "copilot": usage.unavailable_snapshot("copilot", "service"),
+        "kilo": usage.unavailable_snapshot("kilo", "service"),
+        "opencode": usage.unavailable_snapshot("opencode", "service"),
+        "minimax": usage.unavailable_snapshot("minimax", "service"),
+    }
+    service_env = dict(os.environ)
+    service_env["PATH"] = "/old-service-path"
+    payload = usage.service_payload_from_provider_data(cfg, provider_data, service_env)
+    monkeypatch.setattr(usage_service, "request_snapshot", lambda **_kwargs: payload)
+    monkeypatch.setenv("PATH", "/current-client-path")
+
+    assert usage.render_once_via_service(cfg) is False
 
 
 def test_usage_service_ephemeral_client(env: dict[str, str]) -> None:
@@ -429,6 +495,117 @@ def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch:
         common.CLAUDE_OAUTH_TOKEN_URL,
         common.CLAUDE_OAUTH_USAGE_URL,
     ]
+
+
+def _make_http_error(url: str, code: int, headers: dict[str, str] | None = None) -> HTTPError:
+    hdrs = None
+    if headers is not None:
+        from email.message import Message
+
+        hdrs = Message()
+        for key, value in headers.items():
+            hdrs[key] = value
+    return HTTPError(url, code, "err", hdrs, None)  # type: ignore[arg-type]
+
+
+def test_claude_oauth_usage_retries_rate_limit(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 429 is transient and carries a Retry-After; honour it on the same read so
+    # a brief rate-limit recovers to fresh data instead of degrading to the
+    # ~/.claude/projects fallback (which reports "unavailable"). The Retry-After
+    # is capped so a pathological value cannot hang the tool.
+    retry_env = env | {
+        "LLM_USAGE_LIVE_FETCH_RETRIES": "2",
+        "LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "0",
+    }
+    calls = {"n": 0}
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return b'{"rate_limits":{"five_hour":{"used_percentage":7,"resets_at":"2026-06-18T00:00:00Z"}}}'
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+        return FakeResponse()
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    text, unauthorized = common._fetch_claude_oauth_usage_text("tok", retry_env)
+    assert calls["n"] == 2
+    assert unauthorized is False
+    assert text is not None and "five_hour" in text
+
+    # Retry-After is read from the header, defaulted, and capped.
+    assert common._retry_after_seconds(
+        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"}), retry_env, 0.5
+    ) == 0.0
+    assert common._retry_after_seconds(
+        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"}),
+        env | {"LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "3"},
+        0.5,
+    ) == 3.0
+    assert common._retry_after_seconds(
+        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, None),
+        env | {"LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "5"},
+        0.5,
+    ) == 0.5
+
+
+def test_claude_oauth_usage_retries_5xx_and_network(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 5xx / network blip is transient and must be retried within the bounded
+    # budget instead of degrading on the first failure (previously any HTTPError
+    # returned immediately).
+    retry_env = env | {"LLM_USAGE_LIVE_FETCH_RETRIES": "2", "LLM_USAGE_LIVE_FETCH_RETRY_DELAY": "0"}
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return b'{"rate_limits":{"five_hour":{"used_percentage":3,"resets_at":"2026-06-18T00:00:00Z"}}}'
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    seq = [lambda: (_ for _ in ()).throw(_make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 500)),
+           lambda: (_ for _ in ()).throw(OSError("temporary")),
+           lambda: FakeResponse()]
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        idx = calls["n"]
+        calls["n"] += 1
+        return seq[idx]()
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    text, unauthorized = common._fetch_claude_oauth_usage_text("tok", retry_env)
+    assert calls["n"] == 3
+    assert unauthorized is False
+    assert text is not None and "five_hour" in text
+
+
+def test_claude_oauth_usage_rate_limit_single_shot_when_retries_disabled(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With retries globally disabled (the suite's hermetic default) a 429 must not
+    # retry or sleep -- the path stays single-shot.
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    text, unauthorized = common._fetch_claude_oauth_usage_text("tok", env)
+    assert calls["n"] == 1
+    assert text is None
+    assert unauthorized is False
 
 
 def test_usage_dashboard_ready_guidance_and_reset(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1227,13 +1404,21 @@ def test_copilot_refresh_module(env: dict[str, str], tmp_path: Path, monkeypatch
 def test_copilot_refresh_wait_budget_cold_start_is_long(env: dict[str, str]) -> None:
     # Stale-or-missing cache both wait long enough for the capture to land so we
     # never serve a value past its TTL (the warm-cache "serve stale quickly" path
-    # is gone -- it was the source of partially-stale usage).
-    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 12.0
-    assert common.copilot_refresh_wait_budget(env, cache_present=False) == 12.0
-    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_TIMEOUT": "4"}, cache_present=False) == 6.0
+    # is gone -- it was the source of partially-stale usage). The budget covers
+    # the PTY capture timeout *plus* the GitHub premium_request fallback that runs
+    # after it, so the cold run does not give up before the refresh writes real
+    # data (capture timeout 10 + billing fallback 8 = 18).
+    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 18.0
+    assert common.copilot_refresh_wait_budget(env, cache_present=False) == 18.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_TIMEOUT": "4"}, cache_present=False) == 12.0
+    # The billing-fallback headroom is tunable on its own.
+    assert (
+        common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_BILLING_FALLBACK_BUDGET": "3"}, cache_present=False)
+        == 13.0
+    )
     # Explicit override always wins, including the 0 used by other tests.
     assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}, cache_present=False) == 0.0
-    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 12.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 18.0
 
 
 def test_copilot_cold_start_returns_refreshed_data(env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1012,6 +1012,7 @@ def test_render_watch_frame_docks_spinner_right_of_clock(monkeypatch, capsys) ->
     )
     cfg = usage.parse_args([])
     cfg.watch_interval = "1"
+    cfg.use_service = False
     usage.render_watch_frame(cfg)
     out = capsys.readouterr().out
     # Homes the cursor (no full ESC[2J wipe) and closes the frame with ESC[J.
