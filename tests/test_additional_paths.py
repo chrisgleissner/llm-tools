@@ -1651,9 +1651,10 @@ def test_ralph_even_burn_prefers_highest_remaining_daily_capacity(monkeypatch: p
     cfg = ralph_robin.RalphConfig(providers_spec="claude,codex", providers=["claude", "codex"], state_file=tmp_path / "state.json")
     logs = common.setup_run_logs(tmp_path / "logs", "r")
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
-    # Even-burn compares remaining *daily* capacity = weekly remaining / days
-    # until reset. For example, Codex could have less weekly headroom (50%) but resets in 2 days
-    # (25%/day) so it outranks Claude's 80% spread over 5 days (16%/day).
+    # Even-burn ranks by pace deviation (remaining − expected). Codex resets in
+    # 2 days with 50% left: expected = 2/7×100 ≈ 28.6%, delta ≈ +21.4% (headroom).
+    # Claude resets in 5 days with 80% left: expected = 5/7×100 ≈ 71.4%, delta ≈ +8.6%.
+    # Codex has more headroom → wins.
     snapshots = {
         "claude": {
             "available": True,
@@ -1726,7 +1727,9 @@ def test_ralph_even_burn_handles_unknown_weekly_reset(monkeypatch: pytest.Monkey
     }
     monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
 
-    # 81% / 7d ~= 11.6%/day beats 47% / 6d ~= 7.8%/day.
+    # Claude has no reset_epoch → fallback score = 81/7 ≈ 11.6.
+    # Codex: 47% with 6 days left, expected = 6/7×100 ≈ 85.7%, delta ≈ −38.7 (conserve).
+    # 11.6 > −38.7 → Claude wins.
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
     assert selected["provider"] == "claude"
     assert selected["rotation_reason"] == "even-burn"

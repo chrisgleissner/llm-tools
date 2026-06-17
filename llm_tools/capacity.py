@@ -425,14 +425,23 @@ def _combined_block_reason(blocked: Iterable[CapacityScope]) -> str:
 
 # --- Pace calculation (for ralph even-burn) -----------------------------------
 
+# Total period in days for known scope names.
+_PERIOD_DAYS: dict[str, float] = {
+    "5h": 5.0 / 24.0,
+    "weekly": 7.0,
+    "monthly": 30.0,
+    "budget": 30.0,  # kilo / opencode budget resets monthly
+}
+
 
 def scope_pace(scope: CapacityScope, now: int) -> float | None:
-    """A scope's "remaining capacity per day" for rotation ranking.
+    """Pace deviation (remaining − expected) for rotation ranking.
 
-    Higher = more headroom. ``None`` means the scope cannot be ranked (balance
-    / ungated / unknown). Budget and reset_window scopes divide their
-    remaining percent by the days until reset. A scope whose reset is
-    already past is treated as a full window.
+    Higher = more underused (headroom). ``None`` means the scope cannot be
+    ranked (balance / ungated / unknown / opaque). Budget and reset_window
+    scopes compute ``expected_remaining = days_left / total_period_days × 100``
+    and return ``remaining − expected`` in percentage-points. A scope whose
+    reset is past or unknown falls back to ``remaining / 7``.
     """
     if scope.kind in (CapacityKind.BALANCE, CapacityKind.UNGATED, CapacityKind.UNKNOWN, CapacityKind.OPAQUE):
         return None
@@ -440,11 +449,12 @@ def scope_pace(scope: CapacityScope, now: int) -> float | None:
     if rem is None:
         return None
     if scope.reset_epoch is None or scope.reset_epoch <= now:
-        # Stale or unknown reset: assume a generous window so we still rank.
-        days = 7.0
-    else:
-        days = max((scope.reset_epoch - now) / 86400.0, 1.0)
-    return float(rem) / days
+        return float(rem) / 7.0
+    days_left = max((scope.reset_epoch - now) / 86400.0, 0.0)
+    total_days = _PERIOD_DAYS.get(scope.name)
+    if total_days is not None and total_days > 0:
+        return float(rem) - days_left / total_days * 100.0
+    return float(rem) / max(days_left, 1.0)
 
 
 def is_undetermined_reason(reason: str) -> bool:

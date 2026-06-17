@@ -64,7 +64,8 @@ def test_remaining_daily_capacity_with_weekly_window(monkeypatch: pytest.MonkeyP
             }
         ]
     }
-    assert ralph_robin.remaining_daily_capacity(d, os.environ) == pytest.approx(80.0 / 4.0)
+    # pace deviation: 80% − (4/7 × 100%) ≈ +22.86 (headroom)
+    assert ralph_robin.remaining_daily_capacity(d, os.environ) == pytest.approx(80.0 - 4.0 / 7.0 * 100.0)
 
 
 def test_remaining_daily_capacity_with_budget_scope(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -79,7 +80,8 @@ def test_remaining_daily_capacity_with_budget_scope(monkeypatch: pytest.MonkeyPa
             }
         ]
     }
-    assert ralph_robin.remaining_daily_capacity(d, os.environ) == pytest.approx(60.0 / 10.0)
+    # pace deviation: 60% − (10/30 × 100%) ≈ +26.67 (headroom; 30-day budget period)
+    assert ralph_robin.remaining_daily_capacity(d, os.environ) == pytest.approx(60.0 - 10.0 / 30.0 * 100.0)
 
 
 def test_remaining_daily_capacity_skips_balance_and_ungated() -> None:
@@ -127,7 +129,45 @@ def test_even_burn_index_picks_highest_pace() -> None:
         },
     ]
     idx = ralph_robin.even_burn_index(cfg, decisions, current_index=0, skipped=set())
-    assert idx == 1  # kilo budget 80/7 > codex weekly 30/7
+    # Both use fallback (no reset_epoch): kilo 80/7 > codex 30/7
+    assert idx == 1
+
+
+def test_even_burn_index_prefers_on_pace_over_conserve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider that is on-pace beats a provider that is flagged conserve.
+
+    Real-world case: Claude weekly at 4% with 13h 23m left (= on pace, delta ≈ −4%)
+    vs Codex weekly at 92% with 6d 22h left (↓ conserve, delta ≈ −7%).
+    The pace deviation for Claude is higher so ralph picks Claude.
+    """
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    now = 1000
+    claude_reset = now + int((13 * 3600 + 23 * 60))   # ≈ 0.558 days
+    codex_reset = now + int((6 * 86400 + 22 * 3600))  # ≈ 6.917 days
+
+    cfg = ralph_robin.RalphConfig(providers=["claude", "codex"], even_burn=True, scope="auto")
+    decisions = [
+        {
+            "provider": "claude",
+            "usable": True,
+            "reason": "usable",
+            "windows": [
+                {"name": "weekly", "kind": "reset_window", "remaining": 4.0, "reset_epoch": claude_reset},
+            ],
+        },
+        {
+            "provider": "codex",
+            "usable": True,
+            "reason": "usable",
+            "windows": [
+                {"name": "weekly", "kind": "reset_window", "remaining": 92.0, "reset_epoch": codex_reset},
+            ],
+        },
+    ]
+    idx = ralph_robin.even_burn_index(cfg, decisions, current_index=0, skipped=set())
+    # Claude: 4 − (0.558/7×100) ≈ −4.0% (on pace); Codex: 92 − (6.917/7×100) ≈ −6.8% (conserve)
+    # Claude has higher pace deviation → idx 0
+    assert idx == 0
 
 
 def test_even_burn_index_skips_ungated_provider() -> None:

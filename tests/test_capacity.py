@@ -257,7 +257,8 @@ def test_scope_pace_reset_window() -> None:
     s = CapacityScope(
         name="weekly", kind=CapacityKind.RESET_WINDOW, remaining_percent=80.0, reset_epoch=1000 + 4 * 86400
     )
-    assert scope_pace(s, 1000) == 80.0 / 4.0
+    # pace deviation: 80% − (4/7 × 100%) ≈ +22.86 (headroom)
+    assert scope_pace(s, 1000) == pytest.approx(80.0 - 4.0 / 7.0 * 100.0)
 
 
 def test_scope_pace_unknown_reset_falls_back_to_week() -> None:
