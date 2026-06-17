@@ -105,6 +105,22 @@ def test_remaining_daily_capacity_picks_highest_among_known() -> None:
     assert ralph_robin.remaining_daily_capacity(d) == pytest.approx(80.0 / 7.0)
 
 
+def test_remaining_daily_capacity_unknown_name_with_future_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    d = {
+        "windows": [
+            {
+                "name": "custom",
+                "kind": "reset_window",
+                "remaining": 60.0,
+                "reset_epoch": 1000 + 3 * 86400,
+            }
+        ]
+    }
+    # Unknown scope name, fall back to remaining / days_left = 60 / 3
+    assert ralph_robin.remaining_daily_capacity(d, os.environ) == pytest.approx(60.0 / 3.0)
+
+
 # --- even_burn_index: pure rotation logic ------------------------------------
 
 

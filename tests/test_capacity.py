@@ -266,6 +266,16 @@ def test_scope_pace_unknown_reset_falls_back_to_week() -> None:
     assert scope_pace(s, 1000) == 50.0 / 7.0
 
 
+def test_scope_pace_past_reset_falls_back_to_week() -> None:
+    s = CapacityScope(name="weekly", kind=CapacityKind.RESET_WINDOW, remaining_percent=42.0, reset_epoch=500)
+    assert scope_pace(s, 1000) == pytest.approx(42.0 / 7.0)
+
+
+def test_scope_pace_unknown_name_with_known_reset() -> None:
+    s = CapacityScope(name="custom", kind=CapacityKind.RESET_WINDOW, remaining_percent=60.0, reset_epoch=1000 + 3 * 86400)
+    assert scope_pace(s, 1000) == pytest.approx(60.0 / 3.0)
+
+
 def test_scope_pace_balance_and_ungated_return_none() -> None:
     assert scope_pace(CapacityScope(name="balance", kind=CapacityKind.BALANCE, remaining_amount=10.0), 1000) is None
     assert scope_pace(CapacityScope(name="ungated", kind=CapacityKind.UNGATED), 1000) is None
