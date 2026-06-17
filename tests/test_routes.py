@@ -989,6 +989,7 @@ def test_ralph_select_route_rotates_over_routes(
     fake = fake_bin / "kilo"
     fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", env["PATH"])
     cfg_dir = tmp_path / "xdg"
     (cfg_dir / "llm-tools").mkdir(parents=True)
     (cfg_dir / "llm-tools" / "config.toml").write_text(
@@ -1027,6 +1028,7 @@ def test_ralph_select_route_opaque_is_eligible_but_not_rankable(
     fake = fake_bin / "kilo"
     fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", env["PATH"])
     cfg_dir = tmp_path / "xdg"
     (cfg_dir / "llm-tools").mkdir(parents=True)
     (cfg_dir / "llm-tools" / "config.toml").write_text(
@@ -1148,6 +1150,91 @@ def test_ralph_select_route_even_burn_with_one_opaque_and_two_rankable(
     selection = ralph_robin.select_route(cfg, logs, current_index=2, skipped=set())
     # codex-route (index 2) is the current and the only ready rankable.
     assert selection["route"] == "codex-route"
+
+
+def test_ralph_mixed_capacity_routes_fairly_include_opaque_kilo_minimax(
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, fake_bin: Path
+) -> None:
+    """Claude/Codex expose capacity; Kilo MiniMax M3 is opaque yes/no.
+
+    The opaque route must receive a normal turn without pretending it has a
+    weekly/budget score. Among the measurable routes, even-burn still breaks
+    ties by remaining daily capacity.
+    """
+    fake = fake_bin / "kilo"
+    fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", env["PATH"])
+    cfg_dir = tmp_path / "xdg"
+    (cfg_dir / "llm-tools").mkdir(parents=True)
+    (cfg_dir / "llm-tools" / "config.toml").write_text(
+        textwrap.dedent(
+            """
+            [ralph]
+            routes = ["claude-route", "codex-route", "kilo-minimax-m3"]
+
+            [routes.claude-route]
+            provider = "claude"
+            [routes.claude-route.capacity]
+            policy = "provider"
+
+            [routes.codex-route]
+            provider = "codex"
+            [routes.codex-route.capacity]
+            policy = "provider"
+
+            [routes.kilo-minimax-m3]
+            provider = "kilo"
+            model = "minimax-m3"
+            [routes.kilo-minimax-m3.capacity]
+            policy = "opaque"
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_dir))
+    config._cache.clear()
+    cfg = ralph_robin.RalphConfig(
+        routes_spec="claude-route,codex-route,kilo-minimax-m3",
+        routes=["claude-route", "codex-route", "kilo-minimax-m3"],
+        dry_run=True,
+        even_burn=True,
+        scope="auto",
+    )
+    cfg.route_policies = config.parse_routes(config.load_config())
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    monkeypatch.setenv("LLM_SCHEDULER_USAGE_JSON", json.dumps({
+        "claude": {
+            "provider": "claude",
+            "available": True,
+            "source": "test",
+            "five_hour": {"remaining": 50, "resets_at": 2000},
+            "week": {"remaining": 50, "resets_at": 1000 + 6 * 86400},
+        },
+        "codex": {
+            "provider": "codex",
+            "available": True,
+            "source": "test",
+            "five_hour": {"remaining": 90, "resets_at": 2000},
+            "week": {"remaining": 90, "resets_at": 1000 + 6 * 86400},
+        },
+    }))
+    logs = common.setup_run_logs(tmp_path, "r")
+    counts = {"claude-route": 0, "codex-route": 0, "kilo-minimax-m3": 0}
+
+    first = ralph_robin.select_route(cfg, logs, current_index=0, skipped=set(), completed_counts=counts)
+    assert first["route"] == "codex-route"
+    assert first["rotation_reason"] == "fair-rotation"
+
+    counts["codex-route"] += 1
+    second = ralph_robin.select_route(cfg, logs, current_index=1, skipped=set(), completed_counts=counts)
+    assert second["route"] == "kilo-minimax-m3"
+    assert second["rotation_reason"] == "fair-rotation"
+
+    counts["kilo-minimax-m3"] += 1
+    third = ralph_robin.select_route(cfg, logs, current_index=2, skipped=set(), completed_counts=counts)
+    assert third["route"] == "claude-route"
+    assert third["rotation_reason"] == "fair-rotation"
 
 
 def test_ralph_select_route_two_kilo_routes_are_distinct(
@@ -1299,6 +1386,39 @@ def test_even_burn_does_not_collapse_with_unrankable(
     # the caller falls through to current-usable. The opaque route
     # must not affect the result.
     assert ralph_robin.even_burn_index(cfg, decisions, current_index=0, skipped=set()) is None
+
+
+def test_select_provider_delegates_route_completed_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = ralph_robin.RalphConfig(
+        providers=["kilo"],
+        routes=["kilo-minimax-m3"],
+        routes_spec="kilo-minimax-m3",
+        even_burn=True,
+    )
+    logs = common.setup_run_logs(tmp_path, "routes")
+    captured: dict[str, object] = {}
+
+    def fake_select_route(
+        rcfg: ralph_robin.RalphConfig,
+        rlogs: common.RunLogs,
+        current_index: int,
+        skipped: set[str],
+        completed_counts: dict[str, int] | None = None,
+    ) -> dict[str, object]:
+        captured["cfg"] = rcfg
+        captured["logs"] = rlogs
+        captured["current_index"] = current_index
+        captured["skipped"] = skipped
+        captured["completed_counts"] = completed_counts
+        return {"index": 0, "route": "kilo-minimax-m3", "provider": "kilo"}
+
+    monkeypatch.setattr(ralph_robin, "select_route", fake_select_route)
+    counts = {"kilo-minimax-m3": 2}
+    assert ralph_robin.select_provider(cfg, logs, 0, {"other"}, counts)["provider"] == "kilo"
+    assert captured["completed_counts"] == counts
+    assert captured["skipped"] == {"other"}
 
 
 # --- Adversarial review: route_id propagation + runtime context ---------------
