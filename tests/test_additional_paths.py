@@ -1570,12 +1570,58 @@ def test_validation_and_selection_edge_branches(tmp_path: Path, monkeypatch: pyt
     assert ralph_robin.current_index_from_state(cfg) == 0
     cfg.state_file.write_text('{"providers_spec":"other","current_index":9}', encoding="utf-8")
     assert ralph_robin.current_index_from_state(cfg) == 0
+    cfg.state_file.write_text('{"rotation_spec":"claude,codex","current_index":1}', encoding="utf-8")
+    assert ralph_robin.current_index_from_state(cfg) == 1
+
+    assert ralph_robin.completed_counts_from_state(cfg) == {"claude": 0, "codex": 0}
+    cfg.state_file.write_text("{bad", encoding="utf-8")
+    assert ralph_robin.completed_counts_from_state(cfg) == {"claude": 0, "codex": 0}
+    cfg.state_file.write_text('{"rotation_spec":"other","completed_counts":{"claude":9}}', encoding="utf-8")
+    assert ralph_robin.completed_counts_from_state(cfg) == {"claude": 0, "codex": 0}
+    cfg.state_file.write_text('{"providers_spec":"claude,codex"}', encoding="utf-8")
+    assert ralph_robin.completed_counts_from_state(cfg) == {"claude": 0, "codex": 0}
+    cfg.state_file.write_text(
+        '{"rotation_spec":"claude,codex","completed_counts":{"claude":"bad","codex":-4}}',
+        encoding="utf-8",
+    )
+    assert ralph_robin.completed_counts_from_state(cfg) == {"claude": 0, "codex": 0}
+
     cfg.dry_run = False
     ralph_robin.save_state(cfg, 1, "codex", {"claude": 2, "codex": 3})
     assert ralph_robin.completed_counts_from_state(cfg) == {"claude": 2, "codex": 3}
     saved_state = json.loads(cfg.state_file.read_text() or "{}")
     assert saved_state["rotation_spec"] == "claude,codex"
     assert saved_state["completed_counts"] == {"claude": 2, "codex": 3}
+    ralph_robin.save_state(cfg, 0, "claude")
+    assert "completed_counts" not in json.loads(cfg.state_file.read_text() or "{}")
+
+    route_cfg = ralph_robin.RalphConfig(
+        routes_spec="",
+        routes=["mini", "large"],
+        state_file=tmp_path / "route-state.json",
+        dry_run=False,
+    )
+    assert ralph_robin.rotation_state_spec(route_cfg) == "mini,large"
+    ralph_robin.save_state(route_cfg, 1, "kilo", {"mini": 4, "large": 5})
+    assert ralph_robin.completed_counts_from_state(route_cfg) == {"mini": 4, "large": 5}
+
+    flaky_cfg = ralph_robin.RalphConfig(
+        providers_spec="claude,codex",
+        providers=["claude", "codex"],
+        state_file=tmp_path / "flaky-state.json",
+        dry_run=False,
+    )
+    real_chmod = Path.chmod
+
+    def raise_for_flaky_state(path: Path, mode: int) -> None:
+        if path in {flaky_cfg.state_file.parent, flaky_cfg.state_file}:
+            raise OSError("chmod denied")
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "chmod", raise_for_flaky_state)
+    ralph_robin.save_state(flaky_cfg, 0, "claude", {"claude": 1})
+    assert ralph_robin.completed_counts_from_state(flaky_cfg) == {"claude": 1, "codex": 0}
+
     cfg.state_file.write_text('{"providers_spec":"claude,codex","current_index":9}', encoding="utf-8")
     cfg.dry_run = True
     ralph_robin.save_state(cfg, 1, "codex")

@@ -1388,6 +1388,39 @@ def test_even_burn_does_not_collapse_with_unrankable(
     assert ralph_robin.even_burn_index(cfg, decisions, current_index=0, skipped=set()) is None
 
 
+def test_select_provider_delegates_route_completed_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = ralph_robin.RalphConfig(
+        providers=["kilo"],
+        routes=["kilo-minimax-m3"],
+        routes_spec="kilo-minimax-m3",
+        even_burn=True,
+    )
+    logs = common.setup_run_logs(tmp_path, "routes")
+    captured: dict[str, object] = {}
+
+    def fake_select_route(
+        rcfg: ralph_robin.RalphConfig,
+        rlogs: common.RunLogs,
+        current_index: int,
+        skipped: set[str],
+        completed_counts: dict[str, int] | None = None,
+    ) -> dict[str, object]:
+        captured["cfg"] = rcfg
+        captured["logs"] = rlogs
+        captured["current_index"] = current_index
+        captured["skipped"] = skipped
+        captured["completed_counts"] = completed_counts
+        return {"index": 0, "route": "kilo-minimax-m3", "provider": "kilo"}
+
+    monkeypatch.setattr(ralph_robin, "select_route", fake_select_route)
+    counts = {"kilo-minimax-m3": 2}
+    assert ralph_robin.select_provider(cfg, logs, 0, {"other"}, counts)["provider"] == "kilo"
+    assert captured["completed_counts"] == counts
+    assert captured["skipped"] == {"other"}
+
+
 # --- Adversarial review: route_id propagation + runtime context ---------------
 
 

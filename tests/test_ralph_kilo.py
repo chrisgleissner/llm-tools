@@ -155,6 +155,56 @@ def test_even_burn_index_skips_ungated_provider() -> None:
     assert ralph_robin.even_burn_index(cfg, decisions, current_index=0, skipped=set()) is None
 
 
+def test_mixed_capacity_fair_index_edge_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert ralph_robin.mixed_capacity_fair_index([], [], 0, set(), None, lambda d: d.get("score")) is None
+    assert ralph_robin._count_for({"bad": "x"}, "bad") == 0
+
+    decisions = [
+        {"id": "a", "usable": True, "score": 10.0},
+        {"id": "b", "usable": True, "score": 5.0},
+        {"id": "opaque", "usable": True, "score": None},
+    ]
+    calls: dict[str, int] = {}
+
+    def capacity(decision: dict[str, object]) -> float | None:
+        key = str(decision["id"])
+        calls[key] = calls.get(key, 0) + 1
+        if key == "a" and calls[key] > 1:
+            return None
+        value = decision.get("score")
+        return float(value) if isinstance(value, float) else None
+
+    assert ralph_robin.mixed_capacity_fair_index(decisions, ["a", "b", "opaque"], 0, set(), {}, capacity) == 1
+
+    calls.clear()
+
+    def capacity_disappears(decision: dict[str, object]) -> float | None:
+        key = str(decision["id"])
+        calls[key] = calls.get(key, 0) + 1
+        if key in {"a", "b"} and calls[key] > 1:
+            return None
+        value = decision.get("score")
+        return float(value) if isinstance(value, float) else None
+
+    assert (
+        ralph_robin.mixed_capacity_fair_index(decisions, ["a", "b", "opaque"], 0, set(), {}, capacity_disappears)
+        == 0
+    )
+
+    monkeypatch.setattr(ralph_robin, "rotation_order_indices", lambda length, current_index: [])
+    assert (
+        ralph_robin.mixed_capacity_fair_index(
+            [{"id": "a", "usable": True, "score": 1.0}, {"id": "opaque", "usable": True, "score": None}],
+            ["a", "opaque"],
+            0,
+            set(),
+            {},
+            lambda d: d.get("score"),
+        )
+        == 0
+    )
+
+
 # --- select_provider: end-to-end --------------------------------------------------
 
 
@@ -172,8 +222,48 @@ def test_select_provider_falls_back_to_kilo_when_codex_rate_limited(
     cfg = ralph_robin.RalphConfig(providers=["codex", "kilo"], even_burn=False, scope="auto")
     cfg.even_burn = False  # plain rotation
     logs = common.setup_run_logs(tmp_path, "test")
-    selection = ralph_robin.select_provider(cfg, logs, current_index=0, skipped=set())
+    selection = ralph_robin.select_provider(
+        cfg,
+        logs,
+        current_index=0,
+        skipped=set(),
+        completed_counts=cfg.completed_counts,
+    )
     assert selection["provider"] in {"codex", "kilo"}
+
+
+def test_select_provider_mixed_capacity_fair_rotation_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    cfg = ralph_robin.RalphConfig(
+        providers=["claude", "kilo", "codex"],
+        even_burn=True,
+        scope="auto",
+        completed_counts={"claude": 1, "kilo": 0, "codex": 1},
+    )
+    logs = common.setup_run_logs(tmp_path, "test")
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 80},
+            "week": {"remaining": 80, "resets_at": 1000 + 4 * 86400},
+        },
+        "kilo": {
+            "available": True,
+            "scopes": [{"name": "ungated", "kind": "ungated", "label": "byok"}],
+        },
+        "codex": {
+            "available": True,
+            "five_hour": {"remaining": 40},
+            "week": {"remaining": 40, "resets_at": 1000 + 4 * 86400},
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
+
+    selection = ralph_robin.select_provider(cfg, logs, current_index=0, skipped=set())
+    assert selection["provider"] == "kilo"
+    assert selection["rotation_reason"] == "fair-rotation"
 
 
 def test_select_tool_uses_kilo_in_byok_mode(
