@@ -357,6 +357,8 @@ model, and Claude surfaces per-model weekly limits (e.g. `Sonnet`) alongside the
 aggregate window. Model rows are informational - they are shown for visibility
 but do not gate scheduling, which always uses the provider's aggregate scopes.
 
+### Copilot
+
 Copilot shows a second `spend` row with the additional ("add-on") usage spent
 this billing cycle — the dollars billed beyond your included credit allowance.
 The Copilot CLI does not expose this, so it is read from the GitHub billing API
@@ -369,7 +371,9 @@ The Copilot CLI footer shape has changed across releases — pre-1.0.57 printed
 `Plan: N% used` / `Monthly: N% used` (the *used* percentage), 1.0.57+ render
 `Remaining reqs.: N%` (the *remaining* percentage), and 1.0.63+ also dropped
 the colon on the `AI Credits` line. The dashboard recognises all of these
-shapes. The new CLI (>1.0.57) no longer surfaces a *monthly* figure at all in
+shapes. 
+
+The new CLI (>1.0.57) no longer surfaces a *monthly* figure at all in
 its footer, so the reader falls back to GitHub's
 `/users/{login}/settings/billing/premium_request/usage` endpoint, which always
 reports the current month's per-model premium request count. The reader
@@ -381,7 +385,7 @@ year+month-only query for the *current* month silently returns an empty
 result; the reader therefore asks one day at a time so a day with usage
 recorded shows up immediately rather than being hidden until month-end.
 
-How to read the table:
+### Table Columns
 
 | Column      | Meaning                                                                                                                                            |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
