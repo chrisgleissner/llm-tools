@@ -765,15 +765,28 @@ def rotation_order_indices(length: int, current_index: int) -> list[int]:
 
 WEEKLY_WINDOW_DAYS = common.REMAINING_TIME_WINDOW_SECONDS["weekly"] / 86400.0
 
+# Total period in days for known scope names (mirrors capacity._PERIOD_DAYS).
+_SCOPE_PERIOD_DAYS: dict[str, float] = {
+    "5h": 5.0 / 24.0,
+    "weekly": 7.0,
+    "monthly": 30.0,
+    "budget": 30.0,  # kilo / opencode budget resets monthly
+}
+
 
 def _scope_pace_remaining(window: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
-    """Remaining-per-day for a single decision-window dict.
+    """Pace deviation (remaining − expected) for a single decision-window dict.
 
     Mirrors :func:`llm_tools.capacity.scope_pace` but consumes the legacy
-    ``window`` shape (``name``, ``remaining``, ``reset_epoch``, ``kind``)
-    produced by :func:`llm_tools.common.usage_decision_for_provider`. Reset
-    windows and budget scopes are both rankable; balance and ungated are
-    not.
+    ``window`` shape (``name``, ``remaining``, ``reset_epoch``, ``kind``).
+    Higher = more underused (headroom). Reset-window and budget scopes are
+    rankable; balance and ungated are not.
+
+    When the reset epoch is known, returns ``remaining − expected_remaining``
+    where ``expected_remaining = days_left / total_period_days × 100``.  This
+    matches the ``↑ headroom / = on pace / ↓ conserve`` guidance shown by
+    llm-usage so ralph-robin's even-burn picks the most underused provider.
+    Falls back to ``remaining / 7`` when the reset epoch is unknown.
     """
     kind = window.get("kind") or "reset_window"
     if kind in ("balance", "ungated", "unknown"):
@@ -784,10 +797,16 @@ def _scope_pace_remaining(window: dict[str, Any], env: dict[str, str] | None = N
     env = env or os.environ
     reset_epoch = window.get("reset_epoch")
     if isinstance(reset_epoch, int) and reset_epoch > common.now_epoch(env):
-        days = max((reset_epoch - common.now_epoch(env)) / 86400.0, 1.0)
+        days_left = max((reset_epoch - common.now_epoch(env)) / 86400.0, 0.0)
+        name = str(window.get("name") or "")
+        total_days = (
+            common.copilot_monthly_window_days(env) if name == "monthly" else _SCOPE_PERIOD_DAYS.get(name)
+        )
+        if total_days is not None and total_days > 0:
+            return float(rem) - days_left / total_days * 100.0
+        return float(rem) / max(days_left, 1.0)
     else:
-        days = 7.0
-    return float(rem) / days
+        return float(rem) / 7.0
 
 
 def remaining_daily_capacity(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
