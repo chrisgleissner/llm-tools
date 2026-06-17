@@ -989,6 +989,7 @@ def test_ralph_select_route_rotates_over_routes(
     fake = fake_bin / "kilo"
     fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", env["PATH"])
     cfg_dir = tmp_path / "xdg"
     (cfg_dir / "llm-tools").mkdir(parents=True)
     (cfg_dir / "llm-tools" / "config.toml").write_text(
@@ -1027,6 +1028,7 @@ def test_ralph_select_route_opaque_is_eligible_but_not_rankable(
     fake = fake_bin / "kilo"
     fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", env["PATH"])
     cfg_dir = tmp_path / "xdg"
     (cfg_dir / "llm-tools").mkdir(parents=True)
     (cfg_dir / "llm-tools" / "config.toml").write_text(
@@ -1162,6 +1164,7 @@ def test_ralph_mixed_capacity_routes_fairly_include_opaque_kilo_minimax(
     fake = fake_bin / "kilo"
     fake.write_text("#!/bin/sh\necho done\n", encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("PATH", env["PATH"])
     cfg_dir = tmp_path / "xdg"
     (cfg_dir / "llm-tools").mkdir(parents=True)
     (cfg_dir / "llm-tools" / "config.toml").write_text(
