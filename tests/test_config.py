@@ -36,6 +36,43 @@ def _write_toml(env: dict[str, str], path: Path, body: str) -> Path:
     return path
 
 
+def test_budget_section_parses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", '[budget]\nmonthly = 50\ncurrency = "$"\n')
+    amount, currency = config.monthly_budget(load_config())
+    assert amount == 50.0
+    assert currency == "$"
+
+
+def test_budget_defaults_when_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", "[defaults]\nscope = \"auto\"\n")
+    amount, currency = config.monthly_budget(load_config())
+    assert amount is None
+    assert currency == "$"
+
+
+def test_budget_rejects_non_positive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", "[budget]\nmonthly = 0\n")
+    with pytest.raises(SystemExit):
+        load_config()
+
+
+def test_budget_rejects_non_number(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", '[budget]\nmonthly = "lots"\n')
+    with pytest.raises(SystemExit):
+        load_config()
+
+
+def test_budget_rejects_unknown_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", "[budget]\nmonthly = 10\nweekly = 5\n")
+    with pytest.raises(SystemExit):
+        load_config()
+
+
 def test_config_path_uses_explicit_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     explicit = tmp_path / "my-config.toml"
     monkeypatch.setenv("LLM_TOOLS_CONFIG", str(explicit))

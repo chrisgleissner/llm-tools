@@ -72,8 +72,20 @@ def env(tmp_path: Path) -> dict[str, str]:
         del out[key]
     extras: dict[str, str] = {
         "HOME": str(home),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
         "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
+        # Most tests assert direct reader/CLI behaviour. Service behaviour is
+        # covered explicitly and opts back in so the suite does not spawn a
+        # background sampler for every llm-usage subprocess.
+        "LLM_USAGE_NO_SERVICE": "1",
         "LLM_USAGE_COPILOT_CACHE_TTL": "0",
+        # Keep the Copilot add-on (GitHub billing) reader hermetic: never read an
+        # ambient GH_TOKEN or shell out to `gh auth token`. Tests that exercise
+        # the add-on inject a usage payload via LLM_USAGE_COPILOT_ADDON_USAGE_JSON.
+        "LLM_USAGE_DISABLE_COPILOT_ADDON": "1",
+        # Same for the monthly premium-request fallback. It is a separate reader
+        # from the add-on spend path, so tests opt into it explicitly.
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "1",
         # Keep Codex hermetic: never spawn the real `codex app-server` (which
         # would hit the live account). Tests that exercise the active-refresh
         # path inject a payload via LLM_USAGE_CODEX_RATE_LIMITS_JSON, which

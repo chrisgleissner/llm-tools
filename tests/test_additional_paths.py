@@ -3,21 +3,37 @@ from __future__ import annotations
 import json
 import io
 import os
+import socket
 import subprocess
 import sys
+import threading
 from urllib.error import HTTPError
 from pathlib import Path
 
 import pytest
 
-from llm_tools import common, copilot_refresh, ralph_robin, scheduler, usage
+from llm_tools import common, copilot_refresh, ralph_robin, scheduler, usage, usage_service
+from llm_tools.capacity import CapacityKind, CapacityScope, ProviderSnapshot
 
-from .conftest import run_cmd, write_exe
+from .conftest import ROOT, run_cmd, write_exe
 
 
 def test_usage_option_branches_and_unavailable(env: dict[str, str], tmp_path: Path) -> None:
     base = env | {"LLM_USAGE_DISABLE_COPILOT": "1"}
     assert run_cmd(["./llm-usage", "--no-header", "--hide-remaining-time", "--hide-source"], base).returncode == 0
+    assert usage.parse_args(["--no-service"]).use_service is False
+    assert usage.parse_args(["--service-run"]).service_action == "run"
+    assert usage.parse_args(["--service-foreground"]).service_action == "run"
+    assert usage.parse_args(["--service-install"]).service_action == "install"
+    assert usage.parse_args(["--service-uninstall"]).service_action == "uninstall"
+    assert usage.parse_args(["--service-start"]).service_action == "start"
+    assert usage.parse_args(["--service-stop"]).service_action == "stop"
+    assert usage.parse_args(["--service-status"]).service_action == "status"
+    assert usage.parse_args(["--service-interval", "15"]).service_interval == "15"
+    with pytest.raises(SystemExit):
+        usage.parse_args(["--service-interval"])
+    with pytest.raises(SystemExit):
+        usage.parse_args(["--service-interval", "4"])
     bad_offset = run_cmd(["./llm-usage", "--copilot-monthly-reset-offset-days", "x"], env)
     assert bad_offset.returncode == 2
     assert "expects an integer" in bad_offset.stderr
@@ -44,6 +60,407 @@ def test_usage_main_inprocess_and_render_helpers(env: dict[str, str], monkeypatc
     usage.print_unavailable_rows(cfg, "Missing")
     out = capsys.readouterr().out
     assert "Missing" in out
+
+
+def test_usage_watch_interrupt_exits_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupt(_cfg: usage.Config) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(usage, "render_watch_frame", interrupt)
+    monkeypatch.setattr(usage.sys.stdout, "isatty", lambda: False, raising=False)
+    assert usage.main(["--watch", "1", "--no-service"]) == 130
+
+
+def test_usage_service_snapshot_roundtrip(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = usage.Config()
+    provider_data = {
+        "codex": {
+            "provider": "codex",
+            "available": True,
+            "source": "codex cache",
+            "rows": [
+                {
+                    "name": "Codex",
+                    "five_hour": {"used": 20.0},
+                    "week": {"used": 40.0},
+                }
+            ],
+        },
+        "claude": ProviderSnapshot(
+            provider="claude",
+            available=True,
+            source="claude api",
+            scopes=[
+                CapacityScope(name="5h", kind=CapacityKind.RESET_WINDOW, remaining_percent=60.0),
+                CapacityScope(name="weekly", kind=CapacityKind.RESET_WINDOW, remaining_percent=70.0),
+            ],
+            model_scopes=[
+                CapacityScope(
+                    name="weekly",
+                    kind=CapacityKind.RESET_WINDOW,
+                    remaining_percent=42.0,
+                    extras={"model": "Sonnet"},
+                )
+            ],
+        ),
+        "copilot": ProviderSnapshot(
+            provider="copilot",
+            available=True,
+            source="copilot cli",
+            scopes=[
+                CapacityScope(
+                    name="monthly",
+                    kind=CapacityKind.RESET_WINDOW,
+                    remaining_percent=75.0,
+                    reset_epoch=1800000000,
+                )
+            ],
+            model_scopes=[
+                CapacityScope(
+                    name="balance",
+                    kind=CapacityKind.BALANCE,
+                    remaining_amount=3.25,
+                    currency="$",
+                    source="github billing",
+                )
+            ],
+        ),
+        "kilo": ProviderSnapshot(provider="kilo", available=False, reason="missing-cli", source="kilo cli"),
+        "opencode": ProviderSnapshot(provider="opencode", available=False, reason="missing-cli", source="opencode cli"),
+        "minimax": ProviderSnapshot(
+            provider="minimax",
+            available=True,
+            source="mmx cli",
+            scopes=[
+                CapacityScope(
+                    name="5h",
+                    kind=CapacityKind.RESET_WINDOW,
+                    remaining_percent=55.0,
+                )
+            ],
+        ),
+    }
+    payload = usage.service_payload_from_provider_data(cfg, provider_data, env)
+    assert payload["environment_fingerprint"] == usage.service_environment_fingerprint(env)
+    assert usage.service_payload_matches_environment(payload, env) is True
+    assert usage.service_payload_matches_environment({"providers": {}}, env) is False
+    restored = usage.provider_data_from_service_payload(payload)
+    assert restored is not None
+    assert restored["copilot"].available is True
+    assert restored["copilot"].scopes[0].remaining_percent == 75.0
+    assert restored["copilot"].model_scopes[0].remaining_amount == 3.25
+    calls: list[tuple[str, str, float | None]] = []
+    monkeypatch.setattr(common, "log_usage_sample", lambda provider, window, remaining: calls.append((provider, window, remaining)))
+    usage.log_samples_from_provider_data(provider_data)
+    usage.log_samples_from_provider_data(provider_data | {"codex": {"provider": "codex", "available": True, "five_hour": {"used": 10.0}, "week": {"used": 30.0}}})
+    assert ("Claude", "5h", 60.0) in calls
+    assert ("Claude Sonnet", "weekly", 42.0) in calls
+    assert ("Codex", "5h", 80.0) in calls
+    assert ("Codex", "weekly", 70.0) in calls
+    assert ("copilot", "monthly", 75.0) in calls
+    assert ("MiniMax", "5h", 55.0) in calls
+
+
+def test_watch_frame_uses_service_snapshot(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.delenv("LLM_USAGE_NO_SERVICE", raising=False)
+    cfg = usage.Config()
+    cfg.json_output = True
+    provider_data = {
+        "codex": {
+            "provider": "codex",
+            "available": True,
+            "source": "service",
+            "five_hour": {"used": 25.0},
+            "week": {"used": 50.0},
+        },
+        "claude": usage.unavailable_snapshot("claude", "service"),
+        "copilot": usage.unavailable_snapshot("copilot", "service"),
+        "kilo": usage.unavailable_snapshot("kilo", "service"),
+        "opencode": usage.unavailable_snapshot("opencode", "service"),
+        "minimax": usage.unavailable_snapshot("minimax", "service"),
+    }
+    payload = usage.service_payload_from_provider_data(cfg, provider_data)
+    payload["generated_at"] = "2026-06-16T22:37:00+01:00"
+    monkeypatch.setattr(usage_service, "request_snapshot", lambda **_kwargs: payload)
+    monkeypatch.setattr(usage, "_fetch_provider_data", lambda *_args, **_kwargs: pytest.fail("watch bypassed service"))
+
+    assert usage.render_once_via_service(cfg) is True
+    once = json.loads(capsys.readouterr().out)
+    usage.render_watch_frame(cfg)
+    watch = json.loads(capsys.readouterr().out)
+    assert watch == once
+    assert watch["generated_at"] == "2026-06-16T22:37:00+01:00"
+    assert watch["codex"]["available"] is True
+
+
+def test_service_snapshot_rejected_when_environment_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LLM_USAGE_NO_SERVICE", raising=False)
+    cfg = usage.Config()
+    provider_data = {
+        "codex": {"provider": "codex", "available": False, "reason": "missing-cli", "source": "service"},
+        "claude": usage.unavailable_snapshot("claude", "service"),
+        "copilot": usage.unavailable_snapshot("copilot", "service"),
+        "kilo": usage.unavailable_snapshot("kilo", "service"),
+        "opencode": usage.unavailable_snapshot("opencode", "service"),
+        "minimax": usage.unavailable_snapshot("minimax", "service"),
+    }
+    service_env = dict(os.environ)
+    service_env["PATH"] = "/old-service-path"
+    payload = usage.service_payload_from_provider_data(cfg, provider_data, service_env)
+    monkeypatch.setattr(usage_service, "request_snapshot", lambda **_kwargs: payload)
+    monkeypatch.setenv("PATH", "/current-client-path")
+
+    assert usage.render_once_via_service(cfg) is False
+
+
+def test_usage_service_ephemeral_client(env: dict[str, str]) -> None:
+    live_env = env | {
+        "LLM_USAGE_DISABLE_COPILOT": "1",
+        "LLM_USAGE_PROVIDER_PARALLELISM": "1",
+        "LLM_USAGE_SERVICE_INTERVAL": "60",
+        "LLM_USAGE_NO_PROGRESS": "1",
+        "PATH": f"{env['PATH'].split(':', 1)[0]}:{Path(sys.executable).parent}:{ROOT}",
+    }
+    live_env.pop("LLM_USAGE_NO_SERVICE", None)
+    result = run_cmd(["./llm-usage", "--json"], live_env, timeout=20)
+    assert result.returncode == 0, result.stderr
+    obj = json.loads(result.stdout)
+    assert obj["codex"]["available"] is False
+    svc_dir = common.usage_cache_dir(live_env) / "service"
+    assert (svc_dir / "latest.json").is_file()
+    assert (svc_dir / "history.jsonl").is_file()
+
+    status = run_cmd(["./llm-usage", "--service-status", "--json"], live_env, timeout=10)
+    assert status.returncode == 0, status.stderr
+    assert json.loads(status.stdout)["running"] is False
+
+
+def test_usage_service_unit_templates(env: dict[str, str]) -> None:
+    unit = usage_service.systemd_unit_text(30, env)
+    plist = usage_service.launchd_plist_text(30, env)
+    assert "llm_tools.usage_service" in unit
+    assert "--interval 30" in unit
+    assert "llm_tools.usage_service" in plist
+    assert "<string>30</string>" in plist
+
+
+def test_usage_service_paths_io_and_cached_snapshot(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    no_runtime = dict(env)
+    no_runtime.pop("XDG_RUNTIME_DIR", None)
+    assert str(usage_service.runtime_dir(no_runtime)).endswith(f"llm-tools-{os.getuid()}")
+    assert usage_service.systemd_unit_path(env).name == "llm-usage.service"
+    assert usage_service.launchd_plist_path(env).name == "com.llm-tools.llm-usage.plist"
+    assert usage_service._parse_interval("2") == 5
+    assert usage_service._parse_interval("bad") == usage_service.DEFAULT_INTERVAL_SECONDS
+    assert usage_service._parse_interval("15") == 15
+
+    target = tmp_path / "nested" / "latest.json"
+    usage_service._atomic_json_write(target, {"ok": True})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+    hist = tmp_path / "nested" / "history.jsonl"
+    usage_service._append_history(hist, {"n": 1})
+    usage_service._append_history(hist, {"n": 2})
+    assert [json.loads(line)["n"] for line in hist.read_text(encoding="utf-8").splitlines()] == [1, 2]
+
+    monkeypatch.setenv("LLM_USAGE_SERVICE_TEST_OUTER", "outer")
+    with usage_service._temporary_environ({"LLM_USAGE_SERVICE_TEST_INNER": "inner"}):
+        assert os.environ.get("LLM_USAGE_SERVICE_TEST_INNER") == "inner"
+        assert os.environ.get("LLM_USAGE_SERVICE_TEST_OUTER") is None
+    assert os.environ.get("LLM_USAGE_SERVICE_TEST_OUTER") == "outer"
+
+    sampler = usage_service.UsageSampler(env, interval=60)
+    payload = {"generated_at_epoch": common.now_epoch(env), "providers": {}}
+    sampler.paths.latest.parent.mkdir(parents=True, exist_ok=True)
+    sampler.paths.latest.write_text(json.dumps(payload), encoding="utf-8")
+    assert sampler.snapshot()["generated_at_epoch"] == payload["generated_at_epoch"]
+
+    stale = {"generated_at_epoch": 1, "providers": {}}
+    sampler.latest = stale
+    monkeypatch.setattr(sampler, "sample_once", lambda: {"generated_at_epoch": 2, "providers": {}})
+    assert sampler.snapshot(max_age=1)["generated_at_epoch"] == 2
+    assert usage_service._request(tmp_path / "missing.sock", {"op": "snapshot"}, timeout=0.01) is None
+
+
+def test_usage_service_json_protocol(env: dict[str, str], tmp_path: Path) -> None:
+    class DummySampler:
+        def snapshot(self, max_age=None):  # type: ignore[no-untyped-def]
+            return {"generated_at_epoch": 123, "max_age": max_age}
+
+    sock = tmp_path / "svc.sock"
+    stop = threading.Event()
+    server = usage_service.ThreadingUnixServer(str(sock), DummySampler(), stop)  # type: ignore[arg-type]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        snap = usage_service._request(sock, {"op": "snapshot", "max_age": 7})
+        assert snap is not None and snap["snapshot"]["max_age"] == 7
+        status = usage_service._request(sock, {"op": "status"})
+        assert status is not None and status["generated_at_epoch"] == 123
+        unknown = usage_service._request(sock, {"op": "bogus"})
+        assert unknown == {"ok": False, "error": "unknown-op"}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(sock))
+            client.sendall(b"not json\n")
+            assert json.loads(client.recv(1024).decode("utf-8"))["error"] == "bad-request"
+        shutdown = usage_service._request(sock, {"op": "shutdown"})
+        assert shutdown == {"ok": True}
+        assert stop.is_set()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_usage_service_manager_fallbacks(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(usage_service.shutil, "which", lambda _name: None)
+
+    monkeypatch.setattr(usage_service.platform, "system", lambda: "Linux")
+    assert usage_service.install_service(30, env) == 0
+    assert usage_service.systemd_unit_path(env).is_file()
+    assert usage_service.uninstall_service(env) == 0
+    assert not usage_service.systemd_unit_path(env).exists()
+    assert usage_service.start_service(env) == 2
+    assert "no supported service manager" in capsys.readouterr().err
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: {"ok": True})
+    assert usage_service.stop_service(env) == 0
+
+    monkeypatch.setattr(usage_service.platform, "system", lambda: "Darwin")
+    assert usage_service.install_service(30, env) == 0
+    assert usage_service.launchd_plist_path(env).is_file()
+    assert usage_service.uninstall_service(env) == 0
+    assert not usage_service.launchd_plist_path(env).exists()
+
+    monkeypatch.setattr(usage_service.platform, "system", lambda: "Other")
+    assert usage_service.install_service(30, env) == 2
+    assert usage_service.uninstall_service(env) == 2
+
+    run_calls: list[list[str]] = []
+    monkeypatch.setattr(usage_service, "_run", lambda cmd: run_calls.append(cmd) or 0)
+    monkeypatch.setattr(usage_service.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(usage_service.platform, "system", lambda: "Linux")
+    assert usage_service.install_service(45, env) == 0
+    assert any(cmd[:3] == ["systemctl", "--user", "enable"] for cmd in run_calls)
+    assert usage_service.start_service(env) == 0
+    assert usage_service.stop_service(env) == 0
+    assert usage_service.uninstall_service(env) == 0
+
+    run_calls.clear()
+    monkeypatch.setattr(usage_service.platform, "system", lambda: "Darwin")
+    assert usage_service.install_service(45, env) == 0
+    assert any("bootstrap" in cmd for cmd in run_calls)
+    assert usage_service.start_service(env) == 0
+    assert usage_service.stop_service(env) == 0
+    assert usage_service.uninstall_service(env) == 0
+
+
+def test_usage_service_cli_and_status_helpers(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        usage_service,
+        "run_service",
+        lambda *, interval, ephemeral, env=None: calls.append((interval, ephemeral)) or 0,
+    )
+    assert usage_service.service_cli(["--ephemeral", "--interval", "bad"]) == 0
+    assert calls == [(usage_service.DEFAULT_INTERVAL_SECONDS, True)]
+
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: {"ok": True, "pid": 123})
+    assert usage_service.running_status(env)["running"] is True
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: None)
+    assert usage_service.running_status(env)["running"] is False
+
+
+def test_usage_service_action_dispatch(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[tuple[str, int | None]] = []
+    monkeypatch.setattr(usage_service, "run_service", lambda *, interval, ephemeral, env=None: calls.append(("run", interval)) or 0)
+    monkeypatch.setattr(usage_service, "install_service", lambda interval, env=None: calls.append(("install", interval)) or 0)
+    monkeypatch.setattr(usage_service, "uninstall_service", lambda env=None: calls.append(("uninstall", None)) or 0)
+    monkeypatch.setattr(usage_service, "start_service", lambda env=None: calls.append(("start", None)) or 0)
+    monkeypatch.setattr(usage_service, "stop_service", lambda env=None: calls.append(("stop", None)) or 0)
+    monkeypatch.setattr(usage_service, "socket_path", lambda env=None: Path("/tmp/llm-usage.sock"))
+
+    for action, expected in [
+        ("run", ("run", 9)),
+        ("install", ("install", 9)),
+        ("uninstall", ("uninstall", None)),
+        ("start", ("start", None)),
+        ("stop", ("stop", None)),
+    ]:
+        cfg = usage.Config()
+        cfg.service_action = action
+        cfg.service_interval = "9"
+        assert usage.handle_service_action(cfg) == 0
+        assert calls[-1] == expected
+    out = capsys.readouterr().out
+    assert "service installed" in out
+    assert "service uninstalled" in out
+
+    monkeypatch.setattr(usage_service, "running_status", lambda env=None: {"running": True, "pid": 123, "socket": "sock", "generated_at_epoch": 1800000000})
+    cfg = usage.Config()
+    cfg.service_action = "status"
+    assert usage.handle_service_action(cfg) == 0
+    assert "service running" in capsys.readouterr().out
+    cfg.json_output = True
+    assert usage.handle_service_action(cfg) == 0
+    assert json.loads(capsys.readouterr().out)["running"] is True
+    cfg.service_action = "unknown"
+    assert usage.handle_service_action(cfg) == 2
+
+
+def test_usage_service_request_snapshot_branches(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: {"ok": True, "snapshot": {"providers": {}}})
+    assert usage_service.request_snapshot(env=env) == {"providers": {}}
+
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: None)
+    assert usage_service.request_snapshot(env=env, start_ephemeral=False) is None
+    monkeypatch.setattr(usage_service, "start_ephemeral_service", lambda *_args, **_kwargs: None)
+    assert usage_service.request_snapshot(env=env) is None
+
+    class FakeProc:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def wait(self, timeout=None):  # type: ignore[no-untyped-def]
+            raise TimeoutError
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    proc = FakeProc()
+    monkeypatch.setattr(usage_service, "start_ephemeral_service", lambda *_args, **_kwargs: proc)
+    assert usage_service.request_snapshot(env=env) is None
+    assert proc.terminated is True
+
+
+def test_usage_service_request_snapshot_reuses_recent_disk_snapshot(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live_env = env | {"LLM_USAGE_NOW_EPOCH": "1000", "LLM_USAGE_SERVICE_INTERVAL": "60"}
+    provider_data = {
+        "codex": {"provider": "codex", "available": True, "source": "cache", "five_hour": {"used": 11}},
+        "claude": usage.unavailable_snapshot("claude", "claude api"),
+        "copilot": usage.unavailable_snapshot("copilot", "copilot cli"),
+        "kilo": usage.unavailable_snapshot("kilo", "kilo cli"),
+        "opencode": usage.unavailable_snapshot("opencode", "opencode cli"),
+        "minimax": usage.unavailable_snapshot("minimax", "mmx cli"),
+    }
+    payload = usage.service_payload_from_provider_data(usage.Config(), provider_data, live_env)
+    payload["generated_at_epoch"] = 980
+    usage_service._atomic_json_write(usage_service.latest_path(live_env), payload)
+    monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        usage_service,
+        "start_ephemeral_service",
+        lambda *_args, **_kwargs: pytest.fail("recent disk snapshot should be reused"),
+    )
+
+    assert usage_service.request_snapshot(env=live_env) == payload
+
+    payload["generated_at_epoch"] = 900
+    usage_service._atomic_json_write(usage_service.latest_path(live_env), payload)
+    monkeypatch.setattr(usage_service, "start_ephemeral_service", lambda *_args, **_kwargs: None)
+    assert usage_service.request_snapshot(env=live_env) is None
 
 
 def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,6 +525,188 @@ def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch:
         common.CLAUDE_OAUTH_TOKEN_URL,
         common.CLAUDE_OAUTH_USAGE_URL,
     ]
+
+
+def _make_http_error(url: str, code: int, headers: dict[str, str] | None = None) -> HTTPError:
+    hdrs = None
+    if headers is not None:
+        from email.message import Message
+
+        hdrs = Message()
+        for key, value in headers.items():
+            hdrs[key] = value
+    return HTTPError(url, code, "err", hdrs, None)  # type: ignore[arg-type]
+
+
+def test_claude_oauth_usage_retries_rate_limit(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 429 is transient and carries a Retry-After; honour it on the same read so
+    # a brief rate-limit recovers to fresh data instead of degrading to the
+    # ~/.claude/projects fallback (which reports "unavailable"). The Retry-After
+    # is capped so a pathological value cannot hang the tool.
+    retry_env = env | {
+        "LLM_USAGE_LIVE_FETCH_RETRIES": "2",
+        "LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "0",
+    }
+    calls = {"n": 0}
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return b'{"rate_limits":{"five_hour":{"used_percentage":7,"resets_at":"2026-06-18T00:00:00Z"}}}'
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+        return FakeResponse()
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    text, unauthorized = common._fetch_claude_oauth_usage_text("tok", retry_env)
+    assert calls["n"] == 2
+    assert unauthorized is False
+    assert text is not None and "five_hour" in text
+
+    # Retry-After is read from the header, defaulted, and capped.
+    assert common._retry_after_seconds(
+        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"}), retry_env, 0.5
+    ) == 0.0
+    assert common._retry_after_seconds(
+        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"}),
+        env | {"LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "3"},
+        0.5,
+    ) == 3.0
+    assert common._retry_after_seconds(
+        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, None),
+        env | {"LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "5"},
+        0.5,
+    ) == 0.5
+
+
+def test_claude_oauth_usage_retries_5xx_and_network(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 5xx / network blip is transient and must be retried within the bounded
+    # budget instead of degrading on the first failure (previously any HTTPError
+    # returned immediately).
+    retry_env = env | {"LLM_USAGE_LIVE_FETCH_RETRIES": "2", "LLM_USAGE_LIVE_FETCH_RETRY_DELAY": "0"}
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return b'{"rate_limits":{"five_hour":{"used_percentage":3,"resets_at":"2026-06-18T00:00:00Z"}}}'
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    seq = [lambda: (_ for _ in ()).throw(_make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 500)),
+           lambda: (_ for _ in ()).throw(OSError("temporary")),
+           lambda: FakeResponse()]
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        idx = calls["n"]
+        calls["n"] += 1
+        return seq[idx]()
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    text, unauthorized = common._fetch_claude_oauth_usage_text("tok", retry_env)
+    assert calls["n"] == 3
+    assert unauthorized is False
+    assert text is not None and "five_hour" in text
+
+
+def test_claude_oauth_usage_rate_limit_single_shot_when_retries_disabled(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With retries globally disabled (the suite's hermetic default) a 429 must not
+    # retry or sleep -- the path stays single-shot.
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    text, unauthorized = common._fetch_claude_oauth_usage_text("tok", env)
+    assert calls["n"] == 1
+    assert text is None
+    assert unauthorized is False
+
+
+def test_claude_oauth_rate_limit_serves_bounded_api_cache(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live_env = env | {
+        "LLM_USAGE_NOW_EPOCH": "1000",
+        "LLM_USAGE_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE": "300",
+    }
+    cred = Path(live_env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}), encoding="utf-8")
+    cache = common.usage_cache_dir(live_env) / "claude-usage-api.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        '{"rate_limits":{"five_hour":{"used_percentage":20,"resets_at":"2026-06-18T00:00:00Z"}}}',
+        encoding="utf-8",
+    )
+    os.utime(cache, (880, 880))
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude_api(live_env)
+    assert data is not None
+    assert data["five_hour"]["used"] == 20
+    assert calls["n"] == 1
+
+    data = common.read_claude_api(live_env)
+    assert data is not None
+    assert data["five_hour"]["used"] == 20
+    assert calls["n"] == 1
+
+
+def test_claude_oauth_rate_limit_does_not_fall_back_to_stale_project_data(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live_env = env | {
+        "LLM_USAGE_NOW_EPOCH": "1000",
+        "LLM_USAGE_LIVE_FETCH_RETRIES": "2",
+        "LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "0",
+        "LLM_USAGE_STALE_RECOVERY_DELAY": "0",
+    }
+    cred = Path(live_env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok"}}), encoding="utf-8")
+    project = Path(live_env["HOME"]) / ".claude" / "projects" / "r.jsonl"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(
+        '{"message":{"rateLimits":{"fiveHour":{"usedPercent":6,"resetsAt":"2026-06-18T00:00:00Z"}}}}\n',
+        encoding="utf-8",
+    )
+    os.utime(project, (800, 800))
+    calls = {"n": 0}
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        raise _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"})
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude(live_env)
+    assert data == {
+        "provider": "claude",
+        "source": common.CLAUDE_OAUTH_USAGE_URL,
+        "available": False,
+        "reason": "rate-limited",
+    }
+    assert calls["n"] == 2
 
 
 def test_usage_dashboard_ready_guidance_and_reset(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -213,8 +812,8 @@ def test_usage_table_snapshot_has_guidance_and_no_old_dial(capsys: pytest.Captur
     out = capsys.readouterr().out
 
     assert out.startswith("LLM Usage · ")
-    assert "\n\nBars: █ available · ░ spent" in out
-    assert "Bars: █ available · ░ spent" in out
+    assert "\n\nBars: quota rows █ available · ░ spent" in out
+    assert "$ rows █ spent · ░ budget left" in out
     assert "Guidance:" in out
     assert "Provider   Ready   Scope     Remaining" in out
     assert "Codex      yes     5h         84% ████████░░" in out
@@ -906,13 +1505,21 @@ def test_copilot_refresh_module(env: dict[str, str], tmp_path: Path, monkeypatch
 def test_copilot_refresh_wait_budget_cold_start_is_long(env: dict[str, str]) -> None:
     # Stale-or-missing cache both wait long enough for the capture to land so we
     # never serve a value past its TTL (the warm-cache "serve stale quickly" path
-    # is gone -- it was the source of partially-stale usage).
-    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 12.0
-    assert common.copilot_refresh_wait_budget(env, cache_present=False) == 12.0
-    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_TIMEOUT": "4"}, cache_present=False) == 6.0
+    # is gone -- it was the source of partially-stale usage). The budget covers
+    # the PTY capture timeout *plus* the GitHub premium_request fallback that runs
+    # after it, so the cold run does not give up before the refresh writes real
+    # data (capture timeout 10 + billing fallback 8 = 18).
+    assert common.copilot_refresh_wait_budget(env, cache_present=True) == 18.0
+    assert common.copilot_refresh_wait_budget(env, cache_present=False) == 18.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_TIMEOUT": "4"}, cache_present=False) == 12.0
+    # The billing-fallback headroom is tunable on its own.
+    assert (
+        common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_BILLING_FALLBACK_BUDGET": "3"}, cache_present=False)
+        == 13.0
+    )
     # Explicit override always wins, including the 0 used by other tests.
     assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "0"}, cache_present=False) == 0.0
-    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 12.0
+    assert common.copilot_refresh_wait_budget(env | {"LLM_USAGE_COPILOT_REFRESH_WAIT": "bad"}, cache_present=True) == 18.0
 
 
 def test_copilot_cold_start_returns_refreshed_data(env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1416,7 +2023,7 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert common.daily_budget_percent(None, 2000, at1000) is None
     assert common.daily_budget_percent(50, None, at1000) is None
     assert common.daily_budget_percent(50, 900, at1000) is None  # reset already passed
-    assert usage.render_daily_budget(None, plain) == "· no rate data"
+    assert usage.render_daily_budget(None, plain) == ""  # calm: no forecast -> blank
     assert usage.render_daily_budget(60, plain, 50) == "↑ headroom"
     assert usage.render_daily_budget(50, plain, 50) == "= on pace"
     assert usage.render_daily_budget(40, plain, 50) == "↓ conserve"
@@ -1428,7 +2035,7 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert usage.render_gate(0, plain) == "no"
     assert usage.render_gate(1, ucfg) == "yes"
     assert usage.render_gate(0, ucfg).startswith("\x1b[1;31m")
-    assert usage.render_pace_or_gate("5h", 94, plain) == "· no rate data"
+    assert usage.render_pace_or_gate("5h", 94, plain) == ""  # calm: no reset -> blank
     assert usage.is_short_window("5h") is True
     assert usage.is_budget_window("weekly") is True
     usage.print_codex_rows(ucfg, {"source": "src", "five_hour": {"used": 10}, "week": {"used": 20}})
@@ -1490,3 +2097,537 @@ def test_usage_snapshot_and_decision_delegates_to_capacity_provider(monkeypatch:
     assert dec["provider"] == "opencode"
     assert dec["capacity_provider"] == "minimax"
     assert dec["windows"] == [{"name": "5h"}]
+
+
+# ---------------------------------------------------------------------------
+# New footer parsers + GitHub premium_request/usage fallback for Copilot
+# ---------------------------------------------------------------------------
+
+
+def test_parse_copilot_remaining_pct_footer_1_0_57_plus() -> None:
+    """The Copilot CLI >= 1.0.57 swapped the old ``Plan: N% used`` line for a
+    ``Remaining reqs.: N%`` line (it's the *remaining* percentage now, not
+    used). The parser has to recognise the new shape and convert it to a
+    *used* percentage so the dashboard's quota bar still draws correctly.
+    """
+    assert common.parse_copilot_monthly_used("Remaining reqs.: 41%") == 59.0
+    assert common.parse_copilot_monthly_used("Remaining requests: 80%") == 20.0
+    # The legacy shapes must keep working so users on older CLIs do not
+    # silently lose their monthly figure.
+    assert common.parse_copilot_monthly_used("Plan: 62% used") == 62.0
+    assert common.parse_copilot_monthly_used("Monthly: 42% used") == 42.0
+
+
+def test_parse_copilot_ai_credits_new_footer() -> None:
+    """The 1.0.57+ footer prints ``AI Credits N (Ys)`` without a colon; the
+    1.0.40 line was ``AI Credits: N``. The parser has to accept both so a
+    Copilot upgrade does not flip the row to ``format-changed``.
+    """
+    assert common.parse_copilot_ai_credits("AI Credits 7.41 (8s)") == 7.41
+    assert common.parse_copilot_ai_credits("AI Credits 2.07 (3m)") == 2.07
+    assert common.parse_copilot_ai_credits("AI Credits 2.07") == 2.07
+    # The legacy colon-separated form must keep working.
+    assert common.parse_copilot_ai_credits("AI Credits: 9") == 9.0
+
+
+def test_copilot_live_falls_back_to_github_premium_request_usage(env: dict[str, str]) -> None:
+    """The new Copilot CLI no longer prints the ``Plan: N% used`` line. When
+    the GitHub ``premium_request/usage`` endpoint is reachable, the live
+    reader must compute the monthly used percent from the per-model request
+    counts rather than reporting ``format-changed``.
+    """
+    payload = {
+        "usageItems": [
+            {
+                "product": "Copilot",
+                "sku": "Copilot Premium Request",
+                "model": "GPT-5.4",
+                "unitType": "requests",
+                "grossQuantity": 200,
+            },
+            {
+                "product": "Copilot",
+                "sku": "Copilot Premium Request",
+                "model": "Claude Sonnet 4.6",
+                "unitType": "requests",
+                "grossQuantity": 50,
+            },
+        ]
+    }
+    # Capture text is the new footer (no Plan:, AI Credits with no colon).
+    e = env | {
+        "LLM_USAGE_COPILOT_CAPTURE_TEXT": "Changes    +0 -0\nAI Credits 2.07 (3s)\nTokens     ↑ 14.0k (6.7k cached) • ↓ 44 (35 reasoning)\n",
+        "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(payload),
+        "LLM_USAGE_COPILOT_PLAN": "pro",
+        # The conftest disables the GitHub billing addon by default to keep
+        # the suite hermetic; this test explicitly opts back in to inject a
+        # payload via the new env var.
+        "LLM_USAGE_DISABLE_COPILOT_ADDON": "0",
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+    }
+    out = common.read_copilot_live(e)
+    # ``read_copilot_live`` signals "we have data" by returning a dict
+    # without an ``available: False`` key (the failure shape is the only
+    # place that key appears).
+    assert out.get("available") is not False
+    # 200 + 50 = 250 of 300 (Pro allowance) = 83.333...% used.
+    assert abs(out["monthly"]["used"] - (250 / 300 * 100.0)) < 1e-6
+    assert abs(out["monthly"]["remaining"] - (50 / 300 * 100.0)) < 1e-6
+
+
+def test_copilot_live_github_fallback_respects_plan_allowance(env: dict[str, str]) -> None:
+    """Different Copilot plans ship with different monthly premium-request
+    allowances. The math has to follow the resolved plan so a Pro+ user
+    (1500 requests) does not get a quota bar that looks like they used
+    16% of a 300-allowance plan.
+    """
+    payload = {
+        "usageItems": [
+            {
+                "product": "Copilot",
+                "sku": "Copilot Premium Request",
+                "model": "GPT-5.4",
+                "unitType": "requests",
+                "grossQuantity": 240,
+            }
+        ]
+    }
+    e = env | {
+        "LLM_USAGE_COPILOT_CAPTURE_TEXT": "AI Credits 1 (1s)\n",
+        "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(payload),
+        "LLM_USAGE_COPILOT_PLAN": "pro_plus",
+        "LLM_USAGE_DISABLE_COPILOT_ADDON": "0",
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+    }
+    out = common.read_copilot_live(e)
+    # 240 of 1500 = 16%.
+    assert abs(out["monthly"]["used"] - (240 / 1500 * 100.0)) < 1e-6
+    # The source label flips to "github billing" so the user can tell
+    # where the number came from.
+    assert out["source"] == "github billing"
+
+
+def test_copilot_live_prefers_legacy_footer_when_present(env: dict[str, str]) -> None:
+    """The legacy ``Plan: 62% used`` line is the source of truth when it
+    appears; the GitHub fallback is only consulted when the footer is
+    missing the monthly figure. This test pins the precedence so a
+    future refactor does not silently downgrade a working CLI footer to
+    the (slower, rate-limited) REST path.
+    """
+    e = env | {
+        "LLM_USAGE_COPILOT_CAPTURE_TEXT": "Plan: 30% used\nAI Credits 4 (2s)\n",
+    }
+    out = common.read_copilot_live(e)
+    assert out["source"] == "copilot cli"
+    assert out["monthly"]["used"] == 30.0
+
+
+def test_copilot_live_no_token_falls_back_to_format_changed(env: dict[str, str]) -> None:
+    """When the live footer has no monthly figure AND the GitHub billing
+    API is unreachable, the dashboard must still report a clear reason
+    (``format-changed``) so the user knows the live CLI footer is the
+    reason -- the alternative (``inconclusive-usage``) would be a
+    misleading "we don't know" when the truth is "we do know, the CLI
+    changed".
+    """
+    # A footer that matches neither the legacy ``Plan: N% used`` nor the
+    # new ``AI Credits N (Ys)`` shape — so no monthly figure is detected
+    # and the GitHub addon is disabled by the conftest, mirroring a
+    # machine with no ``gh`` CLI / GitHub token.
+    e = env | {
+        "LLM_USAGE_COPILOT_CAPTURE_TEXT": "Welcome to Copilot CLI 1.0.63\n",
+    }
+    out = common.read_copilot_live(e)
+    # Failure shape: the live reader sets ``available: False`` only when
+    # the snapshot represents a "we cannot measure" state.
+    assert out.get("available") is False
+    assert out["reason"] == "format-changed"
+
+
+def test_copilot_billing_fallback_does_not_override_disabled(env: dict[str, str]) -> None:
+    out = common.read_copilot_live(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT": "1",
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(
+                {"usageItems": [{"product": "Copilot", "grossQuantity": 30}]}
+            ),
+        }
+    )
+    assert out.get("available") is False
+    assert out["reason"] == "disabled"
+
+
+def test_copilot_billing_fallback_does_not_override_auth_prompt(env: dict[str, str]) -> None:
+    out = common.read_copilot_live(
+        env
+        | {
+            "LLM_USAGE_COPILOT_CAPTURE_TEXT": "auth required",
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(
+                {"usageItems": [{"product": "Copilot", "grossQuantity": 30}]}
+            ),
+        }
+    )
+    assert out.get("available") is False
+    assert out["reason"] == "not-authenticated"
+
+
+def test_copilot_billing_fallback_does_not_override_missing_cli(env: dict[str, str]) -> None:
+    out = common.read_copilot_live(
+        env
+        | {
+            "PATH": env["PATH"].split(":", 1)[0],
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(
+                {"usageItems": [{"product": "Copilot", "grossQuantity": 30}]}
+            ),
+        }
+    )
+    assert out.get("available") is False
+    assert out["reason"] == "missing-cli"
+
+
+def test_copilot_monthly_allowance_override(env: dict[str, str]) -> None:
+    """Users with custom / enterprise contracts can pin their plan's
+    monthly allowance explicitly so the quota bar uses the right
+    denominator. Pinning a 5000-request allowance for a 100-request
+    payload gives 2% used, regardless of the plan name.
+    """
+    e = env | {
+        "LLM_USAGE_COPILOT_CAPTURE_TEXT": "AI Credits 1 (1s)\n",
+        "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(
+            {"usageItems": [{"product": "Copilot", "grossQuantity": 100, "unitType": "requests"}]}
+        ),
+        "LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE": "5000",
+        "LLM_USAGE_DISABLE_COPILOT_ADDON": "0",
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+    }
+    out = common.read_copilot_live(e)
+    assert abs(out["monthly"]["used"] - 2.0) < 1e-6
+    # The same override is reflected by the underlying helper so the
+    # ``read_copilot_monthly_used`` JSON shape also carries the right
+    # denominator (and the GUI / dashboard can show it on hover).
+    direct = common.read_copilot_monthly_used(e)
+    assert direct.get("allowance") == 5000
+    assert abs(direct["used"] - 2.0) < 1e-6
+
+
+def test_copilot_monthly_fallback_is_not_disabled_by_addon_flag(env: dict[str, str]) -> None:
+    """Disabling add-on spend must not disable the monthly quota fallback.
+
+    The two readers use different GitHub endpoints and different display rows.
+    A user may want to hide the spend row while still relying on
+    ``premium_request/usage`` for the monthly quota figure.
+    """
+    out = common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_ADDON": "1",
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(
+                {"usageItems": [{"product": "Copilot", "grossQuantity": 30}]}
+            ),
+            "LLM_USAGE_COPILOT_PLAN": "pro",
+        }
+    )
+    assert out is not None
+    assert out["requests"] == 30
+    assert abs(out["used"] - 10.0) < 1e-6
+
+
+def test_copilot_monthly_disable_flag_returns_none(env: dict[str, str]) -> None:
+    out = common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "1",
+            "LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON": json.dumps(
+                {"usageItems": [{"product": "Copilot", "grossQuantity": 30}]}
+            ),
+        }
+    )
+    assert out is None
+
+
+def test_copilot_monthly_cache_and_failure_paths(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = common.usage_cache_dir(env) / "copilot-monthly.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"used": 12.5, "remaining": 87.5, "ts": 1}), encoding="utf-8")
+    cached = common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_MONTHLY_TTL": "100000",
+        }
+    )
+    assert cached is not None and cached["used"] == 12.5
+
+    # Invalid TTL falls back to the default, and a malformed cache is ignored.
+    cache.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(common, "_github_token", lambda env=None: None)
+    assert common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_MONTHLY_TTL": "bad",
+        }
+    ) is None
+
+    # A token without a resolvable login degrades to the last usable cache.
+    cache.write_text(json.dumps({"used": 7.0, "remaining": 93.0, "ts": 1}), encoding="utf-8")
+    os.utime(cache, (1, 1))
+    monkeypatch.setattr(common, "_github_token", lambda env=None: "token")
+    monkeypatch.setattr(common, "_github_api_get", lambda path, token, env=None: {})
+    out = common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_MONTHLY_TTL": "0",
+        }
+    )
+    assert out == {"used": 7.0, "remaining": 93.0}
+
+
+def test_copilot_premium_request_payload_malformed_paths() -> None:
+    assert common._copilot_monthly_used_from_premium_request_usage("not-json") is None
+    assert common._copilot_monthly_used_from_premium_request_usage([]) is None
+    assert common._copilot_monthly_used_from_premium_request_usage({}) is None
+    assert common._copilot_monthly_used_from_premium_request_usage({"usageItems": "bad"}) is None
+    assert common._copilot_monthly_used_from_premium_request_usage(
+        {"usageItems": ["bad", {"product": "actions", "grossQuantity": 10}, {"product": "Copilot", "grossQuantity": 0}]}
+    ) == 0.0
+
+
+def test_github_api_get_error_paths(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+
+    class FakeResp:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def read(self) -> bytes:
+            return self.payload
+
+        def __enter__(self) -> "FakeResp":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    def http_403(_req, timeout=0):  # type: ignore[no-untyped-def]
+        raise urllib.error.HTTPError("https://example.invalid", 403, "forbidden", {}, None)
+
+    monkeypatch.setattr(common, "urlopen", http_403)
+    assert common._github_api_get("/x", "token", env) is None
+
+    attempts = {"n": 0}
+
+    def transient_then_ok(_req, timeout=0):  # type: ignore[no-untyped-def]
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("temporary")
+        return FakeResp(b'{"ok": true}')
+
+    monkeypatch.setattr(common, "urlopen", transient_then_ok)
+    out = common._github_api_get(
+        "/x",
+        "token",
+        env | {"LLM_USAGE_LIVE_FETCH_RETRIES": "1", "LLM_USAGE_LIVE_FETCH_RETRY_DELAY": "0"},
+    )
+    assert out == {"ok": True}
+
+
+def test_github_token_gh_failure_returns_none(env: dict[str, str], fake_bin: Path) -> None:
+    write_exe(fake_bin / "gh", "#!/usr/bin/env bash\nexit 2\n")
+    base = {k: v for k, v in env.items() if k not in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")}
+    assert common._github_token(base) is None
+
+
+def test_copilot_ai_credits_survive_provider_snapshot(env: dict[str, str]) -> None:
+    """The provider snapshot path powers ``llm-usage`` table/JSON output.
+
+    It must preserve the optional AI credits figure, while the missing monthly
+    quota remains an unknown monthly scope that does not make Copilot ready.
+    """
+    from llm_tools.providers import copilot as copilot_provider
+
+    snap = copilot_provider.read(env | {"LLM_USAGE_COPILOT_CAPTURE_TEXT": "AI Credits 4.5 (2s)\n"})
+    monthly = next(scope for scope in snap.scopes if scope.name == "monthly")
+    assert monthly.kind == "unknown"
+    legacy = usage._legacy_copilot(snap, show_credits=True)
+    assert legacy["ai_credits"]["used"] == 4.5
+    cfg = usage.Config()
+    cfg.show_copilot_credits = True
+    rows = usage.copilot_rows(cfg, legacy)
+    assert any(row.scope == "ai-credits" and row.left_text == "4.5" for row in rows)
+    assert usage.provider_ready(rows, "Copilot") is False
+
+
+# ---------------------------------------------------------------------------
+# MiniMax error-envelope detection
+# ---------------------------------------------------------------------------
+
+
+def test_minimax_error_envelope_maps_to_clear_reason(env: dict[str, str], tmp_path: Path, fake_bin: Path) -> None:
+    """The mmx CLI returns ``{"error": {"code": 1, "message": "API error:
+    no active token plan subscription (HTTP 200)"}}`` when the user has no
+    active plan. The reader must classify that into a stable, descriptive
+    reason so the dashboard can tell the user "your account has no
+    subscription" instead of the generic ``inconclusive-usage``.
+    """
+    # A fake mmx binary that prints the error envelope, exactly the way
+    # the real CLI does.
+    write_exe(
+        fake_bin / "mmx",
+        "#!/usr/bin/env python3\nimport json, sys\nsys.stdout.write(json.dumps({\"error\": {\"code\": 1, \"message\": \"API error: no active token plan subscription (HTTP 200)\"}}))\n",
+    )
+    from llm_tools.providers import minimax
+    snap = minimax.read_minimax(env)
+    assert snap.available is False
+    assert snap.reason == "subscription-required"
+
+
+def test_minimax_error_envelope_classifier_branches() -> None:
+    """A small lookup table drives the message -> reason mapping; the
+    branches below cover each classification so a future message-string
+    change does not silently fall through to the wrong bucket.
+    """
+    from llm_tools.providers.minimax import _classify_minimax_error as cls
+    assert cls("no active token plan subscription") == "subscription-required"
+    assert cls("no active plan attached") == "subscription-required"
+    assert cls("authentication failed: bad token") == "not-authenticated"
+    assert cls("please login first") == "not-authenticated"
+    assert cls("rate limit exceeded; try again in 30s") == "rate-limited"
+    assert cls("HTTP 429 throttled") == "rate-limited"
+    assert cls("connection refused") == "network-error"
+    assert cls("upstream service unavailable") == "quota-error"
+
+
+# ---------------------------------------------------------------------------
+# Day-by-day fallback for the Copilot monthly figure
+# ---------------------------------------------------------------------------
+
+
+def test_copilot_monthly_sums_per_day_for_current_month(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GitHub ``premium_request/usage`` endpoint silently returns an
+    empty ``usageItems`` for the *current* month when queried with a bare
+    ``?year=...&month=...`` — even when individual days report plenty of
+    usage. The reader has to ask for the month one day at a time
+    otherwise the dashboard draws a full-green "headroom" bar on a day
+    the user has actually exhausted their allowance. This test pins
+    that the day-by-day fallback is the path the reader takes for the
+    current month and that the per-day totals are summed.
+    """
+    from llm_tools import common
+
+    captured: list[str] = []
+
+    def fake_api_get(path: str, token: str, env=None):
+        captured.append(path)
+        # Day 1-2: empty; day 3: 200 requests; day 4: 150; rest empty.
+        if "day=3" in path:
+            return {
+                "usageItems": [
+                    {"product": "Copilot", "grossQuantity": 200, "unitType": "requests"},
+                ]
+            }
+        if "day=4" in path:
+            return {
+                "usageItems": [
+                    {"product": "Copilot", "grossQuantity": 150, "unitType": "requests"},
+                ]
+            }
+        return {"usageItems": []}
+
+    monkeypatch.setattr(common, "_github_token", lambda env=None: "test-token")
+    monkeypatch.setattr(common, "_github_api_get", fake_api_get)
+    out = common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_ADDON": "0",
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_PLAN": "pro",
+            "LLM_USAGE_COPILOT_ADDON_LOGIN": "alice",
+            # Force a deterministic "current month" by fixing the
+            # epoch to 2026-06-16 12:00:00 UTC.
+            "LLM_USAGE_NOW_EPOCH": "1781630400",
+        }
+    )
+    # At least one day-level probe was issued...
+    assert any("day=" in path for path in captured), f"expected day-level probes, got {captured!r}"
+    # ...and no bare month probe.
+    assert not any("day=" not in path and "month=" in path for path in captured), (
+        f"expected NO bare month probe, got {captured!r}"
+    )
+    # 200 + 150 = 350 of 300 (Pro allowance) -> capped at 100% used.
+    assert out is not None
+    assert abs(out["used"] - 100.0) < 1e-6
+    assert out["remaining"] == 0.0
+
+
+def test_copilot_monthly_api_failure_does_not_cache_zero_usage(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A GitHub billing API failure is not the same as "0 requests used"."""
+    from llm_tools import common
+
+    captured: list[str] = []
+
+    def fake_api_get(path: str, token: str, env=None):
+        captured.append(path)
+        return None
+
+    monkeypatch.setattr(common, "_github_token", lambda env=None: "test-token")
+    monkeypatch.setattr(common, "_github_api_get", fake_api_get)
+    out = common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_PLAN": "pro",
+            "LLM_USAGE_COPILOT_ADDON_LOGIN": "alice",
+            "LLM_USAGE_NOW_EPOCH": "1781630400",
+        }
+    )
+    assert out is None
+    assert any("day=" in path for path in captured)
+
+
+def test_copilot_monthly_uses_month_probe_for_past_month(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past (complete) months can be queried with a single
+    ``?year=...&month=...`` request because the API quirk that hides
+    the current month's data does not apply. The reader detects "past
+    month" via the test seam (``LLM_USAGE_COPILOT_PREMIUM_REQUEST_MONTH_OVERRIDE``)
+    and issues exactly one month-level request rather than 30 day-level
+    ones.
+    """
+    from llm_tools import common
+
+    captured: list[str] = []
+
+    def fake_api_get(path: str, token: str, env=None):
+        captured.append(path)
+        return {
+            "usageItems": [
+                {"product": "Copilot", "grossQuantity": 90, "unitType": "requests"},
+            ]
+        }
+
+    monkeypatch.setattr(common, "_github_token", lambda env=None: "test-token")
+    monkeypatch.setattr(common, "_github_api_get", fake_api_get)
+    out = common.read_copilot_monthly_used(
+        env
+        | {
+            "LLM_USAGE_DISABLE_COPILOT_ADDON": "0",
+            "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+            "LLM_USAGE_COPILOT_PLAN": "pro",
+            "LLM_USAGE_COPILOT_ADDON_LOGIN": "alice",
+            "LLM_USAGE_COPILOT_PREMIUM_REQUEST_MONTH_OVERRIDE": "2026-05",
+        }
+    )
+    # Exactly one probe — the month-level one — and no day-by-day
+    # for-each loop. The override is the test seam that pins "May
+    # 2026" so the reader takes the cheap path.
+    assert len(captured) == 1
+    assert "month=5" in captured[0]
+    assert "day=" not in captured[0]
+    assert out is not None
+    assert abs(out["used"] - (90 / 300 * 100)) < 1e-6

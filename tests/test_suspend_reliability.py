@@ -178,6 +178,40 @@ def test_arm_rtc_wake_rtcwake_confirmed(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert arm.armed and arm.method == "rtcwake" and arm.confirmed is True
 
 
+def test_arm_rtc_wake_rejects_wrong_rtcwake_readback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    alarm = tmp_path / "wakealarm"
+    alarm.write_text("9999")
+    env = {"LLM_TOOLS_RTC_WAKEALARM": str(alarm), "LLM_USAGE_NOW_EPOCH": "1000"}
+    monkeypatch.setattr(common, "have_cmd", lambda name: name == "rtcwake")
+    monkeypatch.setattr(common.subprocess, "run", lambda *a, **k: FakeProc(0, "rtcwake ok"))
+    arm = common.arm_rtc_wake(2000, "soak", env)
+    assert arm.armed is False and arm.method == "none"
+
+
+def test_arm_rtc_wake_falls_back_after_wrong_rtcwake_readback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    alarm = tmp_path / "wakealarm"
+    alarm.write_text("9999")
+    env = {"LLM_TOOLS_RTC_WAKEALARM": str(alarm), "LLM_USAGE_NOW_EPOCH": "1000"}
+    calls: list[list[str]] = []
+    monkeypatch.setattr(common, "have_cmd", lambda name: name in ("rtcwake", "systemctl", "systemd-run"))
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        if args[0] == "rtcwake":
+            return FakeProc(0, "rtcwake ok")
+        if args[0] == "systemd-run":
+            return FakeProc(0, "Running timer as unit: x.timer")
+        if args[:3] == ["systemctl", "--user", "is-active"]:
+            return FakeProc(0, "")
+        return FakeProc(0, "")
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+    arm = common.arm_rtc_wake(2000, "soak", env)
+    assert arm.armed and arm.method == "systemd-timer"
+    assert any(call[0] == "rtcwake" for call in calls)
+    assert any(call[0] == "systemd-run" for call in calls)
+
+
 def test_arm_rtc_wake_systemd_timer(monkeypatch: pytest.MonkeyPatch) -> None:
     env = {"LLM_USAGE_NOW_EPOCH": "1000"}
     monkeypatch.setattr(common, "have_cmd", lambda name: name in ("systemctl", "systemd-run"))

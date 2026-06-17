@@ -31,6 +31,7 @@ from urllib.request import Request, urlopen
 AUTONOMY_ABORT_STATUS = 75
 TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
 DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
+DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS = 300
 CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLAUDE_OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
@@ -670,6 +671,124 @@ def stale_if_local_snapshot(
     return obj
 
 
+def claude_rate_limit_cache_max_age(env: dict[str, str] | None = None) -> int:
+    env = env or os.environ
+    raw = env.get("LLM_USAGE_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE", str(DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS))
+    try:
+        parsed = int(float(raw or str(DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS)))
+    except ValueError:
+        return DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS
+    if parsed <= 0:
+        return DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS
+    return parsed
+
+
+def _read_claude_usage_cache(cache: Path, env: dict[str, str], max_age: int) -> dict[str, Any] | None:
+    try:
+        if not cache.is_file() or cache.stat().st_size <= 0:
+            return None
+        mtime = int(cache.stat().st_mtime)
+        norm = normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if norm is None:
+        return None
+    if provider_snapshot_requires_fresh_source(norm, env) and now_epoch(env) - mtime > max_age:
+        return None
+    return norm
+
+
+def is_stale_usage_result(obj: Any) -> bool:
+    """True when a provider read degraded to the ``stale-usage`` marker."""
+    return isinstance(obj, dict) and obj.get("available") is False and obj.get("reason") == "stale-usage"
+
+
+def stale_recovery_schedule(env: dict[str, str] | None = None) -> list[float]:
+    """Backoff delays (seconds) for re-driving a live read that would otherwise
+    surface ``stale-usage``.
+
+    Returns an empty schedule when active-refresh retries are globally disabled
+    (``LLM_USAGE_LIVE_FETCH_RETRIES=0`` — the value the test-suite pins) so
+    failure-path tests never sleep. Otherwise a bounded exponential backoff: it
+    bridges the network-settling window after a resume-from-suspend (the common
+    cause of a transient live-fetch failure) without stalling the watch loop
+    indefinitely when a provider is genuinely offline.
+    """
+    env = env or os.environ
+    try:
+        base_retries = int(env.get("LLM_USAGE_LIVE_FETCH_RETRIES", "2") or "2")
+    except ValueError:
+        base_retries = 2
+    if base_retries <= 0:
+        return []
+    try:
+        attempts = max(0, int(env.get("LLM_USAGE_STALE_RECOVERY_ATTEMPTS", "4") or "4"))
+    except ValueError:
+        attempts = 4
+    try:
+        base_delay = max(0.0, float(env.get("LLM_USAGE_STALE_RECOVERY_DELAY", "0.5") or "0.5"))
+    except ValueError:
+        base_delay = 0.5
+    try:
+        max_delay = max(0.0, float(env.get("LLM_USAGE_STALE_RECOVERY_MAX_DELAY", "4.0") or "4.0"))
+    except ValueError:
+        max_delay = 4.0
+    schedule: list[float] = []
+    delay = base_delay
+    for _ in range(attempts):
+        schedule.append(min(delay, max_delay))
+        delay *= 2
+    return schedule
+
+
+def recover_stale_with_live_retry(
+    read_fn: "Any",
+    live_available: bool,
+    env: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Re-run ``read_fn`` with bounded backoff while it yields ``stale-usage``.
+
+    A ``stale-usage`` result means the on-disk snapshot is too old to trust *and*
+    the proactive live read failed on this attempt. As long as a live
+    acquisition path exists (credentials / CLI present), surfacing stale data to
+    the user is the wrong outcome — the whole point of the tool is to obtain
+    current usage proactively. So we keep re-driving the live read, giving a
+    transient outage (typically the network stack still settling right after a
+    resume from suspend) time to clear before we ever fall back to stale data.
+
+    The retry budget is bounded two ways — a maximum attempt count
+    (:func:`stale_recovery_schedule`) and a wall-clock deadline
+    (``LLM_USAGE_STALE_RECOVERY_MAX_WAIT``, since each re-drive carries its own
+    network timeout) — so a provider that is genuinely unreachable still returns
+    promptly without stalling the watch loop, and ``stale-usage`` only reaches
+    the user under truly exceptional circumstances. When no live path exists, the
+    first (stale) result is returned immediately.
+    """
+    env = env or os.environ
+    result = read_fn()
+    if not live_available or not is_stale_usage_result(result):
+        return result
+    deadline = time.monotonic() + _stale_recovery_max_wait(env)
+    for delay in stale_recovery_schedule(env):
+        if time.monotonic() >= deadline:
+            break
+        if delay > 0:
+            time.sleep(delay)
+        result = read_fn()
+        if not is_stale_usage_result(result):
+            return result
+    return result
+
+
+def _stale_recovery_max_wait(env: dict[str, str] | None = None) -> float:
+    env = env or os.environ
+    try:
+        value = float(env.get("LLM_USAGE_STALE_RECOVERY_MAX_WAIT", "20") or "20")
+    except ValueError:
+        return 20.0
+    return value if value > 0 else 20.0
+
+
 def latest_matching_record(root: Path, predicate: Any, env: dict[str, str] | None = None) -> tuple[str, Path, int] | None:
     env = env or os.environ
     if not root.is_dir():
@@ -731,6 +850,23 @@ def _codex_has_auth(env: dict[str, str]) -> bool:
     if isinstance(tokens, dict):
         return any(str(tokens.get(k) or "").strip() for k in ("access_token", "id_token", "refresh_token"))
     return False
+
+
+def codex_live_available(env: dict[str, str] | None = None) -> bool:
+    """True when a live Codex rate-limit read can be attempted.
+
+    Used to decide whether a ``stale-usage`` result is worth retrying: when the
+    app-server can be reached on our own (CLI installed + authenticated, or a
+    test payload is injected) a transient failure should be re-driven rather
+    than surfaced as stale data. When the app-server is disabled or
+    unauthenticated there is nothing to retry.
+    """
+    env = env or os.environ
+    if env.get("LLM_USAGE_CODEX_RATE_LIMITS_JSON") is not None:
+        return True
+    if env.get("LLM_USAGE_DISABLE_CODEX_APP_SERVER") == "1":
+        return False
+    return bool(codex_cli(env)) and _codex_has_auth(env)
 
 
 def _codex_app_server_timeout(env: dict[str, str]) -> float:
@@ -934,32 +1070,41 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
         pass
     oauth = cred_data.get("claudeAiOauth")
     token = oauth.get("accessToken", "") if isinstance(oauth, dict) else ""
+    has_oauth_token = bool(
+        isinstance(oauth, dict)
+        and (str(oauth.get("accessToken") or "").strip() or str(oauth.get("refreshToken") or "").strip())
+    )
+    if has_oauth_token and _claude_oauth_rate_limit_active(env):
+        cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env))
+        if cached is not None:
+            return cached
+        return _claude_rate_limited_provider()
     if token:
-        text, unauthorized = _fetch_claude_oauth_usage_text(token, env)
-        if text:
-            return _cache_claude_usage_response(cache, text)
-        if unauthorized:
-            refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+        result = _fetch_claude_oauth_usage_result(token, env)
+        if result.text:
+            _clear_claude_oauth_rate_limit(env)
+            return _cache_claude_usage_response(cache, result.text)
+        if result.rate_limited:
+            return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
+        if result.unauthorized:
+            refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
             if refreshed:
-                text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
-                if text:
-                    return _cache_claude_usage_response(cache, text)
+                result = _fetch_claude_oauth_usage_result(refreshed, env)
+                if result.text:
+                    _clear_claude_oauth_rate_limit(env)
+                    return _cache_claude_usage_response(cache, result.text)
+                if result.rate_limited:
+                    return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
     elif isinstance(oauth, dict) and oauth.get("refreshToken"):
-        refreshed = _refresh_claude_oauth_access_token(cred, cred_data)
+        refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
         if refreshed:
-            text, _ = _fetch_claude_oauth_usage_text(refreshed, env)
-            if text:
-                return _cache_claude_usage_response(cache, text)
-    if cache.is_file() and cache.stat().st_size > 0:
-        try:
-            mtime = int(cache.stat().st_mtime)
-            norm = normalize_claude_obj(json.loads(cache.read_text(encoding="utf-8")), str(cache))
-            if stale_if_local_snapshot("claude", norm, str(cache), mtime, env) is not norm:
-                return None
-            return norm
-        except (OSError, json.JSONDecodeError):
-            return None
-    return None
+            result = _fetch_claude_oauth_usage_result(refreshed, env)
+            if result.text:
+                _clear_claude_oauth_rate_limit(env)
+                return _cache_claude_usage_response(cache, result.text)
+            if result.rate_limited:
+                return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
+    return _read_claude_usage_cache(cache, env, local_snapshot_max_age(env))
 
 
 def live_fetch_retry_plan(env: dict[str, str] | None = None) -> tuple[int, float]:
@@ -983,7 +1128,104 @@ def live_fetch_retry_plan(env: dict[str, str] | None = None) -> tuple[int, float
     return attempts, delay
 
 
-def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None = None) -> tuple[str | None, bool]:
+def live_fetch_retry_max_delay(env: dict[str, str] | None = None) -> float:
+    """Cap (seconds) on a server-requested ``Retry-After`` back-off.
+
+    A 429 carries a ``Retry-After`` (the Claude OAuth usage endpoint asks for
+    ~8s); honouring it on the same invocation turns a transient rate-limit into
+    a fresh read instead of a silent degrade to ``unavailable``. The cap keeps a
+    pathological ``Retry-After`` from hanging the tool. ``0`` disables the wait
+    (tests pin it so the rate-limit path stays instant and hermetic).
+    """
+    env = env or os.environ
+    try:
+        return max(0.0, float(env.get("LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY", "10") or "10"))
+    except ValueError:
+        return 10.0
+
+
+def _retry_after_seconds(exc: HTTPError, env: dict[str, str], fallback: float) -> float:
+    """Seconds to wait before retrying a 429, from ``Retry-After`` (capped)."""
+    raw = None
+    try:
+        raw = exc.headers.get("Retry-After")
+    except AttributeError:
+        raw = None
+    wait = fallback
+    if raw:
+        try:
+            wait = float(str(raw).strip())
+        except (TypeError, ValueError):
+            wait = fallback
+    return max(0.0, min(wait, live_fetch_retry_max_delay(env)))
+
+
+@dataclass
+class ClaudeOAuthUsageFetchResult:
+    text: str | None = None
+    unauthorized: bool = False
+    rate_limited: bool = False
+    retry_after_seconds: float | None = None
+
+
+def _claude_oauth_rate_limit_path(env: dict[str, str]) -> Path:
+    return usage_cache_dir(env) / "claude-usage-api-rate-limit.json"
+
+
+def _claude_oauth_rate_limit_active(env: dict[str, str]) -> bool:
+    path = _claude_oauth_rate_limit_path(env)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    until = num(data.get("next_allowed_epoch")) if isinstance(data, dict) else None
+    return until is not None and until > now_epoch(env)
+
+
+def _record_claude_oauth_rate_limit(env: dict[str, str], retry_after_seconds: float | None) -> None:
+    wait = retry_after_seconds if retry_after_seconds is not None else live_fetch_retry_max_delay(env)
+    payload = {
+        "recorded_at_epoch": now_epoch(env),
+        "next_allowed_epoch": now_epoch(env) + max(0.0, wait),
+    }
+    path = _claude_oauth_rate_limit_path(env)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_claude_oauth_rate_limit(env: dict[str, str]) -> None:
+    try:
+        _claude_oauth_rate_limit_path(env).unlink()
+    except OSError:
+        pass
+
+
+def _claude_rate_limited_provider() -> dict[str, Any]:
+    return {
+        "provider": "claude",
+        "source": CLAUDE_OAUTH_USAGE_URL,
+        "available": False,
+        "reason": "rate-limited",
+    }
+
+
+def _claude_rate_limit_fallback(
+    cache: Path,
+    env: dict[str, str],
+    retry_after_seconds: float | None,
+) -> dict[str, Any]:
+    _record_claude_oauth_rate_limit(env, retry_after_seconds)
+    cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env))
+    if cached is not None:
+        return cached
+    return _claude_rate_limited_provider()
+
+
+def _fetch_claude_oauth_usage_result(access_token: str, env: dict[str, str] | None = None) -> ClaudeOAuthUsageFetchResult:
+    env = env or os.environ
     req = Request(
         CLAUDE_OAUTH_USAGE_URL,
         headers={
@@ -994,18 +1236,57 @@ def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None
         },
     )
     attempts, delay = live_fetch_retry_plan(env)
-    for attempt in range(attempts):
+    # A rate-limit (429) is transient and authoritative about *when* to retry, so
+    # it gets one extra honoured-``Retry-After`` attempt on top of the network
+    # budget rather than being lumped in with bad-token 4xx. Without this a 429
+    # used to degrade straight to the ~/.claude/projects fallback (which reports
+    # ``unavailable``), so any second read inside the endpoint's ~8s window made
+    # Claude usage vanish from the dashboard. When retries are globally disabled
+    # (``LLM_USAGE_LIVE_FETCH_RETRIES=0``, the test pin) the budget is 1 and the
+    # rate-limit retry is suppressed too, so the path stays single-shot.
+    rate_limit_retry_used = attempts <= 1
+    attempt = 0
+    while True:
         try:
             with urlopen(req, timeout=20) as resp:
-                return resp.read().decode("utf-8", "replace"), False
+                return ClaudeOAuthUsageFetchResult(text=resp.read().decode("utf-8", "replace"))
         except HTTPError as exc:
             # 400/401 are authoritative (bad/expired token): do not retry, let the
             # caller refresh the OAuth token instead.
-            return None, exc.code in {400, 401}
+            if exc.code in {400, 401}:
+                return ClaudeOAuthUsageFetchResult(unauthorized=True)
+            if exc.code == 429:
+                wait = _retry_after_seconds(exc, env, delay)
+                # Honour Retry-After exactly once. Burning the quick
+                # network-retry budget on a 429 is pointless (0.5s later it is
+                # still rate-limited) and only adds load to an endpoint that
+                # already asked us to back off, so give up after the one wait.
+                if rate_limit_retry_used:
+                    return ClaudeOAuthUsageFetchResult(rate_limited=True, retry_after_seconds=wait)
+                rate_limit_retry_used = True
+                if wait:
+                    time.sleep(wait)
+                continue
+            if 400 <= exc.code < 500:
+                # Any other 4xx is a client error that will not change on retry.
+                return ClaudeOAuthUsageFetchResult()
+            # 5xx is a transient server error: fall through to the bounded
+            # network-retry budget below.
         except Exception:
-            if attempt + 1 < attempts and delay:
+            pass
+        attempt += 1
+        if attempt < attempts:
+            # Retry whenever budget remains; the delay only gates the sleep so
+            # tests can pin it to 0 and still exercise the retry path.
+            if delay:
                 time.sleep(delay)
-    return None, False
+            continue
+        return ClaudeOAuthUsageFetchResult()
+
+
+def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None = None) -> tuple[str | None, bool]:
+    result = _fetch_claude_oauth_usage_result(access_token, env)
+    return result.text, result.unauthorized
 
 
 def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:
@@ -1016,7 +1297,7 @@ def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | Non
     return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
 
 
-def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any]) -> str | None:
+def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any], env: dict[str, str] | None = None) -> str | None:
     oauth = cred_data.get("claudeAiOauth")
     if not isinstance(oauth, dict):
         return None
@@ -1039,11 +1320,26 @@ def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any
             "User-Agent": CLAUDE_OAUTH_USER_AGENT,
         },
     )
-    try:
-        with urlopen(req, timeout=20) as resp:
-            raw = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception:
-        return None
+    # The refresh POST is the critical step after a long suspend (the access
+    # token has usually expired by then). It must be at least as resilient as
+    # the usage fetch itself: a single transient failure here previously forced
+    # a degrade to the stale on-disk cache. A 4xx is authoritative (the refresh
+    # token is bad) and is not retried.
+    attempts, delay = live_fetch_retry_plan(env)
+    raw: Any = None
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=20) as resp:
+                raw = json.loads(resp.read().decode("utf-8", "replace"))
+            break
+        except HTTPError as exc:
+            if 400 <= exc.code < 500:
+                return None
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
+        except Exception:
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
     if not isinstance(raw, dict):
         return None
     access_token = str(raw.get("access_token") or "").strip()
@@ -1068,9 +1364,35 @@ def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     return _read_claude_api_raw(env)
 
 
+def _claude_has_auth(env: dict[str, str] | None = None) -> bool:
+    """True when Claude has OAuth credentials that can drive a live usage fetch.
+
+    Mirrors :func:`_codex_has_auth`: a present access *or* refresh token means
+    the OAuth usage endpoint is reachable on our own (we can refresh an expired
+    access token), so a transient failure must be retried rather than degraded
+    to a stale snapshot. No credentials means the live path is genuinely
+    unavailable and there is nothing to retry.
+    """
+    env = env or os.environ
+    cred = home_dir(env) / ".claude" / ".credentials.json"
+    try:
+        data = json.loads(cred.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    if not isinstance(oauth, dict):
+        return False
+    return bool(str(oauth.get("accessToken") or "").strip() or str(oauth.get("refreshToken") or "").strip())
+
+
 def read_claude(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     env = env or os.environ
-    return freshen_provider_windows(_read_claude_raw(env), env)
+    live_available = _claude_has_auth(env)
+    return recover_stale_with_live_retry(
+        lambda: freshen_provider_windows(_read_claude_raw(env), env),
+        live_available,
+        env,
+    )
 
 
 def _read_claude_raw(env: dict[str, str]) -> dict[str, Any] | None:
@@ -1105,8 +1427,10 @@ def _read_claude_raw(env: dict[str, str]) -> dict[str, Any] | None:
     return norm
 
 
-def find_copilot_cli() -> str | None:
-    return shutil.which("copilot") or shutil.which("github-copilot")
+def find_copilot_cli(env: dict[str, str] | None = None) -> str | None:
+    env = env or os.environ
+    path = env.get("PATH")
+    return shutil.which("copilot", path=path) or shutil.which("github-copilot", path=path)
 
 
 def copilot_config_dir(env: dict[str, str] | None = None) -> Path:
@@ -1175,7 +1499,7 @@ def capture_copilot_screen(env: dict[str, str] | None = None) -> tuple[str, str]
         return "disabled", ""
     if "LLM_USAGE_COPILOT_CAPTURE_TEXT" in env:
         return "fixture", env.get("LLM_USAGE_COPILOT_CAPTURE_TEXT", "")
-    cli = find_copilot_cli()
+    cli = find_copilot_cli(env)
     if not cli:
         return "missing-cli", ""
     capture_cwd = env.get("LLM_USAGE_COPILOT_CWD") or str(Path(__file__).resolve().parent.parent)
@@ -1210,13 +1534,51 @@ def capture_copilot_screen(env: dict[str, str] | None = None) -> tuple[str, str]
 
 
 def parse_copilot_monthly_used(text: str) -> float | None:
+    """Pull the monthly "Plan N% used" / "Remaining N%" figure from a Copilot
+    CLI footer snapshot.
+
+    The footer shape has shifted across releases:
+
+    * Older CLIs (pre-1.0.57): ``Plan: 62% used`` or ``Monthly: 62% used``.
+    * 1.0.57+ render the **remaining** percentage (``Remaining reqs.: 59%``)
+      instead of the used percentage, because GitHub bills by what's left of
+      the monthly allowance. The user-facing metric the dashboard has always
+      reported is "remaining", so we flip that back to "used" here.
+    """
     m = re.search(r"(?:Monthly|Plan):\s*([0-9]+(?:[.][0-9]+)?)%\s*used", text)
-    return float(m.group(1)) if m else None
+    if m:
+        return float(m.group(1))
+    m = re.search(r"(?:Remaining\s+reqs?\.?|Remaining\s+requests?):\s*([0-9]+(?:[.][0-9]+)?)\s*%", text)
+    if m:
+        return max(0.0, min(100.0, 100.0 - float(m.group(1))))
+    return None
 
 
 def parse_copilot_ai_credits(text: str) -> float | None:
+    """Pull the per-session "AI Credits" used figure from a Copilot footer.
+
+    Both the legacy colon form (``AI Credits: 7.41``) and the new
+    space-then-value form (``AI Credits 7.41 (8s)``) are accepted; the
+    parenthetical elapsed time and any trailing unit (``s``/``m``) are
+    ignored. The two field shapes coexist across releases so the parser
+    has to recognise both.
+    """
     m = re.search(r"AI\s+Credits:\s*([0-9]+(?:[.][0-9]+)?)", text)
+    if m:
+        return float(m.group(1))
+    m = re.search(r"AI\s+Credits\s+([0-9]+(?:[.][0-9]+)?)", text)
     return float(m.group(1)) if m else None
+
+
+def copilot_capture_block_reason(status: str, screen: str) -> str | None:
+    """Reason that should prevent billing fallback from marking Copilot usable."""
+    if status in {"disabled", "missing-cli"}:
+        return status
+    if "trust_prompt_seen" in screen:
+        return "trust-prompt"
+    if re.search(r"[Ll]og\s*-?\s*[Ii]n|[Aa]uth", screen):
+        return "not-authenticated"
+    return None
 
 
 def read_copilot_live(env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -1224,23 +1586,53 @@ def read_copilot_live(env: dict[str, str] | None = None) -> dict[str, Any]:
     status, screen = capture_copilot_screen(env)
     monthly_used = parse_copilot_monthly_used(screen)
     ai_credits = parse_copilot_ai_credits(screen)
-    if monthly_used is not None or ai_credits is not None:
+    block_reason = copilot_capture_block_reason(status, screen)
+    if block_reason is not None:
+        return {"provider": "copilot", "source": "copilot cli", "available": False, "reason": block_reason}
+    monthly_result: dict[str, Any] | None = None
+    source = "copilot cli"
+    if monthly_used is not None:
+        monthly_result = {
+            "used": monthly_used,
+            "remaining": min(100.0, max(0.0, 100.0 - monthly_used)),
+        }
+    if monthly_result is None:
+        # The new Copilot CLI (>= 1.0.57) no longer prints the
+        # ``Plan: N% used`` figure in its footer — the only monthly signal
+        # visible from inside the CLI is the per-session "AI Credits" counter
+        # and the token summary, neither of which represents the user's
+        # remaining monthly allowance. When the live footer is missing the
+        # monthly figure, fall back to the GitHub
+        # ``premium_request/usage`` REST endpoint, which always reports the
+        # current month's premium request consumption and lets us draw a
+        # real quota bar instead of collapsing to ``unavailable``. The
+        # fallback is best-effort: when no GitHub token is available, no
+        # user is logged in, or the API returns nothing for the current
+        # month, we still report ``format-changed`` so the user knows the
+        # live footer is the reason.
+        monthly_fallback = read_copilot_monthly_used(env)
+        if (
+            isinstance(monthly_fallback, dict)
+            and num(monthly_fallback.get("used")) is not None
+        ):
+            used = float(num(monthly_fallback["used"]))
+            remaining = monthly_fallback.get("remaining")
+            remaining_float = (
+                float(num(remaining))
+                if num(remaining) is not None
+                else max(0.0, 100.0 - used)
+            )
+            monthly_result = {"used": used, "remaining": remaining_float}
+            source = str(monthly_fallback.get("source") or "github billing")
+    if monthly_result is not None or ai_credits is not None:
         return {
             "provider": "copilot",
-            "source": "copilot cli",
+            "source": source,
             "capture_status": status,
-            "monthly": None
-            if monthly_used is None
-            else {"used": monthly_used, "remaining": min(100.0, max(0.0, 100.0 - monthly_used))},
+            "monthly": monthly_result,
             "ai_credits": None if ai_credits is None else {"used": ai_credits},
         }
-    reason = status
-    if "trust_prompt_seen" in screen:
-        reason = "trust-prompt"
-    elif re.search(r"[Ll]og\s*-?\s*[Ii]n|[Aa]uth", screen):
-        reason = "not-authenticated"
-    elif screen:
-        reason = "format-changed"
+    reason = "format-changed" if screen else status
     return {"provider": "copilot", "source": "copilot cli", "available": False, "reason": reason}
 
 
@@ -1254,7 +1646,28 @@ def copilot_refresh_wait_budget(env: dict[str, str], cache_present: bool) -> flo
     # but no longer shortens the wait -- a warm-but-stale cache used to wait ~1s
     # and serve the old value, which is exactly the staleness we are removing.
     _ = cache_present
-    default = str(int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 2)
+    try:
+        timeout = int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10")
+    except ValueError:
+        timeout = 10
+    # The detached refresh first runs the PTY capture (up to
+    # ``LLM_USAGE_COPILOT_TIMEOUT`` -- and on the new Copilot CLI, which no longer
+    # prints the ``Plan: N% used`` footer, that capture *always* burns the full
+    # timeout) and only THEN runs the GitHub ``premium_request/usage`` fallback
+    # that actually supplies the monthly figure. Under ``llm-usage``'s parallel
+    # provider fan-out the GitHub leg competes for CPU/network, so the old
+    # ``timeout + 2`` budget landed right on the boundary: the very first (cold)
+    # run routinely gave up a beat before the refresh wrote the cache, dropping
+    # the monthly bar *and* the add-on ``spend`` row (which is gated on
+    # availability) and skewing the budget total. Size the budget to cover the
+    # billing fallback so the cold run waits for real data. The wait loop returns
+    # as soon as the cache lands (or the refresh lock clears), so this only moves
+    # the give-up threshold -- it does not slow the happy path.
+    try:
+        fallback = int(env.get("LLM_USAGE_COPILOT_BILLING_FALLBACK_BUDGET", "8") or "8")
+    except ValueError:
+        fallback = 8
+    default = str(timeout + max(0, fallback))
     raw = env.get("LLM_USAGE_COPILOT_REFRESH_WAIT", default) or default
     try:
         return max(0.0, float(raw))
@@ -1388,12 +1801,474 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
     return {"provider": "copilot", "source": "copilot cli", "available": False, "reason": "refresh-pending"}
 
 
+# --- Copilot figures via the GitHub billing API ----------------------------
+#
+# Two figures have to come from GitHub's billing REST API because the new
+# Copilot CLI (>= 1.0.57) stopped printing them in its footer:
+#
+# 1. **Included-credit allowance** -- used to be ``Plan: N% used`` in the
+#    footer; the live CLI now only shows the per-session "AI Credits" counter
+#    and the token summary. ``/users/{login}/settings/billing/premium_request/
+#    usage`` returns the current month's per-model premium request count,
+#    which combined with the plan's monthly allowance gives us a
+#    "used percent" the dashboard can render.
+# 2. **Additional usage ($)** -- money charged beyond the included credit
+#    allowance. The CLI never reported this, so we read it from
+#    ``/users/{login}/settings/billing/usage`` (the ``netAmount`` line for
+#    ``product == copilot``) and surface it as a "spent $X" row.
+#
+# Both readers reuse whatever GitHub token is already on the box -- the same
+# token precedence the Copilot CLI itself documents (``COPILOT_GITHUB_TOKEN``
+# > ``GH_TOKEN`` > ``GITHUB_TOKEN``), then ``gh auth token`` as a fallback.
+# No new credential ever has to be configured for llm-usage; when no token is
+# reachable the figure is simply omitted (or, in the included-allowance case,
+# the row falls back to ``unavailable`` so the user sees the reason).
+GITHUB_API_BASE = "https://api.github.com"
+
+
+def _github_token(env: dict[str, str] | None = None) -> str | None:
+    env = env or os.environ
+    for key in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        value = str(env.get(key) or "").strip()
+        if value:
+            return value
+    gh = shutil.which("gh", path=env.get("PATH"))
+    if not gh:
+        return None
+    try:
+        proc = subprocess.run(
+            [gh, "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    token = (proc.stdout or "").strip()
+    return token if proc.returncode == 0 and token else None
+
+
+def _github_api_get(path: str, token: str, env: dict[str, str] | None = None) -> Any:
+    url = path if path.startswith("http") else f"{GITHUB_API_BASE}{path}"
+    req = Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "llm-tools-usage",
+        },
+    )
+    attempts, delay = live_fetch_retry_plan(env)
+    for attempt in range(attempts):
+        try:
+            with urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode("utf-8", "replace"))
+        except HTTPError as exc:
+            # 4xx (bad/wrong-scoped token, missing user) is authoritative.
+            if 400 <= exc.code < 500:
+                return None
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
+        except Exception:
+            if attempt + 1 < attempts and delay:
+                time.sleep(delay)
+    return None
+
+
+def _copilot_addon_spent_from_usage(payload: Any, env: dict[str, str] | None = None) -> float | None:
+    """Sum the current calendar month's Copilot *net* spend from a GitHub
+    billing ``usage`` payload.
+
+    GitHub reports the included allowance as a fully discounted line
+    (``grossAmount == discountAmount``, ``netAmount == 0``); ``netAmount`` is the
+    money charged *beyond* the allowance -- exactly the "Additional usage" figure.
+    Items are month-bucketed, so we keep only the current month to mirror the
+    web UI's per-cycle view.
+    """
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("usageItems")
+    if not isinstance(items, list):
+        return None
+    now = datetime.fromtimestamp(now_epoch(env), tz=timezone.utc)
+    total = 0.0
+    found = False
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("product") or "").lower() != "copilot":
+            continue
+        date = str(item.get("date") or "")
+        # date is e.g. "2026-06-01T00:00:00Z"; keep the current month only.
+        if len(date) >= 7:
+            if date[:4] != f"{now.year:04d}" or date[5:7] != f"{now.month:02d}":
+                continue
+        net = num(item.get("netAmount"))
+        if net is None:
+            continue
+        total += float(net)
+        found = True
+    if not found:
+        return None
+    return round(total, 2)
+
+
+def _copilot_addon_cache_payload(cache: Path) -> dict[str, Any] | None:
+    if not cache.is_file() or cache.stat().st_size <= 0:
+        return None
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict) and num(data.get("spent")) is not None:
+        return {"spent": float(num(data.get("spent"))), "currency": data.get("currency") or "$", "source": data.get("source") or "github billing (cached)"}
+    return None
+
+
+def read_copilot_addon(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Best-effort Copilot additional-usage ($) from the GitHub billing API.
+
+    Returns ``{"spent": float, "currency": "$", "source": str}`` or ``None`` when
+    the figure cannot be obtained (no token, network failure with no prior
+    cache, billing API without Copilot items). The result is cached with a TTL;
+    a transient failure degrades to the last cached value rather than dropping
+    the figure, since monthly billing totals change slowly. This never blocks
+    Copilot's primary (included-credit) reading: it is additive and isolated.
+    """
+    env = env or os.environ
+    if env.get("LLM_USAGE_DISABLE_COPILOT_ADDON") == "1":
+        return None
+    # Test/diagnostic injection: a usage payload bypasses all network access.
+    injected = env.get("LLM_USAGE_COPILOT_ADDON_USAGE_JSON")
+    if injected is not None:
+        spent = _copilot_addon_spent_from_usage(injected, env)
+        return None if spent is None else {"spent": spent, "currency": "$", "source": "github billing"}
+    cache = usage_cache_dir(env) / "copilot-addon.json"
+    try:
+        ttl = int(env.get("LLM_USAGE_COPILOT_ADDON_TTL", "900") or "900")
+    except ValueError:
+        ttl = 900
+    if cache.is_file() and cache.stat().st_size > 0 and int(time.time()) - int(cache.stat().st_mtime) <= ttl:
+        cached = _copilot_addon_cache_payload(cache)
+        if cached is not None:
+            return cached
+    token = _github_token(env)
+    if not token:
+        return _copilot_addon_cache_payload(cache)
+    login = str(env.get("LLM_USAGE_COPILOT_ADDON_LOGIN") or "").strip()
+    if not login:
+        user = _github_api_get("/user", token, env)
+        login = str((user or {}).get("login") or "").strip() if isinstance(user, dict) else ""
+    if not login:
+        return _copilot_addon_cache_payload(cache)
+    now = datetime.fromtimestamp(now_epoch(env), tz=timezone.utc)
+    payload = _github_api_get(
+        f"/users/{login}/settings/billing/usage?year={now.year}&month={now.month}",
+        token,
+        env,
+    )
+    spent = _copilot_addon_spent_from_usage(payload, env)
+    if spent is None:
+        return _copilot_addon_cache_payload(cache)
+    result = {"spent": spent, "currency": "$", "source": "github billing"}
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n", encoding="utf-8")
+        tmp.replace(cache)
+    except OSError:
+        pass
+    return result
+
+
 def decorate_window(window: dict[str, Any] | None) -> dict[str, Any] | None:
     if window is None:
         return None
     out = dict(window)
     out["remaining"] = remaining_from_used(out.get("used"))
     return out
+
+
+# Monthly premium-request allowances per Copilot plan tier. The mapping is
+# conservative: only the public per-user plans (Pro, Pro+, Business, Enterprise)
+# are spelled out; unknown tiers fall back to the Pro default so we still
+# surface a sensible "used vs allowance" ratio instead of refusing to draw a
+# bar. Anyone with a custom allowance can override it explicitly with
+# ``LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE`` and skip the lookup.
+_COPILOT_MONTHLY_ALLOWANCE_BY_PLAN: dict[str, int] = {
+    "free": 50,
+    "pro": 300,
+    "pro_plus": 1500,
+    "pro+": 1500,
+    "business": 300,
+    "enterprise": 1000,
+}
+
+
+def _copilot_monthly_allowance_for_plan(plan: str | None, env: dict[str, str] | None = None) -> int:
+    """Return the per-month premium-request allowance for a given plan name.
+
+    An explicit ``LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE`` env override always
+    wins so users with custom / enterprise contracts can pin the right
+    denominator without code changes. Otherwise we look up the published
+    allowance by the plan name (``pro`` → 300, ``pro_plus``/``pro+`` → 1500,
+    etc.) and fall back to the Pro allowance when the plan is unknown — the
+    alternative (refusing to render) leaves the user staring at a blank
+    monthly cell.
+    """
+    env = env or os.environ
+    raw = str(env.get("LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE") or "").strip()
+    if raw:
+        try:
+            value = int(float(raw))
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    name = str(plan or "").strip().lower()
+    if name in _COPILOT_MONTHLY_ALLOWANCE_BY_PLAN:
+        return _COPILOT_MONTHLY_ALLOWANCE_BY_PLAN[name]
+    # Free, unknown, or missing → 300 (Pro) keeps the math sane.
+    return _COPILOT_MONTHLY_ALLOWANCE_BY_PLAN["pro"]
+
+
+def _copilot_monthly_used_from_premium_request_usage(payload: Any) -> float | None:
+    """Sum the current month's Copilot premium requests from a GitHub
+    ``premium_request/usage`` payload.
+
+    The endpoint returns one ``usageItems`` entry per (model, date) pair; the
+    raw metric is in *requests* (per the ``unitType: requests`` field), and
+    the ``grossQuantity`` field is the count of premium requests consumed
+    against the user's monthly allowance. We sum across the current calendar
+    month (the caller is expected to pass a payload already filtered to the
+    current ``year``/``month``) and return the raw request count; the caller
+    multiplies by the plan allowance to get a percent.
+
+    Three outcomes are distinguished so the dashboard can render the right
+    cell:
+
+    * **API responded with no rows** (``usageItems`` is ``[]`` or has no
+      Copilot product): the user has a paid plan but no recorded usage
+      yet, so we return ``0.0`` and the dashboard draws a full "remaining"
+      bar instead of collapsing to ``unavailable``.
+    * **API responded with rows**: we sum the ``grossQuantity`` across
+      Copilot items and return the request count.
+    * **API did not respond / malformed** (``usageItems`` is missing, not a
+      list, or the payload itself is not a JSON object): we return
+      ``None`` so the caller can degrade to its own failure shape.
+    """
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("usageItems")
+    if items is None:
+        return None
+    if not isinstance(items, list):
+        return None
+    total = 0.0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("product") or "").lower() != "copilot":
+            continue
+        gross = num(item.get("grossQuantity"))
+        if gross is None or gross <= 0:
+            continue
+        total += float(gross)
+    return total
+
+
+def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, Any] | None:
+    """Best-effort Copilot monthly *used* percent from the GitHub billing API.
+
+    The new Copilot CLI (>= 1.0.57) no longer prints the
+    ``Plan: N% used`` figure in its footer; the dashboard needs a substitute
+    so the monthly cell stays informative rather than ``unavailable``. The
+    premium_request/usage endpoint exposes the raw per-model request counts
+    for the current month, and combined with the plan's monthly allowance
+    that gives us a "used percent" the dashboard can render as a quota bar.
+
+    Returns ``{"used": float, "remaining": float, "requests": int,
+    "allowance": int, "source": str}`` or ``None`` when no measurement is
+    possible (no token, no plan, API failure with no usable cache). The
+    result is cached with a short TTL because the figure is month-bucketed
+    and changes at most once per request.
+
+    Never raises: a billing-API failure is the whole reason the live
+    ``Plan: N% used`` footer exists, so the fallback has to be similarly
+    well-behaved.
+    """
+    env = env or os.environ
+    if env.get("LLM_USAGE_DISABLE_COPILOT_MONTHLY") == "1":
+        return None
+    # Test/diagnostic injection: a usage payload bypasses all network access.
+    injected = env.get("LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON")
+    if injected is not None:
+        requests_used = _copilot_monthly_used_from_premium_request_usage(injected)
+        if requests_used is None:
+            return None
+        allowance = _copilot_monthly_allowance_for_plan(
+            env.get("LLM_USAGE_COPILOT_PLAN"), env
+        )
+        used_percent = max(0.0, min(100.0, requests_used / allowance * 100.0))
+        return {
+            "used": used_percent,
+            "remaining": max(0.0, 100.0 - used_percent),
+            "requests": int(round(requests_used)),
+            "allowance": allowance,
+            "source": "github billing",
+        }
+    cache = usage_cache_dir(env) / "copilot-monthly.json"
+    try:
+        ttl = int(env.get("LLM_USAGE_COPILOT_MONTHLY_TTL", "600") or "600")
+    except ValueError:
+        ttl = 600
+    if cache.is_file() and cache.stat().st_size > 0 and int(time.time()) - int(cache.stat().st_mtime) <= ttl:
+        try:
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = None
+        if isinstance(cached, dict) and num(cached.get("used")) is not None:
+            return cached
+    token = _github_token(env)
+    if not token:
+        return _copilot_monthly_cache_payload(cache)
+    login = str(env.get("LLM_USAGE_COPILOT_ADDON_LOGIN") or "").strip()
+    if not login:
+        user = _github_api_get("/user", token, env)
+        login = str((user or {}).get("login") or "").strip() if isinstance(user, dict) else ""
+    if not login:
+        return _copilot_monthly_cache_payload(cache)
+    now = datetime.fromtimestamp(now_epoch(env), tz=timezone.utc)
+    # The GitHub ``premium_request/usage`` endpoint is documented to only
+    # return data for the past 24 hours, but in practice the
+    # ``?year=...&month=...&day=...`` query returns full per-day
+    # aggregates. The bare ``?year=...&month=...`` query (without a day)
+    # silently returns an empty ``usageItems`` array for the *current*
+    # month -- even when there is plenty of usage recorded for individual
+    # days. This is a well-known API quirk: the dashboard has to ask for
+    # the month one day at a time when computing the current calendar
+    # month's premium request consumption, otherwise it draws a
+    # full-green "headroom" bar on a day the user has actually exhausted
+    # their allowance.
+    is_current_month = True
+    if "LLM_USAGE_COPILOT_PREMIUM_REQUEST_MONTH_OVERRIDE" in env:
+        # Test seam: a frozen ``(year, month)`` lets a test pin "March 2026"
+        # and assert the year+month fast path. The current-month day-by-day
+        # loop is then skipped, so the test does not have to mock 30 API
+        # responses just to exercise the sum logic.
+        raw = env["LLM_USAGE_COPILOT_PREMIUM_REQUEST_MONTH_OVERRIDE"]
+        try:
+            parts = raw.split("-", 2)
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                now = now.replace(year=int(parts[0]), month=int(parts[1]), day=1)
+                is_current_month = False
+        except (ValueError, IndexError):
+            pass
+    if is_current_month:
+        # Day-by-day sum for the current month so we see usage recorded
+        # up to "today". The month-rollover is a wall-clock month
+        # boundary, not 30 days back, so the iteration is bounded.
+        # We fan out the per-day probes in parallel so a full-month
+        # refresh does not take ``days * per-request-timeout``; the
+        # bounded ``LLM_USAGE_PROVIDER_PARALLELISM`` (default = CPU
+        # cores) keeps the fan-out from overwhelming the API.
+        import calendar as _cal
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        days_in_month = _cal.monthrange(now.year, now.month)[1]
+        end_day = min(now.day, days_in_month)
+        day_results: dict[int, float | None] = {}
+
+        def probe_day(day: int) -> tuple[int, float | None]:
+            payload = _github_api_get(
+                f"/users/{login}/settings/billing/premium_request/usage"
+                f"?year={now.year}&month={now.month}&day={day}",
+                token,
+                env,
+            )
+            return day, _copilot_monthly_used_from_premium_request_usage(payload)
+
+        try:
+            parallelism = max(1, int(env.get("LLM_USAGE_PROVIDER_PARALLELISM", "4") or "4"))
+        except ValueError:
+            parallelism = 4
+        with ThreadPoolExecutor(max_workers=parallelism) as pool:
+            futures = [pool.submit(probe_day, day) for day in range(1, end_day + 1)]
+            for future in as_completed(futures):
+                day, day_total = future.result()
+                day_results[day] = day_total
+        successful_days = [v for v in day_results.values() if v is not None]
+        failed_days = len(successful_days) != len(day_results)
+        requests_used = sum(successful_days)
+        if requests_used == 0:
+            # A paid plan with no recorded usage yet still legitimately
+            # reports 0 used; fall back to a single month-level probe
+            # in case the day-by-day responses all come back empty for
+            # an unrelated reason (e.g. the token lost its scopes).
+            payload = _github_api_get(
+                f"/users/{login}/settings/billing/premium_request/usage"
+                f"?year={now.year}&month={now.month}",
+                token,
+                env,
+            )
+            month_total = _copilot_monthly_used_from_premium_request_usage(payload)
+            if month_total is not None:
+                requests_used = month_total
+            elif not successful_days or failed_days:
+                requests_used = None
+    else:
+        payload = _github_api_get(
+            f"/users/{login}/settings/billing/premium_request/usage?year={now.year}&month={now.month}",
+            token,
+            env,
+        )
+        requests_used = _copilot_monthly_used_from_premium_request_usage(payload)
+    if requests_used is None:
+        return _copilot_monthly_cache_payload(cache)
+    plan = str(env.get("LLM_USAGE_COPILOT_PLAN") or "").strip()
+    allowance = _copilot_monthly_allowance_for_plan(plan, env)
+    used_percent = max(0.0, min(100.0, requests_used / allowance * 100.0))
+    result: dict[str, Any] = {
+        "used": used_percent,
+        "remaining": max(0.0, 100.0 - used_percent),
+        "requests": int(round(requests_used)),
+        "allowance": allowance,
+        "source": "github billing",
+    }
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n", encoding="utf-8")
+        tmp.replace(cache)
+    except OSError:
+        pass
+    return result
+
+
+def _copilot_monthly_cache_payload(cache: Path) -> dict[str, Any] | None:
+    if not cache.is_file() or cache.stat().st_size <= 0:
+        return None
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or num(data.get("used")) is None:
+        return None
+    # Strip the bookkeeping "ts" key so the on-disk snapshot matches the
+    # shape returned by a live call.
+    return {k: v for k, v in data.items() if k != "ts"}
 
 
 def json_for_provider(provider_json: dict[str, Any] | None, provider: str) -> dict[str, Any]:
@@ -3055,8 +3930,8 @@ def arm_rtc_wake(target_epoch: int, who: str, env: dict[str, str] | None = None)
         if proc.returncode == 0:
             alarm = read_rtc_wakealarm(env)
             confirmed = alarm is not None and abs(alarm - target_epoch) <= tolerance
-            if confirmed or alarm is not None:
-                return WakeArm(True, "rtcwake", confirmed, detail=proc.stdout.strip())
+            if confirmed:
+                return WakeArm(True, "rtcwake", True, detail=proc.stdout.strip())
 
     if power_backend(env) == "systemd":
         unit = f"{who}-wake-{int(time.time())}"

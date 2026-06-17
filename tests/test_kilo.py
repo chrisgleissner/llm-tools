@@ -545,8 +545,10 @@ def test_usage_table_renders_kilo_spent(env: dict[str, str], capsys, monkeypatch
         usage.print_kilo_rows(cfg, json_obj)
     out = buf.getvalue()
     assert "Kilo" in out
-    assert "spent $7" in out
-    # The renderer must NOT label this as a remaining balance.
+    # Spend rows read "spend  $7.5" (scope label + left-aligned amount), never
+    # right-aligned "spent $", and are distinct from a funded "balance" row.
+    assert "spend" in out
+    assert "$7.5" in out
     assert "balance   $7" not in out
     # A spent-cost row from an available snapshot means the provider is ready.
     assert "yes" in out

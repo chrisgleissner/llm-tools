@@ -4,11 +4,12 @@
 
 This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilot, and Kilo Code CLI:
 
-* `llm-usage` — show local usage/quota for each provider.
+* `llm-usage` — show local usage/quota for each provider, optionally through a local Unix-socket sampler service.
 * `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a scope reset).
 * `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`. Holds an OS idle inhibitor for the whole run so a desktop idle timer cannot suspend the machine mid-work, and when every provider is rate-limited it sleeps the machine itself via a verified RTC wake (see Suspend/wake reliability below).
 * `llm-sleep-soak` — repeatedly suspend and wake the machine using the exact production suspend path to prove sleep/resume is reliable on this hardware. Real-hardware test; cannot run in CI.
 * `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, usage decisions, PTY capture, wake diagnostics, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
+* `llm_tools/usage_service.py` — local-only `llm-usage` sampler service (Unix socket, latest snapshot, append-only history; systemd user service / launchd LaunchAgent install helpers).
 * `llm_tools/capacity.py` — generic `ProviderId`, `CapacityKind`, `CapacityScope`, `ProviderSnapshot`, and `UsageDecision` dataclasses plus the `decide`/`validate_scope`/`scope_pace` helpers. All provider-specific reader code lives outside this module.
 * `llm_tools/providers/kilo.py` — Kilo Code CLI adapter (parser for `kilo stats` output, env-var fallback, command construction).
 * `llm_tools/providers/minimax.py` — MiniMax adapter (parser for `mmx quota show --output json` output, env-var fallback, command construction).
@@ -23,6 +24,8 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * Local planning/work logs: `PLANS.md`, `WORKLOG.md`.
 * Runtime data root: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`, one subdirectory per tool. Legacy `~/.cache/llm-usage`, `~/.cache/llm-scheduler`, and `~/.cache/ralph-robin` dirs are auto-migrated by `migrate_legacy_cache_dirs` in `llm_tools/common.py`.
 * Usage cache and samples log: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage` (`claude-status.json`, `claude-usage-api.json`, `llm-usage.log`)
+* Usage service history/logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage/service` (`latest.json`, `history.jsonl`, service logs)
+* Usage service socket/pid: `${XDG_RUNTIME_DIR:-/tmp/llm-tools-$UID}` (`llm-usage.sock`, `llm-usage.pid`) so Unix socket paths stay below platform length limits.
 * Copilot background refresh helper: `llm_tools/copilot_refresh.py`, launched by `read_copilot` for detached cache refreshes.
 * Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`
 * Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`
@@ -30,7 +33,7 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * Suspend cycle ledger (durable, fsync'd; shared by ralph-robin and the soak): `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/suspend-ledger.jsonl`
 * Sleep-soak run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-sleep-soak/logs`
 
-Keep these as dependency-light Python CLIs sharing helper modules: no daemon, server, database, telemetry, or broad provider SDK design unless explicitly requested. Shared logic belongs in `llm_tools/common.py` and `llm_tools/capacity.py`, not duplicated across CLIs or provider adapters.
+Keep these as dependency-light Python CLIs sharing helper modules. The only supported server process is the explicitly requested, local-only `llm-usage` sampler in `llm_tools/usage_service.py`; keep it Unix-socket based, user-scoped, dependency-free, and optional. Do not add a database, telemetry, broad provider SDK design, or network listener unless explicitly requested. Shared logic belongs in `llm_tools/common.py` and `llm_tools/capacity.py`, not duplicated across CLIs or provider adapters.
 
 ## Fast checks
 
@@ -42,6 +45,8 @@ chmod +x llm-usage llm-scheduler ralph-robin llm-sleep-soak
 ./llm-usage --hide-remaining-time --show-source
 ./llm-usage --show-copilot-credits --show-source
 ./llm-usage --hide-codex-spark
+./llm-usage --no-service --json
+./llm-usage --service-status
 ./llm-scheduler --provider codex --prompt x --dry-run --command-template true
 ./llm-scheduler --wake-test
 ./ralph-robin --prompt x --dry-run --command-template true
@@ -110,6 +115,10 @@ Tests should use `LLM_USAGE_COPILOT_CAPTURE_TEXT` or bounded timeout paths, not 
 
 The PTY capture is slow (up to `LLM_USAGE_COPILOT_TIMEOUT` seconds), so `read_copilot` serves a cached snapshot (`copilot-usage.json`, TTL `LLM_USAGE_COPILOT_CACHE_TTL`, default 300s) and revalidates it with a detached background capture. The fixture/override knobs above and `LLM_USAGE_COPILOT_CACHE_TTL=0` force the original synchronous capture; keep that bypass intact so tests stay deterministic.
 
+The live CLI footer has changed shape over time: pre-1.0.57 printed ``Plan: N% used`` / ``Monthly: N% used`` (the *used* percentage); 1.0.57+ render ``Remaining reqs.: N%`` (the *remaining* percentage). 1.0.63+ also dropped the colon on the ``AI Credits`` line. The parsers must accept every shape; whichever figure is present gets converted to *used* percent so the dashboard's quota bar draws the right way.
+
+The new CLI (>1.0.57) no longer surfaces a *monthly* figure at all — the only monthly signal is the per-session ``AI Credits`` counter and the token summary, neither of which represents the user's remaining monthly allowance. When the live footer is missing the monthly figure, `read_copilot_live` falls back to the GitHub ``premium_request/usage`` REST endpoint (``/users/{login}/settings/billing/premium_request/usage``), which always reports the current month's per-model premium request count and lets us draw a real quota bar instead of collapsing to ``unavailable``. The same GitHub-token precedence the Copilot CLI itself documents (``COPILOT_GITHUB_TOKEN`` > ``GH_TOKEN`` > ``GITHUB_TOKEN`` > ``gh auth token``) drives the request; no Copilot-specific credential is ever required. Override the plan with ``LLM_USAGE_COPILOT_PLAN`` (``pro`` / ``pro_plus`` / ``pro+`` / ``business`` / ``enterprise``) or the allowance directly with ``LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE``.
+
 ### Kilo Code CLI
 
 Tests should use the env-var fallback path (`LLM_USAGE_KILO_*`) and `LLM_USAGE_COPILOT_CAPTURE_TEXT`-style fixture overrides rather than live `kilo stats` capture. The reader tries `kilo stats` first (JSON or human-readable) and falls back to:
@@ -137,6 +146,8 @@ When the same provider can serve several underlying models with different capaci
 
 The MiniMax provider is sourced from the `mmx` CLI (run `mmx quota show --output json`). The reader tries that first and falls back to a deterministic env-var schema for tests. It picks the `general` row from the `model_remains` array (other model rows are ignored) and exposes the same 5h/weekly reset-window shape as Claude Code and Codex, so the row renders and gates identically to the other two reset-window providers. The provider is hidden entirely from the table and `--json` output when the `mmx` binary is not on PATH and no env-var fallback is present.
 
+The mmx CLI writes the JSON ``model_remains`` payload to **stdout** on success, but writes the error envelope ``{"error": {"code": N, "message": "..."}}`` to **stderr** (and exits non-zero) when the underlying API rejects the request. The reader parses stdout and stderr independently (stdout first, then stderr) so stderr warnings cannot corrupt valid quota JSON while stderr error envelopes are still recognised; the error message is classified into a stable reason (``subscription-required`` for "no active plan", ``not-authenticated`` for auth failures, ``rate-limited`` for 429, ``network-error`` for connection failures, ``quota-error`` otherwise) and surfaced in the table instead of the generic ``inconclusive-usage``.
+
 Tests should use the env-var fallback path (`LLM_USAGE_MINIMAX_*`) and `LLM_USAGE_COPILOT_CAPTURE_TEXT`-style fixture overrides rather than live `mmx` capture. The reader tries `mmx quota show --output json` first and falls back to:
 
 * `LLM_USAGE_MINIMAX_5H_PERCENT` — remaining percent for the 5h session window (0..100).
@@ -159,8 +170,12 @@ Missing CLI with no env-var fallback is `reason="missing-cli"`. The provider is 
 * Never log secrets; prompt copies live under the run dir with `600`/`700` perms.
 * Fresh mode on an interactive terminal runs the provider CLI in its normal interactive form on a PTY wired directly to that terminal via `script(1)` (`resolve_attach_mode`, `ATTACHED=1`): output, stdin, resizes, and Ctrl-C must behave exactly as a direct CLI launch. Headless fresh mode (no TTY, `--headless`, `LLM_SCHEDULER_HEADLESS=1`, or `LLM_SCHEDULER_NO_STREAM=1`) keeps the non-interactive provider commands and streams the child output live to the scheduler's stdout (and through `ralph-robin` to the invoking terminal) unless `LLM_SCHEDULER_NO_STREAM=1`. Both paths write the ANSI-cleaned copy to `attempt-N.out`. Attached runs never retry on a clean exit or user cancel (130/143) and skip the rate-limit phrase grep, since interactive screen content can legitimately mention rate limits. Headless runs must abort with status `75` when a blocking prompt UI is detected, when question-like output stalls, or when there is no output progress past `LLM_SCHEDULER_IDLE_TIMEOUT`; `ralph-robin` must treat status `75` as a reason to re-evaluate rotation, not as a final failure after the first provider. Tests extract the run dir from the `logs written to` stdout line, never via `awk '{print $NF}'` over all lines.
 * Ralph must prepend provider-aware runtime context before launching a selected provider. That context must identify the selected provider, list latest usage decisions, and override stale provider-specific handoff/scheduler instructions in the original prompt so Codex does not hand off merely because Claude is exhausted, and vice versa.
-* Every provider is actively refreshed on read; `stale-usage` is a bug to display except for a known authentication or CLI-startup problem. Caches are bounded by a freshness window (TTL); never display a snapshot past its TTL — refresh it first (the Copilot reader waits for the in-flight capture rather than serving a stale snapshot and refreshing "for next time"). Active network refreshes retry a bounded number of times (`LLM_USAGE_LIVE_FETCH_RETRIES`) so a transient blip (e.g. a network stack still settling right after resume) does not degrade to `stale-usage`.
-* Burn-rate / remaining-time estimation despikes isolated single-sample outliers before anchoring to the current window. A lone bad reading and its recovery must not be mistaken for a window reset (which would discard real history and surface a spurious `no rate data`). `no rate data` is correct only when there is genuinely no consumption to forecast (e.g. a window sitting at 100%) or the scope has no time-based pace (balance/ungated).
+* Every provider is actively refreshed on read; `stale-usage` is a bug to display except for a known authentication or CLI-startup problem. Caches are bounded by a freshness window (TTL); never display a snapshot past its TTL — refresh it first (the Copilot reader waits for the in-flight capture rather than serving a stale snapshot and refreshing "for next time"). Active network refreshes retry a bounded number of times (`LLM_USAGE_LIVE_FETCH_RETRIES`) so a transient blip (e.g. a network stack still settling right after resume) does not degrade to `stale-usage`. Both legs of the Claude OAuth read — the usage fetch *and* the token refresh — carry that retry budget; the refresh is the leg that matters after a long suspend, because the access token has usually expired by the time the machine wakes.
+* Stale-usage recovery is the backstop that makes the above guarantee hold: when a read still resolves to `stale-usage` *and* a live acquisition path exists (Claude OAuth credentials present, or the Codex app-server reachable: CLI installed + authenticated), `common.recover_stale_with_live_retry` re-drives the whole live read with bounded exponential backoff (`stale_recovery_schedule`) before ever surfacing stale numbers. This is what prevents the tool from passively waiting for the underlying CLI to refresh its own artifacts — it proactively re-acquires. The retry budget is empty when `LLM_USAGE_LIVE_FETCH_RETRIES=0` (tests) and when no live path exists (genuinely offline / unauthenticated), so a truly unreachable provider still returns promptly and `stale-usage` reaches the user only under genuinely exceptional circumstances. Mirror this for any new provider with a live query: gate recovery on a "live path available" predicate and reuse the shared helper.
+* Copilot surfaces a `monthly` row for the included credit allowance (parsed from the CLI footer `Plan: N% used` / `Remaining reqs.: N%` / `Monthly: N% used`, depending on CLI release) and a `spend` row showing additional ("add-on") usage — the dollar amount billed beyond the allowance, rendered as a left-aligned amount. The new Copilot CLI (>1.0.57) no longer surfaces the monthly figure in its footer; the live reader falls back to GitHub's `premium_request/usage` REST endpoint (`/users/{login}/settings/billing/premium_request/usage`), which always reports the current month's per-model premium request count, summed against the plan's monthly allowance (300 for Pro, 1500 for Pro+, etc.) to draw a real quota bar. The add-on figure comes from the GitHub billing REST API (`/users/{login}/settings/billing/usage`, summing the current month's `netAmount` for `product == "copilot"`). Both readers reuse an already-present GitHub token (`COPILOT_GITHUB_TOKEN` > `GH_TOKEN` > `GITHUB_TOKEN`, then `gh auth token`) so no Copilot-specific credential is ever required; with no token the rows fall back to whatever the live CLI footer / cache reported, never fabricated. Both reads are isolated and cached (`LLM_USAGE_COPILOT_ADDON_TTL` / `LLM_USAGE_COPILOT_MONTHLY_TTL`): they ride in `model_scopes` (display-only) so they never gate provider readiness, and a transient billing-API failure degrades to the last cached figure. The `$5` budget *limit* is web-UI-only (no REST API exposes it), so only the spent amount is shown. The plan allowance can be overridden with `LLM_USAGE_COPILOT_PLAN` (one of `pro` / `pro_plus` / `pro+` / `business` / `enterprise` / `free`) or pinned directly with `LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE`.
+* Burn-rate / remaining-time estimation despikes isolated single-sample outliers before anchoring to the current window. A lone bad reading and its recovery must not be mistaken for a window reset (which would discard real history and surface a spurious "no rate data"). Internally the guidance classifier still emits the `unknown` severity when there is genuinely no consumption to forecast (a window at 100%) or the scope has no time-based pace (balance/ungated); the renderer shows that as a blank cell (see calm-placeholder policy below).
+* Calm-placeholder policy for the usage table: a cell with nothing to report is left blank, never filled with a dash or a "no rate data" placeholder. This applies to Guidance with `unknown` severity (`render_guidance_info`), `Resets in` for non-resetting scopes (`format_reset`), and `Remaining Time` when N/A (`row_values`). The one deliberate exception is a genuine "could not measure" state, which is surfaced as the single word `unavailable` in the Remaining column — that is information the user must see, not an empty cell. Keep that distinction: blank means "not applicable", `unavailable` means "we tried and failed".
+* Monetary spend rows render consistently with quota rows — the amount sits on the left (never a right-aligned `spent $X`), under the `spend` scope label so they read as cost and stay visually distinct from a funded `balance` row. With an overall `[budget]` configured (or `LLM_USAGE_MONTHLY_BUDGET`), a bar follows showing each provider's spend as a share of that single budget (`█` spent · `░` budget left, the opposite fill of quota bars, coloured green→red by `spend_color_code`, the bar capped full while the `% of $B` guidance shows any overage). `budget_total_row` appends a bottom row summing all same-currency spend whenever there is any — labelled `Budget` (with the bar + month-end reset) when a budget exists, else `Total`. Spend rows carry `remaining=1.0` so an available provider stays `Ready` without the cost figure gating rotation.
 
 ## Suspend/wake reliability
 
@@ -186,8 +201,12 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_MAX_FILES`
 * `LLM_USAGE_TAIL_LINES`
 * `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` (seconds before active/unknown Codex/Claude local snapshots are reported as stale; capped at 60; non-positive/invalid values fall back to 60)
-* `LLM_USAGE_LIVE_FETCH_RETRIES` (extra attempts for active-refresh network reads before falling back; default 2; tests pin 0)
+* `LLM_USAGE_LIVE_FETCH_RETRIES` (extra attempts for active-refresh network reads before falling back; default 2; tests pin 0; also gates stale-usage recovery off entirely when 0)
 * `LLM_USAGE_LIVE_FETCH_RETRY_DELAY` (seconds between live-fetch retries; default 0.5)
+* `LLM_USAGE_STALE_RECOVERY_ATTEMPTS` (max full-read re-drives when a result would otherwise be `stale-usage` and a live path exists; default 4)
+* `LLM_USAGE_STALE_RECOVERY_DELAY` (initial backoff seconds between stale-recovery re-drives; default 0.5; doubles each attempt)
+* `LLM_USAGE_STALE_RECOVERY_MAX_DELAY` (cap for the stale-recovery backoff; default 4.0)
+* `LLM_USAGE_STALE_RECOVERY_MAX_WAIT` (wall-clock cap on total stale-recovery time, since each re-drive carries its own network timeout; default 20.0s)
 * `LLM_TOOLS_NO_INHIBIT` (set to `1` to skip the logind idle inhibitor `ralph-robin`/soak hold during a run; tests set this)
 * `LLM_TOOLS_LOCAL_BLOCK_DIR` (override the per-route local block directory; default `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks`)
 * `LLM_TOOLS_LOCAL_BLOCK_BACKOFF` (default backoff in seconds for an opaque route runtime block when no `retry-after` hint is present; default 300)
@@ -200,7 +219,11 @@ Important knobs that tests or users may rely on:
 * `LLM_RALPH_MAX_SUSPENDS` (max machine suspends per run; default 0 = unlimited)
 * `LLM_SCHEDULER_SUSPEND_MIN_LEAD` (minimum lead before arming a wake / suspending; default 120)
 * `LLM_USAGE_PROVIDER_PARALLELISM` (provider reader fan-out concurrency for `llm-usage`; default is CPU cores)
+* `LLM_USAGE_NO_SERVICE` (set to `1` to bypass the local `llm-usage` service and read providers directly; tests set this except service-specific cases)
+* `LLM_USAGE_SERVICE_INTERVAL` (continuous `llm-usage` service refresh interval in seconds; default 60)
 * `LLM_USAGE_NO_PROGRESS` (set to `1` to suppress the ephemeral stderr refresh spinner; it is also auto-suppressed when stderr is not a TTY)
+* `LLM_USAGE_MONTHLY_BUDGET` (overall monthly spend budget; turns `spent $X` rows into coloured progress bars and adds the `Budget` total row; overrides the `[budget].monthly` config key)
+* `LLM_USAGE_BUDGET_CURRENCY` (display symbol for the budget; default `$`; overrides `[budget].currency`)
 * `LLM_USAGE_CODEX_TIMEOUT` (seconds to wait for the `codex app-server` rate-limit handshake; default 15)
 * `LLM_USAGE_DISABLE_CODEX_APP_SERVER` (set to `1` to skip the live Codex app-server refresh and use only the cache/local fallback; used by tests for hermetic runs)
 * `LLM_USAGE_CODEX_APP_SERVER_CMD` (override the `codex app-server` command, e.g. a fake server in tests)
@@ -217,6 +240,16 @@ Important knobs that tests or users may rely on:
 * `LLM_USAGE_COPILOT_CWD`
 * `LLM_USAGE_COPILOT_CAPTURE_CWD`
 * `LLM_USAGE_COPILOT_MONTHLY_RESET_OFFSET_DAYS`
+* `LLM_USAGE_DISABLE_COPILOT_ADDON` (set to `1` to skip the GitHub-billing add-on reader; tests set this)
+* `LLM_USAGE_COPILOT_ADDON_TTL` (seconds the cached Copilot add-on $ figure stays fresh; default 900)
+* `LLM_USAGE_COPILOT_ADDON_USAGE_JSON` (inject a GitHub billing `usage` payload, bypassing all network access; used by tests)
+* `LLM_USAGE_COPILOT_ADDON_LOGIN` (override the GitHub login lookup for the add-on billing query; mainly tests)
+* `LLM_USAGE_DISABLE_COPILOT_MONTHLY` (set to `1` to skip the GitHub `premium_request/usage` monthly fallback without disabling the add-on spend row; tests set this)
+* `LLM_USAGE_COPILOT_MONTHLY_TTL` (seconds the cached Copilot monthly used-percent figure stays fresh; default 600)
+* `LLM_USAGE_COPILOT_PREMIUM_REQUEST_USAGE_JSON` (inject a GitHub `premium_request/usage` payload, bypassing all network access; used by tests)
+* `LLM_USAGE_COPILOT_PLAN` (override the resolved plan name for the monthly allowance lookup; one of `pro`, `pro_plus` / `pro+`, `business`, `enterprise`, or `free`)
+* `LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE` (override the resolved per-month premium-request allowance, in requests; pins the denominator for the quota bar to a custom / enterprise contract)
+* `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` (GitHub token the add-on and monthly readers reuse, in this precedence; falls back to `gh auth token`. Never required — absent a token the add-on row is simply omitted and the monthly figure falls back to the live CLI footer)
 * `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS`
 * `LLM_SCHEDULER_NO_STREAM` (disable live pass-through of the child CLI output to stdout in fresh mode; also forces headless commands)
 * `LLM_SCHEDULER_HEADLESS` (force the non-interactive provider command and captured PTY even on a terminal)

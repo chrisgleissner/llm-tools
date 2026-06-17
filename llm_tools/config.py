@@ -56,7 +56,8 @@ from .capacity import ALL_PROVIDERS
 
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
-_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes"})
+_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget"})
+_BUDGET_KEYS = frozenset({"monthly", "currency"})
 _DEFAULTS_KEYS = frozenset({"providers", "scope", "min_remaining"})
 _PROVIDER_KEYS = frozenset({"model", "allow_fallback", "scope", "min_remaining", "capacity_provider"})
 # Tool sections accept any key a CLI flag maps to; validation of individual
@@ -253,6 +254,8 @@ def _validate(raw: Any) -> dict[str, Any]:
     _validate_section(raw.get("defaults"), "defaults", _DEFAULTS_KEYS)
     _validate_section(raw.get("ralph"), "ralph", _RALPH_KEYS)
     _validate_section(raw.get("scheduler"), "scheduler", _SCHEDULER_KEYS)
+    _validate_section(raw.get("budget"), "budget", _BUDGET_KEYS)
+    _validate_budget(raw.get("budget"))
     providers = raw.get("providers")
     if providers is not None:
         if not isinstance(providers, dict):
@@ -270,6 +273,41 @@ def _validate(raw: Any) -> dict[str, Any]:
         _validate_capacity_providers(providers)
     _validate_routes(raw.get("routes"), providers or {})
     return raw
+
+
+def _validate_budget(budget: Any) -> None:
+    """Validate the optional ``[budget]`` table.
+
+    ``monthly`` is the overall monthly spend ceiling that all providers' add-on
+    costs are measured against; ``currency`` is its display symbol. The amount
+    must be a positive number so a progress bar can be computed against it.
+    """
+    if budget is None:
+        return
+    if "monthly" in budget:
+        amount = budget["monthly"]
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            _fail("budget.monthly must be a number")
+        if amount <= 0:
+            _fail("budget.monthly must be greater than 0")
+    if "currency" in budget and not isinstance(budget["currency"], str):
+        _fail("budget.currency must be a string")
+
+
+def monthly_budget(cfg: dict[str, Any]) -> tuple[float | None, str]:
+    """Return ``(amount, currency)`` for the overall monthly budget.
+
+    ``amount`` is ``None`` when no budget is configured. ``currency`` defaults to
+    ``"$"`` so spend rows render consistently even before a budget is set.
+    """
+    budget = cfg.get("budget") if isinstance(cfg, dict) else None
+    if not isinstance(budget, dict):
+        return None, "$"
+    amount = budget.get("monthly")
+    currency = str(budget.get("currency") or "$")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount <= 0:
+        return None, currency
+    return float(amount), currency
 
 
 def _validate_capacity_providers(providers: dict[str, Any]) -> None:
