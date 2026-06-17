@@ -137,6 +137,7 @@ class RalphConfig:
     prefix_spec: str = "time,provider"
     prefix_fields: list[str] = field(default_factory=list)
     prefix_usage_interval: str = "15"
+    completed_counts: dict[str, int] = field(default_factory=dict)
     # Per-provider routing policies (model + allow_fallback) resolved from the
     # shared config file, keyed by provider name.
     policies: dict[str, toolconfig.ProviderPolicy] = field(default_factory=dict)
@@ -1079,6 +1080,8 @@ def select_route(
         decision = _route_decision_for_index(cfg, rid)
         decisions.append(decision)
         common.log_event(logs, "route_decision", decision)
+    if completed_counts is None:
+        completed_counts = getattr(cfg, "completed_counts", None)
     if cfg.even_burn:
         fair = mixed_capacity_fair_index(
             decisions,
@@ -1198,6 +1201,8 @@ def select_provider(
         decisions.append(decision)
         common.log_event(logs, "usage_snapshot", {"provider": provider, "capacity_provider": capacity_provider, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
+    if completed_counts is None:
+        completed_counts = getattr(cfg, "completed_counts", None)
     if cfg.even_burn:
         fair_index = mixed_capacity_fair_index(
             decisions,
@@ -1611,6 +1616,7 @@ def main(argv: list[str] | None = None) -> int:
     common.log_event(logs, "prompt", {"source": cfg.prompt_source, "sha256": prompt_sha, "prompt": prompt})
     current_index = current_index_from_state(cfg)
     completed_counts = completed_counts_from_state(cfg)
+    cfg.completed_counts = completed_counts
     status_line(f"logs: {logs.run_dir}", level="dim")
     suspend_state = SuspendState()
     report_prior_suspend_failures(logs)
@@ -1642,7 +1648,7 @@ def main(argv: list[str] | None = None) -> int:
         if out_of_time():
             return stop_timed_out()
         common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index, "completed_counts": completed_counts})
-        selection = select_provider(cfg, logs, current_index, skipped, completed_counts)
+        selection = select_provider(cfg, logs, current_index, skipped)
         common.log_event(logs, "selection", {**selection, "skipped": sorted(skipped)})
         selected_index = int(selection.get("index", -1))
         selected_provider = str(selection.get("provider", ""))
@@ -1702,6 +1708,7 @@ def main(argv: list[str] | None = None) -> int:
             completed_key = selected_route_id if selected_route_id else selected_provider
             if completed_key:
                 completed_counts[completed_key] = _count_for(completed_counts, completed_key) + 1
+                cfg.completed_counts = completed_counts
                 save_state(cfg, selected_index, selected_provider, completed_counts)
             common.log_event(logs, "iteration_complete", {"provider": selected_provider, "index": selected_index, "completed": completed, "seconds": round(iter_seconds, 3)})
             if max_iterations and completed >= max_iterations:
