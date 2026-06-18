@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import threading
+from typing import Any
 from urllib.error import HTTPError
 from pathlib import Path
 
@@ -501,10 +502,18 @@ def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch:
         if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer expired-token":
             raise HTTPError(url, 401, "unauthorized", hdrs=None, fp=None)
         if url == common.CLAUDE_OAUTH_TOKEN_URL:
-            body = (data or b"").decode("utf-8")
-            assert "grant_type=refresh_token" in body
-            assert "refresh_token=refresh-token" in body
-            assert f"client_id={common.CLAUDE_OAUTH_CLIENT_ID.replace(':', '%3A').replace('/', '%2F')}" in body
+            # Anthropic's refresh endpoint requires a JSON body. The historical
+            # ``application/x-www-form-urlencoded`` body (and the legacy
+            # URL-form client_id) returns HTTP 400 and silently breaks Claude
+            # usage after every access-token expiry, which is what made the
+            # dashboard report ``unavailable`` for hours at a time.
+            assert req.get_header("Content-type") == "application/json"
+            payload = json.loads((data or b"").decode("utf-8"))
+            assert payload == {
+                "grant_type": "refresh_token",
+                "refresh_token": "refresh-token",
+                "client_id": common.CLAUDE_OAUTH_CLIENT_ID,
+            }
             return FakeResponse('{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}')
         if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer fresh-token":
             return FakeResponse(
@@ -525,6 +534,371 @@ def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch:
         common.CLAUDE_OAUTH_TOKEN_URL,
         common.CLAUDE_OAUTH_USAGE_URL,
     ]
+
+
+def test_read_claude_api_refresh_targets_anthropic_json_endpoint(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: Anthropic's ``/v1/oauth/token`` endpoint speaks JSON, not
+    form-encoded, and lives on ``api.anthropic.com`` (not the
+    ``platform.claude.com`` URL used for the initial code exchange). The
+    historical code posted form-encoded data to the platform host, which the
+    endpoint rejected with HTTP 400 ``Invalid request format``; every refresh
+    silently returned ``None`` so the dashboard degraded to ``unavailable``
+    after the access token's 8h lifetime — a long-standing gap that this test
+    pins so a future refactor cannot regress it back to the broken shape."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "expired-token",
+                    "refreshToken": "refresh-token",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def read(self) -> bytes:
+            return self._text.encode("utf-8")
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        url = req.full_url
+        auth = req.get_header("Authorization")
+        # Only the token-endpoint request is relevant to the regression; we
+        # capture it explicitly so the later usage-call does not clobber the
+        # captured fields.
+        if url == common.CLAUDE_OAUTH_TOKEN_URL:
+            captured["url"] = url
+            captured["content_type"] = req.get_header("Content-type")
+            captured["body"] = (req.data or b"").decode("utf-8")
+            return FakeResponse(
+                '{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}'
+            )
+        if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer expired-token":
+            raise HTTPError(url, 401, "unauthorized", hdrs=None, fp=None)
+        if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer fresh-token":
+            return FakeResponse(
+                '{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":"2026-06-14T18:00:00Z"},'
+                '"seven_day":{"used_percentage":34,"resets_at":"2026-06-20T18:00:00Z"}}}'
+            )
+        raise AssertionError(f"unexpected request: {url}")
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    assert common.read_claude_api(env) is not None
+
+    assert captured["url"] == "https://api.anthropic.com/v1/oauth/token"
+    assert captured["content_type"] in {"application/json", "application/json; charset=utf-8"}
+    assert json.loads(captured["body"]) == {
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh-token",
+        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    }
+    saved = json.loads(cred.read_text(encoding="utf-8"))
+    assert saved["claudeAiOauth"]["accessToken"] == "fresh-token"
+    assert saved["claudeAiOauth"]["refreshToken"] == "fresh-refresh"
+
+
+def test_read_claude_api_uses_claude_code_oauth_token_env_var(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: ``CLAUDE_CODE_OAUTH_TOKEN`` (set by ``claude setup-token``)
+    is a 1-year token that ships without a refresh token, so the OAuth refresh
+    path is a dead end for it. The dashboard must honour the env var directly
+    — otherwise users whose credentials file lost the refresh token (e.g. after
+    a stale ``claude auth logout`` or a CLI upgrade) cannot get fresh Claude
+    usage at all, even when they have a perfectly valid long-lived token in
+    scope. The env var wins over the credentials file's access token."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    # Expired + no refresh token so the OAuth path is dead.
+                    "accessToken": "stale-file-token",
+                    "refreshToken": "",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    token_env = env | {"CLAUDE_CODE_OAUTH_TOKEN": "long-lived-env-token"}
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def read(self) -> bytes:
+            return self._text.encode("utf-8")
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        captured["url"] = req.full_url
+        captured["auth"] = req.get_header("Authorization")
+        # Only the env-var token must reach the server; the credentials file's
+        # stale token must not.
+        if req.get_header("Authorization") != "Bearer long-lived-env-token":
+            raise AssertionError(
+                f"unexpected Authorization header: {req.get_header('Authorization')!r}"
+            )
+        return FakeResponse(
+            '{"rate_limits":{"five_hour":{"used_percentage":42,"resets_at":"2026-06-18T12:00:00Z"},'
+            '"seven_day":{"used_percentage":21,"resets_at":"2026-06-20T12:00:00Z"}}}'
+        )
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude_api(token_env)
+    assert data is not None
+    assert data["five_hour"]["used"] == 42
+    assert data["week"]["used"] == 21
+    assert captured["url"] == common.CLAUDE_OAUTH_USAGE_URL
+    # The refresh endpoint must NOT be touched when the env var is set.
+    assert "token_url" not in captured
+
+
+def test_read_claude_api_reports_needs_reauth_when_refresh_token_missing(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the access token is rejected *and* there is no refresh token
+    to renew it, the OAuth refresh path is a dead end. The reader must
+    surface a distinct ``needs-reauth`` marker so the self-heal flow
+    (``try_claude_self_heal``) can drive a fresh ``claude auth login``
+    instead of silently degrading to ``unavailable`` — the
+    long-standing state where the dashboard reports Claude as broken
+    after every access-token expiry."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "expired-token",
+                    "refreshToken": "",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        if req.full_url == common.CLAUDE_OAUTH_USAGE_URL:
+            raise HTTPError(req.full_url, 401, "unauthorized", hdrs=None, fp=None)
+        raise AssertionError(f"unexpected request: {req.full_url}")
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude_api(env)
+    assert data is not None
+    assert data["available"] is False
+    assert data["reason"] == "needs-reauth"
+
+
+def test_try_claude_self_heal_returns_false_when_disabled(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    disabled_env = env | {"LLM_USAGE_CLAUDE_SELF_HEAL": "0"}
+    # Even if a real ``claude`` CLI existed on PATH, the opt-out must
+    # prevent the spawn entirely.
+    monkeypatch.setattr(common.shutil, "which", lambda *_a, **_k: "/bin/true")
+    assert common.try_claude_self_heal(disabled_env) is False
+
+
+def test_try_claude_self_heal_returns_false_when_claude_cli_missing(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(common.shutil, "which", lambda *_a, **_k: None)
+    assert common.try_claude_self_heal(env) is False
+
+
+def test_try_claude_self_heal_returns_false_when_env_token_set(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CLAUDE_CODE_OAUTH_TOKEN is already a valid long-lived access token;
+    # the credentials file is irrelevant and the self-heal must not
+    # overwrite the user's chosen auth mechanism.
+    monkeypatch.setattr(common.shutil, "which", lambda *_a, **_k: "/bin/true")
+    assert common.try_claude_self_heal(env | {"CLAUDE_CODE_OAUTH_TOKEN": "tok"}) is False
+
+
+def test_try_claude_self_heal_returns_false_when_no_tty(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Background services, cron jobs, and piped invocations have no
+    TTY to drive the interactive ``claude auth login`` flow. The
+    self-heal must bail out (with a clear stderr message) instead of
+    spawning a child process that will block forever on stdin."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "stale",
+                    "refreshToken": "",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(common.shutil, "which", lambda *_a, **_k: "/bin/true")
+    monkeypatch.setattr(common.sys, "stdin", type("S", (), {"isatty": lambda self: False})())
+    monkeypatch.setattr(common.sys, "stdout", type("S", (), {"isatty": lambda self: False})())
+    assert common.try_claude_self_heal(env) is False
+
+
+def test_try_claude_self_heal_succeeds_when_credentials_file_rewritten(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class _FakeProc:
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:  # type: ignore[no-untyped-def]
+            return 0
+
+        def kill(self) -> None:
+            pass
+    """The happy path: ``claude auth login`` rewrites the credentials
+    file with a fresh access token, and the self-heal picks it up."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "stale-token",
+                    "refreshToken": "",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    class FakeStdout:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(common.shutil, "which", lambda *_a, **_k: "/bin/true")
+    monkeypatch.setattr(common.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(common.sys, "stdout", FakeStdout())
+
+    def fake_popen(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # Simulate ``claude auth login`` rewriting the credentials file
+        # with a fresh access token shortly after being spawned.
+        import threading
+        import time as _time
+
+        def _rewrite() -> None:
+            _time.sleep(0.05)
+            cred.write_text(
+                json.dumps(
+                    {
+                        "claudeAiOauth": {
+                            "accessToken": "fresh-token",
+                            "refreshToken": "fresh-refresh",
+                            "expiresAt": 0,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        threading.Thread(target=_rewrite, daemon=True).start()
+        return _FakeProc()
+
+    monkeypatch.setattr(common.subprocess, "Popen", fake_popen)
+    result = common.try_claude_self_heal(env | {"LLM_USAGE_CLAUDE_SELF_HEAL_TIMEOUT": "5"})
+    assert result is True
+    # The freshly written credentials are visible to subsequent reads.
+    saved = json.loads(cred.read_text(encoding="utf-8"))
+    assert saved["claudeAiOauth"]["accessToken"] == "fresh-token"
+
+
+def test_try_claude_self_heal_times_out_when_credentials_not_updated(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``claude auth login`` does not rewrite the credentials
+    within the timeout, the self-heal must return ``False`` and leave
+    the credentials file untouched so the caller can fall back to its
+    own (unavailable) path."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {"claudeAiOauth": {"accessToken": "stale", "refreshToken": "", "expiresAt": 0}}
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    class FakeStdout:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(common.shutil, "which", lambda *_a, **_k: "/bin/true")
+    monkeypatch.setattr(common.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(common.sys, "stdout", FakeStdout())
+
+    # Popen that never updates the credentials file.
+    class _FakeLongRunningProc:
+        def poll(self) -> int | None:
+            # Subprocess never exits on its own within the test window.
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:  # type: ignore[no-untyped-def]
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    def fake_popen(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return _FakeLongRunningProc()
+
+    monkeypatch.setattr(common.subprocess, "Popen", fake_popen)
+    result = common.try_claude_self_heal(
+        env | {"LLM_USAGE_CLAUDE_SELF_HEAL_TIMEOUT": "0.5"}
+    )
+    assert result is False
+    # The stale credentials must still be there.
+    saved = json.loads(cred.read_text(encoding="utf-8"))
+    assert saved["claudeAiOauth"]["accessToken"] == "stale"
 
 
 def _make_http_error(url: str, code: int, headers: dict[str, str] | None = None) -> HTTPError:

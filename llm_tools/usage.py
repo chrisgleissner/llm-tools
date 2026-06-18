@@ -1964,8 +1964,11 @@ def _provider_data_via_service(cfg: Config) -> tuple[dict[str, Any], str | None]
 def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None) -> tuple[dict[str, Any], str | None]:
     service_data = _provider_data_via_service(cfg)
     if service_data is not None:
-        return service_data
-    return _fetch_provider_data(cfg, anchor=anchor), None
+        provider_data, generated_at = service_data
+        provider_data = _maybe_self_heal_claude(cfg, provider_data, os.environ)
+        return provider_data, generated_at
+    provider_data = _fetch_provider_data(cfg, anchor=anchor)
+    return _maybe_self_heal_claude(cfg, provider_data, os.environ), None
 
 
 def render_once_via_service(cfg: Config) -> bool:
@@ -1973,6 +1976,7 @@ def render_once_via_service(cfg: Config) -> bool:
     if service_data is None:
         return False
     provider_data, generated_at = service_data
+    provider_data = _maybe_self_heal_claude(cfg, provider_data, os.environ)
     render_from_provider_data(cfg, provider_data, generated_at)
     return True
 
@@ -2185,8 +2189,56 @@ def _capture(fn: Any) -> list[str]:
     return text.split("\n")
 
 
+def _claude_needs_self_heal(provider_data: dict[str, Any]) -> bool:
+    """True when the Claude snapshot is unavailable specifically because
+    the OAuth credentials cannot be refreshed in-process — the
+    self-heal path (``try_claude_self_heal``) is the only recovery
+    available."""
+    claude = provider_data.get("claude") if isinstance(provider_data, dict) else None
+    if claude is None:
+        return False
+    # The Claude row may be a ``ProviderSnapshot`` (live read) or a
+    # ``dict`` (service payload). Both expose ``available`` and
+    # ``reason`` the same way.
+    available = getattr(claude, "available", None)
+    reason = getattr(claude, "reason", None)
+    if available is None and isinstance(claude, dict):
+        available = claude.get("available")
+        reason = claude.get("reason")
+    return available is False and reason == "needs-reauth"
+
+
+def _maybe_self_heal_claude(cfg: Config, provider_data: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
+    """If the Claude read came back ``needs-reauth``, drive a fresh
+    ``claude auth login`` flow on the user's behalf, then re-read. A
+    single retry is enough: either the credentials are now valid or
+    the user has to act in person.
+    """
+    if not _claude_needs_self_heal(provider_data):
+        return provider_data
+    from .providers.claude import read as read_claude_snapshot
+    from .capacity import ProviderSnapshot
+
+    if not common.try_claude_self_heal(env):
+        return provider_data
+    try:
+        new_snap = read_claude_snapshot(env)
+    except Exception:  # pragma: no cover - defensive
+        return provider_data
+    out = dict(provider_data)
+    if isinstance(new_snap, ProviderSnapshot):
+        out["claude"] = new_snap
+    elif isinstance(new_snap, dict):
+        out["claude"] = new_snap
+    else:
+        return provider_data
+    return out
+
+
 def render_once(cfg: Config) -> None:
+    env = os.environ
     provider_data = _fetch_provider_data(cfg)
+    provider_data = _maybe_self_heal_claude(cfg, provider_data, env)
     render_from_provider_data(cfg, provider_data)
 
 

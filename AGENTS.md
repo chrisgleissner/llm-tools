@@ -193,6 +193,9 @@ Missing CLI with no env-var fallback is `reason="missing-cli"`. The provider is 
 
 Important knobs that tests or users may rely on:
 
+* `CLAUDE_CODE_OAUTH_TOKEN` (long-lived OAuth token from `claude setup-token`; when set, the Claude usage reader uses it directly and skips the file-based OAuth refresh path — useful when `~/.claude/.credentials.json` is missing the refresh token)
+* `LLM_USAGE_CLAUDE_SELF_HEAL` (`0`/`1`, default `1`; when the OAuth refresh path is unrecoverable, drive an interactive `claude auth login` flow on the user's behalf and watch the credentials file for the fresh write instead of silently degrading to `unavailable`)
+* `LLM_USAGE_CLAUDE_SELF_HEAL_TIMEOUT` (seconds; default 300; how long `llm-usage` waits for `claude auth login` to rewrite the credentials before giving up)
 * `LLM_USAGE_NO_COLOR`
 * `LLM_USAGE_SHOW_SOURCE`
 * `LLM_USAGE_SHOW_REMAINING_TIME`
