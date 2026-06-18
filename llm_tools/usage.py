@@ -254,6 +254,7 @@ class Config:
         )
         self.terminal_width = terminal_width(env)
         self.monthly_budget, self.budget_currency = _load_monthly_budget(env)
+        self.copilot_spend_limit, self.copilot_spend_currency = _load_copilot_spend_limit(env)
         self.use_service = env.get("LLM_USAGE_NO_SERVICE", "0") != "1"
         self.service_action = ""
         self.service_interval = env.get("LLM_USAGE_SERVICE_INTERVAL", "60")
@@ -293,6 +294,41 @@ def _load_monthly_budget(env: "dict[str, str]") -> "tuple[float | None, str]":
     return amount, (currency or "$")
 
 
+def _load_copilot_spend_limit(env: "dict[str, str]") -> "tuple[float | None, str]":
+    """Resolve the Copilot pay-as-you-go monthly spend limit and its currency.
+
+    Env (``LLM_USAGE_COPILOT_SPEND_LIMIT`` / ``LLM_USAGE_COPILOT_SPEND_CURRENCY``)
+    wins over the ``[copilot]`` config table so a quick override needs no file
+    edit. ``None`` means "no declared limit" — GitHub does not expose the limit
+    via API, so Copilot then stays gated by its included allowance unless
+    billing already shows overage being charged. Config parse/validation errors
+    remain fatal so a broken config surfaces.
+    """
+    raw = env.get("LLM_USAGE_COPILOT_SPEND_LIMIT")
+    currency = env.get("LLM_USAGE_COPILOT_SPEND_CURRENCY")
+    amount: float | None = None
+    if raw is not None and raw.strip():
+        try:
+            parsed = float(raw)
+            amount = parsed if parsed > 0 else None
+        except ValueError:
+            amount = None
+    if amount is None or not currency:
+        try:
+            from . import config as toolconfig
+
+            cfg_amount, cfg_currency = toolconfig.copilot_spend_limit(toolconfig.load_config(env))
+            if amount is None:
+                amount = cfg_amount
+            if not currency:
+                currency = cfg_currency
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+    return amount, (currency or "$")
+
+
 @dataclass
 class UsageRow:
     provider: str
@@ -314,6 +350,16 @@ class UsageRow:
     # True for monetary "spent" rows (observed cost), so the renderer shows the
     # amount with a budget progress bar instead of a remaining-quota bar.
     spent: bool = False
+    # False marks a row that must NOT gate the provider's Ready state even
+    # though it carries a remaining quota. Copilot uses this for its included
+    # monthly allowance once pay-as-you-go overage is funded: the allowance is
+    # spent (0% left), but the provider is still usable, so the row stays
+    # informational rather than forcing Ready=no.
+    gates_ready: bool = True
+    # Optional explicit Guidance text that bypasses the computed guidance
+    # pipeline (e.g. "pay-as-you-go" on Copilot's exhausted-but-funded
+    # allowance row, where the runout/pace guidance would be misleading).
+    guidance_override: str | None = None
 
 
 @dataclass
@@ -621,7 +667,13 @@ def row_is_ready(row: UsageRow) -> bool:
 
 
 def provider_ready(rows: list[UsageRow], provider: str) -> bool:
-    blocking = [row for row in rows if row.provider == provider and row.scope not in ("ai-credits", "ungated", "byok", "local")]
+    blocking = [
+        row
+        for row in rows
+        if row.provider == provider
+        and row.scope not in ("ai-credits", "ungated", "byok", "local")
+        and row.gates_ready
+    ]
     return bool(blocking) and all(row_is_ready(row) for row in blocking)
 
 
@@ -967,7 +1019,9 @@ def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: st
     # remaining percent / reset). The "ready" state is encoded on
     # the row: ``remaining = 1.0`` means ready, ``None`` means
     # blocked, with the retry hint derived from ``reset``.
-    if row.kind == "opaque":
+    if row.guidance_override is not None:
+        guidance = row.guidance_override
+    elif row.kind == "opaque":
         if row.remaining is not None:
             guidance = "✓ usable"
         else:
@@ -1155,6 +1209,55 @@ def print_codex_rows(cfg: Config, codex_json: dict[str, Any] | None) -> None:
     print_usage_rows(cfg, codex_rows(cfg, codex_json))
 
 
+@dataclass
+class CopilotPayg:
+    """Copilot pay-as-you-go (overage) status for the current month.
+
+    ``spend`` is the net overage already billed by GitHub this month (the same
+    figure rendered as the "spend $X" row); ``limit`` is the user-declared
+    monthly ceiling (``None`` when undeclared — GitHub does not expose it via
+    API). ``funded`` is the bottom line: when ``True`` the included allowance
+    being exhausted must not force Ready=no, because overage is permitted and
+    has headroom.
+    """
+
+    spend: float | None
+    limit: float | None
+    currency: str
+    funded: bool
+
+
+def copilot_payg_status(cfg: Config, copilot_json: dict[str, Any]) -> CopilotPayg:
+    limit = cfg.copilot_spend_limit
+    currency = cfg.copilot_spend_currency or "$"
+    addon = copilot_json.get("add_on") if isinstance(copilot_json.get("add_on"), dict) else None
+    raw_spend = common.num(addon.get("spent")) if isinstance(addon, dict) else None
+    spend = float(raw_spend) if raw_spend is not None else None
+    if limit is not None:
+        # Declared ceiling: funded while this month's billed overage stays under
+        # it (an unknown/zero spend counts as $0 used).
+        used = spend if spend is not None else 0.0
+        funded = used < limit
+        currency = (addon.get("currency") if isinstance(addon, dict) else None) or currency
+    else:
+        # No declared limit (GitHub exposes none). If billing already shows
+        # overage being charged this month, pay-as-you-go is demonstrably
+        # enabled and permitting use, so treat the allowance as non-gating.
+        # Otherwise stay conservative and keep gating on the included allowance.
+        funded = spend is not None and spend > 0
+        if isinstance(addon, dict) and addon.get("currency"):
+            currency = str(addon.get("currency"))
+    return CopilotPayg(spend=spend, limit=limit, currency=currency, funded=funded)
+
+
+def _copilot_payg_guidance(payg: CopilotPayg) -> str:
+    if payg.limit is None:
+        return "pay-as-you-go"
+    used = payg.spend if payg.spend is not None else 0.0
+    cur = payg.currency or "$"
+    return f"pay-as-you-go {cur}{common.fmt_number(used)}/{common.fmt_number(payg.limit)}"
+
+
 def copilot_rows(cfg: Config, copilot_json: dict[str, Any] | None) -> list[UsageRow]:
     reset_epoch = common.copilot_monthly_reset_epoch()
     if not copilot_json:
@@ -1178,7 +1281,21 @@ def copilot_rows(cfg: Config, copilot_json: dict[str, Any] | None) -> list[Usage
         monthly_text = row_left_text(remaining, "unavailable")
         common.log_usage_sample("copilot", "monthly", remaining)
     remaining_time = common.estimate_remaining_time_from_log("copilot", "monthly", monthly_remaining) if cfg.show_remaining_time else ""
-    rows = [UsageRow("Copilot", "monthly", remaining, monthly_text, reset_epoch, source, remaining_time or "-")]
+    monthly_row = UsageRow("Copilot", "monthly", remaining, monthly_text, reset_epoch, source, remaining_time or "-")
+    rows = [monthly_row]
+    # Once the included monthly allowance is spent (0% / unmeasured), Copilot can
+    # still be usable via pay-as-you-go overage. GitHub does not expose the
+    # spending limit, so we infer "funded" from a declared limit with headroom
+    # or from billing that already shows overage being charged. When funded, the
+    # allowance row stays informational (Ready=yes) and explains itself in the
+    # Guidance column instead of forcing a misleading "↓ conserve" / Ready=no.
+    monthly_rem = common.num(remaining)
+    monthly_exhausted = monthly_rem is None or monthly_rem <= 0
+    if monthly_exhausted:
+        payg = copilot_payg_status(cfg, copilot_json)
+        if payg.funded:
+            monthly_row.gates_ready = False
+            monthly_row.guidance_override = _copilot_payg_guidance(payg)
     # Additional ("add-on") usage: the dollar spend beyond the included credit
     # allowance, rendered as a "spend $X" row (scope "spend", distinct from a
     # funded "balance") consistent with Kilo/OpenCode. remaining=1.0 keeps it
@@ -1965,10 +2082,9 @@ def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None) -
     service_data = _provider_data_via_service(cfg)
     if service_data is not None:
         provider_data, generated_at = service_data
-        provider_data = _maybe_self_heal_claude(cfg, provider_data, os.environ)
         return provider_data, generated_at
     provider_data = _fetch_provider_data(cfg, anchor=anchor)
-    return _maybe_self_heal_claude(cfg, provider_data, os.environ), None
+    return provider_data, None
 
 
 def render_once_via_service(cfg: Config) -> bool:
@@ -1976,7 +2092,6 @@ def render_once_via_service(cfg: Config) -> bool:
     if service_data is None:
         return False
     provider_data, generated_at = service_data
-    provider_data = _maybe_self_heal_claude(cfg, provider_data, os.environ)
     render_from_provider_data(cfg, provider_data, generated_at)
     return True
 
@@ -2189,56 +2304,8 @@ def _capture(fn: Any) -> list[str]:
     return text.split("\n")
 
 
-def _claude_needs_self_heal(provider_data: dict[str, Any]) -> bool:
-    """True when the Claude snapshot is unavailable specifically because
-    the OAuth credentials cannot be refreshed in-process — the
-    self-heal path (``try_claude_self_heal``) is the only recovery
-    available."""
-    claude = provider_data.get("claude") if isinstance(provider_data, dict) else None
-    if claude is None:
-        return False
-    # The Claude row may be a ``ProviderSnapshot`` (live read) or a
-    # ``dict`` (service payload). Both expose ``available`` and
-    # ``reason`` the same way.
-    available = getattr(claude, "available", None)
-    reason = getattr(claude, "reason", None)
-    if available is None and isinstance(claude, dict):
-        available = claude.get("available")
-        reason = claude.get("reason")
-    return available is False and reason == "needs-reauth"
-
-
-def _maybe_self_heal_claude(cfg: Config, provider_data: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
-    """If the Claude read came back ``needs-reauth``, drive a fresh
-    ``claude auth login`` flow on the user's behalf, then re-read. A
-    single retry is enough: either the credentials are now valid or
-    the user has to act in person.
-    """
-    if not _claude_needs_self_heal(provider_data):
-        return provider_data
-    from .providers.claude import read as read_claude_snapshot
-    from .capacity import ProviderSnapshot
-
-    if not common.try_claude_self_heal(env):
-        return provider_data
-    try:
-        new_snap = read_claude_snapshot(env)
-    except Exception:  # pragma: no cover - defensive
-        return provider_data
-    out = dict(provider_data)
-    if isinstance(new_snap, ProviderSnapshot):
-        out["claude"] = new_snap
-    elif isinstance(new_snap, dict):
-        out["claude"] = new_snap
-    else:
-        return provider_data
-    return out
-
-
 def render_once(cfg: Config) -> None:
-    env = os.environ
     provider_data = _fetch_provider_data(cfg)
-    provider_data = _maybe_self_heal_claude(cfg, provider_data, env)
     render_from_provider_data(cfg, provider_data)
 
 

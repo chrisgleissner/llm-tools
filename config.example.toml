@@ -49,6 +49,29 @@
 
 
 # ---------------------------------------------------------------------------
+# Copilot pay-as-you-go (overage) spending limit.
+#
+# Copilot keeps working past its included monthly allowance via pay-as-you-go
+# premium requests / AI Credits, but ONLY up to the spending limit you set in
+# GitHub's billing settings. GitHub does not expose that limit through its API,
+# so the dashboard cannot read it. Declare it here and llm-usage keeps Copilot
+# "ready" (overage funded) while the month's billed spend stays under it, and
+# flips to "no" once the limit is reached.
+#
+# When unset, llm-usage still auto-detects funded overage: if GitHub billing
+# already shows premium-request/AI-Credit overage being charged this month, the
+# included allowance being exhausted no longer forces Ready=no. With neither a
+# declared limit nor charged overage, Copilot stays gated by its allowance.
+# Env overrides: LLM_USAGE_COPILOT_SPEND_LIMIT, LLM_USAGE_COPILOT_SPEND_CURRENCY.
+# ---------------------------------------------------------------------------
+[copilot]
+# Your GitHub Copilot premium-request monthly spending limit (a positive number).
+#monthly_spend_limit = 25
+# Display symbol for the limit amount. Built-in default: "$".
+#currency            = "$"
+
+
+# ---------------------------------------------------------------------------
 # Per-provider routing policy. The main thing this lets you set is which
 # model a provider should run, and what to do when that model's limit is
 # used up (via allow_fallback).

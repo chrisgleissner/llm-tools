@@ -1118,17 +1118,17 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
                     return _cache_claude_usage_response(cache, result.text)
                 if result.rate_limited:
                     return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
-            else:
-                # The access token is rejected AND we cannot refresh (no
-                # refresh token, or the refresh token is itself rejected).
-                # That is the *only* state the OAuth refresh path cannot
-                # recover from — the credentials file is the source of
-                # truth, and there is no way to obtain a new access token
-                # without the user completing an OAuth browser flow. Surface
-                # a distinct reason so ``usage.py`` can drive the
-                # self-heal path; the dashboard still renders ``unavailable``
-                # either way.
-                return _claude_needs_reauth_provider()
+            # else: the access token is rejected AND we cannot refresh (no
+            # refresh token, or the refresh token is itself rejected). That
+            # is the one state the OAuth refresh path cannot recover from —
+            # the credentials file is the source of truth, and a new access
+            # token would require the user to complete an OAuth browser
+            # flow. We never drive that flow ourselves (the dashboard must
+            # never block on a prompt); instead we fall through to the
+            # graceful cache/local-snapshot fallback below. Claude Code
+            # rewrites ``~/.claude/.credentials.json`` whenever it is used,
+            # so a later read picks up fresh credentials with no action
+            # from us.
     elif isinstance(oauth, dict) and oauth.get("refreshToken"):
         refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
         if refreshed:
@@ -1138,8 +1138,6 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
                 return _cache_claude_usage_response(cache, result.text)
             if result.rate_limited:
                 return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
-        else:
-            return _claude_needs_reauth_provider()
     return _read_claude_usage_cache(cache, env, local_snapshot_max_age(env))
 
 
@@ -1248,49 +1246,6 @@ def _claude_rate_limited_provider() -> dict[str, Any]:
     }
 
 
-def _claude_needs_reauth_provider() -> dict[str, Any]:
-    """Marker shape returned when the OAuth credentials are unrecoverable.
-
-    Distinct from the rate-limited / stale-usage markers so the caller can
-    detect that re-authentication is the only path forward and trigger the
-    self-heal flow (``try_claude_self_heal``). The dashboard still surfaces
-    ``unavailable`` either way; the marker only matters for the recovery
-    branch.
-    """
-    return {
-        "provider": "claude",
-        "source": CLAUDE_OAUTH_USAGE_URL,
-        "available": False,
-        "reason": "needs-reauth",
-    }
-
-
-def _read_claude_access_token(cred_path: Path) -> str:
-    try:
-        parsed = json.loads(cred_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    oauth = parsed.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        return ""
-    return str(oauth.get("accessToken") or "").strip()
-
-
-def _read_claude_refresh_token(cred_path: Path) -> str:
-    try:
-        parsed = json.loads(cred_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    oauth = parsed.get("claudeAiOauth")
-    if not isinstance(oauth, dict):
-        return ""
-    return str(oauth.get("refreshToken") or "").strip()
-
-
 def _claude_rate_limit_fallback(
     cache: Path,
     env: dict[str, str],
@@ -1301,178 +1256,6 @@ def _claude_rate_limit_fallback(
     if cached is not None:
         return cached
     return _claude_rate_limited_provider()
-
-
-def _claude_self_heal_default_timeout(env: dict[str, str] | None = None) -> float:
-    env = env or os.environ
-    try:
-        value = float(env.get("LLM_USAGE_CLAUDE_SELF_HEAL_TIMEOUT", "300") or "300")
-    except ValueError:
-        value = 300.0
-    return value if value > 0 else 300.0
-
-
-def _claude_self_heal_disabled(env: dict[str, str] | None) -> bool:
-    env = env or os.environ
-    raw = str(env.get("LLM_USAGE_CLAUDE_SELF_HEAL", "1") or "1").strip().lower()
-    return raw in {"0", "false", "no", "off"}
-
-
-def _claude_self_heal_message(
-    cred_path: Path,
-    initial_mtime: float,
-    initial_token: str,
-    initial_refresh: str,
-) -> str:
-    rel = _format_path_for_display(cred_path)
-    return (
-        "\n[llm-usage] Claude credentials at {path} are no longer usable "
-        "(access token rejected, refresh token {refresh_state}).\n"
-        "[llm-usage] Running `claude auth login` to obtain fresh credentials; "
-        "complete the OAuth flow in the browser. The dashboard will pick up "
-        "the new credentials automatically as soon as the file changes.\n"
-    ).format(
-        path=rel,
-        refresh_state=("missing" if not initial_refresh else "rejected"),
-    )
-
-
-def _format_path_for_display(path: Path) -> str:
-    try:
-        return "~" + str(path).split(str(home_dir()), 1)[1]
-    except (ValueError, IndexError):
-        return str(path)
-
-
-def try_claude_self_heal(
-    env: dict[str, str] | None = None,
-    *,
-    timeout_seconds: float | None = None,
-) -> bool:
-    """Recover Claude OAuth credentials that are no longer usable.
-
-    When the credentials file has an expired access token *and* no
-    refresh token (or a refresh token that was rejected), the OAuth
-    refresh path is a dead end — the only way to obtain a fresh
-    access token is for the user to complete a fresh OAuth browser
-    flow. The Claude Code CLI ships an interactive ``claude auth
-    login`` command that does exactly that, so we drive it on the
-    user's behalf and watch ``~/.claude/.credentials.json`` for the
-    fresh write. Once the file carries a new access token (and
-    ideally a refresh token), the next ``read_claude`` call picks
-    them up transparently.
-
-    Returns ``True`` if the credentials file was successfully updated
-    within the timeout, ``False`` otherwise. The function is a no-op
-    when:
-
-    * the ``claude`` CLI is not on ``PATH``;
-    * ``CLAUDE_CODE_OAUTH_TOKEN`` is set (the env var is already a
-      valid access token and the credentials file is irrelevant);
-    * ``LLM_USAGE_CLAUDE_SELF_HEAL=0`` (opt-out);
-    * there is no stdin/stdout to drive the interactive flow with.
-
-    The timeout is configurable via
-    ``LLM_USAGE_CLAUDE_SELF_HEAL_TIMEOUT`` (seconds, default 300).
-    """
-    env = env or os.environ
-    if _claude_self_heal_disabled(env):
-        return False
-    if str(env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip():
-        return False
-    claude_path = shutil.which("claude", path=env.get("PATH"))
-    if not claude_path:
-        return False
-    cred_path = home_dir(env) / ".claude" / ".credentials.json"
-    initial_mtime = cred_path.stat().st_mtime if cred_path.exists() else 0.0
-    initial_token = _read_claude_access_token(cred_path)
-    initial_refresh = _read_claude_refresh_token(cred_path)
-    if not sys.stdin or not sys.stdout:
-        # No TTY to drive an interactive ``claude auth login`` against —
-        # we still try, in case the user has wired stdin/stdout from a
-        # non-default source.
-        pass
-    if not _has_tty_for_self_heal(env):
-        # Without a TTY we cannot paste the OAuth code back into the
-        # subprocess. Print instructions and bail — the user can re-run
-        # from a terminal.
-        sys.stderr.write(
-            _claude_self_heal_message(cred_path, initial_mtime, initial_token, initial_refresh)
-        )
-        sys.stderr.write(
-            "[llm-usage] No interactive TTY detected; please run "
-            "`claude auth login` in a terminal. Skipping self-heal.\n"
-        )
-        sys.stderr.flush()
-        return False
-    if initial_token:
-        sys.stderr.write(
-            _claude_self_heal_message(cred_path, initial_mtime, initial_token, initial_refresh)
-        )
-        sys.stderr.flush()
-    if timeout_seconds is None:
-        timeout_seconds = _claude_self_heal_default_timeout(env)
-    deadline = time.monotonic() + max(1.0, float(timeout_seconds))
-    proc: subprocess.Popen[Any] | None = None
-    try:
-        proc = subprocess.Popen(
-            [claude_path, "auth", "login", "--claudeai"],
-            stdin=sys.stdin,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            env=env,
-        )
-    except OSError as exc:
-        sys.stderr.write(f"[llm-usage] could not launch claude auth login: {exc}\n")
-        sys.stderr.flush()
-        return False
-    try:
-        while True:
-            ret = proc.poll()
-            if ret is not None:
-                break
-            if cred_path.exists() and cred_path.stat().st_mtime > initial_mtime:
-                time.sleep(0.2)
-                new_token = _read_claude_access_token(cred_path)
-                if new_token and new_token != initial_token:
-                    _clear_claude_oauth_rate_limit(env)
-                    return True
-            if time.monotonic() >= deadline:
-                sys.stderr.write(
-                    f"[llm-usage] claude auth login did not refresh "
-                    f"{_format_path_for_display(cred_path)} within "
-                    f"{int(timeout_seconds)}s. Skipping self-heal.\n"
-                )
-                sys.stderr.flush()
-                return False
-            time.sleep(0.3)
-        if cred_path.exists() and cred_path.stat().st_mtime > initial_mtime:
-            new_token = _read_claude_access_token(cred_path)
-            if new_token and new_token != initial_token:
-                _clear_claude_oauth_rate_limit(env)
-                return True
-        return False
-    finally:
-        if proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except (subprocess.TimeoutExpired, OSError):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-
-
-def _has_tty_for_self_heal(env: dict[str, str] | None) -> bool:
-    """True when stdin+stdout are both TTYs we can drive an interactive
-    ``claude auth login`` against. A background service, cron job, or
-    piped invocation should bail out and let the user re-auth manually.
-    """
-    try:
-        return bool(sys.stdin) and bool(sys.stdout) and sys.stdin.isatty() and sys.stdout.isatty()
-    except (AttributeError, ValueError):
-        return False
 
 
 def _fetch_claude_oauth_usage_result(access_token: str, env: dict[str, str] | None = None) -> ClaudeOAuthUsageFetchResult:

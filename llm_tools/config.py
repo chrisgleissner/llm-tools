@@ -56,8 +56,9 @@ from .capacity import ALL_PROVIDERS
 
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
-_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget"})
+_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot"})
 _BUDGET_KEYS = frozenset({"monthly", "currency"})
+_COPILOT_KEYS = frozenset({"monthly_spend_limit", "currency"})
 _DEFAULTS_KEYS = frozenset({"providers", "scope", "min_remaining"})
 _PROVIDER_KEYS = frozenset({"model", "allow_fallback", "scope", "min_remaining", "capacity_provider"})
 # Tool sections accept any key a CLI flag maps to; validation of individual
@@ -256,6 +257,8 @@ def _validate(raw: Any) -> dict[str, Any]:
     _validate_section(raw.get("scheduler"), "scheduler", _SCHEDULER_KEYS)
     _validate_section(raw.get("budget"), "budget", _BUDGET_KEYS)
     _validate_budget(raw.get("budget"))
+    _validate_section(raw.get("copilot"), "copilot", _COPILOT_KEYS)
+    _validate_copilot(raw.get("copilot"))
     providers = raw.get("providers")
     if providers is not None:
         if not isinstance(providers, dict):
@@ -305,6 +308,45 @@ def monthly_budget(cfg: dict[str, Any]) -> tuple[float | None, str]:
         return None, "$"
     amount = budget.get("monthly")
     currency = str(budget.get("currency") or "$")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount <= 0:
+        return None, currency
+    return float(amount), currency
+
+
+def _validate_copilot(copilot: Any) -> None:
+    """Validate the optional ``[copilot]`` table.
+
+    ``monthly_spend_limit`` is the pay-as-you-go ceiling for Copilot premium
+    requests / AI Credits *beyond* the plan's included allowance. GitHub does
+    not expose this limit through its REST API, so the user declares it here;
+    the dashboard then treats Copilot as ready (overage funded) while the
+    month's billed spend stays under it. The amount must be a positive number.
+    """
+    if copilot is None:
+        return
+    if "monthly_spend_limit" in copilot:
+        amount = copilot["monthly_spend_limit"]
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            _fail("copilot.monthly_spend_limit must be a number")
+        if amount <= 0:
+            _fail("copilot.monthly_spend_limit must be greater than 0")
+    if "currency" in copilot and not isinstance(copilot["currency"], str):
+        _fail("copilot.currency must be a string")
+
+
+def copilot_spend_limit(cfg: dict[str, Any]) -> tuple[float | None, str]:
+    """Return ``(limit, currency)`` for the Copilot pay-as-you-go spend limit.
+
+    ``limit`` is ``None`` when no limit is configured (the dashboard then keeps
+    the existing behaviour: Copilot is gated solely by its included allowance,
+    unless GitHub billing shows overage is already being charged). ``currency``
+    defaults to ``"$"``.
+    """
+    copilot = cfg.get("copilot") if isinstance(cfg, dict) else None
+    if not isinstance(copilot, dict):
+        return None, "$"
+    amount = copilot.get("monthly_spend_limit")
+    currency = str(copilot.get("currency") or "$")
     if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount <= 0:
         return None, currency
     return float(amount), currency
