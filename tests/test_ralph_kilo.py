@@ -94,15 +94,53 @@ def test_remaining_daily_capacity_skips_balance_and_ungated() -> None:
     assert ralph_robin.remaining_daily_capacity(d) is None
 
 
-def test_remaining_daily_capacity_picks_highest_among_known() -> None:
+def test_remaining_daily_capacity_picks_binding_lowest_among_known() -> None:
     d = {
         "windows": [
             {"name": "weekly", "kind": "reset_window", "remaining": 70.0, "reset_epoch": None},
             {"name": "budget", "kind": "budget", "remaining": 80.0, "reset_epoch": None},
         ]
     }
-    # Both have no reset, fall back to a 7-day window: 80/7 > 70/7.
-    assert ralph_robin.remaining_daily_capacity(d) == pytest.approx(80.0 / 7.0)
+    # A provider is gated by its most-constrained plan scope, so the surplus it
+    # can absorb is the BINDING (minimum) pace, not the most generous one. Both
+    # fall back to a 7-day window: weekly 70/7 binds below budget 80/7.
+    assert ralph_robin.remaining_daily_capacity(d) == pytest.approx(70.0 / 7.0)
+
+
+def test_remaining_daily_capacity_excludes_5h_session_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The codex never-hands-over bug: a fast-resetting 5h window stays healthy
+    # and, under the old max-aggregation, masked a draining weekly so the
+    # provider was ranked as if it had plenty of surplus. The 5h session scope
+    # must not drive the surplus ranking at all — only the weekly plan does.
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    now = 1000
+    d = {
+        "windows": [
+            # 5h freshly reset and full -> looks generous, but it is a throttle.
+            {"name": "5h", "kind": "reset_window", "remaining": 95.0, "reset_epoch": now + 3 * 3600},
+            # weekly nearly drained with most of the week left -> deep conserve.
+            {"name": "weekly", "kind": "reset_window", "remaining": 6.0, "reset_epoch": now + 5 * 86400},
+        ]
+    }
+    score = ralph_robin.remaining_daily_capacity(d, os.environ)
+    # Score reflects ONLY the binding weekly plan scope, not the healthy 5h.
+    assert score == pytest.approx(6.0 - 5.0 / 7.0 * 100.0)
+
+
+def test_remaining_daily_capacity_binding_min_across_5h_and_weekly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Even when the 5h window is the lower of the two, it is excluded; the plan
+    # surplus is the weekly figure, so two providers are distinguished purely by
+    # their weekly headroom regardless of momentary 5h state.
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    now = 1000
+    d = {
+        "windows": [
+            {"name": "5h", "kind": "reset_window", "remaining": 10.0, "reset_epoch": now + 3600},
+            {"name": "weekly", "kind": "reset_window", "remaining": 90.0, "reset_epoch": now + 2 * 86400},
+        ]
+    }
+    score = ralph_robin.remaining_daily_capacity(d, os.environ)
+    assert score == pytest.approx(90.0 - 2.0 / 7.0 * 100.0)
 
 
 def test_remaining_daily_capacity_unknown_name_with_future_reset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -350,3 +388,127 @@ def test_select_provider_marks_kilo_byok_missing_cli_unusable(
     assert selection["provider"] == "kilo"
     assert selection["decision"]["usable"] is False
     assert selection["decision"]["reason"] == "missing-cli"
+
+
+# --- end-to-end rotation simulations ----------------------------------------
+
+
+def _run_rotation(
+    cfg: ralph_robin.RalphConfig,
+    logs: common.RunLogs,
+    iterations: int,
+    *,
+    on_selected=None,
+) -> list[str]:
+    """Drive ``select_provider`` like the real main loop.
+
+    Mirrors :func:`ralph_robin.main`: each iteration re-selects, anchors
+    ``current_index`` on the winner, and bumps ``completed_counts`` for the
+    selected key. ``on_selected(provider)`` is invoked after each pick so a
+    test can mutate the simulated usage (e.g. burn down a weekly window).
+    Returns the ordered list of providers selected.
+    """
+    order: list[str] = []
+    current_index = 0
+    for _ in range(iterations):
+        selection = ralph_robin.select_provider(cfg, logs, current_index, set())
+        provider = selection["provider"]
+        order.append(provider)
+        current_index = int(selection["index"])
+        cfg.completed_counts[provider] = cfg.completed_counts.get(provider, 0) + 1
+        if on_selected is not None:
+            on_selected(provider)
+    return order
+
+
+def test_even_burn_simulation_balances_weekly_despite_healthy_5h(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end proof of the codex never-hands-over fix.
+
+    Both providers keep a full, fast-resetting 5h window the entire run while
+    their weekly plan is steadily burned by whoever is selected. Under the old
+    max-across-scopes ranking the healthy 5h tied both providers forever and the
+    incumbent monopolised the rotation — burning one weekly to the floor while
+    the other sat untouched. With binding (weekly) ranking the load is shared,
+    so the two weekly balances stay close and both providers get real turns.
+    """
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    now = 1000
+    weekly = {"claude": 80.0, "codex": 80.0}
+
+    def snap(provider: str, env: dict[str, str] | None = None) -> dict[str, object]:
+        return {
+            "available": True,
+            # 5h is always healthy and resets soon: a pure throttle, not a plan.
+            "five_hour": {"remaining": 95, "resets_at": now + 3 * 3600},
+            "week": {"remaining": weekly[provider], "resets_at": now + 5 * 86400},
+        }
+
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", snap)
+    cfg = ralph_robin.RalphConfig(
+        providers_spec="claude,codex",
+        providers=["claude", "codex"],
+        even_burn=True,
+        scope="auto",
+        state_file=tmp_path / "state.json",
+    )
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+
+    def burn(provider: str) -> None:
+        weekly[provider] -= 10.0
+
+    order = _run_rotation(cfg, logs, 8, on_selected=burn)
+
+    # Even burn-down: neither weekly is driven far below the other.
+    assert abs(weekly["claude"] - weekly["codex"]) <= 12.0
+    # No monopoly: both providers shared the load (old code gave codex 0 turns).
+    assert order.count("claude") >= 3
+    assert order.count("codex") >= 3
+
+
+def test_mixed_rotation_opaque_subscription_gets_even_share(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MiniMax-via-Kilo style opaque subscription is rotated fairly.
+
+    Claude and Codex expose percentage weekly windows; Kilo exposes only an
+    ungated/opaque subscription with no rankable number. Over many iterations
+    the opaque provider must still receive an even share of turns rather than
+    being starved by (or starving) the measurable providers.
+    """
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    now = 1000
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 70, "resets_at": now + 3 * 3600},
+            "week": {"remaining": 70, "resets_at": now + 5 * 86400},
+        },
+        "codex": {
+            "available": True,
+            "five_hour": {"remaining": 70, "resets_at": now + 3 * 3600},
+            "week": {"remaining": 70, "resets_at": now + 5 * 86400},
+        },
+        "kilo": {
+            "available": True,
+            "scopes": [{"name": "ungated", "kind": "ungated", "label": "minimax-m3 subscription"}],
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
+    cfg = ralph_robin.RalphConfig(
+        providers_spec="claude,codex,kilo",
+        providers=["claude", "codex", "kilo"],
+        even_burn=True,
+        scope="auto",
+        state_file=tmp_path / "state.json",
+    )
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+
+    order = _run_rotation(cfg, logs, 12)
+    counts = {p: order.count(p) for p in cfg.providers}
+
+    # Fair and even: the spread between the busiest and idlest provider is at
+    # most one turn, and the opaque subscription is never starved.
+    assert max(counts.values()) - min(counts.values()) <= 1
+    assert counts["kilo"] >= 4

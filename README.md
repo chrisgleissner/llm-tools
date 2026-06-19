@@ -367,6 +367,28 @@ or `GITHUB_TOKEN`, otherwise `gh auth token`); no Copilot-specific credential is
 required. With no token available the row is simply omitted. The row is
 informational and never affects `Ready`.
 
+**Pay-as-you-go readiness.** Copilot keeps working past its included monthly
+allowance via pay-as-you-go premium requests / AI Credits, up to the spending
+limit set in your GitHub billing settings. GitHub does not expose that limit
+through its API, so once the included allowance is exhausted (`monthly` at 0%)
+`Ready` would otherwise read `no` even though Copilot is still usable. To fix
+this, llm-usage keeps Copilot `Ready` when overage is **funded**, established
+two ways:
+
+- **Declared limit.** Set `[copilot] monthly_spend_limit` (or the
+  `LLM_USAGE_COPILOT_SPEND_LIMIT` / `LLM_USAGE_COPILOT_SPEND_CURRENCY` env
+  overrides) to your GitHub premium-request spending limit. Copilot stays
+  `Ready` while this month's billed overage stays under it, and flips to `no`
+  once the limit is reached.
+- **Auto-detected overage.** With no declared limit, if GitHub billing already
+  shows premium-request / AI-Credit overage being charged this month (net spend
+  > 0), pay-as-you-go is demonstrably enabled and Copilot stays `Ready`.
+
+With neither signal the previous behaviour stands: an exhausted allowance gates
+`Ready` to `no`. When funded, the exhausted allowance row shows `pay-as-you-go`
+(or `pay-as-you-go $spent/$limit`) in the `Guidance` column instead of a
+misleading runout/pace hint.
+
 The Copilot CLI footer shape has changed across releases — pre-1.0.57 printed
 `Plan: N% used` / `Monthly: N% used` (the *used* percentage), 1.0.57+ render
 `Remaining reqs.: N%` (the *remaining* percentage), and 1.0.63+ also dropped
@@ -681,10 +703,13 @@ By default, `ralph-robin` uses **even burn-down**. When several providers are re
 
 The selector:
 
-* ranks reset-window scopes such as `weekly`
-* ranks budget scopes such as Kilo `budget`
+* ranks long-period **plan** scopes such as `weekly`, `monthly`, and Kilo `budget`
+* scores each provider by its **binding (most-constrained) plan scope**, not its most generous one, so a provider whose weekly is draining ranks below a peer with weekly headroom and the rotation hands over instead of running one plan to the floor
+* excludes the short `5h` **session** window from the surplus ranking — it still gates usability, but it resets too fast to signal plan surplus, and folding it in let a momentarily-full 5h window mask a draining weekly (which kept the loop pinned to one provider, e.g. Codex, without ever handing over)
 * treats `balance` and `ungated` scopes as usable, but not pace-rankable
 * assumes an unknown or stale reset has a full week available, so the provider can still be ranked instead of being skipped
+
+Providers that expose no rankable plan scope — an opaque prepaid **subscription** such as MiniMax M3 via Kilo Code — are still rotated **fairly and evenly**: they take turns by least-completed count alongside the measurable providers (the surplus score only breaks ties between two measurable providers at the same count), so an opaque subscription is neither starved nor allowed to monopolise the loop.
 
 Use `--no-even-burn` to keep using the current provider until it is exhausted.
 

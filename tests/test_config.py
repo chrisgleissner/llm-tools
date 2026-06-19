@@ -73,6 +73,43 @@ def test_budget_rejects_unknown_key(monkeypatch: pytest.MonkeyPatch, tmp_path: P
         load_config()
 
 
+def test_copilot_spend_limit_parses(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", '[copilot]\nmonthly_spend_limit = 25\ncurrency = "$"\n')
+    limit, currency = config.copilot_spend_limit(load_config())
+    assert limit == 25.0
+    assert currency == "$"
+
+
+def test_copilot_spend_limit_defaults_when_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", "[defaults]\nscope = \"auto\"\n")
+    limit, currency = config.copilot_spend_limit(load_config())
+    assert limit is None
+    assert currency == "$"
+
+
+def test_copilot_spend_limit_rejects_non_positive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", "[copilot]\nmonthly_spend_limit = 0\n")
+    with pytest.raises(SystemExit):
+        load_config()
+
+
+def test_copilot_spend_limit_rejects_non_number(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", '[copilot]\nmonthly_spend_limit = "lots"\n')
+    with pytest.raises(SystemExit):
+        load_config()
+
+
+def test_copilot_section_rejects_unknown_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", "[copilot]\nmonthly_spend_limit = 10\nweekly = 5\n")
+    with pytest.raises(SystemExit):
+        load_config()
+
+
 def test_config_path_uses_explicit_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     explicit = tmp_path / "my-config.toml"
     monkeypatch.setenv("LLM_TOOLS_CONFIG", str(explicit))

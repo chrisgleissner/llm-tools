@@ -193,6 +193,13 @@ Missing CLI with no env-var fallback is `reason="missing-cli"`. The provider is 
 
 Important knobs that tests or users may rely on:
 
+* `CLAUDE_CODE_OAUTH_TOKEN` (long-lived OAuth token from `claude setup-token`; when set, the Claude usage reader uses it directly and skips the file-based OAuth refresh path — useful when `~/.claude/.credentials.json` is missing the refresh token)
+
+The Claude usage reader is strictly non-interactive: it never prompts and never drives `claude auth login`. When the OAuth access token is rejected and there is no usable refresh token (the one state the in-process refresh cannot recover), it does **not** ask the user to re-auth; it degrades to the most recent cached API usage, then the local `~/.claude/projects` snapshot. Re-authentication is owned by Claude Code itself — it rewrites `~/.claude/.credentials.json` whenever it is used, so a later read picks up the fresh credentials with no action from the dashboard.
+
+Copilot readiness accounts for pay-as-you-go: once the included monthly allowance is spent, Copilot is still "ready" while overage is funded. GitHub does not expose the premium-request spending limit via API, so "funded" is established either from a declared limit (`[copilot] monthly_spend_limit`, with `LLM_USAGE_COPILOT_SPEND_LIMIT` headroom checked against the month's billed `netAmount`) or auto-detected when GitHub billing already shows overage being charged this month. With neither signal, Copilot stays gated by the allowance (Ready=no). The exhausted-but-funded allowance row shows `pay-as-you-go` (or `pay-as-you-go $spent/$limit`) in the Guidance column instead of a misleading runout/pace hint.
+
+* `LLM_USAGE_COPILOT_SPEND_LIMIT` / `LLM_USAGE_COPILOT_SPEND_CURRENCY` (Copilot pay-as-you-go monthly spend limit + its symbol; env overrides the `[copilot]` config table; a positive limit keeps Copilot ready while billed overage stays under it)
 * `LLM_USAGE_NO_COLOR`
 * `LLM_USAGE_SHOW_SOURCE`
 * `LLM_USAGE_SHOW_REMAINING_TIME`

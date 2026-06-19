@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import threading
+from typing import Any
 from urllib.error import HTTPError
 from pathlib import Path
 
@@ -501,10 +502,18 @@ def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch:
         if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer expired-token":
             raise HTTPError(url, 401, "unauthorized", hdrs=None, fp=None)
         if url == common.CLAUDE_OAUTH_TOKEN_URL:
-            body = (data or b"").decode("utf-8")
-            assert "grant_type=refresh_token" in body
-            assert "refresh_token=refresh-token" in body
-            assert f"client_id={common.CLAUDE_OAUTH_CLIENT_ID.replace(':', '%3A').replace('/', '%2F')}" in body
+            # Anthropic's refresh endpoint requires a JSON body. The historical
+            # ``application/x-www-form-urlencoded`` body (and the legacy
+            # URL-form client_id) returns HTTP 400 and silently breaks Claude
+            # usage after every access-token expiry, which is what made the
+            # dashboard report ``unavailable`` for hours at a time.
+            assert req.get_header("Content-type") == "application/json"
+            payload = json.loads((data or b"").decode("utf-8"))
+            assert payload == {
+                "grant_type": "refresh_token",
+                "refresh_token": "refresh-token",
+                "client_id": common.CLAUDE_OAUTH_CLIENT_ID,
+            }
             return FakeResponse('{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}')
         if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer fresh-token":
             return FakeResponse(
@@ -525,6 +534,252 @@ def test_read_claude_api_refreshes_oauth_token(env: dict[str, str], monkeypatch:
         common.CLAUDE_OAUTH_TOKEN_URL,
         common.CLAUDE_OAUTH_USAGE_URL,
     ]
+
+
+def test_read_claude_api_refresh_targets_anthropic_json_endpoint(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: Anthropic's ``/v1/oauth/token`` endpoint speaks JSON, not
+    form-encoded, and lives on ``api.anthropic.com`` (not the
+    ``platform.claude.com`` URL used for the initial code exchange). The
+    historical code posted form-encoded data to the platform host, which the
+    endpoint rejected with HTTP 400 ``Invalid request format``; every refresh
+    silently returned ``None`` so the dashboard degraded to ``unavailable``
+    after the access token's 8h lifetime — a long-standing gap that this test
+    pins so a future refactor cannot regress it back to the broken shape."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "expired-token",
+                    "refreshToken": "refresh-token",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def read(self) -> bytes:
+            return self._text.encode("utf-8")
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        url = req.full_url
+        auth = req.get_header("Authorization")
+        # Only the token-endpoint request is relevant to the regression; we
+        # capture it explicitly so the later usage-call does not clobber the
+        # captured fields.
+        if url == common.CLAUDE_OAUTH_TOKEN_URL:
+            captured["url"] = url
+            captured["content_type"] = req.get_header("Content-type")
+            captured["body"] = (req.data or b"").decode("utf-8")
+            return FakeResponse(
+                '{"access_token":"fresh-token","refresh_token":"fresh-refresh","expires_in":3600}'
+            )
+        if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer expired-token":
+            raise HTTPError(url, 401, "unauthorized", hdrs=None, fp=None)
+        if url == common.CLAUDE_OAUTH_USAGE_URL and auth == "Bearer fresh-token":
+            return FakeResponse(
+                '{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":"2026-06-14T18:00:00Z"},'
+                '"seven_day":{"used_percentage":34,"resets_at":"2026-06-20T18:00:00Z"}}}'
+            )
+        raise AssertionError(f"unexpected request: {url}")
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    assert common.read_claude_api(env) is not None
+
+    assert captured["url"] == "https://api.anthropic.com/v1/oauth/token"
+    assert captured["content_type"] in {"application/json", "application/json; charset=utf-8"}
+    assert json.loads(captured["body"]) == {
+        "grant_type": "refresh_token",
+        "refresh_token": "refresh-token",
+        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    }
+    saved = json.loads(cred.read_text(encoding="utf-8"))
+    assert saved["claudeAiOauth"]["accessToken"] == "fresh-token"
+    assert saved["claudeAiOauth"]["refreshToken"] == "fresh-refresh"
+
+
+def test_read_claude_api_uses_claude_code_oauth_token_env_var(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: ``CLAUDE_CODE_OAUTH_TOKEN`` (set by ``claude setup-token``)
+    is a 1-year token that ships without a refresh token, so the OAuth refresh
+    path is a dead end for it. The dashboard must honour the env var directly
+    — otherwise users whose credentials file lost the refresh token (e.g. after
+    a stale ``claude auth logout`` or a CLI upgrade) cannot get fresh Claude
+    usage at all, even when they have a perfectly valid long-lived token in
+    scope. The env var wins over the credentials file's access token."""
+    cred = Path(env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    # Expired + no refresh token so the OAuth path is dead.
+                    "accessToken": "stale-file-token",
+                    "refreshToken": "",
+                    "expiresAt": 0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    token_env = env | {"CLAUDE_CODE_OAUTH_TOKEN": "long-lived-env-token"}
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __init__(self, text: str) -> None:
+            self._text = text
+
+        def read(self) -> bytes:
+            return self._text.encode("utf-8")
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        captured["url"] = req.full_url
+        captured["auth"] = req.get_header("Authorization")
+        # Only the env-var token must reach the server; the credentials file's
+        # stale token must not.
+        if req.get_header("Authorization") != "Bearer long-lived-env-token":
+            raise AssertionError(
+                f"unexpected Authorization header: {req.get_header('Authorization')!r}"
+            )
+        return FakeResponse(
+            '{"rate_limits":{"five_hour":{"used_percentage":42,"resets_at":"2026-06-18T12:00:00Z"},'
+            '"seven_day":{"used_percentage":21,"resets_at":"2026-06-20T12:00:00Z"}}}'
+        )
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude_api(token_env)
+    assert data is not None
+    assert data["five_hour"]["used"] == 42
+    assert data["week"]["used"] == 21
+    assert captured["url"] == common.CLAUDE_OAUTH_USAGE_URL
+    # The refresh endpoint must NOT be touched when the env var is set.
+    assert "token_url" not in captured
+
+
+def test_read_claude_api_degrades_to_cache_when_refresh_token_missing(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the access token is rejected *and* there is no refresh token
+    to renew it, the OAuth refresh path is a dead end. The reader must
+    never drive an interactive ``claude auth login`` — the dashboard
+    must never block on a prompt. Instead it degrades to the most recent
+    cached usage so the numbers still render. Claude Code rewrites
+    ``~/.claude/.credentials.json`` on its own whenever it is used, so a
+    later read recovers with no action from the user."""
+    live_env = env | {"LLM_USAGE_NOW_EPOCH": "1000"}
+    cred = Path(live_env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {"claudeAiOauth": {"accessToken": "expired-token", "refreshToken": "", "expiresAt": 0}}
+        ),
+        encoding="utf-8",
+    )
+    cache = common.usage_cache_dir(live_env) / "claude-usage-api.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        '{"rate_limits":{"five_hour":{"used_percentage":20,"resets_at":"2026-06-18T00:00:00Z"}}}',
+        encoding="utf-8",
+    )
+    os.utime(cache, (1000, 1000))
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        if req.full_url == common.CLAUDE_OAUTH_USAGE_URL:
+            raise HTTPError(req.full_url, 401, "unauthorized", hdrs=None, fp=None)
+        raise AssertionError(f"unexpected request: {req.full_url}")
+
+    def no_spawn(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise AssertionError("read_claude_api must never spawn a subprocess")
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    monkeypatch.setattr(common.subprocess, "Popen", no_spawn)
+    data = common.read_claude_api(live_env)
+    assert data is not None
+    assert data.get("reason") != "needs-reauth"
+    assert data["five_hour"]["used"] == 20
+
+
+def test_read_claude_falls_through_to_local_when_oauth_dead(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected access token, no refresh token, and no cached API usage
+    must fall through to the local ``~/.claude/projects`` snapshot rather
+    than degrade to ``unavailable`` — usage still shows."""
+    live_env = env | {"LLM_USAGE_NOW_EPOCH": "1000"}
+    cred = Path(live_env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {"claudeAiOauth": {"accessToken": "expired-token", "refreshToken": "", "expiresAt": 0}}
+        ),
+        encoding="utf-8",
+    )
+    project = Path(live_env["HOME"]) / ".claude" / "projects" / "r.jsonl"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(
+        '{"message":{"rateLimits":{"fiveHour":{"usedPercent":6,"resetsAt":"2026-06-18T00:00:00Z"}}}}\n',
+        encoding="utf-8",
+    )
+    os.utime(project, (1000, 1000))
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        raise HTTPError(req.full_url, 401, "unauthorized", hdrs=None, fp=None)
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    data = common.read_claude(live_env)
+    assert data is not None
+    assert data.get("available") is not False
+    assert data["five_hour"]["used"] == 6
+
+
+def test_read_claude_never_prompts_when_oauth_dead_and_no_data(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dead credentials with no cache and no local data degrade quietly to
+    ``None`` (the provider adapter renders ``no-local-data``) — the reader
+    must never read stdin or spawn ``claude auth login``."""
+    live_env = env | {"LLM_USAGE_NOW_EPOCH": "1000"}
+    cred = Path(live_env["HOME"]) / ".claude" / ".credentials.json"
+    cred.parent.mkdir(parents=True, exist_ok=True)
+    cred.write_text(
+        json.dumps(
+            {"claudeAiOauth": {"accessToken": "expired-token", "refreshToken": "", "expiresAt": 0}}
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(req, timeout=20):  # type: ignore[no-untyped-def]
+        raise HTTPError(req.full_url, 401, "unauthorized", hdrs=None, fp=None)
+
+    def no_spawn(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise AssertionError("the usage reader must never spawn a subprocess")
+
+    monkeypatch.setattr(common, "urlopen", fake_urlopen)
+    monkeypatch.setattr(common.subprocess, "Popen", no_spawn)
+    data = common.read_claude(live_env)
+    assert data is None
 
 
 def _make_http_error(url: str, code: int, headers: dict[str, str] | None = None) -> HTTPError:
@@ -1733,6 +1988,44 @@ def test_ralph_even_burn_handles_unknown_weekly_reset(monkeypatch: pytest.Monkey
     selected = ralph_robin.select_provider(cfg, logs, 1, set())
     assert selected["provider"] == "claude"
     assert selected["rotation_reason"] == "even-burn"
+
+
+def test_ralph_even_burn_hands_over_when_incumbent_weekly_drains(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Regression for "ralph-robin never hands over from codex": the incumbent's
+    # 5h session window stays full and fast-resets, while its weekly plan is
+    # nearly drained. Under the old max-across-scopes ranking both providers
+    # tied on their healthy 5h pace and the incumbent kept winning the tie-break
+    # forever, burning its weekly to the floor. With binding (weekly) ranking
+    # the selector must advance to the peer that still has weekly headroom.
+    cfg = ralph_robin.RalphConfig(providers_spec="claude,codex", providers=["claude", "codex"], state_file=tmp_path / "state.json")
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    now = 1000
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 96},
+            "week": {"remaining": 80, "resets_at": now + 5 * 86400},
+        },
+        "codex": {
+            # 5h looks great (just reset), but weekly is almost gone.
+            "available": True,
+            "five_hour": {"remaining": 96},
+            "week": {"remaining": 6, "resets_at": now + 5 * 86400},
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
+
+    # current_index points at codex (the incumbent that just ran). Even-burn
+    # must hand over to claude rather than keep draining codex's weekly.
+    selected = ralph_robin.select_provider(cfg, logs, 1, set())
+    assert selected["provider"] == "claude"
+    assert selected["rotation_reason"] == "even-burn"
+
+    # Codex is still perfectly usable (weekly 6% > 1% floor) — the hand-over is
+    # driven by relative weekly surplus, not by codex being exhausted.
+    codex_decision = next(d for d in selected["decisions"] if d["provider"] == "codex")
+    assert codex_decision["usable"] is True
 
 
 def _usable_selection(provider: str = "claude") -> dict:

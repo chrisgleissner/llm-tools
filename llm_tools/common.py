@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 from urllib.error import HTTPError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -33,8 +32,14 @@ TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-p
 DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
 DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS = 300
 CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-CLAUDE_OAUTH_CLIENT_ID = "https://claude.ai/oauth/claude-code-client-metadata"
+# The OAuth ``refresh_token`` grant goes to a different host than the
+# initial ``authorization_code`` exchange (``platform.claude.com``) and expects
+# a JSON body — sending ``application/x-www-form-urlencoded`` returns HTTP 400
+# "Invalid request format". The UUID client_id is what the Claude Code CLI
+# itself uses; the URL-form metadata client_id only works for the initial
+# code-for-token exchange, not refresh.
+CLAUDE_OAUTH_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_OAUTH_BETA = "oauth-2025-04-20"
 CLAUDE_OAUTH_USER_AGENT = "claude-code/2.1.177"
 # Codex exposes live, turn-free rate limits through its app-server JSON-RPC
@@ -1074,6 +1079,24 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
         isinstance(oauth, dict)
         and (str(oauth.get("accessToken") or "").strip() or str(oauth.get("refreshToken") or "").strip())
     )
+    # ``claude setup-token`` emits a long-lived (≈1 year) OAuth token that the
+    # Claude Code CLI itself honours via this env var. The token is
+    # functionally an access token (same ``sk-ant-oat01-…`` shape, same
+    # ``api.anthropic.com/api/oauth/usage`` endpoint) but has no refresh
+    # token, so the OAuth refresh path is a dead end for it. When the env
+    # var is set, treat it as the source of truth and skip the file's
+    # (possibly missing/expired) access token and refresh logic entirely —
+    # this is what unblocks dashboards whose credentials file lost the
+    # refresh token after a stale ``claude auth logout`` / CLI upgrade.
+    env_token = str(env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+    if env_token:
+        result = _fetch_claude_oauth_usage_result(env_token, env)
+        if result.text:
+            _clear_claude_oauth_rate_limit(env)
+            return _cache_claude_usage_response(cache, result.text)
+        if result.rate_limited:
+            return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
+        return _read_claude_usage_cache(cache, env, local_snapshot_max_age(env))
     if has_oauth_token and _claude_oauth_rate_limit_active(env):
         cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env))
         if cached is not None:
@@ -1095,6 +1118,17 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
                     return _cache_claude_usage_response(cache, result.text)
                 if result.rate_limited:
                     return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
+            # else: the access token is rejected AND we cannot refresh (no
+            # refresh token, or the refresh token is itself rejected). That
+            # is the one state the OAuth refresh path cannot recover from —
+            # the credentials file is the source of truth, and a new access
+            # token would require the user to complete an OAuth browser
+            # flow. We never drive that flow ourselves (the dashboard must
+            # never block on a prompt); instead we fall through to the
+            # graceful cache/local-snapshot fallback below. Claude Code
+            # rewrites ``~/.claude/.credentials.json`` whenever it is used,
+            # so a later read picks up fresh credentials with no action
+            # from us.
     elif isinstance(oauth, dict) and oauth.get("refreshToken"):
         refreshed = _refresh_claude_oauth_access_token(cred, cred_data, env)
         if refreshed:
@@ -1304,7 +1338,7 @@ def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any
     refresh_token = str(oauth.get("refreshToken") or "").strip()
     if not refresh_token:
         return None
-    payload = urlencode(
+    payload = json.dumps(
         {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -1315,7 +1349,7 @@ def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any
         CLAUDE_OAUTH_TOKEN_URL,
         data=payload,
         headers={
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/json",
             "Accept": "application/json",
             "User-Agent": CLAUDE_OAUTH_USER_AGENT,
         },

@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -739,6 +740,120 @@ def test_copilot_rows_render_spent_balance_row(env: dict[str, str]) -> None:
     assert spend.amount == 1.75
     assert spend.remaining == 1.0  # informational; keeps Ready truthy
     # Copilot stays Ready: the spend row must not gate readiness.
+    assert usage.provider_ready(rows, "Copilot") is True
+
+
+def _copilot_legacy_json(remaining: float | None, spent: float | None = None) -> dict[str, Any]:
+    """Build a Copilot legacy-json dict (the shape ``copilot_rows`` consumes)."""
+    used = None if remaining is None else max(0.0, min(100.0, 100.0 - remaining))
+    out: dict[str, Any] = {
+        "provider": "copilot",
+        "source": "github billing",
+        "available": True,
+        "monthly": {"used": used, "remaining": remaining},
+    }
+    if spent is not None:
+        out["add_on"] = {"spent": spent, "currency": "$", "source": "github billing"}
+    return out
+
+
+def test_copilot_exhausted_allowance_with_overage_is_ready_payg(env: dict[str, str]) -> None:
+    """Included allowance spent (0% left) but GitHub billing already shows
+    overage being charged ($ net spend > 0): pay-as-you-go is demonstrably
+    enabled, so Copilot stays Ready and the allowance row explains itself."""
+    cfg = usage.Config()
+    cfg.copilot_spend_limit = None
+    rows = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=3.0))
+    monthly = next(r for r in rows if r.scope == "monthly")
+    assert monthly.gates_ready is False
+    assert monthly.guidance_override == "pay-as-you-go"
+    assert usage.provider_ready(rows, "Copilot") is True
+
+
+def test_copilot_exhausted_allowance_without_overage_or_limit_not_ready(env: dict[str, str]) -> None:
+    """Allowance spent, no overage charged, and no declared limit: we cannot
+    prove pay-as-you-go is funded, so Copilot stays Ready=no (unchanged)."""
+    cfg = usage.Config()
+    cfg.copilot_spend_limit = None
+    rows = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=0.0))
+    monthly = next(r for r in rows if r.scope == "monthly")
+    assert monthly.gates_ready is True
+    assert usage.provider_ready(rows, "Copilot") is False
+
+
+def test_copilot_declared_spend_limit_with_headroom_is_ready(env: dict[str, str]) -> None:
+    """A declared monthly spend limit with headroom keeps Copilot Ready even
+    with zero overage charged yet, and the Guidance shows spend vs limit."""
+    cfg = usage.Config()
+    cfg.copilot_spend_limit = 25.0
+    cfg.copilot_spend_currency = "$"
+    rows = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=3.0))
+    monthly = next(r for r in rows if r.scope == "monthly")
+    assert monthly.gates_ready is False
+    assert monthly.guidance_override == "pay-as-you-go $3/25"
+    assert usage.provider_ready(rows, "Copilot") is True
+
+
+def test_copilot_declared_spend_limit_exceeded_not_ready(env: dict[str, str]) -> None:
+    """Once billed overage reaches the declared limit, GitHub blocks further
+    use, so Copilot must report Ready=no."""
+    cfg = usage.Config()
+    cfg.copilot_spend_limit = 25.0
+    cfg.copilot_spend_currency = "$"
+    rows = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=30.0))
+    monthly = next(r for r in rows if r.scope == "monthly")
+    assert monthly.gates_ready is True
+    assert usage.provider_ready(rows, "Copilot") is False
+
+
+def test_copilot_declared_spend_limit_unknown_spend_not_ready(env: dict[str, str]) -> None:
+    """A declared limit with NO billing signal (no add-on / GitHub token) cannot
+    verify headroom against the month's billed netAmount, so pay-as-you-go must
+    not be assumed funded: Copilot stays Ready=no and shows no misleading
+    "$0/<limit>" override. A known $0 spend (add-on present) stays funded; this
+    guards only the unknown-spend case."""
+    cfg = usage.Config()
+    cfg.copilot_spend_limit = 25.0
+    cfg.copilot_spend_currency = "$"
+    # spent=None -> no add_on block at all -> billed spend is unknown.
+    rows = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=None))
+    monthly = next(r for r in rows if r.scope == "monthly")
+    assert monthly.gates_ready is True
+    assert monthly.guidance_override is None
+    assert usage.provider_ready(rows, "Copilot") is False
+
+    # Sanity: a *known* $0 spend (add-on present) is still funded and ready.
+    rows_known_zero = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=0.0))
+    monthly_zero = next(r for r in rows_known_zero if r.scope == "monthly")
+    assert monthly_zero.gates_ready is False
+    assert monthly_zero.guidance_override == "pay-as-you-go $0/25"
+    assert usage.provider_ready(rows_known_zero, "Copilot") is True
+
+
+def test_load_copilot_spend_limit_env_overrides_config(env: dict[str, str], tmp_path: Path) -> None:
+    """The env knob wins over any config file so a quick override needs no
+    file edit; an absent/blank knob yields no limit."""
+    # Point config at a nonexistent file so the loader returns {} and the test
+    # never reads an ambient user config.
+    base = env | {"LLM_TOOLS_CONFIG": str(tmp_path / "absent.toml")}
+    assert usage._load_copilot_spend_limit(base | {"LLM_USAGE_COPILOT_SPEND_LIMIT": "40"}) == (40.0, "$")
+    assert usage._load_copilot_spend_limit(
+        base | {"LLM_USAGE_COPILOT_SPEND_LIMIT": "40", "LLM_USAGE_COPILOT_SPEND_CURRENCY": "£"}
+    ) == (40.0, "£")
+    # Non-positive / unparseable -> no declared limit (currency still defaults).
+    assert usage._load_copilot_spend_limit(base | {"LLM_USAGE_COPILOT_SPEND_LIMIT": "0"})[0] is None
+    assert usage._load_copilot_spend_limit(base | {"LLM_USAGE_COPILOT_SPEND_LIMIT": "nope"})[0] is None
+
+
+def test_copilot_with_allowance_headroom_ready_without_payg(env: dict[str, str]) -> None:
+    """The common case is unchanged: included allowance with headroom gates
+    Ready normally and never triggers the pay-as-you-go override."""
+    cfg = usage.Config()
+    cfg.copilot_spend_limit = None
+    rows = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=60.0, spent=0.0))
+    monthly = next(r for r in rows if r.scope == "monthly")
+    assert monthly.gates_ready is True
+    assert monthly.guidance_override is None
     assert usage.provider_ready(rows, "Copilot") is True
 
 
