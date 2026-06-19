@@ -1234,10 +1234,15 @@ def copilot_payg_status(cfg: Config, copilot_json: dict[str, Any]) -> CopilotPay
     raw_spend = common.num(addon.get("spent")) if isinstance(addon, dict) else None
     spend = float(raw_spend) if raw_spend is not None else None
     if limit is not None:
-        # Declared ceiling: funded while this month's billed overage stays under
-        # it (an unknown/zero spend counts as $0 used).
-        used = spend if spend is not None else 0.0
-        funded = used < limit
+        # Declared ceiling: funded only when this month's billed overage
+        # (netAmount) is actually known AND stays under the limit. When the
+        # spend is unknown — no GitHub billing add-on signal (no token / reader
+        # disabled) — we cannot verify headroom, so we stay conservative and
+        # keep gating on the included allowance rather than fabricating a $0
+        # spend and a misleading "pay-as-you-go $0/<limit>" override. This is
+        # the documented "with neither signal, stay gated" contract. A *known*
+        # $0 spend (add-on present, nothing billed yet) still counts as funded.
+        funded = spend is not None and spend < limit
         currency = (addon.get("currency") if isinstance(addon, dict) else None) or currency
     else:
         # No declared limit (GitHub exposes none). If billing already shows

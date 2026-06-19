@@ -806,6 +806,30 @@ def test_copilot_declared_spend_limit_exceeded_not_ready(env: dict[str, str]) ->
     assert usage.provider_ready(rows, "Copilot") is False
 
 
+def test_copilot_declared_spend_limit_unknown_spend_not_ready(env: dict[str, str]) -> None:
+    """A declared limit with NO billing signal (no add-on / GitHub token) cannot
+    verify headroom against the month's billed netAmount, so pay-as-you-go must
+    not be assumed funded: Copilot stays Ready=no and shows no misleading
+    "$0/<limit>" override. A known $0 spend (add-on present) stays funded; this
+    guards only the unknown-spend case."""
+    cfg = usage.Config()
+    cfg.copilot_spend_limit = 25.0
+    cfg.copilot_spend_currency = "$"
+    # spent=None -> no add_on block at all -> billed spend is unknown.
+    rows = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=None))
+    monthly = next(r for r in rows if r.scope == "monthly")
+    assert monthly.gates_ready is True
+    assert monthly.guidance_override is None
+    assert usage.provider_ready(rows, "Copilot") is False
+
+    # Sanity: a *known* $0 spend (add-on present) is still funded and ready.
+    rows_known_zero = usage.copilot_rows(cfg, _copilot_legacy_json(remaining=0.0, spent=0.0))
+    monthly_zero = next(r for r in rows_known_zero if r.scope == "monthly")
+    assert monthly_zero.gates_ready is False
+    assert monthly_zero.guidance_override == "pay-as-you-go $0/25"
+    assert usage.provider_ready(rows_known_zero, "Copilot") is True
+
+
 def test_load_copilot_spend_limit_env_overrides_config(env: dict[str, str], tmp_path: Path) -> None:
     """The env knob wins over any config file so a quick override needs no
     file edit; an absent/blank knob yields no limit."""
