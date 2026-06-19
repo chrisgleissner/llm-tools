@@ -1990,6 +1990,44 @@ def test_ralph_even_burn_handles_unknown_weekly_reset(monkeypatch: pytest.Monkey
     assert selected["rotation_reason"] == "even-burn"
 
 
+def test_ralph_even_burn_hands_over_when_incumbent_weekly_drains(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Regression for "ralph-robin never hands over from codex": the incumbent's
+    # 5h session window stays full and fast-resets, while its weekly plan is
+    # nearly drained. Under the old max-across-scopes ranking both providers
+    # tied on their healthy 5h pace and the incumbent kept winning the tie-break
+    # forever, burning its weekly to the floor. With binding (weekly) ranking
+    # the selector must advance to the peer that still has weekly headroom.
+    cfg = ralph_robin.RalphConfig(providers_spec="claude,codex", providers=["claude", "codex"], state_file=tmp_path / "state.json")
+    logs = common.setup_run_logs(tmp_path / "logs", "r")
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    now = 1000
+    snapshots = {
+        "claude": {
+            "available": True,
+            "five_hour": {"remaining": 96},
+            "week": {"remaining": 80, "resets_at": now + 5 * 86400},
+        },
+        "codex": {
+            # 5h looks great (just reset), but weekly is almost gone.
+            "available": True,
+            "five_hour": {"remaining": 96},
+            "week": {"remaining": 6, "resets_at": now + 5 * 86400},
+        },
+    }
+    monkeypatch.setattr(common, "usage_snapshot_for_provider", lambda provider, env=None: snapshots[provider])
+
+    # current_index points at codex (the incumbent that just ran). Even-burn
+    # must hand over to claude rather than keep draining codex's weekly.
+    selected = ralph_robin.select_provider(cfg, logs, 1, set())
+    assert selected["provider"] == "claude"
+    assert selected["rotation_reason"] == "even-burn"
+
+    # Codex is still perfectly usable (weekly 6% > 1% floor) — the hand-over is
+    # driven by relative weekly surplus, not by codex being exhausted.
+    codex_decision = next(d for d in selected["decisions"] if d["provider"] == "codex")
+    assert codex_decision["usable"] is True
+
+
 def _usable_selection(provider: str = "claude") -> dict:
     return {
         "index": 0,

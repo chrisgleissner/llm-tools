@@ -703,10 +703,13 @@ By default, `ralph-robin` uses **even burn-down**. When several providers are re
 
 The selector:
 
-* ranks reset-window scopes such as `weekly`
-* ranks budget scopes such as Kilo `budget`
+* ranks long-period **plan** scopes such as `weekly`, `monthly`, and Kilo `budget`
+* scores each provider by its **binding (most-constrained) plan scope**, not its most generous one, so a provider whose weekly is draining ranks below a peer with weekly headroom and the rotation hands over instead of running one plan to the floor
+* excludes the short `5h` **session** window from the surplus ranking — it still gates usability, but it resets too fast to signal plan surplus, and folding it in let a momentarily-full 5h window mask a draining weekly (which kept the loop pinned to one provider, e.g. Codex, without ever handing over)
 * treats `balance` and `ungated` scopes as usable, but not pace-rankable
 * assumes an unknown or stale reset has a full week available, so the provider can still be ranked instead of being skipped
+
+Providers that expose no rankable plan scope — an opaque prepaid **subscription** such as MiniMax M3 via Kilo Code — are still rotated **fairly and evenly**: they take turns by least-completed count alongside the measurable providers (the surplus score only breaks ties between two measurable providers at the same count), so an opaque subscription is neither starved nor allowed to monopolise the loop.
 
 Use `--no-even-burn` to keep using the current provider until it is exhausted.
 

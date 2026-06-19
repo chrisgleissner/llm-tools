@@ -773,6 +773,52 @@ _SCOPE_PERIOD_DAYS: dict[str, float] = {
     "budget": 30.0,  # kilo / opencode budget resets monthly
 }
 
+# Scopes that gate usability but must NOT drive the even-burn *surplus* ranking.
+# The 5h session window is a short, fast-resetting throttle: its pace deviation
+# swings wildly between near-full (just reset) and exhausted (mid-burst), so
+# folding it into the surplus score lets a momentarily-healthy 5h window mask a
+# draining weekly/budget plan. That is exactly what kept ralph-robin pinned to
+# one provider (codex especially) and burned a single plan to the floor without
+# ever handing over. The 5h window still gates usability through
+# :func:`capacity.decide`; it is only excluded from the headroom *comparison*.
+_NON_PLAN_RANKING_SCOPES: frozenset[str] = frozenset({"5h"})
+
+
+def _binding_plan_pace(windows: Any, env: dict[str, str] | None = None) -> float | None:
+    """Binding (lowest) pace deviation across a decision's *plan* scopes.
+
+    A provider is gated by its most-constrained scope, so the surplus it can
+    safely absorb before it stops being usable is the **minimum** pace across
+    its pace-rankable plan scopes — never the maximum. Taking the maximum let a
+    fast-resetting 5h window mask a draining weekly window, which kept the
+    selector pinned to the incumbent (the codex never-hands-over bug).
+
+    Scopes are filtered twice:
+
+    * ``balance`` / ``ungated`` / ``unknown`` / ``opaque`` scopes are not
+      pace-rankable and are dropped by :func:`_scope_pace_remaining` (returns
+      ``None``).
+    * The 5h session throttle (:data:`_NON_PLAN_RANKING_SCOPES`) is dropped
+      here: it gates usability but is too volatile to rank plan surplus by.
+
+    Returns the binding (minimum) pace across the surviving plan scopes, or
+    ``None`` when none remain so even-burn falls back to plain rotation.
+    """
+    if not isinstance(windows, list):
+        return None
+    binding: float | None = None
+    for window in windows:
+        if not isinstance(window, dict):
+            continue
+        if window.get("name") in _NON_PLAN_RANKING_SCOPES:
+            continue
+        score = _scope_pace_remaining(window, env)
+        if score is None:
+            continue
+        if binding is None or score < binding:
+            binding = score
+    return binding
+
 
 def _scope_pace_remaining(window: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
     """Pace deviation (remaining − expected) for a single decision-window dict.
@@ -810,26 +856,17 @@ def _scope_pace_remaining(window: dict[str, Any], env: dict[str, str] | None = N
 
 
 def remaining_daily_capacity(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
-    """Highest remaining-per-day across the decision's pace-rankable scopes.
+    """Binding remaining-per-day surplus across the decision's plan scopes.
 
-    Reset-window and budget scopes are ranked. A provider that only exposes
-    balance/ungated scopes returns ``None`` so even-burn falls back to a
-    plain rotation. This replaces the old "weekly window only" logic so
-    Kilo's budget scope can participate in even-burn when it is configured.
+    Reset-window (weekly/monthly) and budget scopes are ranked; the 5h session
+    throttle and balance/ungated scopes are not. The score is the **binding
+    (minimum)** pace across the rankable plan scopes, so a provider whose weekly
+    is draining ranks below a peer with weekly headroom even while its 5h window
+    looks healthy. A provider that exposes no rankable plan scope (balance /
+    ungated only) returns ``None`` so even-burn falls back to plain rotation.
+    See :func:`_binding_plan_pace`.
     """
-    windows = decision.get("windows")
-    if not isinstance(windows, list):
-        return None
-    best: float | None = None
-    for window in windows:
-        if not isinstance(window, dict):
-            continue
-        score = _scope_pace_remaining(window, env)
-        if score is None:
-            continue
-        if best is None or score > best:
-            best = score
-    return best
+    return _binding_plan_pace(decision.get("windows"), env)
 
 
 def weekly_window_exhausted(decision: dict[str, Any]) -> bool:
@@ -1011,26 +1048,15 @@ def _route_decision_for_index(cfg: RalphConfig, route_id: str) -> dict[str, Any]
 
 
 def _route_remaining_daily_capacity(decision: dict[str, Any], env: dict[str, str] | None = None) -> float | None:
-    """Best-effort daily capacity score for a route decision.
+    """Binding daily-capacity surplus for a route decision.
 
-    Routes whose only scope is opaque / ungated / balance return
-    ``None`` so even-burn falls back to the rotation logic. Routes
-    that mix opaque with a rankable budget / reset-window scope use
-    the rankable score.
+    Routes whose only scope is opaque / ungated / balance return ``None`` so
+    even-burn falls back to the rotation logic. Routes that mix an opaque scope
+    with a rankable budget / reset-window scope use the binding (minimum) pace
+    across the rankable plan scopes, excluding the 5h session throttle, exactly
+    like :func:`remaining_daily_capacity`.
     """
-    windows = decision.get("windows")
-    if not isinstance(windows, list):
-        return None
-    best: float | None = None
-    for window in windows:
-        if not isinstance(window, dict):
-            continue
-        score = _scope_pace_remaining(window, env)
-        if score is None:
-            continue
-        if best is None or score > best:
-            best = score
-    return best
+    return _binding_plan_pace(decision.get("windows"), env)
 
 
 def _even_burn_route_index(
