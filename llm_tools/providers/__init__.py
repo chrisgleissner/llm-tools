@@ -16,7 +16,7 @@ Adding a new provider is a small, well-defined change:
    ``llm_tools.scheduler.highlight_provider_text``.
 """
 
-from . import claude, codex, copilot, kilo, minimax, opencode
+from . import claude, codex, copilot, kilo, minimax, opencode, zai
 from .claude import (
     PROVIDER_CLAUDE,
     normalize as claude_normalize,
@@ -65,9 +65,23 @@ from .opencode import (
     opencode_monthly_reset_epoch,
     read_opencode,
 )
+from .zai import (
+    DEFAULT_ZAI_TIMEOUT,
+    PROVIDER_ZAI,
+    ZAI_QUOTA_ENDPOINTS,
+    ZAI_REASON_AUTH,
+    ZAI_REASON_NETWORK,
+    ZAI_REASON_PLAN,
+    ZAI_REASON_QUOTA,
+    read_zai,
+    zai_api_key,
+    zai_model,
+    zai_timeout,
+)
 
 
 __all__ = [
+    "DEFAULT_ZAI_TIMEOUT",
     "KILO_MODES",
     "OPENCODE_MODES",
     "PROVIDER_CLAUDE",
@@ -76,6 +90,12 @@ __all__ = [
     "PROVIDER_KILO",
     "PROVIDER_MINIMAX",
     "PROVIDER_OPENCODE",
+    "PROVIDER_ZAI",
+    "ZAI_QUOTA_ENDPOINTS",
+    "ZAI_REASON_AUTH",
+    "ZAI_REASON_NETWORK",
+    "ZAI_REASON_PLAN",
+    "ZAI_REASON_QUOTA",
     "claude",
     "claude_normalize",
     "codex",
@@ -110,4 +130,9 @@ __all__ = [
     "read_kilo",
     "read_minimax",
     "read_opencode",
+    "read_zai",
+    "zai",
+    "zai_api_key",
+    "zai_model",
+    "zai_timeout",
 ]

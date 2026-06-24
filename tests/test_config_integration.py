@@ -138,19 +138,19 @@ def test_ralph_resolve_policies_warns_for_unsupported_model_provider(
     _write_config(
         tmp_path / "xdg",
         """
-        [providers.kilo]
-        model = "ignored-kilo-model"
+        [providers.minimax]
+        model = "ignored-minimax-model"
         """,
     )
     conf = ralph_robin.apply_config(ralph_robin.RalphConfig())
-    cfg = ralph_robin.RalphConfig(providers=["kilo"])
+    cfg = ralph_robin.RalphConfig(providers=["minimax"])
     ralph_robin.resolve_policies(cfg, conf)
     captured = capsys.readouterr()
     assert "model pinning is not supported" in captured.err
     # The model is reset to None when the provider cannot take one.
-    assert cfg.policies["kilo"].model is None
+    assert cfg.policies["minimax"].model is None
     # The rest of the policy is preserved.
-    assert cfg.policies["kilo"].allow_fallback is False
+    assert cfg.policies["minimax"].allow_fallback is False
 
 
 def test_scheduler_apply_config_returns_early_when_missing(
@@ -252,10 +252,10 @@ def test_scheduler_apply_config_warns_for_unsupported_model_provider(
         tmp_path / "xdg",
         """
         [scheduler]
-        provider = "kilo"
+        provider = "minimax"
 
-        [providers.kilo]
-        model = "ignored-kilo-model"
+        [providers.minimax]
+        model = "ignored-minimax-model"
         """,
     )
     cfg = scheduler.SchedulerConfig()

@@ -454,9 +454,52 @@ def running_status(env: dict[str, str] | None = None) -> dict[str, Any]:
     return {"running": False, "socket": str(socket_path(env))}
 
 
+def _service_path(env: dict[str, str] | None = None) -> str:
+    """PATH to bake into the background-sampler unit.
+
+    systemd (and launchd) start user services with a minimal PATH that
+    omits version-manager bin dirs (nvm, volta, asdf, npm-global). The
+    sampler then cannot find Node-based CLIs such as ``copilot`` and
+    reports them as ``missing-cli`` even though the user has them
+    installed -- and that bad snapshot poisons the shared cache the
+    foreground ``llm-usage`` reads. We bake an explicit PATH so the
+    service sees exactly what the user sees: the directories that hold
+    the CLIs we sample, the install-time PATH, then conventional
+    fallbacks.
+    """
+    env = env or os.environ
+    home = str(common.home_dir(env))
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str | None) -> None:
+        if not raw:
+            return
+        # Expand ``~`` from ``env`` (not ``os.environ``) so tests that set a
+        # synthetic HOME stay hermetic; ``os.path.expanduser`` would leak the
+        # real ``$HOME`` here.
+        if raw == "~" or raw.startswith("~/"):
+            raw = home + raw[1:]
+        path = os.path.expanduser(raw)
+        if path not in seen and os.path.isdir(path):
+            seen.add(path)
+            parts.append(path)
+
+    for tool in ("copilot", "node", "codex", "mmx", "kilo", "opencode"):
+        found = shutil.which(tool, path=env.get("PATH"))
+        if found:
+            add(os.path.dirname(found))
+    for entry in (env.get("PATH") or "").split(os.pathsep):
+        add(entry)
+    for fallback in ("~/.local/bin", "/usr/local/bin", "/usr/bin", "/bin"):
+        add(fallback)
+    return os.pathsep.join(parts)
+
+
 def systemd_unit_text(interval: int, env: dict[str, str] | None = None) -> str:
     python = sys.executable
     cache = str(service_dir(env))
+    path = _service_path(env)
     return f"""[Unit]
 Description=llm-usage background sampler
 After=network-online.target
@@ -467,6 +510,7 @@ ExecStart={python} -m llm_tools.usage_service --foreground --interval {interval}
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
+Environment=PATH={path}
 WorkingDirectory={Path.cwd()}
 StandardOutput=append:{cache}/service.log
 StandardError=append:{cache}/service.err
@@ -479,6 +523,7 @@ WantedBy=default.target
 def launchd_plist_text(interval: int, env: dict[str, str] | None = None) -> str:
     python = sys.executable
     root = service_dir(env)
+    path = _service_path(env)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -496,6 +541,11 @@ def launchd_plist_text(interval: int, env: dict[str, str] | None = None) -> str:
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>{path}</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
   <key>WorkingDirectory</key><string>{Path.cwd()}</string>
   <key>StandardOutPath</key><string>{root}/service.log</string>
   <key>StandardErrorPath</key><string>{root}/service.err</string>

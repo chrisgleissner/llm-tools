@@ -16,7 +16,7 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/sleep_soak.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
 * Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`, `llm-sleep-soak`.
 * Regression tests: `tests/` with pytest and fake provider commands.
-* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_minimax.py`, `tests/test_ralph_kilo.py`.
+* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_minimax.py`, `tests/test_ralph_kilo.py`, `tests/test_zai.py`.
 * Project/package config: `pyproject.toml`.
 * Import/test bootstrap: `sitecustomize.py`.
 * CI: `.github/workflows/test.yml`.
@@ -134,13 +134,17 @@ Missing CLI in BYOK/local/ungated mode is `reason="missing-cli"`. Missing data i
 
 ### Route model
 
-When the same provider can serve several underlying models with different capacity and cost semantics (e.g. Kilo selling `minimax-m3` as a prepaid gateway subscription), use a route (`[routes.<id>]` in the config) instead of a plain provider. Routes are resolved by `llm_tools/routes.resolve_routes`. An explicit `[ralph].routes` list puts `ralph-robin` into route mode; in its absence the legacy provider rotation is used.
+When the same provider can serve several underlying models with different capacity and cost semantics (e.g. Kilo selling `minimax-m3` as a prepaid gateway subscription, or Kilo/OpenCode running z.AI's `zai/glm-4.7` / `zai/glm-5.2`), use a route (`[routes.<id>]` in the config) instead of a plain provider. Routes are resolved by `llm_tools/routes.resolve_routes`. An explicit `[ralph].routes` list puts `ralph-robin` into route mode; in its absence the legacy provider rotation is used.
 
 * `capacity.policy = "opaque"` → `name="subscription"`, `kind="opaque"`, no percent / reset. The route is ready when the launch CLI is on `PATH` and there is no local block; the table reads `Remaining = prepaid $20/mo`, `Guidance = ✓ usable`, `Resets in = -`.
-* `capacity.policy = "delegate"` is the route-level successor to the legacy `providers.<x>.capacity_provider` setting. The provider-level setting still works (it is mapped to an implicit route with `capacity.policy = "delegate"`).
+* `capacity.policy = "delegate"` is the route-level successor to the legacy `providers.<x>.capacity_provider` setting. The provider-level setting still works (it is mapped to an implicit route with `capacity.policy = "delegate"`). This is the right policy for z.AI: the route launches Kilo (or OpenCode) with `-m zai/<model>` and gates, ranks, and suspends on the z.AI API's real `5h` / `weekly` windows.
 * Cost policy is display metadata only: `included`, `fixed_subscription`, `metered_balance`, `metered_budget`, `free`, `external`, `unknown`. It never affects readiness.
 * Local blocks for opaque routes live under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks/<route_id>.json` (override with `LLM_TOOLS_LOCAL_BLOCK_DIR`). One corrupt or missing file is treated as "no block" so a one-off bad write cannot break the orchestrator.
 * `llm-usage` renders a route row prefixed with `route:<route_id>` in the Provider column and the model name in the Model column when the Model column is enabled. No progress bar is rendered for opaque / fixed-subscription rows.
+
+### z.AI (GLM 4.7 / GLM 5.2 via Kilo or OpenCode)
+
+z.AI is a capacity-only provider. There is no `zai` CLI; the user-facing CLI is Kilo (or OpenCode) configured with the `zai/<model>` model id, and the truth source for capacity is `GET https://api.z.ai/api/monitor/usage/quota/limit`. Configure `ZAI_API_KEY` (or `LLM_USAGE_ZAI_API_KEY` for tests) and use a route with `provider = "kilo"` (or `opencode`), `model = "zai/glm-4.7"` (or `5.2`), and `capacity.policy = "delegate"` / `provider = "zai"` so `llm-scheduler` and `ralph-robin` can even-burn across the two GLM models while each one's 5h and weekly windows gate the rotation. The reader accepts an injected payload via `LLM_USAGE_ZAI_QUOTA_LIMIT_JSON` for hermetic tests; when the live API returns HTTP 401/403 it surfaces `not-authenticated` (and similarly for `rate-limited`, `subscription-required`, `network-error`) instead of the generic `inconclusive-usage`.
 
 ### MiniMax
 
@@ -257,6 +261,11 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_USAGE_COPILOT_PLAN` (override the resolved plan name for the monthly allowance lookup; one of `pro`, `pro_plus` / `pro+`, `business`, `enterprise`, or `free`)
 * `LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE` (override the resolved per-month premium-request allowance, in requests; pins the denominator for the quota bar to a custom / enterprise contract)
 * `COPILOT_GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN` (GitHub token the add-on and monthly readers reuse, in this precedence; falls back to `gh auth token`. Never required — absent a token the add-on row is simply omitted and the monthly figure falls back to the live CLI footer)
+* `ZAI_API_KEY` / `LLM_USAGE_ZAI_API_KEY` (z.AI bearer token for the live `https://api.z.ai/api/monitor/usage/quota/limit` quota read; the test override beats the primary env so a fixture can isolate)
+* `LLM_USAGE_ZAI_MODEL` (display-only GLM pin, e.g. `zai/glm-4.7`; the model itself is selected by the route's `model` field, not this env var)
+* `LLM_USAGE_ZAI_5H_PERCENT` / `LLM_USAGE_ZAI_5H_RESET_EPOCH` / `LLM_USAGE_ZAI_WEEKLY_PERCENT` / `LLM_USAGE_ZAI_WEEKLY_RESET_EPOCH` (hermetic env-var fallback for the 5h and weekly reset windows when no API call can be made; reset epoch accepts seconds or milliseconds)
+* `LLM_USAGE_ZAI_TIMEOUT` (HTTP timeout in seconds for the live quota call; default 10)
+* `LLM_USAGE_ZAI_QUOTA_LIMIT_JSON` (inject a fully-formed `/api/monitor/usage/quota/limit` payload — or a `{5h, weekly}` shape — bypassing all network access; used by tests)
 * `LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS`
 * `LLM_SCHEDULER_NO_STREAM` (disable live pass-through of the child CLI output to stdout in fresh mode; also forces headless commands)
 * `LLM_SCHEDULER_HEADLESS` (force the non-interactive provider command and captured PTY even on a terminal)

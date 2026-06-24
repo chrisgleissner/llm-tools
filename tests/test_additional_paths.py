@@ -247,6 +247,41 @@ def test_usage_service_unit_templates(env: dict[str, str]) -> None:
     assert "<string>30</string>" in plist
 
 
+def test_service_path_expands_home_from_env_not_os_environ(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ``_service_path`` bakes ``~/.local/bin`` into the unit PATH by expanding
+    # ``~``. The expansion must come from ``env["HOME"]`` (hermetic), never the
+    # ambient ``os.environ["HOME"]`` -- otherwise the unit leaks the real home.
+    env_local_bin = Path(env["HOME"]) / ".local" / "bin"
+    env_local_bin.mkdir(parents=True)
+    # Point the *ambient* HOME at a different dir that has no ``.local/bin`` so a
+    # regression (expanding against os.environ) would silently drop the entry.
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    monkeypatch.setenv("HOME", str(other_home))
+
+    entries = usage_service._service_path(env).split(os.pathsep)
+    assert str(env_local_bin) in entries
+    assert str(other_home / ".local" / "bin") not in entries
+
+
+def test_service_path_drops_missing_dirs_and_keeps_present(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # Only directories that actually exist on disk are baked in: a
+    # fallback like /usr/local/bin is skipped when absent, and the
+    # ``~`` (bare, no slash) expansion resolves to HOME too.
+    present = tmp_path / "present-bin"
+    present.mkdir()
+    env = {**env, "HOME": str(tmp_path), "PATH": str(present)}
+    entries = usage_service._service_path(env).split(os.pathsep)
+    assert str(present) in entries
+    # A non-existent conventional fallback is never emitted.
+    assert "/this/does/not/exist" not in entries
+    assert entries  # at least the present dir survived
+
+
 def test_usage_service_paths_io_and_cached_snapshot(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     no_runtime = dict(env)
     no_runtime.pop("XDG_RUNTIME_DIR", None)
@@ -314,7 +349,7 @@ def test_usage_service_json_protocol(env: dict[str, str], tmp_path: Path) -> Non
 
 
 def test_usage_service_manager_fallbacks(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(usage_service.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(usage_service.shutil, "which", lambda _name, path=None: None)
 
     monkeypatch.setattr(usage_service.platform, "system", lambda: "Linux")
     assert usage_service.install_service(30, env) == 0
@@ -338,7 +373,7 @@ def test_usage_service_manager_fallbacks(env: dict[str, str], monkeypatch: pytes
 
     run_calls: list[list[str]] = []
     monkeypatch.setattr(usage_service, "_run", lambda cmd: run_calls.append(cmd) or 0)
-    monkeypatch.setattr(usage_service.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(usage_service.shutil, "which", lambda name, path=None: f"/bin/{name}")
     monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(usage_service.platform, "system", lambda: "Linux")
     assert usage_service.install_service(45, env) == 0

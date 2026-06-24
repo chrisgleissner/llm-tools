@@ -1620,6 +1620,65 @@ def print_minimax_rows(cfg: Config, minimax_json: dict[str, Any] | None) -> None
     print_usage_rows(cfg, minimax_rows(cfg, minimax_json))
 
 
+ZAI_DISPLAY_NAME = "z.AI"
+
+
+def zai_rows(cfg: Config, zai_json: dict[str, Any] | None) -> list[UsageRow]:
+    """Render z.AI scopes into a flat list of table rows.
+
+    z.AI exposes the same 5h/weekly reset-window shape the Codex /
+    Claude / minimax readers use, sourced from the
+    ``/api/monitor/usage/quota/limit`` endpoint. When no API key is
+    set and no env-var fallback is configured the reader reports
+    ``available=false`` and we render a single ``unavailable`` row so
+    the user can see why.
+    """
+    from .capacity import CapacityKind
+
+    if not zai_json:
+        return [UsageRow(ZAI_DISPLAY_NAME, "5h", None, "unavailable", None, "z.ai api")]
+    source = zai_json.get("source", "z.ai api")
+    if zai_json.get("available") is False:
+        reason = zai_json.get("reason") or "unavailable"
+        return [UsageRow(ZAI_DISPLAY_NAME, "5h", None, reason, None, source)]
+    scopes = zai_json.get("scopes") if isinstance(zai_json.get("scopes"), list) else []
+    rows: list[UsageRow] = []
+    for scope in scopes:
+        if not isinstance(scope, dict):
+            continue
+        if scope.get("kind") != CapacityKind.RESET_WINDOW:
+            continue
+        name = str(scope.get("name", "5h"))
+        rem = scope.get("remaining_percent")
+        reset = scope.get("reset_epoch")
+        text = "unavailable" if rem is None else row_left_text(rem)
+        common.log_usage_sample(ZAI_DISPLAY_NAME, name, rem if isinstance(rem, (int, float)) else None)
+        remaining_time = (
+            common.estimate_remaining_time_from_log(ZAI_DISPLAY_NAME, name, rem)
+            if cfg.show_remaining_time
+            else "-"
+        )
+        rows.append(
+            UsageRow(
+                ZAI_DISPLAY_NAME,
+                name,
+                rem if isinstance(rem, (int, float)) else None,
+                text,
+                reset,
+                source,
+                remaining_time or "-",
+                kind=CapacityKind.RESET_WINDOW,
+            )
+        )
+    if not rows:
+        return [UsageRow(ZAI_DISPLAY_NAME, "5h", None, "unavailable", None, source)]
+    return rows
+
+
+def print_zai_rows(cfg: Config, zai_json: dict[str, Any] | None) -> None:
+    print_usage_rows(cfg, zai_rows(cfg, zai_json))
+
+
 def unavailable_snapshot(provider: str, source: str, reason: str = "reader-error") -> ProviderSnapshot:
     return ProviderSnapshot(provider=provider, available=False, reason=reason, source=source)
 
@@ -1718,6 +1777,7 @@ _SERVICE_ENV_PREFIXES = (
     "OPENCODE_",
     "MINIMAX_",
     "MMX_",
+    "ZAI_",
 )
 
 
@@ -1750,6 +1810,7 @@ def service_payload_from_provider_data(cfg: Config, provider_data: dict[str, Any
             "kilo": snapshot_to_json(provider_data.get("kilo")),
             "opencode": snapshot_to_json(provider_data.get("opencode")),
             "minimax": snapshot_to_json(provider_data.get("minimax")),
+            "zai": snapshot_to_json(provider_data.get("zai")),
         },
     }
 
@@ -1765,6 +1826,7 @@ def provider_data_from_service_payload(payload: dict[str, Any]) -> dict[str, Any
         "kilo": snapshot_from_json(providers.get("kilo")),
         "opencode": snapshot_from_json(providers.get("opencode")),
         "minimax": snapshot_from_json(providers.get("minimax")),
+        "zai": snapshot_from_json(providers.get("zai")),
     }
 
 
@@ -1815,6 +1877,12 @@ def log_samples_from_provider_data(provider_data: dict[str, Any]) -> None:
         for scope in getattr(minimax_snap, "scopes", []) or []:
             if scope.kind == CapacityKind.RESET_WINDOW:
                 common.log_usage_sample(MINIMAX_DISPLAY_NAME, scope.name, scope.remaining_percent)
+
+    zai_snap = provider_data.get("zai")
+    if getattr(zai_snap, "available", False):
+        for scope in getattr(zai_snap, "scopes", []) or []:
+            if scope.kind == CapacityKind.RESET_WINDOW:
+                common.log_usage_sample(ZAI_DISPLAY_NAME, scope.name, scope.remaining_percent)
 
 
 class ProgressReporter:
@@ -1931,6 +1999,7 @@ def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = No
         read_kilo,
         read_minimax,
         read_opencode,
+        read_zai,
     )
 
     readers: dict[str, tuple[Any, Any]] = {
@@ -1957,6 +2026,10 @@ def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = No
         "minimax": (
             read_minimax,
             lambda: unavailable_snapshot("minimax", "mmx cli"),
+        ),
+        "zai": (
+            read_zai,
+            lambda: unavailable_snapshot("zai", "z.ai api"),
         ),
     }
     if progress is not None:
@@ -2020,6 +2093,7 @@ def json_object_from_provider_data(cfg: Config, provider_data: dict[str, Any], g
         "kilo": _kilo_to_json(provider_data["kilo"]),
         "opencode": _opencode_to_json(provider_data["opencode"]),
         "minimax": _minimax_to_json(provider_data["minimax"]),
+        "zai": _zai_to_json(provider_data["zai"]),
     }
     # Route mode is opt-in: the ``routes`` key only appears when at
     # least one route is configured. Existing JSON consumers keep
@@ -2108,6 +2182,7 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
     rows.extend(kilo_rows(cfg, _kilo_to_json(provider_data["kilo"])))
     rows.extend(minimax_rows(cfg, _minimax_to_json(provider_data["minimax"])))
     rows.extend(opencode_rows(cfg, _opencode_to_json(provider_data["opencode"])))
+    rows.extend(zai_rows(cfg, _zai_to_json(provider_data["zai"])))
     # Route rows are appended in their declared config order so the
     # caller controls grouping. They sit beneath the per-provider
     # aggregate rows; an empty / unconfigured route table is a
@@ -2523,6 +2598,44 @@ def _minimax_to_json(snap: Any) -> dict[str, Any]:
     Same flattening strategy as :func:`_kilo_to_json`. The snapshot's
     :class:`CapacityScope` objects are translated to plain dicts so
     the JSON output stays in sync with the generic capacity model.
+    """
+    scopes: list[dict[str, Any]] = []
+    for scope in getattr(snap, "scopes", []) or []:
+        scopes.append(
+            {
+                "name": scope.name,
+                "kind": scope.kind,
+                "ready": scope.ready,
+                "reason": scope.reason,
+                "remaining_percent": scope.remaining_percent,
+                "remaining_amount": scope.remaining_amount,
+                "total_amount": scope.total_amount,
+                "currency": scope.currency,
+                "reset_epoch": scope.reset_epoch,
+                "resets_at": scope.resets_at,
+                "label": scope.label,
+                "source": scope.source,
+                "extras": dict(getattr(scope, "extras", {}) or {}),
+            }
+        )
+    return {
+        "provider": snap.provider,
+        "available": snap.available,
+        "reason": snap.reason,
+        "source": snap.source,
+        "selected_model": snap.selected_model,
+        "scopes": scopes,
+    }
+
+
+def _zai_to_json(snap: Any) -> dict[str, Any]:
+    """Project a z.AI ProviderSnapshot into a JSON-friendly dict.
+
+    Mirrors :func:`_minimax_to_json`: the snapshot's
+    :class:`CapacityScope` objects are flattened into plain dicts so
+    the JSON output stays in sync with the generic capacity model.
+    The ``selected_model`` key carries the route's GLM pin
+    (``zai/glm-4.7`` / ``zai/glm-5.2``) when one is set.
     """
     scopes: list[dict[str, Any]] = []
     for scope in getattr(snap, "scopes", []) or []:

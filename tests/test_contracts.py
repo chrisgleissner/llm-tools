@@ -96,7 +96,7 @@ def test_usage_json_table_statusline_and_cache(env: dict[str, str]) -> None:
     js = run_cmd(["./llm-usage", "--json", "--show-copilot-credits"], env)
     assert js.returncode == 0, js.stderr
     data = json.loads(js.stdout)
-    assert set(data) == {"generated_at", "codex", "claude", "copilot", "kilo", "opencode", "minimax"}
+    assert set(data) == {"generated_at", "codex", "claude", "copilot", "kilo", "opencode", "minimax", "zai"}
     assert data["codex"]["rows"][1]["key"] == "codex-spark"
     assert data["copilot"]["monthly"]["used"] == 62
     assert data["copilot"]["monthly"]["remaining"] == 38

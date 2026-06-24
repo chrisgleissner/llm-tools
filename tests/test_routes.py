@@ -932,13 +932,14 @@ def test_json_existing_provider_keys_unchanged(
         "kilo": unavailable_snapshot("kilo", "kilo cli"),
         "opencode": unavailable_snapshot("opencode", "opencode cli"),
         "minimax": unavailable_snapshot("minimax", "mmx cli"),
+        "zai": unavailable_snapshot("zai", "z.ai api"),
     }
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         _emit_json(Config(), provider_data)
     obj = json.loads(buf.getvalue())
     # Existing provider keys are still present and untouched.
-    for key in ("codex", "claude", "copilot", "kilo", "opencode", "minimax", "generated_at"):
+    for key in ("codex", "claude", "copilot", "kilo", "opencode", "minimax", "zai", "generated_at"):
         assert key in obj
     # The new routes key is present in route mode.
     assert "routes" in obj
@@ -961,6 +962,7 @@ def test_json_omits_routes_when_unconfigured(
         "kilo": unavailable_snapshot("kilo", "kilo cli"),
         "opencode": unavailable_snapshot("opencode", "opencode cli"),
         "minimax": unavailable_snapshot("minimax", "mmx cli"),
+        "zai": unavailable_snapshot("zai", "z.ai api"),
     }
     import io, contextlib
     buf = io.StringIO()
