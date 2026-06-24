@@ -620,6 +620,13 @@ def _weekly_from_env(env: dict[str, str]) -> tuple[float | None, int | None]:
 
 
 def _env_fallback_present(env: dict[str, str]) -> bool:
+    """Whether any env-var *fallback* scope signal is set.
+
+    Mirrors ``minimax._env_fallback_present``. Deliberately excludes
+    ``LLM_USAGE_ZAI_QUOTA_LIMIT_JSON`` -- that variable drives the
+    injected-payload path (tagged ``z.ai injected``), not the env-var
+    fallback (tagged ``env``), so it must not flip the fallback source on.
+    """
     return any(
         env.get(k)
         for k in (
@@ -627,7 +634,6 @@ def _env_fallback_present(env: dict[str, str]) -> bool:
             "LLM_USAGE_ZAI_5H_RESET_EPOCH",
             "LLM_USAGE_ZAI_WEEKLY_PERCENT",
             "LLM_USAGE_ZAI_WEEKLY_RESET_EPOCH",
-            "LLM_USAGE_ZAI_QUOTA_LIMIT_JSON",
         )
     )
 
@@ -712,15 +718,7 @@ def read_zai(env: dict[str, str] | None = None) -> ProviderSnapshot:
     # 3. Env-var fallback.
     env_five_pct, env_five_reset = _interval_from_env(env)
     env_weekly_pct, env_weekly_reset = _weekly_from_env(env)
-    if any(
-        env.get(k)
-        for k in (
-            "LLM_USAGE_ZAI_5H_PERCENT",
-            "LLM_USAGE_ZAI_5H_RESET_EPOCH",
-            "LLM_USAGE_ZAI_WEEKLY_PERCENT",
-            "LLM_USAGE_ZAI_WEEKLY_RESET_EPOCH",
-        )
-    ):
+    if _env_fallback_present(env):
         source_parts.append("env")
     if five_percent is None and env_five_pct is not None:
         five_percent = env_five_pct

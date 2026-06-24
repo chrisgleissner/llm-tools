@@ -247,6 +247,25 @@ def test_usage_service_unit_templates(env: dict[str, str]) -> None:
     assert "<string>30</string>" in plist
 
 
+def test_service_path_expands_home_from_env_not_os_environ(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ``_service_path`` bakes ``~/.local/bin`` into the unit PATH by expanding
+    # ``~``. The expansion must come from ``env["HOME"]`` (hermetic), never the
+    # ambient ``os.environ["HOME"]`` -- otherwise the unit leaks the real home.
+    env_local_bin = Path(env["HOME"]) / ".local" / "bin"
+    env_local_bin.mkdir(parents=True)
+    # Point the *ambient* HOME at a different dir that has no ``.local/bin`` so a
+    # regression (expanding against os.environ) would silently drop the entry.
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    monkeypatch.setenv("HOME", str(other_home))
+
+    entries = usage_service._service_path(env).split(os.pathsep)
+    assert str(env_local_bin) in entries
+    assert str(other_home / ".local" / "bin") not in entries
+
+
 def test_usage_service_paths_io_and_cached_snapshot(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     no_runtime = dict(env)
     no_runtime.pop("XDG_RUNTIME_DIR", None)

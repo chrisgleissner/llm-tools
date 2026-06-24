@@ -885,7 +885,9 @@ def test_zai_env_fallback_present_detects_all_keys() -> None:
     assert _env_fallback_present({}) is False
     assert _env_fallback_present({"LLM_USAGE_ZAI_5H_PERCENT": "75"}) is True
     assert _env_fallback_present({"LLM_USAGE_ZAI_WEEKLY_PERCENT": "50"}) is True
-    assert _env_fallback_present({"LLM_USAGE_ZAI_QUOTA_LIMIT_JSON": "{}"}) is True
+    # The injected-payload var is NOT an env fallback signal: it drives the
+    # "z.ai injected" source, not "env".
+    assert _env_fallback_present({"LLM_USAGE_ZAI_QUOTA_LIMIT_JSON": "{}"}) is False
 
 
 def test_zai_injected_payload_invalid_json_is_ignored() -> None:

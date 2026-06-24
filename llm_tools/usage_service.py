@@ -468,12 +468,18 @@ def _service_path(env: dict[str, str] | None = None) -> str:
     fallbacks.
     """
     env = env or os.environ
+    home = str(common.home_dir(env))
     parts: list[str] = []
     seen: set[str] = set()
 
     def add(raw: str | None) -> None:
         if not raw:
             return
+        # Expand ``~`` from ``env`` (not ``os.environ``) so tests that set a
+        # synthetic HOME stay hermetic; ``os.path.expanduser`` would leak the
+        # real ``$HOME`` here.
+        if raw == "~" or raw.startswith("~/"):
+            raw = home + raw[1:]
         path = os.path.expanduser(raw)
         if path not in seen and os.path.isdir(path):
             seen.add(path)
