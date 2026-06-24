@@ -266,6 +266,22 @@ def test_service_path_expands_home_from_env_not_os_environ(
     assert str(other_home / ".local" / "bin") not in entries
 
 
+def test_service_path_drops_missing_dirs_and_keeps_present(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    # Only directories that actually exist on disk are baked in: a
+    # fallback like /usr/local/bin is skipped when absent, and the
+    # ``~`` (bare, no slash) expansion resolves to HOME too.
+    present = tmp_path / "present-bin"
+    present.mkdir()
+    env = {**env, "HOME": str(tmp_path), "PATH": str(present)}
+    entries = usage_service._service_path(env).split(os.pathsep)
+    assert str(present) in entries
+    # A non-existent conventional fallback is never emitted.
+    assert "/this/does/not/exist" not in entries
+    assert entries  # at least the present dir survived
+
+
 def test_usage_service_paths_io_and_cached_snapshot(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     no_runtime = dict(env)
     no_runtime.pop("XDG_RUNTIME_DIR", None)

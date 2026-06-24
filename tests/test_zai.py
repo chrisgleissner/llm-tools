@@ -860,6 +860,16 @@ def test_zai_classify_transport_error_falls_through_to_network() -> None:
     assert out["reason"] == "network-error"
 
 
+def test_zai_classify_transport_error_keywordless_reclassifies_to_network() -> None:
+    """A transport exception whose text has no recognisable keyword
+    initially classifies as ``quota-error``; the helper then re-maps a
+    non-empty keywordless failure to ``network-error``."""
+    from llm_tools.providers.zai import _classify_transport_error
+
+    out = _classify_transport_error("https://api.z.ai/x", ValueError("zzz unrecoverable"))
+    assert out["reason"] == "network-error"
+
+
 def test_zai_extracted_envelope_classifies_auth() -> None:
     from llm_tools.providers.zai import _extract_error_envelope
 
@@ -1072,6 +1082,263 @@ def test_zai_env_fallback_present_detects_reset_epoch() -> None:
 
     assert _env_fallback_present({"LLM_USAGE_ZAI_5H_RESET_EPOCH": "1781431200"}) is True
     assert _env_fallback_present({"LLM_USAGE_ZAI_WEEKLY_RESET_EPOCH": "1781481600"}) is True
+
+
+# --- Pure-function branches (coverage) ----------------------------------------
+
+
+def test_zai_safe_int_safe_float_reject_non_numeric() -> None:
+    from llm_tools.providers.zai import _safe_float, _safe_int
+
+    # Booleans are never valid numeric inputs.
+    assert _safe_int(True) is None
+    assert _safe_float(True) is None
+    assert _safe_float(False) is None
+    # A non-integral string trips the exception fallback, not a crash.
+    assert _safe_int("1.5") is None
+    assert _safe_int("abc") is None
+    # Happy path still parses.
+    assert _safe_int("7") == 7
+    assert _safe_float("12.5") == 12.5
+
+
+def test_zai_timeout_garbage_falls_back_to_default() -> None:
+    assert zai_timeout({"LLM_USAGE_ZAI_TIMEOUT": "not-a-number"}) == 10
+    assert zai_timeout({"LLM_USAGE_ZAI_TIMEOUT": "-3"}) == 10  # non-positive
+
+
+def test_zai_agent_auth_key_no_home_discovers_nothing() -> None:
+    from llm_tools.providers.zai import _agent_auth_key
+
+    # No HOME and no XDG_DATA_HOME: nothing to read, nothing discovered.
+    assert _agent_auth_key({}, "zai") is None
+
+
+def test_zai_agent_auth_key_ignores_non_dict_store(tmp_path: Path) -> None:
+    from llm_tools.providers.zai import _agent_auth_key
+
+    share = tmp_path / "share"
+    (share / "kilo").mkdir(parents=True)
+    # A JSON list (not an object) must be skipped, not crash.
+    (share / "kilo" / "auth.json").write_text("[1, 2, 3]", encoding="utf-8")
+    env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(share)}
+    assert _agent_auth_key(env, "zai") is None
+
+
+def test_zai_agent_auth_key_entry_without_key_returns_none(tmp_path: Path) -> None:
+    from llm_tools.providers.zai import _agent_auth_key
+
+    share = tmp_path / "share"
+    (share / "kilo").mkdir(parents=True)
+    # Entry present but key missing / blank: not a usable credential.
+    (share / "kilo" / "auth.json").write_text(
+        json.dumps({"zai": {"type": "api"}}), encoding="utf-8"
+    )
+    env = {"HOME": str(tmp_path), "XDG_DATA_HOME": str(share)}
+    assert _agent_auth_key(env, "zai") is None
+
+
+def test_zai_extract_limits_and_envelope_edge_cases() -> None:
+    from llm_tools.providers.zai import _extract_error_envelope, _extract_limits
+
+    # Non-dict payloads degrade to empty / None rather than crashing.
+    assert _extract_limits(["a", "b"]) == []
+    assert _extract_error_envelope("not-a-dict") is None
+    assert _extract_error_envelope(None) is None
+    # A success-shaped envelope is not an error even with a message.
+    assert _extract_error_envelope({"code": 200, "msg": "ok"}) is None
+    assert _extract_error_envelope({"limits": []}) is None
+    # code/msg both missing: nothing to classify.
+    assert _extract_error_envelope({"foo": "bar"}) is None
+
+
+def test_zai_window_seconds_unknown_unit_is_none() -> None:
+    from llm_tools.providers.zai import _window_seconds
+
+    # Unknown unit code (e.g. 99) cannot be converted to seconds.
+    assert _window_seconds({"unit": 99, "number": 1}) is None
+    assert _window_seconds({"unit": 3}) is None  # missing number
+    assert _window_seconds({"number": 0}) is None  # non-positive
+
+
+def test_zai_parse_limits_horizon_fallback_picks_shortest_and_longest() -> None:
+    """Entries with no usable window/label fall back to the reset horizon:
+    the shortest horizon becomes the 5h row, the longest the weekly row."""
+    from llm_tools.providers.zai import SCOPE_5H as S5, SCOPE_WEEKLY as SW
+    from llm_tools.providers.zai import _parse_zai_limits
+
+    entries = [
+        {"type": "MYSTERY", "nextResetTime": 1781481600000},  # later -> weekly
+        {"type": "OTHER", "nextResetTime": 1781431200000},  # sooner -> 5h
+    ]
+    out = _parse_zai_limits(entries)
+    assert out[S5]["nextResetTime"] == 1781431200000
+    assert out[SW]["nextResetTime"] == 1781481600000
+
+
+def test_zai_parse_limits_horizon_skips_entries_without_reset() -> None:
+    """An unclassified entry with no nextResetTime cannot be placed by the
+    horizon heuristic and is dropped."""
+    from llm_tools.providers.zai import _parse_zai_limits
+
+    out = _parse_zai_limits([{"type": "MYSTERY"}])
+    assert out == {}
+
+
+def test_zai_read_alias_returns_snapshot(env: dict[str, str]) -> None:
+    from llm_tools.providers.zai import read
+
+    env["LLM_USAGE_ZAI_5H_PERCENT"] = "80"
+    env["LLM_USAGE_ZAI_5H_RESET_EPOCH"] = "1781431200"
+    env["ZAI_API_KEY"] = ""
+    env.pop("ZAI_API_KEY", None)
+    env.pop("LLM_USAGE_ZAI_API_KEY", None)
+    snap = read(env)
+    assert snap.provider == PROVIDER_ZAI
+    assert snap.available is True
+
+
+def test_zai_fetch_quota_no_key_returns_none() -> None:
+    from llm_tools.providers.zai import _fetch_zai_quota
+
+    # A truthy env with no key (and no discoverable agent auth.json) bails
+    # before any network call. ``{}`` is falsy and would fall back to
+    # ``os.environ``, so use an explicit empty-ish env instead.
+    assert _fetch_zai_quota({"HOME": "/nonexistent-zai-home"}) is None
+
+
+def test_zai_fetch_quota_all_long_windows_is_quota_error(
+    env: dict[str, str], monkeypatch
+) -> None:
+    """Limits that parse but are all monthly+ (neither 5h nor weekly)
+    surface a quota-error rather than a misleading 'no data'."""
+    env["ZAI_API_KEY"] = "test-key"
+    _mock_urlopen(
+        monkeypatch,
+        {
+            "code": 200,
+            "data": {
+                "limits": [
+                    {
+                        "type": "TIME_LIMIT",
+                        "unit": 5,
+                        "number": 1,
+                        "percentage": 10,
+                        "nextResetTime": 1781431200000,
+                    }
+                ]
+            },
+        },
+    )
+    snap = read_zai(env)
+    assert snap.available is False
+    assert snap.reason == "quota-error"
+
+
+def test_zai_injected_raw_api_shape_parses_into_scopes() -> None:
+    """A raw API-shape payload (``{data:{limits:[...]}}``) injected via
+    LLM_USAGE_ZAI_QUOTA_LIMIT_JSON is decoded by ``_parse_injected_payload``
+    into CapacityScope objects (the dict-shape path is what ``read_zai``
+    consumes; the raw-shape path is exercised at the helper layer)."""
+    from llm_tools.providers.zai import _parse_injected_payload
+
+    out = _parse_injected_payload(
+        {
+            "LLM_USAGE_ZAI_QUOTA_LIMIT_JSON": json.dumps(
+                {
+                    "code": 200,
+                    "data": {
+                        "limits": [
+                            {"type": "TIME_LIMIT", "percentage": 20, "nextResetTime": 1781431200000},
+                            {"type": "WEEKLY_LIMIT", "percentage": 30, "nextResetTime": 1781481600000},
+                        ]
+                    },
+                }
+            )
+        }
+    )
+    assert isinstance(out, dict)
+    assert out[SCOPE_5H].remaining_percent == 80.0  # 100 - 20 used
+    assert out[SCOPE_WEEKLY].remaining_percent == 70.0  # 100 - 30 used
+
+
+def test_zai_injected_raw_api_shape_single_limit_skips_missing_scope() -> None:
+    """A raw payload with only a 5h limit yields just the 5h scope; the
+    absent weekly entry is skipped via the ``not entry`` guard."""
+    from llm_tools.providers.zai import _parse_injected_payload
+
+    out = _parse_injected_payload(
+        {
+            "LLM_USAGE_ZAI_QUOTA_LIMIT_JSON": json.dumps(
+                {
+                    "code": 200,
+                    "data": {
+                        "limits": [
+                            {"type": "TIME_LIMIT", "percentage": 20, "nextResetTime": 1781431200000},
+                        ]
+                    },
+                }
+            )
+        }
+    )
+    assert isinstance(out, dict)
+    assert SCOPE_5H in out
+    assert SCOPE_WEEKLY not in out
+
+
+def test_zai_read_injected_error_envelope_surfaces_reason(env: dict[str, str]) -> None:
+    env.pop("ZAI_API_KEY", None)
+    env.pop("LLM_USAGE_ZAI_API_KEY", None)
+    env["LLM_USAGE_ZAI_QUOTA_LIMIT_JSON"] = json.dumps({"code": 401, "msg": "bad token"})
+    snap = read_zai(env)
+    assert snap.available is False
+    assert snap.reason == "not-authenticated"
+
+
+# --- Scheduler: bare --provider zai launch contract ---------------------------
+
+
+def test_scheduler_zai_attached_launch_rejected() -> None:
+    from llm_tools import scheduler
+
+    cfg = scheduler.SchedulerConfig(provider="zai", attached=True, cwd="/tmp")
+    with pytest.raises(SystemExit) as exc:
+        scheduler.provider_default_argv(cfg, "x")
+    assert exc.value.code == 2
+
+
+def test_scheduler_zai_headless_launch_rejected() -> None:
+    from llm_tools import scheduler
+
+    cfg = scheduler.SchedulerConfig(provider="zai", attached=False, cwd="/tmp")
+    with pytest.raises(SystemExit) as exc:
+        scheduler.provider_default_argv(cfg, "x")
+    assert exc.value.code == 2
+
+
+def test_scheduler_zai_model_description() -> None:
+    from llm_tools import scheduler
+
+    cfg = scheduler.SchedulerConfig(provider="zai")
+    assert "routes" in scheduler.scheduler_model_description(cfg)
+
+
+def test_zai_log_samples_records_reset_windows(env: dict[str, str], monkeypatch) -> None:
+    """``log_samples_from_provider_data`` records a z.AI reset-window sample
+    for each scope, mirroring the minimax path."""
+    env["LLM_USAGE_ZAI_5H_PERCENT"] = "77"
+    env["LLM_USAGE_ZAI_5H_RESET_EPOCH"] = "1781431200"
+    env["LLM_USAGE_ZAI_WEEKLY_PERCENT"] = "88"
+    env["LLM_USAGE_ZAI_WEEKLY_RESET_EPOCH"] = "1781481600"
+    env.pop("ZAI_API_KEY", None)
+    env.pop("LLM_USAGE_ZAI_API_KEY", None)
+    zai_snap = read_zai(env)
+    assert zai_snap.available is True
+    calls: list[tuple[str, str, float | None]] = []
+    monkeypatch.setattr(common, "log_usage_sample", lambda p, w, r: calls.append((p, w, r)))
+    usage.log_samples_from_provider_data({"zai": zai_snap})
+    assert ("z.AI", "5h", 77.0) in calls
+    assert ("z.AI", "weekly", 88.0) in calls
 
 
 # --- Helpers ------------------------------------------------------------------
