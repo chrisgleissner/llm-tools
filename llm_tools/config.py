@@ -139,9 +139,10 @@ class ProviderPolicy:
     different provider's usage windows (5h / weekly / monthly / balance / …)
     while still launching this provider's own CLI. Use it when the CLI is
     configured to run another provider's model (e.g. OpenCode pointed at the
-    MiniMax API): set ``capacity_provider = "minimax"`` so ralph/scheduler gate,
-    rank, and suspend on MiniMax's real windows instead of OpenCode's own
-    (often irrelevant) balance.
+    MiniMax API, or Kilo pointed at z.AI's GLM family): set
+    ``capacity_provider = "minimax"`` or ``capacity_provider = "zai"`` so
+    ralph/scheduler gate, rank, and suspend on that capacity source's real
+    windows instead of the launch provider's own (often irrelevant) balance.
     """
 
     model: str | None = None

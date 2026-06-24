@@ -13,7 +13,7 @@ The goal is to make LLM CLI work **more observable and less wasteful**. You can 
 
 The tools are intentionally **local- and CLI-first**. Instead of introducing another authentication layer, they use the provider CLIs you already have installed and authenticated. Credentials stay with those tools, and normal use remains zero-config.
 
-Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, MiniMax, and OpenCode**.
+Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, MiniMax, OpenCode, and z.AI**.
 
 ## Tools at a Glance
 
@@ -24,7 +24,7 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 | `ralph-robin`    | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
 | `llm-sleep-soak` | Prove suspend/resume is reliable on this machine before trusting unattended overnight runs.      |
 
-<img src="./docs/img/llm-usage4.png" alt="LLM Usage"/>
+<img src="./docs/img/llm-usage5.png" alt="LLM Usage"/>
 
 ## Install
 
@@ -140,6 +140,7 @@ tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/attempt-1.out
 | Kilo Code      | `kilo`     | [kilo.ai](https://kilo.ai) - `npm install -g @kilocode/cli`                                                               |
 | MiniMax        | `mmx`      | [platform.minimax.io](https://platform.minimax.io/) - `npm install -g mmx-cli`                                            |
 | OpenCode       | `opencode` | [opencode.ai](https://opencode.ai/) - `npm install -g opencode-ai`                                                        |
+| z.AI (capacity)| _none_     | Capacity-only: zero-config — the key is read from Kilo's/OpenCode's `auth.json`; launch via Kilo (`zai/<model>`) — see [z.AI](#zai-glm-via-kilo-or-opencode). |
 
 You do not need every provider CLI installed.
 
@@ -155,7 +156,7 @@ A scope is one capacity measure exposed by one provider. For example, Codex and 
 
 | Kind           | Resets? | Examples                             | Providers                       |
 | -------------- | ------- | ------------------------------------ | ------------------------------- |
-| `reset_window` | yes     | `5h`, `weekly`, `monthly`            | Codex, Claude, Copilot, MiniMax |
+| `reset_window` | yes     | `5h`, `weekly`, `monthly`            | Codex, Claude, Copilot, MiniMax, z.AI |
 | `balance`      | no      | Kilo credit balance, GBP/USD/credits | Kilo, OpenCode                  |
 | `budget`       | yes     | Monthly spend budget                 | Kilo, OpenCode                  |
 | `ungated`      | n/a     | BYOK, local, ungated mode            | Kilo, OpenCode                  |
@@ -170,6 +171,7 @@ Per-provider scope allow-lists:
 | Codex          | `auto`, `5h`, `weekly`                         |
 | Claude Code    | `auto`, `5h`, `weekly`                         |
 | MiniMax        | `auto`, `5h`, `weekly`                         |
+| z.AI           | `auto`, `5h`, `weekly`                         |
 | GitHub Copilot | `auto`, `monthly`                              |
 | Kilo Code      | `auto`, `balance`, `budget`, `byok`, `ungated` |
 | OpenCode       | `auto`, `balance`, `budget`, `byok`, `ungated` |
@@ -569,6 +571,9 @@ llm-scheduler --provider codex --prompt-file task.md --dry-run
 | Kilo Code      | `kilo run <prompt>`            | `kilo run --dir <cwd> <prompt>`      |
 | OpenCode       | `opencode`                     | `opencode run --dir <cwd> <prompt>`  |
 | MiniMax        | `mmx`                          | `mmx run --auto -C <cwd> <prompt>`   |
+| z.AI           | _launch via a route_           | _launch via a route_                 |
+
+Kilo Code and OpenCode accept `-m, --model <provider>/<model>`; the scheduler and Ralph inject this flag when the per-provider policy or route pins a model (e.g. `-m zai/glm-4.7`). No permission-bypassing flag is injected; whether a headless run may act without prompting is governed by each tool's own permission config.
 
 Interactive Kilo Code, OpenCode, and MiniMax take no working-directory flag — they inherit it from the launching process (the scheduler sets the subprocess `cwd`). Headless Kilo Code and OpenCode inject no permission-bypassing flag; whether an autonomous run may act without prompting is governed by each tool's own permission config.
 
@@ -851,6 +856,39 @@ The route is usable whenever the Kilo CLI is on `PATH` and no local runtime bloc
 
 The legacy `providers.<x>.capacity_provider = "<y>"` setting is for the *truthful* delegation case (the configured CLI runs another provider's model and that provider's windows truthfully describe the capacity). Use `routes.<id>.capacity.policy = "opaque"` when no such truth source exists.
 
+#### Truthful delegation via routes (z.AI GLM via Kilo or OpenCode)
+
+z.AI exposes the GLM family (e.g. `GLM-4.7`, `GLM-5.2`) with a real 5h / weekly quota served by `https://api.z.ai/api/monitor/usage/quota/limit`. There is no z.AI CLI to launch — Kilo (or OpenCode) runs the model and the z.AI API is the truthful capacity source. Model the route with `capacity.policy = "delegate"` and `provider = "zai"`:
+
+```toml
+[ralph]
+routes = ["kilo-zai-glm-4-7", "kilo-zai-glm-5-2"]
+
+[routes.kilo-zai-glm-4-7]
+provider = "kilo"
+model    = "zai/glm-4.7"
+
+[routes.kilo-zai-glm-4-7.capacity]
+policy   = "delegate"
+provider = "zai"
+
+[routes.kilo-zai-glm-5-2]
+provider = "kilo"
+model    = "zai/glm-5.2"
+
+[routes.kilo-zai-glm-5-2.capacity]
+policy   = "delegate"
+provider = "zai"
+```
+
+`llm-scheduler` and `ralph-robin` then:
+
+* call the launch CLI with `-m zai/glm-4.7` / `-m zai/glm-5.2` so the model pin reaches the provider,
+* gate, rank, and suspend on z.AI's real 5h / weekly windows (read directly from the API),
+* rotate between the two routes with even-burn so each GLM model's quota burns down in parallel rather than one provider eating the whole allowance.
+
+The z.AI capacity reader needs a z.AI key — discovered automatically from Kilo's/OpenCode's `auth.json` (zero-config), or set explicitly via `ZAI_API_KEY` / `LLM_USAGE_ZAI_API_KEY` — and is gated on the usual `5h` / `weekly` / `auto` scopes. A bad or missing key surfaces as `not-authenticated` in the `Ready` / `Remaining` cells rather than a generic `unavailable`, so the user can distinguish "wrong key" from "API down".
+
 ### MiniMax
 
 MiniMax quota is read from the local `mmx` CLI first. Environment variables are available as a fallback for tests and controlled environments.
@@ -875,6 +913,65 @@ If the CLI is missing or the output cannot be parsed, they fall back to the envi
 The MiniMax reader uses the `general` row from `model_remains` by default and exposes the same `5h` and `weekly` reset windows used by Claude Code and Codex. This lets the table render and gate MiniMax consistently with other reset-window providers.
 
 The MiniMax row appears only when the `mmx` CLI is installed or MiniMax environment variables are set.
+
+### z.AI (GLM via Kilo or OpenCode)
+
+z.AI is a capacity-only provider: there is no `zai` CLI to launch, only the GLM family (`GLM-4.7`, `GLM-5.2`, …) served through Kilo (or any provider that exposes the `zai/<model>` id). `llm-usage` reads the user's z.AI quota directly from the official monitoring API; `llm-scheduler` / `ralph-robin` launch the configured provider with `-m zai/<model>` via a route with `capacity.policy = "delegate"` and `provider = "zai"`.
+
+**Zero-config key discovery.** You do not configure a z.AI key in `llm-tools`. When you authenticate z.AI in Kilo (or OpenCode), the agent stores the key in its own owner-only credential file — `$XDG_DATA_HOME/{kilo,opencode}/auth.json` (default `~/.local/share/...`, mode `0600`), shaped `{"zai": {"type": "api", "key": "…"}}`. The reader discovers it there automatically, the same way the Claude/Codex readers read their CLIs' auth files, so adding a z.AI account to Kilo lights up the dashboard row with no further setup. The environment variables below remain available as an explicit override / hermetic-test path, but are not required.
+
+| Variable                          | Purpose                                                            |
+| --------------------------------- | ------------------------------------------------------------------ |
+| `ZAI_API_KEY`                     | Bearer token override (takes precedence over the discovered key) used against `https://api.z.ai/api/monitor/usage/quota/limit`. |
+| `LLM_USAGE_ZAI_API_KEY`           | Same, but overrides `ZAI_API_KEY` (mainly for tests).              |
+| `LLM_USAGE_ZAI_MODEL`             | Display-only GLM pin (e.g. `zai/glm-4.7`); does not affect gating. |
+| `LLM_USAGE_ZAI_5H_PERCENT`        | Remaining percentage for the 5h window, `0..100`. Hermetic fallback. |
+| `LLM_USAGE_ZAI_5H_RESET_EPOCH`    | Epoch seconds or milliseconds when the 5h window resets.           |
+| `LLM_USAGE_ZAI_WEEKLY_PERCENT`    | Remaining percentage for the weekly window, `0..100`.              |
+| `LLM_USAGE_ZAI_WEEKLY_RESET_EPOCH`| Epoch seconds or milliseconds when the weekly window resets.       |
+| `LLM_USAGE_ZAI_TIMEOUT`           | HTTP timeout in seconds. Default `10`.                             |
+| `LLM_USAGE_ZAI_QUOTA_LIMIT_JSON`  | Inject a fully-formed `/api/monitor/usage/quota/limit` payload (or `{5h, weekly}` scopes). Overrides the live API for tests. |
+
+With a discovered (or explicitly configured) key, `llm-usage` calls the international endpoint first:
+
+```bash
+curl -fsS -H "Authorization: Bearer $ZAI_API_KEY" \
+  https://api.z.ai/api/monitor/usage/quota/limit
+```
+
+The response lists several `limits`, each with a window length of `number × unit` (z.AI's `unit` is a time-unit enum — `3` = hour, `6` = week, `5` = month). The reader classifies the rows it surfaces by that **window length**, not the `type` label: the shortest sub-day window is the `5h` row, a roughly-one-week window is the `weekly` row, and longer (monthly) windows — e.g. z.AI's separate tool/search quota — are surfaced by neither. `percentage` is the *used* percent, flipped to remaining for the bar. (When `unit`/`number` are absent — an older payload shape — it falls back to the `type` label, then to `nextResetTime` ordering: shortest reset → 5h, longest → weekly.)
+
+```json
+{
+  "code": 200,
+  "data": {
+    "level": "lite",
+    "limits": [
+      {"type": "TIME_LIMIT",   "unit": 5, "number": 1, "percentage": 0,  "nextResetTime": 1784878391978},
+      {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 97, "nextResetTime": 1782304670000},
+      {"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 19, "nextResetTime": 1782891191000}
+    ]
+  }
+}
+```
+
+Here the `unit 3 × number 5` row is the 5-hour window (97 % used → 3 % remaining, resets in ~1 h), the `unit 6` row is the weekly window (19 % used → 81 % remaining), and the `unit 5` month-long row is *not* shown — the earlier label-only mapping wrongly captured it as the 5h row.
+
+If the international endpoint is unreachable (network, DNS, TLS) the reader falls back to `https://open.bigmodel.cn/api/monitor/usage/quota/limit` (the China mirror). When *both* endpoints fail the live call, the reader surfaces the classified reason — `not-authenticated` (HTTP 401/403), `subscription-required`, `rate-limited`, `network-error`, `quota-error` — instead of the generic `inconclusive-usage`, so a wrong key reads differently from a network outage.
+
+When no key can be discovered from Kilo/OpenCode and none is configured via the environment, the z.AI row renders as `unavailable` and is excluded from provider-fan-out and route decisions.
+
+Launching a z.AI model directly via `--provider zai` is intentionally rejected — z.AI has no CLI to run; always go through a route (typically `provider = "kilo"` with `model = "zai/<model>"`). The scheduler/ralph invocations below make this concrete:
+
+```bash
+# Single GLM model on Kilo, gated on z.AI's 5h quota.
+llm-scheduler --provider kilo --model zai/glm-4.7 --prompt-file task.md --scope 5h
+
+# Even-burn across two GLM models on Kilo, gated on z.AI's real windows.
+ralph-robin --routes kilo-zai-glm-4-7,kilo-zai-glm-5-2 --prompt-file task.md
+```
+
+`llm-usage --json` then emits a `zai` top-level key next to `codex`, `claude`, `copilot`, `kilo`, `opencode`, and `minimax`, with the parsed `5h` and `weekly` scopes under `zai.scopes` and the GLM pin under `zai.selected_model`.
 
 ## Logs and Cache
 

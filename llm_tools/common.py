@@ -2576,6 +2576,8 @@ def validate_provider_scope(provider: str, scope: str) -> None:
             err(f"--scope {scope} is not valid for kilo (use one of: {', '.join(sorted(allowed))})")
         elif provider == "minimax":
             err(f"--scope {scope} is not valid for minimax (use one of: {', '.join(sorted(allowed))})")
+        elif provider == "zai":
+            err(f"--scope {scope} is not valid for zai (use one of: {', '.join(sorted(allowed))})")
         else:
             err(f"--scope {scope} is not valid for {provider} (use one of: {', '.join(sorted(allowed))})")
         raise SystemExit(2)
@@ -2695,7 +2697,7 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
 # Providers recognised as top-level keys of a per-provider
 # ``LLM_SCHEDULER_USAGE_JSON`` map. Mirrors the set accepted by
 # ``--provider`` validation in the scheduler/ralph-robin CLIs.
-KNOWN_PROVIDERS = frozenset({"codex", "claude", "copilot", "kilo", "opencode", "minimax"})
+KNOWN_PROVIDERS = frozenset({"codex", "claude", "copilot", "kilo", "opencode", "minimax", "zai"})
 
 
 def usage_snapshot_for_provider(provider: str, env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -2766,6 +2768,16 @@ def usage_snapshot_for_provider(provider: str, env: dict[str, str] | None = None
             "selected_model": snap.selected_model,
             "scopes": [_scope_to_dict(s) for s in snap.scopes],
         }
+    if provider == "zai":
+        snap = _zai_snapshot(env)
+        return {
+            "provider": snap.provider,
+            "available": snap.available,
+            "reason": snap.reason,
+            "source": snap.source,
+            "selected_model": snap.selected_model,
+            "scopes": [_scope_to_dict(s) for s in snap.scopes],
+        }
     return {"provider": provider, "available": False, "reason": "unsupported-provider"}
 
 
@@ -2785,6 +2797,12 @@ def _minimax_snapshot(env: dict[str, str] | None):
     from .providers import read_minimax
 
     return read_minimax(env)
+
+
+def _zai_snapshot(env: dict[str, str] | None):
+    from .providers import read_zai
+
+    return read_zai(env)
 
 
 def _scope_to_dict(scope: Any) -> dict[str, Any]:
@@ -2855,7 +2873,7 @@ def _legacy_snapshot_to_scopes(snapshot: dict[str, Any]) -> list[dict[str, Any]]
 
 def _decision_scopes(snapshot: dict[str, Any], provider: str) -> list[dict[str, Any]]:
     """Return the decision-ready scope dicts for ``provider``."""
-    if provider in ("kilo", "opencode", "minimax"):
+    if provider in ("kilo", "opencode", "minimax", "zai"):
         existing = snapshot.get("scopes")
         if isinstance(existing, list) and existing and isinstance(existing[0], dict) and "kind" in existing[0]:
             return existing

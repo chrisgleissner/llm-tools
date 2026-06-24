@@ -314,7 +314,7 @@ def test_usage_service_json_protocol(env: dict[str, str], tmp_path: Path) -> Non
 
 
 def test_usage_service_manager_fallbacks(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr(usage_service.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(usage_service.shutil, "which", lambda _name, path=None: None)
 
     monkeypatch.setattr(usage_service.platform, "system", lambda: "Linux")
     assert usage_service.install_service(30, env) == 0
@@ -338,7 +338,7 @@ def test_usage_service_manager_fallbacks(env: dict[str, str], monkeypatch: pytes
 
     run_calls: list[list[str]] = []
     monkeypatch.setattr(usage_service, "_run", lambda cmd: run_calls.append(cmd) or 0)
-    monkeypatch.setattr(usage_service.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(usage_service.shutil, "which", lambda name, path=None: f"/bin/{name}")
     monkeypatch.setattr(usage_service, "_request", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(usage_service.platform, "system", lambda: "Linux")
     assert usage_service.install_service(45, env) == 0

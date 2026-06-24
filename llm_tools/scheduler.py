@@ -263,7 +263,7 @@ def parse_date_d(text: str) -> int | None:
 def validate_args(cfg: SchedulerConfig) -> None:
     if cfg.wake_test:
         return
-    if cfg.provider not in {"codex", "claude", "copilot", "kilo", "opencode", "minimax"}:
+    if cfg.provider not in {"codex", "claude", "copilot", "kilo", "opencode", "minimax", "zai"}:
         if not cfg.provider:
             common.err("--provider is required")
         else:
@@ -398,9 +398,13 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
 
 
 # Providers whose CLI accepts a `--model NAME` flag we can splice into the
-# default command. Kilo and MiniMax select their model through config/env, not
-# a launch flag, so a pinned model there is ignored (with a warning in main).
-MODEL_FLAG_PROVIDERS = frozenset({"claude", "codex", "copilot", "opencode"})
+# default command. Kilo and OpenCode accept ``-m, --model provider/model``;
+# that lets the same harness switch between Claude, OpenAI, Z.AI (zai/glm-*),
+# etc. without dropping a config file. MiniMax and zai (as a no-launch
+# capacity provider) select their model through routes, not the launch
+# flag, so a direct ``--provider zai`` invocation would ignore a model pin
+# (with a warning in main).
+MODEL_FLAG_PROVIDERS = frozenset({"claude", "codex", "copilot", "kilo", "opencode"})
 
 
 def provider_model_flags(provider: str, model: str) -> list[str]:
@@ -418,11 +422,18 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
         if cfg.provider == "claude":
             return ["claude", *m, prompt]
         if cfg.provider == "kilo":
-            return ["kilo", "run", prompt]
+            return ["kilo", "run", *m, prompt]
         if cfg.provider == "opencode":
             return ["opencode", *m]
         if cfg.provider == "minimax":
             return ["mmx"]
+        if cfg.provider == "zai":
+            # zai is a capacity-only provider: it is launched through a
+            # route (``provider=kilo``/``opencode``), not directly. A bare
+            # ``--provider zai`` invocation has no launch CLI, so we surface
+            # the contract here.
+            common.err("--provider zai must be launched through a route (e.g. [routes.kilo-zai-glm-4.7])")
+            raise SystemExit(2)
         return ["copilot", *m, "-C", cfg.cwd, "-i", prompt]
     if cfg.provider == "codex":
         return ["codex", "exec", *m, "-C", cfg.cwd, prompt]
@@ -431,19 +442,25 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
             return ["claude", "--print", "--output-format", "stream-json", "--verbose", *m, prompt]
         return ["claude", "--print", *m, prompt]
     if cfg.provider == "kilo":
-        # kilo uses `--dir` for the working directory. We do not inject any
-        # permission-bypassing flag (e.g. `--auto`): whether a headless run may
-        # act without prompting is governed by the user's own Kilo `permission`
-        # config, not by this framework.
-        return ["kilo", "run", "--dir", cfg.cwd, prompt]
+        # kilo uses `--dir` for the working directory and ``-m, --model
+        # provider/model`` to pick a model (e.g. ``-m zai/glm-4.7``). We
+        # do not inject any permission-bypassing flag (e.g. ``--auto``):
+        # whether a headless run may act without prompting is governed by
+        # the user's own Kilo `permission` config, not by this framework.
+        return ["kilo", "run", *m, "--dir", cfg.cwd, prompt]
     if cfg.provider == "opencode":
-        # opencode uses `--dir` (not `-C`) for the working directory. We do not
-        # inject any permission-bypassing flag: whether a headless run may act
-        # without prompting is governed by the user's own OpenCode `permission`
-        # config, not by this framework.
+        # opencode uses `--dir` (not `-C`) for the working directory. The
+        # model flag uses the same ``provider/model`` convention as Kilo
+        # (e.g. ``-m zai/glm-5.2``). We do not inject any
+        # permission-bypassing flag: whether a headless run may act
+        # without prompting is governed by the user's own OpenCode
+        # `permission` config, not by this framework.
         return ["opencode", "run", *m, "--dir", cfg.cwd, prompt]
     if cfg.provider == "minimax":
         return ["mmx", "run", "--auto", "-C", cfg.cwd, prompt]
+    if cfg.provider == "zai":
+        common.err("--provider zai must be launched through a route (e.g. [routes.kilo-zai-glm-4.7])")
+        raise SystemExit(2)
     return ["copilot", *m, "-C", cfg.cwd, "--prompt", prompt]
 
 
@@ -465,6 +482,7 @@ def scheduler_model_description(cfg: SchedulerConfig) -> str:
         "kilo": "Kilo Code CLI default/configured model",
         "opencode": "OpenCode CLI default/configured model",
         "minimax": "MiniMax default/configured model",
+        "zai": "z.AI capacity source (launch via [routes.<id>])",
     }[cfg.provider]
 
 
