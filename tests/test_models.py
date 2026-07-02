@@ -200,6 +200,71 @@ def test_model_rows_keep_columns_aligned() -> None:
     assert len(bar_offsets) == 1, out  # every bar starts in the same column
 
 
+def test_route_rows_render_as_provider_and_model_columns() -> None:
+    """A route row should not put the route id in Provider. For the table,
+    provider + model is the route's readable identity."""
+    cfg = _cfg()
+    rows = [
+        usage.UsageRow("Claude", "5h", 72.0, "72%", None, "s"),
+        usage.UsageRow(
+            "route:kilo-minimax-m3",
+            "subscription",
+            1.0,
+            "prepaid $20/mo",
+            None,
+            "s",
+            model="minimax-m3",
+            provider_label="Kilo",
+            kind="opaque",
+        ),
+    ]
+    cols = usage.fitted_columns_for_rows(cfg, rows, show_model=True)
+    buf = StringIO()
+    with contextlib.redirect_stdout(buf):
+        usage.print_table_header(cfg, show_model=True, cols=cols)
+        usage.print_usage_rows(cfg, rows, cols=cols)
+    lines = buf.getvalue().splitlines()
+    header = lines[0]
+    route_line = next(line for line in lines if line.startswith("Kilo"))
+    assert "route:kilo-minimax-m3" not in route_line
+    assert header.index("Model") == route_line.index("minimax-m3")
+    assert header.index("Ready") == route_line.index("yes")
+
+
+def test_usage_rows_sort_by_display_provider_then_model() -> None:
+    rows = [
+        usage.UsageRow("z.AI", "5h", 80.0, "80%", None, "s"),
+        usage.UsageRow(
+            "route:kilo-zai-glm-52",
+            "5h",
+            0.0,
+            "0%",
+            None,
+            "s",
+            model="zai/glm-5.2",
+            provider_label="Kilo",
+        ),
+        usage.UsageRow("Kilo", "spend", 1.0, "$1", None, "s"),
+        usage.UsageRow(
+            "route:kilo-minimax-m3",
+            "subscription",
+            1.0,
+            "prepaid $20/mo",
+            None,
+            "s",
+            model="minimax-m3",
+            provider_label="Kilo",
+        ),
+    ]
+    ordered = sorted(rows, key=usage.usage_row_sort_key)
+    assert [(row.provider_label or row.provider, row.model) for row in ordered] == [
+        ("Kilo", ""),
+        ("Kilo", "minimax-m3"),
+        ("Kilo", "zai/glm-5.2"),
+        ("z.AI", ""),
+    ]
+
+
 def test_no_model_column_when_no_models() -> None:
     cfg = _cfg()
     rows = [usage.UsageRow("Copilot", "monthly", 38.0, "38%", None, "s")]

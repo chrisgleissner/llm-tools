@@ -916,8 +916,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
-    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
-    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
+    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, cfg.model, usage_ttl=cfg.output_prefix_usage_ttl)
+    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, cfg.model, usage_ttl=cfg.output_prefix_usage_ttl)
     renderer = ClaudeStreamRenderer()
     stdout_buffer = b""
     combined_parts: list[bytes] = []
@@ -1037,8 +1037,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     open_fds = {stdout_fd: "stdout", stderr_fd: "stderr"}
     stdout_color = stream_color_enabled(sys.stdout)
     stderr_color = stream_color_enabled(sys.stderr)
-    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
-    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, usage_ttl=cfg.output_prefix_usage_ttl)
+    stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, cfg.model, usage_ttl=cfg.output_prefix_usage_ttl)
+    stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, cfg.model, usage_ttl=cfg.output_prefix_usage_ttl)
     stdout_parts: list[bytes] = []
     combined_parts: list[bytes] = []
     start = time.time()

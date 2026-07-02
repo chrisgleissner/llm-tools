@@ -3444,10 +3444,11 @@ def output_is_retryable(status: int, output: str, attached: bool = False, trust_
 
 # Fields that may appear, in any combination and order, inside the `[ ]` marker
 # prepended to each relayed provider line. "time" is the wall-clock HH:MM:SS;
-# "provider" is the provider name (codex/claude/...), "usage" is the remaining
-# percentage per window (e.g. "5h=10% week=30%"). An empty selection disables
-# the marker entirely (no brackets).
-LINE_PREFIX_FIELDS = ("time", "provider", "usage")
+# "provider" is the provider name (codex/claude/...), "model" is the selected
+# launch model when one is pinned, and "usage" is the remaining percentage per
+# window (e.g. "5h=10% week=30%"). An empty selection disables the marker
+# entirely (no brackets).
+LINE_PREFIX_FIELDS = ("time", "provider", "model", "usage")
 
 # Short labels for the scopes shown by the "usage" prefix field.
 USAGE_PREFIX_WINDOW_LABELS = {
@@ -3540,6 +3541,7 @@ USAGE_PREFIX_CACHE = UsagePrefixCache()
 def render_line_prefix(
     fields: list[str],
     provider: str = "",
+    model: str = "",
     now: float | None = None,
     usage_ttl: float = 15.0,
     usage_cache: UsagePrefixCache | None = None,
@@ -3558,6 +3560,8 @@ def render_line_prefix(
             parts.append(time.strftime("%H:%M:%S", moment))
         elif name == "provider" and provider:
             parts.append(provider)
+        elif name == "model" and model:
+            parts.append(model)
         elif name == "usage" and provider:
             cache = usage_cache if usage_cache is not None else USAGE_PREFIX_CACHE
             text = cache.get(provider, usage_ttl)
@@ -3585,12 +3589,14 @@ class LinePrefixer:
         self,
         fields: list[str] | None = None,
         provider: str = "",
+        model: str = "",
         clock: Any | None = None,
         usage_ttl: float = 15.0,
         usage_cache: UsagePrefixCache | None = None,
     ) -> None:
         self.fields = list(fields or [])
         self.provider = provider
+        self.model = model
         self.at_line_start = True
         self._clock = clock or time.time
         self._usage_ttl = usage_ttl
@@ -3603,7 +3609,7 @@ class LinePrefixer:
     def apply(self, raw: bytes) -> bytes:
         if not self.enabled or not raw:
             return raw
-        stamp = render_line_prefix(self.fields, self.provider, self._clock(), self._usage_ttl, self._usage_cache)
+        stamp = render_line_prefix(self.fields, self.provider, self.model, self._clock(), self._usage_ttl, self._usage_cache)
         if not stamp:
             return raw
         out = bytearray()

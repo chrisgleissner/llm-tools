@@ -104,6 +104,7 @@ def test_render_line_prefix_fields_and_order() -> None:
     # time field renders HH:MM:SS; combine with provider in the configured order.
     assert common.render_line_prefix(["time"], "codex", now=0).startswith(b"[")
     assert common.render_line_prefix(["provider"], "codex") == b"[codex] "
+    assert common.render_line_prefix(["provider", "model"], "kilo", "zai/glm-5.2") == b"[kilo zai/glm-5.2] "
     assert common.render_line_prefix(["provider", "time"], "codex", now=0).endswith(b"] ")
     # An empty selection emits no marker at all (not even brackets).
     assert common.render_line_prefix([], "codex") == b""
@@ -157,6 +158,7 @@ def test_line_prefixer_chunked_lines_stamped_once() -> None:
 
 def test_parse_prefix_fields() -> None:
     assert ralph_robin.parse_prefix_fields("time,provider") == ["time", "provider"]
+    assert ralph_robin.parse_prefix_fields("time,provider,model") == ["time", "provider", "model"]
     assert ralph_robin.parse_prefix_fields("provider,time") == ["provider", "time"]
     # De-duplicated, whitespace tolerant.
     assert ralph_robin.parse_prefix_fields(" time , time ,provider") == ["time", "provider"]
