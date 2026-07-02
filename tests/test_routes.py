@@ -962,6 +962,45 @@ def test_route_rendering_fixed_subscription(
     assert "█" not in row.left_text and "░" not in row.left_text
 
 
+def test_shorten_kilo_model_label() -> None:
+    """Kilo sells these gateway models as "Coding Plan"; the vendor prefix
+    baked into Kilo's internal model id (e.g. ``minimax-coding-plan/...``)
+    is redundant and only eats into the narrow Model column. Scoped to Kilo
+    routes so other providers' (unrelated) model ids are left untouched."""
+    from llm_tools import usage
+
+    assert usage._shorten_kilo_model_label("kilo", "minimax-coding-plan/MiniMax-M3") == "coding-plan/MiniMax-M3"
+    # Only applies to kilo routes.
+    assert (
+        usage._shorten_kilo_model_label("zai", "minimax-coding-plan/MiniMax-M3")
+        == "minimax-coding-plan/MiniMax-M3"
+    )
+    # Model ids without the coding-plan namespace pass through unchanged.
+    assert usage._shorten_kilo_model_label("kilo", "minimax-m3") == "minimax-m3"
+
+
+def test_route_rows_shortens_kilo_coding_plan_model_label(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_bin: Path
+) -> None:
+    _setup_route_config(monkeypatch, tmp_path, fake_bin)
+    (tmp_path / "xdg" / "llm-tools" / "config.toml").write_text(
+        textwrap.dedent(
+            """
+            [routes.kilo-minimax-m3]
+            provider = "kilo"
+            model = "minimax-coding-plan/MiniMax-M3"
+            [routes.kilo-minimax-m3.capacity]
+            policy = "opaque"
+            """
+        ),
+        encoding="utf-8",
+    )
+    config._cache.clear()
+    from llm_tools import usage
+    row = usage.route_rows(usage.Config())[0]
+    assert row.model == "coding-plan/MiniMax-M3"
+
+
 def test_route_rendering_generic_opaque(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_bin: Path
 ) -> None:

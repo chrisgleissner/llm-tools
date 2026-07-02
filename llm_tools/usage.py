@@ -2301,6 +2301,23 @@ def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
     )
 
 
+def _shorten_kilo_model_label(provider: str, model_label: str) -> str:
+    """Drop the vendor prefix from Kilo-purchased "coding plan" model ids.
+
+    Kilo namespaces these gateway models by upstream vendor internally
+    (e.g. ``minimax-coding-plan/MiniMax-M3``), but Kilo itself just sells
+    the product as "Coding Plan" -- the vendor prefix is redundant and only
+    eats into the narrow Model column. Scoped to Kilo routes only, since
+    other providers' model ids are not namespaced this way. Kilo may sell
+    more coding plans from other vendors in future, so this matches any
+    ``<vendor>-coding-plan/`` prefix rather than hardcoding "minimax".
+    """
+    if provider != "kilo":
+        return model_label
+    _prefix, sep, rest = model_label.partition("-coding-plan/")
+    return f"coding-plan/{rest}" if sep else model_label
+
+
 def route_rows(cfg: Config) -> list[UsageRow]:
     """Render configured routes (from ``[routes.<id>]``) as table rows.
 
@@ -2371,6 +2388,7 @@ def route_rows(cfg: Config) -> list[UsageRow]:
             model_label = str(extras.get("model"))
         elif route.model:
             model_label = route.model
+        model_label = _shorten_kilo_model_label(route.provider, model_label)
         out.append(
             UsageRow(
                 provider=f"route:{route_id}",
