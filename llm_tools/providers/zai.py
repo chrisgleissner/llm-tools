@@ -1,6 +1,6 @@
-"""z.AI (Zhipu AI) provider adapter.
+"""z.ai (Zhipu AI) provider adapter.
 
-z.AI exposes the GLM family (e.g. ``GLM-4.7``, ``GLM-5.2``) through an
+z.ai exposes the GLM family (e.g. ``GLM-4.7``, ``GLM-5.2``) through an
 OpenAI/Anthropic-compatible API and a per-account quota monitor:
 
     GET https://api.z.ai/api/monitor/usage/quota/limit
@@ -77,7 +77,7 @@ from ..capacity import (
 DEFAULT_ZAI_TIMEOUT = 10
 
 
-# Known z.AI quota endpoint hosts. The international endpoint is tried
+# Known z.ai quota endpoint hosts. The international endpoint is tried
 # first; the China fallback is only consulted on network failure.
 ZAI_QUOTA_ENDPOINTS: tuple[str, ...] = (
     "https://api.z.ai/api/monitor/usage/quota/limit",
@@ -85,8 +85,8 @@ ZAI_QUOTA_ENDPOINTS: tuple[str, ...] = (
 )
 
 
-# Mapping of z.AI ``type`` field to the 5h/weekly bucket we surface.
-# z.AI today uses ``TIME_LIMIT`` (5h time limit) and ``TOKENS_LIMIT``
+# Mapping of z.ai ``type`` field to the 5h/weekly bucket we surface.
+# z.ai today uses ``TIME_LIMIT`` (5h time limit) and ``TOKENS_LIMIT``
 # (token-based monthly cap), plus a weekly quota label. We treat the
 # *shortest* reset horizon as the 5h window and the *longest* reset
 # horizon as the weekly window, but the explicit ``type`` mapping wins
@@ -95,10 +95,10 @@ ZAI_TYPE_5H = frozenset({"TIME_LIMIT", "TIME_LIMIT_5H", "5H_LIMIT"})
 ZAI_TYPE_WEEKLY = frozenset({"WEEKLY_LIMIT", "WEEKLY", "WEEKLY_QUOTA"})
 
 
-# z.AI reports each limit's window length as ``number`` x ``unit``, where
+# z.ai reports each limit's window length as ``number`` x ``unit``, where
 # ``unit`` is a time-unit enum (observed: 3=hour, 5=month, 6=week). We
 # classify the 5h/weekly rows by this *window length* rather than the
-# ``type`` label, because z.AI reuses ``TIME_LIMIT`` / ``TOKENS_LIMIT``
+# ``type`` label, because z.ai reuses ``TIME_LIMIT`` / ``TOKENS_LIMIT``
 # across several windows: the coding plan's 5-hour and weekly prompt
 # quotas (the rows we surface) plus a separate ~monthly tool/search quota
 # that must NOT be mistaken for the 5-hour window. The label-based mapping
@@ -121,7 +121,7 @@ _ZAI_WEEKLY_MAX_WINDOW = 10 * 86_400
 _ZAI_WEEKLY_TARGET = 7 * 86_400
 
 
-# Co-installed agents whose credential stores we read. z.AI is reached
+# Co-installed agents whose credential stores we read. z.ai is reached
 # through Kilo (or OpenCode); their ``auth.json`` (mode 0600, owner-only)
 # is the zero-config source of the key, so llm-tools never has to store
 # an API key of its own.
@@ -136,7 +136,7 @@ def _agent_auth_key(env: dict[str, str], provider: str) -> str | None:
     ``~/.local/share/<app>/auth.json``), owner-only, as
     ``{"<provider>": {"type": "api", "key": "..."}}``. We read the key
     from there the same way the Claude/Codex readers read their CLIs'
-    own credential files -- so adding a z.AI account to Kilo lights up
+    own credential files -- so adding a z.ai account to Kilo lights up
     the dashboard row with no llm-tools-side configuration.
 
     The path is derived *strictly* from ``env`` (no fallback to the
@@ -167,12 +167,12 @@ def _agent_auth_key(env: dict[str, str], provider: str) -> str | None:
 
 
 def zai_api_key(env: dict[str, str] | None = None) -> str | None:
-    """Resolve the bearer token used against the z.AI quota endpoint.
+    """Resolve the bearer token used against the z.ai quota endpoint.
 
     Precedence: ``LLM_USAGE_ZAI_API_KEY`` (test override) > ``ZAI_API_KEY``
     > the key Kilo/OpenCode already persisted in their owner-only
     ``auth.json`` (``$XDG_DATA_HOME/{kilo,opencode}/auth.json``). The
-    final step keeps llm-tools zero-config: authenticating z.AI in Kilo
+    final step keeps llm-tools zero-config: authenticating z.ai in Kilo
     is enough -- no API key is ever configured in llm-tools itself.
     """
     env = env or os.environ
@@ -238,7 +238,7 @@ def _epoch_seconds(value: int | None) -> int | None:
 
 
 def _extract_limits(payload: Any) -> list[dict[str, Any]]:
-    """Pull ``data.limits`` out of a z.AI quota payload, tolerating
+    """Pull ``data.limits`` out of a z.ai quota payload, tolerating
     minor envelope drift.
 
     The endpoint has historically wrapped the result in a ``{code, msg,
@@ -263,10 +263,10 @@ ZAI_REASON_NETWORK = "network-error"
 
 
 def _classify_zai_error(code: int | None, message: str) -> str:
-    """Map a z.AI error code/message pair to a stable reason code.
+    """Map a z.ai error code/message pair to a stable reason code.
 
     Order matters: the subscription-message check runs before the auth
-    check because z.AI returns ``403 subscription required`` for users
+    check because z.ai returns ``403 subscription required`` for users
     whose plan does not include the quota endpoint, which is a
     distinct state from a bad API key. Rate-limit matching covers both
     the explicit ``429`` and the canonical ``Too Many Requests`` /
@@ -293,7 +293,7 @@ def _classify_zai_error(code: int | None, message: str) -> str:
 
 def _extract_error_envelope(payload: Any) -> dict[str, Any] | None:
     """Return ``{"code", "message", "reason"}`` when the payload is a
-    z.AI error envelope rather than a successful quota response.
+    z.ai error envelope rather than a successful quota response.
     """
     if not isinstance(payload, dict):
         return None
@@ -362,7 +362,7 @@ def _parse_zai_limits(limits: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
 
     The primary signal is each limit's *window length* (``number`` x
     ``unit``): the shortest sub-day window is the 5h row, a ~one-week
-    window is the weekly row, and longer (monthly) windows — e.g. z.AI's
+    window is the weekly row, and longer (monthly) windows — e.g. z.ai's
     separate tool/search quota — are surfaced by neither. This is what
     keeps the 5-hour row from being captured by the monthly ``TIME_LIMIT``
     entry that resets weeks out.
@@ -431,8 +431,8 @@ def _parse_zai_limits(limits: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
 
 
 def _limit_to_scope(name: str, entry: dict[str, Any]) -> CapacityScope | None:
-    """Translate a single z.AI ``limits`` row into a :class:`CapacityScope`."""
-    # z.AI reports ``percentage`` as the *used* percent; flip to remaining.
+    """Translate a single z.ai ``limits`` row into a :class:`CapacityScope`."""
+    # z.ai reports ``percentage`` as the *used* percent; flip to remaining.
     used = _safe_float(entry.get("percentage"))
     remaining = _safe_float(entry.get("remaining"))
     if remaining is None and used is not None:

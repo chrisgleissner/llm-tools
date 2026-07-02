@@ -233,7 +233,7 @@ def test_route_rows_render_as_provider_and_model_columns() -> None:
 
 def test_usage_rows_sort_by_display_provider_then_model() -> None:
     rows = [
-        usage.UsageRow("z.AI", "5h", 80.0, "80%", None, "s"),
+        usage.UsageRow("Z.ai", "5h", 80.0, "80%", None, "s"),
         usage.UsageRow(
             "route:kilo-zai-glm-52",
             "5h",
@@ -261,7 +261,7 @@ def test_usage_rows_sort_by_display_provider_then_model() -> None:
         ("Kilo", ""),
         ("Kilo", "minimax-m3"),
         ("Kilo", "zai/glm-5.2"),
-        ("z.AI", ""),
+        ("Z.ai", ""),
     ]
 
 

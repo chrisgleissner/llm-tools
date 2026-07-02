@@ -1,4 +1,4 @@
-"""Tests for the z.AI provider adapter (GLM 4.7 / GLM 5.2 capacity source)."""
+"""Tests for the z.ai provider adapter (GLM 4.7 / GLM 5.2 capacity source)."""
 
 from __future__ import annotations
 
@@ -249,7 +249,7 @@ def test_read_zai_parses_zai_api_envelope(env: dict[str, str], monkeypatch) -> N
 
 
 def test_read_zai_parses_two_time_limit_entries(env: dict[str, str], monkeypatch) -> None:
-    """z.AI's 5h and weekly quotas may both surface as ``TIME_LIMIT``
+    """z.ai's 5h and weekly quotas may both surface as ``TIME_LIMIT``
     entries distinguished only by their reset horizon. The reader
     picks the shorter reset as 5h and the longer as weekly.
     """
@@ -683,7 +683,7 @@ def test_usage_table_renders_zai_rows(env: dict[str, str], monkeypatch) -> None:
     with contextlib.redirect_stdout(buf):
         usage.print_zai_rows(cfg, json_obj)
     out = buf.getvalue()
-    assert "z.AI" in out
+    assert "Z.ai" in out
     assert "5h" in out
     assert "weekly" in out
     assert "75%" in out
@@ -701,7 +701,7 @@ def test_usage_table_renders_zai_unavailable() -> None:
     with contextlib.redirect_stdout(buf):
         usage.print_zai_rows(cfg, None)
     out = buf.getvalue()
-    assert "z.AI" in out
+    assert "Z.ai" in out
     assert "unavailable" in out
 
 
@@ -718,7 +718,7 @@ def test_usage_table_collapses_zai_inconclusive_to_unavailable(capsys) -> None:
     }
     usage.print_zai_rows(cfg, zai_json)
     out = capsys.readouterr().out
-    assert "z.AI" in out
+    assert "Z.ai" in out
     assert "unavailable" in out
     assert "inconclusive-usage" not in out
     # The exhausted-quota marker must not appear for an unmeasured provider.
@@ -1324,7 +1324,7 @@ def test_scheduler_zai_model_description() -> None:
 
 
 def test_zai_log_samples_records_reset_windows(env: dict[str, str], monkeypatch) -> None:
-    """``log_samples_from_provider_data`` records a z.AI reset-window sample
+    """``log_samples_from_provider_data`` records a z.ai reset-window sample
     for each scope, mirroring the minimax path."""
     env["LLM_USAGE_ZAI_5H_PERCENT"] = "77"
     env["LLM_USAGE_ZAI_5H_RESET_EPOCH"] = "1781431200"
@@ -1337,8 +1337,8 @@ def test_zai_log_samples_records_reset_windows(env: dict[str, str], monkeypatch)
     calls: list[tuple[str, str, float | None]] = []
     monkeypatch.setattr(common, "log_usage_sample", lambda p, w, r: calls.append((p, w, r)))
     usage.log_samples_from_provider_data({"zai": zai_snap})
-    assert ("z.AI", "5h", 77.0) in calls
-    assert ("z.AI", "weekly", 88.0) in calls
+    assert ("Z.ai", "5h", 77.0) in calls
+    assert ("Z.ai", "weekly", 88.0) in calls
 
 
 # --- Helpers ------------------------------------------------------------------

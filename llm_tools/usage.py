@@ -109,7 +109,7 @@ def provider_display_name(provider: str) -> str:
         "kilo": "Kilo",
         "opencode": "OpenCode",
         "minimax": "MiniMax",
-        "zai": "z.AI",
+        "zai": "Z.ai",
     }.get(provider, provider)
 
 
@@ -1672,13 +1672,13 @@ def print_minimax_rows(cfg: Config, minimax_json: dict[str, Any] | None) -> None
     print_usage_rows(cfg, minimax_rows(cfg, minimax_json))
 
 
-ZAI_DISPLAY_NAME = "z.AI"
+ZAI_DISPLAY_NAME = "Z.ai"
 
 
 def zai_rows(cfg: Config, zai_json: dict[str, Any] | None) -> list[UsageRow]:
-    """Render z.AI scopes into a flat list of table rows.
+    """Render z.ai scopes into a flat list of table rows.
 
-    z.AI exposes the same 5h/weekly reset-window shape the Codex /
+    z.ai exposes the same 5h/weekly reset-window shape the Codex /
     Claude / minimax readers use, sourced from the
     ``/api/monitor/usage/quota/limit`` endpoint. When no API key is
     set and no env-var fallback is configured the reader reports
@@ -2687,7 +2687,7 @@ def _minimax_to_json(snap: Any) -> dict[str, Any]:
 
 
 def _zai_to_json(snap: Any) -> dict[str, Any]:
-    """Project a z.AI ProviderSnapshot into a JSON-friendly dict.
+    """Project a z.ai ProviderSnapshot into a JSON-friendly dict.
 
     Mirrors :func:`_minimax_to_json`: the snapshot's
     :class:`CapacityScope` objects are flattened into plain dicts so

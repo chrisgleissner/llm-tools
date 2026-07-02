@@ -89,7 +89,7 @@ PROVIDER_SCOPES: dict[str, frozenset[str]] = {
     PROVIDER_KILO: frozenset({SCOPE_AUTO, SCOPE_BALANCE, SCOPE_BUDGET, SCOPE_BYOK, SCOPE_UNGATED}),
     PROVIDER_OPENCODE: frozenset({SCOPE_AUTO, SCOPE_BALANCE, SCOPE_BUDGET, SCOPE_BYOK, SCOPE_UNGATED}),
     PROVIDER_MINIMAX: frozenset({SCOPE_AUTO, SCOPE_5H, SCOPE_WEEKLY}),
-    # z.AI exposes a 5h session window and a weekly quota on the same
+    # z.ai exposes a 5h session window and a weekly quota on the same
     # ``/api/monitor/usage/quota/limit`` endpoint. The provider is launched
     # through Kilo (or OpenCode) via a route, so it is a pure capacity
     # source here: a route with ``capacity.provider = "zai"`` and the
