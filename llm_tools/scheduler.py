@@ -401,7 +401,7 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
 
 # Providers whose CLI accepts a `--model NAME` flag we can splice into the
 # default command. Kilo and OpenCode accept ``-m, --model provider/model``;
-# that lets the same harness switch between Claude, OpenAI, Z.AI (zai/glm-*),
+# that lets the same harness switch between Claude, OpenAI, z.ai (zai/glm-*),
 # etc. without dropping a config file. MiniMax and zai (as a no-launch
 # capacity provider) select their model through routes, not the launch
 # flag, so a direct ``--provider zai`` invocation would ignore a model pin
@@ -498,7 +498,7 @@ def scheduler_model_description(cfg: SchedulerConfig) -> str:
         "kilo": "Kilo Code CLI default/configured model",
         "opencode": "OpenCode CLI default/configured model",
         "minimax": "MiniMax default/configured model",
-        "zai": "z.AI capacity source (launch via [routes.<id>])",
+        "zai": "Z.ai capacity source (launch via [routes.<id>])",
     }[cfg.provider]
 
 
