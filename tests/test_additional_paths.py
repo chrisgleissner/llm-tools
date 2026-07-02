@@ -2890,6 +2890,11 @@ def test_copilot_monthly_quota_live_fetch_and_cache(
     assert out["source"] == "copilot api"
     assert abs(out["remaining"] - 75.4) < 1e-6
     assert out["allowance"] == 1500
+    # entitlement (1500) - quota_remaining (1131.4) = 368.6 credits used;
+    # "requests" keeps the rounded int for backward compatibility while
+    # "credits_used" carries the exact fractional ai-credits figure.
+    assert out["requests"] == 369
+    assert abs(out["credits_used"] - 368.6) < 1e-6
     # The quota result is persisted, so a second call serves it from cache
     # even with the network mocked away.
     monkeypatch.setattr(common, "_github_api_get", lambda *a, **k: None)
@@ -2911,6 +2916,7 @@ def test_copilot_monthly_result_from_quota_without_entitlement() -> None:
     quota = {"remaining": 42.0, "entitlement": None, "quota_remaining": None}
     out = common._copilot_monthly_result_from_quota(quota, {"LLM_USAGE_COPILOT_PLAN": "pro"})
     assert out["requests"] is None
+    assert out["credits_used"] is None
     assert abs(out["remaining"] - 42.0) < 1e-6
     assert abs(out["used"] - 58.0) < 1e-6
     assert out["allowance"] == common._copilot_monthly_allowance_for_plan("pro", {})

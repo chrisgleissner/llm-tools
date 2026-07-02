@@ -2175,17 +2175,24 @@ def _copilot_monthly_result_from_quota(
         else _copilot_monthly_allowance_for_plan(env.get("LLM_USAGE_COPILOT_PLAN"), env)
     )
     quota_remaining = quota.get("quota_remaining")
-    requests_used: float | None = None
+    # Despite the name, the quota snapshot's ``entitlement``/``quota_remaining``
+    # count fractional Copilot "ai-credits", not integer premium requests --
+    # e.g. a Pro+ user might have 1131.4 of 1500 credits remaining. ``requests``
+    # below stays an int for backward compatibility with the billing-sum path
+    # (which does count integer requests); ``credits_used`` carries the exact
+    # fractional figure for callers that want it.
+    credits_used: float | None = None
     if (
         quota_remaining is not None
         and isinstance(entitlement, int)
         and entitlement > 0
     ):
-        requests_used = max(0.0, float(entitlement) - float(quota_remaining))
+        credits_used = max(0.0, float(entitlement) - float(quota_remaining))
     return {
         "used": used,
         "remaining": remaining,
-        "requests": int(round(requests_used)) if requests_used is not None else None,
+        "requests": int(round(credits_used)) if credits_used is not None else None,
+        "credits_used": credits_used,
         "allowance": allowance,
         "source": "copilot api",
     }
@@ -2213,7 +2220,10 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
     "allowance": int, "source": str}`` or ``None`` when no measurement is
     possible (no token, no plan, API failure with no usable cache). The
     result is cached with a short TTL because the figure is month-bucketed
-    and changes at most once per request.
+    and changes at most once per request. When ``source`` is ``"copilot
+    api"`` (the quota-snapshot path), the result also carries
+    ``"credits_used": float | None`` -- the exact fractional ai-credits
+    figure ``requests`` rounds away.
 
     Never raises: a billing-API failure is the whole reason the live
     ``Plan: N% used`` footer exists, so the fallback has to be similarly
