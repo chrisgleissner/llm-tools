@@ -2123,6 +2123,89 @@ def _copilot_monthly_used_from_premium_request_usage(payload: Any) -> float | No
     return total
 
 
+def _copilot_quota_snapshot_from_payload(payload: Any) -> dict[str, Any] | None:
+    """Extract the ``premium_interactions`` quota snapshot from a
+    ``/copilot_internal/user`` payload.
+
+    The Copilot service exposes the authoritative remaining allowance here:
+    ``quota_snapshots.premium_interactions`` carries ``percent_remaining`` (the
+    dashboard's headline figure), ``entitlement`` (the per-month credit
+    allowance, e.g. 1500 for Pro+), ``quota_remaining`` (credits left), and
+    ``overage_permitted``. This is the source the Copilot CLI itself trusts, so
+    it beats reconstructing a percentage from the billing API's raw credit sum
+    divided by a guessed plan allowance. Returns ``None`` when the shape is
+    unrecognised so the caller can fall back to the billing sum.
+    """
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(payload, dict):
+        return None
+    snapshots = payload.get("quota_snapshots")
+    if not isinstance(snapshots, dict):
+        return None
+    pi = snapshots.get("premium_interactions")
+    if not isinstance(pi, dict):
+        return None
+    remaining = num(pi.get("percent_remaining"))
+    if remaining is None:
+        return None
+    entitlement = num(pi.get("entitlement"))
+    quota_remaining = num(pi.get("quota_remaining"))
+    return {
+        "remaining": float(remaining),
+        "entitlement": int(round(entitlement)) if entitlement is not None else None,
+        "quota_remaining": float(quota_remaining) if quota_remaining is not None else None,
+        "overage_permitted": bool(pi.get("overage_permitted")),
+    }
+
+
+def _copilot_monthly_result_from_quota(
+    quota: dict[str, Any], env: dict[str, str]
+) -> dict[str, Any]:
+    """Turn a Copilot quota snapshot into a ``read_copilot_monthly_used`` result."""
+    remaining = max(0.0, min(100.0, float(quota["remaining"])))
+    used = max(0.0, 100.0 - remaining)
+    entitlement = quota.get("entitlement")
+    allowance = (
+        entitlement
+        if isinstance(entitlement, int) and entitlement > 0
+        else _copilot_monthly_allowance_for_plan(env.get("LLM_USAGE_COPILOT_PLAN"), env)
+    )
+    quota_remaining = quota.get("quota_remaining")
+    # Despite the name, the quota snapshot's ``entitlement``/``quota_remaining``
+    # count fractional Copilot "ai-credits", not integer premium requests --
+    # e.g. a Pro+ user might have 1131.4 of 1500 credits remaining. ``requests``
+    # below stays an int for backward compatibility with the billing-sum path
+    # (which does count integer requests); ``credits_used`` carries the exact
+    # fractional figure for callers that want it.
+    credits_used: float | None = None
+    if (
+        quota_remaining is not None
+        and isinstance(entitlement, int)
+        and entitlement > 0
+    ):
+        credits_used = max(0.0, float(entitlement) - float(quota_remaining))
+    return {
+        "used": used,
+        "remaining": remaining,
+        "requests": int(round(credits_used)) if credits_used is not None else None,
+        "credits_used": credits_used,
+        "allowance": allowance,
+        "source": "copilot api",
+    }
+
+
+def _read_copilot_quota_snapshot(env: dict[str, str]) -> dict[str, Any] | None:
+    token = _github_token(env)
+    if not token:
+        return None
+    payload = _github_api_get("/copilot_internal/user", token, env)
+    return _copilot_quota_snapshot_from_payload(payload)
+
+
 def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     """Best-effort Copilot monthly *used* percent from the GitHub billing API.
 
@@ -2137,7 +2220,10 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
     "allowance": int, "source": str}`` or ``None`` when no measurement is
     possible (no token, no plan, API failure with no usable cache). The
     result is cached with a short TTL because the figure is month-bucketed
-    and changes at most once per request.
+    and changes at most once per request. When ``source`` is ``"copilot
+    api"`` (the quota-snapshot path), the result also carries
+    ``"credits_used": float | None`` -- the exact fractional ai-credits
+    figure ``requests`` rounds away.
 
     Never raises: a billing-API failure is the whole reason the live
     ``Plan: N% used`` footer exists, so the fallback has to be similarly
@@ -2163,6 +2249,18 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
             "allowance": allowance,
             "source": "github billing",
         }
+    # Authoritative source: the Copilot service's own quota snapshot
+    # (``/copilot_internal/user``), which reports the exact remaining percent
+    # and the real per-plan entitlement. This supersedes reconstructing a
+    # percentage from the billing API's raw credit sum divided by a guessed
+    # allowance. A diagnostic injection bypasses network access for hermetic
+    # tests.
+    quota_injected = env.get("LLM_USAGE_COPILOT_QUOTA_JSON")
+    if quota_injected is not None:
+        quota = _copilot_quota_snapshot_from_payload(quota_injected)
+        if quota is None:
+            return None
+        return _copilot_monthly_result_from_quota(quota, env)
     cache = usage_cache_dir(env) / "copilot-monthly.json"
     try:
         ttl = int(env.get("LLM_USAGE_COPILOT_MONTHLY_TTL", "600") or "600")
@@ -2178,6 +2276,27 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
     token = _github_token(env)
     if not token:
         return _copilot_monthly_cache_payload(cache)
+    # Primary live source: the Copilot quota snapshot gives the exact remaining
+    # percent and entitlement without a day-by-day billing scan or a guessed
+    # plan allowance. It is a live, current-month figure, so it is meaningless
+    # for an explicitly pinned past month (a test seam) -- skip it then and let
+    # the billing sum answer the historical query. Cache and return on success;
+    # otherwise fall through to the billing API sum.
+    if "LLM_USAGE_COPILOT_PREMIUM_REQUEST_MONTH_OVERRIDE" not in env:
+        quota = _read_copilot_quota_snapshot(env)
+        if quota is not None:
+            result = _copilot_monthly_result_from_quota(quota, env)
+            try:
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+                tmp.write_text(
+                    json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                tmp.replace(cache)
+            except OSError:
+                pass
+            return result
     login = str(env.get("LLM_USAGE_COPILOT_ADDON_LOGIN") or "").strip()
     if not login:
         user = _github_api_get("/user", token, env)

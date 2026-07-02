@@ -2399,6 +2399,10 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert usage.render_remaining("unavailable", plain) == "unavailable"
     assert usage.render_remaining("-", plain) == "-"
     assert usage.render_remaining("9%", ucfg).startswith("\x1b[0;31m")
+    # A fractional source percentage (e.g. Copilot's 75.4%) is rendered as a
+    # whole number so the progress-bar column lines up across rows.
+    assert usage.render_remaining("75.4%", plain) == " 75% ████████░░"
+    assert usage.render_remaining("8.6%", plain) == "  8% █░░░░░░░░░"
     # Daily budget helper remains available to scheduler/Ralph paths.
     at1000 = {"LLM_USAGE_NOW_EPOCH": "1000"}
     assert common.daily_budget_percent(50, 1000 + 86400, at1000) == 50.0  # 1 day out -> 50%
@@ -2781,6 +2785,179 @@ def test_copilot_premium_request_payload_malformed_paths() -> None:
     assert common._copilot_monthly_used_from_premium_request_usage(
         {"usageItems": ["bad", {"product": "actions", "grossQuantity": 10}, {"product": "Copilot", "grossQuantity": 0}]}
     ) == 0.0
+
+
+def test_copilot_quota_snapshot_parsed_from_internal_user_payload() -> None:
+    payload = {
+        "quota_snapshots": {
+            "premium_interactions": {
+                "percent_remaining": 75.4,
+                "entitlement": 1500,
+                "quota_remaining": 1131.4,
+                "overage_permitted": True,
+            },
+            "chat": {"percent_remaining": 100.0, "unlimited": True},
+        }
+    }
+    snap = common._copilot_quota_snapshot_from_payload(payload)
+    assert snap == {
+        "remaining": 75.4,
+        "entitlement": 1500,
+        "quota_remaining": 1131.4,
+        "overage_permitted": True,
+    }
+    # The quota JSON can also arrive as a JSON string.
+    assert common._copilot_quota_snapshot_from_payload(json.dumps(payload))["remaining"] == 75.4
+
+
+def test_copilot_quota_snapshot_malformed_paths() -> None:
+    assert common._copilot_quota_snapshot_from_payload("not-json") is None
+    assert common._copilot_quota_snapshot_from_payload({}) is None
+    assert common._copilot_quota_snapshot_from_payload({"quota_snapshots": {}}) is None
+    # Missing percent_remaining -> unusable.
+    assert common._copilot_quota_snapshot_from_payload(
+        {"quota_snapshots": {"premium_interactions": {"entitlement": 1500}}}
+    ) is None
+
+
+def test_copilot_monthly_prefers_quota_snapshot(env: dict[str, str]) -> None:
+    """The authoritative Copilot quota snapshot (exact remaining % and real
+    entitlement) wins over reconstructing a percentage from a guessed plan
+    allowance, so a Pro+ user with 75.4% left renders correctly instead of
+    being clamped to 0% by a misapplied Pro (300) denominator."""
+    payload = {
+        "quota_snapshots": {
+            "premium_interactions": {
+                "percent_remaining": 75.4,
+                "entitlement": 1500,
+                "quota_remaining": 1131.4,
+                "overage_permitted": True,
+            }
+        }
+    }
+    e = env | {
+        "LLM_USAGE_COPILOT_QUOTA_JSON": json.dumps(payload),
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+    }
+    out = common.read_copilot_monthly_used(e)
+    assert out is not None
+    assert out["source"] == "copilot api"
+    assert abs(out["remaining"] - 75.4) < 1e-6
+    assert abs(out["used"] - 24.6) < 1e-6
+    assert out["allowance"] == 1500
+    # The real entitlement wins even when a different plan is pinned.
+    out2 = common.read_copilot_monthly_used(e | {"LLM_USAGE_COPILOT_PLAN": "pro"})
+    assert out2 is not None and out2["allowance"] == 1500
+
+
+def test_copilot_monthly_quota_disabled_returns_none(env: dict[str, str]) -> None:
+    payload = {"quota_snapshots": {"premium_interactions": {"percent_remaining": 75.4, "entitlement": 1500}}}
+    e = env | {
+        "LLM_USAGE_COPILOT_QUOTA_JSON": json.dumps(payload),
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "1",
+    }
+    assert common.read_copilot_monthly_used(e) is None
+
+
+def test_copilot_monthly_quota_live_fetch_and_cache(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Exercise the live ``/copilot_internal/user`` quota fetch end-to-end
+    (token + mocked API + cache write), covering the primary monthly path."""
+    payload = {
+        "quota_snapshots": {
+            "premium_interactions": {
+                "percent_remaining": 75.4,
+                "entitlement": 1500,
+                "quota_remaining": 1131.4,
+                "overage_permitted": True,
+            }
+        }
+    }
+    monkeypatch.setattr(common, "_github_token", lambda env=None: "tok")
+    monkeypatch.setattr(
+        common,
+        "_github_api_get",
+        lambda path, token, env=None: payload if path == "/copilot_internal/user" else None,
+    )
+    e = env | {
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+        "LLM_USAGE_COPILOT_MONTHLY_TTL": "600",
+        "XDG_CACHE_HOME": str(tmp_path),
+    }
+    out = common.read_copilot_monthly_used(e)
+    assert out is not None
+    assert out["source"] == "copilot api"
+    assert abs(out["remaining"] - 75.4) < 1e-6
+    assert out["allowance"] == 1500
+    # entitlement (1500) - quota_remaining (1131.4) = 368.6 credits used;
+    # "requests" keeps the rounded int for backward compatibility while
+    # "credits_used" carries the exact fractional ai-credits figure.
+    assert out["requests"] == 369
+    assert abs(out["credits_used"] - 368.6) < 1e-6
+    # The quota result is persisted, so a second call serves it from cache
+    # even with the network mocked away.
+    monkeypatch.setattr(common, "_github_api_get", lambda *a, **k: None)
+    cached = common.read_copilot_monthly_used(e)
+    assert cached is not None and abs(cached["remaining"] - 75.4) < 1e-6
+
+
+def test_read_copilot_quota_snapshot_without_token_returns_none(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(common, "_github_token", lambda env=None: None)
+    assert common._read_copilot_quota_snapshot(env) is None
+
+
+def test_copilot_monthly_result_from_quota_without_entitlement() -> None:
+    """Without a numeric ``entitlement``/``quota_remaining`` pair, the request
+    count cannot be derived and the allowance falls back to the plan guess --
+    the ``remaining``/``used`` percent must still come from the snapshot."""
+    quota = {"remaining": 42.0, "entitlement": None, "quota_remaining": None}
+    out = common._copilot_monthly_result_from_quota(quota, {"LLM_USAGE_COPILOT_PLAN": "pro"})
+    assert out["requests"] is None
+    assert out["credits_used"] is None
+    assert abs(out["remaining"] - 42.0) < 1e-6
+    assert abs(out["used"] - 58.0) < 1e-6
+    assert out["allowance"] == common._copilot_monthly_allowance_for_plan("pro", {})
+
+
+def test_copilot_monthly_quota_injected_malformed_returns_none(env: dict[str, str]) -> None:
+    e = env | {
+        "LLM_USAGE_COPILOT_QUOTA_JSON": "not-json",
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+    }
+    assert common.read_copilot_monthly_used(e) is None
+
+
+def test_copilot_monthly_quota_live_fetch_cache_write_failure(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A cache-write failure (e.g. read-only filesystem) is best-effort and
+    must not prevent the live quota result from being returned."""
+    payload = {
+        "quota_snapshots": {
+            "premium_interactions": {"percent_remaining": 60.0, "entitlement": 300}
+        }
+    }
+    monkeypatch.setattr(common, "_github_token", lambda env=None: "tok")
+    monkeypatch.setattr(
+        common,
+        "_github_api_get",
+        lambda path, token, env=None: payload if path == "/copilot_internal/user" else None,
+    )
+
+    def raise_write_text(self, *a, **k):  # type: ignore[no-untyped-def]
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(Path, "write_text", raise_write_text)
+    e = env | {
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+        "XDG_CACHE_HOME": str(tmp_path),
+    }
+    out = common.read_copilot_monthly_used(e)
+    assert out is not None
+    assert abs(out["remaining"] - 60.0) < 1e-6
 
 
 def test_github_api_get_error_paths(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
