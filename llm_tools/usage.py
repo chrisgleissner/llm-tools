@@ -113,6 +113,11 @@ def provider_display_name(provider: str) -> str:
     }.get(provider, provider)
 
 
+def usage_row_sort_key(row: "UsageRow") -> tuple[str, str]:
+    provider = row.provider_label or row.provider
+    return (provider.lower(), row.model.lower())
+
+
 def format_fixed_subscription(cost: dict[str, Any] | None) -> str:
     """Render the Remaining-cell text for a ``fixed_subscription`` route.
 
@@ -2241,6 +2246,7 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
         rows.extend(route_rows(cfg))
     except FileNotFoundError:
         pass
+    rows.sort(key=usage_row_sort_key)
     budget_row = budget_total_row(cfg, rows)
     if budget_row is not None:
         rows.append(budget_row)
@@ -2327,16 +2333,15 @@ def route_rows(cfg: Config) -> list[UsageRow]:
         cost_obj = snapshot.get("cost") or {}
         cost_policy = cost_obj.get("policy") if isinstance(cost_obj, dict) else None
         kind = str(scope.get("kind") or "")
+        rem = scope.get("remaining_percent") if isinstance(scope, dict) else None
         if kind == "opaque" and cost_policy == "fixed_subscription":
             left_text = format_fixed_subscription(cost_obj if isinstance(cost_obj, dict) else None)
         elif kind == "opaque":
             left_text = "not metered"
+        elif isinstance(rem, (int, float)):
+            left_text = row_left_text(float(rem))
         elif ready:
-            rem = scope.get("remaining_percent")
-            if isinstance(rem, (int, float)):
-                left_text = row_left_text(float(rem))
-            else:
-                left_text = "usable"
+            left_text = "usable"
         else:
             left_text = display_remaining(str(decision.get("reason") or "blocked"))
         # Guidance text. Opaque rows show ✓ usable; blocked opaque rows
@@ -2352,10 +2357,11 @@ def route_rows(cfg: Config) -> list[UsageRow]:
             else:
                 guidance_text = "! blocked"
         else:
+            guidance_provider = route.capacity.provider if route.capacity.policy == "delegate" and route.capacity.provider else route.provider
             guidance_text = render_guidance(
-                route.provider,
+                guidance_provider,
                 str(scope.get("name") or ""),
-                scope.get("remaining_percent"),
+                rem,
                 scope.get("reset_epoch"),
                 cfg,
             )
@@ -2369,7 +2375,7 @@ def route_rows(cfg: Config) -> list[UsageRow]:
             UsageRow(
                 provider=f"route:{route_id}",
                 scope=str(scope.get("name") or route.capacity.scope or "subscription"),
-                remaining=1.0 if ready else None,
+                remaining=float(rem) if isinstance(rem, (int, float)) else 1.0 if ready else None,
                 left_text=left_text,
                 reset=scope.get("reset_epoch") if isinstance(scope, dict) else None,
                 source=str(snapshot.get("source") or "config:route"),
@@ -2380,6 +2386,7 @@ def route_rows(cfg: Config) -> list[UsageRow]:
                 currency=(cost_obj.get("currency") if isinstance(cost_obj, dict) else None),
                 kind=kind,
                 label=str(scope.get("label") or "") if isinstance(scope, dict) else "",
+                guidance_override=guidance_text,
             )
         )
     return out

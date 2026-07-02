@@ -1365,6 +1365,14 @@ def effective_model_for(cfg: RalphConfig, provider: str, decision: dict[str, Any
     return policy.model
 
 
+def prefix_fields_for_scheduler(cfg: RalphConfig, selected_model: str) -> list[str]:
+    fields = [] if os.environ.get("LLM_TOOLS_RALPH_NO_TIMESTAMPS", "0") == "1" else list(cfg.prefix_fields)
+    if not selected_model or "provider" not in fields or "model" in fields:
+        return fields
+    idx = fields.index("provider") + 1
+    return [*fields[:idx], "model", *fields[idx:]]
+
+
 def scheduler_config_for(
     cfg: RalphConfig,
     selected_provider: str,
@@ -1420,7 +1428,7 @@ def scheduler_config_for(
         # from a wedged one and the active provider is always clear. See --prefix.
         # LLM_TOOLS_RALPH_NO_TIMESTAMPS=1 forces the marker off entirely (e.g. for
         # byte-exact piping), regardless of --prefix.
-        output_prefix_fields=[] if os.environ.get("LLM_TOOLS_RALPH_NO_TIMESTAMPS", "0") == "1" else list(cfg.prefix_fields),
+        output_prefix_fields=prefix_fields_for_scheduler(cfg, model),
         output_prefix_usage_ttl=float(int(cfg.prefix_usage_interval)),
     )
 

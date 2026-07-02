@@ -996,6 +996,68 @@ def test_route_rendering_generic_opaque(
     assert by_provider["route:kilo-another"].left_text == "not metered"
 
 
+def test_route_rendering_delegate_preserves_measured_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A delegated route with exhausted measured capacity should render ``0%``,
+    not collapse to ``unavailable`` just because Ready is false."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        """
+        [routes.kilo-zai-glm-52]
+        provider = "kilo"
+        model = "zai/glm-5.2"
+        [routes.kilo-zai-glm-52.capacity]
+        policy = "delegate"
+        provider = "zai"
+        """,
+    )
+
+    def fake_route_snapshot(
+        route: RoutePolicy, *args: object, **kwargs: object
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        return (
+            {
+                "route": route.route_id,
+                "provider": route.provider,
+                "selected_model": route.model,
+                "available": False,
+                "source": "z.ai api",
+                "scopes": [
+                    {
+                        "name": "5h",
+                        "kind": "reset_window",
+                        "remaining_percent": 0.0,
+                        "reset_epoch": 2000,
+                    }
+                ],
+                "cost": {},
+            },
+            {
+                "provider": route.provider,
+                "capacity_provider": "zai",
+                "usable": False,
+                "reason": "rate-limited",
+                "wait_until": 2000,
+            },
+        )
+
+    monkeypatch.setattr(routes, "usage_snapshot_and_decision_for_route", fake_route_snapshot)
+    from llm_tools import usage
+
+    row = usage.route_rows(usage.Config())[0]
+    assert row.provider == "route:kilo-zai-glm-52"
+    assert row.provider_label == "Kilo"
+    assert row.model == "zai/glm-5.2"
+    assert row.remaining == 0.0
+    assert row.left_text == "0%"
+    assert row.guidance_override == "× empty"
+
+
 # --- JSON output -------------------------------------------------------------
 
 
@@ -1609,6 +1671,7 @@ def test_scheduler_config_for_threads_route_id(
         routes=["kilo-minimax-m3"],
         even_burn=False,
         scope="auto",
+        prefix_fields=["time", "provider"],
     )
     cfg.route_policies = config.parse_routes(config.load_config())
     logs = common.setup_run_logs(tmp_path, "sc")
@@ -1622,6 +1685,7 @@ def test_scheduler_config_for_threads_route_id(
         route_id="kilo-minimax-m3",
     )
     assert scfg.route_id == "kilo-minimax-m3"
+    assert scfg.output_prefix_fields == ["time", "provider", "model"]
     # And the provider_env / guard_exports plumbing must expose it to
     # any nested llm-scheduler invocation.
     env = scheduler.provider_env(scfg)

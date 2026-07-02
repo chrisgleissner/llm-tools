@@ -231,6 +231,40 @@ def test_route_rows_render_as_provider_and_model_columns() -> None:
     assert header.index("Ready") == route_line.index("yes")
 
 
+def test_usage_rows_sort_by_display_provider_then_model() -> None:
+    rows = [
+        usage.UsageRow("z.AI", "5h", 80.0, "80%", None, "s"),
+        usage.UsageRow(
+            "route:kilo-zai-glm-52",
+            "5h",
+            0.0,
+            "0%",
+            None,
+            "s",
+            model="zai/glm-5.2",
+            provider_label="Kilo",
+        ),
+        usage.UsageRow("Kilo", "spend", 1.0, "$1", None, "s"),
+        usage.UsageRow(
+            "route:kilo-minimax-m3",
+            "subscription",
+            1.0,
+            "prepaid $20/mo",
+            None,
+            "s",
+            model="minimax-m3",
+            provider_label="Kilo",
+        ),
+    ]
+    ordered = sorted(rows, key=usage.usage_row_sort_key)
+    assert [(row.provider_label or row.provider, row.model) for row in ordered] == [
+        ("Kilo", ""),
+        ("Kilo", "minimax-m3"),
+        ("Kilo", "zai/glm-5.2"),
+        ("z.AI", ""),
+    ]
+
+
 def test_no_model_column_when_no_models() -> None:
     cfg = _cfg()
     rows = [usage.UsageRow("Copilot", "monthly", 38.0, "38%", None, "s")]
