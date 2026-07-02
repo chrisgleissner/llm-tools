@@ -424,6 +424,97 @@ def test_resolve_routes_translates_capacity_provider_to_delegate(
     assert resolved[0].capacity.provider == "minimax"
 
 
+def test_resolve_routes_explicit_list_accepts_bare_providers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An explicit ``[ralph].routes`` list may mix declared route ids with bare
+    provider names, so a rotation can be ``codex, claude, kilo-minimax-m3,
+    kilo-zai-glm-52`` without forcing a ``[routes.codex]`` table."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        """
+        [ralph]
+        routes = ["codex", "claude", "kilo-minimax-m3", "kilo-zai-glm-52"]
+
+        [routes.kilo-minimax-m3]
+        provider = "kilo"
+        model = "minimax-m3"
+        [routes.kilo-minimax-m3.capacity]
+        policy = "delegate"
+        provider = "minimax"
+
+        [routes.kilo-zai-glm-52]
+        provider = "kilo"
+        model = "zai/glm-5.2"
+        [routes.kilo-zai-glm-52.capacity]
+        policy = "delegate"
+        provider = "zai"
+        """,
+    )
+    cfg = config.load_config()
+    resolved = routes.resolve_routes(cfg)
+    ids = [r.route_id for r in resolved]
+    assert ids == ["codex", "claude", "kilo-minimax-m3", "kilo-zai-glm-52"]
+    # Bare providers become implicit routes on their own launch CLI.
+    assert resolved[0].provider == "codex"
+    assert resolved[0].capacity.policy == CAPACITY_POLICY_PROVIDER
+    assert resolved[1].provider == "claude"
+    # Both kilo routes share the kilo launch CLI but pin different models.
+    assert resolved[2].provider == "kilo" and resolved[2].model == "minimax-m3"
+    assert resolved[3].provider == "kilo" and resolved[3].model == "zai/glm-5.2"
+
+
+def test_route_or_implicit_provider_classifies_inputs() -> None:
+    # A bare known provider resolves to an implicit route.
+    r = routes.route_or_implicit_provider({}, "codex")
+    assert r is not None and r.route_id == "codex" and r.provider == "codex"
+    # An unknown id resolves to None (caller surfaces a hard config error).
+    assert routes.route_or_implicit_provider({}, "bogus") is None
+    # A declared route wins over the implicit-provider fallback of the same id.
+    cfg = {"routes": {"kilo": {"provider": "kilo", "model": "zai/glm-5.2"}}}
+    r = routes.route_or_implicit_provider(cfg, "kilo")
+    assert r is not None and r.model == "zai/glm-5.2"
+
+
+def test_effective_model_for_pins_route_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """In route mode the route's model is the launch model, so two routes that
+    share the kilo launch CLI select different underlying models."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_toml(
+        os.environ,
+        tmp_path / "xdg" / "llm-tools" / "config.toml",
+        """
+        [routes.kilo-minimax-m3]
+        provider = "kilo"
+        model = "minimax-m3"
+        [routes.kilo-zai-glm-52]
+        provider = "kilo"
+        model = "zai/glm-5.2"
+        """,
+    )
+    cfg = config.load_config()
+    rc = ralph_robin.RalphConfig()
+    rc.routes = ["kilo-minimax-m3", "kilo-zai-glm-52"]
+    rc.route_policies = {
+        "kilo-minimax-m3": config.route_policy(cfg, "kilo-minimax-m3"),
+        "kilo-zai-glm-52": config.route_policy(cfg, "kilo-zai-glm-52"),
+    }
+    # route_policies is the only thing effective_model_for reads in route mode,
+    # so providers/policies staying empty mirrors the real route-mode state.
+    assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}, route_id="kilo-minimax-m3") == "minimax-m3"
+    assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}, route_id="kilo-zai-glm-52") == "zai/glm-5.2"
+    # The model reaches the kilo launch argv, not the kilo default.
+    assert scheduler.provider_model_flags("kilo", "zai/glm-5.2") == ["--model", "zai/glm-5.2"]
+    # A bare-provider implicit route with no model pin yields no flag.
+    assert ralph_robin.effective_model_for(rc, "codex", {"usable": True}, route_id="") == ""
+
+
 # --- Opaque decision ---------------------------------------------------------
 
 
@@ -1614,3 +1705,53 @@ def test_ralph_routes_flag_resolves_even_without_ralph_routes_section(
     )
     with pytest.raises(SystemExit):
         ralph_robin.validate_args(bad)
+
+
+def test_ralph_routes_flag_mixes_bare_providers_and_routes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--routes`` may mix bare provider names with declared route ids so one
+    launch CLI (kilo) can serve two models (minimax-m3 and zai/glm-5.2) in the
+    same even-burn rotation alongside plain codex/claude launches."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    (tmp_path / "xdg" / "llm-tools").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "xdg" / "llm-tools" / "config.toml").write_text(
+        textwrap.dedent(
+            """
+            [routes.kilo-minimax-m3]
+            provider = "kilo"
+            model = "minimax-m3"
+            [routes.kilo-minimax-m3.capacity]
+            policy = "delegate"
+            provider = "minimax"
+
+            [routes.kilo-zai-glm-52]
+            provider = "kilo"
+            model = "zai/glm-5.2"
+            [routes.kilo-zai-glm-52.capacity]
+            policy = "delegate"
+            provider = "zai"
+            """
+        ),
+        encoding="utf-8",
+    )
+    config._cache.clear()
+    cfg = ralph_robin.RalphConfig(
+        routes_spec="codex,claude,kilo-minimax-m3,kilo-zai-glm-52",
+        routes=["codex", "claude", "kilo-minimax-m3", "kilo-zai-glm-52"],
+        providers=[],
+        even_burn=True,
+        scope="auto",
+        dry_run=True,
+        prompt_text="test",
+    )
+    ralph_robin.validate_args(cfg)
+    assert list(cfg.route_policies) == ["codex", "claude", "kilo-minimax-m3", "kilo-zai-glm-52"]
+    # Bare providers resolve to implicit provider routes on their own CLI.
+    assert cfg.route_policies["codex"].provider == "codex"
+    assert cfg.route_policies["codex"].capacity.policy == CAPACITY_POLICY_PROVIDER
+    assert cfg.route_policies["claude"].provider == "claude"
+    # Both kilo routes launch kilo but pin distinct models.
+    assert cfg.route_policies["kilo-minimax-m3"].model == "minimax-m3"
+    assert cfg.route_policies["kilo-zai-glm-52"].model == "zai/glm-5.2"

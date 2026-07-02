@@ -540,7 +540,7 @@ def resolve_routes(cfg: dict[str, Any] | None) -> list[RoutePolicy]:
         for entry in raw_routes:
             if not isinstance(entry, str):
                 continue
-            route = route_policy(cfg, entry)
+            route = route_or_implicit_provider(cfg, entry)
             if route is not None:
                 routes.append(route)
         return routes
@@ -586,6 +586,25 @@ def route_for_provider(cfg: dict[str, Any], provider: str) -> RoutePolicy:
         capacity=capacity,
         cost=cost,
     )
+
+
+def route_or_implicit_provider(cfg: dict[str, Any] | None, route_id: str) -> RoutePolicy | None:
+    """Resolve a rotation member by id, accepting a declared route OR a bare provider name.
+
+    Returns the declared ``[routes.<route_id>]`` policy when it exists. Otherwise,
+    when ``route_id`` names a known provider, returns an implicit route built from
+    that provider's legacy ``[providers.<route_id>]`` policy (so a rotation can mix
+    explicit model-pinned routes with plain provider launches — e.g. rotating over
+    ``codex, claude, kilo-minimax-m3, kilo-zai-glm-52`` where codex/claude need no
+    route table entry). Returns ``None`` when ``route_id`` is neither a declared
+    route nor a known provider, so callers can surface a hard configuration error.
+    """
+    policy = route_policy(cfg, route_id)
+    if policy is not None:
+        return policy
+    if route_id in ALL_PROVIDERS:
+        return route_for_provider(cfg or {}, route_id)
+    return None
 
 
 # --- JSON projection ---------------------------------------------------------
@@ -661,6 +680,7 @@ __all__ = [
     "resolve_routes",
     "route_cli_present",
     "route_for_provider",
+    "route_or_implicit_provider",
     "route_policy",
     "route_to_json",
     "usage_snapshot_and_decision_for_route",

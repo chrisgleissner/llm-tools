@@ -231,6 +231,34 @@ Kilo       MiniMax M3  yes     subscription   prepaid USD20/mo   ✓ usable     
 
 The orchestrator's runtime context and prompt injection include the selected `route_id` and launch provider, so a handoff-style prompt does not stale-route to a different provider.
 
+### One launch CLI, several models in one rotation
+
+A route's `model` is the model ralph-robin pins on the launch command, so two routes that share the same launch provider select different underlying models. This is how one Kilo install serves both `minimax-m3` and `zai/glm-5.2` in a single even-burn rotation:
+
+```toml
+[routes.kilo-minimax-m3]
+provider = "kilo"
+model    = "minimax-m3"
+[routes.kilo-minimax-m3.capacity]
+policy   = "delegate"     # gate on MiniMax's real 5h/weekly windows
+provider = "minimax"
+
+[routes.kilo-zai-glm-52]
+provider = "kilo"
+model    = "zai/glm-5.2"
+[routes.kilo-zai-glm-52.capacity]
+policy   = "delegate"     # gate on z.AI's real 5h/weekly windows
+provider = "zai"
+```
+
+The `--routes` list (and `[ralph].routes`) accepts a mix of declared route ids **and** bare provider names. A bare provider name becomes an implicit route on its own CLI (gated on its own capacity), so you can burn down codex and claude alongside the two Kilo routes without declaring `[routes.codex]` / `[routes.claude]`:
+
+```
+ralph-robin --routes codex,claude,kilo-minimax-m3,kilo-zai-glm-52 --prompt-file task.md
+```
+
+This rotates over four independent capacity pools — Codex's CLI, Claude's CLI, MiniMax M3 (via Kilo), and GLM 5.2 (via Kilo) — and even-burns across whichever are usable.
+
 ## Configuration File
 
 For shared settings across `llm-usage`, `llm-scheduler`, and `ralph-robin`, drop a TOML file at one of these locations (first match wins):

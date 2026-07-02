@@ -57,11 +57,16 @@ Examples:
   ralph-robin --prompt-file task.md
   ralph-robin --prompt "Continue until tests pass"
   ralph-robin --providers claude,codex,copilot,kilo,opencode,minimax --prompt-file task.md
+  ralph-robin --routes codex,claude,kilo-minimax-m3,kilo-zai-glm-52 --prompt-file task.md
   ralph-robin --prompt-file task.md --tmux llm-work
   ralph-robin --prompt-file task.md --dry-run
 
 Options:
   -P, --providers LIST                     Providers in rotation (default: claude,codex,opencode).
+      --routes LIST                        Route ids and/or bare provider names in rotation. Use this (with
+                                            [routes.<id>] entries) when one launch CLI serves several models,
+                                            e.g. kilo-minimax-m3 and kilo-zai-glm-52 both launch kilo but
+                                            pin different --model values and gate on different capacity.
   -p, --prompt TEXT                        Prompt text.
   -f, --prompt-file FILE                   Read prompt from FILE, preserving content.
   -s, --scope SCOPE                        Capacity scope to gate on (default: auto).
@@ -585,9 +590,9 @@ def validate_args(cfg: RalphConfig) -> None:
 
         cfg.route_policies = {}
         for rid in cfg.routes:
-            policy = _routes.route_policy(conf, rid)
+            policy = _routes.route_or_implicit_provider(conf, rid)
             if policy is None:
-                common.err(f"--routes references unknown route id: {rid!r}")
+                common.err(f"--routes references unknown route id or provider: {rid!r}")
                 raise SystemExit(2)
             cfg.route_policies[rid] = policy
         # Also resolve any [ralph].routes that the config carries so a
@@ -1330,13 +1335,28 @@ def select_provider(
     }
 
 
-def effective_model_for(cfg: RalphConfig, provider: str, decision: dict[str, Any]) -> str:
+def effective_model_for(cfg: RalphConfig, provider: str, decision: dict[str, Any], route_id: str = "") -> str:
     """The model ralph should pin for ``provider`` on this iteration.
 
-    Returns the policy's pinned model, except when fallback is allowed and the
-    pinned model's own limit is exhausted — then it drops the pin (empty string)
-    so the provider CLI picks an available model.
+    In route mode (``route_id`` names a resolved route policy) the route's own
+    model pin is used: that is what makes two routes sharing the same launch
+    provider (e.g. ``kilo``) select different underlying models (``minimax-m3``
+    vs ``zai/glm-5.2``). Without this the launch command would carry no
+    ``--model`` flag and the provider CLI would fall back to its configured
+    default model regardless of the route.
+
+    In legacy provider mode (no route) returns the provider policy's pinned
+    model, except when fallback is allowed and the pinned model's own limit is
+    exhausted — then it drops the pin (empty string) so the provider CLI picks
+    an available model.
     """
+    if route_id and route_id in cfg.route_policies:
+        route = cfg.route_policies[route_id]
+        if not route.model:
+            return ""
+        if route.allow_fallback and decision.get("model_exhausted"):
+            return ""
+        return route.model
     policy = cfg.policies.get(provider)
     if policy is None or not policy.model:
         return ""
@@ -1705,12 +1725,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
         reason = str(selection.get("rotation_reason"))
         all_rate_limited = bool(selection.get("all_rate_limited"))
-        selected_model = effective_model_for(cfg, selected_provider, selection.get("decision") or {})
         selected_route_id = ""
         if isinstance(selection, dict):
             rid = selection.get("route")
             if isinstance(rid, str) and rid:
                 selected_route_id = rid
+        selected_model = effective_model_for(cfg, selected_provider, selection.get("decision") or {}, route_id=selected_route_id)
         provider_label = f"{selected_provider}[{selected_model}]" if selected_model else selected_provider
         if selected_route_id and selected_route_id != selected_provider:
             provider_label = f"{selected_route_id} ({provider_label})"
