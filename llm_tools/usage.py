@@ -101,6 +101,18 @@ _CURRENCY_SYMBOLS: dict[str, str] = {
 }
 
 
+def provider_display_name(provider: str) -> str:
+    return {
+        "claude": "Claude",
+        "codex": "Codex",
+        "copilot": "Copilot",
+        "kilo": "Kilo",
+        "opencode": "OpenCode",
+        "minimax": "MiniMax",
+        "zai": "z.AI",
+    }.get(provider, provider)
+
+
 def format_fixed_subscription(cost: dict[str, Any] | None) -> str:
     """Render the Remaining-cell text for a ``fixed_subscription`` route.
 
@@ -342,6 +354,9 @@ class UsageRow:
     # aggregate rows; populated for model-specific sub-rows so the table can
     # render a dedicated Model column under the provider section.
     model: str = ""
+    # ``provider`` remains the internal grouping / readiness key, while route
+    # rows can render the launch provider in the Provider column.
+    provider_label: str = ""
     # Optional secondary fields for non-percent scopes (Kilo balance/ungated).
     amount: float | None = None
     currency: str | None = None
@@ -928,8 +943,12 @@ def print_dashboard_header(cfg: Config) -> None:
         print()
 
 
-def print_table_header(cfg: Config, show_model: bool = False) -> None:
-    cols = table_columns(cfg, show_model)
+def print_table_header(
+    cfg: Config,
+    show_model: bool = False,
+    cols: list[tuple[str, int]] | None = None,
+) -> None:
+    cols = cols or table_columns(cfg, show_model)
     head, rule_parts = [], []
     last = len(cols) - 1
     line = "─" if cfg.symbols_enabled else "-"
@@ -1012,7 +1031,13 @@ def print_value_row(cfg: Config, provider: str, window: str, remaining: str, rem
     print_usage_rows(cfg, [row])
 
 
-def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: str, display_model: str = "") -> dict[str, str]:
+def row_values(
+    cfg: Config,
+    row: UsageRow,
+    display_provider: str,
+    ready_text: str,
+    display_model: str = "",
+) -> dict[str, str]:
     # Opaque rows carry their own short label ("✓ usable" / "! retry
     # in Xm") so they do not flow through the standard guidance
     # pipeline (which would emit "no rate data" for a row with no
@@ -1053,6 +1078,30 @@ def row_values(cfg: Config, row: UsageRow, display_provider: str, ready_text: st
     return values
 
 
+def fitted_columns_for_rows(
+    cfg: Config,
+    rows: list[UsageRow],
+    show_model: bool | None = None,
+) -> list[tuple[str, int]]:
+    if show_model is None:
+        show_model = any(row.model for row in rows)
+    base_cols = table_columns(cfg, show_model)
+    previous_provider = ""
+    previous_model = ""
+    rows_text: list[dict[str, str]] = []
+    for row in rows:
+        first_of_provider = row.provider != previous_provider
+        if first_of_provider:
+            previous_model = ""
+        display_provider = (row.provider_label or row.provider) if first_of_provider else ""
+        ready_text = render_ready(1 if provider_ready(rows, row.provider) else 0, cfg) if display_provider else ""
+        display_model = row.model if (row.model and row.model != previous_model) else ""
+        previous_provider = row.provider
+        previous_model = row.model
+        rows_text.append(row_values(cfg, row, display_provider, ready_text, display_model))
+    return fit_columns(base_cols, rows_text, cfg.terminal_width, has_source=cfg.show_source)
+
+
 def spend_guidance(amount: float | None, currency: str | None, cfg: Config) -> str:
     """Guidance text for a spend row: its share of the overall monthly budget.
 
@@ -1072,22 +1121,20 @@ def spend_guidance(amount: float | None, currency: str | None, cfg: Config) -> s
     return f"\033[{spend_color_code(consumed)}m{text}\033[0m"
 
 
-def print_usage_rows(cfg: Config, rows: list[UsageRow]) -> None:
+def print_usage_rows(cfg: Config, rows: list[UsageRow], cols: list[tuple[str, int]] | None = None) -> None:
     show_model = any(row.model for row in rows)
-    base_cols = table_columns(cfg, show_model)
     # First pass: build the display values so the column widths can be
     # computed against the actual cell text. Doing this in a separate
-    # pass keeps a long Provider (e.g. ``route:kilo-minimax-m3``) from
-    # bleeding into the Model column when the terminal is narrow.
+    # pass keeps dynamically widened cells from bleeding into the next column
+    # when the terminal is narrow.
     previous_provider = ""
     previous_model = ""
     rendered: list[tuple[UsageRow, dict[str, str], bool]] = []
-    rows_text: list[dict[str, str]] = []
     for row in rows:
         first_of_provider = row.provider != previous_provider
         if first_of_provider:
             previous_model = ""
-        display_provider = row.provider if first_of_provider else ""
+        display_provider = (row.provider_label or row.provider) if first_of_provider else ""
         ready_text = render_ready(1 if provider_ready(rows, row.provider) else 0, cfg) if display_provider else ""
         # Show the model label only on the first row of each model sub-block so
         # the column stays uncluttered when a model spans several scope rows.
@@ -1096,8 +1143,8 @@ def print_usage_rows(cfg: Config, rows: list[UsageRow]) -> None:
         previous_model = row.model
         values = row_values(cfg, row, display_provider, ready_text, display_model)
         rendered.append((row, values, first_of_provider))
-        rows_text.append(values)
-    cols = fit_columns(base_cols, rows_text, cfg.terminal_width, has_source=cfg.show_source)
+    if cols is None:
+        cols = fitted_columns_for_rows(cfg, rows, show_model)
     last = len(cols) - 1
     emitted_blank = True
     for row, values, first_of_provider in rendered:
@@ -2122,10 +2169,11 @@ def render_from_provider_data(cfg: Config, provider_data: dict[str, Any], genera
         _emit_json(cfg, provider_data, generated_at)
         return
     rows, show_model = _build_usage_rows(cfg, provider_data)
+    cols = fitted_columns_for_rows(cfg, rows, show_model)
     if not cfg.no_header:
         print_dashboard_header(cfg)
-        print_table_header(cfg, show_model)
-    print_usage_rows(cfg, rows)
+        print_table_header(cfg, show_model, cols)
+    print_usage_rows(cfg, rows, cols)
 
 
 def render_from_service_payload(cfg: Config, payload: dict[str, Any]) -> bool:
@@ -2251,10 +2299,10 @@ def route_rows(cfg: Config) -> list[UsageRow]:
     """Render configured routes (from ``[routes.<id>]``) as table rows.
 
     Returns an empty list when no routes are configured or when the
-    config file is missing. Each row uses the route id as the
-    ``Provider`` column value so users can distinguish multiple
-    routes that share a launch provider (e.g. two Kilo routes with
-    different models).
+    config file is missing. Each row keeps the launch CLI in the
+    ``Provider`` column and puts the route's model pin in ``Model``; the
+    route id remains internal because, for table purposes, provider +
+    model is the useful identity.
     """
     from . import config as toolconfig
     from .routes import usage_snapshot_and_decision_for_route
@@ -2327,6 +2375,7 @@ def route_rows(cfg: Config) -> list[UsageRow]:
                 source=str(snapshot.get("source") or "config:route"),
                 remaining_time="-",
                 model=model_label,
+                provider_label=provider_display_name(route.provider),
                 amount=(cost_obj.get("amount") if isinstance(cost_obj, dict) else None),
                 currency=(cost_obj.get("currency") if isinstance(cost_obj, dict) else None),
                 kind=kind,
@@ -2415,10 +2464,11 @@ def render_watch_frame(cfg: Config) -> None:
             _emit_json(cfg, provider_data, generated_at)
         else:
             rows, show_model = _build_usage_rows(cfg, provider_data)
+            cols = fitted_columns_for_rows(cfg, rows, show_model)
             if not cfg.no_header:
                 print_dashboard_header(cfg)
-                print_table_header(cfg, show_model)
-            print_usage_rows(cfg, rows)
+                print_table_header(cfg, show_model, cols)
+            print_usage_rows(cfg, rows, cols)
         return
 
     # 1. Home the cursor (no full-screen wipe → no flicker) and paint the
@@ -2436,7 +2486,8 @@ def render_watch_frame(cfg: Config) -> None:
     # 3. The data is in — fill in the table beneath the header, clearing each
     #    line, then erase any rows left over from a previous, taller frame.
     rows, show_model = _build_usage_rows(cfg, provider_data)
-    body_lines = _capture(lambda: (print_table_header(cfg, show_model), print_usage_rows(cfg, rows)))
+    cols = fitted_columns_for_rows(cfg, rows, show_model)
+    body_lines = _capture(lambda: (print_table_header(cfg, show_model, cols), print_usage_rows(cfg, rows, cols)))
     for line in body_lines:
         out.write(f"{line}\033[K\n")
     out.write("\033[J")

@@ -496,6 +496,12 @@ def test_effective_model_for_pins_route_model(
         [routes.kilo-zai-glm-52]
         provider = "kilo"
         model = "zai/glm-5.2"
+        [routes.kilo-fallback]
+        provider = "kilo"
+        model = "zai/glm-4.7"
+        allow_fallback = true
+        [routes.kilo-default]
+        provider = "kilo"
         """,
     )
     cfg = config.load_config()
@@ -504,11 +510,15 @@ def test_effective_model_for_pins_route_model(
     rc.route_policies = {
         "kilo-minimax-m3": config.route_policy(cfg, "kilo-minimax-m3"),
         "kilo-zai-glm-52": config.route_policy(cfg, "kilo-zai-glm-52"),
+        "kilo-fallback": config.route_policy(cfg, "kilo-fallback"),
+        "kilo-default": config.route_policy(cfg, "kilo-default"),
     }
     # route_policies is the only thing effective_model_for reads in route mode,
     # so providers/policies staying empty mirrors the real route-mode state.
     assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}, route_id="kilo-minimax-m3") == "minimax-m3"
     assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}, route_id="kilo-zai-glm-52") == "zai/glm-5.2"
+    assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}, route_id="kilo-default") == ""
+    assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True, "model_exhausted": True}, route_id="kilo-fallback") == ""
     # The model reaches the kilo launch argv, not the kilo default.
     assert scheduler.provider_model_flags("kilo", "zai/glm-5.2") == ["--model", "zai/glm-5.2"]
     # A bare-provider implicit route with no model pin yields no flag.
@@ -739,7 +749,7 @@ def test_cell_clipped_truncates_overflow_with_marker() -> None:
     assert len(visible) == 8
 
 
-def test_fit_columns_widens_provider_for_long_route_label() -> None:
+def test_fit_columns_widens_provider_for_long_label() -> None:
     from llm_tools.usage import fit_columns
 
     base = [
@@ -753,7 +763,7 @@ def test_fit_columns_widens_provider_for_long_route_label() -> None:
     ]
     rows = [
         {
-            "Provider": "route:kilo-minimax-m3",
+            "Provider": "VeryLongProviderName",
             "Model": "minimax-m3",
             "Ready": "yes",
             "Scope": "subscription",
@@ -764,7 +774,7 @@ def test_fit_columns_widens_provider_for_long_route_label() -> None:
     ]
     out = fit_columns(base, rows, terminal_width=0, has_source=False)
     widths = dict(out)
-    # Provider column grows to fit the long label.
+    # Provider column grows to fit a long display label.
     assert widths["Provider"] >= 19
 
 

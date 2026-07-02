@@ -521,8 +521,9 @@ def usage_snapshot_and_decision_for_route(
 def resolve_routes(cfg: dict[str, Any] | None) -> list[RoutePolicy]:
     """Resolve the route rotation for a loaded config dict.
 
-    * When ``[ralph].routes`` is set, return only those routes in
-      declared order, validated against the route table.
+    * When ``[ralph].routes`` is set, return only those entries in
+      declared order. Each entry may be a declared route id or a known
+      provider name, which resolves to an implicit route.
     * When it is absent, build one implicit route per provider in
       ``[ralph].providers`` (or ``[defaults].providers``), translating
       each :class:`ProviderPolicy` into a :class:`RoutePolicy` with

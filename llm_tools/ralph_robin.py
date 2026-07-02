@@ -582,10 +582,10 @@ def validate_args(cfg: RalphConfig) -> None:
     # scopes (e.g. opencode->minimax makes 5h/weekly valid for the opencode slot).
     conf = toolconfig.load_config()
     if cfg.routes:
-        # --routes overrides any [ralph].routes. The declared ids must
-        # all resolve via ``[routes.<id>]`` in the config file; anything
-        # else is a hard error so a typo in a CLI flag never silently
-        # picks an unrelated implicit route.
+        # --routes overrides any [ralph].routes. Entries may be declared
+        # route ids or known provider names; anything else is a hard
+        # error so a typo in a CLI flag never silently picks an unrelated
+        # implicit route.
         from . import routes as _routes
 
         cfg.route_policies = {}
