@@ -164,7 +164,7 @@
 #
 #   [routes.kilo-minimax-m3]
 #   provider = "kilo"
-#   model    = "minimax-m3"
+#   model    = "minimax-coding-plan/MiniMax-M3"  # `kilo models minimax-coding-plan` lists exact ids
 #   [routes.kilo-minimax-m3.capacity]
 #   policy = "opaque"
 #   scope  = "subscription"

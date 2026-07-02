@@ -569,6 +569,8 @@ def resolve_policies(cfg: RalphConfig, conf: dict[str, Any]) -> None:
         if policy.model and provider not in scheduler.MODEL_FLAG_PROVIDERS:
             common.err(f"warning: model pinning is not supported for provider '{provider}'; ignoring model={policy.model}")
             policy = toolconfig.ProviderPolicy(model=None, allow_fallback=policy.allow_fallback, scope=policy.scope, min_remaining=policy.min_remaining, capacity_provider=policy.capacity_provider)
+        elif scheduler.model_missing_slash(provider, policy.model):
+            common.err(f"warning: {provider} requires model pins in 'provider/model' format (e.g. 'zai/glm-4.7'); model={policy.model!r} is missing the '/' and the launch CLI will likely reject it")
         policies[provider] = policy
     cfg.policies = policies
 
@@ -610,6 +612,8 @@ def validate_args(cfg: RalphConfig) -> None:
             if route is None:
                 common.err(f"--routes references unknown route id: {rid!r}")
                 raise SystemExit(2)
+            if scheduler.model_missing_slash(route.provider, route.model):
+                common.err(f"warning: route '{rid}' pins model={route.model!r} for provider '{route.provider}', which requires 'provider/model' format (e.g. 'zai/glm-4.7'); the launch CLI will likely reject this model")
             try:
                 common.validate_provider_scope(route.provider, cfg.scope)
             except SystemExit:

@@ -270,6 +270,8 @@ def validate_args(cfg: SchedulerConfig) -> None:
             common.err(f"invalid --provider: {cfg.provider}")
         raise SystemExit(2)
     common.validate_prompt_args(cfg.prompt_text, cfg.prompt_file)
+    if model_missing_slash(cfg.provider, cfg.model):
+        common.err(f"warning: {cfg.provider} requires --model in 'provider/model' format (e.g. 'zai/glm-4.7'); model={cfg.model!r} is missing the '/' and the launch CLI will likely reject it")
     # A delegated provider is gated on its capacity_provider's windows, so the
     # scope must be valid for that provider (e.g. opencode->minimax allows 5h).
     common.validate_provider_scope(cfg.capacity_provider or cfg.provider, cfg.scope)
@@ -406,12 +408,26 @@ def highlight_provider_text(raw: bytes, *, stream_name: str, enabled: bool) -> b
 # (with a warning in main).
 MODEL_FLAG_PROVIDERS = frozenset({"claude", "codex", "copilot", "kilo", "opencode"})
 
+# Kilo and OpenCode both require the ``-m/--model`` value to be a
+# ``provider/model`` pair; a bare model name (no slash) is not rejected up
+# front, it is silently misparsed as a provider id with an empty model. Kilo
+# then fails at launch with a cryptic ``Model not found: <name>/`` (the
+# trailing slash is Kilo echoing the empty model half back). Flagging this at
+# config-resolution time catches the mistake before it burns through several
+# real provider-rotation attempts.
+SLASH_MODEL_PROVIDERS = frozenset({"kilo", "opencode"})
+
 
 def provider_model_flags(provider: str, model: str) -> list[str]:
     """The `--model` tokens to inject for ``provider``, or empty when unsupported."""
     if model and provider in MODEL_FLAG_PROVIDERS:
         return ["--model", model]
     return []
+
+
+def model_missing_slash(provider: str, model: str | None) -> bool:
+    """True when ``model`` is pinned for a provider that requires ``provider/model`` but lacks the separator."""
+    return bool(model) and provider in SLASH_MODEL_PROVIDERS and "/" not in model
 
 
 def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
