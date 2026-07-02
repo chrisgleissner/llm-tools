@@ -2399,6 +2399,10 @@ def test_error_fallback_branches(env: dict[str, str], fake_bin: Path, tmp_path: 
     assert usage.render_remaining("unavailable", plain) == "unavailable"
     assert usage.render_remaining("-", plain) == "-"
     assert usage.render_remaining("9%", ucfg).startswith("\x1b[0;31m")
+    # A fractional source percentage (e.g. Copilot's 75.4%) is rendered as a
+    # whole number so the progress-bar column lines up across rows.
+    assert usage.render_remaining("75.4%", plain) == " 75% ████████░░"
+    assert usage.render_remaining("8.6%", plain) == "  8% █░░░░░░░░░"
     # Daily budget helper remains available to scheduler/Ralph paths.
     at1000 = {"LLM_USAGE_NOW_EPOCH": "1000"}
     assert common.daily_budget_percent(50, 1000 + 86400, at1000) == 50.0  # 1 day out -> 50%
@@ -2781,6 +2785,78 @@ def test_copilot_premium_request_payload_malformed_paths() -> None:
     assert common._copilot_monthly_used_from_premium_request_usage(
         {"usageItems": ["bad", {"product": "actions", "grossQuantity": 10}, {"product": "Copilot", "grossQuantity": 0}]}
     ) == 0.0
+
+
+def test_copilot_quota_snapshot_parsed_from_internal_user_payload() -> None:
+    payload = {
+        "quota_snapshots": {
+            "premium_interactions": {
+                "percent_remaining": 75.4,
+                "entitlement": 1500,
+                "quota_remaining": 1131.4,
+                "overage_permitted": True,
+            },
+            "chat": {"percent_remaining": 100.0, "unlimited": True},
+        }
+    }
+    snap = common._copilot_quota_snapshot_from_payload(payload)
+    assert snap == {
+        "remaining": 75.4,
+        "entitlement": 1500,
+        "quota_remaining": 1131.4,
+        "overage_permitted": True,
+    }
+    # The quota JSON can also arrive as a JSON string.
+    assert common._copilot_quota_snapshot_from_payload(json.dumps(payload))["remaining"] == 75.4
+
+
+def test_copilot_quota_snapshot_malformed_paths() -> None:
+    assert common._copilot_quota_snapshot_from_payload("not-json") is None
+    assert common._copilot_quota_snapshot_from_payload({}) is None
+    assert common._copilot_quota_snapshot_from_payload({"quota_snapshots": {}}) is None
+    # Missing percent_remaining -> unusable.
+    assert common._copilot_quota_snapshot_from_payload(
+        {"quota_snapshots": {"premium_interactions": {"entitlement": 1500}}}
+    ) is None
+
+
+def test_copilot_monthly_prefers_quota_snapshot(env: dict[str, str]) -> None:
+    """The authoritative Copilot quota snapshot (exact remaining % and real
+    entitlement) wins over reconstructing a percentage from a guessed plan
+    allowance, so a Pro+ user with 75.4% left renders correctly instead of
+    being clamped to 0% by a misapplied Pro (300) denominator."""
+    payload = {
+        "quota_snapshots": {
+            "premium_interactions": {
+                "percent_remaining": 75.4,
+                "entitlement": 1500,
+                "quota_remaining": 1131.4,
+                "overage_permitted": True,
+            }
+        }
+    }
+    e = env | {
+        "LLM_USAGE_COPILOT_QUOTA_JSON": json.dumps(payload),
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "0",
+    }
+    out = common.read_copilot_monthly_used(e)
+    assert out is not None
+    assert out["source"] == "copilot api"
+    assert abs(out["remaining"] - 75.4) < 1e-6
+    assert abs(out["used"] - 24.6) < 1e-6
+    assert out["allowance"] == 1500
+    # The real entitlement wins even when a different plan is pinned.
+    out2 = common.read_copilot_monthly_used(e | {"LLM_USAGE_COPILOT_PLAN": "pro"})
+    assert out2 is not None and out2["allowance"] == 1500
+
+
+def test_copilot_monthly_quota_disabled_returns_none(env: dict[str, str]) -> None:
+    payload = {"quota_snapshots": {"premium_interactions": {"percent_remaining": 75.4, "entitlement": 1500}}}
+    e = env | {
+        "LLM_USAGE_COPILOT_QUOTA_JSON": json.dumps(payload),
+        "LLM_USAGE_DISABLE_COPILOT_MONTHLY": "1",
+    }
+    assert common.read_copilot_monthly_used(e) is None
 
 
 def test_github_api_get_error_paths(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:

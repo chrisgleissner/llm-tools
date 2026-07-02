@@ -646,7 +646,10 @@ def render_remaining(value: str, cfg: Config) -> str:
         integer = int(float(value.rstrip("%")))
     except ValueError:
         return value
-    text = f"{value.rjust(4)} {progress_bar(integer)}"
+    # Always render the percentage as a whole number so the progress bar
+    # column lines up across rows: a fractional source (e.g. Copilot's
+    # ``75.4%``) would widen the cell and shift every bar by a character.
+    text = f"{(str(integer) + '%').rjust(4)} {progress_bar(integer)}"
     if not cfg.color_enabled:
         return text
     return f"\033[{percent_color_code(integer)}m{text}\033[0m"
