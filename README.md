@@ -192,7 +192,7 @@ routes = ["kilo-minimax-m3"]
 
 [routes.kilo-minimax-m3]
 provider     = "kilo"
-model        = "minimax-m3"
+model        = "minimax-coding-plan/MiniMax-M3"
 allow_fallback = false
 
 [routes.kilo-minimax-m3.capacity]
@@ -233,12 +233,12 @@ The orchestrator's runtime context and prompt injection include the selected `ro
 
 ### One launch CLI, several models in one rotation
 
-A route's `model` is the model ralph-robin pins on the launch command, so two routes that share the same launch provider select different underlying models. This is how one Kilo install serves both `minimax-m3` and `zai/glm-5.2` in a single even-burn rotation:
+A route's `model` is the model ralph-robin pins on the launch command, so two routes that share the same launch provider select different underlying models. Kilo and OpenCode both require this pin in `provider/model` form (`kilo models <provider>` lists the exact ids); a bare model name is misparsed as a provider with an empty model and fails at launch with `Model not found: <name>/`. This is how one Kilo install serves both `minimax-coding-plan/MiniMax-M3` and `zai/glm-5.2` in a single even-burn rotation:
 
 ```toml
 [routes.kilo-minimax-m3]
 provider = "kilo"
-model    = "minimax-m3"
+model    = "minimax-coding-plan/MiniMax-M3"
 [routes.kilo-minimax-m3.capacity]
 policy   = "delegate"     # gate on MiniMax's real 5h/weekly windows
 provider = "minimax"
@@ -853,7 +853,7 @@ With `--scope auto`, Kilo prefers:
 
 #### Gateway-backed models via routes (Kilo + MiniMax M3)
 
-When Kilo sells a model from another provider (e.g. `minimax-m3` purchased through the Kilo gateway), the entitlement lives behind the Kilo gateway: the direct `mmx quota show` reads the user's *direct* MiniMax account, not the Kilo-purchased subscription, so it is the wrong truth source. Model the route as `opaque`:
+When Kilo sells a model from another provider (e.g. MiniMax M3 purchased through the Kilo gateway), the entitlement lives behind the Kilo gateway: the direct `mmx quota show` reads the user's *direct* MiniMax account, not the Kilo-purchased subscription, so it is the wrong truth source. Model the route as `opaque`. The model pin must be Kilo's own `provider/model` id for the gateway entitlement (run `kilo models minimax-coding-plan` to list them), not the bare upstream model name:
 
 ```toml
 [ralph]
@@ -861,7 +861,7 @@ routes = ["kilo-minimax-m3"]
 
 [routes.kilo-minimax-m3]
 provider = "kilo"
-model    = "minimax-m3"
+model    = "minimax-coding-plan/MiniMax-M3"
 [routes.kilo-minimax-m3.capacity]
 policy = "opaque"
 scope  = "subscription"

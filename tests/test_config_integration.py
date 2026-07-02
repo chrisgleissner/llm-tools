@@ -153,6 +153,28 @@ def test_ralph_resolve_policies_warns_for_unsupported_model_provider(
     assert cfg.policies["minimax"].allow_fallback is False
 
 
+def test_ralph_resolve_policies_warns_for_model_missing_slash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_config(
+        tmp_path / "xdg",
+        """
+        [providers.kilo]
+        model = "minimax-m3"
+        """,
+    )
+    conf = ralph_robin.apply_config(ralph_robin.RalphConfig())
+    cfg = ralph_robin.RalphConfig(providers=["kilo"])
+    ralph_robin.resolve_policies(cfg, conf)
+    captured = capsys.readouterr()
+    assert "requires model pins in 'provider/model' format" in captured.err
+    # Unlike the unsupported-provider case, the model is still pinned: the
+    # launch CLI accepts --model, it just needs the "/" the user forgot.
+    assert cfg.policies["kilo"].model == "minimax-m3"
+
+
 def test_scheduler_apply_config_returns_early_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -241,6 +263,26 @@ def test_scheduler_apply_config_respects_explicit_cli(
     scheduler.apply_config(cfg)
     # explicit CLI scope wins
     assert cfg.scope == "monthly"
+
+
+def test_scheduler_validate_args_warns_for_model_missing_slash(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = scheduler.SchedulerConfig(provider="kilo", model="minimax-m3", prompt_text="hi", cwd=str(tmp_path))
+    scheduler.validate_args(cfg)
+    captured = capsys.readouterr()
+    assert "requires --model in 'provider/model' format" in captured.err
+    # A warning, not a hard error: the model pin is left untouched.
+    assert cfg.model == "minimax-m3"
+
+
+def test_scheduler_validate_args_silent_for_slashed_model(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cfg = scheduler.SchedulerConfig(provider="kilo", model="minimax-coding-plan/MiniMax-M3", prompt_text="hi", cwd=str(tmp_path))
+    scheduler.validate_args(cfg)
+    captured = capsys.readouterr()
+    assert "requires --model in 'provider/model' format" not in captured.err
 
 
 def test_scheduler_apply_config_warns_for_unsupported_model_provider(

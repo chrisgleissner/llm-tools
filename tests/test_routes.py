@@ -1781,6 +1781,47 @@ def test_ralph_routes_flag_resolves_even_without_ralph_routes_section(
         ralph_robin.validate_args(bad)
 
 
+def test_ralph_validate_args_warns_when_route_model_missing_slash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Kilo/OpenCode require ``-m/--model provider/model``; a bare model name
+    (e.g. ``minimax-m3`` instead of ``minimax-coding-plan/MiniMax-M3``) is
+    silently misparsed by the launch CLI as a provider with an empty model
+    and fails at launch with ``Model not found: minimax-m3/``. validate_args
+    should warn about this up front instead of only failing at launch."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    (tmp_path / "xdg" / "llm-tools").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "xdg" / "llm-tools" / "config.toml").write_text(
+        textwrap.dedent(
+            """
+            [routes.kilo-minimax-m3]
+            provider = "kilo"
+            model = "minimax-m3"
+            [routes.kilo-minimax-m3.capacity]
+            policy = "opaque"
+            """
+        ),
+        encoding="utf-8",
+    )
+    config._cache.clear()
+    cfg = ralph_robin.RalphConfig(
+        routes_spec="kilo-minimax-m3",
+        routes=["kilo-minimax-m3"],
+        providers=[],
+        even_burn=False,
+        scope="auto",
+        dry_run=True,
+        prompt_text="test",
+    )
+    ralph_robin.validate_args(cfg)
+    captured = capsys.readouterr()
+    assert "requires 'provider/model' format" in captured.err
+    assert "kilo-minimax-m3" in captured.err
+    # A warning, not a hard error: the route still resolves and pins the model.
+    assert cfg.route_policies["kilo-minimax-m3"].model == "minimax-m3"
+
+
 def test_ralph_routes_flag_mixes_bare_providers_and_routes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
