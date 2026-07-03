@@ -1519,6 +1519,55 @@ def test_scheduler_route_runtime_block_round_trip(
     assert read_local_block("kilo-minimax-m3") is None
 
 
+def test_scheduler_submit_once_autonomy_abort_records_runtime_block(
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Status 75 (autonomy abort) must persist a runtime block for the route.
+
+    When a route hangs (e.g. an opaque Kilo route pinned to a model whose
+    backend silently 429s), llm-scheduler's idle watchdog kills the run with
+    status 75 after the full idle window. Without a runtime block, ralph-robin
+    re-selects the same opaque route on the next iteration and burns another
+    full idle window. The block gives the orchestrator a chance to rotate to
+    a different route until the backoff expires.
+    """
+    from llm_tools.routes import read_local_block
+
+    # submit_once() -> _record_route_runtime_block_autonomy() ->
+    # routes.record_local_block() all consult os.environ directly (no env=
+    # is threaded through), so the override must land in the real process
+    # environment via monkeypatch, not just in the `env` dict fixture.
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(tmp_path / "blocks"))
+    logs = common.setup_run_logs(tmp_path, "autonomy-block")
+    scheduler.clear_route_runtime_block("kilo-minimax-m3")
+
+    cfg = scheduler.SchedulerConfig(
+        provider="kilo",
+        route_id="kilo-minimax-m3",
+        cwd=str(tmp_path),
+        prompt_text="x",
+    )
+
+    def fake_headless(_cfg, _argv, output_file, status_file):
+        status_file.write_text(str(common.AUTONOMY_ABORT_STATUS), encoding="utf-8")
+        output_file.write_text("\n[0m\n> code · MiniMax-M3\n[0m\n", encoding="utf-8")
+        return common.AUTONOMY_ABORT_STATUS
+
+    monkeypatch.setattr(scheduler, "run_fresh_headless", fake_headless)
+    rc = scheduler.submit_once(cfg, logs, 1, ["kilo", "run", "--model", "minimax-coding-plan/MiniMax-M3", "--dir", str(tmp_path), "x"])
+    assert rc == common.AUTONOMY_ABORT_STATUS
+
+    block = read_local_block("kilo-minimax-m3")
+    assert block is not None
+    assert block["route_id"] == "kilo-minimax-m3"
+    assert block["reason"] == "autonomy-abort"
+    assert block["blocked_until"] > common.now_epoch(env)
+
+    # A subsequent successful run still clears the block.
+    scheduler.clear_route_runtime_block("kilo-minimax-m3")
+    assert read_local_block("kilo-minimax-m3") is None
+
+
 def test_scheduler_route_decision_uses_route_when_route_id_set(
     tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, fake_bin: Path
 ) -> None:
