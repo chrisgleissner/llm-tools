@@ -941,12 +941,15 @@ def test_budget_total_row_sums_spend_rows() -> None:
     cfg = _no_color_cfg()
     cfg.monthly_budget = 50.0
     cfg.budget_currency = "$"
+    next_reset = usage._next_month_epoch()
     rows = [
-        usage.UsageRow("Kilo", "balance", 1.0, "spent $27.4", None, "kilo", amount=27.4, currency="$", kind="balance", spent=True),
-        usage.UsageRow("OpenCode", "balance", 1.0, "spent $4.3", None, "oc", amount=4.3, currency="$", kind="balance", spent=True),
-        # A non-spend row and a foreign-currency spend row are both excluded.
+        usage.UsageRow("Kilo", "balance", 1.0, "spent $27.4", next_reset, "kilo", amount=27.4, currency="$", kind="balance", spent=True),
+        usage.UsageRow("OpenCode", "balance", 1.0, "spent $4.3", next_reset, "oc", amount=4.3, currency="$", kind="balance", spent=True),
+        # A non-spend row, a foreign-currency spend row, and an unbounded
+        # (no reset) lifetime spend row are all excluded from the total.
         usage.UsageRow("Claude", "5h", 80.0, "80%", None, "claude"),
-        usage.UsageRow("Kilo", "balance", 1.0, "spent £9.0", None, "kilo", amount=9.0, currency="£", kind="balance", spent=True),
+        usage.UsageRow("Kilo", "balance", 1.0, "spent £9.0", next_reset, "kilo", amount=9.0, currency="£", kind="balance", spent=True),
+        usage.UsageRow("Kilo", "balance", 1.0, "spent $999.0", None, "kilo", amount=999.0, currency="$", kind="balance", spent=True),
     ]
     total = usage.budget_total_row(cfg, rows)
     assert total is not None
@@ -965,12 +968,28 @@ def test_budget_total_row_labels_total_without_budget() -> None:
     cfg = _no_color_cfg()
     cfg.monthly_budget = None
     cfg.budget_currency = "$"
-    rows = [usage.UsageRow("Kilo", "spend", 1.0, "$27.4", None, "kilo", amount=27.4, currency="$", kind="balance", spent=True)]
+    next_reset = usage._next_month_epoch()
+    rows = [usage.UsageRow("Kilo", "spend", 1.0, "$27.4", next_reset, "kilo", amount=27.4, currency="$", kind="balance", spent=True)]
     total = usage.budget_total_row(cfg, rows)
     assert total is not None
     assert total.provider == "Total"  # no budget -> plain total, not "Budget"
     assert total.amount == 27.4
     assert total.reset is None  # no budget -> no reset
+
+
+def test_budget_total_row_excludes_unbounded_lifetime_spend() -> None:
+    """A spend row without a reset_epoch represents cumulative/lifetime
+    spend (no bounded cycle). It must NOT inflate the cross-provider
+    monthly total -- the conservative behaviour is to leave it out of the
+    bottom row entirely rather than mix it with month-to-date figures."""
+    cfg = _no_color_cfg()
+    cfg.monthly_budget = None
+    cfg.budget_currency = "$"
+    rows = [
+        usage.UsageRow("Kilo", "spend", 1.0, "$128.7", None, "kilo", amount=128.7, currency="$", kind="balance", spent=True),
+        usage.UsageRow("OpenCode", "spend", 1.0, "$4.3", None, "oc", amount=4.3, currency="$", kind="balance", spent=True),
+    ]
+    assert usage.budget_total_row(cfg, rows) is None
 
 
 def test_render_spent_over_budget_caps_bar_and_flags_red() -> None:
@@ -1016,8 +1035,9 @@ def test_usage_table_renders_budget_bars_and_blanks(monkeypatch: pytest.MonkeyPa
     cfg = _no_color_cfg()
     cfg.monthly_budget = 50.0
     cfg.budget_currency = "$"
+    next_reset = usage._next_month_epoch()
     rows = [
-        usage.UsageRow("Kilo", "balance", 1.0, "spent $27.4", None, "kilo", amount=27.4, currency="$", kind="balance", spent=True),
+        usage.UsageRow("Kilo", "balance", 1.0, "spent $27.4", next_reset, "kilo", amount=27.4, currency="$", kind="balance", spent=True),
     ]
     budget = usage.budget_total_row(cfg, rows)
     assert budget is not None
