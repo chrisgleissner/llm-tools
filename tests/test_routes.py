@@ -1531,9 +1531,13 @@ def test_scheduler_submit_once_autonomy_abort_records_runtime_block(
     full idle window. The block gives the orchestrator a chance to rotate to
     a different route until the backoff expires.
     """
-    from llm_tools.routes import clear_local_block, read_local_block
+    from llm_tools.routes import read_local_block
 
-    env["LLM_TOOLS_LOCAL_BLOCK_DIR"] = str(tmp_path / "blocks")
+    # submit_once() -> _record_route_runtime_block_autonomy() ->
+    # routes.record_local_block() all consult os.environ directly (no env=
+    # is threaded through), so the override must land in the real process
+    # environment via monkeypatch, not just in the `env` dict fixture.
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(tmp_path / "blocks"))
     logs = common.setup_run_logs(tmp_path, "autonomy-block")
     scheduler.clear_route_runtime_block("kilo-minimax-m3")
 
@@ -1543,14 +1547,6 @@ def test_scheduler_submit_once_autonomy_abort_records_runtime_block(
         cwd=str(tmp_path),
         prompt_text="x",
     )
-
-    # Force the headless runner to return AUTONOMY_ABORT_STATUS, then make
-    # the post-run status-file read see the same code so submit_once takes
-    # the 75 branch.
-    monkeypatch.setattr(scheduler, "run_fresh_headless", lambda *a, **kw: common.AUTONOMY_ABORT_STATUS)
-    (logs.run_dir).mkdir(parents=True, exist_ok=True)
-    status_path = logs.run_dir / "attempt-1.status"
-    out_path = logs.run_dir / "attempt-1.out"
 
     def fake_headless(_cfg, _argv, output_file, status_file):
         status_file.write_text(str(common.AUTONOMY_ABORT_STATUS), encoding="utf-8")
