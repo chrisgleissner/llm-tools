@@ -252,9 +252,15 @@ def _run_opencode_stats(env: dict[str, str]) -> dict[str, Any] | None:
     cli = opencode_cli(env)
     if not cli:
         return None
+    # Bound the query to the current calendar month so the parsed cost is
+    # *month-to-date*, not the all-time cumulative total. ``opencode
+    # stats`` defaults to all-time; without ``--days N`` a long-running
+    # install would surface its full lifetime spend as if it were this
+    # month's bill.
+    days = common.mtd_days_since_month_start(env)
     try:
         proc = subprocess.run(
-            [cli, "stats"],
+            [cli, "stats", "--days", str(days)],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -371,6 +377,10 @@ def _scopes_for_mode(
     # If ``opencode stats`` reported a cost but we have no configured
     # balance or budget, surface the cost as a spent row so the user
     # sees real numbers in the table instead of ``inconclusive-usage``.
+    # The query is already bounded to the current calendar month
+    # (see ``_run_opencode_stats``), so the row is tagged with the next
+    # month-start ``reset_epoch`` so the Total row can sum only this
+    # cycle's spend rather than lifetime totals.
     cost = stats.get("cost") if stats else None
     if (
         cost is not None
@@ -384,8 +394,9 @@ def _scopes_for_mode(
                 kind=CapacityKind.BALANCE,
                 remaining_amount=float(cost),
                 currency=cost_currency,
+                reset_epoch=common.next_month_epoch_from_env(env),
                 source=source,
-                extras={"spent": True},
+                extras={"spent": True, "period": "mtd"},
             )
         )
 

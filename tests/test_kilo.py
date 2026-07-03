@@ -244,6 +244,80 @@ def test_read_kilo_parses_stats_tui(env: dict[str, str], fake_bin: Path) -> None
     assert balances[0].extras.get("spent") is True
     # Source must mention the kilo stats feed so --show-source surfaces it.
     assert any("kilo stats" in s.source for s in snap.scopes)
+    # The CLI spend row is a month-to-date figure, so it must carry a
+    # bounded ``reset_epoch`` (next calendar month start) -- otherwise the
+    # cross-provider Total row cannot tell MTD spend apart from a
+    # lifetime/cumulative total.
+    assert balances[0].reset_epoch is not None
+    assert balances[0].reset_epoch > common.now_epoch(env)
+
+
+def test_read_kilo_stats_query_is_bounded_to_mtd(env: dict[str, str], fake_bin: Path, tmp_path: Path) -> None:
+    """``kilo stats`` defaults to all-time, which would surface a
+    long-running install's lifetime cost as if it were this month's bill.
+    The reader must always pass ``--days N`` (N = days since the start of
+    the current calendar month) so the parsed cost is month-to-date."""
+    log_path = tmp_path / "argv.txt"
+    fake = fake_bin / "kilo"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        f"import sys\n"
+        f"open({str(log_path)!r}, 'w').write(' '.join(sys.argv[1:]))\n"
+        "print('│Total Cost                  $13.15│')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    # Pin the clock to 2026-07-03 (day 3 of the month) so the expected
+    # days argument is deterministic regardless of when tests run.
+    env["LLM_USAGE_NOW_EPOCH"] = "1783074000"  # 2026-07-03 UTC
+    snap = read_kilo(env)
+    assert snap.available is True
+    assert log_path.exists(), "kilo stats was never invoked"
+    argv = log_path.read_text().split()
+    assert "--days" in argv, f"kilo stats not bounded to MTD: argv={argv}"
+    days_idx = argv.index("--days")
+    assert int(argv[days_idx + 1]) == 3, argv
+    balances = [s for s in snap.scopes if s.kind == CapacityKind.BALANCE]
+    assert balances and balances[0].remaining_amount == pytest.approx(13.15)
+
+
+def test_read_kilo_spend_row_has_monthly_reset(env: dict[str, str], fake_bin: Path) -> None:
+    """The MTD spend scope must tag itself with the next calendar month
+    start so ``budget_total_row`` recognises it as a bounded cycle and
+    includes it in the cross-provider Total row."""
+    fake = fake_bin / "kilo"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('│Total Cost                  $13.15│')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    env["LLM_USAGE_NOW_EPOCH"] = "1783074000"  # 2026-07-03
+    snap = read_kilo(env)
+    balances = [s for s in snap.scopes if s.kind == CapacityKind.BALANCE and s.extras.get("spent")]
+    assert balances
+    assert balances[0].reset_epoch is not None
+    import datetime as _dt
+    reset_dt = _dt.datetime.fromtimestamp(balances[0].reset_epoch, tz=_dt.timezone.utc)
+    assert (reset_dt.year, reset_dt.month, reset_dt.day) == (2026, 8, 1)
+    assert balances[0].extras.get("period") == "mtd"
+
+
+def test_read_kilo_spend_disappears_when_stats_cli_missing_cli(
+    env: dict[str, str], fake_bin: Path, monkeypatch
+) -> None:
+    """With PATH cleared and no env-var fallback, the reader reports
+    ``inconclusive-usage`` rather than fabricating a spend figure -- a
+    conservative fallback that keeps the row out of the cross-provider
+    monthly total instead of inventing one."""
+    monkeypatch.setenv("PATH", "/var/empty")
+    env["PATH"] = "/var/empty"
+    snap = read_kilo(env)
+    assert snap.available is False
+    assert snap.reason == "inconclusive-usage"
+    assert not any(s.extras.get("spent") for s in snap.scopes)
 
 
 def test_read_kilo_parses_stats_json(env: dict[str, str], fake_bin: Path) -> None:

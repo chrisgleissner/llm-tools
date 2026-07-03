@@ -239,6 +239,35 @@ def copilot_monthly_reset_epoch(env: dict[str, str] | None = None) -> int | None
     return int(time.mktime(nxt.timetuple())) + offset * 86400
 
 
+def mtd_days_since_month_start(env: dict[str, str] | None = None) -> int:
+    """Number of days elapsed in the current calendar month (>= 1).
+
+    Used to bound CLI queries like ``<provider> stats --days N`` so a
+    provider's monthly spend figure reflects only the current billing
+    cycle, not lifetime cost. Honours ``LLM_USAGE_NOW_EPOCH`` for tests.
+    The day count is computed purely in UTC so it is timezone-stable
+    regardless of the host's local time / DST offset.
+    """
+    env = env or os.environ
+    now = now_epoch(env)
+    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elapsed_seconds = max(0, now - int(start.timestamp()))
+    return max(1, int(elapsed_seconds // 86400) + 1)
+
+
+def next_month_epoch_from_env(env: dict[str, str] | None = None) -> int:
+    """Epoch of the next calendar month start (UTC)."""
+    env = env or os.environ
+    now = now_epoch(env)
+    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    if dt.month == 12:
+        nxt = dt.replace(year=dt.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        nxt = dt.replace(month=dt.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int(nxt.timestamp())
+
+
 def copilot_monthly_window_days(env: dict[str, str] | None = None) -> float:
     env = env or os.environ
     try:

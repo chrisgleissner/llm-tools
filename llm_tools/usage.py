@@ -1370,7 +1370,11 @@ def copilot_rows(cfg: Config, copilot_json: dict[str, Any] | None) -> list[Usage
                 "spend",
                 1.0,
                 format_amount(amount, currency),
-                None,
+                # The GitHub billing ``netAmount`` figure is current-month
+                # only; tag the row with the next month-start reset so
+                # ``budget_total_row`` recognises it as a bounded cycle
+                # and includes it in the cross-provider monthly total.
+                common.next_month_epoch_from_env(),
                 addon.get("source") or source,
                 "-",
                 amount=amount,
@@ -1453,7 +1457,10 @@ def kilo_rows(cfg: Config, kilo_json: dict[str, Any] | None) -> list[UsageRow]:
                     "spend" if is_spent else "balance",
                     row_remaining,
                     text,
-                    None,
+                    # Carry the scope's reset (next month start for MTD
+                    # spend rows) so ``budget_total_row`` only sums
+                    # bounded-cycle rows.
+                    scope.get("reset_epoch"),
                     source,
                     "-",
                     amount=amount,
@@ -1566,7 +1573,10 @@ def opencode_rows(cfg: Config, opencode_json: dict[str, Any] | None) -> list[Usa
                     "spend" if is_spent else "balance",
                     row_remaining,
                     text,
-                    None,
+                    # Carry the scope's reset (next month start for MTD
+                    # spend rows) so ``budget_total_row`` only sums
+                    # bounded-cycle rows.
+                    scope.get("reset_epoch"),
                     source,
                     "-",
                     amount=amount,
@@ -2257,16 +2267,6 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
     return rows, show_model
 
 
-def _next_month_epoch(env: "dict[str, str] | None" = None) -> int:
-    """Epoch of the next calendar month start (UTC) -- the monthly budget reset."""
-    now = datetime.fromtimestamp(common.now_epoch(env), tz=timezone.utc)
-    if now.month == 12:
-        nxt = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        nxt = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    return int(nxt.timestamp())
-
-
 def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
     """A single bottom row totalling every provider's monthly spend.
 
@@ -2276,14 +2276,25 @@ def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
     monetary picture is always visible. When a budget is configured (``[budget]``
     in config, or ``LLM_USAGE_MONTHLY_BUDGET``) the row also draws a capped
     progress bar filling toward that limit, coloured green→red, with the
-    guidance text carrying any overage (for example ``137% of $20``). Only spend
-    in the budget currency is summed (mixed-currency rows are left out of the
-    total). Labelled ``Budget`` when a budget exists, else ``Total``.
+    guidance text carrying any overage (for example ``137% of $20``).
+
+    Tool-specific billing cycles are normalised by requiring every summed
+    row to carry a future ``reset_epoch`` (e.g. the next month-start for a
+    month-to-date window). Lifetime/cumulative spend rows whose period is
+    unbounded are intentionally excluded so a long-running CLI install does
+    not inflate the cross-provider monthly total. Only spend in the budget
+    currency is summed (mixed-currency rows are left out of the total).
+    Labelled ``Budget`` when a budget exists, else ``Total``.
     """
+    now = common.now_epoch()
     matched = [
         float(row.amount)
         for row in rows
-        if row.spent and row.amount is not None and not (row.currency and row.currency != cfg.budget_currency)
+        if row.spent
+        and row.amount is not None
+        and row.reset is not None
+        and row.reset > now
+        and not (row.currency and row.currency != cfg.budget_currency)
     ]
     if not matched:
         return None
@@ -2294,7 +2305,7 @@ def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
         scope="monthly",
         remaining=1.0,
         left_text=format_amount(total, cfg.budget_currency),
-        reset=_next_month_epoch() if has_budget else None,
+        reset=common.next_month_epoch_from_env() if has_budget else None,
         source="config budget" if has_budget else "spend total",
         remaining_time="-",
         amount=total,

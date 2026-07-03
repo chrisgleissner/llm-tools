@@ -219,6 +219,46 @@ def test_copilot_monthly_reset_epoch_before_offset(env: dict[str, str]) -> None:
     assert epoch > 1700000000
 
 
+# --- mtd_days_since_month_start / next_month_epoch_from_env -----------------
+
+
+def test_mtd_days_is_one_on_first_of_month(env: dict[str, str]) -> None:
+    # 2026-07-01 00:00 UTC == 1782864000 — day 1 of the month, so the
+    # function must clamp to 1, never 0.
+    env["LLM_USAGE_NOW_EPOCH"] = "1782864000"
+    assert common.mtd_days_since_month_start(env) == 1
+
+
+def test_mtd_days_increments_with_day_of_month(env: dict[str, str]) -> None:
+    # 2026-07-15 00:00 UTC == 1784140800 (day 15)
+    env["LLM_USAGE_NOW_EPOCH"] = "1784140800"
+    assert common.mtd_days_since_month_start(env) == 15
+
+
+def test_mtd_days_january_rolls_back_to_one(env: dict[str, str]) -> None:
+    # 2026-01-01 00:00 UTC == 1767225600
+    env["LLM_USAGE_NOW_EPOCH"] = "1767225600"
+    assert common.mtd_days_since_month_start(env) == 1
+
+
+def test_next_month_epoch_from_env_first_of_next_month(env: dict[str, str]) -> None:
+    import datetime as _dt
+
+    env["LLM_USAGE_NOW_EPOCH"] = "1781587377"  # 2026-06-16
+    epoch = common.next_month_epoch_from_env(env)
+    nxt = _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc)
+    assert (nxt.year, nxt.month, nxt.day) == (2026, 7, 1)
+
+
+def test_next_month_epoch_from_env_december_rolls_year(env: dict[str, str]) -> None:
+    import datetime as _dt
+
+    env["LLM_USAGE_NOW_EPOCH"] = "1733011200"  # 2024-12-01
+    epoch = common.next_month_epoch_from_env(env)
+    nxt = _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc)
+    assert (nxt.year, nxt.month, nxt.day) == (2025, 1, 1)
+
+
 # --- is_number / is_integer helpers ------------------------------------------
 
 

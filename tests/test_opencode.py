@@ -237,6 +237,60 @@ def test_read_opencode_tui_surfaces_spent_balance(env: dict[str, str], fake_bin:
     assert balances[0].remaining_amount == 7.5
     assert balances[0].currency == "$"
     assert balances[0].extras.get("spent") is True
+    # MTD spend row must carry the next month-start reset so the
+    # cross-provider Total can tell it apart from a lifetime total.
+    assert balances[0].reset_epoch is not None
+    assert balances[0].reset_epoch > common.now_epoch(env)
+
+
+def test_read_opencode_stats_query_is_bounded_to_mtd(
+    env: dict[str, str], fake_bin: Path, tmp_path: Path
+) -> None:
+    """``opencode stats`` defaults to all-time; the reader must pass
+    ``--days N`` (N = days since the start of the current calendar month)
+    so the parsed cost is month-to-date rather than the lifetime total."""
+    log_path = tmp_path / "argv.txt"
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(log_path)!r}, 'w').write(' '.join(sys.argv[1:]))\n"
+        "print('│Total Cost                  $4.30│')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    env["LLM_USAGE_NOW_EPOCH"] = "1783074000"  # 2026-07-03 UTC (day 3)
+    snap = read_opencode(env)
+    assert log_path.exists()
+    argv = log_path.read_text().split()
+    assert "--days" in argv, f"opencode stats not bounded to MTD: argv={argv}"
+    days_idx = argv.index("--days")
+    assert int(argv[days_idx + 1]) == 3, argv
+
+
+def test_read_opencode_spend_row_has_monthly_reset(
+    env: dict[str, str], fake_bin: Path
+) -> None:
+    """The MTD spend scope must tag itself with the next calendar month
+    start so ``budget_total_row`` includes it in the cross-provider Total."""
+    fake = fake_bin / "opencode"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('│Total Cost                  $4.30│')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    env["LLM_USAGE_NOW_EPOCH"] = "1783074000"
+    snap = read_opencode(env)
+    balances = [s for s in snap.scopes if s.kind == CapacityKind.BALANCE and s.extras.get("spent")]
+    assert balances
+    assert balances[0].reset_epoch is not None
+    import datetime as _dt
+    reset_dt = _dt.datetime.fromtimestamp(balances[0].reset_epoch, tz=_dt.timezone.utc)
+    assert (reset_dt.year, reset_dt.month, reset_dt.day) == (2026, 8, 1)
+    assert balances[0].extras.get("period") == "mtd"
 
 
 def test_read_opencode_parses_stats_json(env: dict[str, str], fake_bin: Path) -> None:

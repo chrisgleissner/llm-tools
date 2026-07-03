@@ -381,6 +381,12 @@ plain `Total` row. Cells with nothing to report (a `spend`/`balance` scope has
 no reset; a full window has no runout forecast) are left blank rather than
 padded with placeholder dashes — only a genuine read failure shows `unavailable`.
 
+The `Total` / `Budget` row only sums spend rows that carry a known bounded
+cycle (a future `reset_epoch`, i.e. month-to-date). Lifetime / cumulative
+spend rows from providers whose CLI cannot bound the window are intentionally
+excluded so a long-running install does not inflate the cross-provider monthly
+total; conservative is better than wrong when reporting money.
+
 The `Model` column only appears when a provider reports model-specific limits.
 These sub-rows sit under their provider's section: Codex surfaces its `Spark`
 model, and Claude surfaces per-model weekly limits (e.g. `Sonnet`) alongside the
@@ -843,7 +849,7 @@ Kilo is configured primarily through environment variables, so it can be driven 
 | `LLM_USAGE_KILO_MONTHLY_SPENT`     | Amount already spent in this budget period.                               |
 | `LLM_USAGE_KILO_MONTHLY_RESET_DAY` | Day of month the budget resets. Default: `1`.                             |
 
-When `kilo` is on `PATH`, `llm-usage` and `llm-scheduler` try `kilo stats` first. JSON and text output are supported. If that fails or cannot be parsed, they fall back to the environment variables above.
+When `kilo` is on `PATH`, `llm-usage` and `llm-scheduler` try `kilo stats` first. JSON and text output are supported. If that fails or cannot be parsed, they fall back to the environment variables above. The CLI query is bounded to the **current calendar month** (`kilo stats --days <days_since_month_start>`) so the surfaced `spend` figure reflects month-to-date cost, not the lifetime cumulative total. Without that bound, a long-running Kilo install would surface its all-time cost as if it were this month's bill.
 
 With `--scope auto`, Kilo prefers:
 
@@ -1067,7 +1073,7 @@ Child scheduler logs are written under each Ralph run's `scheduler/` subdirector
 | Codex          | Live `codex app-server` rate limits, then cache, then local `~/.codex/sessions` JSONL. |
 | Claude Code    | OAuth usage API/cache with automatic OAuth token refresh, then statusline cache, then local project JSONL fallback. |
 | GitHub Copilot | Local Copilot CLI footer captured through a bounded PTY helper.             |
-| Kilo Code      | `kilo stats`, then Kilo environment variables.                              |
+| Kilo Code      | `kilo stats --days <MTD>` (month-to-date cost), then Kilo environment variables. |
 | MiniMax        | `mmx quota show --output json`, then MiniMax environment variables.         |
 
 `llm-usage` reads providers concurrently. Configure fan-out with
@@ -1085,7 +1091,7 @@ the provider for current numbers and only falls back if that fails:
 | Codex          | `codex app-server` (live, turn-free) → last cached payload → local session JSONL |
 | Claude Code    | OAuth usage API (auto-refreshing the token) → API cache → statusline cache → project JSONL |
 | GitHub Copilot | Background PTY footer capture → cached capture                              |
-| Kilo / MiniMax / OpenCode | `kilo stats` / `mmx quota show` / `opencode stats` → environment variables |
+| Kilo / MiniMax / OpenCode | `kilo stats --days <MTD>` / `mmx quota show` / `opencode stats --days <MTD>` → environment variables |
 
 A provider only reports `stale-usage` if it cannot be refreshed for a **known
 authentication or CLI-startup reason** - e.g. Codex shows `not-authenticated`
