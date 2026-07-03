@@ -1210,6 +1210,17 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     common.log_event(logs, "attempt_result", {"attempt": attempt, "status": status, "output": output})
     if status == common.AUTONOMY_ABORT_STATUS:
         common.log_event(logs, "autonomy_abort", {"attempt": attempt, "output": output})
+        # An autonomy abort on a route means the provider ran but produced no
+        # observable progress (idle timeout, blocked prompt, hung tool call,
+        # etc.). For opaque routes this is the *only* signal the orchestrator
+        # gets that the route's upstream quota is exhausted — the CLI keeps
+        # reporting "ready" until something actually tries to use it. Without
+        # a runtime block, ralph-robin would re-select the same opaque route
+        # on the next iteration and burn another full idle-timeout window.
+        # Recording the block here is what gives the orchestrator a chance to
+        # rotate to a different route until the backoff expires.
+        if cfg.route_id:
+            _record_route_runtime_block_autonomy(cfg, logs, output)
         return common.AUTONOMY_ABORT_STATUS
     retryable = common.output_is_retryable(status, output, cfg.attached, trust_clean_exit=cfg.ralph_robin_active)
     # A clean exit on a route is a real successful increment; the
@@ -1256,6 +1267,46 @@ def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, outp
             "route": cfg.route_id,
             "blocked_until": blocked_until,
             "reason": "runtime-failure",
+        },
+    )
+
+
+def _record_route_runtime_block_autonomy(cfg: SchedulerConfig, logs: common.RunLogs, output: str) -> None:
+    """Persist a local block for ``cfg.route_id`` after an autonomy abort.
+
+    Autonomy-abort (status 75) means the framework had to kill the run
+    because it produced no observable progress — typically an idle
+    timeout, a blocked prompt, or, for opaque Kilo routes pinned to a
+    model whose backend silently 429s, an API quota that exhausts
+    without surfacing in the captured output. The CLI still reports the
+    route as "ready" (CLI present, no local block), so without this
+    record the orchestrator would re-select the same opaque route on
+    the next iteration and burn another full idle-timeout window.
+
+    The block uses the standard default backoff so the rotation has a
+    chance to land on a different route while the failed one cools
+    down. A retry hint in the output (rare for autonomy aborts, since
+    they usually have empty output) is honoured when present.
+    """
+    from . import routes
+
+    retry_after = _parse_retry_after_seconds(output)
+    backoff = routes.default_backoff_seconds()
+    blocked_until = common.now_epoch() + (retry_after if retry_after is not None else backoff)
+    routes.record_local_block(
+        cfg.route_id,
+        reason="autonomy-abort",
+        blocked_until=blocked_until,
+        last_message=output[:2000],
+        backoff_seconds=backoff,
+    )
+    common.log_event(
+        logs,
+        "route_runtime_block",
+        {
+            "route": cfg.route_id,
+            "blocked_until": blocked_until,
+            "reason": "autonomy-abort",
         },
     )
 

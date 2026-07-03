@@ -164,7 +164,9 @@
 #
 #   [routes.kilo-minimax-m3]
 #   provider = "kilo"
-#   model    = "minimax-coding-plan/MiniMax-M3"  # `kilo models minimax-coding-plan` lists exact ids
+#   model    = "kilo/minimax/minimax-m3"  # a `kilo models` id — the `kilo/` gateway prefix is what's authenticated
+#   # NB: pin an id from the SAME CLI you launch. `minimax-coding-plan/MiniMax-M3`
+#   # is an OpenCode id; Kilo has no such provider credential and hangs on it.
 #   [routes.kilo-minimax-m3.capacity]
 #   policy = "opaque"
 #   scope  = "subscription"

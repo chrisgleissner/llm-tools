@@ -192,7 +192,7 @@ routes = ["kilo-minimax-m3"]
 
 [routes.kilo-minimax-m3]
 provider     = "kilo"
-model        = "minimax-coding-plan/MiniMax-M3"
+model        = "kilo/minimax/minimax-m3"
 allow_fallback = false
 
 [routes.kilo-minimax-m3.capacity]
@@ -233,15 +233,15 @@ The orchestrator's runtime context and prompt injection include the selected `ro
 
 ### One launch CLI, several models in one rotation
 
-A route's `model` is the model ralph-robin pins on the launch command, so two routes that share the same launch provider select different underlying models. Kilo and OpenCode both require this pin in `provider/model` form (`kilo models <provider>` lists the exact ids); a bare model name is misparsed as a provider with an empty model and fails at launch with `Model not found: <name>/`. This is how one Kilo install serves both `minimax-coding-plan/MiniMax-M3` and `zai/glm-5.2` in a single even-burn rotation:
+A route's `model` is the model ralph-robin pins on the launch command, so two routes that share the same launch provider select different underlying models. Kilo and OpenCode both require this pin in `provider/model` form (`kilo models` / `opencode models` list the exact ids); a bare model name is misparsed as a provider with an empty model and fails at launch with `Model not found: <name>/`. **Pin an id from the same CLI you launch:** the provider half is a credential namespace, and the two CLIs do not share it. Kilo's authenticated MiniMax path is `kilo/minimax/minimax-m3` (the `kilo/` gateway prefix); OpenCode's is `minimax-coding-plan/MiniMax-M3`. Cross-wiring them — e.g. pinning the OpenCode id on a Kilo route — is not rejected up front: Kilo has no `minimax-coding-plan` credential, so it prints its agent banner and then **hangs forever** (no auth, no client-side timeout) instead of erroring. This is how one Kilo install serves both `kilo/minimax/minimax-m3` and `zai/glm-5.2` in a single even-burn rotation:
 
 ```toml
 [routes.kilo-minimax-m3]
 provider = "kilo"
-model    = "minimax-coding-plan/MiniMax-M3"
+model    = "kilo/minimax/minimax-m3"
 [routes.kilo-minimax-m3.capacity]
-policy   = "delegate"     # gate on MiniMax's real 5h/weekly windows
-provider = "minimax"
+policy   = "opaque"       # entitlement lives behind the Kilo gateway; no pre-launch window
+scope    = "subscription"
 
 [routes.kilo-zai-glm-52]
 provider = "kilo"
@@ -859,7 +859,7 @@ With `--scope auto`, Kilo prefers:
 
 #### Gateway-backed models via routes (Kilo + MiniMax M3)
 
-When Kilo sells a model from another provider (e.g. MiniMax M3 purchased through the Kilo gateway), the entitlement lives behind the Kilo gateway: the direct `mmx quota show` reads the user's *direct* MiniMax account, not the Kilo-purchased subscription, so it is the wrong truth source. Model the route as `opaque`. The model pin must be Kilo's own `provider/model` id for the gateway entitlement (run `kilo models minimax-coding-plan` to list them), not the bare upstream model name:
+When Kilo sells a model from another provider (e.g. MiniMax M3 purchased through the Kilo gateway), the entitlement lives behind the Kilo gateway: the direct `mmx quota show` reads the user's *direct* MiniMax account, not the Kilo-purchased subscription, so it is the wrong truth source. Model the route as `opaque`. The model pin must be an id from **Kilo's own** catalogue (`kilo models`) that is actually authenticated in Kilo's `auth.json` — for the gateway entitlement that is the `kilo/`-prefixed id `kilo/minimax/minimax-m3` (also Kilo's configured default). Do **not** paste an id from another CLI's catalogue: `minimax-coding-plan/MiniMax-M3` is an *OpenCode* id, and because Kilo has no `minimax-coding-plan` credential, `kilo run -m minimax-coding-plan/...` prints its agent banner and then hangs forever instead of erroring:
 
 ```toml
 [ralph]
@@ -867,7 +867,7 @@ routes = ["kilo-minimax-m3"]
 
 [routes.kilo-minimax-m3]
 provider = "kilo"
-model    = "minimax-coding-plan/MiniMax-M3"
+model    = "kilo/minimax/minimax-m3"
 [routes.kilo-minimax-m3.capacity]
 policy = "opaque"
 scope  = "subscription"
@@ -886,7 +886,7 @@ Provider   Model       Ready   Scope          Remaining         Guidance   Reset
 Kilo       MiniMax M3  yes     subscription   prepaid USD20/mo   ✓ usable   -
 ```
 
-The route is usable whenever the Kilo CLI is on `PATH` and no local runtime block is recorded. If a Kilo run returns a real retryable error (e.g. `HTTP 429`, `quota exceeded`), the scheduler records a local block under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks/<id>.json` so Ralph stops selecting the route until the retry window passes. A successful run clears the block.
+The route is usable whenever the Kilo CLI is on `PATH` and no local runtime block is recorded. If a Kilo run returns a real retryable error (e.g. `HTTP 429`, `quota exceeded`), the scheduler records a local block under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks/<id>.json` so Ralph stops selecting the route until the retry window passes. A run that hits an autonomy abort (idle timeout, blocked prompt, hung tool call, or an opaque provider whose backend silently 429s without surfacing in the captured output) is also recorded as a runtime block for the same backoff window so the orchestrator rotates away from the failing route instead of burning another full idle window on it. A successful run clears the block.
 
 The legacy `providers.<x>.capacity_provider = "<y>"` setting is for the *truthful* delegation case (the configured CLI runs another provider's model and that provider's windows truthfully describe the capacity). Use `routes.<id>.capacity.policy = "opaque"` when no such truth source exists.
 
