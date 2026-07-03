@@ -941,7 +941,7 @@ def test_budget_total_row_sums_spend_rows() -> None:
     cfg = _no_color_cfg()
     cfg.monthly_budget = 50.0
     cfg.budget_currency = "$"
-    next_reset = usage._next_month_epoch()
+    next_reset = common.next_month_epoch_from_env()
     rows = [
         usage.UsageRow("Kilo", "balance", 1.0, "spent $27.4", next_reset, "kilo", amount=27.4, currency="$", kind="balance", spent=True),
         usage.UsageRow("OpenCode", "balance", 1.0, "spent $4.3", next_reset, "oc", amount=4.3, currency="$", kind="balance", spent=True),
@@ -968,7 +968,7 @@ def test_budget_total_row_labels_total_without_budget() -> None:
     cfg = _no_color_cfg()
     cfg.monthly_budget = None
     cfg.budget_currency = "$"
-    next_reset = usage._next_month_epoch()
+    next_reset = common.next_month_epoch_from_env()
     rows = [usage.UsageRow("Kilo", "spend", 1.0, "$27.4", next_reset, "kilo", amount=27.4, currency="$", kind="balance", spent=True)]
     total = usage.budget_total_row(cfg, rows)
     assert total is not None
@@ -1022,7 +1022,7 @@ def test_next_month_epoch_is_first_of_next_month() -> None:
     import datetime as _dt
 
     # now_epoch 1781587377 == 2026-06-16 -> next reset is 2026-07-01 UTC.
-    epoch = usage._next_month_epoch({"LLM_USAGE_NOW_EPOCH": "1781587377"})
+    epoch = common.next_month_epoch_from_env({"LLM_USAGE_NOW_EPOCH": "1781587377"})
     nxt = _dt.datetime.fromtimestamp(epoch, tz=_dt.timezone.utc)
     assert (nxt.year, nxt.month, nxt.day) == (2026, 7, 1)
 
@@ -1035,7 +1035,7 @@ def test_usage_table_renders_budget_bars_and_blanks(monkeypatch: pytest.MonkeyPa
     cfg = _no_color_cfg()
     cfg.monthly_budget = 50.0
     cfg.budget_currency = "$"
-    next_reset = usage._next_month_epoch()
+    next_reset = common.next_month_epoch_from_env()
     rows = [
         usage.UsageRow("Kilo", "balance", 1.0, "spent $27.4", next_reset, "kilo", amount=27.4, currency="$", kind="balance", spent=True),
     ]

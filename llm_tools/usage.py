@@ -1374,7 +1374,7 @@ def copilot_rows(cfg: Config, copilot_json: dict[str, Any] | None) -> list[Usage
                 # only; tag the row with the next month-start reset so
                 # ``budget_total_row`` recognises it as a bounded cycle
                 # and includes it in the cross-provider monthly total.
-                _next_month_epoch(),
+                common.next_month_epoch_from_env(),
                 addon.get("source") or source,
                 "-",
                 amount=amount,
@@ -2267,16 +2267,6 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
     return rows, show_model
 
 
-def _next_month_epoch(env: "dict[str, str] | None" = None) -> int:
-    """Epoch of the next calendar month start (UTC) -- the monthly budget reset."""
-    now = datetime.fromtimestamp(common.now_epoch(env), tz=timezone.utc)
-    if now.month == 12:
-        nxt = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        nxt = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    return int(nxt.timestamp())
-
-
 def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
     """A single bottom row totalling every provider's monthly spend.
 
@@ -2315,7 +2305,7 @@ def budget_total_row(cfg: Config, rows: list[UsageRow]) -> UsageRow | None:
         scope="monthly",
         remaining=1.0,
         left_text=format_amount(total, cfg.budget_currency),
-        reset=_next_month_epoch() if has_budget else None,
+        reset=common.next_month_epoch_from_env() if has_budget else None,
         source="config budget" if has_budget else "spend total",
         remaining_time="-",
         amount=total,

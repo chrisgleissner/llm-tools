@@ -245,12 +245,14 @@ def mtd_days_since_month_start(env: dict[str, str] | None = None) -> int:
     Used to bound CLI queries like ``<provider> stats --days N`` so a
     provider's monthly spend figure reflects only the current billing
     cycle, not lifetime cost. Honours ``LLM_USAGE_NOW_EPOCH`` for tests.
+    The day count is computed purely in UTC so it is timezone-stable
+    regardless of the host's local time / DST offset.
     """
     env = env or os.environ
     now = now_epoch(env)
-    dt = datetime.fromtimestamp(now)
-    start = datetime(dt.year, dt.month, 1)
-    elapsed_seconds = max(0, now - int(time.mktime(start.timetuple())))
+    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elapsed_seconds = max(0, now - int(start.timestamp()))
     return max(1, int(elapsed_seconds // 86400) + 1)
 
 

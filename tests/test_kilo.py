@@ -308,10 +308,10 @@ def test_read_kilo_spend_row_has_monthly_reset(env: dict[str, str], fake_bin: Pa
 def test_read_kilo_spend_disappears_when_stats_cli_missing_cli(
     env: dict[str, str], fake_bin: Path, monkeypatch
 ) -> None:
-    """When the kilo CLI isn't on PATH, the reader must report
-    ``missing-cli`` rather than fabricate a synthetic spend figure -- a
-    conservative fallback is no spend row at all (the table just shows the
-    provider as unavailable)."""
+    """With PATH cleared and no env-var fallback, the reader reports
+    ``inconclusive-usage`` rather than fabricating a spend figure -- a
+    conservative fallback that keeps the row out of the cross-provider
+    monthly total instead of inventing one."""
     monkeypatch.setenv("PATH", "/var/empty")
     env["PATH"] = "/var/empty"
     snap = read_kilo(env)

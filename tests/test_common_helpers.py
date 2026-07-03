@@ -223,9 +223,8 @@ def test_copilot_monthly_reset_epoch_before_offset(env: dict[str, str]) -> None:
 
 
 def test_mtd_days_is_one_on_first_of_month(env: dict[str, str]) -> None:
-    env["LLM_USAGE_NOW_EPOCH"] = "1783074000"  # 2026-07-03
-    # Rewind to start of 2026-07-01 (00:00 UTC == 1782864000) — day 1 of
-    # the month, so the function must clamp to 1, never 0.
+    # 2026-07-01 00:00 UTC == 1782864000 — day 1 of the month, so the
+    # function must clamp to 1, never 0.
     env["LLM_USAGE_NOW_EPOCH"] = "1782864000"
     assert common.mtd_days_since_month_start(env) == 1
 
