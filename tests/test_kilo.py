@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from llm_tools.capacity import (
     SCOPE_BUDGET,
 )
 from llm_tools.providers import (
+    kilo,
     kilo_cli,
     kilo_command_argv,
     kilo_currency,
@@ -280,6 +282,122 @@ def test_read_kilo_stats_query_is_bounded_to_mtd(env: dict[str, str], fake_bin: 
     assert int(argv[days_idx + 1]) == 3, argv
     balances = [s for s in snap.scopes if s.kind == CapacityKind.BALANCE]
     assert balances and balances[0].remaining_amount == pytest.approx(13.15)
+
+
+def test_read_kilo_exact_mtd_cost_uses_db_not_rolling_days(
+    env: dict[str, str], fake_bin: Path
+) -> None:
+    """The spend row must reflect the exact current-month total.
+
+    ``kilo stats --days N`` is a rolling last-N-days window. On July 4,
+    2026, ``--days 4`` includes part of June 30 and can overstate July
+    month-to-date spend. The reader therefore replaces the parsed
+    ``Total Cost`` with an exact sum from Kilo's local SQLite DB.
+    """
+    fake = fake_bin / "kilo"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('│Total Cost                  $37.33│')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    env["LLM_USAGE_NOW_EPOCH"] = "1783158240"  # 2026-07-04 09:44:00 UTC
+
+    kilo_dir = Path(env["HOME"]) / ".local" / "share" / "kilo"
+    kilo_dir.mkdir(parents=True, exist_ok=True)
+    db_path = kilo_dir / "kilo.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("create table session (time_created integer not null, cost real not null)")
+    # June 30 cost that should NOT leak into July MTD.
+    conn.execute(
+        "insert into session (time_created, cost) values (?, ?)",
+        (1782777600 * 1000, 4.93),  # 2026-06-30 00:00:00 UTC
+    )
+    # July 2-4 costs that SHOULD be summed.
+    conn.executemany(
+        "insert into session (time_created, cost) values (?, ?)",
+        [
+            (1782950400 * 1000, 11.33),  # 2026-07-02 00:00:00 UTC
+            (1783036800 * 1000, 5.52),   # 2026-07-03 00:00:00 UTC
+            (1783123200 * 1000, 15.55),  # 2026-07-04 00:00:00 UTC
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    snap = read_kilo(env)
+    balances = [s for s in snap.scopes if s.kind == CapacityKind.BALANCE]
+    assert balances
+    assert balances[0].remaining_amount == pytest.approx(32.40)
+    assert balances[0].extras.get("spent") is True
+    assert "kilo db" in balances[0].source
+
+
+def test_read_kilo_exact_mtd_cost_warns_and_falls_back_on_schema_mismatch(
+    env: dict[str, str], fake_bin: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = fake_bin / "kilo"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('│Total Cost                  $37.33│')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    kilo._KILO_DB_SCHEMA_WARNINGS_EMITTED.clear()
+
+    kilo_dir = Path(env["HOME"]) / ".local" / "share" / "kilo"
+    kilo_dir.mkdir(parents=True, exist_ok=True)
+    db_path = kilo_dir / "kilo.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("create table session (created_at integer not null, amount real not null)")
+    conn.commit()
+    conn.close()
+
+    snap = read_kilo(env)
+    balances = [s for s in snap.scopes if s.kind == CapacityKind.BALANCE]
+    assert balances
+    assert balances[0].remaining_amount == pytest.approx(37.33)
+    assert "kilo db" not in balances[0].source
+    captured = capsys.readouterr()
+    assert "warning: kilo db exact-MTD cost disabled" in captured.err
+    assert "time_created" in captured.err
+    assert "cost" in captured.err
+
+
+def test_read_kilo_source_omits_db_when_exact_cost_is_not_rendered(
+    env: dict[str, str], fake_bin: Path
+) -> None:
+    fake = fake_bin / "kilo"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "print('│Total Cost                  $37.33│')\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    env["PATH"] = str(fake_bin)
+    env["LLM_USAGE_KILO_BALANCE"] = "12.50"
+    env["LLM_USAGE_KILO_CURRENCY"] = "GBP"
+
+    kilo_dir = Path(env["HOME"]) / ".local" / "share" / "kilo"
+    kilo_dir.mkdir(parents=True, exist_ok=True)
+    db_path = kilo_dir / "kilo.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("create table session (time_created integer not null, cost real not null)")
+    conn.execute(
+        "insert into session (time_created, cost) values (?, ?)",
+        (1783123200 * 1000, 15.55),
+    )
+    conn.commit()
+    conn.close()
+
+    snap = read_kilo(env)
+    balances = [s for s in snap.scopes if s.kind == CapacityKind.BALANCE]
+    assert balances
+    assert balances[0].remaining_amount == pytest.approx(12.5)
+    assert snap.source == "kilo stats + env"
+    assert all("kilo db" not in scope.source for scope in snap.scopes)
 
 
 def test_read_kilo_spend_row_has_monthly_reset(env: dict[str, str], fake_bin: Path) -> None:
