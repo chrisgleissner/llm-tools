@@ -45,6 +45,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,8 @@ _UNGATED_LABEL = {
     "local": "local",
     "ungated": "unmetered",
 }
+
+_KILO_DB_SCHEMA_WARNINGS_EMITTED: set[str] = set()
 
 
 def kilo_cli(env: dict[str, str] | None = None) -> str | None:
@@ -281,6 +284,58 @@ def _month_start_epoch_from_env(env: dict[str, str]) -> int:
     return int(start.timestamp())
 
 
+def _warn_kilo_db_schema(path: Path, detail: str) -> None:
+    key = f"{path}:{detail}"
+    if key in _KILO_DB_SCHEMA_WARNINGS_EMITTED:
+        return
+    _KILO_DB_SCHEMA_WARNINGS_EMITTED.add(key)
+    print(
+        f"warning: kilo db exact-MTD cost disabled for {path}: {detail}; "
+        "falling back to kilo stats --days N",
+        file=sys.stderr,
+    )
+
+
+def _kilo_db_has_expected_schema(conn: sqlite3.Connection, path: Path) -> bool:
+    try:
+        rows = conn.execute("PRAGMA table_info(session)").fetchall()
+    except sqlite3.Error as exc:
+        _warn_kilo_db_schema(path, f"failed to inspect session schema ({exc})")
+        return False
+    if not rows:
+        _warn_kilo_db_schema(path, "missing session table")
+        return False
+    columns = {
+        str(row[1])
+        for row in rows
+        if isinstance(row, tuple) and len(row) > 1 and row[1] not in (None, "")
+    }
+    missing = sorted({"time_created", "cost"} - columns)
+    if missing:
+        _warn_kilo_db_schema(
+            path,
+            "session table is missing expected columns: " + ", ".join(missing),
+        )
+        return False
+    return True
+
+
+def _kilo_source_label(
+    *,
+    saw_stats: bool,
+    saw_env_overrides: bool,
+    rendered_db_cost: bool,
+) -> str:
+    parts: list[str] = []
+    if saw_stats:
+        parts.append("kilo stats + kilo db" if rendered_db_cost else "kilo stats")
+    if saw_env_overrides:
+        parts.append("env")
+    if not parts:
+        parts.append("kilo cli")
+    return " + ".join(parts)
+
+
 def _exact_kilo_mtd_cost(env: dict[str, str]) -> float | None:
     """Exact month-to-date session cost from Kilo's local SQLite store.
 
@@ -300,6 +355,8 @@ def _exact_kilo_mtd_cost(env: dict[str, str]) -> float | None:
     except sqlite3.Error:
         return None
     try:
+        if not _kilo_db_has_expected_schema(conn, path):
+            return None
         row = conn.execute(
             """
             SELECT ROUND(COALESCE(SUM(cost), 0), 2)
@@ -376,10 +433,18 @@ def _scopes_for_mode(
     env: dict[str, str],
 ) -> list[CapacityScope]:
     scopes: list[CapacityScope] = []
-    source_parts: list[str] = []
     stats = _run_kilo_stats(env)
+    has_env_overrides = any(
+        env.get(k)
+        for k in (
+            "LLM_USAGE_KILO_BALANCE",
+            "LLM_USAGE_KILO_CURRENCY",
+            "LLM_USAGE_KILO_MONTHLY_BUDGET",
+            "LLM_USAGE_KILO_MONTHLY_SPENT",
+        )
+    )
+    rendered_db_cost = False
     if stats is not None:
-        source_parts.append("kilo stats + kilo db" if stats.get("_exact_cost_from_db") else "kilo stats")
         if balance is None and stats.get("balance") is not None:
             balance = stats["balance"]
         if currency is None and stats.get("currency"):
@@ -388,14 +453,6 @@ def _scopes_for_mode(
             budget_total = stats["budget"]
         if budget_spent is None and stats.get("spent") is not None:
             budget_spent = stats["spent"]
-
-    # Always add the explicit env-vars source if anything was set, to make
-    # tests easy to read.
-    if any(env.get(k) for k in ("LLM_USAGE_KILO_BALANCE", "LLM_USAGE_KILO_CURRENCY", "LLM_USAGE_KILO_MONTHLY_BUDGET", "LLM_USAGE_KILO_MONTHLY_SPENT")):
-        source_parts.append("env")
-    if not source_parts:
-        source_parts.append("kilo cli")
-    source = " + ".join(source_parts)
 
     if mode in ("byok", "local", "ungated"):
         label = _UNGATED_LABEL[mode]
@@ -406,10 +463,16 @@ def _scopes_for_mode(
                 ready=True,
                 reason=mode,
                 label=label,
-                source=source,
+                source="",
                 extras={"mode": mode, "cli": kilo_cli(env) or ""},
             )
         )
+        source = _kilo_source_label(
+            saw_stats=stats is not None,
+            saw_env_overrides=has_env_overrides,
+            rendered_db_cost=False,
+        )
+        scopes[0].source = source
         return scopes
 
     if budget_total is not None and budget_total > 0:
@@ -428,7 +491,7 @@ def _scopes_for_mode(
                 currency=currency,
                 reset_epoch=reset_epoch,
                 resets_at=reset_epoch,
-                source=source,
+                source="",
             )
         )
 
@@ -439,7 +502,7 @@ def _scopes_for_mode(
                 kind=CapacityKind.BALANCE,
                 remaining_amount=balance,
                 currency=currency,
-                source=source,
+                source="",
             )
         )
 
@@ -456,6 +519,7 @@ def _scopes_for_mode(
         and balance is None
         and not any(s.kind == CapacityKind.BUDGET for s in scopes)
     ):
+        rendered_db_cost = bool(stats and stats.get("_exact_cost_from_db"))
         cost_currency = currency or (stats.get("currency") if stats else None)
         scopes.append(
             CapacityScope(
@@ -464,10 +528,18 @@ def _scopes_for_mode(
                 remaining_amount=float(cost),
                 currency=cost_currency,
                 reset_epoch=common.next_month_epoch_from_env(env),
-                source=source,
+                source="",
                 extras={"spent": True, "period": "mtd"},
             )
         )
+
+    source = _kilo_source_label(
+        saw_stats=stats is not None,
+        saw_env_overrides=has_env_overrides,
+        rendered_db_cost=rendered_db_cost,
+    )
+    for scope in scopes:
+        scope.source = source
 
     if not scopes:
         scopes.append(

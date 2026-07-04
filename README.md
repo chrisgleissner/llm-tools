@@ -849,7 +849,7 @@ Kilo is configured primarily through environment variables, so it can be driven 
 | `LLM_USAGE_KILO_MONTHLY_SPENT`     | Amount already spent in this budget period.                               |
 | `LLM_USAGE_KILO_MONTHLY_RESET_DAY` | Day of month the budget resets. Default: `1`.                             |
 
-When `kilo` is on `PATH`, `llm-usage` and `llm-scheduler` try `kilo stats` first. JSON and text output are supported. If that fails or cannot be parsed, they fall back to the environment variables above. For the monetary `spend` row specifically, `llm-tools` replaces Kilo's rolling `--days N` approximation with an exact month-to-date sum from Kilo's local `kilo.db`, so the surfaced July spend is July 1..now rather than "the last N days" bleeding across the month boundary.
+When `kilo` is on `PATH`, `llm-usage` and `llm-scheduler` try `kilo stats` first. JSON and text output are supported. If that fails or cannot be parsed, they fall back to the environment variables above. For the monetary `spend` row specifically, `llm-tools` replaces Kilo's rolling `--days N` approximation with an exact month-to-date sum from Kilo's local `kilo.db`, so the surfaced July spend is July 1..now rather than "the last N days" bleeding across the month boundary. That exact override currently expects Kilo's local SQLite schema to expose `session.time_created` (milliseconds since epoch) and `session.cost`; if a future Kilo release changes that schema, `llm-tools` warns on stderr once and falls back to the `kilo stats --days N` approximation instead of silently claiming an exact MTD figure.
 
 With `--scope auto`, Kilo prefers:
 
