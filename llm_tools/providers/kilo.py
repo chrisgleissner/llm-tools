@@ -43,9 +43,11 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from .. import common
@@ -267,6 +269,54 @@ def _first(obj: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
+def _kilo_db_path(env: dict[str, str]) -> Path:
+    home = env.get("HOME") or os.path.expanduser("~")
+    return Path(home) / ".local" / "share" / "kilo" / "kilo.db"
+
+
+def _month_start_epoch_from_env(env: dict[str, str]) -> int:
+    now = common.now_epoch(env)
+    dt = datetime.fromtimestamp(now, tz=timezone.utc)
+    start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int(start.timestamp())
+
+
+def _exact_kilo_mtd_cost(env: dict[str, str]) -> float | None:
+    """Exact month-to-date session cost from Kilo's local SQLite store.
+
+    ``kilo stats --days N`` is a rolling last-N-days window, which can bleed
+    across the month boundary (for example July 4 includes part of June 30).
+    The local DB lets us sum the current calendar month's session costs
+    exactly, so the spend row and bottom total reflect the real month-to-date
+    figure rather than an approximation.
+    """
+    path = _kilo_db_path(env)
+    if not path.is_file():
+        return None
+    start_ms = _month_start_epoch_from_env(env) * 1000
+    end_ms = common.next_month_epoch_from_env(env) * 1000
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT ROUND(COALESCE(SUM(cost), 0), 2)
+            FROM session
+            WHERE time_created >= ? AND time_created < ?
+            """,
+            (start_ms, end_ms),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return _parse_balance(row[0])
+
+
 def _run_kilo_stats(env: dict[str, str]) -> dict[str, Any] | None:
     cli = kilo_cli(env)
     if not cli:
@@ -293,8 +343,16 @@ def _run_kilo_stats(env: dict[str, str]) -> dict[str, Any] | None:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return _parse_kilo_stats_text(text)
-    return _parse_kilo_stats_payload(payload)
+        out = _parse_kilo_stats_text(text)
+    else:
+        out = _parse_kilo_stats_payload(payload)
+    if out is None:
+        return None
+    exact_cost = _exact_kilo_mtd_cost(env)
+    if exact_cost is not None:
+        out["cost"] = exact_cost
+        out["_exact_cost_from_db"] = True
+    return out
 
 
 def _balance_from_env(env: dict[str, str]) -> float | None:
@@ -321,7 +379,7 @@ def _scopes_for_mode(
     source_parts: list[str] = []
     stats = _run_kilo_stats(env)
     if stats is not None:
-        source_parts.append("kilo stats")
+        source_parts.append("kilo stats + kilo db" if stats.get("_exact_cost_from_db") else "kilo stats")
         if balance is None and stats.get("balance") is not None:
             balance = stats["balance"]
         if currency is None and stats.get("currency"):
