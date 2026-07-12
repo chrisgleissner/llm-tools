@@ -210,6 +210,57 @@ def test_codex_active_refresh_overrides_stale_local_snapshot(env: dict[str, str]
     assert {s.name for s in snap.scopes} == {"5h", "weekly"}
 
 
+# Newer Codex app-server payloads collapse the two-window model into a single
+# weekly window surfaced as ``primary`` (windowDurationMins=10080) with
+# ``secondary`` null. The reader must classify by the window's actual
+# duration so the weekly data point is not lost (and not mislabelled as 5h).
+CODEX_WEEKLY_ONLY_PAYLOAD = (
+    '{"rateLimits":{"limitId":"codex","planType":"plus",'
+    '"primary":{"usedPercent":1,"windowDurationMins":10080,"resetsAt":9000},'
+    '"secondary":null,'
+    '"credits":{"hasCredits":false,"unlimited":false,"balance":"0E-10"},'
+    '"planType":"plus"},'
+    '"rateLimitsByLimitId":{'
+    '"codex":{"primary":{"usedPercent":1,"windowDurationMins":10080,"resetsAt":9000},"secondary":null}},'
+    '"rateLimitResetCredits":{"availableCount":2}}'
+)
+
+
+def test_codex_weekly_only_payload_classifies_by_duration(env: dict[str, str]) -> None:
+    live_env = env | {
+        "LLM_USAGE_NOW_EPOCH": "2000",
+        "LLM_USAGE_CODEX_RATE_LIMITS_JSON": CODEX_WEEKLY_ONLY_PAYLOAD,
+    }
+    raw = codex.read_codex(live_env)
+    assert raw is not None
+    assert raw.get("available") is not False
+    # The single 10080-minute window must land in the weekly bucket, not 5h.
+    assert raw.get("five_hour") is None
+    assert raw["week"]["used"] == 1.0
+    snap = codex.read(live_env)
+    assert snap.available is True
+    assert {s.name for s in snap.scopes} == {"weekly"}
+    weekly = next(s for s in snap.scopes if s.name == "weekly")
+    assert weekly.remaining_percent == 99.0
+
+
+def test_codex_weekly_only_rows_skip_missing_5h_scope(env: dict[str, str]) -> None:
+    """A Codex plan with only a weekly window must not emit a phantom 5h row
+    that gates readiness to ``no`` with no data."""
+    live_env = env | {
+        "LLM_USAGE_NOW_EPOCH": "2000",
+        "LLM_USAGE_CODEX_RATE_LIMITS_JSON": CODEX_WEEKLY_ONLY_PAYLOAD,
+    }
+    cfg = usage.Config()
+    cfg.color_enabled = False
+    raw = codex.read_codex(live_env)
+    rows = usage.codex_rows(cfg, raw)
+    scopes = [r.scope for r in rows]
+    assert "5h" not in scopes
+    assert "weekly" in scopes
+    assert usage.provider_ready(rows, "Codex") is True
+
+
 def test_codex_active_refresh_reports_not_authenticated(env: dict[str, str], fake_bin: Path) -> None:
     """A CLI on PATH but no credentials surfaces an auth reason, not stale data."""
     from .conftest import write_exe

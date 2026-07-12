@@ -467,25 +467,53 @@ def normalize_codex_obj(obj: Any, source: str) -> dict[str, Any] | None:
     if not isinstance(rl, dict):
         return None
 
+    # Codex historically labelled the short (5h) window ``primary`` and the
+    # long (weekly) window ``secondary``. Newer app-server payloads collapse
+    # to a single weekly window surfaced as ``primary`` with ``secondary``
+    # null, so classifying by the ``primary``/``secondary`` name alone
+    # mislabels the weekly window as 5h and loses the weekly data point.
+    # Classify by the window's actual duration (``windowDurationMins`` /
+    # ``window_minutes``) when present, falling back to the
+    # primary→5h / secondary→weekly naming convention for payloads that omit
+    # the duration (e.g. the ``rateLimitsByLimitId`` view or legacy local
+    # session files).
+    _SHORT_WINDOW_KEYS = ("primary", "five_hour", "fiveHour", "primary_window")
+    _LONG_WINDOW_KEYS = (
+        "secondary",
+        "week",
+        "weekly",
+        "seven_day",
+        "sevenDay",
+        "secondary_window",
+    )
+
     def as_row(name: str, key: str, row_obj: Any) -> dict[str, Any] | None:
         if not isinstance(row_obj, dict):
             return None
-        primary = (
-            row_obj.get("primary")
-            or row_obj.get("five_hour")
-            or row_obj.get("fiveHour")
-            or row_obj.get("primary_window")
-        )
-        secondary = (
-            row_obj.get("secondary")
-            or row_obj.get("week")
-            or row_obj.get("weekly")
-            or row_obj.get("seven_day")
-            or row_obj.get("sevenDay")
-            or row_obj.get("secondary_window")
-        )
-        five = window_from(primary, 300) if isinstance(primary, dict) else None
-        week = window_from(secondary, 10080) if isinstance(secondary, dict) else None
+
+        def duration_minutes(win: Any) -> float | None:
+            if not isinstance(win, dict):
+                return None
+            return num(win.get("window_minutes", win.get("windowDurationMins")))
+
+        five: dict[str, Any] | None = None
+        week: dict[str, Any] | None = None
+        seen: set[int] = set()
+        for src_key in _SHORT_WINDOW_KEYS + _LONG_WINDOW_KEYS:
+            win = row_obj.get(src_key)
+            if not isinstance(win, dict) or id(win) in seen:
+                continue
+            seen.add(id(win))
+            minutes = duration_minutes(win)
+            if minutes is not None and minutes > 0:
+                if minutes <= 600 and five is None:
+                    five = window_from(win, 300)
+                elif minutes >= 4320 and week is None:
+                    week = window_from(win, 10080)
+            elif src_key in _SHORT_WINDOW_KEYS and five is None:
+                five = window_from(win, 300)
+            elif src_key in _LONG_WINDOW_KEYS and week is None:
+                week = window_from(win, 10080)
         if five is None and week is None:
             return None
         return {"key": key, "name": name, "source": source, "five_hour": five, "week": week}
