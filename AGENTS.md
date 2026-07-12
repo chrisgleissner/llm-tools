@@ -105,6 +105,8 @@ Prefer changing the smallest relevant function surface. Preserve existing functi
 
 Read local JSONL under `~/.codex/sessions`. Keep selectors tolerant of `rate_limits`, `rateLimits`, `msg`, and `payload` shapes. Keep bounded scans through `LLM_USAGE_MAX_FILES` and `LLM_USAGE_TAIL_LINES`.
 
+The app-server `account/rateLimits/read` payload historically carried a 5h window as `primary` (`windowDurationMins: 300`) and a weekly window as `secondary` (`windowDurationMins: 10080`). Newer payloads collapse to a single weekly window surfaced as `primary` with `secondary` null, so `normalize_codex_obj` classifies each candidate window by its actual `windowDurationMins` / `window_minutes` (≤ 600 min → 5h, ≥ 4320 min → weekly) and only falls back to the `primary`→5h / `secondary`→weekly naming convention when the duration is absent (legacy local files, the `rateLimitsByLimitId` view). `codex_rows` only emits a row for a scope whose window dict exists, so a plan with only a weekly window does not produce a phantom 5h row that would gate readiness to `no`.
+
 ### Claude Code
 
 Preserve fallback order: API/cache/statusline/local project data. `--statusline` must keep caching stdin JSON for later use. API failure must fall back cleanly.

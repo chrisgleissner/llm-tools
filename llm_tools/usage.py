@@ -1229,17 +1229,19 @@ def codex_rows(cfg: Config, codex_json: dict[str, Any] | None) -> list[UsageRow]
     rows = codex_json.get("rows") if isinstance(codex_json.get("rows"), list) else []
     if not rows:
         source = codex_json.get("source", "")
-        five_used = (codex_json.get("five_hour") or {}).get("used")
-        week_used = (codex_json.get("week") or {}).get("used")
-        five_remaining = common.remaining_from_used(five_used)
-        week_remaining = common.remaining_from_used(week_used)
-        common.log_usage_sample("Codex", "5h", five_remaining)
-        common.log_usage_sample("Codex", "weekly", week_remaining)
-        return [
-            row_from_used(cfg, "Codex", "5h", five_used, (codex_json.get("five_hour") or {}).get("resets_at"), source),
-            row_from_used(cfg, "Codex", "weekly", week_used, (codex_json.get("week") or {}).get("resets_at"), source),
-        ]
-    out: list[UsageRow] = []
+        five = codex_json.get("five_hour")
+        week = codex_json.get("week")
+        five_used = (five or {}).get("used") if isinstance(five, dict) else None
+        week_used = (week or {}).get("used") if isinstance(week, dict) else None
+        common.log_usage_sample("Codex", "5h", common.remaining_from_used(five_used))
+        common.log_usage_sample("Codex", "weekly", common.remaining_from_used(week_used))
+        out: list[UsageRow] = []
+        if isinstance(five, dict):
+            out.append(row_from_used(cfg, "Codex", "5h", five_used, five.get("resets_at"), source))
+        if isinstance(week, dict):
+            out.append(row_from_used(cfg, "Codex", "weekly", week_used, week.get("resets_at"), source))
+        return out
+    out = []
     for row in rows:
         key = row.get("key", "codex")
         provider = row.get("name", "Codex")
@@ -1251,12 +1253,16 @@ def codex_rows(cfg: Config, codex_json: dict[str, Any] | None) -> list[UsageRow]
         # of overflowing the Provider column with a long combined name.
         model = "Spark" if is_spark else ""
         source = row.get("source") or codex_json.get("source", "")
-        five_used = (row.get("five_hour") or {}).get("used")
-        week_used = (row.get("week") or {}).get("used")
+        five = row.get("five_hour")
+        week = row.get("week")
+        five_used = (five or {}).get("used") if isinstance(five, dict) else None
+        week_used = (week or {}).get("used") if isinstance(week, dict) else None
         common.log_usage_sample(provider, "5h", common.remaining_from_used(five_used))
         common.log_usage_sample(provider, "weekly", common.remaining_from_used(week_used))
-        out.append(row_from_used(cfg, provider, "5h", five_used, (row.get("five_hour") or {}).get("resets_at"), source, "Codex", model=model))
-        out.append(row_from_used(cfg, provider, "weekly", week_used, (row.get("week") or {}).get("resets_at"), source, "Codex", model=model))
+        if isinstance(five, dict):
+            out.append(row_from_used(cfg, provider, "5h", five_used, five.get("resets_at"), source, "Codex", model=model))
+        if isinstance(week, dict):
+            out.append(row_from_used(cfg, provider, "weekly", week_used, week.get("resets_at"), source, "Codex", model=model))
     return out
 
 
