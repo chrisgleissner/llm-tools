@@ -261,7 +261,12 @@ def model_block_key(provider: str, model: str) -> str:
     successful run).
     """
     def _safe(text: str) -> str:
-        return "".join(c for c in text if c.isalnum() or c in ("-", "_", ".")) or "x"
+        # Map path separators (``/``) to ``.`` so a model id like
+        # ``kilo/minimax/minimax-m3`` becomes ``kilo.minimax.minimax-m3`` in
+        # the block-store key — the same form already used by route ids,
+        # and a form that fits cleanly in a flat filename.
+        cleaned = text.replace("/", ".")
+        return "".join(c for c in cleaned if c.isalnum() or c in ("-", "_", ".")) or "x"
 
     return f"model__{_safe(provider)}__{_safe(model)}"
 
@@ -428,6 +433,29 @@ def _apply_local_block_override(
         }
     )
     decision["exhausted"] = exhausted
+    # Drop the original positive-capacity windows / scopes so downstream
+    # renderers (``decision_summary`` in ``llm_tools/ralph_robin.py``,
+    # ``usage_prefix_text`` in ``llm_tools/common.py``, ``route_to_json``)
+    # cannot surface stale "5h=50% week=80%" alongside ``available=False``.
+    # Replace them with a single synthetic blocked scope mirroring the
+    # opaque path's ``opaque_scope_for_route`` shape.
+    decision["windows"] = []
+    blocked_scope = {
+        "name": "runtime-block",
+        "kind": "opaque",
+        "ready": False,
+        "remaining_percent": None,
+        "reset_epoch": wait_until,
+        "reason": reason,
+        "source": f"runtime-block:{route.route_id}",
+        "extras": {
+            "route_id": route.route_id,
+            "provider": route.provider,
+            "model": route.model or "",
+            "blocked_reason": reason,
+        },
+    }
+    snapshot["scopes"] = [blocked_scope]
     return snapshot, decision
 
 

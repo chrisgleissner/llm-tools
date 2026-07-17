@@ -2034,6 +2034,23 @@ def test_delegate_route_block_makes_route_not_usable(
     assert dec["reason"] == "credit-exhausted"
     assert isinstance(dec["wait_until"], int)
     assert snap["available"] is False
+    assert dec["windows"] == []
+    assert snap["scopes"] == [{
+        "name": "runtime-block",
+        "kind": "opaque",
+        "ready": False,
+        "remaining_percent": None,
+        "reset_epoch": 1600,
+        "reason": "credit-exhausted",
+        "source": "runtime-block:opencode-claude",
+        "extras": {
+            "route_id": "opencode-claude",
+            "provider": "opencode",
+            "model": "",
+            "blocked_reason": "credit-exhausted",
+        },
+    }]
+    assert routes.route_to_json(snap)["scopes"][0]["ready"] is False
     # Clearing the block restores usability.
     routes.clear_local_block("opencode-claude")
     snap, dec = routes.usage_snapshot_and_decision_for_route(route, "auto", "1", "60")
@@ -2201,7 +2218,7 @@ def test_select_route_rotates_away_from_credit_blocked_route(
     monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(block_dir))
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
 
-    def route_decision_for(rid):
+    def route_decision_for(cfg, rid):
         # Simulate: kilo-minimax-m3 is credit-blocked (its model is spent);
         # kilo-zai-glm-52 is usable.
         if rid == "kilo-minimax-m3":
@@ -2252,4 +2269,3 @@ def test_select_route_rotates_away_from_credit_blocked_route(
     sel = ralph_robin.select_route(rc, logs, current_index=0, skipped=set())
     assert sel["route"] == "kilo-zai-glm-52"
     assert sel["provider"] == "kilo"
-

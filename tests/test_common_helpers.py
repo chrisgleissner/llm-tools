@@ -303,8 +303,8 @@ def test_credit_exhausted_detects_kilo_payment_required() -> None:
 
 def test_credit_exhausted_detects_individual_signatures() -> None:
     assert common.output_signals_credit_exhausted('{"error_type":"usage_limit_exceeded"}') is True
-    assert common.output_signals_credit_exhausted("Low Credit Warning!") is True
-    assert common.output_signals_credit_exhausted("Add credits to continue, or switch to a free model") is True
+    assert common.output_signals_credit_exhausted('{"low_credit": true}') is True
+    assert common.output_signals_credit_exhausted('{"message":"Add credits to continue"}') is True
     # Payment Required only counts when followed by a JSON body.
     assert common.output_signals_credit_exhausted('Payment Required: {"error": "x"}') is True
 
@@ -314,7 +314,8 @@ def test_credit_exhausted_ignores_model_prose() -> None:
     # real gateway 402 envelope. Bare "Payment Required" without a JSON body
     # does not match (the brace-window guard).
     assert common.output_signals_credit_exhausted("the endpoint returns Payment Required when funds are low") is False
-    assert common.output_signals_credit_exhausted("we should add credits to the billing flow") is False
+    assert common.output_signals_credit_exhausted("the user has a low credit rating") is False
+    assert common.output_signals_credit_exhausted("we should add credits to continue using this service") is False
     assert common.output_signals_credit_exhausted("") is False
     assert common.output_signals_credit_exhausted("normal agent output, no errors here") is False
 
@@ -325,4 +326,3 @@ def test_credit_exhausted_does_not_change_output_is_retryable() -> None:
     # so the existing contract holds (a clean exit is trusted for everything
     # except the explicit credit envelope).
     assert common.output_is_retryable(0, '{"error_type":"usage_limit_exceeded"}', trust_clean_exit=True) is False
-

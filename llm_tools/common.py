@@ -3631,18 +3631,29 @@ def output_is_retryable(status: int, output: str, attached: bool = False, trust_
 # balance is still positive. The launch CLI prints the structured error
 # envelope and exits 0, so without acting on it ralph-robin re-selects the same
 # route/model every few seconds forever (the capacity reader still reports the
-# gateway balance as usable). Every token here is a machine error envelope or
-# gateway-specific JSON field, never a model's prose about the system under
-# test, so these are safe to act on without the trust_clean_exit guard.
+# gateway balance as usable).
+#
+# Every alternative either matches a machine token that cannot occur in agent
+# prose (``usage_limit_exceeded``, ``buycreditsurl``) or is wrapped in a JSON
+# envelope guard: the loose literal phrases ``low credit`` / ``add credits to
+# continue`` only count when sandwiched between ``{`` and ``}`` within a 200-char
+# window on each side, and ``payment required`` only when immediately followed
+# by a JSON ``{`` body. So these patterns cannot be tripped by a model's own
+# prose about the system under test (e.g. "low credit rating", "add credits to
+# continue using this service", or a paragraph that mentions a payment API).
 CREDIT_EXHAUSTED_RE = re.compile(
     r"usage_limit_exceeded"
-    r"|low[ _-]?credit"
-    r"|add credits to continue"
     r"|buycreditsurl"
     # "Payment Required" only counts when immediately followed by a JSON body,
     # so a model discussing a payment API in prose ("returns Payment Required")
     # is not mistaken for a real gateway 402 envelope.
-    r"|payment required[^{]{0,80}\{",
+    r"|payment required[^{]{0,80}\{"
+    # Loose literal phrases only count when wrapped inside a JSON object
+    # (``{...low credit...}`` / ``{...add credits to continue...}``). Agent
+    # prose mentioning the same phrases is not enclosed in braces and is
+    # therefore ignored.
+    r"|\{[^{}]{0,200}low[ _-]?credit[^{}]{0,200}\}"
+    r"|\{[^{}]{0,200}add credits to continue[^{}]{0,200}\}",
     re.I,
 )
 
@@ -3656,9 +3667,10 @@ def output_signals_credit_exhausted(output: str) -> bool:
     specific prepaid model (e.g. ``kilo/minimax/minimax-m3``) is out of
     credit, so the CLI prints
     ``Payment Required: {"error_type": "usage_limit_exceeded", ...}`` and
-    returns 0. The patterns matched are structured error envelopes and
-    gateway-specific JSON fields, so they cannot be tripped by a model's own
-    prose about the system under test.
+    returns 0. Loose literal phrases (``low credit``, ``add credits to
+    continue``) only count when they appear inside a JSON object, so model
+    prose such as "low credit rating" or "add credits to continue using this
+    service" cannot trip a rotation.
     """
     if not output:
         return False
