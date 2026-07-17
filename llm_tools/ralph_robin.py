@@ -1352,7 +1352,11 @@ def effective_model_for(cfg: RalphConfig, provider: str, decision: dict[str, Any
     In legacy provider mode (no route) returns the provider policy's pinned
     model, except when fallback is allowed and the pinned model's own limit is
     exhausted — then it drops the pin (empty string) so the provider CLI picks
-    an available model.
+    an available model. A runtime credit exhaustion recorded by the scheduler
+    (:func:`llm_tools.scheduler._record_model_runtime_block`) is treated the
+    same way: while that model's block is active and fallback is allowed, the
+    pin is dropped so the CLI does not keep launching a model the gateway has
+    already rejected for insufficient prepaid credit.
     """
     if route_id and route_id in cfg.route_policies:
         route = cfg.route_policies[route_id]
@@ -1364,9 +1368,16 @@ def effective_model_for(cfg: RalphConfig, provider: str, decision: dict[str, Any
     policy = cfg.policies.get(provider)
     if policy is None or not policy.model:
         return ""
-    if policy.allow_fallback and decision.get("model_exhausted"):
+    if policy.allow_fallback and (decision.get("model_exhausted") or _model_pin_blocked(provider, policy.model)):
         return ""
     return policy.model
+
+
+def _model_pin_blocked(provider: str, model: str) -> bool:
+    """Whether a provider+model pin has an active runtime credit block."""
+    from . import routes
+
+    return routes.is_model_blocked(provider, model)
 
 
 def prefix_fields_for_scheduler(cfg: RalphConfig, selected_model: str) -> list[str]:

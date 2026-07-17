@@ -284,3 +284,45 @@ def test_is_integer_rejects() -> None:
     assert common.is_integer("3.14") is False
     assert common.is_integer("") is False
     assert common.is_integer("abc") is False
+
+
+# --- output_signals_credit_exhausted -----------------------------------------
+
+
+def test_credit_exhausted_detects_kilo_payment_required() -> None:
+    # The exact Kilo gateway envelope the bug report showed: the CLI exits 0
+    # but prints a structured Payment Required / usage_limit_exceeded error.
+    payload = (
+        'Error: Payment Required: {"error":{"title":"Low Credit Warning!",'
+        '"message":"Add credits to continue, or switch to a free model",'
+        '"balance":-0.007525,"buyCreditsUrl":"https://app.kilo.ai/profile"},'
+        '"error_type":"usage_limit_exceeded"}'
+    )
+    assert common.output_signals_credit_exhausted(payload) is True
+
+
+def test_credit_exhausted_detects_individual_signatures() -> None:
+    assert common.output_signals_credit_exhausted('{"error_type":"usage_limit_exceeded"}') is True
+    assert common.output_signals_credit_exhausted("Low Credit Warning!") is True
+    assert common.output_signals_credit_exhausted("Add credits to continue, or switch to a free model") is True
+    # Payment Required only counts when followed by a JSON body.
+    assert common.output_signals_credit_exhausted('Payment Required: {"error": "x"}') is True
+
+
+def test_credit_exhausted_ignores_model_prose() -> None:
+    # A model discussing a payment API in prose must NOT be mistaken for a
+    # real gateway 402 envelope. Bare "Payment Required" without a JSON body
+    # does not match (the brace-window guard).
+    assert common.output_signals_credit_exhausted("the endpoint returns Payment Required when funds are low") is False
+    assert common.output_signals_credit_exhausted("we should add credits to the billing flow") is False
+    assert common.output_signals_credit_exhausted("") is False
+    assert common.output_signals_credit_exhausted("normal agent output, no errors here") is False
+
+
+def test_credit_exhausted_does_not_change_output_is_retryable() -> None:
+    # The credit signal is acted on in submit_once BEFORE the trust_clean_exit
+    # guard; output_is_retryable itself stays prose-blind under trust_clean_exit
+    # so the existing contract holds (a clean exit is trusted for everything
+    # except the explicit credit envelope).
+    assert common.output_is_retryable(0, '{"error_type":"usage_limit_exceeded"}', trust_clean_exit=True) is False
+
