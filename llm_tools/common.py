@@ -3613,9 +3613,68 @@ def output_is_retryable(status: int, output: str, attached: bool = False, trust_
     # output for rate-limit-ish words then double-counts the SYSTEM UNDER TEST's
     # prose (e.g. "the device was overloaded") as a provider failure, which is
     # what previously re-ran the same work and finally killed the loop.
+    #
+    # The one deliberate exception is a gateway CREDIT EXHAUSTION (see
+    # ``output_signals_credit_exhausted``), which is acted on in ``submit_once``
+    # *before* this trust guard runs. ``output_is_retryable`` itself stays
+    # prose-blind here so the trust-clean-exit contract holds for everything
+    # except that explicit, structured gateway error envelope.
     if trust_clean_exit:
         return False
     return bool(PROVIDER_RATE_LIMIT_RE.search(output))
+
+
+# Gateway / API credit-exhaustion signatures. Unlike ``PROVIDER_RATE_LIMIT_RE``
+# above, these are checked EVEN on a clean (status 0) exit, because a gateway
+# such as Kilo can report a per-model prepaid credit exhaustion (HTTP 402
+# "Payment Required", error_type "usage_limit_exceeded") while the gateway's own
+# balance is still positive. The launch CLI prints the structured error
+# envelope and exits 0, so without acting on it ralph-robin re-selects the same
+# route/model every few seconds forever (the capacity reader still reports the
+# gateway balance as usable).
+#
+# Every alternative either matches a machine token that cannot occur in agent
+# prose (``usage_limit_exceeded``, ``buycreditsurl``) or is wrapped in a JSON
+# envelope guard: the loose literal phrases ``low credit`` / ``add credits to
+# continue`` only count when sandwiched between ``{`` and ``}`` within a 200-char
+# window on each side, and ``payment required`` only when immediately followed
+# by a JSON ``{`` body. So these patterns cannot be tripped by a model's own
+# prose about the system under test (e.g. "low credit rating", "add credits to
+# continue using this service", or a paragraph that mentions a payment API).
+CREDIT_EXHAUSTED_RE = re.compile(
+    r"usage_limit_exceeded"
+    r"|buycreditsurl"
+    # "Payment Required" only counts when immediately followed by a JSON body,
+    # so a model discussing a payment API in prose ("returns Payment Required")
+    # is not mistaken for a real gateway 402 envelope.
+    r"|payment required[^{]{0,80}\{"
+    # Loose literal phrases only count when wrapped inside a JSON object
+    # (``{...low credit...}`` / ``{...add credits to continue...}``). Agent
+    # prose mentioning the same phrases is not enclosed in braces and is
+    # therefore ignored.
+    r"|\{[^{}]{0,200}low[ _-]?credit[^{}]{0,200}\}"
+    r"|\{[^{}]{0,200}add credits to continue[^{}]{0,200}\}",
+    re.I,
+)
+
+
+def output_signals_credit_exhausted(output: str) -> bool:
+    """True when provider output carries a gateway credit/payment-exhaustion
+    error envelope, meaning the route's (or pinned model's) entitlement is
+    spent — even when the launch CLI exited 0.
+
+    Kilo is the canonical case: the gateway balance stays positive while a
+    specific prepaid model (e.g. ``kilo/minimax/minimax-m3``) is out of
+    credit, so the CLI prints
+    ``Payment Required: {"error_type": "usage_limit_exceeded", ...}`` and
+    returns 0. Loose literal phrases (``low credit``, ``add credits to
+    continue``) only count when they appear inside a JSON object, so model
+    prose such as "low credit rating" or "add credits to continue using this
+    service" cannot trip a rotation.
+    """
+    if not output:
+        return False
+    return bool(CREDIT_EXHAUSTED_RE.search(output))
 
 
 # Fields that may appear, in any combination and order, inside the `[ ]` marker

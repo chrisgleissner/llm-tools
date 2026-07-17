@@ -99,6 +99,27 @@ def test_ralph_apply_config_respects_explicit_cli_flag(
     assert cfg.even_burn is False
 
 
+def test_ralph_explicit_providers_disable_configured_route_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``-P codex`` must not retain configured Kilo routes and launch Kilo."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    _write_config(
+        tmp_path / "xdg",
+        """
+        [ralph]
+        routes = ["kilo-minimax-m3", "kilo-zai-glm-52"]
+        """,
+    )
+    cfg = ralph_robin.parse_args(["-P", "codex", "-p", "x"])
+    ralph_robin.apply_config(cfg)
+    ralph_robin.validate_args(cfg)
+    assert cfg.providers == ["codex"]
+    assert cfg.routes == []
+    assert cfg.route_policies == {}
+
+
 def test_ralph_resolve_policies_loads_per_provider_blocks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

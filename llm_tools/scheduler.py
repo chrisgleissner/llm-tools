@@ -1222,11 +1222,37 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
         if cfg.route_id:
             _record_route_runtime_block_autonomy(cfg, logs, output)
         return common.AUTONOMY_ABORT_STATUS
+    # Gateway credit/payment exhaustion can surface on a CLEAN (status 0)
+    # exit: a gateway such as Kilo keeps a positive aggregate balance while a
+    # specific prepaid model (e.g. kilo/minimax/minimax-m3) is out of credit,
+    # so the CLI prints ``Payment Required: {"error_type":
+    # "usage_limit_exceeded"}`` and returns 0. Detect that structured error
+    # envelope here — BEFORE the trust_clean_exit guard — and treat it as a
+    # route/model capacity exhaustion instead of a successful increment.
+    # Otherwise ralph-robin re-selects the same route/model every few seconds
+    # forever, because the capacity reader still reports the gateway balance
+    # as usable. Returning AUTONOMY_ABORT_STATUS makes ralph rotate away (and
+    # skip retries on the same exhausted model).
+    if common.output_signals_credit_exhausted(output):
+        if cfg.route_id:
+            _record_route_runtime_block(cfg, logs, output, reason="credit-exhausted")
+        elif cfg.model and cfg.provider:
+            _record_model_runtime_block(cfg, logs, output)
+        common.log_event(
+            logs,
+            "credit_exhausted",
+            {"route": cfg.route_id, "provider": cfg.provider, "model": cfg.model, "attempt": attempt},
+        )
+        return common.AUTONOMY_ABORT_STATUS
     retryable = common.output_is_retryable(status, output, cfg.attached, trust_clean_exit=cfg.ralph_robin_active)
     # A clean exit on a route is a real successful increment; the
     # route's local block (if any) is no longer needed.
     if status == 0 and cfg.route_id:
         clear_route_runtime_block(cfg.route_id)
+    # A clean exit with a pinned model in provider mode also clears any
+    # stale model runtime block — the model is working again.
+    if status == 0 and not cfg.route_id and cfg.model and cfg.provider:
+        clear_model_runtime_block(cfg.provider, cfg.model)
     # When the route is opaque, a real provider-runtime failure is the
     # only signal we get. Record a local block so the orchestrator
     # (ralph) stops selecting the route until the retry window passes.
@@ -1235,7 +1261,7 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     return 1 if retryable else 0
 
 
-def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, output: str) -> None:
+def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, output: str, *, reason: str = "runtime-failure") -> None:
     """Persist a local block for ``cfg.route_id`` when the provider
     returned a retryable runtime failure.
 
@@ -1243,10 +1269,11 @@ def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, outp
     hint in the output (``retry-after``, ``retry in Xm``, ``reset in
     Xh``); when no hint is present we use the route's
     :func:`routes.default_backoff_seconds`. A successful run clears
-    the block via :func:`clear_route_runtime_block`. Blocks are
-    recorded for any route id, but only opaque routes consult the
-    block ledger in their decision path — for non-opaque routes the
-    block file exists but has no effect on scheduling.
+    the block via :func:`clear_route_runtime_block`. The block is now
+    consulted by every capacity policy (not only opaque) via
+    :func:`routes._apply_local_block_override`, so a delegate / balance
+    route whose pinned model runs out of prepaid credit is rotated
+    away from instead of re-selected forever.
     """
     from . import routes
 
@@ -1255,7 +1282,7 @@ def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, outp
     blocked_until = common.now_epoch() + (retry_after if retry_after is not None else backoff)
     routes.record_local_block(
         cfg.route_id,
-        reason="runtime-failure",
+        reason=reason,
         blocked_until=blocked_until,
         last_message=output[:2000],
         backoff_seconds=backoff,
@@ -1266,7 +1293,45 @@ def _record_route_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, outp
         {
             "route": cfg.route_id,
             "blocked_until": blocked_until,
-            "reason": "runtime-failure",
+            "reason": reason,
+        },
+    )
+
+
+def _record_model_runtime_block(cfg: SchedulerConfig, logs: common.RunLogs, output: str) -> None:
+    """Persist a runtime block for a provider+model pin (provider mode).
+
+    The legacy provider-mode equivalent of a route runtime block. When a
+    pinned model (e.g. kilo → ``kilo/minimax/minimax-m3``) exhausts its
+    prepaid credit at runtime while the gateway balance stays positive,
+    this records a block keyed by :func:`routes.model_block_key` so
+    :func:`llm_tools.ralph_robin.effective_model_for` can drop the pin on
+    the next iteration (when ``allow_fallback`` is set) and the launch CLI
+    picks a different model. A subsequent successful run clears it via
+    :func:`clear_model_runtime_block`.
+    """
+    from . import routes
+
+    key = routes.model_block_key(cfg.provider, cfg.model)
+    retry_after = _parse_retry_after_seconds(output)
+    backoff = routes.default_backoff_seconds()
+    blocked_until = common.now_epoch() + (retry_after if retry_after is not None else backoff)
+    routes.record_local_block(
+        key,
+        reason="credit-exhausted",
+        blocked_until=blocked_until,
+        last_message=output[:2000],
+        backoff_seconds=backoff,
+    )
+    common.log_event(
+        logs,
+        "model_runtime_block",
+        {
+            "provider": cfg.provider,
+            "model": cfg.model,
+            "key": key,
+            "blocked_until": blocked_until,
+            "reason": "credit-exhausted",
         },
     )
 
@@ -1346,6 +1411,14 @@ def clear_route_runtime_block(route_id: str) -> None:
     from . import routes
 
     routes.clear_local_block(route_id)
+
+
+def clear_model_runtime_block(provider: str, model: str) -> None:
+    """Drop the runtime block for a provider+model pin after a successful run."""
+    from . import routes
+
+    if provider and model:
+        routes.clear_local_block(routes.model_block_key(provider, model))
 
 
 # Config keys (merged defaults + [scheduler]) that map to a string cfg field.

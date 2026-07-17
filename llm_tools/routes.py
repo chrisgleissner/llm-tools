@@ -249,6 +249,35 @@ def default_backoff_seconds() -> int:
     return max(5, value)
 
 
+def model_block_key(provider: str, model: str) -> str:
+    """Stable block-store key for a provider + model pin (provider mode).
+
+    In route mode a route id is the block key. In legacy provider mode a
+    provider may be pinned to one model (e.g. kilo → ``kilo/minimax/minimax-m3``);
+    the same per-route block ledger is reused with a synthetic key derived
+    from the provider and model so a runtime credit exhaustion on that
+    specific model can be recorded and later consulted by
+    :func:`llm_tools.ralph_robin.effective_model_for` (and cleared on a
+    successful run).
+    """
+    def _safe(text: str) -> str:
+        # Map path separators (``/``) to ``.`` so a model id like
+        # ``kilo/minimax/minimax-m3`` becomes ``kilo.minimax.minimax-m3`` in
+        # the block-store key — the same form already used by route ids,
+        # and a form that fits cleanly in a flat filename.
+        cleaned = text.replace("/", ".")
+        return "".join(c for c in cleaned if c.isalnum() or c in ("-", "_", ".")) or "x"
+
+    return f"model__{_safe(provider)}__{_safe(model)}"
+
+
+def is_model_blocked(provider: str, model: str, env: dict[str, str] | None = None) -> bool:
+    """Whether a provider+model pin currently has an active runtime block."""
+    if not provider or not model:
+        return False
+    return is_locally_blocked(model_block_key(provider, model), env)
+
+
 # --- Opaque scope construction -----------------------------------------------
 
 
@@ -352,6 +381,84 @@ def _windows_from_capacity_scopes(scopes: list[CapacityScope]) -> list[dict[str,
     ]
 
 
+def _apply_local_block_override(
+    route: RoutePolicy,
+    snapshot: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    env: dict[str, str] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Force a non-opaque route's decision to not-usable when a runtime block
+    is active for it.
+
+    Originally only ``opaque`` routes consulted the local block ledger in
+    :func:`usage_snapshot_and_decision_for_route`: an opaque route has no
+    other readiness signal, so a runtime failure (a backend 429 / credit
+    exhaustion the CLI surfaced) was the only way to learn it was spent. A
+    ``delegate`` / ``balance`` / ``provider`` route whose *pinned model* runs
+    out of prepaid credit while the gateway balance stays positive still
+    looked "usable" from the aggregate capacity reader, so ralph-robin
+    re-selected it every few seconds forever. Applying the block override to
+    every non-opaque policy closes that hole: any route that recorded a
+    runtime block is reported as not-usable (with a ``wait_until``) so the
+    orchestrator rotates to a different route until the backoff expires.
+
+    The opaque policy builds its own blocked scope inline, so it is excluded
+    here to avoid double-processing.
+    """
+    blocked = read_local_block(route.route_id, env)
+    if blocked is None:
+        return snapshot, decision
+    now = common.now_epoch(env)
+    wait_until = int(blocked.get("blocked_until", now + 60))
+    reason = str(blocked.get("reason", "blocked")) or "blocked"
+    snapshot = dict(snapshot)
+    snapshot["available"] = False
+    snapshot["reason"] = reason
+    decision = dict(decision)
+    decision["usable"] = False
+    decision["reason"] = reason
+    decision["wait_until"] = wait_until
+    exhausted = decision.get("exhausted")
+    if not isinstance(exhausted, list):
+        exhausted = []
+    else:
+        exhausted = list(exhausted)
+    exhausted.append(
+        {
+            "name": "runtime-block",
+            "kind": "opaque",
+            "remaining": None,
+            "reset_epoch": wait_until,
+        }
+    )
+    decision["exhausted"] = exhausted
+    # Drop the original positive-capacity windows / scopes so downstream
+    # renderers (``decision_summary`` in ``llm_tools/ralph_robin.py``,
+    # ``usage_prefix_text`` in ``llm_tools/common.py``, ``route_to_json``)
+    # cannot surface stale "5h=50% week=80%" alongside ``available=False``.
+    # Replace them with a single synthetic blocked scope mirroring the
+    # opaque path's ``opaque_scope_for_route`` shape.
+    decision["windows"] = []
+    blocked_scope = {
+        "name": "runtime-block",
+        "kind": "opaque",
+        "ready": False,
+        "remaining_percent": None,
+        "reset_epoch": wait_until,
+        "reason": reason,
+        "source": f"runtime-block:{route.route_id}",
+        "extras": {
+            "route_id": route.route_id,
+            "provider": route.provider,
+            "model": route.model or "",
+            "blocked_reason": reason,
+        },
+    }
+    snapshot["scopes"] = [blocked_scope]
+    return snapshot, decision
+
+
 def usage_snapshot_and_decision_for_route(
     route: RoutePolicy,
     scope: str,
@@ -451,7 +558,7 @@ def usage_snapshot_and_decision_for_route(
         snapshot["route"] = route.route_id
         snapshot["selected_model"] = route.model or model or snapshot.get("selected_model")
         snapshot["cost"] = asdict(route.cost)
-        return snapshot, decision
+        return _apply_local_block_override(route, snapshot, decision, env=env)
 
     if policy == CAPACITY_POLICY_DELEGATE:
         target = route.capacity.provider
@@ -492,7 +599,7 @@ def usage_snapshot_and_decision_for_route(
         decision = dict(dec)
         decision["provider"] = route.provider
         decision["capacity_provider"] = target
-        return snapshot, decision
+        return _apply_local_block_override(route, snapshot, decision, env=env)
 
     # Unknown policies should have been rejected at config parse time.
     snapshot = {
@@ -673,7 +780,9 @@ __all__ = [
     "clear_local_block",
     "default_backoff_seconds",
     "is_locally_blocked",
+    "is_model_blocked",
     "local_block_dir",
+    "model_block_key",
     "opaque_scope_for_route",
     "parse_routes",
     "read_local_block",

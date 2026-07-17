@@ -1958,3 +1958,314 @@ def test_ralph_routes_flag_mixes_bare_providers_and_routes(
     # Both kilo routes launch kilo but pin distinct models.
     assert cfg.route_policies["kilo-minimax-m3"].model == "minimax-m3"
     assert cfg.route_policies["kilo-zai-glm-52"].model == "zai/glm-5.2"
+
+
+# --- Credit-exhaustion runtime block (clean-exit gateway 402) ----------------
+
+
+def test_model_block_key_is_stable_and_namespaced() -> None:
+    assert routes.model_block_key("kilo", "kilo/minimax/minimax-m3") == "model__kilo__kilo.minimax.minimax-m3"
+    # Empty inputs degrade safely instead of producing a degenerate key.
+    assert routes.model_block_key("", "") == "model__x__x"
+    assert routes.is_model_blocked("", "m") is False
+    assert routes.is_model_blocked("kilo", "") is False
+
+
+def test_model_block_lifecycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    block_dir = tmp_path / "blocks"
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(block_dir))
+    assert routes.is_model_blocked("kilo", "kilo/minimax/minimax-m3") is False
+    routes.record_local_block(
+        routes.model_block_key("kilo", "kilo/minimax/minimax-m3"),
+        reason="credit-exhausted",
+        blocked_until=common.now_epoch() + 600,
+    )
+    assert routes.is_model_blocked("kilo", "kilo/minimax/minimax-m3") is True
+    routes.clear_local_block(routes.model_block_key("kilo", "kilo/minimax/minimax-m3"))
+    assert routes.is_model_blocked("kilo", "kilo/minimax/minimax-m3") is False
+
+
+def test_delegate_route_block_makes_route_not_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``delegate`` route with an active runtime block must report
+    not-usable even when its capacity target has plenty of headroom.
+
+    This is the regression guard for the kilo/minimax-m3 credit-exhaustion
+    bug: the gateway balance stays positive so a delegate/balance route kept
+    looking 'usable' from the aggregate reader, and ralph-robin re-selected
+    it every few seconds forever. The block override now applies to every
+    non-opaque capacity policy.
+    """
+    block_dir = tmp_path / "blocks"
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(block_dir))
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+    monkeypatch.setenv(
+        "LLM_SCHEDULER_USAGE_JSON",
+        json.dumps(
+            {
+                "claude": {
+                    "provider": "claude",
+                    "available": True,
+                    "source": "test",
+                    "five_hour": {"remaining": 50, "resets_at": 2000},
+                    "week": {"remaining": 80, "resets_at": 1000 + 6 * 86400},
+                }
+            }
+        ),
+    )
+    route = RoutePolicy(
+        route_id="opencode-claude",
+        provider="opencode",
+        model="",
+        capacity=CapacityPolicyConfig(policy="delegate", provider="claude"),
+        cost=CostPolicyConfig(policy="unknown"),
+    )
+    snap, dec = routes.usage_snapshot_and_decision_for_route(route, "auto", "1", "60")
+    assert dec["usable"] is True
+    # Record a runtime block exactly as a credit exhaustion would.
+    routes.record_local_block(
+        "opencode-claude",
+        reason="credit-exhausted",
+        blocked_until=common.now_epoch() + 600,
+    )
+    snap, dec = routes.usage_snapshot_and_decision_for_route(route, "auto", "1", "60")
+    assert dec["usable"] is False
+    assert dec["reason"] == "credit-exhausted"
+    assert isinstance(dec["wait_until"], int)
+    assert snap["available"] is False
+    assert dec["windows"] == []
+    assert snap["scopes"] == [{
+        "name": "runtime-block",
+        "kind": "opaque",
+        "ready": False,
+        "remaining_percent": None,
+        "reset_epoch": 1600,
+        "reason": "credit-exhausted",
+        "source": "runtime-block:opencode-claude",
+        "extras": {
+            "route_id": "opencode-claude",
+            "provider": "opencode",
+            "model": "",
+            "blocked_reason": "credit-exhausted",
+        },
+    }]
+    assert routes.route_to_json(snap)["scopes"][0]["ready"] is False
+    # Clearing the block restores usability.
+    routes.clear_local_block("opencode-claude")
+    snap, dec = routes.usage_snapshot_and_decision_for_route(route, "auto", "1", "60")
+    assert dec["usable"] is True
+
+
+def test_submit_once_credit_exhausted_clean_exit_records_route_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean (status 0) exit whose output carries a gateway credit
+    exhaustion must record a route runtime block and return
+    AUTONOMY_ABORT_STATUS so ralph-robin rotates away instead of counting
+    a failed model as a successful increment.
+
+    Reproduces the kilo/minimax-m3 bug: the CLI prints
+    ``Payment Required: {"error_type":"usage_limit_exceeded"}`` and exits 0
+    because the gateway balance is positive, so ralph kept re-selecting it.
+    """
+    from llm_tools.routes import read_local_block
+
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(tmp_path / "blocks"))
+    logs = common.setup_run_logs(tmp_path, "credit-route")
+    scheduler.clear_route_runtime_block("kilo-minimax-m3")
+
+    cfg = scheduler.SchedulerConfig(
+        provider="kilo",
+        route_id="kilo-minimax-m3",
+        cwd=str(tmp_path),
+        prompt_text="x",
+        ralph_robin_active=True,
+    )
+
+    credit_output = (
+        'Error: Payment Required: {"error":{"title":"Low Credit Warning!",'
+        '"message":"Add credits to continue, or switch to a free model",'
+        '"balance":-0.007525,"buyCreditsUrl":"https://app.kilo.ai/profile"},'
+        '"error_type":"usage_limit_exceeded"}'
+    )
+
+    def fake_headless(_cfg, _argv, output_file, status_file):
+        status_file.write_text("0", encoding="utf-8")  # clean exit!
+        output_file.write_text(credit_output, encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(scheduler, "run_fresh_headless", fake_headless)
+    rc = scheduler.submit_once(cfg, logs, 1, ["kilo", "run", "--model", "minimax-m3"])
+    assert rc == common.AUTONOMY_ABORT_STATUS
+
+    block = read_local_block("kilo-minimax-m3")
+    assert block is not None
+    assert block["reason"] == "credit-exhausted"
+    assert block["blocked_until"] > common.now_epoch()
+    scheduler.clear_route_runtime_block("kilo-minimax-m3")
+
+
+def test_submit_once_credit_exhausted_provider_mode_records_model_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In legacy provider mode (no route), a credit exhaustion on a pinned
+    model records a model-keyed block and returns AUTONOMY_ABORT_STATUS."""
+    from llm_tools.routes import read_local_block
+
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(tmp_path / "blocks"))
+    logs = common.setup_run_logs(tmp_path, "credit-model")
+    model = "kilo/minimax/minimax-m3"
+    scheduler.clear_model_runtime_block("kilo", model)
+
+    cfg = scheduler.SchedulerConfig(
+        provider="kilo",
+        model=model,
+        cwd=str(tmp_path),
+        prompt_text="x",
+        ralph_robin_active=True,
+    )
+
+    def fake_headless(_cfg, _argv, output_file, status_file):
+        status_file.write_text("0", encoding="utf-8")
+        output_file.write_text(
+            '{"error_type":"usage_limit_exceeded","message":"Low Credit Warning"}',
+            encoding="utf-8",
+        )
+        return 0
+
+    monkeypatch.setattr(scheduler, "run_fresh_headless", fake_headless)
+    rc = scheduler.submit_once(cfg, logs, 1, ["kilo", "run", "--model", model])
+    assert rc == common.AUTONOMY_ABORT_STATUS
+
+    key = routes.model_block_key("kilo", model)
+    block = read_local_block(key)
+    assert block is not None
+    assert block["reason"] == "credit-exhausted"
+    assert routes.is_model_blocked("kilo", model) is True
+    # A successful run clears the model block.
+    scheduler.clear_model_runtime_block("kilo", model)
+    assert routes.is_model_blocked("kilo", model) is False
+
+
+def test_submit_once_clean_success_clears_model_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clean successful run clears a stale model runtime block so a model
+    that recovered (credits topped up) is used again."""
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(tmp_path / "blocks"))
+    logs = common.setup_run_logs(tmp_path, "credit-clear")
+    model = "kilo/minimax/minimax-m3"
+    routes.record_local_block(
+        routes.model_block_key("kilo", model),
+        reason="credit-exhausted",
+        blocked_until=common.now_epoch() + 600,
+    )
+    assert routes.is_model_blocked("kilo", model) is True
+
+    cfg = scheduler.SchedulerConfig(
+        provider="kilo", model=model, cwd=str(tmp_path), prompt_text="x"
+    )
+
+    def fake_headless(_cfg, _argv, output_file, status_file):
+        status_file.write_text("0", encoding="utf-8")
+        output_file.write_text("all good, real work done\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(scheduler, "run_fresh_headless", fake_headless)
+    rc = scheduler.submit_once(cfg, logs, 1, ["kilo", "run", "--model", model])
+    assert rc == 0
+    assert routes.is_model_blocked("kilo", model) is False
+
+
+def test_effective_model_for_drops_pin_when_model_blocked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """In provider mode, when a model pin is credit-blocked and fallback is
+    allowed, the pin is dropped so the CLI picks a different model."""
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(tmp_path / "blocks"))
+    model = "kilo/minimax/minimax-m3"
+    rc = ralph_robin.RalphConfig()
+    rc.policies = {
+        "kilo": config.ProviderPolicy(
+            model=model, allow_fallback=True, capacity_provider=""
+        )
+    }
+    # Without a block the pin is kept.
+    assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}) == model
+    # With a block the pin drops (fallback allowed).
+    routes.record_local_block(
+        routes.model_block_key("kilo", model),
+        reason="credit-exhausted",
+        blocked_until=common.now_epoch() + 600,
+    )
+    assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}) == ""
+    # With allow_fallback=False the pin is kept (do not silently switch model).
+    rc.policies["kilo"] = config.ProviderPolicy(
+        model=model, allow_fallback=False, capacity_provider=""
+    )
+    assert ralph_robin.effective_model_for(rc, "kilo", {"usable": True}) == model
+
+
+def test_select_route_rotates_away_from_credit_blocked_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ralph-robin route selection must not keep selecting a route whose
+    pinned model is credit-exhausted (blocked), even when its launch CLI
+    reports a positive gateway balance. It rotates to the next usable route.
+    """
+    block_dir = tmp_path / "blocks"
+    monkeypatch.setenv("LLM_TOOLS_LOCAL_BLOCK_DIR", str(block_dir))
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000")
+
+    def route_decision_for(cfg, rid):
+        # Simulate: kilo-minimax-m3 is credit-blocked (its model is spent);
+        # kilo-zai-glm-52 is usable.
+        if rid == "kilo-minimax-m3":
+            routes.record_local_block(
+                "kilo-minimax-m3",
+                reason="credit-exhausted",
+                blocked_until=common.now_epoch() + 600,
+            )
+            return {
+                "route": "kilo-minimax-m3",
+                "provider": "kilo",
+                "usable": False,
+                "reason": "credit-exhausted",
+                "wait_until": common.now_epoch() + 600,
+                "windows": [],
+            }
+        return {
+            "route": "kilo-zai-glm-52",
+            "provider": "kilo",
+            "usable": True,
+            "reason": "usable",
+            "wait_until": None,
+            "windows": [],
+        }
+
+    monkeypatch.setattr(ralph_robin, "_route_decision_for_index", route_decision_for)
+    rc = ralph_robin.RalphConfig(
+        routes=["kilo-minimax-m3", "kilo-zai-glm-52"],
+        providers=[],
+        even_burn=False,
+        scope="auto",
+        prompt_text="x",
+    )
+    rc.route_policies = {
+        "kilo-minimax-m3": RoutePolicy(
+            route_id="kilo-minimax-m3", provider="kilo", model="minimax-m3",
+            capacity=CapacityPolicyConfig(policy="opaque"),
+            cost=CostPolicyConfig(policy="unknown"),
+        ),
+        "kilo-zai-glm-52": RoutePolicy(
+            route_id="kilo-zai-glm-52", provider="kilo", model="zai/glm-5.2",
+            capacity=CapacityPolicyConfig(policy="opaque"),
+            cost=CostPolicyConfig(policy="unknown"),
+        ),
+    }
+    logs = common.setup_run_logs(tmp_path, "rotation")
+    # Start on the blocked route's index; selection must advance to glm-5.2.
+    sel = ralph_robin.select_route(rc, logs, current_index=0, skipped=set())
+    assert sel["route"] == "kilo-zai-glm-52"
+    assert sel["provider"] == "kilo"
