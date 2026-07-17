@@ -551,6 +551,12 @@ def apply_config(cfg: RalphConfig, env: dict[str, str] | None = None) -> dict[st
     for key, (attr, kind) in _RALPH_CONFIG_FIELDS.items():
         if key in cfg.explicit or tool.get(key) is None:
             continue
+        # ``--providers`` explicitly selects legacy provider rotation.  A
+        # configured ``[ralph].routes`` list must not silently switch that
+        # invocation into route mode (and launch a different CLI/model).
+        # ``--routes`` remains the explicit way to opt into route mode.
+        if key == "routes" and "providers" in cfg.explicit:
+            continue
         value = tool[key]
         if kind == "bool":
             setattr(cfg, attr, bool(value))
