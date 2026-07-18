@@ -77,6 +77,20 @@ printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":10}}}' | ./llm-usa
 
 Prefer changing the smallest relevant function surface. Preserve existing function boundaries unless a helper clearly reduces duplication or risk.
 
+## Adding a provider
+
+`llm-tools` uses a small provider-adapter contract. To add a new CLI, for example `acme-cli`:
+
+1. Add `llm_tools/providers/acme.py` exposing `read(env) -> ProviderSnapshot`. The snapshot carries zero or more `CapacityScope` objects.
+2. Use one of the supported capacity scope kinds: `reset_window`, `balance`, `budget`, `ungated`, `unknown`.
+3. Re-export the module from `llm_tools/providers/__init__.py`.
+4. Register supported scopes in `capacity.PROVIDER_SCOPES`, e.g. `PROVIDER_SCOPES["acme"] = {SCOPE_AUTO, ...}`.
+5. Add default launch commands under `llm_tools.scheduler.provider_default_argv` (both attached and headless paths where applicable).
+6. Optionally add a highlighting pattern in `scheduler.highlight_provider_text`.
+7. Add `--provider` / `--providers` membership in the validators in `scheduler.py` and `ralph_robin.py`.
+
+After that, the generic `llm_tools/capacity.decide` logic handles the provider's scopes, and all three tools can use it through the same model as the existing providers.
+
 ## Hard invariants
 
 * Keep Python code typed, explicit, and standard-library-first.

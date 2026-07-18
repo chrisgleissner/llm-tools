@@ -15,6 +15,8 @@ The tools are intentionally **local- and CLI-first**. Instead of introducing ano
 
 Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, MiniMax, OpenCode, and Z.ai**.
 
+> Implementation and design detail (provider internals, environment knobs, invariants) lives in [AGENTS.md](./AGENTS.md). This README is the user-facing guide.
+
 ## Tools at a Glance
 
 | Command         | Use it when you want to...                                                                       |
@@ -57,37 +59,7 @@ command -v llm-scheduler
 command -v ralph-robin
 ```
 
-### Install from a Release Wheel
-
-Each [release](https://github.com/chrisgleissner/llm-tools/releases) ships a wheel ZIP archive. You can install the wheel directly:
-
-```bash
-pipx install https://github.com/chrisgleissner/llm-tools/releases/download/0.3.2/llm_tools-0.3.2-py3-none-any.whl
-```
-
-### Install from a Local Checkout
-
-From a cloned repository:
-
-```bash
-pipx install .
-```
-
-Or install into a virtual environment:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install .
-```
-
-You can also run the tools directly from a checkout:
-
-```bash
-./llm-usage
-./llm-scheduler
-./ralph-robin
-```
+Other install paths: a release wheel (`pipx install <wheel-url>` from the [releases page](https://github.com/chrisgleissner/llm-tools/releases)), a local checkout (`pipx install .`), or running the scripts straight from a checkout (`./llm-usage`, `./llm-scheduler`, `./ralph-robin`).
 
 ## Quick Start
 
@@ -98,8 +70,7 @@ llm-usage
 llm-usage --watch 60
 ```
 
-Keep a continuous low-overhead sampler running for instant client reports and
-burn-down history:
+Keep a continuous low-overhead sampler running for instant reports and burn-down history:
 
 ```bash
 llm-usage --service-install
@@ -111,8 +82,6 @@ Run a prompt once a specific provider is ready:
 
 ```bash
 llm-scheduler --provider codex --prompt-file task.md
-llm-scheduler --provider kilo --prompt-file task.md
-llm-scheduler --provider minimax --prompt-file task.md
 ```
 
 Keep work moving across providers:
@@ -125,7 +94,6 @@ Follow the latest scheduler run:
 
 ```bash
 tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
-tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/attempt-1.out
 ```
 
 ## Provider CLI Requirements
@@ -150,9 +118,7 @@ You do not need every provider CLI installed.
 
 ## Capacity Scopes
 
-`llm-tools` calls every quota-like constraint a **scope**.
-
-A scope is one capacity measure exposed by one provider. For example, Codex and Claude can expose `5h` and `weekly` reset windows, while Kilo can expose a credit balance or monthly budget.
+`llm-tools` calls every quota-like constraint a **scope** — one capacity measure exposed by one provider. For example, Codex and Claude expose `5h` and `weekly` reset windows, while Kilo can expose a credit balance or monthly budget.
 
 | Kind           | Resets? | Examples                             | Providers                       |
 | -------------- | ------- | ------------------------------------ | ------------------------------- |
@@ -162,7 +128,7 @@ A scope is one capacity measure exposed by one provider. For example, Codex and 
 | `ungated`      | n/a     | BYOK, local, ungated mode            | Kilo, OpenCode                  |
 | `opaque`       | n/a     | Prepaid gateway subscription         | configured via routes           |
 
-`llm-usage` shows one row per scope. `llm-scheduler` and `ralph-robin` can gate on a specific scope with `--scope`.
+`llm-usage` shows one row per scope. `llm-scheduler` and `ralph-robin` can gate on a specific scope with `--scope`. `opaque` is capacity that exists but cannot be measured before launch (most commonly a prepaid gateway subscription); it is selected by a route — see [Route Mode](#route-mode).
 
 Per-provider scope allow-lists:
 
@@ -176,48 +142,93 @@ Per-provider scope allow-lists:
 | Kilo Code      | `auto`, `balance`, `budget`, `byok`, `ungated` |
 | OpenCode       | `auto`, `balance`, `budget`, `byok`, `ungated` |
 
-`opaque` is for capacity that exists but cannot be measured before launch — most commonly a prepaid subscription on a gateway. It is selected by an explicit route (`[routes.<id>]` with `capacity.policy = "opaque"`); see [Route Mode](#route-mode) below. The canonical scope name is `subscription` so the table reads naturally when the cost is a fixed periodic charge.
+## Configuration File
+
+For shared settings across `llm-usage`, `llm-scheduler`, and `ralph-robin`, drop a TOML file at one of these locations (first match wins):
+
+1. `$LLM_TOOLS_CONFIG` (explicit path)
+2. `$XDG_CONFIG_HOME/llm-tools/config.toml`
+3. `~/.config/llm-tools/config.toml`
+
+A missing file is fine — the tools use their built-in defaults. **What wins when settings overlap:** built-in defaults < config file < CLI flags. Unknown sections or keys are rejected at load time so typos surface immediately.
+
+The main thing the file sets is which model each provider runs, and what to do when that model's limit is used up:
+
+```toml
+# ~/.config/llm-tools/config.toml
+
+[defaults]
+# Order ralph-robin tries providers when --providers isn't given.
+providers     = ["claude", "codex", "opencode"]
+# Which capacity check to use: auto | 5h | weekly | monthly | balance | budget | byok | ungated
+scope         = "auto"
+# Minimum quota left before a provider is considered usable.
+min_remaining = 1
+
+[providers.claude]
+model          = "sonnet"   # run `claude --model sonnet`; only run while Sonnet has capacity
+# When Sonnet's limit is used up: false -> skip claude; true -> keep claude, let it pick another model
+allow_fallback = false
+#scope          = "weekly"   # optional per-provider override of [defaults]
+#min_remaining  = 5
+
+[providers.codex]
+model          = "spark"
+allow_fallback = false
+
+[providers.opencode]
+# Gate opencode on another provider's usage windows instead of its own — see capacity_provider below.
+capacity_provider = "minimax"
+
+[ralph]                                # ralph-robin-only settings (override [defaults])
+providers      = ["claude", "codex", "kilo"]
+
+[scheduler]                            # llm-scheduler-only settings (override [defaults])
+provider       = "claude"
+```
+
+A complete template with every supported key (all commented out) ships at [config.example.toml](./config.example.toml). Copy it to one of the locations above and uncomment what you want.
+
+**`model` / `allow_fallback`.** With `model` set, the tools call the provider with `--model NAME` and only run while that model has capacity. `allow_fallback = false` (default) treats the provider as unavailable once the model's limit is used up and moves to the next provider; `allow_fallback = true` keeps the provider but drops the model pin so its CLI picks another model. `--model NAME` on the command line overrides the file for a single run.
+
+**`capacity_provider`.** Ties one provider's gating to another provider's usage windows (a single hop). The borrowing provider's own CLI is still launched — only the capacity reading is delegated. The motivating case is a CLI configured to run a different provider's model, such as OpenCode pointed at the MiniMax API, where OpenCode's own balance says nothing about whether a run will succeed. With `capacity_provider = "minimax"`, `ralph-robin` only routes to OpenCode while MiniMax has capacity, even-burns on MiniMax's remaining, and suspends until MiniMax's reset. Route mode's `delegate` policy is the successor to this setting (see below).
 
 ## Route Mode
 
-The default rotation is over **providers** (`[providers.*]`, `--providers`). When the same provider can serve several underlying models with different capacity and cost semantics, you also have access to a **route** rotation (`[ralph].routes`, `[routes.<route_id>]`). A route binds a launch provider, a model, a capacity policy, and a cost policy into a single schedulable unit.
+By default `ralph-robin` rotates over **providers**, and each entry runs one model — the CLI's default, or the one pinned in `[providers.<name>]`. **Route mode** rotates over **routes** instead. A route binds a launch provider, a specific model, a capacity policy, and a cost policy into one schedulable unit — so a single CLI can serve several models in the same rotation (for example, one Kilo install running both MiniMax M3 and GLM 5.2). `--providers kilo` can only ever reach one Kilo model, because only a route carries a per-entry `model` pin.
 
-### `--providers` vs `--routes`
+### Turning it on
 
-Use **`--providers`** (`-P`) when each entry in the rotation runs a single model — the CLI's default, or the one pinned in `[providers.<name>]`. Use **`--routes`** when one launch CLI must serve **several models** in the same rotation (e.g. one Kilo install running both MiniMax M3 and GLM 5.2): only a route carries a per-entry `model` pin, so `--providers kilo` can never reach a second Kilo model.
+Set `[ralph].routes` in your config and plain `ralph-robin --prompt-file task.md` rotates over those routes. Pass `--routes a,b` to override the list for one run.
 
-The two flags select different rotation modes, and **an explicit `--providers` wins over a configured `[ralph].routes`** — passing `-P` forces legacy provider mode and silently ignores your routes, launching the provider with its default model only. This is the common surprise: `-P kilo` looks like it should honour the two Kilo routes in your config, but it does not.
+One gotcha: **`--providers` (`-P`) forces legacy provider mode and silently ignores your routes.** So `-P kilo` launches Kilo with its default model only, even when you have two Kilo routes configured.
 
 ```
-# ✗ launches kilo with its default model only (e.g. minimax-m3), ignoring [ralph].routes
+# ✗ launches kilo with its default model only, ignoring [ralph].routes
 ralph-robin --providers kilo --prompt-file task.md
 
 # ✓ rotates both Kilo models, even-burning across whichever is usable
 ralph-robin --routes kilo-minimax-m3,kilo-zai-glm-52 --prompt-file task.md
 ```
 
-If `[ralph].routes` is set in your config, plain `ralph-robin --prompt-file task.md` (no `-P`, no `--routes`) already rotates over those routes — pass `--routes` only to override that list for one run.
-
-A route is shaped like this:
+### Defining a route
 
 ```toml
 [ralph]
-# When this list is present, ralph-robin rotates over routes in this
-# order. In its absence the legacy provider rotation is used.
-routes = ["kilo-minimax-m3"]
+routes = ["kilo-minimax-m3"]   # presence of this list enables route mode
 
 [routes.kilo-minimax-m3]
-provider     = "kilo"
-model        = "kilo/minimax/minimax-m3"
+provider       = "kilo"
+model          = "kilo/minimax/minimax-m3"
 allow_fallback = false
 
 [routes.kilo-minimax-m3.capacity]
-# Capacity policies:
+# How readiness is measured. One of:
 #   provider        - read the provider's own snapshot (default)
-#   provider_model  - same, but model-aware (claude / codex have model-specific buckets)
-#   delegate        - launch this route's provider, read capacity from another provider
+#   provider_model  - model-aware (claude / codex have per-model buckets)
+#   delegate        - launch this route's provider, read capacity from another
 #   opaque          - capacity exists but cannot be measured before launch
-#   ungated         - usable when the launch CLI is present
+#   ungated         - usable whenever the launch CLI is present
 #   balance         - read the provider's balance scope
 #   budget          - read the provider's budget scope
 policy = "opaque"
@@ -225,7 +236,7 @@ scope  = "subscription"     # display name; defaults to "subscription"
 label  = "MiniMax M3 via Kilo"
 
 [routes.kilo-minimax-m3.cost]
-# Cost policies (display only; never affect readiness):
+# Display only; never affects readiness. One of:
 #   included, fixed_subscription, metered_balance, metered_budget,
 #   free, external, unknown
 policy   = "fixed_subscription"
@@ -234,22 +245,23 @@ currency = "USD"
 period   = "monthly"
 ```
 
-`llm-usage` then renders:
+`llm-usage` renders this as:
 
 ```
 Provider   Model       Ready   Scope          Remaining         Guidance              Resets in
 Kilo       MiniMax M3  yes     subscription   prepaid USD20/mo   ✓ usable              -
 ```
 
-`opaque` rows never display a percentage, balance, or reset time. `prepaid USD20/mo` is the cost text; routes without a `fixed_subscription` cost render as `not metered`. There is never a progress bar on these rows.
+`opaque` rows never show a percentage, balance, reset time, or progress bar. The `prepaid USD20/mo` text comes from the cost block; routes without a `fixed_subscription` cost render as `not metered`. The `delegate` policy replaces the legacy `capacity_provider` setting, and the selected `route_id` and launch provider are injected into the run's prompt so a handoff never stale-routes to the wrong provider.
 
-`delegate` is the route-level successor to the legacy `providers.<x>.capacity_provider` setting. The provider-level setting still works (it is mapped to an implicit route with `capacity.policy = "delegate"`), so existing configs do not need to migrate.
+### One CLI, several models
 
-The orchestrator's runtime context and prompt injection include the selected `route_id` and launch provider, so a handoff-style prompt does not stale-route to a different provider.
+A route's `model` is what ralph-robin pins on the launch command, so two routes sharing a provider select different underlying models. **The pin must be an id from the CLI you launch, in `provider/model` form** (`kilo models` / `opencode models` list the exact ids). Two rules to respect:
 
-### One launch CLI, several models in one rotation
+- A bare model name is misparsed as a provider with an empty model and fails at launch with `Model not found: <name>/`.
+- The `provider/` half is a credential namespace, and Kilo and OpenCode do **not** share it. Kilo's MiniMax path is `kilo/minimax/minimax-m3`; OpenCode's is `minimax-coding-plan/MiniMax-M3`. Cross-wiring them is not rejected up front — Kilo has no `minimax-coding-plan` credential, so it prints its banner and then **hangs forever** (no auth, no timeout) instead of erroring.
 
-A route's `model` is the model ralph-robin pins on the launch command, so two routes that share the same launch provider select different underlying models. Kilo and OpenCode both require this pin in `provider/model` form (`kilo models` / `opencode models` list the exact ids); a bare model name is misparsed as a provider with an empty model and fails at launch with `Model not found: <name>/`. **Pin an id from the same CLI you launch:** the provider half is a credential namespace, and the two CLIs do not share it. Kilo's authenticated MiniMax path is `kilo/minimax/minimax-m3` (the `kilo/` gateway prefix); OpenCode's is `minimax-coding-plan/MiniMax-M3`. Cross-wiring them — e.g. pinning the OpenCode id on a Kilo route — is not rejected up front: Kilo has no `minimax-coding-plan` credential, so it prints its agent banner and then **hangs forever** (no auth, no client-side timeout) instead of erroring. This is how one Kilo install serves both `kilo/minimax/minimax-m3` and `zai/glm-5.2` in a single even-burn rotation:
+Here one Kilo install serves both models in a single even-burn rotation, each gated on its own real capacity:
 
 ```toml
 [routes.kilo-minimax-m3]
@@ -267,80 +279,15 @@ policy   = "delegate"     # gate on Z.ai's real 5h/weekly windows
 provider = "zai"
 ```
 
-The `--routes` list (and `[ralph].routes`) accepts a mix of declared route ids **and** bare provider names. A bare provider name becomes an implicit route on its own CLI (gated on its own capacity), so you can burn down codex and claude alongside the two Kilo routes without declaring `[routes.codex]` / `[routes.claude]`:
+### Mixing routes and bare providers
+
+The route list also accepts **bare provider names**, which become implicit routes on their own CLI, gated on their own capacity. So you can burn down codex and claude alongside the Kilo routes without declaring `[routes.codex]` / `[routes.claude]`:
 
 ```
 ralph-robin --routes codex,claude,kilo-minimax-m3,kilo-zai-glm-52 --prompt-file task.md
 ```
 
-This rotates over four independent capacity pools — Codex's CLI, Claude's CLI, MiniMax M3 (via Kilo), and GLM 5.2 (via Kilo) — and even-burns across whichever are usable.
-
-## Configuration File
-
-For shared settings across `llm-usage`, `llm-scheduler`, and `ralph-robin`, drop a TOML file at one of these locations (first match wins):
-
-1. `$LLM_TOOLS_CONFIG` (explicit path)
-2. `$XDG_CONFIG_HOME/llm-tools/config.toml`
-3. `~/.config/llm-tools/config.toml`
-
-A missing file is fine - the tools just use their built-in defaults. Parsed with the standard library's `tomllib` (Python 3.11+), so no extra dependency.
-
-**What wins when settings overlap:** built-in defaults < config file < CLI flags. A flag you pass on the command line always beats the same key in the file.
-
-The main thing the file lets you set is which model each provider should run, and what to do when that model's limit is used up:
-
-```toml
-# ~/.config/llm-tools/config.toml
-
-[defaults]
-# Order ralph-robin tries providers when --providers isn't given.
-providers     = ["claude", "codex", "opencode"]
-# Which capacity check to use. One of:
-# auto | 5h | weekly | monthly | balance | budget | byok | ungated
-scope         = "auto"
-# Minimum quota left before a provider is considered usable.
-min_remaining = 1
-
-[providers.claude]
-# Run `claude --model sonnet`; only run while Sonnet has capacity.
-model          = "sonnet"
-# What to do when Sonnet's limit is used up:
-#   false -> skip claude and switch to the next provider
-#   true  -> keep claude and let it pick another model
-allow_fallback = false
-# Optional: override [defaults].scope / min_remaining for just this provider.
-#scope          = "weekly"
-#min_remaining  = 5
-
-[providers.codex]
-model          = "spark"
-allow_fallback = false
-
-[providers.opencode]
-# Tie opencode's availability/capacity to another provider's usage windows
-# instead of its own. Use it when the opencode CLI is configured to run another
-# provider's model (e.g. the MiniMax API), so opencode's own balance is
-# irrelevant. ralph-robin then only routes to opencode while minimax has
-# capacity, ranks even-burn on minimax's remaining, and suspends on minimax's
-# reset — while still launching the opencode CLI.
-capacity_provider = "minimax"
-
-[ralph]                                # ralph-robin-only settings (override [defaults] above)
-# One example key — see config.example.toml for the full list:
-providers      = ["claude", "codex", "kilo"]
-
-[scheduler]                            # llm-scheduler-only settings (override [defaults] above)
-# One example key — see config.example.toml for the full list:
-provider       = "claude"
-```
-
-A complete template with every supported key (all commented out) is shipped at [config.example.toml](./config.example.toml) in this repository. Copy it to one of the locations above and uncomment the lines you want to set.
-
-When `model` is set, `llm-scheduler` and `ralph-robin` call the provider with `--model NAME` and only run while that model still has capacity. With `allow_fallback = false` (the default), the tool treats the provider as unavailable once that model's limit is used up and switches to the next provider. With `allow_fallback = true`, the tool keeps trying the provider but drops the model setting and lets the provider's CLI pick a different model. Pass `--model NAME` on the command line to override the file for a single run.
-
-`capacity_provider` ties one provider's gating to another provider's usage windows. It is generic: any provider may borrow any other provider's windows (a single hop — a provider cannot reference itself or a provider that itself delegates). The borrowing provider's own CLI is still the one launched; only the availability/capacity reading is delegated. The motivating case is a CLI configured to run a different provider's model — for example OpenCode pointed at the MiniMax API, where OpenCode's own balance says nothing about whether a run will succeed. With `capacity_provider = "minimax"`, `ralph-robin` only routes to OpenCode while MiniMax has capacity, ranks even-burn on MiniMax's remaining-per-day, and suspends until MiniMax's reset; the scope you gate on (e.g. `5h`, `weekly`) is then validated against MiniMax's windows rather than OpenCode's.
-
-Unknown sections or keys are rejected at load time so typos surface immediately.
+This rotates over four independent capacity pools and even-burns across whichever are usable.
 
 ## `llm-usage`
 
@@ -350,8 +297,6 @@ Use `llm-usage` before starting work, in status lines, or in scripts that need a
 llm-usage
 llm-usage --json
 llm-usage --watch 60
-llm-usage --show-copilot-credits
-llm-usage --show-source
 llm-usage --statusline
 ```
 
@@ -386,78 +331,15 @@ OpenCode             yes     spend     $4.3 █░░░░░░░░░    8.
 Budget               yes     monthly  $16.7 ███░░░░░░░    33.5% of $50          14d 17h
 ```
 
-Cost is shown the same way as quota: the amount sits on the left, followed by a
-bar — never a right-aligned `spent $X`. A `spend` row (distinct from a funded
-`balance`) reports money already spent this cycle; with an overall monthly
-budget configured the bar fills with how much of that budget the spend consumes
-(green when low, red at or over budget), and the trailing `Budget` row totals
-every provider's spend against the cap (filling past it, in red, if you exceed
-it). Without a budget the rows show just the amount and the total appears as a
-plain `Total` row. Cells with nothing to report (a `spend`/`balance` scope has
-no reset; a full window has no runout forecast) are left blank rather than
-padded with placeholder dashes — only a genuine read failure shows `unavailable`.
+Cost is shown like quota: the amount sits on the left, followed by a bar — never a right-aligned `spent $X`. A `spend` row (distinct from a funded `balance`) reports money already spent this cycle. With an overall monthly budget configured, its bar fills with how much of that budget the spend consumes (green low, red at/over) and the trailing `Budget` row totals every provider's spend against the cap; without a budget the rows show just the amount and the total appears as a plain `Total` row. The `Total`/`Budget` row only sums spend that carries a known bounded cycle (month-to-date), so a long-running install doesn't inflate the cross-provider total.
 
-The `Total` / `Budget` row only sums spend rows that carry a known bounded
-cycle (a future `reset_epoch`, i.e. month-to-date). Lifetime / cumulative
-spend rows from providers whose CLI cannot bound the window are intentionally
-excluded so a long-running install does not inflate the cross-provider monthly
-total; conservative is better than wrong when reporting money.
-
-The `Model` column only appears when a provider reports model-specific limits.
-These sub-rows sit under their provider's section: Codex surfaces its `Spark`
-model, and Claude surfaces per-model weekly limits (e.g. `Sonnet`) alongside the
-aggregate window. Model rows are informational - they are shown for visibility
-but do not gate scheduling, which always uses the provider's aggregate scopes.
+The `Model` column only appears when a provider reports model-specific limits (e.g. Codex's `Spark`, Claude's per-model weekly). These sub-rows are informational — scheduling always gates on the provider's aggregate scopes.
 
 ### Copilot
 
-Copilot shows a second `spend` row with the additional ("add-on") usage spent
-this billing cycle — the dollars billed beyond your included credit allowance.
-The Copilot CLI does not expose this, so it is read from the GitHub billing API
-using a GitHub token already on your machine (`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
-or `GITHUB_TOKEN`, otherwise `gh auth token`); no Copilot-specific credential is
-required. With no token available the row is simply omitted. The row is
-informational and never affects `Ready`.
+Copilot reports two extras beyond the usual quota: a `monthly` row for your included premium-request allowance, and a `spend` row for add-on usage billed beyond it. Both come from the GitHub billing API using a token already on your machine (`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`) — no Copilot-specific credential. With no token the rows are simply omitted; they never affect `Ready`.
 
-**Pay-as-you-go readiness.** Copilot keeps working past its included monthly
-allowance via pay-as-you-go premium requests / AI Credits, up to the spending
-limit set in your GitHub billing settings. GitHub does not expose that limit
-through its API, so once the included allowance is exhausted (`monthly` at 0%)
-`Ready` would otherwise read `no` even though Copilot is still usable. To fix
-this, llm-usage keeps Copilot `Ready` when overage is **funded**, established
-two ways:
-
-- **Declared limit.** Set `[copilot] monthly_spend_limit` (or the
-  `LLM_USAGE_COPILOT_SPEND_LIMIT` / `LLM_USAGE_COPILOT_SPEND_CURRENCY` env
-  overrides) to your GitHub premium-request spending limit. Copilot stays
-  `Ready` while this month's billed overage stays under it, and flips to `no`
-  once the limit is reached.
-- **Auto-detected overage.** With no declared limit, if GitHub billing already
-  shows premium-request / AI-Credit overage being charged this month (net spend
-  > 0), pay-as-you-go is demonstrably enabled and Copilot stays `Ready`.
-
-With neither signal the previous behaviour stands: an exhausted allowance gates
-`Ready` to `no`. When funded, the exhausted allowance row shows `pay-as-you-go`
-(or `pay-as-you-go $spent/$limit`) in the `Guidance` column instead of a
-misleading runout/pace hint.
-
-The Copilot CLI footer shape has changed across releases — pre-1.0.57 printed
-`Plan: N% used` / `Monthly: N% used` (the *used* percentage), 1.0.57+ render
-`Remaining reqs.: N%` (the *remaining* percentage), and 1.0.63+ also dropped
-the colon on the `AI Credits` line. The dashboard recognises all of these
-shapes. 
-
-The new CLI (>1.0.57) no longer surfaces a *monthly* figure at all in
-its footer, so the reader falls back to GitHub's
-`/users/{login}/settings/billing/premium_request/usage` endpoint, which always
-reports the current month's per-model premium request count. The reader
-sums that against your plan's monthly allowance (300 for Pro, 1500 for Pro+,
-1000 for Enterprise, etc.) to draw the quota bar — overriding the plan via
-`LLM_USAGE_COPILOT_PLAN` or pinning the allowance directly with
-`LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE` is supported. Note: the
-year+month-only query for the *current* month silently returns an empty
-result; the reader therefore asks one day at a time so a day with usage
-recorded shows up immediately rather than being hidden until month-end.
+**Pay-as-you-go readiness.** Copilot keeps working past its included allowance via pay-as-you-go, up to the spending limit in your GitHub billing settings. GitHub does not expose that limit, so once the allowance is spent (`monthly` at 0%) `llm-usage` keeps Copilot `Ready` when overage is **funded** — either a limit you declare (`[copilot] monthly_spend_limit`, or `LLM_USAGE_COPILOT_SPEND_LIMIT`) or auto-detected when GitHub billing already shows overage being charged this month. When funded, the exhausted allowance row shows `pay-as-you-go` in the `Guidance` column instead of a misleading runout hint. (The CLI-footer parsing and GitHub-API fallback are detailed in [AGENTS.md](./AGENTS.md).)
 
 ### Table Columns
 
@@ -470,16 +352,9 @@ recorded shows up immediately rather than being hidden until month-end.
 | `Guidance`  | For `5h`, whether current burn should last until reset. For weekly/monthly/budget scopes, pace vs. a linear target. For `$` rows, share of budget. |
 | `Resets in` | Relative reset time. Blank when the scope does not reset (`spend`/`balance`/`ungated`).                                                             |
 
-Empty cells are intentional (calm design): a cell is left blank when it has
-nothing to report (a non-resetting scope, a window with no runout forecast).
-Only a real read failure is called out, as `unavailable`.
+Empty cells are intentional: a cell is left blank when it has nothing to report (a non-resetting scope, a window with no runout forecast). Only a real read failure is called out, as `unavailable`.
 
-Set an overall monthly spend budget in `[budget]` (see `config.example.toml`,
-or the `LLM_USAGE_MONTHLY_BUDGET` / `LLM_USAGE_BUDGET_CURRENCY` env overrides) to
-turn every `spend` figure into a coloured progress bar against that one cap, plus
-a `Budget` row totalling all providers' spend (filling past the cap, in red, if
-you exceed it). Without a budget, `spend` rows show just the amount and the total
-appears as a plain `Total` row.
+Set an overall monthly spend budget in `[budget]` (or the `LLM_USAGE_MONTHLY_BUDGET` / `LLM_USAGE_BUDGET_CURRENCY` env overrides) to turn every `spend` figure into a coloured progress bar against that cap, plus the `Budget` total row.
 
 ### `llm-usage` Options
 
@@ -513,24 +388,12 @@ appears as a plain `Total` row.
 
 ## `llm-scheduler`
 
-Use `llm-scheduler` when you want one specific provider to run one specific prompt, but only after that provider has usable capacity.
-
-It is useful for:
-
-* delayed launches
-* rate-limit-aware retries
-* tmux launches
-* wake scheduling
-* suspend-until-ready workflows
-
-### Basic Usage
+Use `llm-scheduler` when you want one specific provider to run one specific prompt, but only after that provider has usable capacity. It is useful for delayed launches, rate-limit-aware retries, tmux launches, wake scheduling, and suspend-until-ready workflows.
 
 ```bash
 llm-scheduler --provider codex --prompt-file task.md
 llm-scheduler --provider claude --prompt "Continue the work in this repo until CI is green"
 llm-scheduler --provider copilot --prompt-file task.md --retry-delays 60,180,600
-llm-scheduler --provider kilo --prompt-file task.md
-llm-scheduler --provider minimax --prompt-file task.md
 ```
 
 Required form:
@@ -539,36 +402,14 @@ Required form:
 llm-scheduler --provider codex|claude|copilot|kilo|minimax (--prompt TEXT | --prompt-file FILE) [options]
 ```
 
-### Common Examples
-
-Run after a specific local time:
+Common examples:
 
 ```bash
-llm-scheduler --provider codex --prompt-file task.md --at "23:05"
-```
-
-Run inside tmux:
-
-```bash
-llm-scheduler --provider codex --prompt-file task.md --tmux llm-work
-```
-
-Schedule a wake-up:
-
-```bash
-llm-scheduler --provider codex --prompt-file task.md --wake
-```
-
-Suspend until the selected provider is ready:
-
-```bash
+llm-scheduler --provider codex --prompt-file task.md --at "23:05"          # run after a local time
+llm-scheduler --provider codex --prompt-file task.md --tmux llm-work       # run inside tmux
+llm-scheduler --provider codex --prompt-file task.md --wake                 # schedule a wake-up
 llm-scheduler --provider claude --prompt-file task.md --scope 5h --suspend-until-ready
-```
-
-Show the resolved plan without launching:
-
-```bash
-llm-scheduler --provider codex --prompt-file task.md --dry-run
+llm-scheduler --provider codex --prompt-file task.md --dry-run              # show the plan, don't launch
 ```
 
 ### Runtime Behavior
@@ -623,34 +464,13 @@ llm-scheduler --provider codex --prompt-file task.md --dry-run
 | MiniMax        | `mmx`                          | `mmx run --auto -C <cwd> <prompt>`   |
 | Z.ai           | _launch via a route_           | _launch via a route_                 |
 
-Kilo Code and OpenCode accept `-m, --model <provider>/<model>`; the scheduler and Ralph inject this flag when the per-provider policy or route pins a model (e.g. `-m zai/glm-4.7`). No permission-bypassing flag is injected; whether a headless run may act without prompting is governed by each tool's own permission config.
-
-Interactive Kilo Code, OpenCode, and MiniMax take no working-directory flag — they inherit it from the launching process (the scheduler sets the subprocess `cwd`). Headless Kilo Code and OpenCode inject no permission-bypassing flag; whether an autonomous run may act without prompting is governed by each tool's own permission config.
-
-The default Claude adapter uses your local Claude Code permission settings. To override Claude Code settings for one scheduler run:
-
-```bash
-llm-scheduler --provider claude --prompt-file task.md --command-template 'claude --permission-mode plan --print {prompt}'
-```
+Kilo Code and OpenCode accept `-m, --model <provider>/<model>`; the scheduler and Ralph inject this flag when the per-provider policy or route pins a model (e.g. `-m zai/glm-4.7`). No permission-bypassing flag is injected — whether a headless run may act without prompting is governed by each tool's own permission config. Interactive Kilo, OpenCode, and MiniMax inherit the working directory from the launching process. To override Claude Code's settings for one run, use `--command-template`, e.g. `claude --permission-mode plan --print {prompt}`.
 
 ## `ralph-robin`
 
-Use `ralph-robin` when the task matters more than which provider runs it.
+Use `ralph-robin` when the task matters more than which provider runs it. It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the-simpsons-to-the-biggest-name-in-ai-right-now/): a persistent autonomous workflow that keeps going instead of stopping when one provider reaches a limit, stalls, or becomes temporarily unusable. That makes it useful for long-running coding, repair, hardening, documentation, and investigation tasks.
 
-It runs a [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the-simpsons-to-the-biggest-name-in-ai-right-now/): a persistent autonomous workflow that keeps going instead of stopping when one provider reaches a limit, stalls, or becomes temporarily unusable.
-
-This makes it useful for long-running coding, repair, hardening, documentation, and investigation tasks where stopping at the first rate limit would waste time.
-
-`ralph-robin` wraps `llm-scheduler` and rotates across configured providers. It can either:
-
-* keep using the current provider until it is exhausted
-* distribute work more evenly so provider limits burn down at a similar rate
-
-Even burn-down is the default.
-
-When Ralph selects Claude Code through the built-in adapter, it uses Claude's `stream-json` print mode and renders that event stream as readable stdout. Assistant text, tool calls, and tool results appear while the run is active.
-
-### Basic Usage
+`ralph-robin` wraps `llm-scheduler` and rotates across configured providers. It can either keep using the current provider until exhausted, or spread work so provider limits burn down at a similar rate — **even burn-down is the default**. When it selects Claude Code, it renders Claude's `stream-json` output as readable stdout (assistant text, tool calls, and results appear live).
 
 ```bash
 ralph-robin --prompt-file task.md
@@ -669,20 +489,9 @@ ralph-robin --prompt-file /home/chris/dev/ralph.prompt.md
 [16:22:47] ◆ ralph-robin: ✓ selected claude (even-burn)
 [16:22:52 claude] I'll begin the RALPH loop iteration following FAST-PATH STARTUP. Let me start by establishing current state.
 [16:22:54 claude] Tool call: Bash
-[16:22:54 claude] {
-[16:22:54 claude]   "command": "git status && echo \"---LATEST COMMIT---\" && git log --oneline -5 && echo \"---BRANCH---\" && git branch --show-current",
-[16:22:54 claude]   "description": "Check git status, branch, and recent commits"
-[16:22:54 claude] }
 ```
 
-Each relayed provider line is prefixed with `[time provider]` by default. This makes a quiet increment distinguishable from a wedged one and keeps the active provider visible.
-
-Customize the prefix with `--prefix`:
-
-```bash
-ralph-robin --prompt-file task.md --prefix time,provider,usage
-ralph-robin --prompt-file task.md --prefix none
-```
+Each relayed provider line is prefixed with `[time provider]` by default, so a quiet increment is distinguishable from a wedged one. Customize with `--prefix time,provider,usage` or disable with `--prefix none`.
 
 ### `ralph-robin` Options
 
@@ -722,117 +531,29 @@ ralph-robin --prompt-file task.md --prefix none
 | `-d`, `--dry-run`                                                   | Resolve rotation and usage state without submitting.                                                                                                          |
 | `-h`, `--help`                                                      | Show help.                                                                                                                                                    |
 
-The following options are passed through to `llm-scheduler`:
+Scope, retry, launch, and headless-timeout options (`-s`, `-m`, `-i`, `-u`, `-r`, `-R`, `-C`, `-F`, `-H`, `-T`, `-g`, `-y`, `-Y`, `-q`, `-Q`) are passed straight through to `llm-scheduler`.
 
-```text
--s, --scope
--m, --min-remaining
--i, --poll-interval
--u, --max-unavailable-wait
--r, --retry-delays
--R, --no-retry
--C, --cwd
--F, --fresh
--H, --headless
--T, --tmux
--g, --command-template
--y, --auto-confirm
--Y, --no-auto-confirm
--q, --headless-idle-timeout
--Q, --headless-question-timeout
-```
+### Behavior
 
-### `ralph-robin` Behavior
+`ralph-robin` owns the full rotation loop: provider selection, retries, waiting, suspend decisions, and handoff between providers. It starts each increment in autonomous headless mode (even from an interactive terminal), re-evaluates capacity before each increment, and re-submits the same prompt so long-running work continues across provider boundaries.
 
-`ralph-robin` owns the full rotation loop: provider selection, retries, waiting, suspend decisions, and handoff between providers.
+**Provider selection.** By default ralph-robin uses even burn-down: among ready providers it prefers the one with the most pace-adjusted headroom in its long-period plan scopes (`weekly`, `monthly`, Kilo `budget`), scoring each by its most-constrained plan scope so a draining weekly hands over instead of running to the floor. The short `5h` window still gates usability but does not drive ranking. Providers with no rankable plan scope — such as an opaque prepaid subscription like MiniMax M3 via Kilo — take fair turns by least-completed count, so they are neither starved nor allowed to monopolise the loop. Use `--no-even-burn` to stay on one provider until it is exhausted.
 
-#### Launch Mode
-
-* Starts provider increments in autonomous headless mode by default, even from an interactive terminal.
-* Re-evaluates provider capacity before each increment.
-* Submits the same prompt again after each increment, so long-running work can continue across provider boundaries.
-
-#### Provider Selection
-
-By default, `ralph-robin` uses **even burn-down**. When several providers are ready, it prefers the provider with the highest remaining pace-adjusted capacity.
-
-The selector:
-
-* ranks long-period **plan** scopes such as `weekly`, `monthly`, and Kilo `budget`
-* scores each provider by its **binding (most-constrained) plan scope**, not its most generous one, so a provider whose weekly is draining ranks below a peer with weekly headroom and the rotation hands over instead of running one plan to the floor
-* excludes the short `5h` **session** window from the surplus ranking — it still gates usability, but it resets too fast to signal plan surplus, and folding it in let a momentarily-full 5h window mask a draining weekly (which kept the loop pinned to one provider, e.g. Codex, without ever handing over)
-* treats `balance` and `ungated` scopes as usable, but not pace-rankable
-* assumes an unknown or stale reset has a full week available, so the provider can still be ranked instead of being skipped
-
-Providers that expose no rankable plan scope — an opaque prepaid **subscription** such as MiniMax M3 via Kilo Code — are still rotated **fairly and evenly**: they take turns by least-completed count alongside the measurable providers (the surplus score only breaks ties between two measurable providers at the same count), so an opaque subscription is neither starved nor allowed to monopolise the loop.
-
-Use `--no-even-burn` to keep using the current provider until it is exhausted.
-
-#### Blocking and Recovery
-
-`ralph-robin` does not stop just because every provider is currently blocked.
-
-When no provider is usable, it waits or suspends until the rotation can recover. The loop ends only when one of these conditions is met:
-
-* a non-recoverable failure occurs
-* a degenerate instant-success streak is detected
-* `--max-duration` is reached
-* `--max-iterations` is reached
-
-#### Output Handling
-
-Provider output is streamed live.
-
-On interactive terminals, `ralph-robin` highlights:
-
-* status lines
-* diffs
-* commands
-* warnings
-* errors
-
-Colors are disabled automatically for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
-
-#### Failure Handling
-
-If usage cannot be measured, `ralph-robin` tries that provider before suspending.
-
-If a provider exits with a scheduler autonomy abort, `ralph-robin` skips that provider for the current invocation and tries the next usable provider.
-
-
-### Suspend and Wake Behavior
-
-When all providers are blocked, Ralph sets an RTC wake-up timer for the earliest known reset across the whole rotation, then resumes its own loop after wake.
-
-If suspend infrastructure is unavailable, the lead time is too short, `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` is set, or `--dry-run` is used, Ralph falls back to an in-process wait (the machine stays awake — always correct, it just forgoes power saving).
-
-This is different from:
-
-```bash
-llm-scheduler --suspend-until-ready
-```
-
-That scheduler mode wakes into one selected provider. Ralph wakes back into cross-provider rotation.
+**Blocking and recovery.** ralph-robin does not stop just because every provider is currently blocked — it waits or suspends until the rotation can recover. The loop ends only on a non-recoverable failure, a degenerate instant-success streak, `--max-duration`, or `--max-iterations`. If a provider's usage cannot be measured, Ralph tries it before suspending; if a provider hits a scheduler autonomy abort, Ralph skips it for the current invocation and tries the next.
 
 ### Reliable sleep/wake
 
-An overnight Ralph run waits out provider reset windows by suspending the whole machine. That is only safe if the box reliably resumes, and only sensible if nothing *else* suspends it underneath the run. Ralph handles both, simply and portably.
+An overnight Ralph run waits out reset windows by suspending the whole machine — safe only if the box reliably resumes, and only sensible if nothing else suspends it mid-run. Ralph handles both, portably:
 
-**It defers your OS auto-suspend while it works.** Most desktops auto-suspend after some idle period (for example KDE PowerDevil, GNOME, or `logind`'s `IdleAction`). That idle timer does not know a headless job is busy, so it can suspend the machine mid-iteration — with no wake armed, leaving it asleep until you touch it (and then possibly hanging on a flaky resume). For its whole run Ralph holds a logind **`idle` inhibitor** (`systemd-inhibit --what=idle`) so the OS will not auto-suspend out from under it. An `idle` inhibitor does **not** block an explicit suspend, so Ralph still controls its own deliberate, RTC-armed suspends. You do not have to change your auto-suspend settings.
+* **Defers your OS auto-suspend.** For its whole run Ralph holds a logind `idle` inhibitor (`systemd-inhibit --what=idle`) so a desktop idle timer (KDE PowerDevil, GNOME, logind's `IdleAction`) cannot suspend the machine mid-iteration. An `idle` inhibitor does not block Ralph's own deliberate, RTC-armed suspends, so you do not have to change your auto-suspend settings.
+* **Never suspends without an armed wake.** Ralph arms an RTC wake (`rtcwake -m no` when it can, otherwise a `systemd-run --user` `WakeSystem=true` timer) before every suspend. If it cannot arm one, it waits awake instead.
+* **Verifies wakes by behaviour.** After resume it checks how far the wall clock landed from target; an unreliable wake latches Ralph to awake-only for the rest of that run rather than risk repeating a bad cycle.
+* **Caps suspend churn** with a minimum awake interval and an optional per-run cap, and writes a durable fsync'd ledger so a wedged resume that forced a hard reset is reported on the next start.
+* **`--watchdog` (opt-in)** arms a hardware watchdog across each suspend so a hung resume reboots the machine instead of hanging. This needs a `/dev/watchdog` whose timer keeps counting across S3; without one it is a logged no-op.
 
-> You can still keep your normal auto-suspend timeout. If you prefer the belt-and-braces approach, set it longer than a typical Ralph session — but that is brittle for long runs, which is exactly why Ralph inhibits idle instead of relying on it.
+The suspend backend is feature-detected (systemd today) and degrades to an awake wait where the tools are missing. Tuning knobs (`LLM_TOOLS_NO_INHIBIT`, `LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE`, `LLM_RALPH_MIN_AWAKE_SECONDS`, `LLM_RALPH_MAX_SUSPENDS`, `LLM_SCHEDULER_SUSPEND_MIN_LEAD`, `LLM_TOOLS_WATCHDOG_DEVICE`) are documented in [AGENTS.md](./AGENTS.md). Run `llm-scheduler --wake-test` to see what your host supports.
 
-**Its own suspends are verified and recorded:**
-
-* **A wake is always armed before suspending.** Ralph never suspends without first arming an RTC wake (via `rtcwake -m no` when it can, otherwise a `systemd-run --user` `WakeSystem=true` timer). If it cannot arm one, it does not suspend — it waits awake instead.
-* **Wakes are verified by behaviour.** After resume, Ralph checks how far the wall clock landed from the target. A wake that fires far from target (or not at all) is treated as unreliable, and Ralph stays awake for the rest of that run rather than risk repeating a bad cycle.
-* **Suspend churn is capped.** A minimum awake interval between suspends and an optional per-run cap stop flaky suspend/resume hardware from being cycled dozens of times unattended.
-* **A durable ledger survives a wedged resume.** Ralph writes an fsync'd marker before each suspend and another after resume. If a resume ever wedges the machine and it is hard-reset, the unfinished cycle is still on disk — Ralph (and the soak tool) warn about it on the next start.
-* **`--watchdog` (opt-in) recovers a wedged resume.** With `--watchdog`, Ralph arms a hardware watchdog across each suspend so a hung resume reboots the machine instead of hanging. This needs a usable `/dev/watchdog` whose timer keeps counting across S3 (a TCO/iTCO or IPMI watchdog, or `RuntimeWatchdogSec=` in `systemd-system.conf`); without one it is a logged no-op.
-
-**Portability.** The suspend backend is feature-detected, not distro-specific: it works across systemd-based Linux and degrades to an awake wait where the tools are missing. The design is modular so a future macOS backend (`caffeinate` / `pmset schedule wake`) can be added without changing how Ralph uses it.
-
-Tuning knobs: `LLM_TOOLS_NO_INHIBIT`, `LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE`, `LLM_RALPH_MIN_AWAKE_SECONDS`, `LLM_RALPH_MAX_SUSPENDS`, `LLM_SCHEDULER_SUSPEND_MIN_LEAD`, `LLM_TOOLS_WATCHDOG_DEVICE`. Run `llm-scheduler --wake-test` to see what the current host supports.
+When all providers are blocked, Ralph sets an RTC wake for the earliest known reset across the rotation and resumes its own loop after wake. This differs from `llm-scheduler --suspend-until-ready`, which wakes into one selected provider — Ralph wakes back into cross-provider rotation.
 
 ### `llm-sleep-soak` — prove sleep/wake is reliable
 
@@ -843,17 +564,17 @@ llm-sleep-soak --cycles 50 --period 90s        # 50 real suspend/wake cycles
 llm-sleep-soak --cycles 20 --period 2m --watchdog --json
 ```
 
-Each cycle suspends the machine, wakes it via the same verified RTC path Ralph uses, measures the wake drift, scrapes the kernel log for resume errors, and records the cycle in the durable ledger. It prints a `PASS`/`FAIL` summary and exits non-zero if any cycle resumed late or logged a resume error — or if an earlier run left a cycle unfinished (the fingerprint of a past wedged resume).
+Each cycle suspends the machine, wakes it via the same verified RTC path Ralph uses, measures wake drift, scrapes the kernel log for resume errors, and records the cycle in the durable ledger. It prints a `PASS`/`FAIL` summary and exits non-zero if any cycle resumed late or logged an error — or if an earlier run left a cycle unfinished (the fingerprint of a past wedged resume).
 
-This is a **real-hardware test**: it genuinely suspends the machine and therefore cannot run in CI. Run it when the machine is otherwise idle. `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` runs the whole loop in simulation (no real sleep) if you just want to see the flow.
+This is a **real-hardware test**: it genuinely suspends the machine and cannot run in CI. `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` runs the whole loop in simulation (no real sleep) if you just want to see the flow.
 
 ## Provider Setup Details
 
-Most providers only need their CLI installed and authenticated once. Kilo and MiniMax also support environment-variable fallbacks, which are useful for CI and deterministic tests.
+Most providers only need their CLI installed and authenticated once. Kilo, MiniMax, and Z.ai also support environment-variable fallbacks, useful for CI and deterministic tests.
 
 ### Kilo Code
 
-Kilo is configured primarily through environment variables, so it can be driven from CI or Ralph without changing local state.
+Kilo is driven primarily through its CLI, with environment variables as a CI/test fallback:
 
 | Variable                           | Purpose                                                                   |
 | ---------------------------------- | ------------------------------------------------------------------------- |
@@ -865,83 +586,38 @@ Kilo is configured primarily through environment variables, so it can be driven 
 | `LLM_USAGE_KILO_MONTHLY_SPENT`     | Amount already spent in this budget period.                               |
 | `LLM_USAGE_KILO_MONTHLY_RESET_DAY` | Day of month the budget resets. Default: `1`.                             |
 
-When `kilo` is on `PATH`, `llm-usage` and `llm-scheduler` try `kilo stats` first. JSON and text output are supported. If that fails or cannot be parsed, they fall back to the environment variables above. For the monetary `spend` row specifically, `llm-tools` replaces Kilo's rolling `--days N` approximation with an exact month-to-date sum from Kilo's local `kilo.db`, so the surfaced July spend is July 1..now rather than "the last N days" bleeding across the month boundary. That exact override currently expects Kilo's local SQLite schema to expose `session.time_created` (milliseconds since epoch) and `session.cost`; if a future Kilo release changes that schema, `llm-tools` warns on stderr once and falls back to the `kilo stats --days N` approximation instead of silently claiming an exact MTD figure.
+When `kilo` is on `PATH`, the tools try `kilo stats` (JSON or text) first and fall back to the variables above. The monetary `spend` row is an exact month-to-date sum from Kilo's local database rather than a rolling `--days N` approximation. With `--scope auto`, Kilo prefers `budget`, then `balance`, then `ungated`.
 
-With `--scope auto`, Kilo prefers:
+**Gateway-backed models (e.g. MiniMax M3 via Kilo).** When Kilo sells another provider's model through its gateway, the entitlement lives behind the Kilo gateway and cannot be measured before launch — model it as an `opaque` route, pinned to an id from Kilo's own catalogue (`kilo/minimax/minimax-m3`). See [Route Mode](#route-mode) for the full config; the legacy `capacity_provider` setting is for the *truthful* delegation case only.
 
-1. `budget`, when configured
-2. `balance`, when configured
-3. `ungated`
+### Z.ai (GLM via Kilo or OpenCode)
 
-#### Gateway-backed models via routes (Kilo + MiniMax M3)
+Z.ai is a capacity-only provider: there is no `zai` CLI, only the GLM family (`GLM-4.7`, `GLM-5.2`, …) served through Kilo (or OpenCode) via the `zai/<model>` id. `llm-usage` reads your Z.ai `5h`/`weekly` quota directly from the official monitoring API; `llm-scheduler` / `ralph-robin` launch the configured provider with `-m zai/<model>` through a route with `capacity.policy = "delegate"` and `provider = "zai"` (see [Route Mode](#route-mode)).
 
-When Kilo sells a model from another provider (e.g. MiniMax M3 purchased through the Kilo gateway), the entitlement lives behind the Kilo gateway: the direct `mmx quota show` reads the user's *direct* MiniMax account, not the Kilo-purchased subscription, so it is the wrong truth source. Model the route as `opaque`. The model pin must be an id from **Kilo's own** catalogue (`kilo models`) that is actually authenticated in Kilo's `auth.json` — for the gateway entitlement that is the `kilo/`-prefixed id `kilo/minimax/minimax-m3` (also Kilo's configured default). Do **not** paste an id from another CLI's catalogue: `minimax-coding-plan/MiniMax-M3` is an *OpenCode* id, and because Kilo has no `minimax-coding-plan` credential, `kilo run -m minimax-coding-plan/...` prints its agent banner and then hangs forever instead of erroring:
+**Zero-config key discovery.** You do not configure a Z.ai key in `llm-tools`. When you authenticate Z.ai in Kilo (or OpenCode), the key is stored in that agent's owner-only `auth.json`; the reader discovers it there automatically, so adding a Z.ai account to Kilo lights up the dashboard row with no further setup. A bad or missing key reads as `not-authenticated` (rather than a generic `unavailable`), so "wrong key" is distinguishable from "API down". The environment variables below are an explicit override / hermetic-test path, not required.
 
-```toml
-[ralph]
-routes = ["kilo-minimax-m3"]
+| Variable                          | Purpose                                                            |
+| --------------------------------- | ------------------------------------------------------------------ |
+| `ZAI_API_KEY`                     | Bearer token override (takes precedence over the discovered key).  |
+| `LLM_USAGE_ZAI_API_KEY`           | Same, but overrides `ZAI_API_KEY` (mainly for tests).              |
+| `LLM_USAGE_ZAI_MODEL`             | Display-only GLM pin (e.g. `zai/glm-4.7`); does not affect gating. |
+| `LLM_USAGE_ZAI_5H_PERCENT` / `..._RESET_EPOCH` | Hermetic fallback for the 5h window (percent `0..100`, epoch s/ms). |
+| `LLM_USAGE_ZAI_WEEKLY_PERCENT` / `..._RESET_EPOCH` | Hermetic fallback for the weekly window.                     |
+| `LLM_USAGE_ZAI_TIMEOUT`           | HTTP timeout in seconds. Default `10`.                             |
 
-[routes.kilo-minimax-m3]
-provider = "kilo"
-model    = "kilo/minimax/minimax-m3"
-[routes.kilo-minimax-m3.capacity]
-policy = "opaque"
-scope  = "subscription"
-label  = "MiniMax M3 via Kilo"
-[routes.kilo-minimax-m3.cost]
-policy   = "fixed_subscription"
-amount   = 20
-currency = "USD"
-period   = "monthly"
+```bash
+# Single GLM model on Kilo, gated on Z.ai's 5h quota.
+llm-scheduler --provider kilo --model zai/glm-4.7 --prompt-file task.md --scope 5h
+
+# Even-burn across two GLM models on Kilo, gated on Z.ai's real windows.
+ralph-robin --routes kilo-zai-glm-4-7,kilo-zai-glm-5-2 --prompt-file task.md
 ```
 
-`llm-usage` then renders:
-
-```
-Provider   Model       Ready   Scope          Remaining         Guidance   Resets in
-Kilo       MiniMax M3  yes     subscription   prepaid USD20/mo   ✓ usable   -
-```
-
-The route is usable whenever the Kilo CLI is on `PATH` and no local runtime block is recorded. If a Kilo run returns a real retryable error (e.g. `HTTP 429`, `quota exceeded`), the scheduler records a local block under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/routes/blocks/<id>.json` so Ralph stops selecting the route until the retry window passes. A run that hits an autonomy abort (idle timeout, blocked prompt, hung tool call, or an opaque provider whose backend silently 429s without surfacing in the captured output) is also recorded as a runtime block for the same backoff window so the orchestrator rotates away from the failing route instead of burning another full idle window on it. A successful run clears the block.
-
-The legacy `providers.<x>.capacity_provider = "<y>"` setting is for the *truthful* delegation case (the configured CLI runs another provider's model and that provider's windows truthfully describe the capacity). Use `routes.<id>.capacity.policy = "opaque"` when no such truth source exists.
-
-#### Truthful delegation via routes (Z.ai GLM via Kilo or OpenCode)
-
-Z.ai exposes the GLM family (e.g. `GLM-4.7`, `GLM-5.2`) with a real 5h / weekly quota served by `https://api.z.ai/api/monitor/usage/quota/limit`. There is no Z.ai CLI to launch — Kilo (or OpenCode) runs the model and the Z.ai API is the truthful capacity source. Model the route with `capacity.policy = "delegate"` and `provider = "zai"`:
-
-```toml
-[ralph]
-routes = ["kilo-zai-glm-4-7", "kilo-zai-glm-5-2"]
-
-[routes.kilo-zai-glm-4-7]
-provider = "kilo"
-model    = "zai/glm-4.7"
-
-[routes.kilo-zai-glm-4-7.capacity]
-policy   = "delegate"
-provider = "zai"
-
-[routes.kilo-zai-glm-5-2]
-provider = "kilo"
-model    = "zai/glm-5.2"
-
-[routes.kilo-zai-glm-5-2.capacity]
-policy   = "delegate"
-provider = "zai"
-```
-
-`llm-scheduler` and `ralph-robin` then:
-
-* call the launch CLI with `-m zai/glm-4.7` / `-m zai/glm-5.2` so the model pin reaches the provider,
-* gate, rank, and suspend on Z.ai's real 5h / weekly windows (read directly from the API),
-* rotate between the two routes with even-burn so each GLM model's quota burns down in parallel rather than one provider eating the whole allowance.
-
-The Z.ai capacity reader needs a Z.ai key — discovered automatically from Kilo's/OpenCode's `auth.json` (zero-config), or set explicitly via `ZAI_API_KEY` / `LLM_USAGE_ZAI_API_KEY` — and is gated on the usual `5h` / `weekly` / `auto` scopes. A bad or missing key surfaces as `not-authenticated` in the `Ready` / `Remaining` cells rather than a generic `unavailable`, so the user can distinguish "wrong key" from "API down".
+Launching Z.ai directly via `--provider zai` is rejected — it has no CLI to run; always go through a route. `llm-usage --json` emits a `zai` top-level key with the parsed `5h` and `weekly` scopes. (The API endpoints, payload classification, and China-mirror fallback are detailed in [AGENTS.md](./AGENTS.md).)
 
 ### MiniMax
 
-MiniMax quota is read from the local `mmx` CLI first. Environment variables are available as a fallback for tests and controlled environments.
+MiniMax quota is read from the local `mmx` CLI (`mmx quota show --output json`), with environment variables as a fallback for tests:
 
 | Variable                               | Purpose                                                            |
 | -------------------------------------- | ------------------------------------------------------------------ |
@@ -952,86 +628,11 @@ MiniMax quota is read from the local `mmx` CLI first. Environment variables are 
 | `LLM_USAGE_MINIMAX_MODEL`              | `model_remains` row to read. Default: `general`.                   |
 | `LLM_USAGE_MINIMAX_TIMEOUT`            | Timeout for `mmx quota show`, in seconds. Default: `10`.           |
 
-When `mmx` is on `PATH`, `llm-usage` and `llm-scheduler` try:
-
-```bash
-mmx quota show --output json
-```
-
-If the CLI is missing or the output cannot be parsed, they fall back to the environment variables above.
-
-The MiniMax reader uses the `general` row from `model_remains` by default and exposes the same `5h` and `weekly` reset windows used by Claude Code and Codex. This lets the table render and gate MiniMax consistently with other reset-window providers.
-
-The MiniMax row appears only when the `mmx` CLI is installed or MiniMax environment variables are set.
-
-### Z.ai (GLM via Kilo or OpenCode)
-
-Z.ai is a capacity-only provider: there is no `zai` CLI to launch, only the GLM family (`GLM-4.7`, `GLM-5.2`, …) served through Kilo (or any provider that exposes the `zai/<model>` id). `llm-usage` reads the user's Z.ai quota directly from the official monitoring API; `llm-scheduler` / `ralph-robin` launch the configured provider with `-m zai/<model>` via a route with `capacity.policy = "delegate"` and `provider = "zai"`.
-
-**Zero-config key discovery.** You do not configure a Z.ai key in `llm-tools`. When you authenticate Z.ai in Kilo (or OpenCode), the agent stores the key in its own owner-only credential file — `$XDG_DATA_HOME/{kilo,opencode}/auth.json` (default `~/.local/share/...`, mode `0600`), shaped `{"zai": {"type": "api", "key": "…"}}`. The reader discovers it there automatically, the same way the Claude/Codex readers read their CLIs' auth files, so adding a Z.ai account to Kilo lights up the dashboard row with no further setup. The environment variables below remain available as an explicit override / hermetic-test path, but are not required.
-
-| Variable                          | Purpose                                                            |
-| --------------------------------- | ------------------------------------------------------------------ |
-| `ZAI_API_KEY`                     | Bearer token override (takes precedence over the discovered key) used against `https://api.z.ai/api/monitor/usage/quota/limit`. |
-| `LLM_USAGE_ZAI_API_KEY`           | Same, but overrides `ZAI_API_KEY` (mainly for tests).              |
-| `LLM_USAGE_ZAI_MODEL`             | Display-only GLM pin (e.g. `zai/glm-4.7`); does not affect gating. |
-| `LLM_USAGE_ZAI_5H_PERCENT`        | Remaining percentage for the 5h window, `0..100`. Hermetic fallback. |
-| `LLM_USAGE_ZAI_5H_RESET_EPOCH`    | Epoch seconds or milliseconds when the 5h window resets.           |
-| `LLM_USAGE_ZAI_WEEKLY_PERCENT`    | Remaining percentage for the weekly window, `0..100`.              |
-| `LLM_USAGE_ZAI_WEEKLY_RESET_EPOCH`| Epoch seconds or milliseconds when the weekly window resets.       |
-| `LLM_USAGE_ZAI_TIMEOUT`           | HTTP timeout in seconds. Default `10`.                             |
-| `LLM_USAGE_ZAI_QUOTA_LIMIT_JSON`  | Inject a fully-formed `/api/monitor/usage/quota/limit` payload (or `{5h, weekly}` scopes). Overrides the live API for tests. |
-
-With a discovered (or explicitly configured) key, `llm-usage` calls the international endpoint first:
-
-```bash
-curl -fsS -H "Authorization: Bearer $ZAI_API_KEY" \
-  https://api.z.ai/api/monitor/usage/quota/limit
-```
-
-The response lists several `limits`, each with a window length of `number × unit` (Z.ai's `unit` is a time-unit enum — `3` = hour, `6` = week, `5` = month). The reader classifies the rows it surfaces by that **window length**, not the `type` label: the shortest sub-day window is the `5h` row, a roughly-one-week window is the `weekly` row, and longer (monthly) windows — e.g. Z.ai's separate tool/search quota — are surfaced by neither. `percentage` is the *used* percent, flipped to remaining for the bar. (When `unit`/`number` are absent — an older payload shape — it falls back to the `type` label, then to `nextResetTime` ordering: shortest reset → 5h, longest → weekly.)
-
-```json
-{
-  "code": 200,
-  "data": {
-    "level": "lite",
-    "limits": [
-      {"type": "TIME_LIMIT",   "unit": 5, "number": 1, "percentage": 0,  "nextResetTime": 1784878391978},
-      {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 97, "nextResetTime": 1782304670000},
-      {"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 19, "nextResetTime": 1782891191000}
-    ]
-  }
-}
-```
-
-Here the `unit 3 × number 5` row is the 5-hour window (97 % used → 3 % remaining, resets in ~1 h), the `unit 6` row is the weekly window (19 % used → 81 % remaining), and the `unit 5` month-long row is *not* shown — the earlier label-only mapping wrongly captured it as the 5h row.
-
-If the international endpoint is unreachable (network, DNS, TLS) the reader falls back to `https://open.bigmodel.cn/api/monitor/usage/quota/limit` (the China mirror). When *both* endpoints fail the live call, the reader surfaces the classified reason — `not-authenticated` (HTTP 401/403), `subscription-required`, `rate-limited`, `network-error`, `quota-error` — instead of the generic `inconclusive-usage`, so a wrong key reads differently from a network outage.
-
-When no key can be discovered from Kilo/OpenCode and none is configured via the environment, the Z.ai row renders as `unavailable` and is excluded from provider-fan-out and route decisions.
-
-Launching a Z.ai model directly via `--provider zai` is intentionally rejected — Z.ai has no CLI to run; always go through a route (typically `provider = "kilo"` with `model = "zai/<model>"`). The scheduler/ralph invocations below make this concrete:
-
-```bash
-# Single GLM model on Kilo, gated on Z.ai's 5h quota.
-llm-scheduler --provider kilo --model zai/glm-4.7 --prompt-file task.md --scope 5h
-
-# Even-burn across two GLM models on Kilo, gated on Z.ai's real windows.
-ralph-robin --routes kilo-zai-glm-4-7,kilo-zai-glm-5-2 --prompt-file task.md
-```
-
-`llm-usage --json` then emits a `zai` top-level key next to `codex`, `claude`, `copilot`, `kilo`, `opencode`, and `minimax`, with the parsed `5h` and `weekly` scopes under `zai.scopes` and the GLM pin under `zai.selected_model`.
+MiniMax exposes the same `5h` and `weekly` reset windows as Claude Code and Codex, so it renders and gates identically. The row appears only when the `mmx` CLI is installed or MiniMax environment variables are set.
 
 ## Logs and Cache
 
-Runtime data lives under:
-
-```text
-${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools
-```
-
-Directory layout:
+Runtime data lives under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`:
 
 ```text
 llm-tools/llm-usage/                 Usage caches and llm-usage.log
@@ -1040,31 +641,7 @@ llm-tools/llm-scheduler/logs/        Per-run scheduler logs
 llm-tools/ralph-robin/               Ralph state and logs
 ```
 
-Each scheduler run directory contains:
-
-```text
-run.log
-events.jsonl
-prompt.txt
-attempt-N.out
-attempt-N.status
-```
-
-The scheduler logs:
-
-* arguments
-* prompt source
-* prompt SHA-256
-* prompt content
-* usage snapshots
-* wait decisions
-* command plan
-* output
-* exit code
-* retry delays
-* final status
-
-Useful symlinks:
+Each scheduler run directory contains `run.log`, `events.jsonl`, `prompt.txt`, and `attempt-N.out` / `attempt-N.status`. The scheduler logs arguments, prompt source and SHA-256, usage snapshots, wait decisions, the command plan, output, exit code, and final status. Convenience symlinks point at the latest runs:
 
 ```text
 ~/.cache/llm-tools/llm-scheduler/logs/latest
@@ -1072,64 +649,22 @@ Useful symlinks:
 ~/.cache/llm-tools/llm-scheduler/logs/latest-codex
 ```
 
-Ralph logs live under:
-
-```text
-${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs
-```
-
-Child scheduler logs are written under each Ralph run's `scheduler/` subdirectory.
-
 ## Data Sources
 
-`llm-tools` reads local provider state where possible.
-
-| Provider       | Source                                                                      |
-| -------------- | --------------------------------------------------------------------------- |
-| Codex          | Live `codex app-server` rate limits, then cache, then local `~/.codex/sessions` JSONL. |
-| Claude Code    | OAuth usage API/cache with automatic OAuth token refresh, then statusline cache, then local project JSONL fallback. |
-| GitHub Copilot | Local Copilot CLI footer captured through a bounded PTY helper.             |
-| Kilo Code      | `kilo stats` (JSON/text) plus exact month-to-date cost from local `kilo.db`, then Kilo environment variables. |
-| MiniMax        | `mmx quota show --output json`, then MiniMax environment variables.         |
-
-`llm-usage` reads providers concurrently. Configure fan-out with
-`--provider-parallelism` or `LLM_USAGE_PROVIDER_PARALLELISM`; the default is
-the number of CPU cores.
-
-### How refreshing works
-
-Every provider is **actively refreshed** on each run - `llm-usage` never just
-echoes a session log left behind the last time you used a CLI. Each reader asks
-the provider for current numbers and only falls back if that fails:
+`llm-tools` reads local provider state where possible, and **actively refreshes** every provider on each run — it never just echoes a stale session log. Each reader asks the provider for current numbers and only falls back if that fails:
 
 | Provider       | Active refresh → fallback                                                   |
 | -------------- | --------------------------------------------------------------------------- |
 | Codex          | `codex app-server` (live, turn-free) → last cached payload → local session JSONL |
 | Claude Code    | OAuth usage API (auto-refreshing the token) → API cache → statusline cache → project JSONL |
-| GitHub Copilot | Background PTY footer capture → cached capture                              |
-| Kilo / MiniMax / OpenCode | `kilo stats --days <MTD>` / `mmx quota show` / `opencode stats --days <MTD>` → environment variables |
+| GitHub Copilot | Background PTY footer capture → cached capture → GitHub billing API          |
+| Kilo / MiniMax / OpenCode | `kilo stats` / `mmx quota show` / `opencode stats` → environment variables |
 
-A provider only reports `stale-usage` if it cannot be refreshed for a **known
-authentication or CLI-startup reason** - e.g. Codex shows `not-authenticated`
-(no `~/.codex/auth.json` credentials) or `missing-cli` (the `codex` binary is
-not on `PATH`). When the CLI is installed and signed in, you always see live
-data.
-
-The local-snapshot fallbacks (Codex/Claude session files) are still treated as
-stale after `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` seconds (default `60`, capped at
-60) while they claim an active window, so a brief network blip degrades to
-"unavailable" rather than to a misleadingly old percentage.
+A provider only reports `stale-usage` if it cannot be refreshed for a known authentication or CLI-startup reason (e.g. Codex `not-authenticated` or `missing-cli`). When the CLI is installed and signed in, you always see live data. `llm-usage` reads providers concurrently — configure fan-out with `--provider-parallelism` or `LLM_USAGE_PROVIDER_PARALLELISM` (default: CPU cores).
 
 ### Local Service
 
-By default, a one-shot `llm-usage` client first asks the local Unix-socket
-service for a snapshot. If no continuous service is running, it starts the same
-sampler ephemerally, reads one snapshot, asks it to shut down, and falls back to
-direct provider reads if the service cannot start. This keeps the default user
-experience as a single CLI while using the same protocol future clients can use.
-
-For instant reports and continuous burn-down history, install the sampler as a
-native user service:
+By default a one-shot `llm-usage` first asks the local Unix-socket service for a snapshot; if no continuous service is running it starts the sampler ephemerally, reads one snapshot, and shuts it down, falling back to direct reads if the service can't start. For instant reports and continuous burn-down history, install the sampler as a native user service:
 
 ```bash
 llm-usage --service-install
@@ -1137,161 +672,27 @@ llm-usage --service-status
 llm-usage --service-uninstall
 ```
 
-On Linux this writes and enables a `systemd --user` unit. On macOS it writes and
-loads a launchd LaunchAgent. The service is local-only: it listens on a
-Unix-domain socket under `${XDG_RUNTIME_DIR:-/tmp/llm-tools-$UID}`, writes
-`latest.json` under the `llm-usage` cache directory, and appends samples to
-`history.jsonl`. It has no HTTP listener, database, telemetry, or extra runtime
-dependency. Use `--no-service` for an explicit direct read, or `--service-run`
-to run the foreground process under a custom supervisor.
+On Linux this writes a `systemd --user` unit; on macOS a launchd LaunchAgent. The service is local-only: a Unix-domain socket under `${XDG_RUNTIME_DIR:-/tmp/llm-tools-$UID}`, `latest.json` and `history.jsonl` under the cache dir, and no HTTP listener, database, telemetry, or extra dependency. Use `--no-service` for an explicit direct read.
 
-While readers are in flight, `llm-usage` shows a small spinner that erases
-itself once the table is ready. In `--watch` mode it docks to the right of the
-clock in the header (`LLM Usage · 14:29  ⠙ refreshing usage 3/6`) and the frame
-redraws in place - no full-screen wipe, so the dashboard updates without a
-flash. It uses only the most portable cursor sequences (`ESC[H`, `ESC[K`,
-`ESC[r;cH`, and `ESC 7`/`ESC 8` save-restore), so it renders correctly under
-tmux, GNU screen, and a raw telnet PTY. Outside `--watch`, the spinner sits on
-`stderr` and self-erases. It is shown only on an interactive terminal, so pipes,
-`--json` consumers, and batch scripts stay byte-clean. Disable it with
-`LLM_USAGE_NO_PROGRESS=1`.
+### GitHub Copilot
 
-### GitHub Copilot Notes
+The Copilot footer only shows plan/session usage when the `quota` and `ai-used` status-line items are enabled. These are off on a fresh install, so before each capture `llm-usage` enables them in `${COPILOT_HOME:-~/.copilot}/settings.json` (all other settings preserved). Set `LLM_USAGE_COPILOT_NO_SETTINGS_WRITE=1` to skip that write.
 
-The Copilot footer only shows plan/session usage when the `quota` and `ai-used` status-line items are enabled. These are off by default on a fresh install and are normally toggled via `/statusline`.
-
-Before each capture, `llm-usage` enables those items in:
-
-```text
-${COPILOT_HOME:-~/.copilot}/settings.json
-```
-
-All other settings are preserved.
-
-Set this variable to skip the settings write:
-
-```bash
-LLM_USAGE_COPILOT_NO_SETTINGS_WRITE=1
-```
-
-Copilot capture is cached with `LLM_USAGE_COPILOT_CACHE_TTL`. The PTY footer
-capture is slow and occasionally flaky, so when a refresh cannot complete within
-its wait budget, `llm-usage` shows the most recent monthly figure ("usage on
-start") and refreshes it in the background for the next run, rather than dropping
-to `unavailable`.
-
-Default:
-
-```bash
-LLM_USAGE_COPILOT_CACHE_TTL=300
-```
-
-Force synchronous capture:
-
-```bash
-LLM_USAGE_COPILOT_CACHE_TTL=0
-```
-
-### Copilot monthly allowance override
-
-The GitHub `premium_request/usage` fallback computes the monthly quota bar
-from the user's plan. Override the plan or pin the allowance explicitly:
-
-```bash
-# Resolve as Pro+ (1500 requests / month) instead of the default Pro
-LLM_USAGE_COPILOT_PLAN=pro_plus
-
-# Or pin a custom allowance for an enterprise / custom contract
-LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE=5000
-```
-
-The cached `premium_request/usage` figure is reused across runs (default
-TTL 600s):
-
-```bash
-LLM_USAGE_COPILOT_MONTHLY_TTL=600
-```
-
-Disable only the monthly GitHub fallback, without hiding the add-on spend row:
-
-```bash
-LLM_USAGE_DISABLE_COPILOT_MONTHLY=1
-```
-
-Tests can pin a frozen "current month" so the reader takes the cheap
-year+month path instead of fanning out 30 day-level requests:
-
-```bash
-LLM_USAGE_COPILOT_PREMIUM_REQUEST_MONTH_OVERRIDE=2026-05
-```
-
-## Wake Support
-
-`llm-scheduler --wake` is best effort.
-
-It prefers a transient user `systemd-run` timer with `WakeSystem=true`. If that is unavailable, it logs an `rtcwake` fallback command.
-
-`llm-scheduler --suspend-until-ready` schedules a resumed scheduler invocation, then calls:
-
-```bash
-systemctl suspend
-```
-
-after the timer is accepted.
-
-Configure the pre-suspend confirmation pause:
-
-```bash
-LLM_SCHEDULER_PRE_SUSPEND_CONFIRMATION_SECONDS=10
-```
-
-Wake reliability depends on:
-
-* firmware and BIOS/UEFI settings
-* motherboard RTC support
-* kernel support
-* systemd user timers
-* power state
-
-The tool does not modify BIOS/UEFI settings and does not silently require `sudo`.
-
-Run diagnostics with:
-
-```bash
-llm-scheduler --wake-test
-```
+Capture is cached with `LLM_USAGE_COPILOT_CACHE_TTL` (default `300`; `0` forces synchronous capture) because the PTY footer capture is slow and occasionally flaky — a refresh that can't complete in its budget shows the most recent figure and refreshes in the background. To override the monthly allowance denominator, set `LLM_USAGE_COPILOT_PLAN` (e.g. `pro_plus`) or pin `LLM_USAGE_COPILOT_MONTHLY_ALLOWANCE`. The full set of Copilot knobs is catalogued in [AGENTS.md](./AGENTS.md).
 
 ## Appearance and Output Customization
 
-Color override example:
+Override colors and symbols with environment variables:
 
 ```bash
-LLM_TOOLS_COLOR_ERROR='1;34'
+LLM_TOOLS_COLOR_ERROR='1;34'     # one color role
+LLM_TOOLS_SYMBOL_ERROR=!         # one symbol role
+LLM_TOOLS_NO_SYMBOLS=1           # disable symbols, keep color
 ```
 
-Supported color roles:
+Color roles: `BRAND, INFO, OK, WARN, ERROR, DIM, DIFF_ADD, DIFF_REMOVE, DIFF_HUNK, COMMAND, TOOL, STDERR, HEADING`. Colors are disabled automatically for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 
-```text
-BRAND, INFO, OK, WARN, ERROR, DIM, DIFF_ADD, DIFF_REMOVE, DIFF_HUNK,
-COMMAND, TOOL, STDERR, HEADING
-```
-
-Symbol override examples:
-
-```bash
-LLM_TOOLS_SYMBOL_ERROR=!
-LLM_TOOLS_NO_SYMBOLS=1
-```
-
-Ralph-launched provider processes inherit:
-
-```text
-LLM_TOOLS_RALPH_ROBIN_ACTIVE=1
-LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER
-LLM_TOOLS_RALPH_ROBIN_PROVIDERS
-```
-
-If a child process tries to run `llm-scheduler --suspend-until-ready` while Ralph is active, the scheduler exits with status `75` instead of suspending. Ralph remains the single rotation and suspend coordinator.
+Ralph-launched provider processes inherit `LLM_TOOLS_RALPH_ROBIN_ACTIVE=1`, `..._SELECTED_PROVIDER`, and `..._PROVIDERS`. If a child tries to run `llm-scheduler --suspend-until-ready` while Ralph is active, the scheduler exits with status `75` instead of suspending — Ralph remains the single rotation and suspend coordinator.
 
 ## Requirements
 
@@ -1300,130 +701,36 @@ If a child process tries to run `llm-scheduler --suspend-until-ready` while Ralp
 * Optional: `tmux` for tmux mode.
 * Optional: `systemd-run` or `rtcwake` for wake support.
 
-Wake and suspend features require Linux with systemd:
-
-```text
---wake
---suspend-until-ready
-```
-
-Everything else works on Linux and macOS.
+Wake and suspend features (`--wake`, `--suspend-until-ready`) require Linux with systemd. The tool never modifies BIOS/UEFI settings and never silently requires `sudo`. Wake reliability depends on firmware, motherboard RTC support, the kernel, systemd user timers, and power state — run `llm-scheduler --wake-test` for diagnostics. Everything else works on Linux and macOS.
 
 ## Limitations
 
-* Uses local data and locally authenticated CLIs only.
-* Not an official billing dashboard.
+* Uses local data and locally authenticated CLIs only. Not an official billing dashboard.
 * Missing or inconclusive provider data is shown as `-`, `unknown`, or `unavailable`.
-* If usage remains unavailable beyond `--max-unavailable-wait`, the scheduler launches optimistically and lets provider rate-limit handling and retry behavior take over.
+* If usage stays unavailable beyond `--max-unavailable-wait`, the scheduler launches optimistically and lets provider rate-limit handling and retry behavior take over.
 * Provider local data formats and CLI syntax can change.
-* Copilot AI credits are parsed when requested, but scheduler gating currently uses monthly remaining usage.
-
-## Adding a Provider
-
-`llm-tools` uses a small provider-adapter contract. To add a new CLI, for example `acme-cli`:
-
-1. Add a provider module:
-
-   ```text
-   llm_tools/providers/acme.py
-   ```
-
-   It should expose:
-
-   ```text
-   read(env) -> ProviderSnapshot
-   ```
-
-   The snapshot carries zero or more `CapacityScope` objects.
-
-2. Use one of the supported capacity scope kinds:
-
-   ```text
-   reset_window
-   balance
-   budget
-   ungated
-   unknown
-   ```
-
-3. Re-export the module from:
-
-   ```text
-   llm_tools/providers/__init__.py
-   ```
-
-4. Register supported scopes in:
-
-   ```text
-   llm_tools/capacity.PROVIDER_SCOPES
-   ```
-
-   Example:
-
-   ```python
-   PROVIDER_SCOPES["acme"] = {SCOPE_AUTO, ...}
-   ```
-
-5. Add default launch commands under:
-
-   ```text
-   llm_tools.scheduler.provider_default_argv
-   ```
-
-   Add both attached and headless paths where applicable.
-
-6. Optionally add a highlighting pattern in:
-
-   ```text
-   scheduler.highlight_provider_text
-   ```
-
-7. Add `--provider` and `--providers` membership in the relevant validators:
-
-   ```text
-   scheduler.py
-   ralph_robin.py
-   ```
-
-After that, the generic decision logic in `llm_tools/capacity.decide` handles the provider's scopes. `llm-usage`, `llm-scheduler`, and `ralph-robin` can then use the new provider through the same model as the existing ones.
+* Copilot AI credits are parsed when requested, but scheduler gating uses monthly remaining usage.
 
 ## Tests
 
-Install test dependencies:
-
 ```bash
 python -m pip install -e . pytest coverage
-```
-
-Run tests with coverage:
-
-```bash
 coverage run -m pytest
 coverage combine
 coverage report --fail-under=85
 ```
 
-Tests use fixtures and mock commands. They do not require:
-
-* real Codex, Claude, Copilot, Kilo, or MiniMax installations
-* provider credentials
-* network access
-* the user's real home directory
-
-For manual end-to-end checks, run the examples above against installed and authenticated providers without the test fixture environment.
+Tests use fixtures and mock commands. They do not require real provider installations, credentials, network access, or the user's real home directory. For manual end-to-end checks, run the examples above against installed and authenticated providers.
 
 ## Contributing
 
-Small, focused pull requests are welcome.
-
-Before opening a PR, make sure total coverage is at or above `85%`:
+Small, focused pull requests are welcome. Before opening a PR, make sure total coverage is at or above `85%`:
 
 ```bash
-python -m pytest -q
-coverage run -m pytest
-coverage combine
-coverage report --fail-under=85
+coverage run -m pytest && coverage combine && coverage report --fail-under=85
 ```
+
+Adding a new provider follows a small adapter contract — see the provider-adapter steps and implementation map in [AGENTS.md](./AGENTS.md).
 
 ## License
 
