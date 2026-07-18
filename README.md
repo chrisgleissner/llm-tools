@@ -182,6 +182,22 @@ Per-provider scope allow-lists:
 
 The default rotation is over **providers** (`[providers.*]`, `--providers`). When the same provider can serve several underlying models with different capacity and cost semantics, you also have access to a **route** rotation (`[ralph].routes`, `[routes.<route_id>]`). A route binds a launch provider, a model, a capacity policy, and a cost policy into a single schedulable unit.
 
+### `--providers` vs `--routes`
+
+Use **`--providers`** (`-P`) when each entry in the rotation runs a single model — the CLI's default, or the one pinned in `[providers.<name>]`. Use **`--routes`** when one launch CLI must serve **several models** in the same rotation (e.g. one Kilo install running both MiniMax M3 and GLM 5.2): only a route carries a per-entry `model` pin, so `--providers kilo` can never reach a second Kilo model.
+
+The two flags select different rotation modes, and **an explicit `--providers` wins over a configured `[ralph].routes`** — passing `-P` forces legacy provider mode and silently ignores your routes, launching the provider with its default model only. This is the common surprise: `-P kilo` looks like it should honour the two Kilo routes in your config, but it does not.
+
+```
+# ✗ launches kilo with its default model only (e.g. minimax-m3), ignoring [ralph].routes
+ralph-robin --providers kilo --prompt-file task.md
+
+# ✓ rotates both Kilo models, even-burning across whichever is usable
+ralph-robin --routes kilo-minimax-m3,kilo-zai-glm-52 --prompt-file task.md
+```
+
+If `[ralph].routes` is set in your config, plain `ralph-robin --prompt-file task.md` (no `-P`, no `--routes`) already rotates over those routes — pass `--routes` only to override that list for one run.
+
 A route is shaped like this:
 
 ```toml
