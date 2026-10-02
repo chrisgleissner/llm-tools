@@ -56,7 +56,8 @@ from .capacity import ALL_PROVIDERS
 
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
-_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot"})
+_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot", "usage"})
+_USAGE_KEYS = frozenset({"providers"})
 _BUDGET_KEYS = frozenset({"monthly", "currency"})
 _COPILOT_KEYS = frozenset({"monthly_spend_limit", "currency"})
 _DEFAULTS_KEYS = frozenset({"providers", "scope", "min_remaining"})
@@ -260,6 +261,8 @@ def _validate(raw: Any) -> dict[str, Any]:
     _validate_budget(raw.get("budget"))
     _validate_section(raw.get("copilot"), "copilot", _COPILOT_KEYS)
     _validate_copilot(raw.get("copilot"))
+    _validate_section(raw.get("usage"), "usage", _USAGE_KEYS)
+    _validate_usage(raw.get("usage"))
     providers = raw.get("providers")
     if providers is not None:
         if not isinstance(providers, dict):
@@ -296,6 +299,57 @@ def _validate_budget(budget: Any) -> None:
             _fail("budget.monthly must be greater than 0")
     if "currency" in budget and not isinstance(budget["currency"], str):
         _fail("budget.currency must be a string")
+
+
+def _validate_usage(usage: Any) -> None:
+    """Validate the optional ``[usage]`` table.
+
+    ``providers`` is the set of providers every tool may use (see
+    ``enabled_providers``). It must be a non-empty list of known provider
+    names; an empty list would disable every provider, so enabling all
+    providers is expressed by omitting the key.
+    """
+    if usage is None or "providers" not in usage:
+        return
+    providers = usage["providers"]
+    if not isinstance(providers, list) or not all(isinstance(name, str) for name in providers):
+        _fail("usage.providers must be a list of provider names")
+    if not providers:
+        _fail("usage.providers must name at least one provider (omit the key to enable all providers)")
+    for name in providers:
+        if name not in ALL_PROVIDERS:
+            _fail(f"usage.providers: unknown provider '{name}' (known: {', '.join(ALL_PROVIDERS)})")
+
+
+def usage_providers(cfg: dict[str, Any]) -> tuple[str, ...] | None:
+    """Return ``[usage].providers`` from a loaded config, or ``None`` when unset."""
+    usage = cfg.get("usage") if isinstance(cfg, dict) else None
+    if not isinstance(usage, dict) or "providers" not in usage:
+        return None
+    return tuple(usage["providers"])
+
+
+def enabled_providers(env: dict[str, str] | None = None) -> frozenset[str] | None:
+    """Return the providers every tool may use, or ``None`` when all are enabled.
+
+    ``LLM_USAGE_PROVIDERS`` (comma-separated) wins over ``[usage].providers``.
+    ``llm-usage`` reads and shows only these providers, ``ralph-robin`` drops
+    rotation entries whose launch CLI is not listed, and ``llm-scheduler``
+    refuses to launch an unlisted provider. The env value is validated like the
+    config key: an unknown name or an empty list exits with status 2.
+    """
+    env = env or os.environ
+    raw = env.get("LLM_USAGE_PROVIDERS")
+    if raw is not None and raw.strip():
+        names = [name.strip().lower() for name in raw.split(",") if name.strip()]
+        unknown = [name for name in names if name not in ALL_PROVIDERS]
+        if unknown or not names:
+            problem = f"unknown provider(s) {', '.join(unknown)}" if unknown else "no provider names"
+            common.err(f"LLM_USAGE_PROVIDERS: {problem} (known: {', '.join(ALL_PROVIDERS)})")
+            raise SystemExit(2)
+        return frozenset(names)
+    names_from_config = usage_providers(load_config(env))
+    return frozenset(names_from_config) if names_from_config is not None else None
 
 
 def monthly_budget(cfg: dict[str, Any]) -> tuple[float | None, str]:

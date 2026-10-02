@@ -185,6 +185,9 @@ providers      = ["claude", "codex", "kilo"]
 
 [scheduler]                            # llm-scheduler-only settings (override [defaults])
 provider       = "claude"
+
+[usage]                                # providers enabled for all tools (omit to enable all)
+providers      = ["claude", "codex"]
 ```
 
 A complete template with every supported key (all commented out) ships at [config.example.toml](./config.example.toml). Copy it to one of the locations above and uncomment what you want.
@@ -355,6 +358,19 @@ Copilot reports two extras beyond the usual quota: a `monthly` row for your incl
 Empty cells are intentional: a cell is left blank when it has nothing to report (a non-resetting scope, a window with no runout forecast). Only a real read failure is called out, as `unavailable`.
 
 Set an overall monthly spend budget in `[budget]` (or the `LLM_USAGE_MONTHLY_BUDGET` / `LLM_USAGE_BUDGET_CURRENCY` env overrides) to turn every `spend` figure into a coloured progress bar against that cap, plus the `Budget` total row.
+
+To work with only some providers, list them in `[usage]` (or the comma-separated `LLM_USAGE_PROVIDERS` env override, which wins over the file). The list applies to all tools:
+
+- `llm-usage` reads and shows only the listed providers. Unlisted providers report `available:false` with `reason:"hidden"` in `--json`; the JSON top-level keys stay the same.
+- `ralph-robin` drops rotation entries (from `--providers`, `--routes`, or the config) whose launch CLI is unlisted, prints a warning naming them, and exits with status 2 if none are left.
+- `llm-scheduler` exits with status 2 when `--provider` (or `[scheduler].provider`) is unlisted.
+
+Routes are matched by their launch CLI, so a Kilo route whose capacity is delegated to z.ai needs `kilo` in the list. An unknown provider name or an empty list is an error. Remove the key to enable every provider again.
+
+```toml
+[usage]
+providers = ["claude", "codex"]
+```
 
 ### `llm-usage` Options
 

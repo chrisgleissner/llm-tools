@@ -16,7 +16,7 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/sleep_soak.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
 * Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`, `llm-sleep-soak`.
 * Regression tests: `tests/` with pytest and fake provider commands.
-* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_minimax.py`, `tests/test_ralph_kilo.py`, `tests/test_zai.py`.
+* Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_minimax.py`, `tests/test_ralph_kilo.py`, `tests/test_zai.py`, `tests/test_enabled_providers.py`.
 * Project/package config: `pyproject.toml`.
 * Import/test bootstrap: `sitecustomize.py`.
 * CI: `.github/workflows/test.yml`.
@@ -101,7 +101,7 @@ After that, the generic `llm_tools/capacity.decide` logic handles the provider's
 * Keep color disabled for non-TTY output, `TERM=dumb`, `NO_COLOR`, or `LLM_USAGE_NO_COLOR`.
 * Ralph/scheduler highlighting should default to a readable green/blue/teal palette that works on typical dark and light terminals. Keep colors centralized in `common.ANSI_COLOR_ROLES` and configurable through `LLM_TOOLS_COLOR_<ROLE>` rather than hard-coding ANSI codes at call sites.
 * Ralph/scheduler live output may use compact UTF-8 symbols to distinguish status, command, tool-call, stderr, diff hunk, and error blocks. Keep symbols centralized in `common.UTF_SYMBOL_ROLES`, configurable through `LLM_TOOLS_SYMBOL_<ROLE>`, and suppressible with `LLM_TOOLS_NO_SYMBOLS=1`.
-* Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `minimax`. A top-level `routes` key is added when at least one `[routes.<id>]` is configured; the existing provider keys remain unchanged.
+* Keep JSON top-level keys stable: `generated_at`, `codex`, `claude`, `copilot`, `kilo`, `minimax`. A provider hidden by `[usage].providers` / `LLM_USAGE_PROVIDERS` keeps its key with `{"provider": ..., "available": false, "reason": "hidden"}`. A top-level `routes` key is added when at least one `[routes.<id>]` is configured; the existing provider keys remain unchanged.
 * Keep Copilot unavailable shape explicit: `available:false`, with `reason` when known.
 * Keep option semantics stable: `--show-source`, `--hide-source`, `--show-remaining-time`, `--hide-remaining-time`, `--show-codex-spark`, `--hide-codex-spark`, `--show-copilot-credits`.
 * The `--scope` flag replaces the legacy `--window` flag. `--window` is accepted as a deprecated alias and should not appear as the primary documented interface.
@@ -249,6 +249,7 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_RALPH_MAX_SUSPENDS` (max machine suspends per run; default 0 = unlimited)
 * `LLM_SCHEDULER_SUSPEND_MIN_LEAD` (minimum lead before arming a wake / suspending; default 120)
 * `LLM_USAGE_PROVIDER_PARALLELISM` (provider reader fan-out concurrency for `llm-usage`; default is CPU cores)
+* `LLM_USAGE_PROVIDERS` (comma-separated providers enabled for all tools; overrides `[usage].providers`, resolved by `config.enabled_providers`; an unknown name or empty list exits with status 2. `llm-usage` skips unlisted providers, omits them and routes on an unlisted launch CLI from the table, and reports `reason:"hidden"` in JSON; `ralph-robin` drops rotation entries whose launch CLI is unlisted; `llm-scheduler` refuses an unlisted `--provider`)
 * `LLM_USAGE_NO_SERVICE` (set to `1` to bypass the local `llm-usage` service and read providers directly; tests set this except service-specific cases)
 * `LLM_USAGE_SERVICE_INTERVAL` (continuous `llm-usage` service refresh interval in seconds; default 60)
 * `LLM_USAGE_NO_PROGRESS` (set to `1` to suppress the ephemeral stderr refresh spinner; it is also auto-suppressed when stderr is not a TTY)

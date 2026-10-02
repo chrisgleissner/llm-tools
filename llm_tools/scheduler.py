@@ -269,6 +269,10 @@ def validate_args(cfg: SchedulerConfig) -> None:
         else:
             common.err(f"invalid --provider: {cfg.provider}")
         raise SystemExit(2)
+    enabled = toolconfig.enabled_providers()
+    if enabled is not None and cfg.provider not in enabled:
+        common.err(f"provider {cfg.provider} is disabled by [usage].providers / LLM_USAGE_PROVIDERS (enabled: {', '.join(sorted(enabled))})")
+        raise SystemExit(2)
     common.validate_prompt_args(cfg.prompt_text, cfg.prompt_file)
     if model_missing_slash(cfg.provider, cfg.model):
         common.err(f"warning: {cfg.provider} requires --model in 'provider/model' format (e.g. 'zai/glm-4.7'); model={cfg.model!r} is missing the '/' and the launch CLI will likely reject it")

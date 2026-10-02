@@ -49,6 +49,21 @@
 
 
 # ---------------------------------------------------------------------------
+# Providers enabled for all tools. When set:
+# - llm-usage reads and shows only the listed providers. Unlisted providers
+#   report available:false with reason "hidden" in --json.
+# - ralph-robin drops rotation entries (providers or routes) whose launch CLI
+#   is unlisted, and fails if none are left.
+# - llm-scheduler refuses to launch an unlisted provider.
+# Routes are matched by their launch CLI (e.g. a kilo route needs "kilo").
+# Remove the key to enable every provider. An unknown name or an empty list is
+# an error. Env override: LLM_USAGE_PROVIDERS (comma-separated).
+# ---------------------------------------------------------------------------
+[usage]
+#providers = ["claude", "codex"]
+
+
+# ---------------------------------------------------------------------------
 # Copilot pay-as-you-go (overage) spending limit.
 #
 # Copilot keeps working past its included monthly allowance via pay-as-you-go
