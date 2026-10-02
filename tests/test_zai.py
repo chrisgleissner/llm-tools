@@ -447,7 +447,11 @@ def test_validate_provider_scope_rejects_weekly_for_unknown_provider() -> None:
     # Same shape as the minimax error, just for zai.
     import subprocess
 
-    result = run_cmd(["./llm-scheduler", "--provider", "zai", "--prompt", "x", "--scope", "balance"], env={})
+    # Keep the subprocess on the isolated config dir set by conftest, not the real home config.
+    result = run_cmd(
+        ["./llm-scheduler", "--provider", "zai", "--prompt", "x", "--scope", "balance"],
+        env={"XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"]},
+    )
     assert result.returncode == 2
     assert "not valid for zai" in result.stderr
 

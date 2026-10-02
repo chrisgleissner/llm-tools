@@ -53,6 +53,18 @@ def _hermetic_power_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Never read the developer's real ``~/.config/llm-tools/config.toml``.
+
+    Points the config lookup at an empty directory. Tests that need a config
+    file set ``XDG_CONFIG_HOME`` or ``LLM_TOOLS_CONFIG`` themselves.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "isolated-xdg-config"))
+    monkeypatch.delenv("LLM_TOOLS_CONFIG", raising=False)
+    monkeypatch.delenv("LLM_USAGE_PROVIDERS", raising=False)
+
+
 @pytest.fixture()
 def env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"

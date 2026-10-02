@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import common
-from .capacity import CapacityKind, ProviderSnapshot
+from .capacity import ALL_PROVIDERS, CapacityKind, ProviderSnapshot
 
 
 APP_NAME = "llm-usage"
@@ -281,26 +281,18 @@ class Config:
 def _load_visible_providers(env: "dict[str, str]") -> "frozenset[str] | None":
     """Resolve which providers to read and show; ``None`` means all of them.
 
-    ``LLM_USAGE_PROVIDERS`` (comma-separated) wins over ``[usage].providers``
-    in the config file. Hidden providers are not read at all, are omitted from
-    the table, and report ``available:false`` with ``reason:"hidden"`` in JSON.
-    Routes whose launch CLI is a hidden provider are omitted as well.
+    See ``config.enabled_providers``. Hidden providers are not read at all, are
+    omitted from the table, and report ``available:false`` with
+    ``reason:"hidden"`` in JSON. Routes whose launch CLI is a hidden provider
+    are omitted as well.
     """
-    raw = env.get("LLM_USAGE_PROVIDERS")
-    if raw is not None and raw.strip():
-        return frozenset(name.strip().lower() for name in raw.split(",") if name.strip())
     from . import config as toolconfig
 
-    try:
-        names = toolconfig.usage_providers(toolconfig.load_config(env))
-    except SystemExit:
-        raise
-    except Exception:
-        return None
-    return frozenset(names) if names is not None else None
+    return toolconfig.enabled_providers(env)
 
 
 def provider_visible(cfg: "Config", provider: str) -> bool:
+    """Whether ``llm-usage`` should read and show ``provider`` under ``cfg``."""
     visible = getattr(cfg, "visible_providers", None)
     return visible is None or provider in visible
 
@@ -2202,8 +2194,8 @@ def json_object_from_provider_data(cfg: Config, provider_data: dict[str, Any], g
         "minimax": _minimax_to_json(provider_data["minimax"]),
         "zai": _zai_to_json(provider_data["zai"]),
     }
-    for name in ("codex", "claude", "copilot", "kilo", "opencode", "minimax", "zai"):
-        if not provider_visible(cfg, name):
+    for name in ALL_PROVIDERS:
+        if name in obj and not provider_visible(cfg, name):
             obj[name] = {"provider": name, "available": False, "reason": "hidden"}
     # Route mode is opt-in: the ``routes`` key only appears when at
     # least one route is configured. Existing JSON consumers keep
@@ -2264,8 +2256,25 @@ def _provider_data_via_service(cfg: Config) -> tuple[dict[str, Any], str | None]
     provider_data = provider_data_from_service_payload(payload)
     if provider_data is None:
         return None
+    if _service_hid_visible_provider(cfg, provider_data):
+        return None
     generated_at = payload.get("generated_at")
     return provider_data, generated_at if isinstance(generated_at, str) else None
+
+
+def _service_hid_visible_provider(cfg: Config, provider_data: dict[str, Any]) -> bool:
+    """Whether the service snapshot skipped a provider this run should show.
+
+    The service samples on an interval, so right after ``[usage].providers`` is
+    widened or removed its latest snapshot can still carry ``reason="hidden"``
+    for providers that are now visible. Reading directly avoids rendering those
+    providers as ``unavailable`` until the next sample.
+    """
+    for name, data in provider_data.items():
+        reason = data.get("reason") if isinstance(data, dict) else getattr(data, "reason", "")
+        if reason == "hidden" and provider_visible(cfg, name):
+            return True
+    return False
 
 
 def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None) -> tuple[dict[str, Any], str | None]:

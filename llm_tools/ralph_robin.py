@@ -581,6 +581,38 @@ def resolve_policies(cfg: RalphConfig, conf: dict[str, Any]) -> None:
     cfg.policies = policies
 
 
+def drop_disabled_rotation_entries(cfg: RalphConfig) -> None:
+    """Remove rotation entries whose launch CLI is not an enabled provider.
+
+    The enabled set comes from ``[usage].providers`` / ``LLM_USAGE_PROVIDERS``
+    (see ``config.enabled_providers``); without it every provider is enabled.
+    A route is kept or dropped by its launch CLI, not by the provider its
+    capacity is delegated to. The spec strings are rewritten to the remaining
+    entries so the saved rotation state matches the rotation actually used.
+    An empty rotation after filtering is a configuration error.
+    """
+    enabled = toolconfig.enabled_providers()
+    if enabled is None:
+        return
+    if cfg.routes:
+        dropped = [rid for rid in cfg.routes if cfg.route_policies[rid].provider not in enabled]
+        cfg.routes = [rid for rid in cfg.routes if rid not in dropped]
+        if dropped:
+            cfg.routes_spec = ",".join(cfg.routes)
+        remaining = cfg.routes
+    else:
+        dropped = [provider for provider in cfg.providers if provider not in enabled]
+        cfg.providers = [provider for provider in cfg.providers if provider not in dropped]
+        if dropped:
+            cfg.providers_spec = ",".join(cfg.providers)
+        remaining = cfg.providers
+    if dropped:
+        common.err(f"warning: skipping {', '.join(dropped)}: not in [usage].providers / LLM_USAGE_PROVIDERS")
+    if not remaining:
+        common.err("no rotation entries left: every configured provider or route is disabled by [usage].providers / LLM_USAGE_PROVIDERS")
+        raise SystemExit(2)
+
+
 def validate_args(cfg: RalphConfig) -> None:
     cfg.providers = parse_providers(cfg.providers_spec)
     cfg.routes = parse_routes_spec(cfg.routes_spec)
@@ -625,7 +657,8 @@ def validate_args(cfg: RalphConfig) -> None:
             except SystemExit:
                 if cfg.scope != "auto":
                     raise
-    else:
+    drop_disabled_rotation_entries(cfg)
+    if not cfg.routes:
         for provider in cfg.providers:
             capacity_provider = toolconfig.provider_policy(conf, provider).capacity_provider or provider
             common.validate_provider_scope(capacity_provider, cfg.scope)
