@@ -56,7 +56,8 @@ from .capacity import ALL_PROVIDERS
 
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
-_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot"})
+_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot", "usage"})
+_USAGE_KEYS = frozenset({"providers"})
 _BUDGET_KEYS = frozenset({"monthly", "currency"})
 _COPILOT_KEYS = frozenset({"monthly_spend_limit", "currency"})
 _DEFAULTS_KEYS = frozenset({"providers", "scope", "min_remaining"})
@@ -260,6 +261,8 @@ def _validate(raw: Any) -> dict[str, Any]:
     _validate_budget(raw.get("budget"))
     _validate_section(raw.get("copilot"), "copilot", _COPILOT_KEYS)
     _validate_copilot(raw.get("copilot"))
+    _validate_section(raw.get("usage"), "usage", _USAGE_KEYS)
+    _validate_usage(raw.get("usage"))
     providers = raw.get("providers")
     if providers is not None:
         if not isinstance(providers, dict):
@@ -296,6 +299,30 @@ def _validate_budget(budget: Any) -> None:
             _fail("budget.monthly must be greater than 0")
     if "currency" in budget and not isinstance(budget["currency"], str):
         _fail("budget.currency must be a string")
+
+
+def _validate_usage(usage: Any) -> None:
+    """Validate the optional ``[usage]`` table.
+
+    ``providers`` limits which providers ``llm-usage`` reads and shows. Each
+    entry must be a known provider name.
+    """
+    if usage is None or "providers" not in usage:
+        return
+    providers = usage["providers"]
+    if not isinstance(providers, list) or not all(isinstance(name, str) for name in providers):
+        _fail("usage.providers must be a list of provider names")
+    for name in providers:
+        if name not in ALL_PROVIDERS:
+            _fail(f"usage.providers: unknown provider '{name}' (known: {', '.join(ALL_PROVIDERS)})")
+
+
+def usage_providers(cfg: dict[str, Any]) -> tuple[str, ...] | None:
+    """Return the providers ``llm-usage`` should show, or ``None`` for all."""
+    usage = cfg.get("usage") if isinstance(cfg, dict) else None
+    if not isinstance(usage, dict) or "providers" not in usage:
+        return None
+    return tuple(usage["providers"])
 
 
 def monthly_budget(cfg: dict[str, Any]) -> tuple[float | None, str]:

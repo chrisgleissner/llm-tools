@@ -249,6 +249,7 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_RALPH_MAX_SUSPENDS` (max machine suspends per run; default 0 = unlimited)
 * `LLM_SCHEDULER_SUSPEND_MIN_LEAD` (minimum lead before arming a wake / suspending; default 120)
 * `LLM_USAGE_PROVIDER_PARALLELISM` (provider reader fan-out concurrency for `llm-usage`; default is CPU cores)
+* `LLM_USAGE_PROVIDERS` (comma-separated providers `llm-usage` reads and shows; overrides `[usage].providers`; hidden providers are skipped, omitted from the table, and report `reason:"hidden"` in JSON, and routes on a hidden launch CLI are omitted)
 * `LLM_USAGE_NO_SERVICE` (set to `1` to bypass the local `llm-usage` service and read providers directly; tests set this except service-specific cases)
 * `LLM_USAGE_SERVICE_INTERVAL` (continuous `llm-usage` service refresh interval in seconds; default 60)
 * `LLM_USAGE_NO_PROGRESS` (set to `1` to suppress the ephemeral stderr refresh spinner; it is also auto-suppressed when stderr is not a TTY)

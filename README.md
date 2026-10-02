@@ -356,6 +356,13 @@ Empty cells are intentional: a cell is left blank when it has nothing to report 
 
 Set an overall monthly spend budget in `[budget]` (or the `LLM_USAGE_MONTHLY_BUDGET` / `LLM_USAGE_BUDGET_CURRENCY` env overrides) to turn every `spend` figure into a coloured progress bar against that cap, plus the `Budget` total row.
 
+To show only some providers, list them in `[usage]` (or the comma-separated `LLM_USAGE_PROVIDERS` env override). Unlisted providers are not read, are left out of the table, and report `available:false` with `reason:"hidden"` in `--json`. Routes whose launch CLI is unlisted are hidden as well. Remove the table to show every provider again.
+
+```toml
+[usage]
+providers = ["claude", "codex"]
+```
+
 ### `llm-usage` Options
 
 | Option                   | Purpose                                                                                                 |

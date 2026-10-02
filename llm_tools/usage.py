@@ -271,10 +271,38 @@ class Config:
         )
         self.terminal_width = terminal_width(env)
         self.monthly_budget, self.budget_currency = _load_monthly_budget(env)
+        self.visible_providers = _load_visible_providers(env)
         self.copilot_spend_limit, self.copilot_spend_currency = _load_copilot_spend_limit(env)
         self.use_service = env.get("LLM_USAGE_NO_SERVICE", "0") != "1"
         self.service_action = ""
         self.service_interval = env.get("LLM_USAGE_SERVICE_INTERVAL", "60")
+
+
+def _load_visible_providers(env: "dict[str, str]") -> "frozenset[str] | None":
+    """Resolve which providers to read and show; ``None`` means all of them.
+
+    ``LLM_USAGE_PROVIDERS`` (comma-separated) wins over ``[usage].providers``
+    in the config file. Hidden providers are not read at all, are omitted from
+    the table, and report ``available:false`` with ``reason:"hidden"`` in JSON.
+    Routes whose launch CLI is a hidden provider are omitted as well.
+    """
+    raw = env.get("LLM_USAGE_PROVIDERS")
+    if raw is not None and raw.strip():
+        return frozenset(name.strip().lower() for name in raw.split(",") if name.strip())
+    from . import config as toolconfig
+
+    try:
+        names = toolconfig.usage_providers(toolconfig.load_config(env))
+    except SystemExit:
+        raise
+    except Exception:
+        return None
+    return frozenset(names) if names is not None else None
+
+
+def provider_visible(cfg: "Config", provider: str) -> bool:
+    visible = getattr(cfg, "visible_providers", None)
+    return visible is None or provider in visible
 
 
 def _load_monthly_budget(env: "dict[str, str]") -> "tuple[float | None, str]":
@@ -2103,16 +2131,17 @@ def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = No
             lambda: unavailable_snapshot("zai", "z.ai api"),
         ),
     }
+    hidden = {name: fallback for name, (_reader, fallback) in readers.items() if not provider_visible(cfg, name)}
+    readers = {name: pair for name, pair in readers.items() if name not in hidden}
     if progress is not None:
         progress.begin(len(readers))
+    out = {name: _hidden_provider_data(name, fallback) for name, fallback in hidden.items()}
     if cfg.provider_parallelism <= 1:
-        out = {}
         for name, (reader, fallback) in readers.items():
             out[name] = read_provider(name, reader, fallback)
             if progress is not None:
                 progress.advance()
         return out
-    out = {}
     with ThreadPoolExecutor(max_workers=cfg.provider_parallelism) as pool:
         futures = {
             pool.submit(read_provider, name, reader, fallback): name
@@ -2123,6 +2152,13 @@ def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = No
             if progress is not None:
                 progress.advance()
     return out
+
+
+def _hidden_provider_data(name: str, fallback: Any) -> Any:
+    data = fallback()
+    if isinstance(data, dict):
+        return {**data, "reason": "hidden"}
+    return unavailable_snapshot(name, data.source, reason="hidden")
 
 
 def _fetch_provider_data(cfg: Config, anchor: tuple[int, int] | None = None) -> dict[str, Any]:
@@ -2166,13 +2202,16 @@ def json_object_from_provider_data(cfg: Config, provider_data: dict[str, Any], g
         "minimax": _minimax_to_json(provider_data["minimax"]),
         "zai": _zai_to_json(provider_data["zai"]),
     }
+    for name in ("codex", "claude", "copilot", "kilo", "opencode", "minimax", "zai"):
+        if not provider_visible(cfg, name):
+            obj[name] = {"provider": name, "available": False, "reason": "hidden"}
     # Route mode is opt-in: the ``routes`` key only appears when at
     # least one route is configured. Existing JSON consumers keep
     # working unchanged when the route table is empty. A misconfigured
     # route table is fatal: surface the config error to the user
     # rather than silently dropping the routes section.
     try:
-        routes = route_decision_summary()
+        routes = route_decision_summary(cfg)
     except SystemExit:
         raise
     except Exception as exc:
@@ -2248,13 +2287,19 @@ def render_once_via_service(cfg: Config) -> bool:
 
 
 def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[Any], bool]:
-    rows = claude_rows(cfg, provider_data["claude"])
-    rows.extend(codex_rows(cfg, provider_data["codex"]))
-    rows.extend(copilot_rows(cfg, _legacy_copilot(provider_data["copilot"], False)))
-    rows.extend(kilo_rows(cfg, _kilo_to_json(provider_data["kilo"])))
-    rows.extend(minimax_rows(cfg, _minimax_to_json(provider_data["minimax"])))
-    rows.extend(opencode_rows(cfg, _opencode_to_json(provider_data["opencode"])))
-    rows.extend(zai_rows(cfg, _zai_to_json(provider_data["zai"])))
+    builders: list[tuple[str, Any]] = [
+        ("claude", lambda: claude_rows(cfg, provider_data["claude"])),
+        ("codex", lambda: codex_rows(cfg, provider_data["codex"])),
+        ("copilot", lambda: copilot_rows(cfg, _legacy_copilot(provider_data["copilot"], False))),
+        ("kilo", lambda: kilo_rows(cfg, _kilo_to_json(provider_data["kilo"]))),
+        ("minimax", lambda: minimax_rows(cfg, _minimax_to_json(provider_data["minimax"]))),
+        ("opencode", lambda: opencode_rows(cfg, _opencode_to_json(provider_data["opencode"]))),
+        ("zai", lambda: zai_rows(cfg, _zai_to_json(provider_data["zai"]))),
+    ]
+    rows: list[UsageRow] = []
+    for name, build in builders:
+        if provider_visible(cfg, name):
+            rows.extend(build())
     # Route rows are appended in their declared config order so the
     # caller controls grouping. They sit beneath the per-provider
     # aggregate rows; an empty / unconfigured route table is a
@@ -2359,6 +2404,8 @@ def route_rows(cfg: Config) -> list[UsageRow]:
         return []
     out: list[UsageRow] = []
     for route_id, route in routes.items():
+        if not provider_visible(cfg, route.provider):
+            continue
         try:
             snapshot, decision = usage_snapshot_and_decision_for_route(
                 route, "auto", "1", "60"
@@ -2430,7 +2477,7 @@ def route_rows(cfg: Config) -> list[UsageRow]:
     return out
 
 
-def route_decision_summary() -> list[dict[str, Any]]:
+def route_decision_summary(cfg: "Config | None" = None) -> list[dict[str, Any]]:
     """Project the current route config into a JSON-friendly list.
 
     Each entry contains ``route``, ``provider``, ``selected_model``,
@@ -2454,6 +2501,8 @@ def route_decision_summary() -> list[dict[str, Any]]:
         return []
     out: list[dict[str, Any]] = []
     for route_id, route in routes.items():
+        if cfg is not None and not provider_visible(cfg, route.provider):
+            continue
         try:
             snapshot, _decision = usage_snapshot_and_decision_for_route(
                 route, "auto", "1", "60"

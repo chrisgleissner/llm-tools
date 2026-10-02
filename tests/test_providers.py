@@ -109,6 +109,7 @@ def test_usage_provider_reads_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda: wait_for_peers(ProviderSnapshot(provider="zai", available=False, reason="fixture")),
     )
     cfg = usage.Config()
+    cfg.visible_providers = None
     cfg.provider_parallelism = 7
     start = time.monotonic()
     data = usage.read_all_provider_data(cfg)
@@ -1067,6 +1068,52 @@ def test_load_monthly_budget_invalid_env_is_ignored(tmp_path: "Path") -> None:
     )
     assert amount is None
     assert currency == "$"
+
+
+def test_visible_providers_env_overrides_config(tmp_path: "Path") -> None:
+    conf = tmp_path / "config.toml"
+    conf.write_text('[usage]\nproviders = ["claude"]\n', encoding="utf-8")
+    assert usage._load_visible_providers({"LLM_TOOLS_CONFIG": str(conf)}) == frozenset({"claude"})
+    assert usage._load_visible_providers(
+        {"LLM_TOOLS_CONFIG": str(conf), "LLM_USAGE_PROVIDERS": "Codex, claude"}
+    ) == frozenset({"codex", "claude"})
+    assert usage._load_visible_providers({"LLM_TOOLS_CONFIG": str(tmp_path / "none.toml")}) is None
+
+
+def test_usage_providers_config_rejects_unknown_provider(tmp_path: "Path") -> None:
+    from llm_tools import config as toolconfig
+
+    conf = tmp_path / "config.toml"
+    conf.write_text('[usage]\nproviders = ["claude", "acme"]\n', encoding="utf-8")
+    with pytest.raises(SystemExit):
+        toolconfig.load_config({"LLM_TOOLS_CONFIG": str(conf)})
+
+
+def test_hidden_providers_are_not_read_or_shown(monkeypatch: pytest.MonkeyPatch, tmp_path: "Path") -> None:
+    import llm_tools.providers as providers
+
+    def must_not_read() -> object:
+        raise AssertionError("hidden provider was read")
+
+    for name in ("read_copilot_snapshot", "read_kilo", "read_opencode", "read_minimax", "read_zai"):
+        monkeypatch.setattr(providers, name, must_not_read)
+    monkeypatch.setattr(usage.common, "read_codex", lambda: {"provider": "codex", "available": False, "reason": "fixture"})
+    monkeypatch.setattr(
+        providers, "read_claude_snapshot", lambda: ProviderSnapshot(provider="claude", available=False, reason="fixture")
+    )
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "none.toml"))
+    monkeypatch.setenv("LLM_USAGE_PROVIDERS", "claude,codex")
+    cfg = _no_color_cfg()
+    for parallelism in (1, 4):
+        cfg.provider_parallelism = parallelism
+        data = usage.read_all_provider_data(cfg)
+        assert data["kilo"].reason == "hidden"
+        assert data["codex"]["reason"] == "fixture"
+    rows, _show_model = usage._build_usage_rows(cfg, data)
+    assert {row.provider for row in rows} <= {"Claude", "Codex", "claude", "codex"}
+    obj = usage.json_object_from_provider_data(cfg, data)
+    assert obj["copilot"] == {"provider": "copilot", "available": False, "reason": "hidden"}
+    assert obj["codex"]["reason"] == "fixture"
 
 
 def test_next_month_epoch_is_first_of_next_month() -> None:
