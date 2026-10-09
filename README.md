@@ -667,7 +667,7 @@ Each scheduler run directory contains `run.log`, `events.jsonl`, `prompt.txt`, a
 
 ## Data Sources
 
-`llm-tools` reads local provider state where possible, and **actively refreshes** every provider on each run — it never just echoes a stale session log. Each reader asks the provider for current numbers and only falls back if that fails:
+`llm-tools` reads local provider state where possible, and **actively refreshes** providers when their samples expire — it never just echoes a stale session log. Each reader asks the provider for current numbers and only falls back if that fails:
 
 | Provider       | Active refresh → fallback                                                   |
 | -------------- | --------------------------------------------------------------------------- |
@@ -677,6 +677,8 @@ Each scheduler run directory contains `run.log`, `events.jsonl`, `prompt.txt`, a
 | Kilo / MiniMax / OpenCode | `kilo stats` / `mmx quota show` / `opencode stats` → environment variables |
 
 A provider only reports `stale-usage` if it cannot be refreshed for a known authentication or CLI-startup reason (e.g. Codex `not-authenticated` or `missing-cli`). When the CLI is installed and signed in, you always see live data. `llm-usage` reads providers concurrently — configure fan-out with `--provider-parallelism` or `LLM_USAGE_PROVIDER_PARALLELISM` (default: CPU cores).
+
+Claude usage reads share a sample for up to 60 seconds (`LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` can shorten this), so a watch window and the sampler do not duplicate requests. Concurrent readers coordinate through a lock in the usage cache directory. On HTTP 429, readers share a cooldown of at least 60 seconds, including when Anthropic returns `Retry-After: 0`. Longer server delays are honoured without keeping the dashboard waiting; `LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY` caps only an immediate retry's wait. During cooldown, an API sample may be shown for up to `LLM_USAGE_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE` seconds (default 300); after that Claude reports `unavailable` with reason `rate-limited` until a live read succeeds. This does not mean the Claude sessions themselves have exhausted their quota, and no session restart or login is needed.
 
 ### Local Service
 

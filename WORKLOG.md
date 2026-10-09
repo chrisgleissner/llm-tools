@@ -1,5 +1,27 @@
 llm-scheduler worklog
 
+2026-10-09: Restored Claude usage in `llm-usage -w 30` without restarting
+either active Claude session or changing credentials.
+
+- The usage endpoint returned HTTP 429 with `Retry-After: 0`. The reader
+  retried immediately and persisted a zero-length cooldown, eventually
+  exhausting the five-minute fallback cache. Service history first marked
+  Claude unavailable at 22:48:37 BST, before the latest apt upgrade began
+  at 22:52:50; authentication remained valid.
+- Share API samples for the existing freshness TTL (at most 60 seconds)
+  and serialize usage readers with a cache-directory file lock. Persist
+  at least a 60-second cooldown on 429, including for environment tokens;
+  honour longer Retry-After values without shortening them to the inline
+  retry cap. Keep rate-limit fallback samples strictly bounded by their TTL.
+- A five-minute usage-only pause let the endpoint recover. Reloaded only
+  the usage sampler; verified repeated production watch frames and both
+  direct/service JSON show Claude available (75% 5h, 62% weekly).
+- Added 19 hermetic polling regression cases. All 780 tests passed;
+  isolated coverage run/combine/report passed the 85% gate at 88% total.
+  Used `COVERAGE_FILE=/tmp/llm-tools-claude-fix-coverage` to avoid an older,
+  corrupt coverage shard in the workspace. No provider session was launched
+  or interrupted by the live verification.
+
 2026-06-15 (adversarial review): Reviewed the route-level capacity and
 cost modeling implementation. Found and fixed:
 

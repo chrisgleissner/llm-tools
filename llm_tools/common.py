@@ -5,6 +5,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import pty
 import re
@@ -31,6 +32,7 @@ AUTONOMY_ABORT_STATUS = 75
 TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
 DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
 DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS = 300
+DEFAULT_CLAUDE_USAGE_COOLDOWN_SECONDS = 60
 CLAUDE_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # The OAuth ``refresh_token`` grant goes to a different host than the
 # initial ``authorization_code`` exchange (``platform.claude.com``) and expects
@@ -745,7 +747,9 @@ def claude_rate_limit_cache_max_age(env: dict[str, str] | None = None) -> int:
     return parsed
 
 
-def _read_claude_usage_cache(cache: Path, env: dict[str, str], max_age: int) -> dict[str, Any] | None:
+def _read_claude_usage_cache(
+    cache: Path, env: dict[str, str], max_age: int, *, require_fresh: bool = False,
+) -> dict[str, Any] | None:
     try:
         if not cache.is_file() or cache.stat().st_size <= 0:
             return None
@@ -755,7 +759,7 @@ def _read_claude_usage_cache(cache: Path, env: dict[str, str], max_age: int) -> 
         return None
     if norm is None:
         return None
-    if provider_snapshot_requires_fresh_source(norm, env) and now_epoch(env) - mtime > max_age:
+    if (require_fresh or provider_snapshot_requires_fresh_source(norm, env)) and now_epoch(env) - mtime > max_age:
         return None
     return norm
 
@@ -1146,6 +1150,15 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
     # this is what unblocks dashboards whose credentials file lost the
     # refresh token after a stale ``claude auth logout`` / CLI upgrade.
     env_token = str(env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip()
+    if env_token or has_oauth_token:
+        # Watch clients, the sampler, and scheduler share a short-lived sample.
+        # Even elapsed windows must be fetched again once this TTL expires.
+        cached = _read_claude_usage_cache(cache, env, local_snapshot_max_age(env), require_fresh=True)
+        if cached is not None:
+            return cached
+        if _claude_oauth_rate_limit_active(env):
+            cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env), require_fresh=True)
+            return cached if cached is not None else _claude_rate_limited_provider()
     if env_token:
         result = _fetch_claude_oauth_usage_result(env_token, env)
         if result.text:
@@ -1154,11 +1167,6 @@ def _read_claude_api_raw(env: dict[str, str] | None) -> dict[str, Any] | None:
         if result.rate_limited:
             return _claude_rate_limit_fallback(cache, env, result.retry_after_seconds)
         return _read_claude_usage_cache(cache, env, local_snapshot_max_age(env))
-    if has_oauth_token and _claude_oauth_rate_limit_active(env):
-        cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env))
-        if cached is not None:
-            return cached
-        return _claude_rate_limited_provider()
     if token:
         result = _fetch_claude_oauth_usage_result(token, env)
         if result.text:
@@ -1220,13 +1228,13 @@ def live_fetch_retry_plan(env: dict[str, str] | None = None) -> tuple[int, float
 
 
 def live_fetch_retry_max_delay(env: dict[str, str] | None = None) -> float:
-    """Cap (seconds) on a server-requested ``Retry-After`` back-off.
+    """Maximum in-process wait (seconds) for a ``Retry-After`` back-off.
 
     A 429 carries a ``Retry-After`` (the Claude OAuth usage endpoint asks for
     ~8s); honouring it on the same invocation turns a transient rate-limit into
-    a fresh read instead of a silent degrade to ``unavailable``. The cap keeps a
-    pathological ``Retry-After`` from hanging the tool. ``0`` disables the wait
-    (tests pin it so the rate-limit path stays instant and hermetic).
+    a fresh read instead of a silent degrade to ``unavailable``. Longer delays
+    are persisted as a cooldown instead of hanging the tool or retrying early.
+    ``0`` defers all rate-limit retries to later reads.
     """
     env = env or os.environ
     try:
@@ -1235,8 +1243,8 @@ def live_fetch_retry_max_delay(env: dict[str, str] | None = None) -> float:
         return 10.0
 
 
-def _retry_after_seconds(exc: HTTPError, env: dict[str, str], fallback: float) -> float:
-    """Seconds to wait before retrying a 429, from ``Retry-After`` (capped)."""
+def _retry_after_seconds(exc: HTTPError, env: dict[str, str], fallback: float, *, capped: bool = True) -> float:
+    """Seconds before retrying a 429; optionally cap the in-process wait."""
     raw = None
     try:
         raw = exc.headers.get("Retry-After")
@@ -1248,7 +1256,9 @@ def _retry_after_seconds(exc: HTTPError, env: dict[str, str], fallback: float) -
             wait = float(str(raw).strip())
         except (TypeError, ValueError):
             wait = fallback
-    return max(0.0, min(wait, live_fetch_retry_max_delay(env)))
+    if not math.isfinite(wait):
+        wait = fallback
+    return max(0.0, min(wait, live_fetch_retry_max_delay(env)) if capped else wait)
 
 
 @dataclass
@@ -1274,7 +1284,7 @@ def _claude_oauth_rate_limit_active(env: dict[str, str]) -> bool:
 
 
 def _record_claude_oauth_rate_limit(env: dict[str, str], retry_after_seconds: float | None) -> None:
-    wait = retry_after_seconds if retry_after_seconds is not None else live_fetch_retry_max_delay(env)
+    wait = max(DEFAULT_CLAUDE_USAGE_COOLDOWN_SECONDS, retry_after_seconds or 0.0)
     payload = {
         "recorded_at_epoch": now_epoch(env),
         "next_allowed_epoch": now_epoch(env) + max(0.0, wait),
@@ -1309,7 +1319,7 @@ def _claude_rate_limit_fallback(
     retry_after_seconds: float | None,
 ) -> dict[str, Any]:
     _record_claude_oauth_rate_limit(env, retry_after_seconds)
-    cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env))
+    cached = _read_claude_usage_cache(cache, env, claude_rate_limit_cache_max_age(env), require_fresh=True)
     if cached is not None:
         return cached
     return _claude_rate_limited_provider()
@@ -1334,7 +1344,8 @@ def _fetch_claude_oauth_usage_result(access_token: str, env: dict[str, str] | No
     # ``unavailable``), so any second read inside the endpoint's ~8s window made
     # Claude usage vanish from the dashboard. When retries are globally disabled
     # (``LLM_USAGE_LIVE_FETCH_RETRIES=0``, the test pin) the budget is 1 and the
-    # rate-limit retry is suppressed too, so the path stays single-shot.
+    # rate-limit retry is suppressed too, so the path stays single-shot. Longer
+    # waits and unusable Retry-After hints always defer to the shared cooldown.
     rate_limit_retry_used = attempts <= 1
     attempt = 0
     while True:
@@ -1347,12 +1358,16 @@ def _fetch_claude_oauth_usage_result(access_token: str, env: dict[str, str] | No
             if exc.code in {400, 401}:
                 return ClaudeOAuthUsageFetchResult(unauthorized=True)
             if exc.code == 429:
-                wait = _retry_after_seconds(exc, env, delay)
+                wait = _retry_after_seconds(exc, env, DEFAULT_CLAUDE_USAGE_COOLDOWN_SECONDS, capped=False)
+                if wait <= 0:
+                    # The live endpoint can return Retry-After: 0 while still
+                    # rejecting every request. Immediate retries amplify it.
+                    wait = DEFAULT_CLAUDE_USAGE_COOLDOWN_SECONDS
                 # Honour Retry-After exactly once. Burning the quick
                 # network-retry budget on a 429 is pointless (0.5s later it is
                 # still rate-limited) and only adds load to an endpoint that
                 # already asked us to back off, so give up after the one wait.
-                if rate_limit_retry_used:
+                if rate_limit_retry_used or wait > live_fetch_retry_max_delay(env):
                     return ClaudeOAuthUsageFetchResult(rate_limited=True, retry_after_seconds=wait)
                 rate_limit_retry_used = True
                 if wait:
@@ -1452,7 +1467,21 @@ def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any
 
 
 def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
-    return _read_claude_api_raw(env)
+    env = env or os.environ
+    # Serialize our own readers, without taking Claude Code's credential lock
+    # or touching any running session. Recheck cache/cooldown after acquiring.
+    lock = usage_cache_dir(env) / "claude-usage-api.lock"
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = lock.open("a", encoding="utf-8")
+    except OSError:
+        return _read_claude_api_raw(env)
+    with lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError:
+            return _read_claude_api_raw(env)
+        return _read_claude_api_raw(env)
 
 
 def _claude_has_auth(env: dict[str, str] | None = None) -> bool:

@@ -831,13 +831,15 @@ def _make_http_error(url: str, code: int, headers: dict[str, str] | None = None)
 def test_claude_oauth_usage_retries_rate_limit(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     # A 429 is transient and carries a Retry-After; honour it on the same read so
     # a brief rate-limit recovers to fresh data instead of degrading to the
-    # ~/.claude/projects fallback (which reports "unavailable"). The Retry-After
-    # is capped so a pathological value cannot hang the tool.
+    # ~/.claude/projects fallback (which reports "unavailable"). Longer waits
+    # are deferred to a later read rather than shortened to retry early.
     retry_env = env | {
         "LLM_USAGE_LIVE_FETCH_RETRIES": "2",
-        "LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "0",
+        "LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "10",
     }
     calls = {"n": 0}
+    waits: list[float] = []
+    monkeypatch.setattr(common.time, "sleep", waits.append)
 
     class FakeResponse:
         def read(self) -> bytes:
@@ -858,12 +860,14 @@ def test_claude_oauth_usage_retries_rate_limit(env: dict[str, str], monkeypatch:
     monkeypatch.setattr(common, "urlopen", fake_urlopen)
     text, unauthorized = common._fetch_claude_oauth_usage_text("tok", retry_env)
     assert calls["n"] == 2
+    assert waits == [8.0]
     assert unauthorized is False
     assert text is not None and "five_hour" in text
 
     # Retry-After is read from the header, defaulted, and capped.
     assert common._retry_after_seconds(
-        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"}), retry_env, 0.5
+        _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"}),
+        env | {"LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY": "0"}, 0.5
     ) == 0.0
     assert common._retry_after_seconds(
         _make_http_error(common.CLAUDE_OAUTH_USAGE_URL, 429, {"Retry-After": "8"}),
@@ -996,7 +1000,7 @@ def test_claude_oauth_rate_limit_does_not_fall_back_to_stale_project_data(
         "available": False,
         "reason": "rate-limited",
     }
-    assert calls["n"] == 2
+    assert calls["n"] == 1
 
 
 def test_usage_dashboard_ready_guidance_and_reset(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

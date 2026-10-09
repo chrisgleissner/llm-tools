@@ -233,6 +233,8 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_USAGE_LOCAL_SNAPSHOT_MAX_AGE` (seconds before active/unknown Codex/Claude local snapshots are reported as stale; capped at 60; non-positive/invalid values fall back to 60)
 * `LLM_USAGE_LIVE_FETCH_RETRIES` (extra attempts for active-refresh network reads before falling back; default 2; tests pin 0; also gates stale-usage recovery off entirely when 0)
 * `LLM_USAGE_LIVE_FETCH_RETRY_DELAY` (seconds between live-fetch retries; default 0.5)
+* `LLM_USAGE_LIVE_FETCH_RETRY_MAX_DELAY` (maximum in-process wait before retrying a Claude usage HTTP 429; default 10s; longer Retry-After delays are persisted instead of shortened)
+* `LLM_USAGE_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE` (maximum age of a Claude API sample served during usage-endpoint HTTP 429 cooldown; default 300s)
 * `LLM_USAGE_STALE_RECOVERY_ATTEMPTS` (max full-read re-drives when a result would otherwise be `stale-usage` and a live path exists; default 4)
 * `LLM_USAGE_STALE_RECOVERY_DELAY` (initial backoff seconds between stale-recovery re-drives; default 0.5; doubles each attempt)
 * `LLM_USAGE_STALE_RECOVERY_MAX_DELAY` (cap for the stale-recovery backoff; default 4.0)
