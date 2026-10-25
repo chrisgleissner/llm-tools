@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import common
 from . import config as toolconfig
@@ -116,6 +116,12 @@ class SchedulerConfig:
     cwd: str = field(default_factory=lambda: str(Path.cwd()))
     exec_mode: str = "fresh"
     tmux_target: str = ""
+    # Bridge-owned native terminal station. These stay empty for ordinary CLI
+    # use, preserving the public --tmux behaviour and global tmux socket.
+    tmux_socket: str = ""
+    tmux_pane: str = ""
+    native_tui: bool = False
+    process_started: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
     command_template: str = ""
     auto_confirm: bool = True
     headless: bool = False
@@ -302,6 +308,9 @@ def validate_args(cfg: SchedulerConfig) -> None:
 
 
 def resolve_attach_mode(cfg: SchedulerConfig) -> None:
+    if cfg.exec_mode == "tmux" and cfg.native_tui:
+        cfg.attached = True
+        return
     cfg.attached = (
         cfg.exec_mode == "fresh"
         and not cfg.headless
@@ -327,6 +336,9 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "cwd": cfg.cwd,
         "mode": cfg.exec_mode,
         "tmux": cfg.tmux_target,
+        "tmux_socket": cfg.tmux_socket,
+        "tmux_pane": cfg.tmux_pane,
+        "native_tui": cfg.native_tui,
         "prompt_source": cfg.prompt_source,
         "log_dir": str(cfg.log_dir),
         "headless_idle_timeout": int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600")),
@@ -343,6 +355,34 @@ def safe_args_json(cfg: SchedulerConfig) -> dict[str, Any]:
         "output_prefix_fields": list(cfg.output_prefix_fields),
         "output_prefix_usage_ttl": cfg.output_prefix_usage_ttl,
     }
+
+
+def _record_spawned_process(cfg: SchedulerConfig, process_pid: int) -> None:
+    callback = cfg.process_started
+    if callback is None:
+        return
+    try:
+        callback(process_pid)
+    except BaseException:
+        try:
+            os.killpg(process_pid, 9)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(process_pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+        raise
+
+
+def _record_popen_process(cfg: SchedulerConfig, proc: subprocess.Popen[Any]) -> None:
+    try:
+        _record_spawned_process(cfg, proc.pid)
+    except BaseException:
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
 
 
 def provider_env(cfg: SchedulerConfig) -> dict[str, str] | None:
@@ -442,11 +482,12 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
         if cfg.provider == "claude":
             return ["claude", *m, prompt]
         if cfg.provider == "kilo":
-            return ["kilo", "run", *m, prompt]
+            return ["kilo", *m, "--prompt", prompt]
         if cfg.provider == "opencode":
-            return ["opencode", *m]
+            return ["opencode", *m, "--prompt", prompt]
         if cfg.provider == "minimax":
-            return ["mmx"]
+            common.err("MiniMax mmx exposes text chat, not a native engineering session for LLM Bridge")
+            raise SystemExit(2)
         if cfg.provider == "zai":
             # zai is a capacity-only provider: it is launched through a
             # route (``provider=kilo``/``opencode``), not directly. A bare
@@ -477,7 +518,7 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
         # `permission` config, not by this framework.
         return ["opencode", "run", *m, "--dir", cfg.cwd, prompt]
     if cfg.provider == "minimax":
-        return ["mmx", "run", "--auto", "-C", cfg.cwd, prompt]
+        return ["mmx", "text", "chat", "--message", prompt]
     if cfg.provider == "zai":
         common.err("--provider zai must be launched through a route (e.g. [routes.kilo-zai-glm-4.7])")
         raise SystemExit(2)
@@ -762,10 +803,12 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
 
 def run_fresh_attached(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
     command_line = common.argv_to_command_line(argv)
-    proc = subprocess.run(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, env=provider_env(cfg), check=False)
-    status_file.write_text(str(proc.returncode), encoding="utf-8")
+    proc = subprocess.Popen(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, env=provider_env(cfg), start_new_session=True)
+    _record_popen_process(cfg, proc)
+    return_code = proc.wait()
+    status_file.write_text(str(return_code), encoding="utf-8")
     common.clean_capture_file(output_file)
-    return proc.returncode
+    return return_code
 
 
 def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
@@ -784,6 +827,7 @@ def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path,
         idle_timeout=int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600") or "600"),
         question_idle_timeout=int(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30") or "30"),
         env=provider_env(cfg),
+        on_process_started=lambda pid: _record_spawned_process(cfg, pid) if cfg.process_started else None,
     )
     return status
 
@@ -929,7 +973,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     import select
     import signal
 
-    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg))
+    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg), start_new_session=True)
+    _record_popen_process(cfg, proc)
     assert proc.stdout is not None and proc.stderr is not None
     stdout_fd = proc.stdout.fileno()
     stderr_fd = proc.stderr.fileno()
@@ -1050,7 +1095,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     import select
     import signal
 
-    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg))
+    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg), start_new_session=True)
+    _record_popen_process(cfg, proc)
     assert proc.stdout is not None and proc.stderr is not None
     stdout_fd = proc.stdout.fileno()
     stderr_fd = proc.stderr.fileno()
@@ -1133,6 +1179,11 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         output_file.write_text("tmux not installed\n", encoding="utf-8")
         status_file.write_text("127", encoding="utf-8")
         return 127
+    tmux_prefix = ["tmux", *( ["-S", cfg.tmux_socket] if cfg.tmux_socket else [] )]
+
+    def tmux(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        return subprocess.run([*tmux_prefix, *args], **kwargs)
+
     if ":" in cfg.tmux_target:
         session, window = cfg.tmux_target.split(":", 1)
         if not session or not window:
@@ -1141,7 +1192,7 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             return 2
     else:
         session, window = cfg.tmux_target, "llm-scheduler"
-    target = f"{session}:{window}"
+    target = cfg.tmux_pane or f"{session}:{window}"
     command_line = common.argv_to_command_line(argv)
     cmd_file = logs.run_dir / "tmux-command.sh"
     guard_exports = "export LLM_TOOLS_RALPH_ROBIN_ACTIVE=1\nexport LLM_TOOLS_RALPH_ROBIN_SCHEDULER=guarded\n" if cfg.ralph_robin_active else ""
@@ -1162,23 +1213,61 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     )
     cmd_file.chmod(0o700)
     invocation = f"bash {shlex.quote(str(cmd_file))}"
-    if subprocess.run(["tmux", "has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
-        subprocess.run(["tmux", "new-session", "-d", "-s", session, "-n", window, invocation], check=False)
+    owned_pane = bool(cfg.tmux_socket and cfg.tmux_pane)
+    if tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
+        if cfg.tmux_socket:
+            output_file.write_text("Bridge-owned tmux station is no longer available\n", encoding="utf-8")
+            status_file.write_text("143", encoding="utf-8")
+            return 143
+        tmux(["new-session", "-d", "-s", session, "-n", window, invocation], check=False)
+    elif owned_pane:
+        pane_dead = tmux(["display-message", "-p", "-t", target, "#{pane_dead}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
+        if pane_dead != "1":
+            output_file.write_text("Bridge provider pane is busy; refusing to replace a live native process\n", encoding="utf-8")
+            status_file.write_text(str(common.AUTONOMY_ABORT_STATUS), encoding="utf-8")
+            return common.AUTONOMY_ABORT_STATUS
+        pipe_command = f"cat >> {shlex.quote(str(output_file))}"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        output_file.touch()
+        respawn = tmux(["respawn-pane", "-k", "-t", target, "-c", cfg.cwd, f"sleep 0.1; {invocation}"], check=False)
+        if respawn.returncode != 0:
+            output_file.write_text("could not respawn provider pane\n", encoding="utf-8")
+            status_file.write_text("127", encoding="utf-8")
+            return 127
+        if cfg.process_started is not None:
+            pane_pid = tmux(["display-message", "-p", "-t", target, "#{pane_pid}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
+            if pane_pid.isdigit():
+                _record_spawned_process(cfg, int(pane_pid))
+        tmux(["pipe-pane", "-t", target, pipe_command], check=False)
     else:
-        windows = subprocess.run(["tmux", "list-windows", "-t", session, "-F", "#W"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.splitlines()
+        windows = tmux(["list-windows", "-t", session, "-F", "#W"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.splitlines()
         if window not in windows:
-            subprocess.run(["tmux", "new-window", "-d", "-t", session, "-n", window, invocation], check=False)
+            tmux(["new-window", "-d", "-t", session, "-n", window, invocation], check=False)
         else:
-            subprocess.run(["tmux", "send-keys", "-t", target, invocation, "C-m"], check=False)
+            tmux(["send-keys", "-t", target, invocation, "C-m"], check=False)
     waited = 0
     timeout = int(os.environ.get("LLM_SCHEDULER_TMUX_TIMEOUT", "3600") or "3600")
     while (not status_file.is_file() or status_file.stat().st_size == 0) and waited < timeout:
-        pane = subprocess.run(["tmux", "capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-        output_file.write_text(pane.stdout, encoding="utf-8")
+        if cfg.tmux_socket and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
+            status_file.write_text("143", encoding="utf-8")
+            break
+        if owned_pane:
+            pane_dead = tmux(["display-message", "-p", "-t", target, "#{pane_dead}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
+            if pane_dead == "1":
+                time.sleep(0.05)
+                if not status_file.is_file() or status_file.stat().st_size == 0:
+                    status_file.write_text("124", encoding="utf-8")
+                    break
+        else:
+            pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+            output_file.write_text(pane.stdout, encoding="utf-8")
         time.sleep(1)
         waited += 1
-    pane = subprocess.run(["tmux", "capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-    output_file.write_text(pane.stdout, encoding="utf-8")
+    if owned_pane:
+        tmux(["pipe-pane", "-t", target], check=False)
+    else:
+        pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+        output_file.write_text(pane.stdout, encoding="utf-8")
     if not status_file.is_file() or status_file.stat().st_size == 0:
         status_file.write_text("124", encoding="utf-8")
     try:

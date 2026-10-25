@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -3467,6 +3467,7 @@ def run_pty_capture(
     idle_timeout: int = 0,
     question_idle_timeout: int = 0,
     env: dict[str, str] | None = None,
+    on_process_started: Callable[[int], None] | None = None,
 ) -> tuple[int, str]:
     safe_prompts = SAFE_TRUST_PROMPTS
     blocking_patterns = BLOCKING_PROMPT_PATTERNS
@@ -3480,6 +3481,20 @@ def run_pty_capture(
         if env is None:
             os.execvp(argv[0], list(argv))
         os.execvpe(argv[0], list(argv), env)
+    if on_process_started is not None:
+        try:
+            on_process_started(pid)
+        except BaseException:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            os.waitpid(pid, 0)
+            os.close(fd)
+            raise
     try:
         if sys.stdout.isatty():
             winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)

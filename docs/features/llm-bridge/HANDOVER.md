@@ -100,3 +100,34 @@ MiniMax mmx 1.0.16 is text chat, not a native autonomous engineering session.
 Store-only measured benchmark: 10k durable tasks 4.06 s, list 97 ms, command
 commit 0.37 ms, integrity ok; see `performance.md`. This does not verify UI
 latency under 1 MiB/s output or multi-day reliability. These remain open.
+
+## Publication checkpoint requested by user
+
+User requested immediate push of all changes and a PR because credits are low.
+Work is frozen on `feat/llm-bridge`; publish as DRAFT, not merge-ready.
+All relevant implementation, tests, ledgers and unchanged original prompt are
+included. Packaging checkpoint is `f60adef`; this handover started at `de32b6d`.
+
+Latest root acceptance command: `python -m pytest tests/test_bridge_concurrency.py
+tests/test_bridge_cli_acceptance.py tests/test_bridge_dispatch_atomicity.py
+tests/test_bridge_end_to_end.py -o addopts='' -q
+--basetemp=/tmp/llm-bridge-root-acceptance-01` -> **15 passed in 3.14 s**.
+This includes pause during work, provider exit to VERIFYING, graceful headless
+stop, complete controller shutdown, resume, manual verification, no replay.
+Compileall and `git diff --check` passed at publication freeze.
+
+Main implementor reports full repository pytest passed before the newest two
+native recovery tests. Those two currently FAIL during tmux startup; observed
+socket path length is 128 characters, likely exceeding Unix socket limits.
+FIRST NEXT ACTION: shorten private socket paths under validated XDG_RUNTIME_DIR
+(keep durable metadata under XDG_STATE_HOME), expose tmux stderr, then rerun
+`tests/test_bridge_recovery_tmux.py`. Its graceful-stop expectation was corrected
+to require terminating UI/station, not retaining them. These tests remain red.
+
+Open review findings: O3 task-cancel/pause interleave before launch; O4 wait-loop
+stop/pause responsiveness; O5 truthful active cancellation; O7 graceful tmux
+cleanup; O8 surviving native provider reconciliation; O9 native IDs/restoration.
+Native resume remains unimplemented/unverified. Selection/handoff/wait events
+now persist, but station/capacity/controller/health status projections and stall
+controls remain unfinished. Final coverage/CI/performance gates are NOT passed.
+Resolve blockers, rerun full suite and 85% coverage before making PR ready.

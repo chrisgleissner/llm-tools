@@ -25,6 +25,16 @@ def wait_for(predicate, timeout=15):
     assert predicate(), "detached mission did not reach expected state"
 
 
+def controller_released(state, mission):
+    lock = MissionLock(state / "locks", mission)
+    try:
+        lock.acquire()
+    except BlockingIOError:
+        return False
+    lock.release()
+    return True
+
+
 def test_detached_submission_amendment_and_verification(tmp_path, env):
     state = tmp_path / "state"
     env["LLM_BRIDGE_STATE_DIR"] = str(state)
@@ -85,3 +95,51 @@ print('FAKE PROVIDER FINISHED', flush=True)
             lock.release()
             return True
         wait_for(controller_released)
+
+
+def test_pause_graceful_shutdown_and_restart_do_not_replay_completed_provider_work(tmp_path, env):
+    state = tmp_path / "state"
+    env["LLM_BRIDGE_STATE_DIR"] = str(state)
+    env["LLM_SCHEDULER_USAGE_JSON"] = json.dumps({"codex": {"available": True,
+        "five_hour": {"remaining": 80}, "week": {"remaining": 80}}})
+    release = tmp_path / "release"
+    fake = tmp_path / "provider.py"
+    fake.write_text("""from pathlib import Path
+import time
+with Path('calls').open('a') as out: out.write('run\\n')
+print('active', flush=True)
+deadline = time.monotonic()+20
+while not Path('release').exists() and time.monotonic()<deadline: time.sleep(.05)
+if not Path('release').exists(): raise SystemExit(2)
+print('finished', flush=True)
+""")
+    created = json.loads(call(env, "mission", "create", "--prompt", "Work requiring approval",
+        "--cwd", tmp_path, "--headless", "--providers", "codex", "--command-template",
+        shlex.join([sys.executable, str(fake)]), "--json"))
+    mid, task = created["mission"]["id"], created["task"]["id"]
+    path = state / "bridge.sqlite3"
+    def states():
+        with BridgeStore(path) as store:
+            return store.get_mission(mid)["status"], store.get_task(task)["status"]
+    try:
+        call(env, "start", "--mission", mid, "--headless")
+        wait_for(lambda: (tmp_path / "calls").exists())
+        call(env, "pause", "--mission", mid)
+        release.touch()
+        wait_for(lambda: states()[1] != "RUNNING")
+        assert states() == ("PAUSED", "VERIFYING")
+        call(env, "stop", "--mission", mid)
+        wait_for(lambda: states()[0] == "STOPPED")
+        wait_for(lambda: controller_released(state, mid))
+        assert not (state / "runtime" / f"mission-{mid}" / "tmux.sock").exists()
+        call(env, "resume", "--mission", mid)
+        wait_for(lambda: states()[0] == "RUNNING")
+        assert states()[1] == "VERIFYING"
+        call(env, "task", "verify", "--mission", mid, "--task", task, "--approve")
+        wait_for(lambda: states()[0] == "COMPLETED")
+        assert (tmp_path / "calls").read_text().splitlines() == ["run"]
+    finally:
+        release.touch()
+        if states()[0] not in {"COMPLETED", "STOPPED", "CANCELLED", "FAILED"}:
+            call(env, "stop", "--mission", mid)
+        wait_for(lambda: controller_released(state, mid))

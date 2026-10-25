@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import stat
+import subprocess
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from typing import Any, Iterator
 TASK_STATES = frozenset({"QUEUED", "READY", "RUNNING", "PAUSED", "BLOCKED", "VERIFYING", "COMPLETED", "FAILED", "CANCELLED"})
 MISSION_STATES = frozenset({"CREATED", "RUNNING", "PAUSED", "STOPPING", "STOPPED", "COMPLETED", "FAILED", "CANCELLED"})
 UNRESOLVED_OPERATION_STATES = frozenset({"INTENT", "PREPARED", "RUNNING"})
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class TransitionError(ValueError):
@@ -36,6 +37,25 @@ def default_state_dir(env: dict[str, str] | None = None) -> Path:
         return Path(override).expanduser()
     state_home = Path(env.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")))
     return state_home / "llm-tools" / "llm-bridge"
+
+
+def repository_identity(cwd: str | Path) -> str:
+    """Resolve a directory to its Git worktree root, falling back to the path."""
+    path = Path(cwd).expanduser().resolve(strict=True)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return str(path)
+    if result.returncode == 0 and result.stdout.strip():
+        return str(Path(result.stdout.strip()).resolve())
+    return str(path)
 
 
 class BridgeStore:
@@ -165,12 +185,16 @@ class BridgeStore:
             self._ensure_column("operations", "process_start", "TEXT")
             self._ensure_column("events", "schema_version", f"INTEGER NOT NULL DEFAULT {SCHEMA_VERSION}")
             self.db.execute("UPDATE tasks SET original_prompt=prompt WHERE original_prompt=''")
-            self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_mission_per_worktree ON missions(cwd) WHERE status IN ('RUNNING','PAUSED','STOPPING')")
+            for mission in self.db.execute("SELECT id,cwd FROM missions").fetchall():
+                self.db.execute("UPDATE missions SET repo_identity=? WHERE id=?", (repository_identity(mission["cwd"]), mission["id"]))
+            self.db.execute("DROP INDEX IF EXISTS one_active_mission_per_worktree")
+            self.db.execute("CREATE UNIQUE INDEX one_active_mission_per_worktree ON missions(repo_identity) WHERE status IN ('RUNNING','PAUSED','STOPPING')")
             self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_unresolved_operation_per_task ON operations(task_id) WHERE status IN ('INTENT','PREPARED','RUNNING')")
             self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.db.execute("COMMIT")
         except BaseException:
-            self.db.execute("ROLLBACK")
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
             raise
         self._secure_sqlite_files()
 
@@ -189,16 +213,29 @@ class BridgeStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
+        if self.db.in_transaction:
+            savepoint = "bridge_" + uuid.uuid4().hex
+            self.db.execute(f"SAVEPOINT {savepoint}")
+            try:
+                yield
+                self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+                self._secure_sqlite_files()
+                raise
+            return
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield
+            self.db.execute("COMMIT")
         except BaseException:
-            self.db.execute("ROLLBACK")
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
             self._secure_sqlite_files()
             raise
-        else:
-            self.db.execute("COMMIT")
-            self._secure_sqlite_files()
+        self._secure_sqlite_files()
 
     @staticmethod
     def _json(value: Any) -> str:
@@ -230,6 +267,12 @@ class BridgeStore:
             raise KeyError(f"unknown task: {task_id}")
         return row
 
+    def _dependencies_complete(self, task_id: int) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM task_dependencies d JOIN tasks prerequisite ON prerequisite.id=d.depends_on WHERE d.task_id=? AND prerequisite.status!='COMPLETED' LIMIT 1",
+            (task_id,),
+        ).fetchone() is None
+
     def _task_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         task = dict(row)
         task["acceptance"] = json.loads(task.pop("acceptance_json"))
@@ -253,18 +296,19 @@ class BridgeStore:
         if not name.strip() or not objective:
             raise ValueError("mission name and objective must be non-empty")
         canonical_cwd = str(Path(cwd).expanduser().resolve(strict=True))
+        repo_root = repository_identity(canonical_cwd)
         mid = mission_id or uuid.uuid4().hex
         now = utc_now()
         try:
             with self._transaction():
-                active = self.db.execute("SELECT id,cwd FROM missions WHERE status IN ('RUNNING','PAUSED','STOPPING')").fetchall()
+                active = self.db.execute("SELECT id,cwd,repo_identity FROM missions WHERE status IN ('RUNNING','PAUSED','STOPPING')").fetchall()
                 wanted = Path(canonical_cwd)
-                owned = next((row for row in active if wanted == Path(row["cwd"]) or wanted.is_relative_to(Path(row["cwd"])) or Path(row["cwd"]).is_relative_to(wanted)), None)
+                owned = next((row for row in active if row["repo_identity"] == repo_root or wanted == Path(row["cwd"]) or wanted.is_relative_to(Path(row["cwd"])) or Path(row["cwd"]).is_relative_to(wanted)), None)
                 if owned:
                     raise TransitionError(f"an active mission already owns worktree: {canonical_cwd}")
                 self.db.execute(
                     "INSERT INTO missions(id,name,objective,cwd,repo_identity,config_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'CREATED',?,?)",
-                    (mid, name.strip(), objective, canonical_cwd, canonical_cwd, self._json(config or {}), now, now),
+                    (mid, name.strip(), objective, canonical_cwd, repo_root, self._json(config or {}), now, now),
                 )
                 self._event(mid, "mission-created", {"name": name.strip(), "cwd": canonical_cwd})
                 task_id: int | None = None
@@ -354,6 +398,10 @@ class BridgeStore:
         dep = self._task_row(depends_on)
         if task["mission_id"] != mission_id or dep["mission_id"] != mission_id:
             raise TransitionError("dependencies must refer to tasks in the same mission")
+        if task["status"] in {"RUNNING", "VERIFYING"}:
+            raise TransitionError(f"cannot add a dependency to a {str(task['status']).lower()} task")
+        if task["status"] in {"COMPLETED", "CANCELLED"}:
+            raise TransitionError(f"cannot change dependencies of terminal task: {task['status']}")
         if task_id == depends_on:
             raise TransitionError("task cannot depend on itself")
         cycle = self.db.execute(
@@ -392,7 +440,10 @@ class BridgeStore:
             for row in ready:
                 self.db.execute("UPDATE tasks SET status='READY',updated_at=? WHERE id=?", (utc_now(), row["id"]))
                 self._event(mission_id, "task-ready", {"from": "QUEUED", "to": "READY"}, task_id=row["id"])
-            rows = self.db.execute("SELECT * FROM tasks WHERE mission_id=? AND status='READY' ORDER BY priority DESC,ordering,id", (mission_id,))
+            rows = self.db.execute(
+                "SELECT * FROM tasks t WHERE mission_id=? AND status='READY' AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.depends_on WHERE d.task_id=t.id AND p.status!='COMPLETED') ORDER BY priority DESC,ordering,id",
+                (mission_id,),
+            )
             return [self._task_dict(row) for row in rows]
 
     def amend_task(self, task_id: int, *, prompt: str | None = None, title: str | None = None, priority: int | None = None, acceptance: list[str] | None = None) -> int:
@@ -407,6 +458,18 @@ class BridgeStore:
             revision = int(task["revision"]) + 1
             self.db.execute("UPDATE tasks SET pending_json=?,revision=?,updated_at=? WHERE id=?", (self._json(pending), revision, utc_now(), task_id))
             self.db.execute("INSERT INTO amendments(task_id,revision,changes_json,status,created_at) VALUES(?,?,?,'PENDING',?)", (task_id, revision, self._json(pending), utc_now()))
+            if task["status"] == "VERIFYING":
+                mapping = {"prompt": "prompt", "title": "title", "priority": "priority", "acceptance": "acceptance_json"}
+                assignments, values = [], []
+                for key, value in pending.items():
+                    if key in mapping:
+                        assignments.append(mapping[key] + "=?")
+                        values.append(self._json(value) if key == "acceptance" else value)
+                assignments.extend(["pending_json='{}'", "evidence_json='[]'", "status='READY'"])
+                values.extend([utc_now(), task_id])
+                self.db.execute(f"UPDATE tasks SET {','.join(assignments)},updated_at=? WHERE id=?", values)
+                self.db.execute("UPDATE amendments SET status='APPLIED',applied_at=? WHERE task_id=? AND status='PENDING'", (utc_now(), task_id))
+                self._event(task["mission_id"], "task-amendment-applied", {"revision": revision, "reason": "after-verification-result"}, task_id=task_id)
             self._event(task["mission_id"], "task-amended", {"revision": revision, "fields": sorted(pending)}, task_id=task_id)
             return revision
 
@@ -495,17 +558,16 @@ class BridgeStore:
             raise ValueError("iteration must be positive and station must be non-empty")
         with self._transaction():
             task = self._task_row(task_id)
+            mission = self._mission_row(str(task["mission_id"]))
+            if mission["status"] != "RUNNING":
+                raise TransitionError("mission is not running; refusing a new operation intent")
             if task["status"] not in {"QUEUED", "READY", "RUNNING"}:
                 raise TransitionError(f"task is not runnable: {task['status']}")
             existing_op = self.db.execute("SELECT id FROM operations WHERE task_id=? AND status IN ('INTENT','PREPARED','RUNNING') LIMIT 1", (task_id,)).fetchone()
             if existing_op:
                 raise TransitionError(f"task already has unresolved operation {existing_op[0]}")
-            blocked_dep = self.db.execute(
-                "SELECT p.id FROM task_dependencies d JOIN tasks p ON p.id=d.depends_on WHERE d.task_id=? AND p.status!='COMPLETED' LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            if blocked_dep:
-                raise TransitionError(f"task dependency {blocked_dep[0]} is incomplete")
+            if not self._dependencies_complete(task_id):
+                raise TransitionError("task dependency is incomplete")
             pending = json.loads(task["pending_json"])
             if pending:
                 mapping = {"prompt": "prompt", "title": "title", "priority": "priority", "acceptance": "acceptance_json"}
@@ -543,6 +605,21 @@ class BridgeStore:
             )
             self._event(op["mission_id"], "operation-running", {"pane_id": pane_id, "process_pid": process_pid, "route_id": route_id, "model": model}, task_id=op["task_id"], operation_id=operation_id)
 
+    def record_operation_process(self, operation_id: str, *, process_pid: int, process_start: str) -> None:
+        if process_pid < 1 or not process_start:
+            raise ValueError("process identity requires a positive pid and start token")
+        with self._transaction():
+            op = self.db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if op is None:
+                raise KeyError(f"unknown operation: {operation_id}")
+            if op["status"] != "RUNNING":
+                raise TransitionError(f"operation is not running: {op['status']}")
+            self.db.execute(
+                "UPDATE operations SET process_pid=?,process_start=?,updated_at=? WHERE id=?",
+                (int(process_pid), process_start, utc_now(), operation_id),
+            )
+            self._event(op["mission_id"], "operation-process", {"process_pid": int(process_pid), "process_start": process_start}, task_id=op["task_id"], operation_id=operation_id)
+
     def get_operation(self, operation_id: str) -> dict[str, Any]:
         row = self.db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
         if row is None:
@@ -557,6 +634,13 @@ class BridgeStore:
             if op["status"] not in UNRESOLVED_OPERATION_STATES:
                 raise TransitionError(f"operation already resolved: {op['status']}")
             task = self._task_row(int(op["task_id"]))
+            requested_status = str(task["status"])
+            if requested_status == "CANCELLED":
+                boundary_status = "CANCELLED"
+            elif requested_status == "PAUSED":
+                boundary_status = "PAUSED"
+            else:
+                boundary_status = None
             if exit_code == 0:
                 pending = json.loads(task["pending_json"])
                 if pending:
@@ -578,6 +662,8 @@ class BridgeStore:
                 status = "BLOCKED"
             else:
                 status = "FAILED"
+            if boundary_status is not None:
+                status = boundary_status
             now = utc_now()
             self.db.execute("UPDATE operations SET status='EXITED',exit_code=?,logs_path=?,updated_at=? WHERE id=?", (int(exit_code), logs_path, now, operation_id))
             self.db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (status, now, task["id"]))
@@ -598,21 +684,45 @@ class BridgeStore:
                 count += 1
         return count
 
-    def verify_task(self, task_id: int, *, evidence: str = "", approved: bool = False) -> dict[str, Any]:
+    def verify_task(
+        self,
+        task_id: int,
+        *,
+        evidence: str = "",
+        approved: bool = False,
+        source: str = "operator",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not evidence.strip() and not approved:
             raise TransitionError("completion requires verification evidence or explicit operator approval")
+        if source not in {"operator", "verifier"}:
+            raise ValueError("verification evidence source must be operator or verifier")
         with self._transaction():
             task = self._task_row(task_id)
             if task["status"] != "VERIFYING":
                 raise TransitionError(f"task is not awaiting verification: {task['status']}")
+            if task["pending_json"] != "{}":
+                raise TransitionError("task has unapplied amendments and cannot be verified")
+            if not self._dependencies_complete(task_id):
+                raise TransitionError("task dependency is incomplete and prevents verification")
             all_evidence = json.loads(task["evidence_json"])
             if evidence.strip():
-                all_evidence.append({"text": evidence, "at": utc_now(), "source": "operator"})
+                entry = {"text": evidence, "at": utc_now(), "source": source, "revision": int(task["revision"])}
+                if metadata:
+                    entry.update(metadata)
+                all_evidence.append(entry)
             if approved:
-                all_evidence.append({"text": "operator approved", "at": utc_now(), "source": "approval"})
+                all_evidence.append({"text": "operator approved", "at": utc_now(), "source": "approval", "revision": int(task["revision"])})
             self.db.execute("UPDATE tasks SET status='COMPLETED',evidence_json=?,updated_at=? WHERE id=?", (self._json(all_evidence), utc_now(), task_id))
             self._event(task["mission_id"], "task-verified", {"evidence_count": len(all_evidence), "approved": bool(approved)}, task_id=task_id)
         return self.get_task(task_id)
+
+    def record_verification_attempt(self, task_id: int, result: dict[str, Any]) -> None:
+        with self._transaction():
+            task = self._task_row(task_id)
+            if task["status"] != "VERIFYING":
+                raise TransitionError(f"task is not awaiting verification: {task['status']}")
+            self._event(str(task["mission_id"]), "verification-failed", result, task_id=task_id)
 
     def set_task_status(self, task_id: int, status: str) -> dict[str, Any]:
         status = status.upper()
@@ -632,6 +742,8 @@ class BridgeStore:
             old = str(task["status"])
             if status != old and status not in allowed[old]:
                 raise TransitionError(f"invalid task transition: {old} -> {status}")
+            if status == "READY" and not self._dependencies_complete(task_id):
+                raise TransitionError("task dependency is incomplete and prevents readiness")
             self.db.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (status, utc_now(), task_id))
             self._event(task["mission_id"], "task-status", {"from": old, "to": status}, task_id=task_id)
         return self.get_task(task_id)
@@ -642,6 +754,17 @@ class BridgeStore:
             {**dict(row), "data": json.loads(row["data_json"])}
             for row in self.db.execute("SELECT * FROM events WHERE mission_id=? AND id>? ORDER BY id", (mission_id, after))
         ]
+
+    def record_runtime_event(self, mission_id: str, kind: str, data: dict[str, Any]) -> int:
+        if not kind or len(kind) > 100:
+            raise ValueError("runtime event kind must be a non-empty value up to 100 characters")
+        bounded = json.loads(self._json(data))
+        if len(self._json(bounded).encode("utf-8")) > 16_384:
+            raise ValueError("runtime event payload exceeds 16 KiB")
+        with self._transaction():
+            self._mission_row(mission_id)
+            self._event(mission_id, kind, bounded)
+            return int(self.db.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     def close(self) -> None:
         self.db.close()
@@ -665,6 +788,8 @@ class MissionLock:
         self._file: Any | None = None
 
     def acquire(self) -> None:
+        if self._file is not None:
+            return
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = self.directory.stat()
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:

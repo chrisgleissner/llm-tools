@@ -1728,7 +1728,7 @@ def report_prior_suspend_failures(logs: common.RunLogs) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> int:
     common.migrate_legacy_cache_dirs()
     cfg = parse_args(list(sys.argv[1:] if argv is None else argv))
     conf = apply_config(cfg)
@@ -1774,13 +1774,36 @@ def main(argv: list[str] | None = None) -> int:
     while True:
         if out_of_time():
             return stop_timed_out()
+        bridge_context: dict[str, Any] | None = None
+        iteration_prompt = prompt
+        if bridge_hooks is not None:
+            bridge_context = bridge_hooks.before_iteration()
+            action = str(bridge_context.get("action", "run"))
+            if action == "stop":
+                code = int(bridge_context.get("exit_code", 0))
+                common.log_event(logs, "bridge_stop", {"reason": bridge_context.get("reason", "operator stop"), "exit_code": code})
+                common.log_event(logs, "final", {"status": "stopped", "completed": completed})
+                return code
+            if action == "wait":
+                continue
+            if action != "run" or not isinstance(bridge_context.get("prompt"), str):
+                raise ValueError("Bridge before_iteration must return run, wait, or stop with a prompt for run")
+            iteration_prompt = str(bridge_context["prompt"])
         common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index, "completed_counts": completed_counts})
         selection = select_provider(cfg, logs, current_index, skipped)
         common.log_event(logs, "selection", {**selection, "skipped": sorted(skipped)})
+        if bridge_hooks is not None:
+            observe_selection = getattr(bridge_hooks, "on_selection", None)
+            if callable(observe_selection):
+                observe_selection(selection)
         selected_index = int(selection.get("index", -1))
         selected_provider = str(selection.get("provider", ""))
         if selected_index == -1 or not selected_provider:
             # Every provider is blocked. Do not stop: wait for one to free up.
+            if bridge_hooks is not None:
+                observe_wait = getattr(bridge_hooks, "on_wait", None)
+                if callable(observe_wait):
+                    observe_wait(selection, soonest_wait_until(selection))
             if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-skipped"):
                 return stop_timed_out()
             skipped = set()
@@ -1806,6 +1829,10 @@ def main(argv: list[str] | None = None) -> int:
             # resume this loop and re-evaluate which provider to use. Do not run a
             # provider or count this as an increment.
             target = soonest_wait_until(selection) or (common.now_epoch() + int(cfg.poll_interval))
+            if bridge_hooks is not None:
+                observe_wait = getattr(bridge_hooks, "on_wait", None)
+                if callable(observe_wait):
+                    observe_wait(selection, target)
             save_state(cfg, selected_index, selected_provider, completed_counts)
             if cfg.dry_run:
                 common.log_event(logs, "final", {"status": "dry-run"})
@@ -1820,14 +1847,19 @@ def main(argv: list[str] | None = None) -> int:
             common.log_event(logs, "final", {"status": "dry-run"})
             print("dry-run: no prompt submitted", file=sys.stderr)
             return 0
-        provider_prompt = provider_prompt_for(cfg, selected_provider, selection, prompt)
+        provider_prompt = provider_prompt_for(cfg, selected_provider, selection, iteration_prompt)
         iteration += 1
         selected_route_id = str(selection.get("route") or "")
         scfg = scheduler_config_for(cfg, selected_provider, logs, provider_prompt, iteration, model=selected_model, route_id=selected_route_id)
+        if bridge_hooks is not None and bridge_context is not None:
+            if bridge_hooks.before_launch(bridge_context, selection, scfg, iteration) is False:
+                continue
         common.log_event(logs, "scheduler_command", {"argv": ["llm-scheduler", "--provider", selected_provider, *(["--model", selected_model] if selected_model else [])], "iteration": iteration, "run_dir": str(scfg.run_dir)})
         iter_start = monotonic()
         status = run_scheduler_inline(scfg)
         iter_seconds = monotonic() - iter_start
+        if bridge_hooks is not None and bridge_context is not None:
+            bridge_hooks.after_iteration(bridge_context, selection, scfg, iteration, status, iter_seconds)
         common.log_event(logs, "scheduler_result", {"status": status, "seconds": round(iter_seconds, 3)})
         if status == 0:
             completed += 1

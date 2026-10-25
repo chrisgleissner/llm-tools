@@ -1479,9 +1479,9 @@ def test_parser_option_coverage(tmp_path: Path) -> None:
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="claude"), "p") == ["claude", "--print", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="claude", claude_stream_json=True), "p") == ["claude", "--print", "--output-format", "stream-json", "--verbose", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="copilot", cwd="/c", attached=True), "p") == ["copilot", "-C", "/c", "-i", "p"]
-    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c", attached=True), "p") == ["kilo", "run", "p"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c", attached=True), "p") == ["kilo", "--prompt", "p"]
     assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="kilo", cwd="/c"), "p") == ["kilo", "run", "--dir", "/c", "p"]
-    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="opencode", cwd="/c", attached=True), "p") == ["opencode"]
+    assert scheduler.provider_default_argv(scheduler.SchedulerConfig(provider="opencode", cwd="/c", attached=True), "p") == ["opencode", "--prompt", "p"]
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(provider="codex")).startswith("Codex")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(provider="claude")).startswith("Claude")
     assert scheduler.scheduler_model_description(scheduler.SchedulerConfig(provider="copilot")).startswith("GitHub")

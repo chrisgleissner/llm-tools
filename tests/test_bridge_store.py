@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from llm_tools.bridge_store import BridgeStore, MissionLock, TransitionError
+
+
+def _activate(store: BridgeStore, mission: dict[str, object]) -> None:
+    store.set_mission_status(str(mission["id"]), "RUNNING")
 
 
 def test_task_order_dependencies_and_boundary_amendment_are_durable(tmp_path: Path) -> None:
@@ -37,6 +42,7 @@ def test_task_order_dependencies_and_boundary_amendment_are_durable(tmp_path: Pa
 def test_operation_intent_precedes_launch_and_crash_becomes_uncertain(tmp_path: Path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
     task_id = store.add_task(mission["id"], "do something")
 
     operation_id = store.begin_operation(task_id, iteration=1, station="codex")
@@ -52,6 +58,7 @@ def test_operation_intent_precedes_launch_and_crash_becomes_uncertain(tmp_path: 
 def test_success_requires_explicit_verification_and_dependencies_unlock_afterwards(tmp_path: Path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
     first = store.add_task(mission["id"], "write code", acceptance=["tests pass"])
     second = store.add_task(mission["id"], "integrate", depends_on=[first])
     op = store.begin_operation(first, iteration=1, station="claude")
@@ -68,6 +75,7 @@ def test_success_requires_explicit_verification_and_dependencies_unlock_afterwar
 def test_nonzero_and_autonomy_abort_are_not_marked_complete(tmp_path: Path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
     failed_id = store.add_task(mission["id"], "fails")
     failed_op = store.begin_operation(failed_id, iteration=1, station="codex")
     assert store.finish_operation(failed_op, exit_code=2)["status"] == "FAILED"
@@ -94,12 +102,13 @@ def test_events_share_transaction_and_mission_lock_is_exclusive(tmp_path: Path) 
 
     with sqlite3.connect(tmp_path / "bridge.sqlite3") as db:
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
 
 
 def test_operation_identity_commands_and_worktree_exclusion(tmp_path: Path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
     task = store.add_task(mission["id"], "task")
     op_id = store.begin_operation(task, iteration=1, station="kilo")
     store.mark_operation_running(op_id, pane_id="%0", process_pid=123, process_start="boot:1", route_id="kilo-coder", model="vendor/model")
@@ -116,7 +125,6 @@ def test_operation_identity_commands_and_worktree_exclusion(tmp_path: Path) -> N
     with pytest.raises(TransitionError, match="different request"):
         store.enqueue_command(mission["id"], {"action": "stop"}, command_id="request-1")
 
-    store.set_mission_status(mission["id"], "RUNNING")
     with pytest.raises(TransitionError, match="already owns worktree"):
         store.create_mission("duplicate", "another objective", cwd=tmp_path)
 
@@ -133,10 +141,10 @@ def test_private_state_directory_is_required_and_is_not_chmodded(tmp_path: Path)
 def test_completion_requires_evidence_and_all_tasks_verified(tmp_path: Path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
     task = store.add_task(mission["id"], "one task")
     op = store.begin_operation(task, iteration=1, station="codex")
     store.finish_operation(op, exit_code=0)
-    store.set_mission_status(mission["id"], "RUNNING")
     with pytest.raises(TransitionError, match="invalid task transition"):
         store.set_task_status(task, "COMPLETED")
     with pytest.raises(TransitionError, match="tasks are not complete"):
@@ -146,6 +154,7 @@ def test_completion_requires_evidence_and_all_tasks_verified(tmp_path: Path) -> 
 def test_amendment_during_operation_invalidates_that_operation_success(tmp_path: Path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
     task = store.add_task(mission["id"], "original")
     op = store.begin_operation(task, iteration=1, station="codex")
     store.amend_task(task, prompt="new revision")
@@ -214,5 +223,167 @@ def test_version_one_database_migrates_original_prompts_and_new_tables(tmp_path:
     assert store.get_task(1)["original_prompt"] == "verbatim old prompt"
     assert store.get_mission("old")["config"] == {}
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_amendment_after_exit_invalidates_verification_and_requeues_task(tmp_path: Path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
+    task = store.add_task(mission["id"], "first revision")
+    operation = store.begin_operation(task, iteration=1, station="codex")
+    store.finish_operation(operation, exit_code=0)
+    assert store.get_task(task)["status"] == "VERIFYING"
+    store.amend_task(task, prompt="second revision")
+    updated = store.get_task(task)
+    assert updated["status"] == "READY"
+    assert updated["prompt"] == "second revision"
+    assert updated["pending"] == {}
+    assert updated["revision"] == 2
+    with pytest.raises(TransitionError, match="not awaiting verification"):
+        store.verify_task(task, approved=True)
+
+
+def test_running_task_cannot_gain_new_dependencies(tmp_path: Path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
+    task = store.add_task(mission["id"], "running task")
+    dependency = store.add_task(mission["id"], "new prerequisite")
+    store.begin_operation(task, iteration=1, station="claude")
+    with pytest.raises(TransitionError, match="running task"):
+        store.add_dependency(mission["id"], task, dependency)
+
+
+def test_dependency_invariant_covers_verifying_paused_ready_and_completion(tmp_path: Path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
+    verifying = store.add_task(mission["id"], "verifying")
+    prerequisite = store.add_task(mission["id"], "prerequisite")
+    store.begin_operation(verifying, iteration=1, station="codex")
+    store.finish_operation(store.db.execute("SELECT id FROM operations WHERE task_id=?", (verifying,)).fetchone()[0], exit_code=0)
+    with pytest.raises(TransitionError, match="dependency"):
+        store.add_dependency(mission["id"], verifying, prerequisite)
+    with store._transaction():
+        store.db.execute("INSERT INTO task_dependencies(task_id,depends_on) VALUES(?,?)", (verifying, prerequisite))
+    with pytest.raises(TransitionError, match="dependency"):
+        store.verify_task(verifying, approved=True)
+
+    paused = store.add_task(mission["id"], "paused")
+    store.set_task_status(paused, "PAUSED")
+    store.add_dependency(mission["id"], paused, prerequisite)
+    with pytest.raises(TransitionError, match="dependency"):
+        store.set_task_status(paused, "READY")
+    store.set_task_status(paused, "QUEUED")
+    assert paused not in [task["id"] for task in store.ready_tasks(mission["id"]) if task["id"] != prerequisite]
+
+
+def test_sibling_directories_in_one_git_worktree_are_exclusive(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "a").mkdir(parents=True)
+    (repo / "b").mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("a", "objective", cwd=repo / "a")
+    store.set_mission_status(mission["id"], "RUNNING")
+    with pytest.raises(TransitionError, match="already owns worktree"):
+        store.create_mission("b", "other objective", cwd=repo / "b")
+
+
+def test_commit_failure_rolls_back_and_leaves_connection_reusable(tmp_path: Path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    with pytest.raises(sqlite3.IntegrityError):
+        with store._transaction():
+            store.db.execute("PRAGMA defer_foreign_keys=ON")
+            store.db.execute("INSERT INTO task_dependencies(task_id,depends_on) VALUES(999,998)")
+    assert not store.db.in_transaction
+    task = store.add_task(mission["id"], "connection still works")
+    assert store.get_task(task)["prompt"] == "connection still works"
+
+
+@pytest.mark.parametrize(("requested_status", "expected_status"), [("PAUSED", "PAUSED"), ("CANCELLED", "CANCELLED")])
+def test_successful_child_exit_preserves_operator_task_state(tmp_path: Path, requested_status: str, expected_status: str) -> None:
+    store = BridgeStore(tmp_path / f"{requested_status}.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
+    task = store.add_task(mission["id"], "task being operated on")
+    operation = store.begin_operation(task, iteration=1, station="codex")
+    store.set_task_status(task, requested_status)
+
+    result = store.finish_operation(operation, exit_code=0)
+
+    assert result["status"] == expected_status
+    assert store.get_operation(operation)["status"] == "EXITED"
+
+
+def test_successful_child_exit_observes_mission_pause(tmp_path: Path) -> None:
+    store = BridgeStore(tmp_path / "mission-pause.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    task = store.add_task(mission["id"], "task being operated on")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation = store.begin_operation(task, iteration=1, station="codex")
+    store.set_mission_status(mission["id"], "PAUSED")
+
+    result = store.finish_operation(operation, exit_code=0)
+
+    assert result["status"] == "VERIFYING"
+
+
+def test_reentering_an_acquired_mission_lock_does_not_drop_exclusion(tmp_path: Path) -> None:
+    lock = MissionLock(tmp_path / "locks", "mission")
+    competing = MissionLock(tmp_path / "locks", "mission")
+    lock.acquire()
+    try:
+        with lock:
+            with pytest.raises(BlockingIOError):
+                competing.acquire()
+    finally:
+        lock.release()
+    competing.acquire()
+    competing.release()
+
+
+def test_operation_process_identity_is_persisted_only_while_running(tmp_path: Path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    _activate(store, mission)
+    task_id = store.add_task(mission["id"], "work")
+    operation = store.begin_operation(task_id, iteration=1, station="codex")
+    store.mark_operation_running(operation, process_pid=10, process_start="start-a")
+
+    store.record_operation_process(operation, process_pid=11, process_start="start-b")
+
+    assert store.get_operation(operation)["process_pid"] == 11
+    assert store.get_operation(operation)["process_start"] == "start-b"
+    store.finish_operation(operation, exit_code=0)
+    with pytest.raises(TransitionError, match="not running"):
+        store.record_operation_process(operation, process_pid=12, process_start="start-c")
+
+
+@pytest.mark.parametrize("mission_status", ["PAUSED", "STOPPING", "STOPPED", "CANCELLED"])
+def test_operation_intent_cannot_cross_a_nonrunning_mission_boundary(tmp_path: Path, mission_status: str) -> None:
+    store = BridgeStore(tmp_path / f"{mission_status}.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    store.set_mission_status(mission["id"], "RUNNING")
+    task = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], mission_status)
+
+    with pytest.raises(TransitionError, match="mission is not running"):
+        store.begin_operation(task, iteration=1, station="codex")
+
+
+def test_runtime_events_are_transactional_and_payloads_are_bounded(tmp_path: Path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+
+    event_id = store.record_runtime_event(mission["id"], "provider-selection", {"provider": "codex", "usable": True})
+
+    event = store.events(mission["id"])[-1]
+    assert event["id"] == event_id
+    assert event["kind"] == "provider-selection"
+    assert event["data"] == {"provider": "codex", "usable": True}
+    with pytest.raises(ValueError, match="16 KiB"):
+        store.record_runtime_event(mission["id"], "too-large", {"payload": "x" * 17_000})
 

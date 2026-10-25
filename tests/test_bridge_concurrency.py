@@ -90,6 +90,7 @@ def test_committed_dispatch_survives_process_death_without_automatic_replay(tmp_
     with BridgeStore(path) as store:
         mid = store.create_mission("dispatch crash", "objective", cwd=tmp_path)["id"]
         task_id = store.add_task(mid, "external operation")
+        store.set_mission_status(mid, "RUNNING")
     code = '''import os, sys
 from llm_tools.bridge_store import BridgeStore
 store = BridgeStore(sys.argv[1])

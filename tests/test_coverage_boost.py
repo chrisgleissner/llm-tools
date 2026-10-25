@@ -218,7 +218,7 @@ def test_is_undetermined_reason_and_sleep_until(monkeypatch: pytest.MonkeyPatch)
 
 def test_provider_default_argv_kilo_and_opencode_cwd_handling() -> None:
     attached_kilo = scheduler.SchedulerConfig(provider="kilo", cwd="/tmp/work", attached=True)
-    assert scheduler.provider_default_argv(attached_kilo, "prompt") == ["kilo", "run", "prompt"]
+    assert scheduler.provider_default_argv(attached_kilo, "prompt") == ["kilo", "--prompt", "prompt"]
 
     headless_kilo = scheduler.SchedulerConfig(provider="kilo", cwd="/tmp/work")
     assert scheduler.provider_default_argv(headless_kilo, "prompt") == [
@@ -226,7 +226,7 @@ def test_provider_default_argv_kilo_and_opencode_cwd_handling() -> None:
     ]
 
     attached_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work", attached=True)
-    assert scheduler.provider_default_argv(attached_opencode, "prompt") == ["opencode"]
+    assert scheduler.provider_default_argv(attached_opencode, "prompt") == ["opencode", "--prompt", "prompt"]
 
     headless_opencode = scheduler.SchedulerConfig(provider="opencode", cwd="/tmp/work")
     assert scheduler.provider_default_argv(headless_opencode, "prompt") == [
