@@ -1,0 +1,13 @@
+{
+  "tasks": 10000,
+  "provider_calls": 0,
+  "insert_seconds": 4.062488,
+  "list_seconds": 0.097032,
+  "command_commit_seconds": 0.000373,
+  "state_bytes_including_wal": 8048264,
+  "integrity_check": "ok",
+  "database_bytes_after_close": 3887104,
+  "cpu_seconds": 4.176313,
+  "peak_rss_platform_units": 35644,
+  "note": "Store-only local measurement; does not establish TUI latency or long-duration memory behavior"
+}

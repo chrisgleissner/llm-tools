@@ -1,0 +1,68 @@
+[
+  {
+    "provider": "codex",
+    "model_call_budget": 1,
+    "model_execution": "NOT VERIFIED",
+    "mouse": "NOT VERIFIED",
+    "native_resume": "NOT VERIFIED",
+    "keyboard": "interrupt sent; response NOT VERIFIED",
+    "ansi_rendering": "PASS",
+    "resize": "GEOMETRY PASS; provider response NOT VERIFIED",
+    "version": "codex-cli 0.164.0",
+    "output_seen": true,
+    "startup": "OUTPUT OBSERVED",
+    "pane_state": "0:",
+    "process_alive_after_startup": true,
+    "pane_dimensions": [
+      "80x17",
+      "120x33",
+      "180x48"
+    ],
+    "private_server_cleanup": "PASS",
+    "duration_seconds": 20.639
+  },
+  {
+    "provider": "claude",
+    "model_call_budget": 1,
+    "model_execution": "NOT VERIFIED",
+    "mouse": "NOT VERIFIED",
+    "native_resume": "NOT VERIFIED",
+    "keyboard": "interrupt sent; response NOT VERIFIED",
+    "ansi_rendering": "NOT VERIFIED",
+    "resize": "GEOMETRY PASS; provider response NOT VERIFIED",
+    "version": "2.1.310 (Claude Code)",
+    "output_seen": true,
+    "startup": "OUTPUT OBSERVED",
+    "pane_state": "0:",
+    "process_alive_after_startup": true,
+    "pane_dimensions": [
+      "80x17",
+      "120x33",
+      "180x48"
+    ],
+    "private_server_cleanup": "PASS",
+    "duration_seconds": 20.414
+  },
+  {
+    "provider": "copilot",
+    "model_call_budget": 1,
+    "model_execution": "NOT VERIFIED",
+    "mouse": "NOT VERIFIED",
+    "native_resume": "NOT VERIFIED",
+    "keyboard": "interrupt sent; response NOT VERIFIED",
+    "ansi_rendering": "PASS",
+    "resize": "GEOMETRY PASS; provider response NOT VERIFIED",
+    "version": "GitHub Copilot CLI 1.0.95.",
+    "output_seen": true,
+    "startup": "OUTPUT OBSERVED",
+    "pane_state": "0:",
+    "process_alive_after_startup": true,
+    "pane_dimensions": [
+      "80x17",
+      "120x33",
+      "180x48"
+    ],
+    "private_server_cleanup": "PASS",
+    "duration_seconds": 20.626
+  }
+]
