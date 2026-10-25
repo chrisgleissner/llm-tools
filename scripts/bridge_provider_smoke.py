@@ -113,7 +113,7 @@ def probe(provider: str, seconds: float, *, submit: bool = False) -> dict[str, o
         finally:
             if handle:
                 backend.stop(handle)
-                result["private_server_cleanup"] = "PASS" if not backend.is_alive(handle) else "FAILED"
+                result["private_server_cleanup"] = "PASS" if not backend.server_exists(handle) else "FAILED"
             result["duration_seconds"] = round(time.monotonic() - started, 3)
     return result
 
