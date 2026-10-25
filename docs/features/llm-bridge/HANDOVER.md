@@ -105,6 +105,9 @@ latency under 1 MiB/s output or multi-day reliability. These remain open.
 
 User requested immediate push of all changes and a PR because credits are low.
 Work is frozen on `feat/llm-bridge`; publish as DRAFT, not merge-ready.
+Published draft PR: https://github.com/chrisgleissner/llm-tools/pull/26
+The branch is pushed to origin. Resume with `git switch feat/llm-bridge`
+and `git pull --ff-only`, or `gh pr checkout 26` in a fresh checkout.
 All relevant implementation, tests, ledgers and unchanged original prompt are
 included. Packaging checkpoint is `f60adef`; this handover started at `de32b6d`.
 
