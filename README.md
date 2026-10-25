@@ -25,6 +25,7 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 | `llm-scheduler`  | Run one prompt through one selected provider once that provider has usable capacity.             |
 | `ralph-robin`    | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
 | `llm-sleep-soak` | Prove suspend/resume is reliable on this machine before trusting unattended overnight runs.      |
+| `llm-bridge`     | Create durable engineering missions, order tasks, inspect evidence, and control provider sessions. |
 
 <img src="./docs/img/llm-usage5.png" alt="LLM Usage"/>
 
@@ -57,9 +58,10 @@ Open a new shell, then verify the commands are available:
 command -v llm-usage
 command -v llm-scheduler
 command -v ralph-robin
+command -v llm-bridge
 ```
 
-Other install paths: a release wheel (`pipx install <wheel-url>` from the [releases page](https://github.com/chrisgleissner/llm-tools/releases)), a local checkout (`pipx install .`), or running the scripts straight from a checkout (`./llm-usage`, `./llm-scheduler`, `./ralph-robin`).
+Other install paths: a release wheel (`pipx install <wheel-url>` from the [releases page](https://github.com/chrisgleissner/llm-tools/releases)), a local checkout (`pipx install .`), or running the scripts straight from a checkout (`./llm-usage`, `./llm-scheduler`, `./ralph-robin`, `./llm-bridge`).
 
 ## Quick Start
 
@@ -95,6 +97,42 @@ Follow the latest scheduler run:
 ```bash
 tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
 ```
+
+### LLM Bridge
+
+Create a mission from a verbatim prompt file, inspect its initial task, and start autonomous work:
+
+```bash
+llm-bridge mission create --file task.md --cwd "$PWD" --json
+llm-bridge mission list --json
+llm-bridge start --mission MISSION_ID
+llm-bridge status --mission MISSION_ID --json
+```
+
+The default run opens a private tmux station with an interactive Bridge command pane and a provider activity pane. Install `tmux` for this mode. Use `--headless` on mission creation or `start` to run without a station. Use `--native` to put an interactive provider CLI in the provider pane; `--native` and `--headless` cannot be combined. Bridge records durable task state and operation results, but it does not restore a provider's exact conversation after a controller restart. Continued work is reconstructed from the mission, task revision, checkpoint, and evidence recorded by Bridge.
+
+Add a task from a file or standard input, then use task commands to order or amend it:
+
+```bash
+llm-bridge task add --mission MISSION_ID --file follow-up.md --priority 5 --acceptance "tests pass"
+llm-bridge task list --mission MISSION_ID --json
+llm-bridge task amend --mission MISSION_ID --task TASK_ID --file revised.md
+llm-bridge pause --mission MISSION_ID
+llm-bridge resume --mission MISSION_ID
+llm-bridge attach --mission MISSION_ID
+```
+
+A zero exit from a provider leaves the task in `VERIFYING`. Complete it with explicit operator approval or configure a deterministic verifier on mission creation. Each repeated `--verifier-arg` supplies one argv element; `{context}` is replaced with a private JSON file containing the task revision and acceptance criteria. A configured verifier succeeds on exit code zero. It may print JSON with `summary` and artifact paths relative to the mission working directory; `passed: false` explicitly vetoes success:
+
+```bash
+llm-bridge mission create --file task.md --cwd "$PWD" \
+  --verifier-arg ./verify-task --verifier-arg '{context}' --verifier-timeout 120
+llm-bridge task verify --mission MISSION_ID --task TASK_ID --approve
+```
+
+Verifier output and context files are private local artifacts. A verifier failure or timeout leaves the task awaiting review; it never marks the task complete.
+
+Open the seven-view control screen with `llm-bridge control --mission ID`. The tmux station's compact command pane is available by attaching to the mission. Use `llm-bridge doctor` to check SQLite integrity and whether `tmux` is installed. See the [Bridge operations guide](./docs/llm-bridge/operations.md) for task states, terminal controls, pause/stop behavior, and recovery limits.
 
 ## Provider CLI Requirements
 

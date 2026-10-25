@@ -17,10 +17,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install tmux for native terminal integration tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tmux
+          command -v tmux
+          tmux -V
+
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e . pytest coverage
+
+      - name: Check installed Bridge entry point
+        run: |
+          llm-bridge --help >/dev/null
+          llm-bridge mission create --help >/dev/null
 
       - name: Run tests with coverage
         run: |

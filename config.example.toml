@@ -14,6 +14,19 @@
 # Run `<tool> --help` (e.g. `ralph-robin --help`) to see the value each
 # flag expects (numbers, durations like "24h", comma-separated lists, etc.).
 
+# ---------------------------------------------------------------------------
+# LLM Bridge
+# ---------------------------------------------------------------------------
+# Bridge settings are supplied on `llm-bridge` commands. This config parser
+# does not support a [bridge] table. Mission creation flags include
+# --providers, --routes, --headless, and --native; see `llm-bridge mission create
+# --help`. Without --headless, tmux is required for the local control
+# station. --native asks the selected provider CLI to use its interactive UI;
+# otherwise the provider station shows the autonomous activity log. The
+# durable mission database defaults to
+# ${XDG_STATE_HOME:-~/.local/state}/llm-tools/llm-bridge and can be relocated
+# with LLM_BRIDGE_STATE_DIR.
+
 
 # ---------------------------------------------------------------------------
 # Shared defaults applied to all three tools. Each tool can override these
