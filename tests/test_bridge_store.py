@@ -545,3 +545,25 @@ def test_agent_proposals_require_operator_acceptance_before_scheduling(tmp_path:
         assert {task["id"] for task in store.list_proposals(mission["id"], status="ALL", limit=1)} == {proposed}
         assert [task["id"] for task in store.list_proposals(mission["id"], status="REJECTED")] == [rejected]
 
+
+@pytest.mark.parametrize("terminal_status", ["COMPLETED", "CANCELLED"])
+def test_terminal_mission_rejects_new_operator_tasks_and_proposal_acceptance(tmp_path: Path, terminal_status: str) -> None:
+    with BridgeStore(tmp_path / f"{terminal_status.lower()}.sqlite3") as store:
+        mission = store.create_mission("mission", "objective", cwd=tmp_path)
+        task = store.add_task(mission["id"], "source work")
+        store.set_mission_status(mission["id"], "RUNNING")
+        operation = store.begin_operation(task, iteration=1, station="codex")
+        store.finish_operation(operation, exit_code=0)
+        if terminal_status == "COMPLETED":
+            store.verify_task(task, evidence="verified source work")
+            proposal = store.propose_task(mission["id"], "new proposal", source_operation_id=operation)
+            store.set_mission_status(mission["id"], "COMPLETED")
+            with pytest.raises(TransitionError, match="terminal mission"):
+                store.decide_proposal(mission["id"], proposal, accept=True)
+            assert store.get_task(proposal)["proposal_status"] == "PENDING"
+        else:
+            store.set_mission_status(mission["id"], "CANCELLED")
+
+        with pytest.raises(TransitionError, match="terminal mission"):
+            store.add_task(mission["id"], "must not be stranded")
+

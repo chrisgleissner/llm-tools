@@ -122,9 +122,12 @@ class SchedulerConfig:
     tmux_pane: str = ""
     native_tui: bool = False
     process_started: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
+    process_observer: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     # Internal Bridge callback used to interrupt long capacity waits promptly.
     should_interrupt_wait: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
     command_argv_transform: Callable[[list[str]], list[str]] | None = field(default=None, repr=False, compare=False)
+    # Internal environment additions supplied by a managed Bridge operation.
+    env_overrides: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
     max_output_bytes: int = 0
     max_output_rotations: int = 0
     command_template: str = ""
@@ -391,16 +394,21 @@ def _record_popen_process(cfg: SchedulerConfig, proc: subprocess.Popen[Any]) -> 
 
 
 def provider_env(cfg: SchedulerConfig) -> dict[str, str] | None:
-    if not cfg.ralph_robin_active:
+    if not cfg.ralph_robin_active and not cfg.env_overrides:
         return None
     env = os.environ.copy()
-    env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] = "1"
-    env["LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER"] = cfg.provider
-    if cfg.route_id:
-        env["LLM_TOOLS_RALPH_ROBIN_SELECTED_ROUTE"] = cfg.route_id
-    if cfg.ralph_robin_providers:
-        env["LLM_TOOLS_RALPH_ROBIN_PROVIDERS"] = cfg.ralph_robin_providers
-    env.setdefault("LLM_TOOLS_RALPH_ROBIN_SCHEDULER", "guarded")
+    if cfg.ralph_robin_active:
+        env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] = "1"
+        env["LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER"] = cfg.provider
+        if cfg.route_id:
+            env["LLM_TOOLS_RALPH_ROBIN_SELECTED_ROUTE"] = cfg.route_id
+        if cfg.ralph_robin_providers:
+            env["LLM_TOOLS_RALPH_ROBIN_PROVIDERS"] = cfg.ralph_robin_providers
+        env.setdefault("LLM_TOOLS_RALPH_ROBIN_SCHEDULER", "guarded")
+    for key, value in cfg.env_overrides.items():
+        if not re.fullmatch(r"LLM_BRIDGE_[A-Z0-9_]+", key):
+            raise ValueError(f"invalid managed provider environment name: {key}")
+        env[key] = str(value)
     return env
 
 
@@ -1267,6 +1275,10 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     guard_exports = "export LLM_TOOLS_RALPH_ROBIN_ACTIVE=1\nexport LLM_TOOLS_RALPH_ROBIN_SCHEDULER=guarded\n" if cfg.ralph_robin_active else ""
     if cfg.ralph_robin_active and cfg.route_id:
         guard_exports += f"export LLM_TOOLS_RALPH_ROBIN_SELECTED_ROUTE={shlex.quote(cfg.route_id)}\n"
+    for key, value in cfg.env_overrides.items():
+        if not re.fullmatch(r"LLM_BRIDGE_[A-Z0-9_]+", key):
+            raise ValueError(f"invalid managed provider environment name: {key}")
+        guard_exports += f"export {key}={shlex.quote(str(value))}\n"
     cmd_file.write_text(
         "#!/usr/bin/env bash\n"
         f"# tmux target: {target}\n"
@@ -1325,6 +1337,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     waited = 0
     timeout = int(os.environ.get("LLM_SCHEDULER_TMUX_TIMEOUT", "3600") or "3600")
     while (not status_file.is_file() or status_file.stat().st_size == 0) and waited < timeout:
+        if owned_pane and cfg.process_observer is not None:
+            cfg.process_observer()
         if cfg.tmux_socket and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
             status_file.write_text("143", encoding="utf-8")
             break

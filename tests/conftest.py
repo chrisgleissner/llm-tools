@@ -65,6 +65,12 @@ def _hermetic_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     monkeypatch.delenv("LLM_USAGE_PROVIDERS", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_cache_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Unit readers/samplers must never append to the developer's usage history."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "isolated-xdg-cache"))
+
+
 @pytest.fixture()
 def env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
@@ -84,6 +90,7 @@ def env(tmp_path: Path) -> dict[str, str]:
         del out[key]
     extras: dict[str, str] = {
         "HOME": str(home),
+        "XDG_CACHE_HOME": str(home / ".cache"),
         "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
         "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
         # Most tests assert direct reader/CLI behaviour. Service behaviour is

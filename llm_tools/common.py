@@ -2554,6 +2554,12 @@ def json_for_copilot(copilot_json: dict[str, Any] | None, show_credits: bool = F
     return out
 
 
+def usage_history_provider(provider: str) -> str:
+    """Canonical aggregate sample label shared with the usage dashboard."""
+    return {"codex": "Codex", "claude": "Claude", "minimax": "MiniMax",
+            "zai": "Z.ai", "opencode": "OpenCode", "kilo": "Kilo"}.get(provider, provider)
+
+
 def log_usage_sample(provider: str, window: str, remaining: Any, env: dict[str, str] | None = None) -> None:
     if remaining in (None, "", "-", "unknown"):
         return
@@ -3258,7 +3264,9 @@ def model_decision_scopes(provider: str, snapshot: dict[str, Any], model: str | 
                 week = entry.get("week")
                 if not isinstance(week, dict):
                     return None
-                return [_window_scope_dict("weekly", week, str(snapshot.get("source", "")))]
+                scope = _window_scope_dict("weekly", week, str(snapshot.get("source", "")))
+                scope["usage_history_provider"] = f"Claude {entry['model']}"
+                return [scope]
         return None
     if provider == "codex":
         # The spark row is the only per-model Codex bucket; any other model maps
@@ -3276,7 +3284,9 @@ def model_decision_scopes(provider: str, snapshot: dict[str, Any], model: str | 
         for name, key in (("5h", "five_hour"), ("weekly", "week")):
             window = spark.get(key)
             if isinstance(window, dict):
-                scopes.append(_window_scope_dict(name, window, source))
+                scope = _window_scope_dict(name, window, source)
+                scope["usage_history_provider"] = str(spark.get("name") or "Codex Spark")
+                scopes.append(scope)
         return scopes or None
     return None
 
@@ -3361,6 +3371,10 @@ def usage_decision_for_provider(
         decision["model_exhausted"] = (
             model_decision.get("usable") is not True if model_decision is not None else False
         )
+    decision["usage_history_provider"] = (
+        model_scopes[0].get("usage_history_provider", usage_history_provider(provider))
+        if model_scopes and not allow_fallback else usage_history_provider(provider)
+    )
     return decision
 
 

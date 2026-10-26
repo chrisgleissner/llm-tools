@@ -1,0 +1,10 @@
+{
+  "provider": "codex",
+  "initial_prompt_budget": 2,
+  "native_reply": "PASS",
+  "native_resume": "PASS: same owned UUID, new controller, new response recalls history",
+  "provider_mouse": "NOT VERIFIED",
+  "cleanup": "PASS",
+  "version": "codex-cli 0.164.0",
+  "identity_source": "codex:session_meta"
+}

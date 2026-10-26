@@ -153,7 +153,7 @@ def project_snapshot(
     criterion_row = store.db.execute(
         "SELECT COALESCE(SUM(json_array_length(acceptance_json)),0), "
         "COALESCE(SUM(CASE WHEN status='COMPLETED' THEN json_array_length(acceptance_json) ELSE 0 END),0) "
-        "FROM tasks WHERE mission_id=?", (mission_id,),
+        "FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')", (mission_id,),
     ).fetchone()
     criterion_total, criterion_verified = int(criterion_row[0]), int(criterion_row[1])
 
@@ -225,6 +225,15 @@ def project_snapshot(
     stall_warning = None
     if failed_streak >= 3:
         stall_warning = f"{failed_streak} consecutive provider operations failed; no automatic stall claim is made for long-running work"
+    from .bridge_progress import convergence_signals
+    progress_boundary = int(latest_progress["id"]) if latest_progress else 0
+    progress_rows = store.db.execute(
+        "SELECT data_json FROM events WHERE mission_id=? AND kind='operation-progress' AND id>? ORDER BY id DESC LIMIT 32",
+        (mission_id, progress_boundary),
+    ).fetchall()
+    convergence = convergence_signals([json.loads(row[0]) for row in reversed(progress_rows)])
+    if convergence["warnings"]:
+        stall_warning = "; ".join(convergence["warnings"])
 
     configured = _configured_stations(mission["config"])
     observation_data = (latest_station_observation or {}).get("data", {})
@@ -237,6 +246,11 @@ def project_snapshot(
     observed_effort = observed_effort if isinstance(observed_effort, str) and observed_effort else "unknown"
     last_launched_station = (active or latest_op or {}).get("route_id") or (active or latest_op or {}).get("station") or "unknown"
     station_names = list(dict.fromkeys([*configured["providers"], *configured["routes"]]))
+    configured_names = set(station_names)
+    for operation in operations:
+        for name in (operation.get("route_id"), operation.get("station")):
+            if name and name not in station_names:
+                station_names.append(name)
     if last_launched_station != "unknown" and last_launched_station not in station_names:
         station_names.append(last_launched_station)
     stations = [
@@ -249,8 +263,9 @@ def project_snapshot(
             "model_source": "frozen provider/route configuration",
             "effort": configured["efforts"].get(name, "unknown"),
             "observed_model": observed_model if name == observed_station else "unknown",
-            "status": "configured",
-            "restoration_state": "unknown",
+            "status": "configured" if name in configured_names else "historical",
+            "restoration_state": next((op["restoration_state"] or "unknown" for op in operations
+                                       if name in {op.get("route_id"), op.get("station")}), "unknown"),
         }
         for name in station_names[:32]
     ]
@@ -278,6 +293,11 @@ def project_snapshot(
         "SELECT id FROM commands WHERE mission_id=? AND status='QUEUED' ORDER BY created_at,id LIMIT 100", (mission_id,)
     ).fetchall()
     pending_commands = [store.get_command(str(row[0])) for row in pending_rows]
+    timed_operation = active or latest_op or {}
+    began = _event_time(timed_operation.get("created_at"))
+    ended = now if active else _event_time(timed_operation.get("updated_at"))
+    operation_elapsed = max(0, int(ended-began)) if began is not None and ended is not None else None
+    verified_at = _event_time(latest_progress.get("created_at")) if latest_progress else None
     return {
         "schema_version": 1,
         "mission": mission,
@@ -304,7 +324,13 @@ def project_snapshot(
             "operation_status": active["status"] if active else (latest_op["status"] if latest_op else "unknown"),
             "provider_liveness": "unknown",
             "last_launched_station": last_launched_station,
-            "viewed_station": "unknown",
+            "viewed_station": mission["config"].get("viewed_station") or "unknown",
+        },
+        "execution": {
+            "iteration": (active or latest_op or {}).get("iteration"),
+            "operation_elapsed_seconds": operation_elapsed,
+            "seconds_since_verified_progress": max(0, int(now-verified_at)) if verified_at is not None else None,
+            "progress_source": "task-verified event" if latest_progress else "no verification evidence yet",
         },
         "capacity": {
             "selection": selected or None,
@@ -339,7 +365,8 @@ def project_snapshot(
             "reason": suspend_data.get("reason") if isinstance(suspend_data, dict) else None,
             "source": "persisted event" if latest_suspend else "unavailable",
         },
-        "health": {"status": "warning" if stall_warning else "unknown", "consecutive_failed_operations": failed_streak, "max_provider_failures": failure_budget, "failure_budget_source": "persisted provider-handoff event" if isinstance(handoff_budget, int) else ("configured mission rotation" if configured_failure_budget is not None else "unknown"), "stall_warning": stall_warning},
+        "health": {"status": "warning" if stall_warning else "unknown", "consecutive_failed_operations": failed_streak, "max_provider_failures": failure_budget, "failure_budget_source": "persisted provider-handoff event" if isinstance(handoff_budget, int) else ("configured mission rotation" if configured_failure_budget is not None else "unknown"), "stall_warning": stall_warning,
+                   **{key: value for key, value in convergence.items() if key != "warnings"}},
         "persistence": {"database": str(store.path), "schema_version": int(db.execute("PRAGMA user_version").fetchone()[0]), "journal_mode": str(db.execute("PRAGMA journal_mode").fetchone()[0]).lower()},
         "last_meaningful_progress": {"event_id": latest_progress["id"], "kind": latest_progress["kind"], "at": latest_progress["created_at"]} if latest_progress else None,
     }

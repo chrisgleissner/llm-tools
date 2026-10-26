@@ -55,6 +55,7 @@ _SESSION_SOURCES = {
     "claude": "claude:system.init",
     "copilot": "copilot:session.start",
 }
+_CODEX_NO_DAEMON = re.compile(r"(?<![A-Za-z0-9_-])--no-daemon(?:\s|[=<]|[\]\)]|$)")
 _CAPABILITIES: dict[str, _Capability] = {
     "codex": _Capability("codex", ("resume",), re.compile(r"(?im)^\s*resume(?:\s|$)"), _UUID),
     "claude": _Capability(
@@ -231,6 +232,166 @@ def codex_session_records(
     return records
 
 
+def _proc_stat(process_pid: int) -> tuple[str, int, int, str] | None:
+    """Return state, parent pid, process group and boot-scoped start token."""
+    try:
+        raw = Path(f"/proc/{int(process_pid)}/stat").read_text(encoding="ascii")
+        fields = raw[raw.rfind(")") + 2:].split()
+        if len(fields) <= 19:
+            return None
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        if not boot_id:
+            return None
+        return fields[0], int(fields[1]), int(fields[2]), f"{boot_id}:{fields[19]}"
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _owned_processes(process_pid: int, start_token: str) -> dict[int, str] | None:
+    """Bound inspection to exact live PID ancestry, including new sessions."""
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        return None
+    records: dict[int, tuple[str, int]] = {}
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            parsed = _proc_stat(int(entry.name))
+            if parsed is not None:
+                state, parent, _group, token = parsed
+                records[int(entry.name)] = (token, parent)
+    root = records.get(process_pid)
+    if root is None or root[0] != start_token:
+        return None
+    children: dict[int, list[int]] = {}
+    for pid, (_token, parent) in records.items():
+        children.setdefault(parent, []).append(pid)
+    owned: dict[int, str] = {process_pid: start_token}
+    pending = [process_pid]
+    while pending:
+        parent = pending.pop()
+        for child in children.get(parent, []):
+            if child not in owned:
+                owned[child] = records[child][0]
+                pending.append(child)
+    return owned
+
+
+def _fd_is_writable(process_pid: int, fd_name: str) -> bool:
+    try:
+        info = Path(f"/proc/{process_pid}/fdinfo/{fd_name}").read_text(encoding="ascii")
+    except OSError:
+        return False
+    for line in info.splitlines():
+        if line.startswith("flags:"):
+            try:
+                flags = int(line.partition(":")[2].strip(), 8)
+            except ValueError:
+                return False
+            return (flags & os.O_ACCMODE) != os.O_RDONLY
+    return False
+
+
+def discover_owned_codex_session(
+    process_pid: int,
+    start_token: str,
+    *,
+    cwd: str | os.PathLike[str],
+) -> NativeSessionIdentity | None:
+    """Discover one Codex session through writable FDs in the owned PID tree.
+
+    This does not search for recent/global transcripts. The provider PID must
+    still match its persisted boot-scoped start token, and exactly one unique
+    `session_meta` ID+CWD must be open writable by that PID or a live child.
+    """
+    if int(process_pid) < 2 or not start_token:
+        return None
+    try:
+        expected_cwd = _absolute_cwd(cwd)
+        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve(strict=True)
+        sessions_root = (codex_home / "sessions").resolve(strict=True)
+        if not sessions_root.is_dir():
+            return None
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+    owned = _owned_processes(int(process_pid), start_token)
+    if not owned:
+        return None
+    identities: dict[tuple[str, str, str], NativeSessionIdentity] = {}
+    for pid, token in owned.items():
+        current = _proc_stat(pid)
+        if current is None or current[0] == "Z" or current[3] != token:
+            continue
+        process_identities: dict[tuple[str, str, str], NativeSessionIdentity] = {}
+        try:
+            fd_entries = os.scandir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        with fd_entries:
+            for fd_entry in fd_entries:
+                if not fd_entry.name.isdigit() or not _fd_is_writable(pid, fd_entry.name):
+                    continue
+                proc_fd = Path(fd_entry.path)
+                try:
+                    link = os.readlink(fd_entry.path)
+                    if not link.startswith("/") or link.endswith(" (deleted)"):
+                        continue
+                    path = Path(link).resolve(strict=True)
+                    if path.suffix != ".jsonl" or not path.is_relative_to(sessions_root):
+                        continue
+                    info = proc_fd.stat()
+                    if not stat.S_ISREG(info.st_mode):
+                        continue
+                    read_fd: int | None
+                    try:
+                        # Opening the proc descriptor binds reads to the exact
+                        # live FD. For write-only provider FDs, fall back to
+                        # the link target only after verifying device/inode.
+                        read_fd = os.open(proc_fd, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                    except OSError:
+                        read_fd = os.open(link, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                    opened = os.fstat(read_fd)
+                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                        os.close(read_fd)
+                        continue
+                    try:
+                        first_line = os.pread(read_fd, 65537, 0)
+                    finally:
+                        os.close(read_fd)
+                    if len(first_line) > 65536:
+                        continue
+                    record = json.loads(first_line)
+                    if not isinstance(record, Mapping):
+                        continue
+                    identity = parse_session_metadata("codex", record, cwd=expected_cwd)
+                    final_info = proc_fd.stat()
+                    if (
+                        identity is not None
+                        and os.readlink(fd_entry.path) == link
+                        and _fd_is_writable(pid, fd_entry.name)
+                        and (final_info.st_dev, final_info.st_ino) == (info.st_dev, info.st_ino)
+                    ):
+                        process_identities[(identity.provider, identity.session_id, identity.cwd)] = identity
+                except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+        after = _proc_stat(pid)
+        if after is None or after[3] != token:
+            # Discard this process's candidates rather than attributing a
+            # reused or exited PID to the session it previously held.
+            if pid == int(process_pid):
+                return None
+            continue
+        identities.update(process_identities)
+    if len(identities) != 1:
+        return None
+    root_after = _proc_stat(int(process_pid))
+    if root_after is None or root_after[3] != start_token or root_after[0] == "Z":
+        return None
+    return next(iter(identities.values()))
+
+
 def provider_session_metadata(
     provider: str,
     session_id: str,
@@ -310,7 +471,14 @@ def _installed_help(
     except (OSError, subprocess.SubprocessError):
         return None
     help_text = (result.stdout + "\n" + result.stderr)[:128 * 1024]
-    pattern = capability.help_pattern if option == "resume" else capability.new_session_pattern
+    if option == "resume":
+        pattern = capability.help_pattern
+    elif option == "new-session":
+        pattern = capability.new_session_pattern
+    elif option == "no-daemon" and provider == "codex":
+        pattern = _CODEX_NO_DAEMON
+    else:
+        pattern = None
     if result.returncode != 0 or pattern is None or not pattern.search(help_text):
         return None
     return resolved, help_text
@@ -386,6 +554,30 @@ def new_session_argv(
     return ([resolved, *capability.new_session_syntax, exact_id, *argv[1:]], exact_id)
 
 
+def codex_owned_argv(
+    argv: list[str],
+    *,
+    executable: str | None = None,
+    help_text: str | None = None,
+) -> list[str] | None:
+    """Select Codex's directly owned terminal mode when explicitly supported."""
+    if not argv or Path(argv[0]).name != "codex":
+        return None
+    resolved = shutil.which(executable or argv[0])
+    if resolved is None:
+        return None
+    if help_text is None:
+        detected = _installed_help("codex", resolved, option="no-daemon")
+        if detected is None:
+            return None
+        resolved, help_text = detected
+    if not _CODEX_NO_DAEMON.search(help_text):
+        return None
+    if "--no-daemon" in argv:
+        return list(argv)
+    return [resolved, "--no-daemon", *argv[1:]]
+
+
 def confirm_restored(
     expected: NativeSessionIdentity,
     observed: NativeSessionIdentity | None,
@@ -404,7 +596,9 @@ __all__ = [
     "NativeSessionIdentity",
     "NativeSessionRecord",
     "codex_session_records",
+    "codex_owned_argv",
     "confirm_restored",
+    "discover_owned_codex_session",
     "new_session_argv",
     "provider_session_metadata",
     "parse_session_metadata",

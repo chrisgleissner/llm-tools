@@ -9,6 +9,7 @@ import secrets
 import select
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -18,9 +19,12 @@ from typing import Any, Callable
 from . import ralph_robin
 from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, utc_now
 from .bridge_refresh import CapacityRefreshWorker
+from .bridge_progress import repository_checkpoint
 from .bridge_sessions import (
     NativeSessionIdentity,
     confirm_restored,
+    codex_owned_argv,
+    discover_owned_codex_session,
     new_session_argv,
     provider_session_metadata,
     resume_argv,
@@ -56,45 +60,16 @@ class BridgeMissionHooks:
         self._session_candidates: dict[str, NativeSessionIdentity] = {}
         self._session_providers: dict[str, str] = {}
         self._session_cwds: dict[str, str] = {}
+        self._codex_owned_operations: set[str] = set()
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
 
     @staticmethod
     def _selection_projection(selection: dict[str, Any]) -> dict[str, Any]:
-        decisions: list[dict[str, Any]] = []
-        raw_decisions = selection.get("decisions")
-        if isinstance(raw_decisions, list):
-            for decision in raw_decisions[:16]:
-                if not isinstance(decision, dict):
-                    continue
-                item: dict[str, Any] = {
-                    key: decision[key]
-                    for key in ("provider", "route", "selected_model", "usable", "reason", "wait_until")
-                    if key in decision and isinstance(decision[key], (str, int, float, bool, type(None)))
-                }
-                windows: list[dict[str, Any]] = []
-                raw_windows = decision.get("windows")
-                if isinstance(raw_windows, list):
-                    for window in raw_windows[:8]:
-                        if isinstance(window, dict):
-                            windows.append({
-                                key: window[key]
-                                for key in ("name", "kind", "remaining_percent", "remaining_amount", "currency", "reset_epoch")
-                                if key in window and isinstance(window[key], (str, int, float, bool, type(None)))
-                            })
-                item["windows"] = windows
-                decisions.append(item)
-        current = selection.get("decision") if isinstance(selection.get("decision"), dict) else {}
-        return {
-            "provider": str(selection.get("provider") or current.get("provider") or ""),
-            "route": str(selection.get("route") or ""),
-            "selected_model": str(selection.get("selected_model") or current.get("selected_model") or ""),
-            "rotation_reason": str(selection.get("rotation_reason") or ""),
-            "all_rate_limited": bool(selection.get("all_rate_limited")),
-            "decision": {key: current[key] for key in ("usable", "reason", "wait_until") if key in current},
-            "decisions": decisions,
-        }
+        from .bridge_refresh import _safe_decision
+
+        return _safe_decision(selection)
 
     def on_selection(self, selection: dict[str, Any]) -> None:
         projection = self._selection_projection(selection)
@@ -178,7 +153,14 @@ class BridgeMissionHooks:
                     "iteration": self._iteration,
                 }
 
-            counts = {row["status"]: int(row["n"]) for row in self.store.db.execute("SELECT status,COUNT(*) AS n FROM tasks WHERE mission_id=? GROUP BY status", (self.mission_id,))}
+            counts = {
+                row["status"]: int(row["n"])
+                for row in self.store.db.execute(
+                    "SELECT status,COUNT(*) AS n FROM tasks WHERE mission_id=? "
+                    "AND (origin!='agent-proposal' OR proposal_status='ACCEPTED') GROUP BY status",
+                    (self.mission_id,),
+                )
+            }
             total = sum(counts.values())
             if total and counts.get("COMPLETED", 0) == total:
                 self.store.set_mission_status(self.mission_id, "COMPLETED")
@@ -286,15 +268,66 @@ class BridgeMissionHooks:
         context["operation_id"] = operation_id
         context["selected_route"] = route_id
         context["selected_provider"] = provider
+        task_id = int(context["task_id"])
+        task_revision = int(context.get("revision") or self.store.get_task(task_id)["revision"])
+        controls = {
+            "status": f"llm-bridge status --mission {self.mission_id}",
+            "pause": f"llm-bridge pause --mission {self.mission_id}",
+            "stop": f"llm-bridge stop --mission {self.mission_id}",
+            "propose_follow_up": (
+                f"llm-bridge proposal create --mission {self.mission_id} "
+                f"--operation {operation_id} --file PATH"
+            ),
+        }
+        identity = {
+            "managed": True,
+            "mission_id": self.mission_id,
+            "task_id": task_id,
+            "task_revision": task_revision,
+            "operation_id": operation_id,
+            "provider": provider,
+            "route": route_id or None,
+        }
+        scheduler_config.env_overrides = {
+            **getattr(scheduler_config, "env_overrides", {}),
+            "LLM_BRIDGE_MANAGED": "1",
+            "LLM_BRIDGE_MISSION_ID": self.mission_id,
+            "LLM_BRIDGE_TASK_ID": str(task_id),
+            "LLM_BRIDGE_TASK_REVISION": str(task_revision),
+            "LLM_BRIDGE_OPERATION_ID": operation_id,
+            "LLM_BRIDGE_PROVIDER": provider,
+            "LLM_BRIDGE_ROUTE": route_id,
+            "LLM_BRIDGE_CONTROL": "llm-bridge",
+            "LLM_BRIDGE_CONTROLS": json.dumps(controls, ensure_ascii=True, sort_keys=True),
+        }
+        prior_prompt = str(getattr(scheduler_config, "prompt_text", ""))
+        scheduler_config.prompt_text = (
+            "Managed execution context (LLM Bridge): this provider process is launched and supervised by LLM Bridge; "
+            "do not describe it as a direct or unmanaged invocation. These identifiers name the durable operation.\n"
+            f"{json.dumps(identity, ensure_ascii=True, sort_keys=True)}\n"
+            "Operator controls are available through the inherited LLM_BRIDGE_* environment variables. "
+            "To suggest additional work, run `llm-bridge proposal create` with this mission and operation ID. "
+            "Proposals require operator acceptance and are never scheduled automatically.\n\n"
+            + prior_prompt
+        )
         self._session_providers[operation_id] = provider
         try:
             self._session_cwds[operation_id] = str(Path(getattr(scheduler_config, "cwd", mission["cwd"])).expanduser().resolve(strict=True))
         except (OSError, RuntimeError, ValueError, TypeError):
             self._session_cwds[operation_id] = str(getattr(scheduler_config, "cwd", mission["cwd"]))
+        checkpoint = repository_checkpoint(self._session_cwds[operation_id])
+        context["repository_before"] = checkpoint.get("fingerprint")
+        self.store.record_runtime_event(self.mission_id, "repository-checkpoint", {
+            "operation_id": operation_id,
+            "task_id": task_id,
+            "revision": task_revision,
+            "checkpoint": checkpoint,
+        })
         log_config = self.store.get_mission(self.mission_id)["config"]
         scheduler_config.max_output_bytes = int(log_config.get("log_max_bytes", 4 * 1024 * 1024))
         scheduler_config.max_output_rotations = int(log_config.get("log_rotations", 3))
         scheduler_config.process_started = lambda process_pid: self._record_process(operation_id, process_pid)
+        scheduler_config.process_observer = lambda: self._observe_owned_codex_session(operation_id)
         scheduler_config.should_interrupt_wait = lambda: self._should_interrupt_wait(int(context["task_id"]))
         scheduler_config.command_argv_transform = self._native_session_argv_transform(operation_id, provider, scheduler_config)
         return True
@@ -306,6 +339,12 @@ class BridgeMissionHooks:
         def transform(argv: list[str]) -> list[str]:
             if not argv:
                 return argv
+            if provider == "codex":
+                owned_argv = codex_owned_argv(argv)
+                if owned_argv is not None:
+                    argv = owned_argv
+                    self._codex_owned_operations.add(operation_id)
+                    self._session_started_ns[operation_id] = time.time_ns()
             cwd = self._session_cwds.get(
                 operation_id,
                 str(Path(getattr(scheduler_config, "cwd", Path.cwd())).expanduser().resolve()),
@@ -331,14 +370,22 @@ class BridgeMissionHooks:
                     current = provider_session_metadata(provider, expected.session_id, cwd=cwd)
                     self._session_baselines[operation_id] = {str(current.path): current.modified_ns} if current else {}
                     self._session_started_ns[operation_id] = time.time_ns()
+                    self.store.record_operation_session(
+                        operation_id,
+                        provider=provider,
+                        restoration_state="RESTORING",
+                        session_id=expected.session_id,
+                        cwd=expected.cwd,
+                        source=expected.source,
+                    )
                     if provider == "codex":
                         # Codex treats -C as a global option; retain it before
                         # the exact resume subcommand and saved session UUID.
                         return [argv[0], *argv[1:-1], *resume[1:], argv[-1]]
                     return [*resume, *argv[1:]]
             if provider not in {"claude", "copilot"} or Path(argv[0]).name != provider:
-                # Codex does not let Bridge own a new session ID. Time/cwd-only
-                # transcript discovery can bind another process's session.
+                # New Codex IDs are captured only from this operation's owned
+                # writable process descriptors, never from recency scans.
                 return argv
             candidate = new_session_argv(provider, argv, cwd=cwd)
             if candidate is None:
@@ -400,6 +447,28 @@ class BridgeMissionHooks:
         )
         self._session_providers.pop(operation_id, None)
         self._session_cwds.pop(operation_id, None)
+        self._codex_owned_operations.discard(operation_id)
+
+    def _observe_owned_codex_session(self, operation_id: str) -> None:
+        if operation_id not in self._codex_owned_operations:
+            return
+        operation = self.store.get_operation(operation_id)
+        if operation.get("restoration_state") in {"NATIVE_CREATED", "RESTORED_NATIVE"}:
+            return
+        pid = int(operation.get("process_pid") or 0)
+        token = str(operation.get("process_start") or "")
+        cwd = self._session_cwds.get(operation_id, "")
+        identity = discover_owned_codex_session(pid, token, cwd=cwd)
+        if identity is None:
+            return
+        expected = self._session_restore_expectations.get(operation_id)
+        if expected is not None and not confirm_restored(expected, identity):
+            return
+        if expected is None:
+            self._session_candidates[operation_id] = identity
+        self.store.record_operation_session(operation_id, provider="codex",
+            restoration_state="RESTORED_NATIVE" if expected else "NATIVE_CREATED",
+            session_id=identity.session_id, cwd=identity.cwd, source=identity.source)
 
     def _capture_session_after_launch(self, operation_id: str) -> None:
         """Wait briefly for exact provider-owned metadata from the live pane."""
@@ -460,7 +529,10 @@ class BridgeMissionHooks:
             # small interval remains uncertain and cannot be force-signalled.
             return
         self.store.record_operation_process(operation_id, process_pid=process_pid, process_start=token)
-        self._capture_session_after_launch(operation_id)
+        if operation_id in self._codex_owned_operations:
+            self._observe_owned_codex_session(operation_id)
+        else:
+            self._capture_session_after_launch(operation_id)
 
     def after_iteration(
         self,
@@ -490,6 +562,18 @@ class BridgeMissionHooks:
                 str(Path(scheduler_config.cwd).expanduser().resolve(strict=True)),
             )
             task = self.store.finish_operation(operation_id, exit_code=int(status), logs_path=logs_path)
+            checkpoint = repository_checkpoint(getattr(scheduler_config, "cwd", self.store.get_mission(self.mission_id)["cwd"]))
+            self.store.record_runtime_event(self.mission_id, "operation-progress", {
+                "operation_id": operation_id,
+                "task_id": int(task["id"]),
+                "revision": int(task["revision"]),
+                "before": context.get("repository_before"),
+                "after": checkpoint.get("fingerprint"),
+                "checkpoint_reason": checkpoint.get("reason"),
+                "station": str(selection.get("route") or selection.get("provider") or scheduler_config.provider),
+                "exit_code": int(status),
+                "output_sha256": _bounded_output_digest(output_files[-1]) if output_files else None,
+            })
             if status != 0:
                 continued = self.store.continue_task_after_provider_failure(
                     operation_id,
@@ -557,6 +641,37 @@ def _prune_old_run_logs(store: BridgeStore, mission_id: str, log_root: Path, *, 
                 digest, size = "unavailable", 0
             store.record_pruned_operation_log(mission_id, str(logs_path), size_bytes=size, sha256=digest)
         shutil.rmtree(canonical, ignore_errors=True)
+
+
+def _bounded_output_digest(path: Path, *, max_bytes: int = 1_048_576) -> str | None:
+    """Digest a bounded log snapshot without following links or trusting races."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size < 0:
+            return None
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                return None
+            if before.st_size > max_bytes:
+                stream.seek(before.st_size - max_bytes)
+                data = stream.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    data = data[-max_bytes:]
+                digest = hashlib.sha256(f"tail:{before.st_size}:".encode("ascii"))
+            else:
+                data = stream.read(max_bytes + 1)
+                digest = hashlib.sha256()
+        after = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+        ):
+            return None
+        digest.update(data)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def _artifact_records(cwd: Path, artifacts: Any) -> list[dict[str, str]]:
@@ -876,18 +991,86 @@ def _session_name(mission_id: str) -> str:
 
 
 def _process_start_token(process_pid: int) -> str:
+    info = _proc_process_info(int(process_pid))
+    return info["start"] if info and info["state"] != "Z" else ""
+
+
+def _proc_process_info(process_pid: int) -> dict[str, Any] | None:
     try:
         raw = Path(f"/proc/{int(process_pid)}/stat").read_text(encoding="ascii")
-    except (OSError, ValueError):
-        return ""
-    tail = raw[raw.rfind(")") + 2:].split()
-    if len(tail) <= 19 or tail[0] == "Z":
-        return ""
-    try:
+        tail = raw[raw.rfind(")") + 2:].split()
+        if len(tail) <= 19:
+            return None
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-    except OSError:
-        return ""
-    return f"{boot_id}:{tail[19]}" if boot_id else ""
+        return {
+            "pid": int(process_pid),
+            "state": tail[0],
+            "ppid": int(tail[1]),
+            "pgid": int(tail[2]),
+            "start": f"{boot_id}:{tail[19]}" if boot_id else "",
+        }
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _owned_process_tree(root_pid: int, root_start: str) -> dict[int, dict[str, Any]]:
+    """Snapshot a process and its current descendants with /proc start tokens."""
+    try:
+        entries = os.scandir("/proc")
+    except OSError as exc:
+        raise RuntimeError("cannot inspect /proc to verify owned provider descendants") from exc
+    processes: dict[int, dict[str, Any]] = {}
+    with entries:
+        for entry in entries:
+            if entry.name.isdigit():
+                info = _proc_process_info(int(entry.name))
+                if info and info["start"]:
+                    processes[int(entry.name)] = info
+    root = processes.get(root_pid)
+    if root and root["start"] != root_start:
+        raise PermissionError("provider PID no longer matches its persisted process identity")
+    if root is None:
+        return {}
+    children: dict[int, list[int]] = {}
+    for pid, info in processes.items():
+        children.setdefault(int(info["ppid"]), []).append(pid)
+    owned: dict[int, dict[str, Any]] = {root_pid: root}
+    pending = [root_pid]
+    while pending:
+        parent = pending.pop()
+        for child_pid in children.get(parent, []):
+            if child_pid in owned:
+                continue
+            owned[child_pid] = processes[child_pid]
+            pending.append(child_pid)
+    return owned
+
+
+def _signal_owned_process_tree(processes: dict[int, dict[str, Any]], sig: int) -> None:
+    """Signal verified process groups where possible, otherwise exact PIDs."""
+    group_leaders = {
+        int(info["pgid"]): (int(pid), str(info["start"]))
+        for pid, info in processes.items()
+        if int(info["pgid"]) == int(pid)
+    }
+    signalled: set[int] = set()
+    for process_group, (leader_pid, leader_start) in group_leaders.items():
+        if _process_start_token(leader_pid) != leader_start:
+            continue
+        try:
+            os.killpg(process_group, sig)
+            signalled.add(process_group)
+        except ProcessLookupError:
+            pass
+    for pid, info in processes.items():
+        if int(info["pgid"]) in signalled:
+            continue
+        if _process_start_token(int(pid)) != str(info["start"]):
+            continue
+        try:
+            os.kill(int(pid), sig)
+        except ProcessLookupError:
+            pass
 
 
 def terminate_managed_processes(store: BridgeStore, mission_id: str) -> None:
@@ -951,23 +1134,42 @@ def _terminate_owned_process_group(process_pid: int, process_start: str, *, time
     try:
         if os.getpgid(process_pid) != process_pid:
             raise PermissionError("owned provider process is not a process-group leader")
-        os.killpg(process_pid, signal.SIGTERM)
     except ProcessLookupError:
         return
+    owned = _owned_process_tree(process_pid, process_start)
+    if not owned:
+        return
+    _signal_owned_process_tree(owned, signal.SIGTERM)
     deadline = time.monotonic() + max(0.05, timeout)
     while time.monotonic() < deadline:
-        if not _live_process_group_members(process_pid):
+        current = _owned_process_tree(process_pid, process_start)
+        owned.update(current)
+        _signal_owned_process_tree(current, signal.SIGTERM)
+        if not _live_process_group_members(process_pid) and not _owned_process_records_alive(owned):
             return
         time.sleep(0.05)
-    if not _live_process_group_members(process_pid):
+    current = _owned_process_tree(process_pid, process_start)
+    owned.update(current)
+    _signal_owned_process_tree(owned, signal.SIGKILL)
+    if not _live_process_group_members(process_pid) and not _owned_process_records_alive(owned):
         return
-    os.killpg(process_pid, signal.SIGKILL)
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
-        if not _live_process_group_members(process_pid):
+        current = _owned_process_tree(process_pid, process_start)
+        owned.update(current)
+        _signal_owned_process_tree(owned, signal.SIGKILL)
+        if not _live_process_group_members(process_pid) and not _owned_process_records_alive(owned):
             return
         time.sleep(0.05)
-    raise TimeoutError(f"owned process group {process_pid} did not exit after SIGKILL")
+    raise TimeoutError(f"owned process tree rooted at {process_pid} did not exit after SIGKILL")
+
+
+def _owned_process_records_alive(processes: dict[int, dict[str, Any]]) -> bool:
+    for pid, info in processes.items():
+        current = _proc_process_info(int(pid))
+        if current and current["state"] != "Z" and current["start"] == info["start"]:
+            return True
+    return False
 
 
 def _live_process_group_members(process_group: int) -> list[int]:
@@ -1062,21 +1264,22 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
 
     with lock, BridgeStore(default_state_dir() / "bridge.sqlite3") as store:
         mission = store.get_mission(mission_id)
-        # A start command's effective overrides become durable mission config
-        # before the controller can launch any provider work. A later resume
-        # therefore uses the same stations and execution mode after a full
-        # controller shutdown.
-        headless = bool(headless or mission["config"].get("headless", False))
-        native_tui = bool(native_tui or mission["config"].get("native_tui", False))
-        providers = str(providers or mission["config"].get("providers", "claude,codex,opencode"))
-        routes = str(routes or mission["config"].get("routes", ""))
+        # Recovery must use the mode that owned the previous station. A new
+        # explicit mode takes effect only after old owned resources are cleaned
+        # up successfully, then becomes durable before new provider work.
+        prior_headless = bool(mission["config"].get("headless", False))
+        prior_native_tui = bool(mission["config"].get("native_tui", False))
         if headless and native_tui:
             raise ValueError("--headless and --native cannot be combined")
-        mission = store.set_mission_config_values(
-            mission_id,
-            {"headless": headless, "native_tui": native_tui, "providers": providers, "routes": routes},
-            event_kind="controller-config",
-        )
+        if headless:
+            effective_headless, effective_native_tui = True, False
+        elif native_tui:
+            effective_headless, effective_native_tui = False, True
+        else:
+            effective_headless, effective_native_tui = prior_headless, prior_native_tui
+        headless, native_tui = effective_headless, effective_native_tui
+        providers = str(providers or mission["config"].get("providers", "claude,codex,opencode"))
+        routes = str(routes or mission["config"].get("routes", ""))
         interrupted = [
             dict(row)
             for row in store.db.execute(
@@ -1094,7 +1297,6 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         # headless process group. Resolve those exact owned identities before
         # creating a replacement controller/station, after first making the
         # durable operation UNCERTAIN so recovery cannot replay it.
-        prior_headless = bool(mission["config"].get("headless", False))
         prior_handle: TerminalHandle | None = None
         if not prior_headless and shutil.which("tmux"):
             prior_handle = _open_existing(TmuxTerminalBackend(), runtime, mission_id)
@@ -1132,6 +1334,13 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         elif mission["status"] in {"COMPLETED", "CANCELLED"}:
             _write_controller_ready(ready, startup_token, mission["status"])
             return 0
+
+        mission = store.set_mission_config_values(
+            mission_id,
+            {"headless": headless, "native_tui": native_tui, "providers": providers, "routes": routes},
+            event_kind="controller-config",
+        )
+        prior_headless = bool(mission["config"].get("headless", False))
 
         _install_frozen_tool_config(mission, runtime)
         backend: TmuxTerminalBackend | None = None

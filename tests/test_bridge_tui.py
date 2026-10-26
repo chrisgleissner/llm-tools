@@ -112,7 +112,8 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     state.handle_mouse(2, stations_x, 24, 80)
     assert state.view == "Stations"
     state.handle_mouse(2, 78, 24, 80)
-    assert state.view == "Palette"
+    assert state.view == "Usage"
+    state.handle_key("KEY_F7")
     state.handle_mouse(3, 2, 24, 80)
     assert state.command == "help"  # A click stages an action; Enter runs it.
     state.handle_key("\x15")
@@ -270,6 +271,32 @@ def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt
     assert sent_prompt == ["original prompt\nsecond line\nrevised"]
 
 
+def test_orders_detail_scroll_does_not_change_selected_order_or_amend_target() -> None:
+    snapshot = bridge_tui._bounded_snapshot({
+        "tasks": [
+            {"id": 11, "title": "first", "prompt": "first prompt", "status": "READY"},
+            {"id": 22, "title": "second", "prompt": "second prompt", "status": "READY"},
+        ],
+    })
+    state = bridge_tui._ConsoleState("M11", lambda _mission, _line: "", lambda _id: {}, full=True, snapshot=snapshot)
+    state.choose_view(1)
+    state.handle_key("KEY_DOWN")
+    assert state.selected == 1
+    state.handle_key("KEY_ENTER")
+    state.handle_key("KEY_DOWN")
+    state.handle_key("KEY_NPAGE")
+    assert state.detail_scroll == 11
+    assert state.selected == 1
+    assert bridge_tui._selected_task_id(state) == "22"
+    assert "second prompt" in state.rows()[-1]
+
+    state.handle_mouse(3, 5, 24, 80)
+    assert state.selected == 1
+    assert state.detail_scroll == 0
+    state.handle_key("\x1b")
+    assert state.task_detail is False
+
+
 def test_systems_preserves_and_renders_quota_budget_and_reset_windows() -> None:
     snapshot = bridge_tui._bounded_snapshot({
         "capacity": {
@@ -290,7 +317,7 @@ def test_systems_preserves_and_renders_quota_budget_and_reset_windows() -> None:
     state = bridge_tui._ConsoleState("M12", lambda _mission, _line: "", lambda _id: {}, full=True, snapshot=snapshot)
     state.choose_view(3)
     rendered = "\n".join(state.rows())
-    assert "Quota/budget codex weekly [reset_window]: remaining 34.0%; reset epoch 1999999999" in rendered
+    assert "Quota/budget codex weekly [reset_window]: remaining 34.0%; est. runout unknown; reset epoch 1999999999" in rendered
     assert "Quota/budget codex balance [budget]: remaining 12.5 USD; no reset" in rendered
     assert "private_payload" not in str(state.snapshot)
 
@@ -309,6 +336,42 @@ def test_stations_enter_selects_view_and_shows_recent_operation_history() -> Non
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["station codex"]
+
+
+def test_real_monitor_projection_survives_tui_bounding_and_systems_render(tmp_path) -> None:
+    from llm_tools.bridge_monitor import project_snapshot
+    from llm_tools.bridge_store import BridgeStore
+
+    with BridgeStore(tmp_path / "monitor-ui.sqlite3") as store:
+        mission = store.create_mission("monitor UI", "inspect persisted system data", cwd=tmp_path, config={
+            "headless": True,
+            "providers": "codex",
+            "frozen_tool_config": '[providers.codex]\nmodel = "gpt-6.1-sol"\n',
+        })
+        task_id = store.add_task(mission["id"], "work")
+        store.set_mission_status(mission["id"], "RUNNING")
+        operation = store.begin_operation(task_id, iteration=1, station="codex")
+        store.mark_operation_running(operation, process_pid=123, process_start="test-start")
+        store.record_runtime_event(mission["id"], "controller-heartbeat", {
+            "controller_state": "RUNNING", "observed_at": "2026-10-26T13:00:00Z",
+            "owner_lock_held": True, "desired_mission_status": "RUNNING",
+        })
+        store.record_runtime_event(mission["id"], "controller-mode", {"verified": True, "actual_mode": "headless"})
+        monitor_data = project_snapshot(store, mission["id"], task_limit=20)
+
+    state = bridge_tui._ConsoleState(
+        mission["id"], lambda _mission, _line: "", lambda _id: {},
+        full=True, snapshot=bridge_tui._bounded_snapshot(monitor_data),
+    )
+    state.choose_view(2)
+    station_rows = "\n".join(state.rows())
+    assert "codex  configured gpt-6.1-sol  observed unknown" in station_rows
+    assert "Provider liveness: unknown" in station_rows
+    state.choose_view(3)
+    system_rows = "\n".join(state.rows())
+    assert "configured_mode=headless" in system_rows and "actual_mode=headless" in system_rows
+    assert "Controller heartbeat (last observed):" in system_rows
+    assert "current_liveness=unknown" in system_rows
 
 
 def test_mouse_double_click_uses_enter_activation_for_orders_and_stations() -> None:
@@ -559,6 +622,28 @@ def test_private_editor_file_dispatches_multiline_task_and_cleans_up(monkeypatch
     assert calls == [(["add", editor_argv[-1]], "first line\nsecond line\n")]
     assert not Path(editor_argv[-1]).exists()
     assert state.output[-1] == "task queued"
+
+
+def test_editor_appends_file_to_typed_task_options(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def run_editor(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+        Path(argv[-1]).write_text("multiline prompt\nsecond line", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setenv("EDITOR", "fake-editor")
+    monkeypatch.delenv("VISUAL", raising=False)
+    monkeypatch.setattr(bridge_tui.subprocess, "run", run_editor)
+    monkeypatch.setattr(bridge_tui.curses, "def_prog_mode", lambda: None)
+    monkeypatch.setattr(bridge_tui.curses, "endwin", lambda: None)
+    monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
+    state = bridge_tui._ConsoleState("M7", lambda _mission, line: calls.append(shlex.split(line)) or "queued", lambda _id: {}, full=False)
+    state.command = "task add --priority 5 --acceptance 'tests pass'"
+    bridge_tui._edit_task_prompt(FakeWindow(6, 80), state)  # type: ignore[arg-type]
+    _wait_for(lambda: not state.command_pending, state)
+    assert calls and calls[0][:7] == ["task", "add", "--priority", "5", "--acceptance", "tests pass", "--file"]
+    assert Path(calls[0][-1]).exists() is False
+    assert state.command == ""
 
 
 def test_editor_amends_selected_order_through_same_dispatch(monkeypatch) -> None:

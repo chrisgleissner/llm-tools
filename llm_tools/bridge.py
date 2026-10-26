@@ -51,9 +51,14 @@ def console_snapshot(
     task_limit: int = 200,
     task_offset: int = 0,
     search: str = "",
+    view: str = "Bridge",
 ) -> dict[str, Any]:
     """Bound the live control pane projection regardless of mission size."""
-    return status_snapshot(mission_id, task_limit=task_limit, task_offset=task_offset, search=search)
+    result = status_snapshot(mission_id, task_limit=task_limit, task_offset=task_offset, search=search)
+    if view == "Usage":
+        from .bridge_usage import embedded_usage
+        result["usage"] = embedded_usage.snapshot()
+    return result
 
 
 def _json_print(value: Any) -> None:
@@ -197,6 +202,26 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 acceptance=[str(x) for x in payload.get("acceptance", [])],
             )
             result = store.get_task(task_id)
+        elif action == "task.propose":
+            task_id = store.propose_task(
+                mission_id,
+                str(payload.get("prompt", "")),
+                source_operation_id=str(payload.get("source_operation_id", "")),
+                title=str(payload.get("title", "")),
+                priority=int(payload.get("priority", 0)),
+                depends_on=[int(value) for value in payload.get("depends_on", [])],
+                acceptance=[str(value) for value in payload.get("acceptance", [])],
+            )
+            result = store.get_task(task_id)
+        elif action == "task.proposal-decision":
+            task_id = int(payload["task_id"])
+            _require_task(store, mission_id, task_id)
+            result = store.decide_proposal(
+                mission_id,
+                task_id,
+                accept=bool(payload.get("accept", False)),
+                reason=str(payload.get("reason", "")),
+            )
         elif action == "task.amend":
             task_id = int(payload["task_id"])
             _require_task(store, mission_id, task_id)
@@ -250,77 +275,100 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
 
 
 def dispatch_console_command(mission_id: str, command_line: str) -> str:
-    """Dispatch one shell-free control-pane command through shared handlers."""
+    """Run the public CLI grammar in this mission's shell-free REPL context."""
     try:
         words = shlex.split(command_line)
         if not words:
             return ""
-        command, *args = words
+        command = words[0]
         if command in {"help", "?"}:
-            return "status | tasks | events | station NAME | steer KIND [TASK/ROUTE] [FILE] | pause | resume | stop | verify ID [--approve] | add FILE | amend ID FILE | priority ID N | reorder ID N | dependencies ID DEP_ID | retry ID | cancel ID | control"
-        if command == "status":
-            return json.dumps(status_snapshot(mission_id), ensure_ascii=False)
+            return (
+                _build_parser().format_help()
+                + "\nConsole examples: task add --priority 5 --acceptance 'tests pass' --file PATH; "
+                + "task amend --task ID --file PATH; pause ID; resume ID; proposal list; proposal accept ID.\n"
+            )
+
+        # Keep the old compact commands while routing every action through the
+        # exact same parser and durable command handlers as the standalone CLI.
         if command in {"tasks", "orders"}:
-            return json.dumps(status_snapshot(mission_id)["tasks"], ensure_ascii=False)
-        if command == "events":
-            with open_store() as store:
-                return json.dumps(store.events(mission_id, after=int(args[0]) if args else 0), ensure_ascii=False)
-        if command in {"pause", "resume", "stop"}:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": command}), ensure_ascii=False)
-        if command == "cancel" and not args:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "cancel"}), ensure_ascii=False)
-        if command == "station" and len(args) == 1:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "station.view", "station": args[0]}), ensure_ascii=False)
-        if command == "steer" and args:
-            kind, *rest = args
-            if kind in {"help", "?"}:
-                return "steer replace TASK FILE | steer review TASK [FILE] | steer verify TASK | steer pause-after-iteration | steer stop-after-task TASK | steer handoff ROUTE"
-            payload: dict[str, Any] = {"action": "steer", "kind": kind}
-            if kind in {"replace", "review", "verify", "stop-after-task"}:
-                if not rest:
-                    return "error: steering kind requires a task id"
-                payload["task_id"] = int(rest.pop(0))
-            if kind == "handoff":
-                if not rest:
-                    return "error: handoff steering requires a route"
-                payload["route"] = rest.pop(0)
-            if rest:
-                payload["prompt"] = read_verbatim(rest[0])
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, payload), ensure_ascii=False)
-        if command == "verify" and args:
-            payload = {"action": "task.verify", "task_id": int(args[0]), "approved": "--approve" in args[1:]}
-            evidence_arg = next((arg.split("=", 1)[1] for arg in args[1:] if arg.startswith("--evidence=")), "")
-            payload["evidence"] = evidence_arg
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, payload), ensure_ascii=False)
-        if command == "priority" and len(args) == 2:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "task.priority", "task_id": int(args[0]), "priority": int(args[1])}), ensure_ascii=False)
-        if command == "reorder" and len(args) == 2:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "task.reorder", "task_id": int(args[0]), "order": int(args[1])}), ensure_ascii=False)
-        if command == "dependencies" and len(args) == 2:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "task.dependency", "task_id": int(args[0]), "depends_on": int(args[1])}), ensure_ascii=False)
-        if command == "retry" and args:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "task.retry", "task_id": int(args[0])}), ensure_ascii=False)
-        if command == "cancel" and len(args) == 1:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "task.cancel", "task_id": int(args[0])}), ensure_ascii=False)
-        if command == "cancel":
-            return "error: usage: cancel [TASK_ID]"
-        if command == "add" and args:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "task.add", "prompt": read_verbatim(args[0])}), ensure_ascii=False)
-        if command == "amend" and len(args) == 2:
-            with open_store() as store:
-                return json.dumps(_apply_operator_command(store, mission_id, {"action": "task.amend", "task_id": int(args[0]), "prompt": read_verbatim(args[1])}), ensure_ascii=False)
-        return f"unknown command: {command}; type help"
+            words = ["task", "list"]
+        elif command == "proposals":
+            words = ["proposal", "list", *( ["--status", words[1].upper()] if len(words) > 1 else [] )]
+        elif (
+            command == "proposal"
+            and len(words) >= 3
+            and words[1] in {"accept", "reject"}
+            and not words[2].startswith("-")
+        ):
+            words = ["proposal", words[1], "--task", words[2]]
+            if len(shlex.split(command_line)) > 3:
+                reason = " ".join(shlex.split(command_line)[3:])
+                words.extend(["--reason", reason])
+        elif command == "add" and len(words) == 2:
+            words = ["task", "add", "--file", words[1]]
+        elif command == "amend" and len(words) == 3:
+            words = ["task", "amend", "--task", words[1], "--file", words[2]]
+        elif command in {"priority", "reorder"} and len(words) == 3:
+            words = ["task", command, "--task", words[1], "--value", words[2]]
+        elif command == "dependencies" and len(words) == 3:
+            words = ["task", "dependencies", "--task", words[1], "--add", words[2]]
+        elif command in {"retry", "verify"} and len(words) >= 2:
+            words = ["task", command, "--task", words[1], *words[2:]]
+        elif command in {"pause", "resume", "cancel"} and len(words) == 2 and words[1].isdecimal():
+            words = ["task", command, "--task", words[1]]
+        elif command == "verify" and len(words) >= 2:
+            words = ["task", "verify", "--task", words[1], *words[2:]]
+        elif command == "propose" and len(words) == 3:
+            words = ["proposal", "create", "--operation", words[1], "--file", words[2]]
+        elif command == "events" and len(words) == 2 and words[1].isdecimal():
+            words = ["events", "--after", words[1]]
+
+        if words[0] in {"console", "_controller"}:
+            return "error: this REPL cannot recursively start a console/controller"
+        if words[0] == "control":
+            return "Use the Control view keys to switch views inside the active console."
+        if words[0] in {"attach"}:
+            return "Use the terminal's native attach controls from the shell; nested attach would take over this console."
+
+        mission_position: int | None = None
+        if words[0] in {"task", "proposal"}:
+            if len(words) < 2:
+                return _build_parser().format_help()
+            mission_position = 2
+        elif words[0] in {"status", "events", "start", "pause", "resume", "stop", "cancel", "detach", "doctor", "station", "steer"}:
+            mission_position = 1
+        if mission_position is not None:
+            if "--mission" in words:
+                index = words.index("--mission")
+                if index + 1 >= len(words) or words[index + 1] != mission_id:
+                    return "error: console commands are scoped to the active mission"
+            else:
+                words[mission_position:mission_position] = ["--mission", mission_id]
+        if words[:2] == ["task", "add"] and not any(flag in words for flag in ("--file", "--prompt", "-f", "-p")):
+            return "error: task add needs --file PATH or --prompt TEXT; use Ctrl-E to edit multiline task text"
+
+        # The public parser is the REPL grammar. JSON mode gives the control
+        # pane a stable response string; commands that take over the terminal
+        # cannot be nested here.
+        if "--help" not in words and "-h" not in words and words[0] not in {"attach", "control", "console", "_controller"} and "--json" not in words:
+            words.append("--json")
+        env = os.environ.copy()
+        package_root = str(Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, (package_root, env.get("PYTHONPATH", ""))))
+        result = subprocess.run(
+            [sys.executable, "-m", "llm_tools.bridge", *words],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            check=False,
+        )
+        if result.stdout.strip():
+            return result.stdout.strip()
+        if result.stderr.strip():
+            return result.stderr.strip()
+        return f"command exited with status {result.returncode}"
     except (ValueError, KeyError, OSError, TransitionError) as exc:
         return f"error: {exc}"
 
@@ -434,6 +482,31 @@ def _build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--approve", action="store_true")
         cmd.add_argument("--json", action="store_true")
 
+    proposals = sub.add_parser("proposal", help="review agent-originated task proposals")
+    proposal_sub = proposals.add_subparsers(dest="proposal_action", required=True)
+    proposal_create = proposal_sub.add_parser("create", help="record a proposal from an operation")
+    proposal_create.add_argument("--mission", required=True)
+    proposal_create.add_argument("--operation", required=True, dest="source_operation_id")
+    _read_prompt_args(proposal_create)
+    proposal_create.add_argument("--title", default="")
+    proposal_create.add_argument("--priority", type=int, default=0)
+    proposal_create.add_argument("--depends-on", default="")
+    proposal_create.add_argument("--acceptance", action="append", default=[])
+    proposal_create.add_argument("--json", action="store_true")
+    proposal_list = proposal_sub.add_parser("list", help="list proposals")
+    proposal_list.add_argument("--mission", required=True)
+    proposal_list.add_argument("--status", choices=("PENDING", "ACCEPTED", "REJECTED", "ALL"), default="PENDING")
+    proposal_list.add_argument("--limit", type=int, default=100)
+    proposal_list.add_argument("--after", type=int, default=0)
+    proposal_list.add_argument("--json", action="store_true")
+    for proposal_action in ("accept", "reject"):
+        proposal_decision = proposal_sub.add_parser(proposal_action, help=f"{proposal_action} a pending proposal")
+        proposal_decision.add_argument("--mission", required=True)
+        proposal_decision.add_argument("--task", type=int, required=True)
+        if proposal_action == "reject":
+            proposal_decision.add_argument("--reason", default="")
+        proposal_decision.add_argument("--json", action="store_true")
+
     events = sub.add_parser("events")
     events.add_argument("--mission", required=True)
     events.add_argument("--after", type=int, default=0)
@@ -460,6 +533,8 @@ def _build_parser() -> argparse.ArgumentParser:
     console.add_argument("--mission", required=True)
     control = sub.add_parser("control", help="open the full Bridge control view")
     control.add_argument("--mission", required=True)
+    usage_view = sub.add_parser("usage", help="show the full llm-usage dashboard inside Bridge")
+    usage_view.add_argument("--mission", required=True)
 
     station = sub.add_parser("station", help="choose the station shown in the control view")
     station.add_argument("--mission", required=True)
@@ -581,10 +656,11 @@ def main(argv: list[str] | None = None) -> int:
             from .bridge_tui import run_console
 
             return run_console(args.mission, dispatch=dispatch_console_command, snapshot=console_snapshot)
-        if args.command == "control":
+        if args.command in {"control", "usage"}:
             from .bridge_tui import run_control
 
-            return run_control(args.mission, dispatch=dispatch_console_command, snapshot=console_snapshot)
+            return run_control(args.mission, dispatch=dispatch_console_command, snapshot=console_snapshot,
+                               initial_view="Usage" if args.command == "usage" else "Bridge")
         if args.command == "resume":
             with open_store() as store:
                 mission = store.get_mission(args.mission)
@@ -663,8 +739,42 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "events":
             with open_store() as store:
-                result = {"schema_version": 1, "events": store.events(args.mission, after=args.after)[-max(0, args.limit):]}
+                result = {"schema_version": 1, "events": store.events(args.mission, after=args.after, limit=args.limit)}
             _print_result(result, args.json)
+            return 0
+        if args.command == "proposal":
+            with open_store() as store:
+                if args.proposal_action == "list":
+                    result = {
+                        "proposals": store.list_proposals(
+                            args.mission, status=args.status, limit=args.limit, after_task_id=args.after,
+                        ),
+                    }
+                else:
+                    if args.proposal_action == "create":
+                        prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+                        payload = {
+                            "action": "task.propose",
+                            "source_operation_id": args.source_operation_id,
+                            "prompt": prompt,
+                            "title": args.title,
+                            "priority": args.priority,
+                            "depends_on": [int(value) for value in args.depends_on.split(",") if value.strip()],
+                            "acceptance": args.acceptance,
+                        }
+                    else:
+                        payload = {
+                            "action": "task.proposal-decision",
+                            "task_id": args.task,
+                            "accept": args.proposal_action == "accept",
+                            "reason": getattr(args, "reason", ""),
+                        }
+                    result = _apply_operator_command(store, args.mission, payload)
+            if isinstance(result, dict) and result.get("status") == "REJECTED":
+                detail = result.get("result") or {}
+                print(f"llm-bridge: {detail.get('error', 'proposal command rejected')}", file=sys.stderr)
+                return 2
+            _print_result(result, bool(getattr(args, "json", False)))
             return 0
         if args.command == "task":
             with open_store() as store:
@@ -672,7 +782,7 @@ def main(argv: list[str] | None = None) -> int:
                     prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
                     dep_ids = [int(x) for x in args.depends_on.split(",") if x.strip()]
                     command_result = _apply_operator_command(store, args.mission, {"action": "task.add", "prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": args.acceptance})
-                    result = command_result.get("result") or command_result
+                    result = command_result if command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
                 elif args.task_action == "list":
                     result = store.list_tasks(args.mission)
                 elif args.task_action == "show":

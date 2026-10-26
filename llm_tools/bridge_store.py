@@ -419,7 +419,9 @@ class BridgeStore:
             raise ValueError("task prompt must be non-empty")
         now = utc_now()
         with self._transaction():
-            self._mission_row(mission_id)
+            mission = self._mission_row(mission_id)
+            if mission["status"] in {"COMPLETED", "CANCELLED"}:
+                raise TransitionError("cannot add a task to a terminal mission")
             next_order = int(self.db.execute("SELECT COALESCE(MAX(ordering),0)+10 FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0])
             cur = self.db.execute(
                 "INSERT INTO tasks(mission_id,title,original_prompt,prompt,priority,ordering,acceptance_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -466,7 +468,9 @@ class BridgeStore:
             raise ValueError("proposal prompt and source operation are required")
         now = utc_now()
         with self._transaction():
-            self._mission_row(mission_id)
+            mission = self._mission_row(mission_id)
+            if mission["status"] in {"COMPLETED", "CANCELLED"}:
+                raise TransitionError("cannot add a proposal to a terminal mission")
             source = self.db.execute("SELECT mission_id FROM operations WHERE id=?", (source_operation_id,)).fetchone()
             if source is None or source["mission_id"] != mission_id:
                 raise TransitionError("proposal source operation must belong to the same mission")
@@ -495,6 +499,9 @@ class BridgeStore:
             if task["origin"] != "agent-proposal" or task["proposal_status"] != "PENDING":
                 raise TransitionError("task is not a pending agent proposal")
             if accept:
+                mission = self._mission_row(mission_id)
+                if mission["status"] in {"COMPLETED", "CANCELLED"}:
+                    raise TransitionError("cannot accept a proposal on a terminal mission")
                 self.db.execute("UPDATE tasks SET proposal_status='ACCEPTED',updated_at=? WHERE id=?", (utc_now(), task_id))
                 self._event(mission_id, "task-proposal-accepted", {"source_operation_id": task["proposed_by_operation"]}, task_id=task_id)
             else:
@@ -774,7 +781,7 @@ class BridgeStore:
         source: str | None = None,
     ) -> None:
         """Persist an exactly confirmed provider session and its operation state."""
-        allowed = {"NATIVE_CREATED", "RESTORED_NATIVE", "RECONSTRUCTED", "UNAVAILABLE"}
+        allowed = {"RESTORING", "NATIVE_CREATED", "RESTORED_NATIVE", "RECONSTRUCTED", "UNAVAILABLE"}
         if restoration_state not in allowed:
             raise ValueError("unknown native session restoration state")
         has_identity = bool(session_id and cwd and source)
@@ -994,11 +1001,18 @@ class BridgeStore:
             self._event(task["mission_id"], "task-status", {"from": old, "to": status}, task_id=task_id)
         return self.get_task(task_id)
 
-    def events(self, mission_id: str, *, after: int = 0) -> list[dict[str, Any]]:
+    def events(self, mission_id: str, *, after: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
         self._mission_row(mission_id)
+        if limit is not None and not 0 <= limit <= 1000:
+            raise ValueError("event page limit must be between 0 and 1000")
+        query = "SELECT * FROM events WHERE mission_id=? AND id>? ORDER BY id"
+        params: tuple[Any, ...] = (mission_id, after)
+        if limit is not None:
+            query += " LIMIT ?"
+            params += (limit,)
         return [
             {**dict(row), "data": json.loads(row["data_json"])}
-            for row in self.db.execute("SELECT * FROM events WHERE mission_id=? AND id>? ORDER BY id", (mission_id, after))
+            for row in self.db.execute(query, params)
         ]
 
     def record_runtime_event(self, mission_id: str, kind: str, data: dict[str, Any]) -> int:

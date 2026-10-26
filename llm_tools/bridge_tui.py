@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import textwrap
 import time
 import unicodedata
 from collections import deque
@@ -27,7 +28,7 @@ from typing import Callable
 Snapshot = Callable[..., dict[str, object]]
 Dispatch = Callable[[str, str], str]
 
-VIEWS = ("Bridge", "Orders", "Stations", "Systems", "Log", "Sessions", "Palette")
+VIEWS = ("Bridge", "Orders", "Stations", "Systems", "Log", "Sessions", "Palette", "Usage")
 PALETTE_COMMANDS = (
     "help",
     "status",
@@ -49,7 +50,7 @@ _MAX_STATION_ROWS = 32
 _MAX_EVENT_ROWS = 80
 _MAX_DETAIL_TEXT = 16000
 _MAX_DETAIL_ITEMS = 12
-_NAV_HINT = "F1-7/Tab views PgUp/Dn pages Ctrl-F search Ctrl-E add Ctrl-R edit Ctrl-D exit"
+_NAV_HINT = "F1-8/Tab views PgUp/Dn pages Ctrl-E add Ctrl-R edit Ctrl-] z expand Ctrl-D exit"
 
 
 def _text(value: object, limit: int = 1000) -> str:
@@ -339,12 +340,43 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
                 for field, item in value.items()
                 if isinstance(item, (str, int, float, bool, type(None)))
             }
+    usage = _dict(data.get("usage"))
+    if usage:
+        result["usage"] = usage
     return result
 
 
 def _mission(snapshot: dict[str, object]) -> dict[str, object]:
     nested = _dict(snapshot.get("mission"))
     return nested or snapshot
+
+
+def _capacity_summaries(snapshot: dict[str, object]) -> list[str]:
+    """Compact, explicitly estimated scope forecasts for active and alternate routes."""
+    from . import common
+
+    capacity = _dict(snapshot.get("capacity"))
+    selection = _dict(capacity.get("selection"))
+    active = str(selection.get("route") or selection.get("provider") or "")
+    summaries = []
+    for row in _items(selection.get("decisions")):
+        owner = str(row.get("route") or row.get("provider") or "unknown")
+        scopes = []
+        for window in _items(row.get("windows")):
+            name = _text(window.get("name") or "scope", 20)
+            if window.get("kind") == "opaque":
+                scopes.append(f"{name}: quota unmeasured")
+                continue
+            estimate = window.get("estimated_remaining")
+            estimate = str(estimate) if estimate and estimate != "None" else "unknown"
+            reset = common.parse_epoch(window.get("reset_epoch"))
+            reset_text = common.fmt_duration(max(0, reset-common.now_epoch())) if reset is not None else "unknown"
+            remaining = window.get("remaining_percent")
+            remaining_text = f"{remaining}%" if remaining not in (None, "None", "") else "unknown"
+            scopes.append(f"{name} est {estimate} ({remaining_text}; reset {reset_text})")
+        label = "ACTIVE " if owner == active else "READY " if str(row.get("usable")) in {"True", "true"} else "ALT "
+        summaries.append(label + _text(owner, 40) + (" / " + _text(row["selected_model"], 40) if row.get("selected_model") else "") + " | " + (" | ".join(scopes) or "capacity unavailable"))
+    return sorted(summaries, key=lambda text: not text.startswith("ACTIVE "))
 
 
 def _task_label(task: dict[str, object]) -> str:
@@ -401,6 +433,7 @@ class _ConsoleState:
     search_query: str = ""
     search_editing: bool = False
     task_detail: bool = False
+    detail_scroll: int = 0
     history: deque[str] = field(default_factory=lambda: deque(maxlen=50))
     history_index: int | None = None
     output: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_OUTPUT_LINES))
@@ -412,6 +445,7 @@ class _ConsoleState:
     _snapshot_result: tuple[dict[str, object] | None, str] | None = field(default=None, repr=False)
     _command_result: str | None = field(default=None, repr=False)
     command_pending: bool = False
+    expand_requested: bool = False
 
     @property
     def view(self) -> str:
@@ -452,6 +486,7 @@ class _ConsoleState:
                     "task_offset": self.task_offset,
                     "task_limit": _TASK_PAGE_SIZE,
                     "search": self.search_query,
+                    "view": self.view,
                 }
                 kwargs = {
                     key: value
@@ -480,6 +515,11 @@ class _ConsoleState:
     def _dispatch(self, line: str, *, cleanup_path: Path | None = None) -> bool:
         text = line.strip()
         if not text:
+            return True
+        if text in {"control", "usage"}:
+            self.choose_view(VIEWS.index("Usage" if text == "usage" else "Bridge"))
+            self.expand_requested = True
+            self.last_refresh = 0.0
             return True
         if self.command_pending:
             self.output.append("A command is still running; wait for its result before dispatching another.")
@@ -547,10 +587,16 @@ class _ConsoleState:
             self.selected = 0
             return True
         if key in {"KEY_UP", "KEY_DOWN"} and not self.command:
-            self.selected = max(0, self.selected - 1) if key == "KEY_UP" else self.selected + 1
+            if self.view == "Orders" and self.task_detail:
+                self.detail_scroll = max(0, self.detail_scroll - 1) if key == "KEY_UP" else self.detail_scroll + 1
+            else:
+                self.selected = max(0, self.selected - 1) if key == "KEY_UP" else self.selected + 1
             return True
         if key in {"KEY_PPAGE", "KEY_NPAGE"} and not self.command and not self.search_editing:
-            if self.view == "Orders":
+            if self.view == "Orders" and self.task_detail:
+                delta = 10 if self.full else 5
+                self.detail_scroll = max(0, self.detail_scroll - delta) if key == "KEY_PPAGE" else self.detail_scroll + delta
+            elif self.view == "Orders":
                 total = self.snapshot.get("task_total")
                 if key == "KEY_PPAGE":
                     self.task_offset = max(0, self.task_offset - _TASK_PAGE_SIZE)
@@ -595,6 +641,7 @@ class _ConsoleState:
                 self._dispatch(command)
             elif self.view == "Orders" and not self.command:
                 self.task_detail = not self.task_detail
+                self.detail_scroll = 0
             elif self.view == "Stations" and not self.command:
                 station = self.selected_station_name()
                 if station:
@@ -662,6 +709,10 @@ class _ConsoleState:
         events = _items(data.get("events"))
         operations = _items(data.get("operations"))
         task_counts = _dict(data.get("task_counts"))
+        if self.view == "Usage":
+            usage = _dict(data.get("usage"))
+            return [f"Usage: {usage.get('status', 'refreshing')} | age {usage.get('age_seconds', 'unknown')}s | {usage.get('error') or 'background refresh'}",
+                    *str(usage.get("text") or "Loading full llm-usage dashboard...").splitlines()]
         if self.view == "Bridge":
             next_task = next((task for task in tasks if task.get("status") in {"READY", "QUEUED"}), None)
             current_task = _dict(data.get("current_task"))
@@ -684,6 +735,7 @@ class _ConsoleState:
                 f"Next: {_task_label(next_task) if next_task else 'none ready'}",
                 f"Pending commands: {data.get('pending_command_count', 0)}",
                 f"Criteria verified: {_dict(data.get('criteria')).get('verified', '?')}/{_dict(data.get('criteria')).get('total', '?')} | ops {len(operations)} | events {len(events)}",
+                *_capacity_summaries(data),
             ]
         if self.view == "Orders":
             if self.task_detail:
@@ -809,7 +861,10 @@ class _ConsoleState:
                             reset_text = f"reset epoch {reset}" if reset not in (None, "None", "") else "no reset"
                             reason = item.get("reason")
                             suffix = f" ({_text(reason, 80)})" if reason else ""
-                            found.append(f"Quota/budget {owner} {name} [{kind}]: {remaining_text}; {reset_text}{suffix}")
+                            estimate = item.get("estimated_remaining")
+                            estimate_text = f"est. runout {estimate}" if estimate and estimate != "None" else "est. runout unknown"
+                            details = "; ".join(part for part in (remaining_text, estimate_text if kind == "reset_window" else "", reset_text) if part)
+                            found.append(f"Quota/budget {owner} {name} [{kind}]: {details}{suffix}")
             return found or ["System and capacity status is not available in this snapshot."]
         if self.view == "Log":
             return [
@@ -840,9 +895,13 @@ class _ConsoleState:
             rows = self.rows()
             content_height = max(1, height - 6)
             row_offset = self._selection_row_offset()
-            start = _scroll_start(self.selected + row_offset, len(rows), content_height)
+            selected_row = self.detail_scroll if self.view == "Orders" and self.task_detail else self.selected + row_offset
+            start = _scroll_start(selected_row, len(rows), content_height)
             row_index = min(max(0, len(rows) - 1), start + y - 3)
-            self.selected = max(0, row_index - row_offset)
+            if self.view == "Orders" and self.task_detail:
+                self.detail_scroll = row_index
+            else:
+                self.selected = max(0, row_index - row_offset)
 
 
 def _put(window: curses.window, y: int, x: int, value: object, width: int) -> None:
@@ -890,9 +949,9 @@ def _hint(state: _ConsoleState) -> str:
     if state.view == "Orders":
         return "Enter inspect Ctrl-R amend Ctrl-E add Ctrl-F find PgUp/Dn pages Ctrl-D exit"
     if state.view == "Stations":
-        return "Enter choose station; recent history below | F1-7/Tab views | Ctrl-D exit"
+        return "Enter choose station; recent history below | F1-8/Tab views | Ctrl-D exit"
     if state.view == "Palette":
-        return "Enter run selected command | type command | F1-7/Tab views | Ctrl-D exit"
+        return "Enter run selected command | type command | F1-8/Tab views | Ctrl-D exit"
     return _NAV_HINT
 
 
@@ -917,6 +976,10 @@ def _draw_compact(window: curses.window, state: _ConsoleState) -> None:
     rows = state.rows()
     if height >= 2:
         first = _orders_summary(state) if state.view == "Orders" else (rows[0] if rows else "Status unavailable")
+        if state.view == "Bridge":
+            forecasts = _capacity_summaries(state.snapshot)
+            if forecasts:
+                first = forecasts[0]
         _put(window, 1, 0, first, width)
     if height >= 3:
         nav = _nav_line(state.view_index, " ")
@@ -951,12 +1014,22 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
         _put(window, 2, 0, nav, width)
     content_height = max(0, height - 6)
     rows = state.rows()
+    if state.view == "Usage":
+        rows = [part for line in rows for part in (textwrap.wrap(line, max(1, width-2),
+                replace_whitespace=False, drop_whitespace=False) or [""])]
     row_offset = state._selection_row_offset()
-    selected_row = state.selected + row_offset
+    selected_row = state.detail_scroll if state.view == "Orders" and state.task_detail else state.selected + row_offset
     start = _scroll_start(selected_row, len(rows), content_height)
     for offset, value in enumerate(rows[start : start + content_height]):
         marker = "> " if start + offset == selected_row else "  "
-        _put(window, offset + 3, 0, marker + value, width)
+        if state.view == "Usage":
+            clean = "".join(char if unicodedata.category(char) not in {"Cc", "Cs"} else " " for char in value)
+            try:
+                window.addnstr(offset+3, 0, marker+clean, width)
+            except curses.error:
+                pass
+        else:
+            _put(window, offset + 3, 0, marker + value, width)
     if height >= 2:
         prompt = _input_prompt(state)
         _put(window, height - 2, 0, prompt + _command_display(state.command, width - len(prompt)), width - len(prompt))
@@ -1011,9 +1084,16 @@ def _edit_task_prompt(
             state.output.append("Empty task text was not dispatched.")
             path.unlink(missing_ok=True)
             return
-        argv = ["add", str(path)] if task_id is None else ["amend", task_id, str(path)]
+        if task_id is None and state.command.strip():
+            # The CLI parser owns grammar and validation. The editor only
+            # supplies the file argument, preserving every typed option.
+            argv = [*shlex.split(state.command), "--file", str(path)]
+        else:
+            argv = ["add", str(path)] if task_id is None else ["amend", task_id, str(path)]
         if not state._dispatch(shlex.join(argv), cleanup_path=path):
             path.unlink(missing_ok=True)
+        else:
+            state.command = ""
     except Exception as exc:
         try:
             os.close(fd)
@@ -1035,8 +1115,9 @@ def _selected_task_id(state: _ConsoleState) -> str | None:
     return _text(value, 40) if value is not None else None
 
 
-def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool) -> int:
+def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool, initial_view: str = "Bridge") -> int:
     state = _ConsoleState(mission_id, dispatch, snapshot, full)
+    state.choose_view(VIEWS.index(initial_view))
     state.refresh(force=True)
 
     def loop(window: curses.window) -> int:
@@ -1051,8 +1132,18 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool)
         except curses.error:
             pass
         while True:
+            state.full = full or window.getmaxyx()[0] > 8
+            if state.expand_requested:
+                state.expand_requested = False
+                if not state.full:
+                    try:
+                        from .bridge import _load_handle
+                        from .terminal import TmuxTerminalBackend
+                        TmuxTerminalBackend().focus(_load_handle(mission_id), pane="bridge", expand=True)
+                    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                        state.output.append(f"Could not expand controls: {type(exc).__name__}")
             state.refresh()
-            if full:
+            if state.full:
                 _draw_full(window, state)
             else:
                 _draw_compact(window, state)
@@ -1079,9 +1170,9 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool)
                 except curses.error:
                     continue
                 if button_state & curses.BUTTON4_PRESSED:
-                    state.selected = max(0, state.selected - 1)
+                    state.handle_key("KEY_UP")
                 elif button_state & curses.BUTTON5_PRESSED:
-                    state.selected += 1
+                    state.handle_key("KEY_DOWN")
                 elif button_state & curses.BUTTON1_CLICKED:
                     _handle_mouse_event(state, y, x, *window.getmaxyx())
                 elif button_state & getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0):
@@ -1115,6 +1206,6 @@ def run_console(mission_id: str, dispatch: Dispatch, snapshot: Snapshot) -> int:
     return _run(mission_id, dispatch, snapshot, full=False)
 
 
-def run_control(mission_id: str, dispatch: Dispatch, snapshot: Snapshot) -> int:
-    """Run the full-screen seven-view terminal control UI."""
-    return _run(mission_id, dispatch, snapshot, full=True)
+def run_control(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, initial_view: str = "Bridge") -> int:
+    """Run the full-screen terminal control UI."""
+    return _run(mission_id, dispatch, snapshot, full=True, initial_view=initial_view)

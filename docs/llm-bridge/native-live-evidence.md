@@ -73,3 +73,30 @@ pane resizing, and private-server cleanup, plus a separate successful
 headless Bridge reply. It does **not** support a successful native first reply,
 native attach/detach, or native session-ID restoration. Codex native
 restoration remains **NOT VERIFIED**.
+
+## 2026-10-26: actual native Codex reply and exact-ID resume
+
+Two bounded prompt submissions through the **full Bridge mission controller**
+passed using installed Codex 0.164.0. The first native reply matched an anchored
+response oracle; prompt echo cannot satisfy it. Bridge captured the conversation
+UUID from its owned no-daemon process's writable transcript metadata. After
+complete controller/PTY shutdown, the second task resumed the same exact UUID
+in a new controller and returned a new marker requiring prior conversation
+context. Operations recorded NATIVE_CREATED then RESTORED_NATIVE. Cleanup
+released the controller lock. Raw response text/transcripts were not retained.
+
+Executed: `python scripts/bridge_native_mission_smoke.py --model-call-budget 2
+--seconds 35 --output /tmp/bridge-native-mission-results.json`.
+Results: `native-mission-results.json`. The earlier lower-level backend probe
+also passed reply/resume (`native-reply-resume-results.json`), but the full
+mission result is the stronger evidence. No paid Claude/Copilot call was made.
+
+**Provider mouse remains NOT VERIFIED.** An actual attached PTY SGR click in
+Codex's model picker did not activate an effort picker. This is not a mouse
+compatibility pass. Compare the same interaction against a direct native CLI
+before attributing the limitation to Bridge; preserve supported native mouse
+behaviour and document unsupported provider interactions explicitly.
+
+Before major native/session changes are committed, rerun the bounded mission
+script and relevant zero-budget startup/input/mouse probe. Live probes are
+ad-hoc only; CI runs deterministic provider transport and oracle contracts.

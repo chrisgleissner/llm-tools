@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
+import time
 
 from llm_tools.bridge_sessions import (
     NativeSessionIdentity,
     codex_session_records,
+    codex_owned_argv,
     confirm_restored,
+    discover_owned_codex_session,
     new_session_argv,
     parse_session_metadata,
     resume_argv,
 )
+from llm_tools.bridge_runtime import _process_start_token
 
 
 CODEX_ID = "12345678-1234-4234-8234-123456789abc"
@@ -48,6 +56,16 @@ def test_codex_session_identity_requires_exact_session_meta_and_workdir(tmp_path
     other_cwd = tmp_path / "other"
     other_cwd.mkdir()
     assert parse_session_metadata("codex", record, cwd=other_cwd) is None
+
+
+def test_codex_owned_terminal_argv_requires_advertised_no_daemon(tmp_path: Path) -> None:
+    executable = _fake_cli(tmp_path / "codex", "usage: codex [--no-daemon] [PROMPT]")
+    argv = [str(executable), "--model", "gpt-test", "objective"]
+
+    assert codex_owned_argv(argv, executable=str(executable), help_text="codex [--no-daemon] prompt") == [
+        str(executable), "--no-daemon", "--model", "gpt-test", "objective",
+    ]
+    assert codex_owned_argv(argv, executable=str(executable), help_text="codex [PROMPT]") is None
 
 
 def test_claude_session_identity_requires_structured_init_record(tmp_path: Path) -> None:
@@ -175,3 +193,87 @@ def test_codex_metadata_file_scan_reads_only_exact_structured_first_line(tmp_pat
     assert records[0].identity.session_id == CODEX_ID
     assert records[0].path == transcript
     assert records[0].modified_ns == transcript.stat().st_mtime_ns
+
+
+def _codex_transcript(path: Path, session_id: str, cwd: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session_id, "cwd": str(cwd)}}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _process_holding_fds(paths: list[Path], *, readonly: bool = False, child: bool = False) -> subprocess.Popen[str]:
+    open_expr = "\n".join(
+        f"held_{index}=open({str(path)!r},{'r' if readonly else 'a'!r})"
+        for index, path in enumerate(paths)
+    )
+    opener = f"import time\n{open_expr}\nprint('READY',flush=True)\ntime.sleep(30)"
+    if child:
+        script = (
+            "import subprocess,sys,time\n"
+            f"p=subprocess.Popen([sys.executable,'-c',{opener!r}],stdout=subprocess.PIPE,text=True,start_new_session=True)\n"
+            "print(p.pid,flush=True)\n"
+            "print(p.stdout.readline().strip(),flush=True)\n"
+            "time.sleep(30)\n"
+        )
+    else:
+        script = opener
+    process = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True, start_new_session=True)
+    assert process.stdout is not None
+    if child:
+        process.owned_child_pid = int(process.stdout.readline().strip())
+    assert process.stdout.readline().strip() == "READY"
+    return process
+
+
+def test_owned_codex_session_requires_exact_live_writable_process_tree_fd(tmp_path: Path, monkeypatch) -> None:
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    transcript = tmp_path / "codex" / "sessions" / "owned.jsonl"
+    _codex_transcript(transcript, CODEX_ID, cwd)
+    process = _process_holding_fds([transcript], child=True)
+    token = _process_start_token(process.pid)
+    assert token
+    try:
+        identity = discover_owned_codex_session(process.pid, token, cwd=str(cwd))
+        assert identity == NativeSessionIdentity("codex", CODEX_ID, str(cwd.resolve()), "codex:session_meta")
+        assert discover_owned_codex_session(process.pid, token + ":reused", cwd=str(cwd)) is None
+    finally:
+        child_pid = getattr(process, "owned_child_pid", 0)
+        if child_pid:
+            try:
+                os.killpg(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=3)
+
+
+def test_codex_session_discovery_rejects_unrelated_readonly_and_multiple_fds(tmp_path: Path, monkeypatch) -> None:
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    codex_home = tmp_path / "codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    first = codex_home / "sessions" / "first.jsonl"
+    second = codex_home / "sessions" / "second.jsonl"
+    unrelated = tmp_path / "outside.jsonl"
+    _codex_transcript(first, CODEX_ID, cwd)
+    _codex_transcript(second, CLAUDE_ID, cwd)
+    _codex_transcript(unrelated, CODEX_ID, cwd)
+
+    for paths, readonly in (([unrelated], False), ([first], True), ([first, second], False)):
+        process = _process_holding_fds(paths, readonly=readonly)
+        token = _process_start_token(process.pid)
+        try:
+            assert discover_owned_codex_session(process.pid, token, cwd=str(cwd)) is None
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=3)

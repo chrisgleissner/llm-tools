@@ -131,6 +131,43 @@ def test_controller_tears_down_station_before_marking_mission_stopped(tmp_path, 
     assert socket_path.with_name(socket_path.name + ".conf").exists() is stop_fails
 
 
+def test_start_mode_override_uses_prior_station_config_and_persists_after_cleanup(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr("llm_tools.bridge_runtime.shutil.which", lambda name: "/usr/bin/tmux" if name == "tmux" else None)
+    database = tmp_path / "state" / "bridge.sqlite3"
+    setup = BridgeStore(database)
+    mission = setup.create_mission("mode", "objective", cwd=tmp_path, config={"headless": False, "native_tui": True})
+    old_socket = mission_socket_path(mission["id"])
+    old_socket.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    old_socket.write_text("owned old station", encoding="ascii")
+    phases: list[str] = []
+
+    class Backend:
+        def open_existing(self, socket_path, session_name, *, bridge_rows=6):
+            phases.append("open-existing")
+            return TerminalHandle(Path(socket_path), Path(str(socket_path) + ".conf"), session_name, "%0", "%1", 6)
+
+        def stop(self, _handle):
+            phases.append("stop")
+            if len([phase for phase in phases if phase == "stop"]) == 1:
+                raise RuntimeError("old native station teardown failed")
+
+        def start(self, **_kwargs):
+            phases.append("start")
+            return TerminalHandle(tmp_path / "new.sock", tmp_path / "new.conf", "mission", "%0", "%1", 6)
+
+    monkeypatch.setattr("llm_tools.bridge_runtime.TmuxTerminalBackend", Backend)
+    monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", lambda *_args, **_kwargs: 0)
+
+    with pytest.raises(RuntimeError, match="old native station teardown failed"):
+        run_controller(mission["id"], headless=True)
+
+    persisted = setup.get_mission(mission["id"])
+    assert persisted["config"]["headless"] is False
+    assert persisted["config"]["native_tui"] is True
+    assert "start" not in phases
+
+
 def test_controller_recovery_terminates_unresolved_verifier_without_completing_task(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
     database = tmp_path / "state" / "bridge.sqlite3"
@@ -307,6 +344,124 @@ def test_runtime_hook_keeps_autonomous_provider_launch_headless_with_control_pan
     assert config.exec_mode == "fresh"
     assert config.headless is True
     assert config.native_tui is False
+
+
+def test_provider_receives_explicit_bridge_identity_and_operator_controls(tmp_path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "mission objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "task objective")
+    store.set_mission_status(mission["id"], "RUNNING")
+    context = {"task_id": task_id, "revision": store.get_task(task_id)["revision"], "prompt": "managed prompt"}
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    config = scheduler.SchedulerConfig(provider="codex", prompt_text="managed prompt", cwd=str(tmp_path), ralph_robin_active=True)
+
+    assert hook.before_launch(context, {"provider": "codex"}, config, 1)
+
+    env = scheduler.provider_env(config)
+    assert env["LLM_BRIDGE_MANAGED"] == "1"
+    assert env["LLM_BRIDGE_MISSION_ID"] == mission["id"]
+    assert env["LLM_BRIDGE_TASK_ID"] == str(task_id)
+    assert env["LLM_BRIDGE_TASK_REVISION"] == str(context["revision"])
+    assert env["LLM_BRIDGE_OPERATION_ID"] == context["operation_id"]
+    assert "llm-bridge proposal create" in env["LLM_BRIDGE_CONTROLS"]
+    assert mission["id"] in env["LLM_BRIDGE_CONTROLS"] and context["operation_id"] in env["LLM_BRIDGE_CONTROLS"]
+    assert "supervised by LLM Bridge" in config.prompt_text
+    assert context["operation_id"] in config.prompt_text
+    assert "proposal create" in config.prompt_text
+
+
+def test_operation_progress_records_real_workspace_change_and_bounded_log_digest(tmp_path, monkeypatch) -> None:
+    from llm_tools.bridge_progress import repository_checkpoint
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    source = repo / "main.py"
+    source.write_text("before\n", encoding="utf-8")
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("progress", "objective", cwd=repo)
+    task_id = store.add_task(mission["id"], "implement change")
+    noop_task_id = store.add_task(mission["id"], "report existing state")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hooks = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hooks.bind(store)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    output = run_dir / "attempt-1.out"
+    output.write_bytes(b"provider output" * 1000)
+    config = _provider_config("codex", repo, run_dir)
+    config.log_dir = None
+    context = {"task_id": task_id, "revision": store.get_task(task_id)["revision"]}
+    before = repository_checkpoint(repo)["fingerprint"]
+
+    assert hooks.before_launch(context, {"provider": "codex"}, config, 1)
+    source.write_text("after\n", encoding="utf-8")
+    after = repository_checkpoint(repo)["fingerprint"]
+    hooks.after_iteration(context, {"provider": "codex"}, config, 1, 0, 0.1)
+
+    events = store.events(mission["id"])
+    checkpoint = next(event for event in events if event["kind"] == "repository-checkpoint")
+    progress = next(event for event in events if event["kind"] == "operation-progress")
+    assert checkpoint["data"]["operation_id"] == context["operation_id"]
+    assert checkpoint["data"]["checkpoint"]["fingerprint"] == before
+    assert progress["data"]["before"] == before
+    assert progress["data"]["after"] == after
+    assert before != after
+    assert progress["data"]["output_sha256"]
+    assert progress["data"]["task_id"] == task_id
+    assert progress["data"]["revision"] == context["revision"]
+
+    noop_run = tmp_path / "noop-run"
+    noop_run.mkdir()
+    (noop_run / "attempt-1.out").write_text("no-op provider result", encoding="utf-8")
+    noop_config = _provider_config("claude", repo, noop_run)
+    noop_config.log_dir = None
+    noop_context = {"task_id": noop_task_id}
+    assert hooks.before_launch(noop_context, {"provider": "claude"}, noop_config, 2)
+    unchanged = repository_checkpoint(repo)["fingerprint"]
+    hooks.after_iteration(noop_context, {"provider": "claude"}, noop_config, 2, 75, 0.1)
+    noop_progress = [event for event in store.events(mission["id"]) if event["kind"] == "operation-progress"][-1]
+    assert noop_progress["data"]["before"] == unchanged == noop_progress["data"]["after"]
+
+
+def test_unknown_repository_progress_is_not_reported_as_unchanged(tmp_path, monkeypatch) -> None:
+    from llm_tools import bridge_progress
+
+    monkeypatch.setattr(bridge_progress, "repository_checkpoint", lambda _cwd: {"fingerprint": None, "files": 0, "bytes": 0, "reason": "unavailable"})
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("unknown progress", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hooks = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hooks.bind(store)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    config = _provider_config("codex", tmp_path, run_dir)
+    config.log_dir = None
+    context = {"task_id": task_id}
+
+    assert hooks.before_launch(context, {"provider": "codex"}, config, 1)
+    hooks.after_iteration(context, {"provider": "codex"}, config, 1, 1, 0.1)
+    events = store.events(mission["id"])
+    progress = next(event for event in events if event["kind"] == "operation-progress")
+    assert progress["data"]["before"] is None
+    assert progress["data"]["after"] is None
+
+
+def test_bounded_output_digest_hashes_only_a_stable_tail_and_rejects_symlinks(tmp_path) -> None:
+    import hashlib
+    from llm_tools.bridge_runtime import _bounded_output_digest
+
+    output = tmp_path / "attempt.out"
+    output.write_bytes(b"0123456789abcdefghijklmnopqrstuvwxyz")
+    expected = hashlib.sha256(b"tail:36:" + b"uvwxyz").hexdigest()
+    assert _bounded_output_digest(output, max_bytes=6) == expected
+    link = tmp_path / "linked.out"
+    link.symlink_to(output)
+    assert _bounded_output_digest(link, max_bytes=6) is None
 
 
 def test_task_pause_winning_prelaunch_race_aborts_prepared_operation(tmp_path, monkeypatch) -> None:
@@ -548,6 +703,73 @@ def test_detached_launch_never_accepts_a_stale_ready_file(tmp_path, monkeypatch)
     assert observed == [True]
 
 
+def test_detached_launch_accepts_only_the_new_controller_startup_identity(tmp_path, monkeypatch, capsys) -> None:
+    from types import SimpleNamespace as Namespace
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("launch", "durable objective", cwd=tmp_path, config={"headless": True})
+    runtime = state / "runtime" / f"mission-{mission['id']}"
+    runtime.mkdir(parents=True, mode=0o700)
+    ready = runtime / "controller-ready.json"
+
+    class FakeProcess:
+        pid = 4545
+        returncode = None
+
+        def poll(self):
+            return None
+
+    observed: dict[str, object] = {}
+
+    def popen(command, **kwargs):
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        token = command[command.index("--startup-token") + 1]
+        ready.write_text(json.dumps({"pid": 4545, "startup_token": token, "status": "RUNNING"}), encoding="utf-8")
+        return FakeProcess()
+
+    monkeypatch.setattr("llm_tools.bridge_runtime.subprocess", Namespace(Popen=popen, DEVNULL=subprocess.DEVNULL))
+    assert launch_controller(mission["id"], headless=True, providers="codex,claude", routes="fast,review") == 0
+    output = capsys.readouterr().out
+    assert "controller log" in output
+    assert observed["kwargs"]["start_new_session"] is True
+    assert "--headless" in observed["command"]
+    assert observed["command"][observed["command"].index("--providers") + 1] == "codex,claude"
+    assert observed["command"][observed["command"].index("--routes") + 1] == "fast,review"
+
+
+def test_detached_launch_reports_a_controller_that_exits_before_ready(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace as Namespace
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("launch failure", "objective", cwd=tmp_path, config={"headless": True})
+
+    class ExitedProcess:
+        pid = 4546
+        returncode = 9
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr("llm_tools.bridge_runtime.subprocess", Namespace(Popen=lambda *_args, **_kwargs: ExitedProcess(), DEVNULL=subprocess.DEVNULL))
+    with pytest.raises(RuntimeError, match="exited with status 9"):
+        launch_controller(mission["id"], headless=True)
+
+
+def test_detached_native_launch_requires_tmux_before_spawning(tmp_path, monkeypatch) -> None:
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("native needs tmux", "objective", cwd=tmp_path)
+    monkeypatch.setattr("llm_tools.bridge_runtime.shutil.which", lambda name: None)
+    with pytest.raises(RuntimeError, match="tmux is required"):
+        launch_controller(mission["id"], native_tui=True)
+
+
 def test_explicit_native_mode_uses_owned_provider_pane(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
@@ -659,6 +881,8 @@ def test_owned_claude_and_copilot_sessions_survive_controller_restart_by_exact_i
             resumed = config2.command_argv_transform([str(binary), "-C", str(cwd), "-i", "resume prompt"])
             assert resumed[:3] == [str(binary), "--resume", session_id]
         assert "--last" not in resumed
+        assert store.get_operation(context2["operation_id"])["restoration_state"] == "RESTORING"
+        assert store.get_operation(context2["operation_id"])["native_session_id"] == session_id
         _write_provider_metadata(provider, home, cwd, session_id, append=True)
         hooks._record_process(context2["operation_id"], os.getpid())
         assert store.get_operation(context2["operation_id"])["restoration_state"] == "RESTORED_NATIVE"

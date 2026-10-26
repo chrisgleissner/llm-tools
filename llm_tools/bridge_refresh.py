@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from pathlib import Path
 import threading
 import time
 from typing import Any, Callable
 
 from .bridge_store import BridgeStore, default_state_dir, utc_now
+
+
+@lru_cache(maxsize=256)
+def _sample_forecast(label: str, scope: str, remaining: float, reset: object,
+                     cache_root: str, time_bucket: int) -> str | None:
+    """Reuse unchanged forecasts for at most 30 seconds, with a bounded cache.
+
+    Reset, cache root and time bucket form part of the key. A quota change
+    always creates a new observation; rapid identical iterations do not bloat
+    shared history or reparse it thousands of times.
+    """
+    from . import common
+    common.log_usage_sample(label, scope, remaining)
+    estimate = common.estimate_remaining_time_from_log(label, scope, remaining)
+    return None if estimate in {"", "-"} else estimate
 
 
 def _process_identity(pid: int) -> str:
@@ -24,6 +40,8 @@ def _process_identity(pid: int) -> str:
 
 
 def _safe_decision(selection: dict[str, Any]) -> dict[str, Any]:
+    from . import common
+
     def scalar(source: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
         output: dict[str, Any] = {}
         for key in keys:
@@ -40,13 +58,27 @@ def _safe_decision(selection: dict[str, Any]) -> dict[str, Any]:
     for decision in selection.get("decisions", []) if isinstance(selection.get("decisions"), list) else []:
         if not isinstance(decision, dict):
             continue
-        item = scalar(decision, ("provider", "route", "selected_model", "usable", "reason", "wait_until"))
+        item = scalar(decision, ("provider", "capacity_provider", "usage_history_provider", "route", "selected_model", "usable", "reason", "wait_until"))
         item["windows"] = [
-            scalar(window, ("name", "kind", "remaining_percent", "remaining_amount", "currency", "reset_epoch", "reason"))
+            scalar(window, ("name", "kind", "remaining", "remaining_percent", "remaining_amount", "currency", "reset_epoch", "reason"))
             for window in decision.get("windows", [])[:8]
             if isinstance(window, dict)
         ] if isinstance(decision.get("windows"), list) else []
+        for window in item["windows"]:
+            if "remaining_percent" not in window:
+                window["remaining_percent"] = window.get("remaining")
+            remaining = window.get("remaining_percent")
+            if window.get("kind") != "reset_window" or not isinstance(remaining, (int, float)):
+                continue
+            # The same logged samples and confidence rules as llm-usage.
+            # Model-specific histories are never silently replaced with the
+            # aggregate history of a different capacity pool.
+            provider = str(item.get("capacity_provider") or item.get("provider", ""))
+            label = str(item.get("usage_history_provider") or common.usage_history_provider(provider))
+            window["estimated_remaining"] = _sample_forecast(label, str(window.get("name", "")), remaining,
+                window.get("reset_epoch"), os.fspath(common.usage_cache_dir()), common.now_epoch()//30)
         decisions.append(item)
+    common.prune_usage_log()
     selected = selection.get("decision") if isinstance(selection.get("decision"), dict) else {}
     return {
         "provider": str(selection.get("provider") or selected.get("provider") or ""),

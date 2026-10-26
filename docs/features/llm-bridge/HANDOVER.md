@@ -196,3 +196,40 @@ Native resume remains unimplemented/unverified. Selection/handoff/wait events
 now persist, but station/capacity/controller/health status projections and stall
 controls remain unfinished. Final coverage/CI/performance gates are NOT passed.
 Resolve blockers, rerun full suite and 85% coverage before making PR ready.
+
+## 2026-10-26 post-reset checkpoint (supersedes older open-state summaries)
+
+Native full-controller Codex reply + exact owned UUID resume + clean controller
+shutdown **PASS**: `scripts/bridge_native_mission_smoke.py`, checked-in
+`docs/llm-bridge/native-mission-results.json`. Two prompt budget, Codex0.164.0.
+Provider mouse remains NOT VERIFIED; actual Codex model-picker SGR click did
+not trigger an effort picker. CI oracle tests reject echoes/substrings/history
+as successful model replies. No paid Claude/Copilot attempts were repeated.
+
+Owned Codex writable-FD discovery is now wired to native argv/runtime. It uses
+capability-gated --no-daemon, exact managed PID/start tokens, periodic scheduler
+observation, and safe ambiguity fallback. Fake native controller/restart suite
+for Claude/Copilot/Codex + session/owned-pane contracts:23passed17.16s.
+
+Private tmux status focus wrappers used unsupported click styles; root removed
+them. Actual outer-PTY keyboard/paste/mouse/zoom/resizing test passes1.97s.
+TUI+PTY+backend31passed1.59s; fresh10kstreamingREPLstresspassed7.82s. These are
+focused evidence, not final frozen-head gates.
+
+New user requirements are in spec-additions.md: full in-process llm-usage view,
+active/alternate5hweekly runout estimates, sharedCLI/REPLgrammar, CtrlEeditor
+retaining taskoptions. Root added usage.dashboard_snapshot private-stream API,
+bridge_usage nonblocking single-inflight cache, F8Usage view/dynamiczoomedfullUI,
+control/usage interactive expand, and reused one selection projection/forecast.
+Usage/API/refresh/TUI focused34passed. Runtime/store/CLI agents own their files;
+terminal agent ownsTUI/terminal/sessions; root currently ownsmonitor/usage/scripts,
+docs/screenshot. Independent Sol6.1High reviewer resumed after capacityreset.
+
+Last diagnostic fullPython311:985passed1failed while UI was changing; full315:
+989passed5failed while REPL/UI changed. The statusfocus issue is fixed and
+focusedCLI315retakes passed except oldresponse-shape test nowupdated. CI on
+pushedb11b719 passed global85 but failed requiredBridge90 (80%). Do NOT weaken
+coveragegate, markready, merge/tagorclaimfinalpass. Finish purposefulcoverage,
+monitor/stall/history/UI gaps, screenshot, finalindependentreview and full311/
+315coverage before publication. New native script must retain recovery metadata
+if cleanup fails (currently TemporaryDirectory must be hardened).

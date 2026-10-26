@@ -351,7 +351,7 @@ Reviewed `llm_tools/bridge.py` command application and
   launch fails instead of accepting it. The 94-test execution/restoration
   suite passed.
 
-### O7 — High: graceful stop can report STOPPED before terminal cleanup succeeds — OPEN
+### O7 — High: graceful stop can report STOPPED before terminal cleanup succeeds — CLOSED
 
 - **Location:** `llm_tools/bridge_runtime.py` (`run_controller` shutdown) and
   `llm_tools/bridge.py` (`stop` command).
@@ -376,7 +376,7 @@ Reviewed `llm_tools/bridge.py` command application and
   not inject tmux kill failure. Add an ordering/failure regression and, if
   feasible, assert attached-client return through the CLI stop path.
 
-### O8 — High: recovery can accept an unverified terminal teardown — OPEN
+### O8 — High: recovery can accept an unverified terminal teardown — CLOSED
 
 - **Location:** `llm_tools/bridge_runtime.py` (`run_controller` recovery and
   `_open_existing`).
@@ -421,7 +421,7 @@ Reviewed `llm_tools/bridge.py` command application and
   controller restart test. Installed-provider native restore remains
   **NOT VERIFIED**, and unsupported providers remain reconstructed/unavailable.
 
-### O10 — High: force stop leaves an independent verifier running — OPEN
+### O10 — High: force stop leaves an independent verifier running — CLOSED
 
 - **Location:** `llm_tools/bridge_runtime.py` (`_run_bounded_verifier`,
   `run_configured_verifier`) and `llm_tools/bridge.py` (`stop --force`).
@@ -533,10 +533,9 @@ passed (35 tests). It covers normal O3-O8 lifecycle paths and exact native
 resume across a controller restart; the injected tmux kill failure above is a
 separate manual reproduction.
 
-- Persistence gate: **OPEN** — P1-P9 and verifier/process-identity fixes have
-  targeted coverage; the latest full focused persistence/concurrency gate has
-  not been independently rerun here. P9 is closed.
-  hook change has only targeted verification (3 tests).
+- Persistence gate: **CLOSED** — P1-P9, command atomicity, process identity,
+  migrations and concurrent transactions passed the latest independent
+  96-test persistence/lifecycle/CLI gate recorded below.
 - Native terminal gate: **CLOSED** — T1-T6 passed at this checkpoint. CI
   configuration was reviewed locally; no CI run has been reviewed.
 - Operator command dispatch: **CLOSED for O1, O2 and O5** — command effects are
@@ -547,14 +546,13 @@ separate manual reproduction.
   interleaving has manual evidence but no dedicated checked-in regression.
 - Stop and wait lifecycle: **CLOSED for O4** — Bridge-aware Ralph and scheduler
   waits poll operator state; no-hook behavior remains unchanged.
-- Controller recovery: **OPEN for O8** — the real-tmux success path terminates
-  the orphan provider before readiness, but failed tmux shutdown is unverified
-  and demonstrably can orphan live panes.
-- Graceful stop restoration: **OPEN for O7** — STOPPED currently precedes
-  verified terminal cleanup; failed tmux shutdown can leave live panes.
-- Verifier cancellation: **OPEN for O10** — force stop demonstrably leaves a
-  verifier in its independently-created process group running after reporting
-  success.
+- Controller recovery: **CLOSED for O8** — real tmux and injected teardown
+  failure checks pass; failed cleanup preserves metadata and replacement
+  readiness is not published.
+- Graceful stop restoration: **CLOSED for O7** — verified terminal cleanup
+  precedes STOPPED, including injected failure coverage.
+- Verifier cancellation: **CLOSED for O10** — persisted verifier identity and
+  owned descendant-tree teardown are exercised by force-stop/recovery tests.
 - Native session identity safety: **CLOSED** — Codex is never auto-bound to a
   discovered session; Claude/Copilot IDs are Bridge-generated and matched to
   exact structured metadata before persistence. Actual provider restore remains
@@ -576,7 +574,7 @@ production changes against `066af5c`, including uncommitted Bridge modules.
 This section supersedes older blanket gate-closed claims where a finding below
 reopens the gate. Production code is owned by the implementors.
 
-### A1 — High: rejected mission cancellation commits partial effects — OPEN
+### A1 — High: rejected mission cancellation commits partial effects — CLOSED
 
 - **Location:** `bridge._apply_operator_command`, `_apply_operator_effect`, and
   `BridgeStore.set_task_status`.
@@ -593,7 +591,7 @@ reopens the gate. Production code is owned by the implementors.
   working tree. One uses actual failed-task state; one injects a transition
   rejection after the mission transition to enforce rollback generally.
 
-### A2 — High: complete stop can leave owned descendants running — OPEN
+### A2 — High: complete stop can leave owned descendants running — CLOSED
 
 - **Location:** `bridge_runtime._terminate_owned_process_group`.
 - **Reproduction:** An isolated process-group leader creates a child that
@@ -609,7 +607,7 @@ reopens the gate. Production code is owned by the implementors.
   subprocess regression, independently RED. Its finally block cleans up only
   the process group created by that test.
 
-### A3 — High: effective launch configuration is lost on restart — OPEN
+### A3 — High: effective launch configuration is lost on restart — CLOSED
 
 - **Location:** `bridge.start_mission`, `bridge_runtime.launch_controller`,
   `run_controller`, and `bridge_refresh.refresh_capacity_observation`.
@@ -663,7 +661,7 @@ reopens the gate. Production code is owned by the implementors.
 Overall full-spec verdict at this audit checkpoint: **NOT MERGE READY**.
 See `spec-audit.md` for the requirement and acceptance-scenario trace.
 
-### A6 — High: existing attached scheduler loses terminal resize propagation — OPEN
+### A6 — High: existing attached scheduler loses terminal resize propagation — CLOSED
 
 - **Location:** `scheduler.run_fresh_attached`.
 - **Evidence:** The new unconditional `start_new_session=True` separates
@@ -679,3 +677,209 @@ See `spec-audit.md` for the requirement and acceptance-scenario trace.
 - **Verification:** Actual outer-PTY test
   `test_legacy_attached_scheduler_forwards_outer_terminal_resize` independently
   RED. No provider credentials or model invocation are involved.
+
+### Reverification at `b11b719`, 2026-10-26
+
+- `python -m pytest tests/test_bridge_review_regressions.py
+  tests/test_bridge_force_stop.py tests/test_terminal_teardown_failure.py -q`
+  passed all 14 cases before the additional A7 regression below.
+- **A1 CLOSED:** failed-task cancellation succeeds; a rejected effect rolls back
+  before its durable rejection acknowledgement. Both independent regressions
+  pass after inspection of the exception/transaction boundary.
+- **A6 CLOSED:** ordinary attached execution retains its foreground group;
+  the actual outer-PTY resize regression passes.
+- **A2 CLOSED for same-process-group descendants:** the group-membership scan
+  now waits for descendants and escalates after leader exit; actual subprocess
+  regression passes. A7 below covers the distinct independent-session case.
+- **A3 PARTIAL:** provider/mode overrides are persisted and the basic shutdown
+  regression passes. Prior configuration must still be retained for recovery:
+  the current controller overwrites `headless` before deciding whether to stop
+  an old tmux station. Explicit mode switches also need unambiguous semantics.
+  These concerns were sent to the root before final closure.
+
+### A7 — High: independent-session owned tools survive complete stop — CLOSED
+
+- **Location:** `bridge_runtime._terminate_owned_process_group` and process
+  ownership metadata/recovery.
+- **Runtime observation:** The real Codex 0.164.0 daemonless native probe
+  created MCP tool subprocesses in separate process groups. This is normal
+  provider behavior, not a hypothetical detached unrelated session.
+- **Independent reproduction:** A provider fixture starts a TERM-ignoring
+  child using `start_new_session=True`. Complete-stop helper returns after
+  killing the original group while the owned child remains alive.
+- **Impact:** Managed tool processes may continue running after successful
+  force-stop/recovery. Group membership alone is insufficient for the complete
+  managed-process shutdown contract.
+- **Required correction:** Track and terminate verified owned descendants,
+  including independent sessions, without signalling unrelated or reused PIDs.
+  Preserve sufficient identity before losing parent ancestry during shutdown.
+- **Verification:** New actual-subprocess regression
+  `test_complete_stop_terminates_owned_descendant_in_a_new_session` independently
+  RED. Its cleanup validates the exact child start token and signals only
+  fixture-created groups. Root and main implementor were notified.
+
+### Owned Codex native identity observation (no transcript capture)
+
+- Root's native probe supplied its exact root PID 125853/start tick 40682190,
+  launched with `--no-daemon` in `/tmp/lb-native-owned/work`.
+- The reviewer checked that root identity before and after the read-only probe.
+  Its direct native Codex child PID 125873/start tick 40682195 held writable
+  rollout descriptor 61. Only the first structured `session_meta` record was
+  read; no messages, credentials or transcript contents were logged.
+- The metadata identified UUID `01a17795-0e6a-7a00-9080-e5db0c68a535`, matching
+  CWD, source `cli`, originator `codex-tui`. Exactly one owned writable rollout
+  identity was found. This establishes process-bound provenance and avoids a
+  global recency/CWD lookup. Implementation must retain ambiguity/missing-data
+  fallback and recheck process start tokens.
+- Installed protocol schemas were generated without model calls. The official
+  [App Server documentation](https://learn.chatgpt.com/docs/app-server) also
+  provides `thread/start` returning an exact ID; it is a possible alternative,
+  but this review did not execute a precreate/resume protocol experiment.
+- Root reported `NATIVE_BRIDGE_OK` from the live reply. That reply and native
+  resume/mouse evidence belong to the root's live-probe ledger; the reviewer
+  independently establishes only the owned-FD identity facts above.
+
+### Changed-surface re-review after `b11b719`, 2026-10-26
+
+This review covers the subsequent working-tree fixes. It is not final approval
+of an unfrozen release head.
+
+- **Independently passed:** 82 tests in 16.72 seconds across reviewer
+  regressions, typed native sessions, real-controller fake native restart,
+  runtime, embedded Usage/cache/rendering, TUI and attached outer PTY suites.
+  Command: `python -m pytest tests/test_bridge_review_regressions.py
+  tests/test_bridge_sessions.py tests/test_bridge_native_e2e.py
+  tests/test_bridge_runtime.py tests/test_bridge_usage.py
+  tests/test_usage_embedded.py tests/test_bridge_tui.py
+  tests/test_terminal_attached.py -q -o addopts=''`.
+- **Independently passed:** a further 96 tests in 12.35 seconds using
+  `python -m pytest tests/test_bridge_store.py tests/test_bridge_concurrency.py
+  tests/test_bridge_dispatch_atomicity.py tests/test_bridge_force_stop.py
+  tests/test_bridge_recovery_tmux.py tests/test_bridge_verifier.py
+  tests/test_terminal_teardown_failure.py tests/test_bridge_cli.py
+  tests/test_bridge_cli_acceptance.py tests/test_bridge_steering.py
+  tests/test_bridge_store_boundaries.py -q -o addopts=''`.
+- **A3 CLOSED:** the controller now retains prior station mode for recovery,
+  cleans up before persisting a new effective mode, and makes explicit native
+  versus headless overrides mutually exclusive. Both basic persistence and
+  prior-mode teardown-failure regressions pass.
+- **A7 CLOSED:** a bounded process-tree snapshot records descendant start
+  tokens before signalling; separate-session groups and surviving descendants
+  are terminated with identity checks. The actual separate-session fixture
+  passes, alongside the prior leader-exit fixture.
+- **O7/O8/O10 CLOSED:** stop/recovery preserve terminal metadata on failed
+  teardown and do not publish STOPPED/replacement readiness first; verifiers
+  have persisted process identity and owned tree cleanup. Runtime, force-stop
+  and teardown fault cases have independently passed.
+- **A4 PARTIAL:** task detail, amendment preload, preserved capacity scopes and
+  scope forecasts now exist and their targeted tests pass. Selected-station
+  projection and detail scrolling remain assigned follow-up work; this High
+  finding remains open until those actual workflows are verified.
+- **A5 PARTIAL:** explicit proposal provenance/acceptance now exists, operator
+  commands share public parser/handlers, and events use bounded SQL paging.
+  Root owns remaining monitor/stall/history evidence and final ledger refresh.
+- The reviewer inspected the stronger root-owned full native mission probe
+  and `native-mission-results.json`. It checks a real native reply, complete
+  controller shutdown, the same owned UUID with RESTORED_NATIVE after a new
+  controller, and a new reply recalling prior context. Its response oracle
+  distinguishes the first and resumed marker and rejects substring matches.
+  Codex native reply/resume are now supported by live evidence; provider mouse
+  remains explicitly NOT VERIFIED. No paid calls were initiated by this reviewer.
+
+### A8 — Medium: accepted follow-up can be stranded in a terminal mission — CLOSED
+
+- The independent temporary-store reproduction accepted a pending proposal
+  after mission completion, returning APPLIED with an ACCEPTED/QUEUED task in a
+  COMPLETED mission that cannot resume. Ordinary task additions had the same
+  issue.
+- `add_task`, `propose_task` and proposal acceptance now reject COMPLETED and
+  CANCELLED missions before mutation. Two independent parameterized review
+  regressions pass; failed acceptance preserves PENDING state.
+
+### A9 — Medium: public proposal options are rewritten as compact syntax — CLOSED
+
+- The reviewer independently reproduced `proposal accept --task ID` failing
+  inside the REPL while being valid standalone grammar. The positional alias
+  rewrite treated `--task` itself as the task ID.
+- The rewrite now applies only to a positional third token. Independent
+  acceptance/rejection tests using public option syntax both pass, including a
+  quoted rejection reason. The original standalone parser still validates it.
+
+### A10 — Medium: embedded Usage can hide a configuration exit — CLOSED
+
+- `EmbeddedUsage._refresh` catches Exception while the existing configuration
+  loader deliberately raises SystemExit for invalid configuration. The worker
+  then exits through `finally` with no recorded error; an empty snapshot can
+  incorrectly report ready.
+- Root owns the boundary fix and regression: report unavailable/configuration
+  error without blocking input or printing provider/config payloads. The
+  already-tested ordinary Exception path retains an explicitly stale result.
+
+### A11 — Medium: repository activity fingerprint ignores executable changes — CLOSED
+
+- **Location:** `bridge_progress.repository_checkpoint`.
+- The new bounded fingerprint hashes names and content but omits executable
+  mode. Independently changing an existing script from 0644 to 0755 yields the
+  same nonempty fingerprint, so meaningful executable changes can contribute
+  to a false repeated-unchanged warning.
+- Include the relevant file mode in activity evidence and race validation.
+  `test_repository_progress_observes_executable_mode_changes` independently
+  fails using a real disposable Git repository; no provider calls are involved.
+
+### A12 — Medium: unaccepted proposals prevent normal mission completion — CLOSED
+
+- **Location:** `BridgeMissionHooks.before_iteration` completion count.
+- `ready_tasks`, monitor counts, verification criteria and the mission's legal
+  COMPLETED transition exclude unaccepted proposals. The controller's final
+  task count still includes them, so all accepted work can be verified while
+  the controller waits forever on a proposal that must not be scheduled.
+- Apply the same accepted/operator work predicate to the controller's
+  completion decision. Pending proposals remain inspectable without becoming
+  required work.
+- `test_unaccepted_proposal_does_not_prevent_verified_mission_completion`
+  independently fails against actual store/hook state; its wait guard prevents
+  a hanging test and does not replace the scheduling/count logic.
+
+### A13 — High: unchanged editor roundtrip silently truncates task instructions — OPEN
+
+- **Location:** `bridge_tui._run` Ctrl-R path, `_bounded_task_value` and
+  `_edit_task_prompt`.
+- Ctrl-R preloads the display projection's prompt, which is truncated to
+  16,000 characters and has tabs/carriage returns replaced. Saving without
+  changing anything submits that lossy projection as the next durable prompt.
+- **Independent reproduction:** A real curses control process, real SQLite
+  mission and shared CLI dispatcher use `/bin/true` as a no-op editor. A prompt
+  over 20,000 characters loses its tail, tab and CRLF in the persisted amendment.
+  `tests/test_bridge_long_prompt_editor.py` is independently RED in 0.39s.
+- **Impact:** Later execution silently receives incomplete or modified user
+  instructions even though the operator made no content changes.
+- Fetch full verbatim task text on edit through an appropriate task-read
+  callback/public CLI, preserving newlines when writing the private editor
+  file. Keep display projections bounded and sanitized for rendering only.
+  The terminal implementor has the regression and owns remediation.
+
+### Activity/monitor/Usage follow-up verification
+
+Independent command `python -m pytest tests/test_bridge_progress.py
+tests/test_bridge_review_regressions.py tests/test_bridge_monitor.py
+tests/test_bridge_refresh.py tests/test_bridge_usage.py tests/test_usage_embedded.py
+-q -o addopts=''` passed **46 tests in 2.36s**.
+
+- **A10 CLOSED:** embedded refresh catches the configuration loader's
+  SystemExit at its background boundary and records unavailable state.
+- **A11 CLOSED:** executable permission bits are now part of the repository
+  fingerprint; the independent chmod regression passes.
+- **A12 CLOSED:** controller completion counts accepted/operator work only;
+  the independent pending-proposal hook regression passes.
+- The inspected convergence module bounds retained evidence to 32 observations,
+  returns unknown for incomplete scans, and distinguishes unchanged boundaries,
+  identical failures, provider cycling and repeated reversals. A single long
+  operation is not called stalled. Repository evidence remains separate from
+  task completion evidence.
+- Actual capacity refresh now records observations through the shared usage
+  sample helper before estimating. The non-mock test creates two real history
+  samples and obtains the expected estimate without opening Usage or relying on
+  an optional service. Model-specific and delegated pool labels are preserved.
+- Selected-station preference, historical operation metadata, elapsed time,
+  iteration and progress age now reach the real monitor snapshot. Final TUI
+  behavior and A13 editor preservation remain under terminal review.

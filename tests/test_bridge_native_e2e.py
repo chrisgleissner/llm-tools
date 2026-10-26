@@ -26,25 +26,34 @@ def wait(predicate, timeout=15):
     assert predicate(), "native controller did not reach expected state"
 
 
-@pytest.mark.parametrize("provider", ["claude", "copilot"])
+@pytest.mark.parametrize("provider", ["claude", "copilot", "codex"])
 def test_native_session_id_survives_full_controller_shutdown(tmp_path, env, fake_bin, provider):
     state = tmp_path / "state"
     env["LLM_BRIDGE_STATE_DIR"] = str(state)
     env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "claude-config")
     env["COPILOT_CONFIG_DIR"] = str(tmp_path / "copilot-config")
+    env["CODEX_HOME"] = str(tmp_path / "codex-config")
     ready = {"available": True, "five_hour": {"remaining": 80}, "week": {"remaining": 80}, "monthly": {"remaining": 80}}
     env["LLM_SCHEDULER_USAGE_JSON"] = json.dumps({provider: ready})
     binary = fake_bin / provider
     binary.write_text("#!" + sys.executable + "\n" + """import json, os, sys, time
 from pathlib import Path
 if '--help' in sys.argv:
-    print('Usage: --session-id UUID --resume ID'); raise SystemExit(0)
+    print('Usage: --session-id UUID --resume ID --no-daemon\\n  resume  Resume session'); raise SystemExit(0)
 provider = Path(sys.argv[0]).name
-mode = 'resume' if '--resume' in sys.argv else 'new'
-flag = '--resume' if mode == 'resume' else '--session-id'
-session_id = sys.argv[sys.argv.index(flag)+1]
+mode = 'resume' if '--resume' in sys.argv or 'resume' in sys.argv else 'new'
+flag = 'resume' if provider == 'codex' else '--resume' if mode == 'resume' else '--session-id'
+if provider == 'codex' and mode == 'new':
+    import uuid
+    session_id = str(uuid.uuid4())
+else:
+    session_id = sys.argv[sys.argv.index(flag)+1]
 cwd = str(Path.cwd().resolve())
-if provider == 'claude':
+if provider == 'codex':
+    assert '--no-daemon' in sys.argv
+    path = Path(os.environ['CODEX_HOME'])/'sessions'/('rollout-'+session_id+'.jsonl')
+    record = {'type':'session_meta','payload':{'id':session_id,'cwd':cwd}}
+elif provider == 'claude':
     path = Path(os.environ['CLAUDE_CONFIG_DIR'])/'projects'/cwd.replace('/','-')/(session_id+'.jsonl')
     record = {'type':'system','subtype':'init','session_id':session_id,'cwd':cwd}
 else:
@@ -54,8 +63,9 @@ if mode == 'resume': assert path.exists()
 path.parent.mkdir(parents=True, exist_ok=True)
 with path.open('a') as output: output.write(json.dumps(record)+'\\n')
 with Path('native-calls.jsonl').open('a') as output: output.write(json.dumps({'mode':mode,'id':session_id,'pid':os.getpid(),'args':sys.argv[1:]})+'\\n')
+held = path.open('a')
 print('native fake completed', flush=True)
-time.sleep(.1)
+time.sleep(1.5 if provider == 'codex' else .1)
 """)
     binary.chmod(0o700)
     created = json.loads(cli(env, "mission", "create", "--prompt", "First native task",

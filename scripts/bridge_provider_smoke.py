@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -29,14 +30,28 @@ COMMANDS = {
 }
 
 
-def probe(provider: str, seconds: float, *, submit: bool = False) -> dict[str, object]:
+def response_seen(screen: str, expected: str) -> bool:
+    """A prompt echo or historic status message is not a model response."""
+    return any(re.fullmatch(r"\s*(?:[•●]\s*)?" + re.escape(expected) + r"\s*", line)
+               for line in screen.splitlines())
+
+
+def probe(provider: str, seconds: float, *, submit: bool = False,
+          resume_id: str | None = None, resume_cwd: Path | None = None,
+          expected: str = "BRIDGE_SMOKE_OK") -> dict[str, object]:
     command = list(COMMANDS[provider])
     if submit:
         prompt = ("Reply with the uppercased word bridge followed by an underscore, "
                   "then the uppercased word smoke, an underscore, then the uppercased "
                   "word ok. Do not use tools or inspect or change any files.")
         if provider == "codex":
-            command += ["--sandbox", "read-only", "--ask-for-approval", "never", prompt]
+            command += ["--sandbox", "read-only", "--ask-for-approval", "never"]
+            if resume_id:
+                command += ["resume", resume_id]
+                prompt = ("Recall the exact marker in your first reply in this conversation. "
+                          "Reply only with that marker followed by an underscore and the uppercase "
+                          "word resumed. Do not use tools or read or change files.")
+            command += [prompt]
         elif provider == "claude":
             command += ["--tools", "", "--", prompt]
         elif provider == "copilot":
@@ -64,8 +79,9 @@ def probe(provider: str, seconds: float, *, submit: bool = False) -> dict[str, o
     backend = TmuxTerminalBackend()
     with tempfile.TemporaryDirectory(prefix="bridge-smoke-") as directory:
         root = Path(directory)
-        cwd = root / "workspace"
-        cwd.mkdir()
+        cwd = resume_cwd if resume_id else root / "workspace"
+        if not resume_id:
+            cwd.mkdir()
         runtime = root / "runtime"
         runtime.mkdir(mode=0o700)
         subprocess.run(["git", "init", "-q", str(cwd)], check=True)
@@ -77,15 +93,24 @@ def probe(provider: str, seconds: float, *, submit: bool = False) -> dict[str, o
                 cwd=cwd, socket_path=runtime / "tmux.sock",
                 session_name="probe", size=(120, 40))
             text = ""
+            trusted = False
             while time.monotonic() - started < seconds:
                 try:
                     text = backend.capture(handle, pane="provider", ansi=True)
                 except subprocess.CalledProcessError:
                     break
+                if provider == "codex" and not resume_id and "Trust this folder?" in text and not trusted:
+                    # Only the empty git directory just created by this probe.
+                    backend.send_keys(handle, pane="provider", keys="Enter")
+                    trusted = True
+                if submit and response_seen(text, expected):
+                    break
                 time.sleep(0.2)
             result["output_seen"] = bool(text.strip())
-            if submit and "BRIDGE_SMOKE_OK" in text:
+            if submit and response_seen(text, expected):
                 result["model_execution"] = "PASS: expected response observed"
+                if resume_id:
+                    result["native_resume"] = "PASS: exact-ID conversation recalled previous marker"
             result["ansi_rendering"] = "PASS" if "\x1b[" in text else "NOT VERIFIED"
             result["startup"] = "OUTPUT OBSERVED" if text.strip() else "NOT VERIFIED: no output"
             pane = subprocess.run(["tmux", "-S", str(handle.socket_path),
@@ -124,16 +149,29 @@ def main() -> int:
     parser.add_argument("--seconds", type=float, default=8)
     parser.add_argument("--model-call-budget", type=int, default=0, choices=range(4),
                         help="Explicit opt-in: submit at most N harmless initial prompts (default zero)")
+    parser.add_argument("--resume-session-id", help="Explicit previously owned Codex UUID; never use most recent")
+    parser.add_argument("--resume-cwd", type=Path, help="Original disposable probe directory")
+    parser.add_argument("--expected-reply", default="BRIDGE_SMOKE_OK")
+    parser.add_argument("--require-model-reply", action="store_true", help="Exit nonzero unless expected response observed")
     args = parser.parse_args()
     if not 1 <= args.seconds <= 30:
         parser.error("--seconds must be between 1 and 30")
     if args.model_call_budget and (len(args.provider) > args.model_call_budget or
                                    any(p not in {"codex", "claude", "copilot"} for p in args.provider)):
         parser.error("model probes require one budget unit per provider; only codex/claude/copilot supported")
+    if args.resume_session_id:
+        if (args.provider != ["codex"] or not args.model_call_budget or args.resume_cwd is None
+                or not args.resume_cwd.is_dir()
+                or not re.fullmatch(r"[0-9a-fA-F-]{36}", args.resume_session_id)):
+            parser.error("resume requires one Codex model call, its explicit UUID and original --resume-cwd")
+        if args.expected_reply == "BRIDGE_SMOKE_OK":
+            parser.error("resume requires --expected-reply with the new _RESUMED suffix to reject history echoes")
     os.environ.setdefault("TERM", "xterm-256color")
-    print(json.dumps([probe(provider, args.seconds, submit=bool(args.model_call_budget))
-                      for provider in args.provider], indent=2))
-    return 0
+    results = [probe(provider, args.seconds, submit=bool(args.model_call_budget),
+                     resume_id=args.resume_session_id, resume_cwd=args.resume_cwd,
+                     expected=args.expected_reply) for provider in args.provider]
+    print(json.dumps(results, indent=2))
+    return int(args.require_model_reply and any(not str(result["model_execution"]).startswith("PASS") for result in results))
 
 
 if __name__ == "__main__":

@@ -196,3 +196,77 @@ def test_refresh_failure_event_is_bounded_and_does_not_leak_exception_text(tmp_p
     event = next(event for event in store.events(mission["id"]) if event["kind"] == "capacity-refresh-error")
     assert event["data"]["reason"] == "TimeoutError"
     assert "credential" not in str(event["data"])
+
+
+def test_capacity_projection_reuses_usage_forecast_without_inventing_opaque_values(monkeypatch):
+    from llm_tools import common
+    from llm_tools.bridge_refresh import _safe_decision
+    observed = []
+    def estimate(provider, scope, remaining):
+        observed.append((provider, scope, remaining))
+        return '38m' if scope == '5h' else '-'
+    monkeypatch.setattr(common, 'estimate_remaining_time_from_log', estimate)
+    result = _safe_decision({'decisions':[{'provider':'codex','windows':[
+        {'name':'5h','kind':'reset_window','remaining_percent':25},
+        {'name':'weekly','kind':'reset_window','remaining_percent':71},
+        {'name':'subscription','kind':'opaque','remaining_percent':None}]}]})
+    windows = result['decisions'][0]['windows']
+    assert windows[0]['estimated_remaining'] == '38m'
+    assert windows[1]['estimated_remaining'] is None
+    assert windows[2].get('estimated_remaining') is None
+    assert observed == [('Codex','5h',25),('Codex','weekly',71)]
+
+
+def test_live_capacity_observations_warm_real_forecast_history_without_usage_view(tmp_path, monkeypatch):
+    import json
+    from llm_tools import common
+    from llm_tools.bridge_refresh import _safe_decision
+    monkeypatch.setenv('XDG_CACHE_HOME',str(tmp_path/'cache'))
+    monkeypatch.setenv('LLM_USAGE_NOW_EPOCH','100000')
+    decision = {'provider':'codex','windows':[{'name':'5h','kind':'reset_window','remaining_percent':90}]}
+    assert _safe_decision({'decisions':[decision]})['decisions'][0]['windows'][0]['estimated_remaining'] is None
+    monkeypatch.setenv('LLM_USAGE_NOW_EPOCH','101000')
+    decision['windows'][0]['remaining_percent'] = 80
+    result = _safe_decision({'decisions':[decision]})
+    assert result['decisions'][0]['windows'][0]['estimated_remaining'] == common.fmt_duration(8000)
+    rows = [json.loads(line) for line in (common.usage_cache_dir()/'llm-usage.log').read_text().splitlines()]
+    assert [row['remaining'] for row in rows] == [90,80]
+
+
+def test_forecast_pool_identity_preserves_actual_model_and_delegated_capacity(monkeypatch, tmp_path):
+    import json
+    from llm_tools import common
+    from llm_tools.bridge_refresh import _safe_decision
+    monkeypatch.setenv('XDG_CACHE_HOME',str(tmp_path/'cache'))
+    codex_snapshot = {'available':True,'rows':[{'key':'codex-spark','name':'Codex Spark capacity pool',
+        'five_hour':{'used':40},'week':{'used':30}}]}
+    spark = common.usage_decision_for_provider('codex','auto','1','60',codex_snapshot,
+        model='gpt-spark',allow_fallback=False)
+    assert spark['usage_history_provider'] == 'Codex Spark capacity pool'
+    claude_snapshot = {'available':True,'model_weeks':[{'model':'Sonnet','week':{'used':20}}]}
+    sonnet = common.usage_decision_for_provider('claude','auto','1','60',claude_snapshot,
+        model='claude-sonnet',allow_fallback=False)
+    assert sonnet['usage_history_provider'] == 'Claude Sonnet'
+    delegated = {'provider':'kilo','capacity_provider':'zai','usage_history_provider':'Z.ai',
+        'selected_model':'zai/glm-5.2','windows':[{'name':'5h','kind':'reset_window','remaining':50}]}
+    _safe_decision({'decisions':[spark,sonnet,delegated]})
+    rows = [json.loads(line) for line in (common.usage_cache_dir()/'llm-usage.log').read_text().splitlines()]
+    assert {row['provider'] for row in rows} == {'Codex Spark capacity pool','Claude Sonnet','Z.ai'}
+
+
+def test_rapid_identical_observations_are_sampled_once_per_30_seconds(tmp_path, monkeypatch):
+    import json
+    from llm_tools import common
+    from llm_tools.bridge_refresh import _safe_decision
+    monkeypatch.setenv('XDG_CACHE_HOME',str(tmp_path/'cache'))
+    monkeypatch.setenv('LLM_USAGE_NOW_EPOCH','120000')
+    selection = {'decisions':[{'provider':'codex','windows':[{'name':'5h','kind':'reset_window','remaining_percent':80}]}]}
+    for _ in range(20): _safe_decision(selection)
+    log = common.usage_cache_dir()/'llm-usage.log'
+    assert len(log.read_text().splitlines()) == 1
+    monkeypatch.setenv('LLM_USAGE_NOW_EPOCH','120030')
+    _safe_decision(selection)
+    assert len(log.read_text().splitlines()) == 2
+    selection['decisions'][0]['windows'][0]['remaining_percent'] = 79
+    _safe_decision(selection)
+    assert json.loads(log.read_text().splitlines()[-1])['remaining'] == 79

@@ -299,3 +299,44 @@ def test_latest_event_queries_use_mission_kind_id_index(tmp_path) -> None:
         assert "events_mission_kind_id" in plan
         assert "TEMP B-TREE" not in plan
     store.close()
+
+
+def test_viewed_station_and_native_history_are_independent_of_executing_station(tmp_path):
+    with BridgeStore(tmp_path/'bridge.sqlite3') as store:
+        mission = store.create_mission('stations','objective',cwd=tmp_path,config={'providers':'claude,codex','viewed_station':'claude'})
+        mid = mission['id']
+        store.set_mission_status(mid,'RUNNING')
+        first = store.add_task(mid,'first')
+        operation = store.begin_operation(first,iteration=1,station='claude')
+        store.mark_operation_running(operation,model='sonnet',route_id='claude-old')
+        store.record_operation_session(operation,provider='claude',restoration_state='NATIVE_CREATED',session_id='fixture-session',cwd=str(tmp_path),source='claude:system.init')
+        store.finish_operation(operation,exit_code=0)
+        store.verify_task(first,approved=True)
+        second = store.add_task(mid,'second')
+        current = store.begin_operation(second,iteration=2,station='codex')
+        store.mark_operation_running(current,model='gpt-6-luna')
+        snapshot = project_snapshot(store,mid)
+        assert snapshot['station_context']['viewed_station'] == 'claude'
+        assert snapshot['station_context']['last_launched_station'] == 'codex'
+        assert snapshot['station_context']['executing_operation'] == current
+        claude = next(row for row in snapshot['stations'] if row['id']=='claude')
+        assert claude['restoration_state'] == 'NATIVE_CREATED'
+        assert any(row['id']=='claude-old' for row in snapshot['stations'])
+        assert snapshot['execution']['iteration'] == 2
+        assert snapshot['execution']['operation_elapsed_seconds'] >= 0
+
+
+def test_convergence_uses_bounded_persisted_evidence_and_verified_progress_resets_warning(tmp_path):
+    with BridgeStore(tmp_path/'bridge.sqlite3') as store:
+        mission = store.create_mission('convergence','objective',cwd=tmp_path)
+        mid = mission['id']
+        for station in ['codex','claude','codex']:
+            store.record_runtime_event(mid,'operation-progress',{'before':'same','after':'same','station':station,'exit_code':1,'output_sha256':'identical'})
+        snapshot = project_snapshot(store,mid)
+        assert snapshot['health']['provider_cycles_without_change'] is True
+        assert snapshot['health']['identical_failures'] == 3
+        assert 'without observed repository change' in snapshot['health']['stall_warning']
+        store.record_runtime_event(mid,'task-verified',{'evidence_count':1})
+        recovered = project_snapshot(store,mid)
+        assert recovered['health']['identical_failures'] == 0
+        assert recovered['health']['stall_warning'] is None

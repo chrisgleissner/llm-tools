@@ -1,0 +1,8 @@
+{
+  "successful_tasks": 1000,
+  "provider_attempts": 1009,
+  "elapsed_seconds": 24.00947156600887,
+  "traced_current_growth_bytes": 360410,
+  "traced_peak_bytes": 1597349,
+  "database_bytes": 3944448
+}

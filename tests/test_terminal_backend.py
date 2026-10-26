@@ -77,6 +77,27 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
             capture_output=True,
         ).stdout.strip()
         assert focus_events == "on"
+        status = subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), "show-option", "-g", "-v", "status"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        assert status == "on"
+        status_left = subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), "show-option", "-g", "-v", "status-left"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        status_right = subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), "show-option", "-g", "-v", "status-right"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        assert "Bridge controls [C-] B]" in status_left
+        assert "Provider [C-] P]" in status_right
         root_bindings = subprocess.run(
             ["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "root"],
             check=True,
@@ -85,6 +106,20 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
         ).stdout
         assert "MouseDown1Pane" in root_bindings and "select-pane -t = \\; send-keys -M \\; select-pane -t =" in root_bindings
         assert "WheelUpPane" in root_bindings and "WheelDownPane" in root_bindings
+        root_bindings = subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "root"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        prefix_bindings = subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "prefix"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        assert "MouseDown1StatusLeft" in root_bindings and "MouseDown1StatusRight" in root_bindings
+        assert "B" in prefix_bindings and "P" in prefix_bindings
 
         backend.resize(handle, cols=120, rows=40)
         backend.send_keys(handle, pane="provider", keys="hello")
@@ -137,6 +172,38 @@ def test_terminal_backend_uses_only_its_private_tmux_server(tmp_path: Path) -> N
         reopened = backend.open_existing(handle.socket_path, handle.session_name)
         assert reopened == handle
         assert backend.server_owned(handle.socket_path)
+    finally:
+        backend.stop(handle)
+
+
+def test_focus_helper_expands_the_selected_owned_pane(tmp_path: Path) -> None:
+    backend = TmuxTerminalBackend()
+    handle = backend.start(
+        provider_argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+        bridge_argv=["/bin/sh", "-c", "exec cat"],
+        cwd=tmp_path,
+        socket_path=tmp_path / "focus.sock",
+        session_name="focus-test",
+    )
+
+    def value(*args: str) -> str:
+        return subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), *args], check=True, text=True, capture_output=True,
+        ).stdout.strip()
+
+    try:
+        backend.focus(handle, pane="provider", expand=True)
+        assert value("display-message", "-p", "#{pane_id}") == handle.provider_pane
+        assert value("display-message", "-p", "#{window_zoomed_flag}") == "1"
+        backend.focus(handle, pane="provider", expand=True)  # Already expanded is idempotent.
+        assert value("display-message", "-p", "#{window_zoomed_flag}") == "1"
+        backend.focus(handle, pane="bridge", expand=True)
+        assert value("display-message", "-p", "#{pane_id}") == handle.bridge_pane
+        assert value("display-message", "-p", "#{window_zoomed_flag}") == "1"
+        backend.focus(handle, pane="provider")
+        assert value("display-message", "-p", "#{pane_id}") == handle.provider_pane
+        with pytest.raises(ValueError, match="at least 80"):
+            backend.resize(handle, cols=79, rows=24)
     finally:
         backend.stop(handle)
 

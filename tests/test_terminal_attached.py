@@ -122,9 +122,7 @@ with out.open("ab", buffering=0) as log:
         return result.stdout.strip() == "1"
 
     def detach_client() -> None:
-        os.write(master, b"\x1d")
-        wait_for(prefix_pending)
-        os.write(master, b"d")
+        prefix_key("d")
         wait_for(lambda: process.poll() is not None)
 
     process = attach()
@@ -142,6 +140,42 @@ with out.open("ab", buffering=0) as log:
     def received(path: Path, expected: bytes) -> bool:
         return path.exists() and expected in path.read_bytes()
 
+    def pane_top(pane: str) -> int:
+        return int(subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "-t", pane, "#{pane_top}"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip())
+
+    def zoomed() -> bool:
+        return subprocess.run(
+            ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "#{window_zoomed_flag}"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip() == "1"
+
+    def prefix_key(key: str) -> None:
+        for _attempt in range(5):
+            wait_for(lambda: not prefix_pending())
+            os.write(master, b"\x1d")
+            try:
+                wait_for(prefix_pending, timeout=0.5)
+            except AssertionError:
+                continue
+            os.write(master, key.encode("ascii"))
+            wait_for(lambda: not prefix_pending())
+            break
+        else:
+            raise AssertionError(f"tmux did not accept the configured prefix before {key!r}")
+        expected = handle.bridge_pane if key == "B" else handle.provider_pane if key == "P" else None
+        if expected:
+            try:
+                wait_for(lambda: active_pane() == expected)
+            except AssertionError as exc:
+                raise AssertionError(f"prefix {key} target mismatch active={active_pane()} zoom={zoomed()}") from exc
+
     try:
         wait_for(lambda: b"NATIVE READY" in screen)
         assert b"\x1b[" in screen
@@ -153,7 +187,8 @@ with out.open("ab", buffering=0) as log:
         # Pane selection and native SGR mouse forwarding happen together.
         os.write(master, b"\x1b[<0;3;3M\x1b[<0;3;3m")
         wait_for(lambda: received(provider, b"\x1b[<0;3;3M"))
-        os.write(master, b"\x1b[<0;3;37M\x1b[<0;3;37m")
+        bridge_click_y = pane_top(handle.bridge_pane) + 3
+        os.write(master, f"\x1b[<0;3;{bridge_click_y}M\x1b[<0;3;{bridge_click_y}m".encode("ascii"))
         wait_for(lambda: received(controls, b"\x1b[<0;3;3M"))
         os.write(master, b"controls")
         wait_for(lambda: received(controls, b"controls"))
@@ -161,29 +196,80 @@ with out.open("ab", buffering=0) as log:
         wait_for(lambda: received(provider, b"\x1b[O") and received(controls, b"\x1b[I"))
 
         # Native mouse wheel reporting survives tmux pane routing.
-        os.write(master, b"\x1b[<64;3;37M\x1b[<65;3;37M")
+        os.write(master, f"\x1b[<64;3;{bridge_click_y}M\x1b[<65;3;{bridge_click_y}M".encode("ascii"))
         wait_for(
             lambda: received(controls, b"\x1b[<64;3;3M")
             and received(controls, b"\x1b[<65;3;3M")
         )
 
+        # Ctrl-] B/P are the deliberate escape from a native CLI that owns raw
+        # input, alternate screen, and mouse reporting.
+        prefix_key("P")
+        os.write(master, b"provider-shortcut-path")
+        wait_for(lambda: received(provider, b"provider-shortcut-path"))
+        prefix_key("B")
+        os.write(master, b"bridge-shortcut-path")
+        wait_for(lambda: received(controls, b"bridge-shortcut-path"))
+
+        # Prefix shortcuts unzoom the window before focusing their target.
+        prefix_key("P")
+        prefix_key("z")
+        wait_for(zoomed)
+        prefix_key("B")
+        wait_for(lambda: active_pane() == handle.bridge_pane and not zoomed())
+        os.write(master, b"bridge-after-key-unzoom")
+        wait_for(lambda: received(controls, b"bridge-after-key-unzoom"))
+
+        # Status labels remain tmux-owned and clickable while the provider is
+        # zoomed despite its raw SGR mouse mode.
+        prefix_key("P")
+        prefix_key("z")
+        wait_for(zoomed)
+        client_height = int(attached_geometry()[0].split("x", 1)[1])
+        os.write(master, f"\x1b[<0;3;{client_height}M\x1b[<0;3;{client_height}m".encode("ascii"))
+        wait_for(lambda: active_pane() == handle.bridge_pane and not zoomed())
+        os.write(master, b"bridge-after-status-click")
+        wait_for(lambda: received(controls, b"bridge-after-status-click"))
+
+        prefix_key("z")
+        wait_for(zoomed)
+        client_width, client_height_text = attached_geometry()[0].split("x", 1)
+        status_y = int(client_height_text)
+        status_right_x = int(client_width)
+        for status_right_x in range(int(client_width) - 1, int(client_width) - 31, -1):
+            click = f"\x1b[<0;{status_right_x};{status_y}M\x1b[<0;{status_right_x};{status_y}m".encode("ascii")
+            os.write(master, click)
+            deadline = time.monotonic() + 0.15
+            while time.monotonic() < deadline and (active_pane() != handle.provider_pane or zoomed()):
+                select.select([master], [], [], 0.01)
+            if active_pane() == handle.provider_pane and not zoomed():
+                break
+        assert active_pane() == handle.provider_pane and not zoomed(), f"right click state active={active_pane()} zoom={zoomed()} x={status_right_x}"
+        print(f"right status target column {status_right_x}")
+        os.write(master, b"provider-after-status-click")
+        wait_for(lambda: received(provider, b"provider-after-status-click"))
+
         # Ctrl-] Ctrl-] sends a literal prefix byte to the provider process.
+        wait_for(lambda: not prefix_pending())
         os.write(master, b"\x1b[<0;3;3M\x1b[<0;3;3m")
         wait_for(lambda: active_pane() == handle.provider_pane)
         os.write(master, b"\x02")
         wait_for(lambda: received(provider, b"\x02"))
-        os.write(master, b"\x1d\x1d")
+        wait_for(lambda: not prefix_pending())
+        os.write(master, b"\x1d")
+        wait_for(prefix_pending)
+        os.write(master, b"\x1d")
         wait_for(lambda: received(provider, b"\x1d"))
 
         # The provider receives the real attached-client resize, minus the
         # six rows assigned to the command pane.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         os.killpg(process.pid, signal.SIGWINCH)
-        wait_for(lambda: provider.with_suffix(".size").read_text() == "80x17")
+        wait_for(lambda: provider.with_suffix(".size").read_text() == "80x16")
         wait_for(
             lambda: attached_geometry() == (
                 "80x24",
-                {handle.provider_pane: "80x17", handle.bridge_pane: "80x6"},
+                {handle.provider_pane: "80x16", handle.bridge_pane: "80x6"},
             )
         )
         # tmux can emit a focus transition after updating pane geometry. Prove

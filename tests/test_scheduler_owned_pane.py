@@ -59,17 +59,23 @@ def test_scheduler_submits_through_private_owned_pane_and_keeps_server_alive(tmp
             tmux_socket=str(handle.socket_path),
             tmux_pane=handle.provider_pane,
             native_tui=True,
+            env_overrides={
+                "LLM_BRIDGE_MANAGED": "1",
+                "LLM_BRIDGE_OPERATION_ID": "owned-operation",
+            },
         )
         rc = scheduler.run_tmux(
             cfg,
             logs,
-            [sys.executable, "-c", "print('bridge-owned-provider-output')"],
+            [sys.executable, "-c", "import os; print('bridge-owned-provider-output'); print('managed=' + os.environ.get('LLM_BRIDGE_MANAGED','')); print('operation=' + os.environ.get('LLM_BRIDGE_OPERATION_ID',''))"],
             output,
             status,
         )
         assert rc == 0
         assert status.read_text(encoding="utf-8").strip() == "0"
         assert "bridge-owned-provider-output" in output.read_text(encoding="utf-8")
+        assert "managed=1" in output.read_text(encoding="utf-8")
+        assert "operation=owned-operation" in output.read_text(encoding="utf-8")
         listed = subprocess.run(["tmux", "-S", str(handle.socket_path), "has-session", "-t", handle.session_name], check=False)
         assert listed.returncode == 0
         assert not backend.pane_is_alive(handle, pane="provider")

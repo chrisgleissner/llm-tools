@@ -3,8 +3,12 @@
 Independent review on 2026-10-26 against `docs/features/llm-bridge/prompt.md`,
 baseline `066af5c` and the current working tree. Reviewer: GPT-6.1 Sol / High,
 as most recently requested by the user. This is an implementation audit, not a
-claim that mocks establish live-provider compatibility. Findings A1–A6 are in
+claim that mocks establish live-provider compatibility. Findings A1–A10 are in
 `review-findings.md`; current merge verdict is **NOT READY**.
+
+The tables below preserve the first full-spec checkpoint. The changed-surface
+re-review at the end records which initial gaps have since closed; it takes
+precedence over their historical OPEN/PARTIAL labels.
 
 **Verified** means an inspected implementation has relevant checked-in tests;
 exact commands independently rerun are recorded below. **Partial** means useful
@@ -110,3 +114,30 @@ an existing test name from being mistaken for an executed acceptance pass.
   accurately recorded as a failing gate. The subsequently added attached
   scheduler resize test also independently **failed**.
 - No paid-provider completion was invoked by the reviewer.
+
+## Changed-surface re-review after `b11b719`
+
+Independent commands passed **82 tests in 16.72s** for runtime/session/Usage/TUI/
+attached PTY and **96 tests in 12.35s** for persistence/concurrency/CLI/verification/
+forced-stop/tmux fault paths. Exact commands are in `review-findings.md`.
+Independent public-option REPL proposal tests added afterward also passed.
+
+| Requirement / scenario | Updated state | Verification |
+| --- | --- | --- |
+| Atomic command rejection / durable task state (Done 2; §§8,12) | Verified, A1 closed | Independent failed-task cancellation and general rejection rollback regressions. |
+| Complete stop / recovery (Done 12,16; I,N; §§11.1–11.2) | Verified targeted, A2/A7/O7/O8/O10 closed | Actual same-group and independent-session descendants; persisted verifier identity; tmux teardown failure preserves metadata; 96-test gate. |
+| Effective configuration restoration (Done 12,13; J,M; §11.2) | Verified, A3 closed | Prior station mode retained until cleanup, explicit mode override and persisted configuration tests. |
+| Legacy attached fidelity (Done 7,18; O,Q; §7) | Resize regression closed, final full gate pending | Actual outer PTY receives SIGWINCH after restoring foreground process-group behavior. |
+| Task/proposal provenance (Done 3; §§8.2–8.3) | Verified explicit workflow | Durable PENDING proposals cannot be scheduled; same-mission operation provenance; accept/reject commands; terminal missions reject stranded additions/acceptance (A8 closed). |
+| Shared CLI/REPL grammar (Done 3,5; B,D,E) | Verified targeted | Public parser/handlers used through a shell-free CLI child; file/options retained; public proposal option grammar repaired (A9 closed). |
+| Task inspection / capacity / Usage UI (Done 4,5,9; §§5,6,10,13) | Partial, A4 remains open | Task detail/amendment preload/scopes/estimates and full in-process Usage renderer have targeted tests. Station-view projection and detail scrolling await root/terminal follow-up. |
+| Embedded Usage error boundary | Partial, A10 open | Ordinary asynchronous errors/stale cache tested; root is adding SystemExit/configuration failure handling. |
+| Native Codex restoration (Done 14; K,R) | Live verified at installed 0.164.0 | Root-owned `scripts/bridge_native_mission_smoke.py` and `native-mission-results.json`: real native reply, full stop, new controller, same owned UUID/RESTORED_NATIVE, new response recalls context, cleanup PASS. Reviewer inspected the oracle and independently observed initial owned-FD provenance. |
+| Other live provider capabilities / mouse (Done 6,22; C,R) | Explicitly unverified where not observed | Claude/Copilot exact-ID fake E2E is not a paid live completion. Actual Codex provider mouse remains NOT VERIFIED. |
+| Monitoring/convergence/history (§§9.1,13,18) | Partial, A5 follow-up | SQL event paging fixed; root owns selected-station/stall/status evidence. |
+| Final coverage/CI/release/docs (Done 18–21,23–27) | Pending frozen head | Latest user adds Bridge90 and Python3.11/3.15 while retaining global85. Root owns final evidence, actual screenshot/README and publication; no premature merge approval. |
+
+The user-added requirements in `../features/llm-bridge/spec-additions.md` are
+part of this review: prefix/clickable focus, parser parity, model-scope forecasts,
+full embedded Usage, opt-in native probes, separate Bridge90 gate, and actual
+screenshot/dogfood evidence. Native probe outcomes must remain capability-specific.

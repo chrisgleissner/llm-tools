@@ -180,7 +180,12 @@ class TmuxTerminalBackend:
             "set-option -g focus-events on\n"
             "set-option -g @llm_bridge_station 1\n"
             'set-option -g default-terminal "screen-256color"\n'
-            "set-option -g status off\n"
+            "set-option -g status on\n"
+            "set-option -g status-style 'bg=colour234,fg=colour250'\n"
+            "set-option -g status-left-length 42\n"
+            "set-option -g status-right-length 30\n"
+            "set-option -g status-left '#[fg=colour39,bold] Bridge controls [C-] B] #[default]'\n"
+            "set-option -g status-right '#[fg=colour76,bold] Provider [C-] P] #[default]'\n"
         )
         config += (
             f"bind-key {prefix} send-prefix\n"
@@ -269,6 +274,33 @@ class TmuxTerminalBackend:
                 "client-resized",
                 f"run-shell -b {shlex.quote(resize_after_client)}",
             )
+            # Native tmux left/right status hitboxes remain outside every
+            # provider viewport, including while a pane is zoomed.
+            self._run(
+                socket,
+                "set-option", "-g", "status-left",
+                "#[fg=colour39,bold] Bridge controls [C-] B] #[default]",
+            )
+            self._run(
+                socket,
+                "set-option", "-g", "status-right",
+                "#[fg=colour76,bold] Provider [C-] P] #[default]",
+            )
+            # Use pane IDs captured from this exact launch. Prefix shortcuts
+            # are in tmux's prefix table, so native providers receive all keys
+            # until the operator deliberately sends Ctrl-]. Status-line clicks
+            # remain available even while the provider pane is zoomed.
+            for key, target in (("B", bridge_pane), ("P", pane)):
+                self._run(socket, "bind-key", "-T", "prefix", key, "select-pane", "-t", target)
+            for mouse_key, target in (
+                ("MouseDown1StatusLeft", bridge_pane),
+                ("MouseDown1StatusRight", pane),
+                # tmux versions and terminals differ in how they classify the
+                # right-hand status click. The generic status binding keeps
+                # the provider target reliable outside the explicit left hitbox.
+                ("MouseDown1Status", pane),
+            ):
+                self._run(socket, "bind-key", "-T", "root", mouse_key, "select-pane", "-t", target)
             self._run(socket, "select-pane", "-t", pane)
             return TerminalHandle(socket, config_path, session_name, pane, bridge_pane, bridge_rows)
         except Exception:
@@ -312,6 +344,17 @@ class TmuxTerminalBackend:
             self._run(handle.socket_path, "send-keys", "-t", self._target(handle, pane), keys)
         else:
             self._run(handle.socket_path, "send-keys", "-l", "-t", self._target(handle, pane), keys)
+
+    def focus(self, handle: TerminalHandle, *, pane: str, expand: bool = False) -> None:
+        """Select an owned pane; optionally give its existing UI the full window."""
+        self._require_owned(handle)
+        target = self._target(handle, pane)
+        self._run(handle.socket_path, "select-pane", "-t", target)
+        if expand:
+            zoomed = self._run(handle.socket_path, "display-message", "-p", "-t", target,
+                               "#{window_zoomed_flag}", capture=True).stdout.strip()
+            if zoomed != "1":
+                self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
 
     def resize(self, handle: TerminalHandle, *, cols: int, rows: int) -> None:
         self._require_owned(handle)

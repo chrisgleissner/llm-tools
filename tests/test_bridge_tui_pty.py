@@ -68,7 +68,7 @@ def _start_console(
         "record = os.environ['BRIDGE_TUI_RECORD']\n"
         "def dispatch(mission, command):\n"
         "    argv = shlex.split(command)\n"
-        "    payload = open(argv[-1], encoding='utf-8').read() if argv and argv[0] == 'add' else ''\n"
+        "    payload = open(argv[-1], encoding='utf-8').read() if argv and (argv[0] == 'add' or argv[:2] == ['task', 'add']) else ''\n"
         "    with open(record, 'a', encoding='utf-8') as stream: stream.write(repr((mission, command, payload)) + '\\n')\n"
         "    if argv and argv[0] == 'priority':\n"
         "        return '{\"id\":\"private-command-uuid\",\"status\":\"APPLIED\",\"result\":{\"task_id\":42,\"priority\":7}}'\n"
@@ -165,6 +165,35 @@ def test_real_curses_editor_roundtrip_dispatches_and_removes_private_file(tmp_pa
                     pass
         assert process.poll() is not None
         assert process.returncode == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        os.close(master)
+
+
+def test_real_curses_ctrl_e_preserves_typed_task_options(tmp_path: Path) -> None:
+    editor = tmp_path / "fake-editor"
+    editor.write_text(
+        "#!" + sys.executable + "\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path(sys.argv[-1]).write_text('prompt line one\\nprompt line two', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    editor.chmod(0o700)
+    process, master, record = _start_console(tmp_path, editor=editor)
+    try:
+        _read_until(master, process, b"PTY Mission")
+        os.write(master, b"task add --priority 5 --acceptance 'tests pass'")
+        os.write(master, b"\x05")
+        rendered = _wait_for_record(master, process, record)
+        mission, command, prompt = ast.literal_eval(rendered)
+        argv = shlex.split(command)
+        assert mission == "pty-mission"
+        assert argv[:7] == ["task", "add", "--priority", "5", "--acceptance", "tests pass", "--file"]
+        assert prompt == "prompt line one\nprompt line two"
+        assert not Path(argv[-1]).exists()
     finally:
         if process.poll() is None:
             process.kill()

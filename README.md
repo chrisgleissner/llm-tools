@@ -29,6 +29,10 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 
 <img src="./docs/img/llm-usage5.png" alt="LLM Usage"/>
 
+<img src="./docs/img/llm-bridge.png" alt="LLM Bridge with an actual native Codex station, capacity forecasts and persistent Bridge controls"/>
+
+LLM Bridge during native provider acceptance testing. The provider owns its terminal; Bridge keeps mission controls and capacity forecasts visible.
+
 ## Install
 
 Install with [pipx](https://pipx.pypa.io):
