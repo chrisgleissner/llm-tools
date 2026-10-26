@@ -1,5 +1,67 @@
 # LLM Bridge resume handover
 
+## Latest user requirements (publication update)
+
+- Continue until fully merge-ready, then merge PR #26 and publish a new release.
+- Full adversarial review against the entire specification; Sol 6.1 reviewer
+  MUST use **High** effort (the earlier extra-high fallback was interrupted).
+- New Bridge code must pass **90% CI coverage**, retaining the old global85%.
+- Validate on current Python3.15 as well as minimum3.11; 3.11 is not a cap.
+- Only Codex currently has credits. Test actual Codex and installed Claude CLI
+  command propagation without claiming a paid Claude completion.
+- Add an actual running-terminal screenshot to README, matching usage docs.
+- Dogfood Bridge for further improvements. Any direct-Codex/facade discrepancy
+  becomes spec/implementation work. First real mission completed; its verified
+  cancellation/rollback patch is now integrated. See `docs/llm-bridge/dogfood.md`.
+- Reliable keyboard AND mouse return from any native CLI to Bridge controls;
+  terminal agent is implementing explicit outer-multiplexer focus bindings and
+  an always-visible clickable control target, including provider-zoom mode.
+
+Current checkpoint: independent dogfood patch integration tests53pass; prior
+frozen fullPython3.11 suite941pass withglobal85%. Required newBridge90% has NOT
+passed yet. Python3.15.1 installed via current uv runner. Screenshot, CLI proposal
+approval wiring, final adversarial remediation and final coverage/CI remain open.
+Do not mark PR ready or merge/tag until all new gates actually pass.
+
+## Current authorization (resumed implementation)
+
+The user explicitly revoked the publication freeze: continue until fully done,
+make PR #26 fully merge-ready, then **merge and tag a new release**, with diligent
+verification first. Do not stop at a draft checkpoint. Pushes/PR updates/merge
+and release tagging are authorized. Existing release workflow matches plain
+numeric tags (e.g. `1.1.0`, not `v1.1.0`); latest release at resume is `1.0.0`.
+Do not merge/tag until all substantial requirements and independent high/critical
+findings are resolved, full regression/85% coverage and CI pass on final head.
+
+Resumed gates: short private sockets + native graceful stop/crash recovery +
+real two-provider abort/handoff independently passed 3 tests (3.48 s). Native
+exact-ID/session integration and actual curses PTYs passed a terminal-owned
+100-test focused suite; independent O9 review is active. Monitor has indexed
+latest-event queries and truthful mode/model labels under re-review. Typed
+steering has seven focused tests. Main owns runtime/store again.
+
+Root real Codex headless reply through Bridge passed (7.13 s). Claude/Copilot
+remain NOT VERIFIED; Claude exposed force-stop leaving an idle controller alive.
+Root safely killed only matching recorded probe PID/start-token group. Main's
+new real controller-group/lock tests pass and enforce release before STOPPED.
+Root actual command-pane load test passes with 10,000 tasks and sustained fake
+output; detailed metrics are being recorded. A diagnostic moving-source coverage
+run was 78%; frozen final coverage must still pass unchanged 85%.
+
+Resumed milestones: short private sockets, native graceful stop/crash recovery,
+and real two-provider handoff independently passed 3 tests in 3.48 s. Native
+session persistence/exact-ID resume across controller restart, real curses PTYs,
+monitor paging and managed wait interrupts passed a terminal-owned 100-test
+focused gate; independent native review is underway. Main owns runtime/store
+again after terminal integration. Typed steering has seven focused tests.
+
+Real Codex through Bridge returned the expected harmless reply; cleanup passed
+(7.13 s). Claude/Copilot remain NOT VERIFIED. Claude exposed a force-stop bug:
+mission STOPPED but idle controller still owned flock. Root verified the recorded
+PID/start token, terminated only that probe's group, and confirmed lock release.
+Main is adding a regression/fix. Diagnostic coverage during concurrent source
+edits was 78%; a frozen full rerun remains mandatory, with no gate reduction.
+
 Updated 2026-10-25. Implementation is NOT complete. Preserve adjacent user-owned `prompt.md` unchanged. Read `docs/llm-bridge/progress.md`, `architecture.md` and `review-findings.md` before resuming. This handover is updated at each major milestone at the user's request.
 
 ## Objective and decisions

@@ -6,7 +6,12 @@ on:
 
 jobs:
   test:
+    name: test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.15"]
     permissions:
       contents: read
       id-token: write
@@ -15,7 +20,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install tmux for native terminal integration tests
         run: |
@@ -39,6 +44,7 @@ jobs:
           coverage run -m pytest
           coverage combine
           coverage report --fail-under=85
+          coverage report --include='llm_tools/bridge*.py,llm_tools/terminal.py' --fail-under=90
           coverage xml
 
       - name: Upload coverage to Codecov

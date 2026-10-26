@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import sys
+import threading
+import time
 
 from llm_tools.bridge_runtime import run_configured_verifier
 from llm_tools.bridge_store import BridgeStore
@@ -36,7 +40,10 @@ def test_verifier_success_records_revision_bound_artifact_digest(tmp_path) -> No
     assert task["evidence"][-1]["revision"] == task["revision"]
     assert len(task["evidence"][-1]["digest"]) == 64
     assert task["evidence"][-1]["artifacts"][0]["path"] == "result.txt"
-    assert (tmp_path / "runtime" / "verifier" / f"{task_id}.log").stat().st_mode & 0o777 == 0o600
+    assert Path(outcome["logs_path"]).stat().st_mode & 0o777 == 0o600
+    managed = store.db.execute("SELECT status,process_pid,process_start FROM managed_processes WHERE mission_id=?", (mission["id"],)).fetchone()
+    assert managed["status"] == "EXITED"
+    assert managed["process_pid"] > 0 and managed["process_start"]
 
 
 def test_verifier_failure_leaves_task_verifying_and_records_private_result(tmp_path) -> None:
@@ -74,11 +81,70 @@ def test_verifier_output_memory_and_private_log_are_bounded(tmp_path) -> None:
 
     outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
 
-    log = tmp_path / "runtime" / "verifier" / f"{task_id}.log"
+    log = Path(outcome["logs_path"])
     assert outcome["status"] == "VERIFYING"
     assert outcome["reason"] == "output-too-large"
     assert outcome["output_size"] > 1_000_000
     assert log.stat().st_size <= 10 * 1024 * 1024 + 64
+
+
+def test_verifier_logs_are_immutable_per_revision_and_attempt(tmp_path) -> None:
+    store, mission, task_id = _verifying_mission(
+        tmp_path,
+        {"argv": ["python", "-c", "print('{\"passed\": false}')"]},
+    )
+
+    first = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+    second = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    assert first["logs_path"] != second["logs_path"]
+    assert Path(first["logs_path"]).exists()
+    assert Path(second["logs_path"]).exists()
+    assert f"{task_id}-r1-" in Path(first["logs_path"]).name
+    assert f"{task_id}-r1-" in Path(second["logs_path"]).name
+
+
+def test_task_amendment_during_verifier_cannot_commit_old_revision_evidence(tmp_path) -> None:
+    started = tmp_path / "verifier-started"
+    release = tmp_path / "verifier-release"
+    script = tmp_path / "wait_verifier.py"
+    script.write_text(
+        "import json,time\nfrom pathlib import Path\n"
+        f"Path({str(started)!r}).write_text('started')\n"
+        f"release=Path({str(release)!r})\n"
+        "while not release.exists(): time.sleep(.01)\n"
+        "print(json.dumps({'passed': True, 'summary': 'old revision'}))\n",
+        encoding="utf-8",
+    )
+    store, mission, task_id = _verifying_mission(
+        tmp_path,
+        {"argv": [sys.executable, str(script)], "timeout_seconds": 5},
+    )
+    result: dict[str, object] = {}
+
+    def verify_in_separate_connection() -> None:
+        with BridgeStore(store.path) as verifier_store:
+            result.update(run_configured_verifier(verifier_store, mission["id"], task_id, runtime=tmp_path / "runtime"))
+
+    thread = threading.Thread(target=verify_in_separate_connection)
+    thread.start()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not started.exists():
+        time.sleep(0.01)
+    assert started.exists()
+    store.amend_task(task_id, prompt="new revision")
+    release.write_text("continue", encoding="ascii")
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    task = store.get_task(task_id)
+    assert task["status"] == "READY"
+    assert task["revision"] == 2
+    assert task["prompt"] == "new revision"
+    assert task["evidence"] == []
+    assert result["passed"] is False
+    assert result["reason"] == "task-changed-during-verification"
+    assert not any(event["kind"] == "task-verified" for event in store.events(mission["id"]))
 
 
 def test_verifier_timeout_kills_descendant_process_group(tmp_path) -> None:

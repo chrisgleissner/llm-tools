@@ -3468,6 +3468,7 @@ def run_pty_capture(
     question_idle_timeout: int = 0,
     env: dict[str, str] | None = None,
     on_process_started: Callable[[int], None] | None = None,
+    max_output_bytes: int = 0,
 ) -> tuple[int, str]:
     safe_prompts = SAFE_TRUST_PROMPTS
     blocking_patterns = BLOCKING_PROMPT_PATTERNS
@@ -3505,6 +3506,26 @@ def run_pty_capture(
         pass
 
     chunks: list[str] = []
+    retained_bytes = 0
+    output_truncated = False
+
+    def append_output(text: str) -> None:
+        nonlocal retained_bytes, output_truncated
+        chunks.append(text)
+        retained_bytes += len(text.encode("utf-8", "replace"))
+        if max_output_bytes <= 0:
+            return
+        while chunks and retained_bytes > max_output_bytes:
+            excess = retained_bytes - max_output_bytes
+            first_bytes = chunks[0].encode("utf-8", "replace")
+            if len(first_bytes) <= excess:
+                retained_bytes -= len(first_bytes)
+                chunks.pop(0)
+            else:
+                trimmed = first_bytes[excess:].decode("utf-8", "replace")
+                chunks[0] = trimmed
+                retained_bytes -= excess
+            output_truncated = True
     trust_sent = False
     exit_code = 124
     start = time.time()
@@ -3524,7 +3545,7 @@ def run_pty_capture(
         abort_reason = reason
         exit_code = AUTONOMY_ABORT_STATUS
         line = f"\nllm-scheduler: autonomous abort: {reason}\n"
-        chunks.append(line)
+        append_output(line)
         if stream:
             os.write(sys.stdout.fileno(), line.encode("utf-8", "replace"))
 
@@ -3551,7 +3572,7 @@ def run_pty_capture(
                     eof = True
                     break
                 text = raw.decode("utf-8", "replace")
-                chunks.append(text)
+                append_output(text)
                 last_progress = time.time()
                 if stream:
                     try:
@@ -3614,6 +3635,9 @@ def run_pty_capture(
                 break
             time.sleep(0.2)
     text = strip_ansi("".join(chunks))
+    if output_truncated:
+        marker = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n"
+        text = marker + text
     if output_path:
         output_path.write_text(text, encoding="utf-8")
     if status_path:

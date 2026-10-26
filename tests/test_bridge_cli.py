@@ -6,7 +6,7 @@ import json
 import io
 from pathlib import Path
 
-from llm_tools.bridge import main, status_snapshot
+from llm_tools.bridge import dispatch_console_command, main, status_snapshot
 from llm_tools.bridge_store import BridgeStore, MissionLock
 
 
@@ -58,6 +58,27 @@ def test_legacy_prompt_file_creates_task_one_and_console_command_is_safe(tmp_pat
     assert snapshot["tasks"][0]["id"] == result["task"]["id"]
 
 
+def test_console_cancel_task_id_does_not_cancel_other_mission_work(tmp_path: Path, monkeypatch) -> None:
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("mission", "objective", cwd=tmp_path)
+        task_to_cancel = store.add_task(mission["id"], "cancel this queued task")
+        active_task = store.add_task(mission["id"], "keep active work")
+        store.set_mission_status(mission["id"], "RUNNING")
+        operation = store.begin_operation(active_task, iteration=1, station="codex")
+        store.mark_operation_running(operation)
+
+    response = json.loads(dispatch_console_command(mission["id"], f"cancel {task_to_cancel}"))
+
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        assert store.get_mission(mission["id"])["status"] == "RUNNING"
+        assert store.get_task(task_to_cancel)["status"] == "CANCELLED"
+        assert store.get_task(active_task)["status"] == "RUNNING"
+        assert store.get_operation(operation)["status"] == "RUNNING"
+    assert response["status"] == "APPLIED"
+
+
 def test_mission_create_accepts_stdin_and_persists_verifier_argv(tmp_path: Path, monkeypatch, capsys) -> None:
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
@@ -67,6 +88,7 @@ def test_mission_create_accepts_stdin_and_persists_verifier_argv(tmp_path: Path,
         "mission", "create", "--file", "-", "--cwd", str(tmp_path), "--native",
         "--verifier-arg", "python", "--verifier-arg=-c", "--verifier-arg",
         "import json; print(json.dumps({'passed': True}))", "--verifier-timeout", "17", "--json",
+        "--capacity-refresh-seconds", "30",
     ]) == 0
 
     created = json.loads(capsys.readouterr().out)
@@ -76,6 +98,7 @@ def test_mission_create_accepts_stdin_and_persists_verifier_argv(tmp_path: Path,
     assert mission["config"]["native_tui"] is True
     assert mission["config"]["verifier"]["argv"] == ["python", "-c", "import json; print(json.dumps({'passed': True}))"]
     assert mission["config"]["verifier"]["timeout_seconds"] == 17
+    assert mission["config"]["capacity_refresh_seconds"] == 30
 
 
 def test_mission_freezes_provider_model_and_route_config(tmp_path: Path, monkeypatch, capsys) -> None:

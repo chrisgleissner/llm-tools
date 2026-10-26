@@ -200,7 +200,7 @@ def suspend_wait_chunk_seconds() -> float:
     return value if value > 0 else 15.0
 
 
-def wait_until_epoch(target_epoch: int) -> None:
+def wait_until_epoch(target_epoch: int, should_interrupt: Any | None = None) -> bool:
     """Block until the wall clock reaches target_epoch, polling in short chunks.
 
     This must survive a system suspend that happens during the wait. time.sleep()
@@ -212,10 +212,12 @@ def wait_until_epoch(target_epoch: int) -> None:
     """
     chunk = suspend_wait_chunk_seconds()
     while True:
+        if callable(should_interrupt) and should_interrupt():
+            return False
         remaining = target_epoch - common.now_epoch()
         if remaining <= 0:
-            return
-        sleep_seconds(min(float(remaining), chunk))
+            return True
+        sleep_seconds(min(float(remaining), 1.0 if callable(should_interrupt) else chunk))
 
 
 def color_enabled() -> bool:
@@ -1490,6 +1492,7 @@ def scheduler_config_for(
 def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
     scheduler.resolve_attach_mode(scfg)
     child_logs = common.setup_run_logs(scfg.log_dir, scfg.provider or "wake", scfg.provider or "", scfg.run_dir)
+    scfg.run_dir = child_logs.run_dir
     prompt, prompt_sha = common.load_prompt(scfg.prompt_text, scfg.prompt_file, child_logs)
     scfg.prompt_text = prompt
     common.log_text(child_logs, f"start provider={scfg.provider} cwd={scfg.cwd} attached={1 if scfg.attached else 0}")
@@ -1517,9 +1520,8 @@ def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
         return common.AUTONOMY_ABORT_STATUS
     for delay in delays:
         common.log_event(child_logs, "retry", {"after_attempt": attempt, "delay": delay})
-        import time
-
-        time.sleep(delay)
+        if not scheduler._sleep_interruptibly(scfg, common.now_epoch() + delay):
+            return 143
         attempt += 1
         result = scheduler.submit_once(scfg, child_logs, attempt, argv)
         if result == 0:
@@ -1553,6 +1555,7 @@ def suspend_until_available(
     start_monotonic: float,
     max_duration: int,
     reason: str,
+    should_interrupt: Any | None = None,
 ) -> bool:
     """Wait for a blocked provider to free up instead of giving up.
 
@@ -1573,11 +1576,15 @@ def suspend_until_available(
         if remaining <= 0:
             return False
         wait_until = min(wait_until, now + int(remaining))
-    common.log_event(logs, "all_blocked_suspend", {"reason": reason, "wait_seconds": max(0, wait_until - now), "wait_until": wait_until})
-    status_line(f"all configured providers blocked ({reason}); suspending {wait_msg}", level="warn")
+    common.log_event(logs, "all_blocked_wait" if callable(should_interrupt) else "all_blocked_suspend", {"reason": reason, "wait_seconds": max(0, wait_until - now), "wait_until": wait_until, "awake_for_control": callable(should_interrupt)})
+    wording = "waiting awake" if callable(should_interrupt) else "suspending"
+    status_line(f"all configured providers blocked ({reason}); {wording} {wait_msg}", level="warn")
     # Wall-clock poll so the wait still ends on time if the machine is suspended
     # (e.g. a closed lid) while we idle -- time.sleep alone freezes across that.
-    wait_until_epoch(wait_until)
+    if callable(should_interrupt):
+        wait_until_epoch(wait_until, should_interrupt)
+    else:
+        wait_until_epoch(wait_until)
     return True
 
 
@@ -1634,6 +1641,7 @@ def suspend_machine_until(
     start_monotonic: float,
     max_duration: int,
     state: SuspendState,
+    should_interrupt: Any | None = None,
 ) -> bool:
     """Wait out the earliest provider renewal, suspending the machine when it is
     safe to and waiting awake otherwise.
@@ -1656,6 +1664,16 @@ def suspend_machine_until(
             target_epoch = now + int(remaining)
     common.log_event(logs, "suspend_until_renewal", {"target_epoch": target_epoch, "wait_seconds": int(wait_s)})
 
+    if callable(should_interrupt):
+        # Bridge operator requests are polled through the owning controller.
+        # Keep its process awake so pause/stop/cancel commands remain responsive.
+        common.log_event(logs, "bridge_wait_awake", {"target_epoch": target_epoch})
+        if callable(should_interrupt):
+            wait_until_epoch(target_epoch, should_interrupt)
+        else:
+            wait_until_epoch(target_epoch)
+        return True
+
     block = suspend_block_reason(state)
     if block:
         status_line(
@@ -1663,7 +1681,10 @@ def suspend_machine_until(
             level="warn",
         )
         common.log_event(logs, "suspend_deferred_awake", {"reason": block, "target_epoch": target_epoch})
-        wait_until_epoch(target_epoch)
+        if callable(should_interrupt):
+            wait_until_epoch(target_epoch, should_interrupt)
+        else:
+            wait_until_epoch(target_epoch)
         return True
 
     status_line(
@@ -1686,7 +1707,7 @@ def suspend_machine_until(
         if outcome.reason in ("arm-failed", "missing-backend"):
             state.disabled = True
             state.disabled_reason = outcome.reason
-        wait_until_epoch(target_epoch)
+        wait_until_epoch(target_epoch, should_interrupt)
     return True
 
 
@@ -1771,6 +1792,10 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
         status_line(f"reached max duration after {completed} iteration(s); stopping", level="ok" if completed else "warn")
         return code
 
+    def bridge_wait_interrupted() -> bool:
+        callback = getattr(bridge_hooks, "wait_interrupted", None) if bridge_hooks is not None else None
+        return bool(callback()) if callable(callback) else False
+
     while True:
         if out_of_time():
             return stop_timed_out()
@@ -1791,6 +1816,10 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
             iteration_prompt = str(bridge_context["prompt"])
         common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index, "completed_counts": completed_counts})
         selection = select_provider(cfg, logs, current_index, skipped)
+        if bridge_hooks is not None:
+            apply_handoff = getattr(bridge_hooks, "apply_handoff_preference", None)
+            if callable(apply_handoff):
+                selection = apply_handoff(selection)
         common.log_event(logs, "selection", {**selection, "skipped": sorted(skipped)})
         if bridge_hooks is not None:
             observe_selection = getattr(bridge_hooks, "on_selection", None)
@@ -1804,7 +1833,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
                 observe_wait = getattr(bridge_hooks, "on_wait", None)
                 if callable(observe_wait):
                     observe_wait(selection, soonest_wait_until(selection))
-            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-skipped"):
+            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-skipped", bridge_wait_interrupted if bridge_hooks is not None else None):
                 return stop_timed_out()
             skipped = set()
             continue
@@ -1838,7 +1867,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
                 common.log_event(logs, "final", {"status": "dry-run"})
                 print("dry-run: no prompt submitted", file=sys.stderr)
                 return 0
-            if not suspend_machine_until(cfg, logs, target, start_monotonic, max_duration, suspend_state):
+            if not suspend_machine_until(cfg, logs, target, start_monotonic, max_duration, suspend_state, bridge_wait_interrupted if bridge_hooks is not None else None):
                 return stop_timed_out()
             skipped = set()
             continue
@@ -1904,7 +1933,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
             rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
             if len(skipped) >= rotation_size:
                 # All providers aborted this pass. Do not stop: wait and retry.
-                if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-autonomy-abort"):
+                if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-autonomy-abort", bridge_wait_interrupted if bridge_hooks is not None else None):
                     return stop_timed_out()
                 skipped = set()
                 continue
@@ -1927,7 +1956,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
         rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
         if len(skipped) >= rotation_size:
             # Every provider hard-failed this pass. Do not stop: wait and retry.
-            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-failed"):
+            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-failed", bridge_wait_interrupted if bridge_hooks is not None else None):
                 return stop_timed_out()
             skipped = set()
             continue

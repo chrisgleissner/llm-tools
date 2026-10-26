@@ -122,6 +122,11 @@ class SchedulerConfig:
     tmux_pane: str = ""
     native_tui: bool = False
     process_started: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
+    # Internal Bridge callback used to interrupt long capacity waits promptly.
+    should_interrupt_wait: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+    command_argv_transform: Callable[[list[str]], list[str]] | None = field(default=None, repr=False, compare=False)
+    max_output_bytes: int = 0
+    max_output_rotations: int = 0
     command_template: str = ""
     auto_confirm: bool = True
     headless: bool = False
@@ -527,8 +532,12 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
 
 def command_argv(cfg: SchedulerConfig, logs: common.RunLogs, prompt: str) -> list[str]:
     if cfg.command_template:
-        return common.template_argv(cfg.command_template, provider=cfg.provider, prompt=prompt, prompt_file=logs.run_dir / "prompt.txt", cwd=cfg.cwd)
-    return provider_default_argv(cfg, prompt)
+        argv = common.template_argv(cfg.command_template, provider=cfg.provider, prompt=prompt, prompt_file=logs.run_dir / "prompt.txt", cwd=cfg.cwd)
+    else:
+        argv = provider_default_argv(cfg, prompt)
+    if cfg.command_argv_transform is not None:
+        argv = cfg.command_argv_transform(argv)
+    return argv
 
 
 def scheduler_model_description(cfg: SchedulerConfig) -> str:
@@ -710,6 +719,17 @@ def sleep_until(target: int) -> None:
         time.sleep(seconds)
 
 
+def _sleep_interruptibly(cfg: SchedulerConfig, target: int) -> bool:
+    """Sleep to an epoch in bounded slices; return False on a mission request."""
+    while True:
+        if cfg.should_interrupt_wait is not None and cfg.should_interrupt_wait():
+            return False
+        remaining = target - common.now_epoch()
+        if remaining <= 0:
+            return True
+        time.sleep(min(float(remaining), 1.0))
+
+
 def _route_or_provider_decision(cfg: SchedulerConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     """Snapshot + decision for ``cfg``, honouring an inherited route id.
 
@@ -764,7 +784,8 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
                 common.log_event(logs, "suspend_schedule_fallback", {"reason": "schedule_resume_and_suspend failed", "gate": "not-before"})
             if cfg.dry_run:
                 return
-            sleep_until(not_before)
+            if not _sleep_interruptibly(cfg, not_before):
+                raise SystemExit(143)
         snapshot, decision = _route_or_provider_decision(cfg)
         common.log_event(logs, "usage_snapshot", snapshot)
         common.log_event(logs, "usage_decision", decision)
@@ -798,12 +819,17 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
             common.log_event(logs, "suspend_schedule_fallback", {"reason": "schedule_resume_and_suspend failed", "gate": reason})
         if cfg.dry_run:
             return
-        sleep_until(target)
+        if not _sleep_interruptibly(cfg, target):
+            raise SystemExit(143)
 
 
 def run_fresh_attached(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
     command_line = common.argv_to_command_line(argv)
-    proc = subprocess.Popen(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, env=provider_env(cfg), start_new_session=True)
+    # Keep the normal foreground process group and controlling terminal. In
+    # particular, SIGWINCH must reach `script` so it can resize its PTY child.
+    # Bridge-managed headless/native work has its own explicit process-group
+    # ownership path and does not use this attached launch mode.
+    proc = subprocess.Popen(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, env=provider_env(cfg))
     _record_popen_process(cfg, proc)
     return_code = proc.wait()
     status_file.write_text(str(return_code), encoding="utf-8")
@@ -828,6 +854,7 @@ def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path,
         question_idle_timeout=int(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30") or "30"),
         env=provider_env(cfg),
         on_process_started=lambda pid: _record_spawned_process(cfg, pid) if cfg.process_started else None,
+        max_output_bytes=cfg.max_output_bytes,
     )
     return status
 
@@ -986,6 +1013,24 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     renderer = ClaudeStreamRenderer()
     stdout_buffer = b""
     combined_parts: list[bytes] = []
+    retained_bytes = 0
+    output_truncated = False
+
+    def append_combined(data: bytes) -> None:
+        nonlocal retained_bytes, output_truncated
+        combined_parts.append(data)
+        retained_bytes += len(data)
+        limit = int(cfg.max_output_bytes)
+        if limit <= 0:
+            return
+        while combined_parts and retained_bytes > limit:
+            excess = retained_bytes - limit
+            if len(combined_parts[0]) <= excess:
+                retained_bytes -= len(combined_parts.pop(0))
+            else:
+                combined_parts[0] = combined_parts[0][excess:]
+                retained_bytes -= excess
+            output_truncated = True
     start = time.time()
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
     exit_code = 124
@@ -1015,7 +1060,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                 if open_fds.get(fd) == "stdout" and stdout_buffer:
                     rendered = renderer.render_line(stdout_buffer)
                     if rendered:
-                        combined_parts.append(rendered)
+                        append_combined(rendered)
                         try:
                             sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color)))
                             sys.stdout.buffer.flush()
@@ -1029,6 +1074,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
             guard.last_progress = time.time()
             if open_fds.get(fd) == "stdout":
                 stdout_buffer += chunk
+                if cfg.max_output_bytes > 0 and len(stdout_buffer) > cfg.max_output_bytes:
+                    stdout_buffer = stdout_buffer[-cfg.max_output_bytes:]
                 lines = stdout_buffer.splitlines(keepends=True)
                 if lines and not lines[-1].endswith((b"\n", b"\r")):
                     stdout_buffer = lines.pop()
@@ -1038,7 +1085,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     rendered = renderer.render_line(line)
                     if not rendered:
                         continue
-                    combined_parts.append(rendered)
+                    append_combined(rendered)
                     try:
                         sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color)))
                         sys.stdout.buffer.flush()
@@ -1048,7 +1095,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                         blocking = True
                         break
             else:
-                combined_parts.append(chunk)
+                append_combined(chunk)
                 try:
                     sys.stderr.buffer.write(stderr_ts.apply(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color)))
                     sys.stderr.buffer.flush()
@@ -1079,13 +1126,16 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
         exit_code = int(proc.returncode)
     if abort_reason:
         abort_line = f"\nllm-scheduler: autonomous abort: {abort_reason}\n".encode()
-        combined_parts.append(abort_line)
+        append_combined(abort_line)
         try:
             sys.stderr.buffer.write(stderr_ts.apply(highlight_provider_text(abort_line, stream_name="stderr", enabled=stderr_color)))
             sys.stderr.buffer.flush()
         except OSError:
             pass
-    output_file.write_text(b"".join(combined_parts).decode("utf-8", "replace"), encoding="utf-8")
+    output_text = b"".join(combined_parts).decode("utf-8", "replace")
+    if output_truncated:
+        output_text = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n" + output_text
+    output_file.write_text(output_text, encoding="utf-8")
     status_file.write_text(str(exit_code), encoding="utf-8")
     return exit_code
 
@@ -1105,8 +1155,25 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     stderr_color = stream_color_enabled(sys.stderr)
     stdout_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, cfg.model, usage_ttl=cfg.output_prefix_usage_ttl)
     stderr_ts = common.LinePrefixer(cfg.output_prefix_fields, cfg.provider, cfg.model, usage_ttl=cfg.output_prefix_usage_ttl)
-    stdout_parts: list[bytes] = []
     combined_parts: list[bytes] = []
+    retained_bytes = 0
+    output_truncated = False
+
+    def append_combined(data: bytes) -> None:
+        nonlocal retained_bytes, output_truncated
+        combined_parts.append(data)
+        retained_bytes += len(data)
+        limit = int(cfg.max_output_bytes)
+        if limit <= 0:
+            return
+        while combined_parts and retained_bytes > limit:
+            excess = retained_bytes - limit
+            if len(combined_parts[0]) <= excess:
+                retained_bytes -= len(combined_parts.pop(0))
+            else:
+                combined_parts[0] = combined_parts[0][excess:]
+                retained_bytes -= excess
+            output_truncated = True
     start = time.time()
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
     exit_code = 124
@@ -1130,9 +1197,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
             if not chunk:
                 open_fds.pop(fd, None)
                 continue
-            combined_parts.append(chunk)
+            append_combined(chunk)
             if open_fds.get(fd) == "stdout":
-                stdout_parts.append(chunk)
                 try:
                     sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(chunk, stream_name="stdout", enabled=stdout_color)))
                     sys.stdout.buffer.flush()
@@ -1168,8 +1234,11 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     if proc.poll() is not None and not blocking and exit_code == 124:
         exit_code = int(proc.returncode)
     if abort_reason:
-        combined_parts.append(f"\nllm-scheduler: autonomous abort: {abort_reason}\n".encode())
-    output_file.write_text(b"".join(combined_parts).decode("utf-8", "replace"), encoding="utf-8")
+        append_combined(f"\nllm-scheduler: autonomous abort: {abort_reason}\n".encode())
+    output_text = b"".join(combined_parts).decode("utf-8", "replace")
+    if output_truncated:
+        output_text = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n" + output_text
+    output_file.write_text(output_text, encoding="utf-8")
     status_file.write_text(str(exit_code), encoding="utf-8")
     return exit_code
 
@@ -1226,7 +1295,15 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             output_file.write_text("Bridge provider pane is busy; refusing to replace a live native process\n", encoding="utf-8")
             status_file.write_text(str(common.AUTONOMY_ABORT_STATUS), encoding="utf-8")
             return common.AUTONOMY_ABORT_STATUS
-        pipe_command = f"cat >> {shlex.quote(str(output_file))}"
+        if cfg.max_output_bytes > 0:
+            pipe_command = common.argv_to_command_line([
+                sys.executable, "-m", "llm_tools.bridge_log_sink",
+                "--path", str(output_file),
+                "--max-bytes", str(cfg.max_output_bytes),
+                "--rotations", str(cfg.max_output_rotations),
+            ])
+        else:
+            pipe_command = f"cat >> {shlex.quote(str(output_file))}"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.touch()
         respawn = tmux(["respawn-pane", "-k", "-t", target, "-c", cfg.cwd, f"sleep 0.1; {invocation}"], check=False)
@@ -1265,6 +1342,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         waited += 1
     if owned_pane:
         tmux(["pipe-pane", "-t", target], check=False)
+        time.sleep(0.05)
+        common.clean_capture_file(output_file)
     else:
         pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
         output_file.write_text(pane.stdout, encoding="utf-8")

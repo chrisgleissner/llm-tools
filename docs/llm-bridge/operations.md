@@ -32,6 +32,14 @@ together. The default provider order is `claude,codex,opencode`; set
 `--providers` or `--routes` when creating the mission to choose a different
 selection.
 
+Mission creation accepts `--verifier-arg` (repeat once per argv element),
+`--verifier-timeout` (default 300 seconds), `--log-max-bytes` (default 4 MiB),
+`--log-rotations` (default 3), `--log-retained-runs` (default 20), and
+`--capacity-refresh-seconds` (default 60). The verifier timeout range is
+1–3600 seconds; log size is 1 KiB–1 GiB, rotations 0–20, retained runs 1–1000,
+and capacity refresh 5–3600 seconds. These are mission options, not entries in
+the shared TOML file. The TOML reader does not support a `[bridge]` table.
+
 List missions with `llm-bridge mission list`, and inspect one with:
 
 ```bash
@@ -41,11 +49,20 @@ llm-bridge doctor --mission MISSION_ID
 ```
 
 `status` reports the mission, tasks and their states, recent operations,
-pending commands, and recent events. Add `--json` to these commands for
-machine-readable output. `doctor` reports the state directory, SQLite
-integrity, and tmux availability.
+pending commands, and recent events. `--json` selects machine-readable output;
+it does not create, start, or otherwise change a mission. `doctor` reports the
+state directory, SQLite integrity, and tmux availability. The monitor reports
+configured mode separately from actual controller mode. Actual mode is shown
+only after a verified controller-mode event; provider liveness and observed
+model remain `unknown` when no provider observation proves them. An operation's
+model is a configured scheduler pin, not an observed model.
 
 ## Task ordering and verification
+
+The task lifecycle uses `QUEUED`, `READY`, `RUNNING`, `VERIFYING`, `COMPLETED`,
+`FAILED`, `BLOCKED`, `PAUSED`, and `CANCELLED`. Only `COMPLETED` tasks satisfy
+dependencies. Provider exit code zero moves work to `VERIFYING`; completion
+requires explicit operator approval or a passing configured verifier.
 
 Add a task with a verbatim file or standard input. Dependencies refer to task
 IDs and prevent a task from becoming ready until each prerequisite is
@@ -57,6 +74,13 @@ llm-bridge task add --mission MISSION_ID --file follow-up.md \
   --priority 5 --depends-on 1 --acceptance "tests pass"
 llm-bridge task list --mission MISSION_ID
 llm-bridge task show --mission MISSION_ID --task TASK_ID
+llm-bridge task priority --mission MISSION_ID --task TASK_ID --value 10
+llm-bridge task reorder --mission MISSION_ID --task TASK_ID --value 20
+llm-bridge task dependencies --mission MISSION_ID --task TASK_ID --add PREREQUISITE_ID
+llm-bridge task retry --mission MISSION_ID --task TASK_ID
+llm-bridge task pause --mission MISSION_ID --task TASK_ID
+llm-bridge task resume --mission MISSION_ID --task TASK_ID
+llm-bridge task cancel --mission MISSION_ID --task TASK_ID
 ```
 
 Amend task text with `llm-bridge task amend --mission ID --task ID --file
@@ -111,7 +135,12 @@ llm-bridge control --mission MISSION_ID
 ```
 
 It offers seven views: Bridge, Orders, Stations, Systems, Log, Sessions, and
-Palette. Keyboard and mouse operate those views:
+Palette. The Bridge view summarizes mission state, current work, task counts,
+and acceptance-criteria progress. Orders are fetched in pages of 200; Page Up
+and Page Down navigate them, and Ctrl-F opens the Orders filter. Search and
+page controls make tasks past the first page reachable without loading the
+whole queue into the terminal process. Log and Sessions views show recent
+bounded histories. Keyboard and mouse operate those views:
 
 | Input | Action |
 | --- | --- |
@@ -120,6 +149,8 @@ Palette. Keyboard and mouse operate those views:
 | Click a view label | Change view |
 | Click a palette row, then Enter | Select and run that command |
 | Wheel up / down | Move the selection |
+| Page Up / Page Down in Orders | Previous / next 200-task page |
+| Ctrl-F, type query, Enter | Filter Orders by task title or prompt |
 | Ctrl-E | Open `$VISUAL` or `$EDITOR` to add a multiline task |
 | Ctrl-R | Open the editor to amend the selected order |
 | Enter | Run the command in the input line |
@@ -130,8 +161,39 @@ Palette. Keyboard and mouse operate those views:
 The editor is launched as an argv (not through a shell) on a private temporary
 file. Saving non-empty text submits the task; cancelling the editor or saving
 an empty file submits nothing. The UI accepts printable command text without
-using letters as view shortcuts. The private tmux station starts at 80 columns
-by 24 rows or larger.
+using letters as view shortcuts. Palette actions and keyboard commands use the
+same dispatcher. The command result pane summarizes durable command envelopes
+as a concise applied/rejected message; detailed state remains available in the
+Log view, CLI status, and event history. The station follows terminal resize
+events and is designed to remain usable down to 80 columns by 24 rows.
+
+Stations distinguishes the station selected for viewing from the last station
+selected to execute work. Selecting a station with Enter or running
+`llm-bridge station --mission ID NAME` changes only the view preference; it
+does not change routing, start a provider, or switch an executing operation.
+Models are labelled as configured or observed so a model pin is never mistaken
+for provider-reported identity. The Systems view keeps configured mode and
+actual controller mode separate; `unknown` means there is no verified
+observation.
+
+The compact console and full control view accept the same command handlers.
+The compact pane's six status lines include the current mission/task summary.
+Its `help` command lists task and mission controls. Typed steering is available
+in either UI and on the CLI:
+
+| Kind | Effect |
+| --- | --- |
+| `replace TASK FILE` | Replace a task prompt at the next safe boundary |
+| `review TASK [FILE]` | Queue a review task, optionally from a prompt file |
+| `verify TASK` | Request the configured verifier for a task awaiting verification |
+| `pause-after-iteration` | Pause after current iteration, including while waiting for provider capacity |
+| `stop-after-task TASK` | Stop after the selected task reaches completion |
+| `handoff ROUTE` | Prefer the named configured route at the next selection |
+
+CLI form: `llm-bridge steer --mission ID --kind KIND`, with `--task ID`,
+`--route NAME`, and `--file PATH` or `--prompt TEXT` as required by that kind.
+See `llm-bridge steer --help` and `steer help` in the console for the live
+syntax.
 
 ## Attach, pause, stop, and resume
 
@@ -140,11 +202,27 @@ remove attached clients with `llm-bridge detach --mission ID`. Detaching only
 closes the terminal view; it does not pause the mission or stop a provider.
 Headless missions have no station to attach to.
 
+The isolated tmux server uses Ctrl-] as its prefix, leaving the provider's
+usual Ctrl-B available as input. Press Ctrl-] then `d` to detach a terminal
+client; press Ctrl-] twice to send a literal Ctrl-] to the provider. Mouse
+clicks select the pane under the pointer and forward the click. Paste, wheel,
+focus, and resize events are forwarded to the native provider terminal when
+its mode requests them. Detaching leaves the controller and panes alive.
+
 `pause` prevents a new provider iteration from starting. If a provider is
 already working, it runs until that invocation returns, then the controller
-waits for `resume`. Pause does not suspend the machine. `resume` continues an
-active controller or starts one if needed. `stop` asks the controller to stop
-at its next boundary; `stop --force` reconciles unresolved work and terminates
+waits for `resume`. When provider capacity is unavailable, Ralph's managed
+readiness wait keeps the machine awake and remains interruptible. Separately,
+Bridge's background capacity-observation worker emits a fresh read-only
+capacity snapshot every 60 seconds by default, configurable with
+`--capacity-refresh-seconds`; those provider reads do not run on the terminal
+input path. Pause, stop, and boundary steering interrupt the managed wait
+promptly. Bridge does not automatically suspend the operating system; a user
+or external power manager can still put the machine to sleep independently.
+`resume` continues an active controller or starts one if needed.
+`stop` asks the controller to stop at its next boundary and closes the owned
+station after the controller stops; a later resume creates or reconnects the
+station as needed. `stop --force` reconciles unresolved work and terminates
 only a process group or tmux station whose persisted ownership can be
 validated. `cancel` durably cancels the mission and its unfinished tasks.
 
@@ -156,10 +234,33 @@ the task is complete, and it does not silently replay uncertain work. Inspect
 resume after resolving the uncertainty.
 
 The provider pane in native mode is a real provider terminal UI while that
-process is running. Bridge does not claim to restore an exact provider
-conversation after restart or switch providers. Follow-up work is reconstructed
-from the durable objective, task revision, checkpoints, operation records, and
-verification evidence; provider conversation context may be unavailable.
+process is running. Session continuation is provider-specific and is not
+inferred from terminal text or timestamps:
+
+* For Claude Code and Copilot, Bridge uses its own UUID only when the installed
+  CLI advertises `--session-id`. It records that session as `NATIVE_CREATED`
+  only after structured provider metadata confirms the same UUID and working
+  directory. On recovery it requests that exact ID only when the persisted
+  Bridge-owned ID has the same provider and working directory and the CLI
+  still advertises exact-ID resume. It reports `RESTORED_NATIVE` only after
+  metadata confirms the resumed identity. Capability drift, missing metadata,
+  or a directory mismatch prevents exact restoration.
+* Bridge cannot choose a new Codex session ID and will not bind an unrelated
+  Codex transcript because it is recent or has the same working directory. A
+  new Codex session is `UNAVAILABLE` for exact capture; work continues from
+  Bridge's durable mission/task/checkpoint/evidence as `RECONSTRUCTED`. Old
+  session records without explicit Bridge ownership are ignored. An already
+  Bridge-owned exact identity may be resumed only if its ID, directory,
+  provider metadata, and current CLI capability all validate.
+
+`RESTORED_NATIVE`, `NATIVE_CREATED`, `RECONSTRUCTED`, and `UNAVAILABLE` are
+distinct records; do not treat a newly created native session as a restored
+conversation. The Claude/Copilot recovery path has hermetic fake-provider
+coverage. Live native restoration has not been verified for those providers.
+A real Codex reply through Bridge verified a headless prompt only, not native
+session restoration. When exact continuity is unavailable, the next prompt is
+reconstructed from durable mission objective, task revision, checkpoints,
+operation records, and verification evidence.
 
 ## Local state and config
 
@@ -170,6 +271,15 @@ database, private runtime files, and logs there. The shared `config.toml` has
 no `[bridge]` section; choose providers, routes, and execution mode on the
 mission creation/start commands. The selected shared tool configuration is
 captured for the mission so later changes do not silently alter its routing.
+
+Bridge tmux sockets use a short private runtime path under
+`${XDG_RUNTIME_DIR}/llm-bridge` when available, or `/tmp/lb-UID`, with a
+mission-ID hash in the socket name. Controller runtime files remain under the
+private Bridge state directory. Provider output is rotated at 4 MiB per file
+with three rotations by default. Bridge retains the latest 20 run directories;
+when older directories are pruned it records log size and a SHA-256 digest in
+the mission database before deleting the files. Adjust these limits with the
+mission creation flags above.
 
 See `llm-bridge --help` and the command-specific `--help` output for all
 available CLI operations.

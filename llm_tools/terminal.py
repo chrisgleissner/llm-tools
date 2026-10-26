@@ -11,8 +11,10 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import socket
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +35,12 @@ class TmuxTerminalBackend:
     """Manage native terminal processes in a private, user-owned tmux server."""
 
     _COMMAND_TIMEOUT_SECONDS = 10
+    _TEARDOWN_CONFIRM_TIMEOUT_SECONDS = 2.0
+    _BRIDGE_CONFIG_MARKER = "set-option -g @llm_bridge_station 1\n"
+    _SERVER_OWNED = "owned"
+    _SERVER_FOREIGN = "foreign"
+    _SERVER_ABSENT = "absent"
+    _SERVER_UNKNOWN = "unknown"
     _PREFIX_RE = re.compile(
         r"(?:(?:C-|M-|S-)?(?:[A-Za-z0-9]|F(?:[1-9]|1[0-2])|"
         r"Space|Tab|Enter|Escape|[\[\]@_]))"
@@ -264,13 +272,13 @@ class TmuxTerminalBackend:
             self._run(socket, "select-pane", "-t", pane)
             return TerminalHandle(socket, config_path, session_name, pane, bridge_pane, bridge_rows)
         except Exception:
-            if started and self.server_owned(socket):
+            if started:
                 try:
-                    self._run(socket, "kill-server", check=False)
-                except (FileNotFoundError, PermissionError, subprocess.SubprocessError):
+                    self.stop(TerminalHandle(socket, config_path, session_name, "", "", bridge_rows))
+                except (FileNotFoundError, PermissionError, RuntimeError, subprocess.SubprocessError):
                     pass
-            self._unlink_owned_socket(socket)
-            self._unlink_owned_config(socket, config_path)
+            else:
+                self._unlink_owned_config(socket, config_path)
             raise
 
     @staticmethod
@@ -314,22 +322,43 @@ class TmuxTerminalBackend:
 
     def server_exists(self, handle: TerminalHandle) -> bool:
         """Return whether the private tmux server responds on its socket."""
-        try:
-            result = self._run(
-                handle.socket_path,
-                "show-option",
-                "-gqv",
-                "prefix",
-                check=False,
-                capture=True,
-            )
-        except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired):
-            return False
-        return result.returncode == 0
+        state = self._probe_server(handle.socket_path)
+        if state == self._SERVER_UNKNOWN:
+            raise RuntimeError(f"cannot determine whether tmux server is alive: {handle.socket_path}")
+        return state in {self._SERVER_OWNED, self._SERVER_FOREIGN}
 
     def server_owned(self, socket_path: str | Path) -> bool:
         """Return whether a responsive tmux server identifies as an LLM Bridge station."""
         socket = Path(socket_path).expanduser().absolute()
+        state = self._probe_server(socket)
+        if state == self._SERVER_UNKNOWN:
+            raise RuntimeError(f"cannot determine tmux server ownership: {socket}")
+        return state == self._SERVER_OWNED
+
+    @staticmethod
+    def _socket_listener_state(socket_path: Path) -> str:
+        """Distinguish an absent listener from a live or unqueryable socket."""
+        try:
+            info = socket_path.lstat()
+        except FileNotFoundError:
+            return TmuxTerminalBackend._SERVER_ABSENT
+        if not stat.S_ISSOCK(info.st_mode):
+            return TmuxTerminalBackend._SERVER_UNKNOWN
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            connection.settimeout(0.2)
+            connection.connect(str(socket_path))
+        except (FileNotFoundError, ConnectionRefusedError):
+            return TmuxTerminalBackend._SERVER_ABSENT
+        except (OSError, TimeoutError):
+            return TmuxTerminalBackend._SERVER_UNKNOWN
+        finally:
+            connection.close()
+        return "reachable"
+
+    def _probe_server(self, socket_path: Path) -> str:
+        """Return owned/foreign/absent, or unknown when the server cannot be queried."""
+        socket = socket_path.expanduser().absolute()
         try:
             result = self._run(
                 socket,
@@ -339,9 +368,44 @@ class TmuxTerminalBackend:
                 check=False,
                 capture=True,
             )
-        except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired):
+        except FileNotFoundError:
+            return self._socket_listener_state(socket)
+        except (PermissionError, subprocess.TimeoutExpired):
+            listener = self._socket_listener_state(socket)
+            return self._SERVER_ABSENT if listener == self._SERVER_ABSENT else self._SERVER_UNKNOWN
+        if result.returncode == 0:
+            return self._SERVER_OWNED if result.stdout.strip() == "1" else self._SERVER_FOREIGN
+        listener = self._socket_listener_state(socket)
+        return self._SERVER_ABSENT if listener == self._SERVER_ABSENT else self._SERVER_UNKNOWN
+
+    @classmethod
+    def _has_bridge_config_marker(cls, config_path: Path) -> bool:
+        if not config_path.name.endswith(".conf"):
             return False
-        return result.returncode == 0 and result.stdout.strip() == "1"
+        try:
+            cls._validate_config_path(config_path.with_name(config_path.name[:-5]), config_path)
+            content = config_path.read_text(encoding="utf-8")
+        except (OSError, PermissionError, UnicodeError):
+            return False
+        return cls._BRIDGE_CONFIG_MARKER in content
+
+    def _remove_dead_server_artifacts(self, handle: TerminalHandle) -> None:
+        socket_path = handle.socket_path
+        config_path = handle.config_path
+        socket_exists = socket_path.exists()
+        config_exists = config_path.exists()
+        if not socket_exists and not config_exists:
+            return
+        if config_exists and not self._has_bridge_config_marker(config_path):
+            raise PermissionError(f"cannot prove ownership of dead tmux server metadata: {socket_path}")
+        if socket_exists:
+            self._validate_socket_path(socket_path)
+        if config_exists:
+            self._validate_config_path(socket_path, config_path)
+        if socket_exists:
+            socket_path.unlink()
+        if config_exists:
+            config_path.unlink()
 
     def _require_owned(self, handle: TerminalHandle) -> None:
         self._validate_socket_path(handle.socket_path)
@@ -432,14 +496,40 @@ class TmuxTerminalBackend:
         return result.returncode
 
     def stop(self, handle: TerminalHandle) -> None:
-        """Stop only this private server and remove its socket."""
-        if not self.server_owned(handle.socket_path):
+        """Stop an owned server; retain its metadata unless teardown is proven."""
+        state = self._probe_server(handle.socket_path)
+        if state == self._SERVER_FOREIGN:
+            raise PermissionError(f"refusing to stop a non-Bridge tmux server: {handle.socket_path}")
+        if state == self._SERVER_UNKNOWN:
+            raise RuntimeError(f"cannot determine tmux server ownership; preserving metadata: {handle.socket_path}")
+        if state == self._SERVER_ABSENT:
+            self._remove_dead_server_artifacts(handle)
             return
+
+        error: BaseException | None = None
         try:
-            self._run(handle.socket_path, "kill-server", check=False)
-        except (FileNotFoundError, PermissionError, subprocess.SubprocessError):
-            # A missing or replaced socket is not ours to remove or signal.
-            pass
-        self._unlink_owned_socket(handle.socket_path)
-        self._unlink_owned_config(handle.socket_path, handle.config_path)
+            result = self._run(handle.socket_path, "kill-server", check=False)
+            if result.returncode != 0:
+                error = RuntimeError(f"tmux kill-server failed with exit status {result.returncode}: {handle.socket_path}")
+        except (FileNotFoundError, PermissionError, subprocess.SubprocessError) as exc:
+            error = RuntimeError(f"tmux kill-server could not be confirmed: {handle.socket_path}")
+            error.__cause__ = exc
+
+        deadline = time.monotonic() + self._TEARDOWN_CONFIRM_TIMEOUT_SECONDS
+        while True:
+            state = self._probe_server(handle.socket_path)
+            if state == self._SERVER_ABSENT:
+                self._remove_dead_server_artifacts(handle)
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+
+        if state == self._SERVER_FOREIGN:
+            raise RuntimeError(f"tmux socket was replaced during teardown; preserving metadata: {handle.socket_path}") from error
+        if state == self._SERVER_UNKNOWN:
+            raise RuntimeError(f"tmux server teardown is unverified; preserving metadata: {handle.socket_path}") from error
+        if error is not None:
+            raise error
+        raise RuntimeError(f"tmux server remains alive after kill-server; preserving metadata: {handle.socket_path}")
 

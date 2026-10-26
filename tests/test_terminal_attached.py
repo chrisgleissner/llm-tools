@@ -13,6 +13,7 @@ import subprocess
 import sys
 import termios
 import time
+import uuid
 
 import pytest
 
@@ -185,9 +186,20 @@ with out.open("ab", buffering=0) as log:
                 {handle.provider_pane: "80x17", handle.bridge_pane: "80x6"},
             )
         )
-        resize_sentinel = b"resize-input-ready"
-        os.write(master, resize_sentinel)
-        wait_for(lambda: received(provider, resize_sentinel))
+        # tmux can emit a focus transition after updating pane geometry. Prove
+        # that the attached input path has settled by retrying unique printable
+        # tokens until the active native process logs one intact token.
+        wait_for(lambda: active_pane() == handle.provider_pane)
+        for attempt in range(8):
+            resize_sentinel = f"resize-ready-{uuid.uuid4().hex}".encode("ascii")
+            os.write(master, resize_sentinel)
+            try:
+                wait_for(lambda token=resize_sentinel: received(provider, token), timeout=0.25)
+                break
+            except AssertionError:
+                if attempt == 7:
+                    raise
+                wait_for(lambda: active_pane() == handle.provider_pane)
 
         # Detach uses the configured prefix. It leaves both native PTYs alive.
         detach_client()

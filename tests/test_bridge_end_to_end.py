@@ -35,6 +35,51 @@ def controller_released(state, mission):
     return True
 
 
+def test_provider_abort_hands_same_task_to_next_provider(tmp_path, env):
+    state = tmp_path / "state"
+    env["LLM_BRIDGE_STATE_DIR"] = str(state)
+    ready = {"available": True, "five_hour": {"remaining": 80}, "week": {"remaining": 80}}
+    env["LLM_SCHEDULER_USAGE_JSON"] = json.dumps({"codex": ready, "claude": ready})
+    fake = tmp_path / "handoff.py"
+    fake.write_text("""from pathlib import Path
+import sys
+provider = sys.argv[1]
+with Path('providers').open('a') as out: out.write(provider+'\\n')
+if provider == 'codex':
+    Path('checkpoint.txt').write_text('prior provider work')
+    print('route unavailable', flush=True)
+    raise SystemExit(75)
+assert Path('checkpoint.txt').read_text() == 'prior provider work'
+assert 'Durable checkpoint' in Path(sys.argv[2]).read_text()
+Path('result.txt').write_text('completed by second provider')
+print('work completed', flush=True)
+""")
+    verifier = tmp_path / "verify.py"
+    verifier.write_text("from pathlib import Path\nimport json\nassert Path('result.txt').exists()\nprint(json.dumps({'passed': True,'artifacts':['result.txt']}))\n")
+    created = json.loads(call(env, "mission", "create", "--prompt", "Continue through a provider handoff",
+        "--cwd", tmp_path, "--headless", "--providers", "codex,claude", "--command-template",
+        shlex.join([sys.executable, str(fake), "{provider}", "{prompt_file}"]),
+        "--verifier-arg", sys.executable, "--verifier-arg", verifier, "--json"))
+    mid, task = created["mission"]["id"], created["task"]["id"]
+    path = state / "bridge.sqlite3"
+    def status():
+        with BridgeStore(path) as store:
+            return store.get_mission(mid)["status"]
+    try:
+        call(env, "start", "--mission", mid, "--headless")
+        wait_for(lambda: status() == "COMPLETED", timeout=8)
+        with BridgeStore(path) as store:
+            operations = store.db.execute("SELECT station,exit_code FROM operations WHERE task_id=? ORDER BY rowid", (task,)).fetchall()
+            assert [(row[0], row[1]) for row in operations] == [("codex", 75), ("claude", 0)]
+            assert store.get_task(task)["revision"] == 1
+            assert store.get_task(task)["evidence"]
+        assert (tmp_path / "providers").read_text().splitlines() == ["codex", "claude"]
+    finally:
+        if status() not in {"STOPPED", "COMPLETED", "FAILED", "CANCELLED"}:
+            call(env, "stop", "--mission", mid)
+        wait_for(lambda: controller_released(state, mid))
+
+
 def test_detached_submission_amendment_and_verification(tmp_path, env):
     state = tmp_path / "state"
     env["LLM_BRIDGE_STATE_DIR"] = str(state)

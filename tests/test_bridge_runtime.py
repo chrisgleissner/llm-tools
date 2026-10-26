@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+import sys
 from types import SimpleNamespace
 import shutil
+import subprocess
 import time
+
+import pytest
 
 from llm_tools import bridge
 from llm_tools.bridge import _apply_operator_command
 from llm_tools import common
-from llm_tools.bridge_runtime import BridgeMissionHooks
-from llm_tools.bridge_runtime import _provider_station_argv, _process_start_token, _terminate_owned_process_group, launch_controller
+from llm_tools import scheduler
+from llm_tools.bridge_runtime import BridgeMissionHooks, terminate_managed_processes
+from llm_tools.bridge_runtime import _provider_station_argv, _process_start_token, _terminate_owned_process_group, launch_controller, mission_socket_path, run_controller
 from llm_tools.bridge_store import BridgeStore
+from llm_tools.terminal import TerminalHandle
 
 
 def test_pause_command_reports_active_provider_work_is_deferred(tmp_path, monkeypatch) -> None:
@@ -31,6 +38,197 @@ def test_pause_command_reports_active_provider_work_is_deferred(tmp_path, monkey
     assert command["result"]["detail"] == "pause takes effect when the active provider returns"
 
 
+def test_mission_tmux_socket_uses_short_private_user_runtime_path(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / ("runtime-" + "x" * 100)))
+    path = mission_socket_path("a" * 32)
+
+    assert len(os.fsencode(str(path.with_name(path.name + ".conf")))) < 96
+    assert path.name.startswith("m-") and path.suffix == ".sock"
+    assert path.parent.stat().st_uid == os.getuid()
+    assert path.parent.stat().st_mode & 0o077 == 0
+    assert path == mission_socket_path("a" * 32)
+    assert path != mission_socket_path("b" * 32)
+
+
+def test_controller_return_cannot_leave_mission_claiming_running(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_BRIDGE_STATE_DIR", raising=False)
+    state = tmp_path / "llm-tools" / "llm-bridge"
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    store.add_task(mission["id"], "work")
+    monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", lambda *_args, **_kwargs: 1)
+
+    assert run_controller(mission["id"], headless=True) == 1
+
+    current = store.get_mission(mission["id"])
+    assert current["status"] == "FAILED"
+    events = store.events(mission["id"])
+    assert any(event["kind"] == "controller-exited-unexpectedly" for event in events)
+    mode = next(event for event in events if event["kind"] == "controller-mode")
+    assert mode["data"] == {"verified": True, "actual_mode": "headless", "controller_pid": os.getpid()}
+
+
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_controller_tears_down_station_before_marking_mission_stopped(tmp_path, monkeypatch, stop_fails) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setattr("llm_tools.bridge_runtime.shutil.which", lambda name: "/usr/bin/tmux" if name == "tmux" else None)
+    database = tmp_path / "state" / "bridge.sqlite3"
+    setup = BridgeStore(database)
+    mission = setup.create_mission("mission", "objective", cwd=tmp_path, config={"native_tui": True})
+    teardown_statuses: list[str] = []
+
+    class Backend:
+        def start(self, **kwargs):
+            socket_path = Path(kwargs["socket_path"])
+            socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            socket_path.write_text("owned station marker", encoding="ascii")
+            config_path = socket_path.with_name(socket_path.name + ".conf")
+            config_path.write_text("owned station config", encoding="ascii")
+            return TerminalHandle(socket_path, config_path, kwargs["session_name"], "%0", "%1", 6)
+
+        def open_existing(self, socket_path, session_name, *, bridge_rows=6):
+            socket_path = Path(socket_path)
+            if not socket_path.exists():
+                return None
+            return TerminalHandle(socket_path, socket_path.with_name(socket_path.name + ".conf"), session_name, "%0", "%1", bridge_rows)
+
+        def stop(self, _handle):
+            with BridgeStore(database) as observer:
+                teardown_statuses.append(observer.get_mission(mission["id"])["status"])
+            if stop_fails:
+                raise RuntimeError("tmux kill-server failed")
+            _handle.socket_path.unlink(missing_ok=True)
+            _handle.config_path.unlink(missing_ok=True)
+
+    monkeypatch.setattr("llm_tools.bridge_runtime.TmuxTerminalBackend", Backend)
+
+    def stop_request(_argv, *, bridge_hooks):
+        with BridgeStore(database) as controller:
+            controller.set_mission_status(mission["id"], "STOPPING")
+        return 0
+
+    monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", stop_request)
+    if stop_fails:
+        with pytest.raises(RuntimeError, match="kill-server failed"):
+            run_controller(mission["id"])
+        assert setup.get_mission(mission["id"])["status"] == "STOPPING"
+        with pytest.raises(RuntimeError, match="kill-server failed"):
+            run_controller(mission["id"])
+    else:
+        assert run_controller(mission["id"]) == 0
+
+    assert teardown_statuses == ["STOPPING"] if not stop_fails else ["STOPPING", "STOPPING"]
+    current = setup.get_mission(mission["id"])
+    assert current["status"] == ("STOPPING" if stop_fails else "STOPPED")
+    runtime = tmp_path / "state" / "runtime" / f"mission-{mission['id']}"
+    ready = runtime / "controller-ready.json"
+    if stop_fails:
+        assert not ready.exists(), "failed recovery teardown must not publish a replacement controller as ready"
+    socket_path = mission_socket_path(mission["id"])
+    assert socket_path.exists() is stop_fails
+    assert socket_path.with_name(socket_path.name + ".conf").exists() is stop_fails
+
+
+def test_controller_recovery_terminates_unresolved_verifier_without_completing_task(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    database = tmp_path / "state" / "bridge.sqlite3"
+    store = BridgeStore(database)
+    mission = store.create_mission("mission", "objective", cwd=tmp_path, config={"headless": True})
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation = store.begin_operation(task_id, iteration=1, station="codex")
+    store.finish_operation(operation, exit_code=0)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    process_start = _process_start_token(process.pid)
+    managed_id = store.prepare_managed_process(mission["id"], task_id, kind="verifier")
+    store.mark_managed_process_running(managed_id, process_pid=process.pid, process_start=process_start)
+    monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", lambda *_args, **_kwargs: 0)
+
+    try:
+        assert run_controller(mission["id"], headless=True) == 0
+        process.wait(timeout=4)
+        assert store.get_managed_process(managed_id)["status"] == "TERMINATED"
+        assert store.get_mission(mission["id"])["status"] == "FAILED"
+        task = store.get_task(task_id)
+        assert task["status"] == "VERIFYING"
+        assert task["evidence"] == []
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=3)
+
+
+def test_unidentified_starting_verifier_blocks_cleanup_instead_of_claiming_stopped(tmp_path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation = store.begin_operation(task_id, iteration=1, station="codex")
+    store.finish_operation(operation, exit_code=0)
+    process_id = store.prepare_managed_process(mission["id"], task_id, kind="verifier")
+
+    with pytest.raises(RuntimeError, match="no verified identity"):
+        terminate_managed_processes(store, mission["id"])
+
+    assert store.get_managed_process(process_id)["status"] == "STARTING"
+    assert store.get_mission(mission["id"])["status"] == "RUNNING"
+
+
+def test_verifier_pid_reuse_is_never_signalled_and_is_recorded_uncertain(tmp_path, monkeypatch) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation = store.begin_operation(task_id, iteration=1, station="codex")
+    store.finish_operation(operation, exit_code=0)
+    process_id = store.prepare_managed_process(mission["id"], task_id, kind="verifier")
+    store.mark_managed_process_running(process_id, process_pid=1234, process_start="old:identity")
+    monkeypatch.setattr("llm_tools.bridge_runtime._process_start_token", lambda _pid: "new:identity")
+    monkeypatch.setattr(
+        "llm_tools.bridge_runtime._terminate_owned_process_group",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not signal a reused pid")),
+    )
+
+    terminate_managed_processes(store, mission["id"])
+
+    assert store.get_managed_process(process_id)["status"] == "UNCERTAIN"
+
+
+def test_live_verifier_with_unreadable_identity_blocks_controller_cleanup(tmp_path, monkeypatch) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation = store.begin_operation(task_id, iteration=1, station="codex")
+    store.finish_operation(operation, exit_code=0)
+    process_id = store.prepare_managed_process(mission["id"], task_id, kind="verifier")
+    store.mark_managed_process_running(process_id, process_pid=1234, process_start="expected")
+    monkeypatch.setattr("llm_tools.bridge_runtime._process_start_token", lambda _pid: "")
+    monkeypatch.setattr("llm_tools.bridge_runtime._process_alive_but_unverifiable", lambda _pid: True)
+
+    with pytest.raises(PermissionError, match="alive but its identity cannot be verified"):
+        terminate_managed_processes(store, mission["id"])
+
+    assert store.get_managed_process(process_id)["status"] == "RUNNING"
+
+
+def test_scheduler_wait_is_interruptible_within_one_poll_slice() -> None:
+    calls = 0
+
+    def interrupt() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls >= 2
+
+    config = scheduler.SchedulerConfig(should_interrupt_wait=interrupt)
+    started = time.monotonic()
+
+    assert scheduler._sleep_interruptibly(config, common.now_epoch() + 30) is False
+    assert time.monotonic() - started < 1.5
+
+
 def test_cancel_command_is_durable_and_defers_process_boundary(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("mission", "objective", cwd=tmp_path)
@@ -43,6 +241,41 @@ def test_cancel_command_is_durable_and_defers_process_boundary(tmp_path) -> None
     assert command["result"]["mission_status"] == "CANCELLED"
     assert command["result"]["work_status"] == "DEFERRED"
     assert store.get_task(task_id)["status"] == "CANCELLED"
+
+
+def test_task_cancel_reports_the_active_provider_operation_as_deferred(tmp_path) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation_id = store.begin_operation(task_id, iteration=1, station="codex")
+    store.mark_operation_running(operation_id)
+
+    command = _apply_operator_command(store, mission["id"], {"action": "task.cancel", "task_id": task_id})
+
+    assert command["result"]["work_status"] == "DEFERRED"
+    assert command["result"]["active_operation_id"] == operation_id
+    assert "active provider returns" in command["result"]["detail"]
+    assert store.get_operation(operation_id)["status"] == "RUNNING"
+    assert store.get_task(task_id)["status"] == "CANCELLED"
+
+
+def test_station_selection_is_persisted_as_view_only_preference(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_BRIDGE_STATE_DIR", raising=False)
+    with bridge.open_store() as setup_store:
+        mission = setup_store.create_mission(
+            "mission", "objective", cwd=tmp_path,
+            config={"providers": "codex,claude", "routes": ""},
+        )
+
+    response = bridge.dispatch_console_command(mission["id"], "station claude")
+
+    assert '"status": "APPLIED"' in response
+    with bridge.open_store() as store:
+        current = store.get_mission(mission["id"])
+        assert current["config"]["viewed_station"] == "claude"
+        assert any(event["kind"] == "station-viewed" for event in store.events(mission["id"]))
 
 
 def test_mission_pause_leaves_completed_work_awaiting_verification(tmp_path) -> None:
@@ -74,6 +307,32 @@ def test_runtime_hook_keeps_autonomous_provider_launch_headless_with_control_pan
     assert config.exec_mode == "fresh"
     assert config.headless is True
     assert config.native_tui is False
+
+
+def test_task_pause_winning_prelaunch_race_aborts_prepared_operation(tmp_path, monkeypatch) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    context = {"task_id": task_id}
+    config = SimpleNamespace(provider="codex", exec_mode="fresh", tmux_pane="", native_tui=False, headless=True, run_dir=None, model="")
+    original = store.mark_operation_running
+
+    def pause_before_mark(operation_id, **kwargs):
+        store.set_task_status(task_id, "PAUSED")
+        return original(operation_id, **kwargs)
+
+    monkeypatch.setattr(store, "mark_operation_running", pause_before_mark)
+
+    assert hook.before_launch(context, {"provider": "codex"}, config, 1) is False
+    operation = store.db.execute("SELECT status,exit_code FROM operations").fetchone()
+    assert tuple(operation) == ("EXITED", 143)
+    assert store.get_task(task_id)["status"] == "PAUSED"
+    event = store.events(mission["id"])[-1]
+    assert event["kind"] == "operation-aborted-before-launch"
+    assert event["data"]["provider_started"] is False
 
 
 def test_task_prompt_contains_objective_checkpoint_and_explicit_reconstruction(tmp_path) -> None:
@@ -306,6 +565,199 @@ def test_explicit_native_mode_uses_owned_provider_pane(tmp_path) -> None:
     assert config.tmux_pane == "%1"
     assert config.native_tui is True
     assert config.headless is False
+
+
+def _provider_config(provider, cwd, run_dir):
+    return SimpleNamespace(
+        provider=provider, exec_mode="fresh", tmux_target="", tmux_socket="", tmux_pane="",
+        native_tui=False, headless=True, run_dir=run_dir, model="", command_template="", cwd=str(cwd),
+    )
+
+
+def _fake_session_cli(path: Path, provider: str, *, resume: bool = True) -> None:
+    options = "--session-id UUID " + ("--resume SESSION_ID" if resume else "")
+    path.write_text("#!" + sys.executable + "\nprint(" + repr("usage: " + provider + " " + options) + ")\n", encoding="utf-8")
+    path.chmod(0o700)
+
+
+def _write_provider_metadata(provider: str, home: Path, cwd: Path, session_id: str, *, append: bool = False) -> Path:
+    if provider == "claude":
+        project = str(cwd.resolve()).replace("/", "-")
+        path = home / ".claude" / "projects" / project / f"{session_id}.jsonl"
+        record = {"type": "system", "subtype": "init", "session_id": session_id, "cwd": str(cwd.resolve())}
+    else:
+        path = home / ".copilot" / "session-state" / session_id / "events.jsonl"
+        record = {"type": "session.start", "id": "event-id", "data": {
+            "sessionId": session_id, "context": {"cwd": str(cwd.resolve())},
+        }}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a" if append else "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(record) + "\n")
+    future_ns = time.time_ns() + 2_000_000
+    os.utime(path, ns=(future_ns, future_ns))
+    return path
+
+
+def test_owned_claude_and_copilot_sessions_survive_controller_restart_by_exact_id(tmp_path, monkeypatch) -> None:
+    for provider in ("claude", "copilot"):
+        case = tmp_path / provider
+        case.mkdir(mode=0o700)
+        cwd = case / "worktree"
+        cwd.mkdir(parents=True)
+        home = case / "home"
+        home.mkdir()
+        bin_dir = case / "bin"
+        bin_dir.mkdir()
+        binary = bin_dir / provider
+        _fake_session_cli(binary, provider)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+        store_path = case / "bridge.sqlite3"
+        store = BridgeStore(store_path)
+        mission = store.create_mission("native", "objective", cwd=cwd)
+        store.set_mission_status(mission["id"], "RUNNING")
+        hooks = BridgeMissionHooks(mission["id"], handle=SimpleNamespace(session_name="m", socket_path=case / "sock", provider_pane="%1"), headless=False, native_tui=True, controller_logs=case / "controller.log")
+        hooks.bind(store)
+        task1 = store.add_task(mission["id"], "first prompt")
+        config1 = _provider_config(provider, cwd, case / "run1")
+        context1 = {"task_id": task1}
+        assert hooks.before_launch(context1, {"provider": provider}, config1, 1)
+        if provider == "claude":
+            initial_argv = config1.command_argv_transform([str(binary), "first prompt"])
+        else:
+            initial_argv = config1.command_argv_transform([str(binary), "-C", str(cwd), "-i", "first prompt"])
+        assert initial_argv[0] == str(binary) and initial_argv[1] == "--session-id"
+        session_id = initial_argv[2]
+        assert initial_argv.count("--session-id") == 1
+
+        _write_provider_metadata(provider, home, cwd, session_id)
+        hooks._record_process(context1["operation_id"], os.getpid())
+        assert store.get_operation(context1["operation_id"])["restoration_state"] == "NATIVE_CREATED"
+        config1.run_dir.mkdir()
+        hooks.after_iteration(context1, {"provider": provider}, config1, 1, 0, 0.1)
+        operation1 = store.get_operation(context1["operation_id"])
+        assert operation1["native_session_id"] == session_id
+        assert operation1["restoration_state"] == "NATIVE_CREATED"
+        saved = store.get_mission(mission["id"])["config"]["native_sessions"][provider]
+        assert saved["owned_by_bridge"] is True
+        assert saved["session_id"] == session_id and saved["cwd"] == str(cwd.resolve())
+        store.close()
+
+        # A reopened SQLite connection and new hook instance model controller
+        # death/restart; the UUID must come from durable owned state.
+        store = BridgeStore(store_path)
+        hooks = BridgeMissionHooks(mission["id"], handle=SimpleNamespace(session_name="m", socket_path=case / "sock", provider_pane="%1"), headless=False, native_tui=True, controller_logs=case / "controller.log")
+        hooks.bind(store)
+        task2 = store.add_task(mission["id"], "resume prompt")
+        config2 = _provider_config(provider, cwd, case / "run2")
+        context2 = {"task_id": task2}
+        assert hooks.before_launch(context2, {"provider": provider}, config2, 2)
+        if provider == "claude":
+            resumed = config2.command_argv_transform([str(binary), "resume prompt"])
+            assert resumed[:3] == [str(binary), "--resume", session_id]
+        else:
+            resumed = config2.command_argv_transform([str(binary), "-C", str(cwd), "-i", "resume prompt"])
+            assert resumed[:3] == [str(binary), "--resume", session_id]
+        assert "--last" not in resumed
+        _write_provider_metadata(provider, home, cwd, session_id, append=True)
+        hooks._record_process(context2["operation_id"], os.getpid())
+        assert store.get_operation(context2["operation_id"])["restoration_state"] == "RESTORED_NATIVE"
+        config2.run_dir.mkdir()
+        hooks.after_iteration(context2, {"provider": provider}, config2, 2, 0, 0.1)
+        operation2 = store.get_operation(context2["operation_id"])
+        assert operation2["native_session_id"] == session_id
+        assert operation2["restoration_state"] == "RESTORED_NATIVE"
+        store.close()
+
+
+def test_codex_same_worktree_session_is_never_auto_bound_to_bridge(tmp_path, monkeypatch) -> None:
+    cwd = tmp_path / "worktree"
+    cwd.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    codex = bin_dir / "codex"
+    codex.write_text("#!" + sys.executable + "\nprint('codex commands:\\n  resume SESSION_ID [PROMPT]')\n", encoding="utf-8")
+    codex.chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("native", "objective", cwd=cwd, config={
+        "native_sessions": {"codex": {
+            "provider": "codex", "session_id": "11111111-1111-4111-8111-111111111111",
+            "cwd": str(cwd), "source": "codex:session_meta",
+        }}
+    })
+    store.set_mission_status(mission["id"], "RUNNING")
+    task_id = store.add_task(mission["id"], "work")
+    hooks = BridgeMissionHooks(mission["id"], handle=SimpleNamespace(session_name="m", socket_path=tmp_path / "s", provider_pane="%1"), headless=False, native_tui=True, controller_logs=tmp_path / "controller.log")
+    hooks.bind(store)
+    config = _provider_config("codex", cwd, tmp_path / "run")
+    context = {"task_id": task_id}
+    assert hooks.before_launch(context, {"provider": "codex"}, config, 1)
+    argv = config.command_argv_transform([str(codex), "-C", str(cwd), "work"])
+    assert argv == [str(codex), "-C", str(cwd), "work"]
+
+    # Even a unique new session_meta in the same worktree is insufficient
+    # provenance: Codex did not let Bridge own this ID.
+    unrelated_id = "11111111-1111-4111-8111-111111111111"
+    session_dir = home / ".codex" / "sessions" / "2026" / "10" / "25"
+    session_dir.mkdir(parents=True)
+    (session_dir / f"rollout-{unrelated_id}.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": unrelated_id, "cwd": str(cwd)}}) + "\n",
+        encoding="utf-8",
+    )
+    hooks._record_process(context["operation_id"], os.getpid())
+    assert store.get_operation(context["operation_id"])["native_session_id"] is None
+    config.run_dir.mkdir()
+    hooks.after_iteration(context, {"provider": "codex"}, config, 1, 0, 0.1)
+    operation = store.get_operation(context["operation_id"])
+    assert operation["native_session_id"] is None
+    assert operation["restoration_state"] == "UNAVAILABLE"
+
+
+def test_owned_native_identity_cwd_mismatch_and_capability_drift_do_not_resume(tmp_path, monkeypatch) -> None:
+    cwd = tmp_path / "current"
+    cwd.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    claude = bin_dir / "claude"
+    _fake_session_cli(claude, "claude", resume=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    stale_id = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+    mission = store.create_mission("native", "objective", cwd=cwd, config={
+        "native_sessions": {"claude": {
+            "owned_by_bridge": True,
+            "provider": "claude",
+            "session_id": stale_id,
+            "cwd": str(other),
+            "source": "claude:system.init",
+        }}
+    })
+    store.set_mission_status(mission["id"], "RUNNING")
+    task_id = store.add_task(mission["id"], "resume from durable checkpoint")
+    hooks = BridgeMissionHooks(mission["id"], handle=SimpleNamespace(session_name="m", socket_path=tmp_path / "s", provider_pane="%1"), headless=False, native_tui=True, controller_logs=tmp_path / "controller.log")
+    hooks.bind(store)
+    config = _provider_config("claude", cwd, tmp_path / "run")
+    context = {"task_id": task_id}
+    assert hooks.before_launch(context, {"provider": "claude"}, config, 1)
+    argv = config.command_argv_transform([str(claude), "continue from checkpoint"])
+
+    assert "--resume" not in argv
+    assert argv[1] == "--session-id" and argv[2] != stale_id
+    config.run_dir.mkdir()
+    hooks.after_iteration(context, {"provider": "claude"}, config, 1, 0, 0.1)
+    operation = store.get_operation(context["operation_id"])
+    assert operation["native_session_id"] is None
+    assert operation["restoration_state"] == "UNAVAILABLE"
 
 
 def test_before_launch_treats_concurrent_mission_stop_as_rejected_launch(tmp_path, monkeypatch) -> None:

@@ -13,6 +13,7 @@ import sys
 import time
 
 from llm_tools.bridge_store import BridgeStore, MissionLock
+from llm_tools.bridge_runtime import mission_socket_path
 from llm_tools.terminal import TmuxTerminalBackend
 
 
@@ -102,13 +103,14 @@ def test_graceful_stop_terminates_tmux_station_and_bridge_ui(tmp_path: Path, env
     task_id = int(created["task"]["id"])
     database = state / "bridge.sqlite3"
     runtime = state / "runtime" / f"mission-{mission_id}"
+    socket_path = mission_socket_path(mission_id, env=env)
     backend = TmuxTerminalBackend()
     handle = None
     try:
         call(env, "start", "--mission", mission_id)
         wait_for(lambda: (tmp_path / "provider-ran").exists())
         wait_for(lambda: _mission_task_state(database, mission_id, task_id)[1] == "VERIFYING")
-        handle = backend.open_existing(runtime / "tmux.sock", f"mission-{mission_id}")
+        handle = backend.open_existing(socket_path, f"mission-{mission_id}")
         assert backend.session_exists(handle)
         assert backend.pane_is_alive(handle, pane="bridge")
 
@@ -121,9 +123,9 @@ def test_graceful_stop_terminates_tmux_station_and_bridge_ui(tmp_path: Path, env
         with BridgeStore(database) as store:
             assert store.get_task(task_id)["status"] == "VERIFYING"
     finally:
-        if handle is None and (runtime / "tmux.sock").exists():
+        if handle is None and socket_path.exists():
             try:
-                handle = backend.open_existing(runtime / "tmux.sock", f"mission-{mission_id}")
+                handle = backend.open_existing(socket_path, f"mission-{mission_id}")
             except (OSError, RuntimeError, PermissionError):
                 handle = None
         if handle is not None:
@@ -174,6 +176,7 @@ def test_resume_reconciles_native_mutator_and_stops_old_station(tmp_path: Path, 
     task_id = int(created["task"]["id"])
     database = state / "bridge.sqlite3"
     runtime = state / "runtime" / f"mission-{mission_id}"
+    socket_path = mission_socket_path(mission_id, env=env)
     backend = TmuxTerminalBackend()
     old_handle = None
     try:
@@ -181,7 +184,7 @@ def test_resume_reconciles_native_mutator_and_stops_old_station(tmp_path: Path, 
         wait_for(lambda: pid_file.exists() and beat_file.exists())
         provider_pid = int(pid_file.read_text(encoding="ascii"))
         assert _pid_alive(provider_pid)
-        old_handle = backend.open_existing(runtime / "tmux.sock", f"mission-{mission_id}")
+        old_handle = backend.open_existing(socket_path, f"mission-{mission_id}")
         assert backend.pane_is_alive(old_handle, pane="provider")
 
         ready = json.loads((runtime / "controller-ready.json").read_text(encoding="utf-8"))
@@ -206,14 +209,14 @@ def test_resume_reconciles_native_mutator_and_stops_old_station(tmp_path: Path, 
             ).fetchall()
         assert [row["status"] for row in operations] == ["UNCERTAIN"]
 
-        resumed_handle = backend.open_existing(runtime / "tmux.sock", f"mission-{mission_id}")
+        resumed_handle = backend.open_existing(socket_path, f"mission-{mission_id}")
         assert backend.session_exists(resumed_handle)
         assert backend.pane_is_alive(resumed_handle, pane="bridge")
         assert not backend.pane_is_alive(resumed_handle, pane="provider")
     finally:
-        if old_handle is None and (runtime / "tmux.sock").exists():
+        if old_handle is None and socket_path.exists():
             try:
-                old_handle = backend.open_existing(runtime / "tmux.sock", f"mission-{mission_id}")
+                old_handle = backend.open_existing(socket_path, f"mission-{mission_id}")
             except (OSError, RuntimeError, PermissionError):
                 old_handle = None
         provider_pid = int(pid_file.read_text(encoding="ascii")) if pid_file.exists() else -1

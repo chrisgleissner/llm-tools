@@ -130,6 +130,20 @@ escapes as a controller error; no full suite was rerun after that change.
   5 passed. This closes these store-level boundaries, not later end-to-end
   stop/resume and reconstruction review.
 
+### P9 — High: opening the database depends on every historical working directory — CLOSED
+
+- **Location:** `llm_tools/bridge_store.py` (`_initialize`).
+- **Initial reproduction:** Opening an already-v3 store after deleting one
+  historical mission cwd raised `FileNotFoundError` before serving any mission;
+  every open also recomputed each stored Git identity.
+- **Fix:** Repository identity backfill only runs when the schema version is
+  upgraded. Migration preserves the old identity when a historical cwd no
+  longer exists; current-schema opens trust the persisted value.
+- **Verification:** `test_current_schema_open_preserves_identity_for_removed_worktree`
+  and `test_migration_preserves_identity_when_historical_cwd_is_gone` cover
+  current open and migration behavior. I independently reopened a database
+  after deleting its mission cwd; reading the mission succeeded.
+
 ## Gate 2 — Native terminal transport
 
 Reviewed `llm_tools/terminal.py`, `tests/test_terminal_backend.py` and the
@@ -271,64 +285,50 @@ Reviewed `llm_tools/bridge.py` command application and
   `test_successful_child_exit_observes_mission_pause` covers mission pause.
   The focused 28-test persistence/concurrency/dispatch suite passes.
 
-### O5 — High: active task cancellation hides the still-running provider — OPEN
+### O5 — High: active task cancellation hides the still-running provider — CLOSED
 
 - **Location:** `llm_tools/bridge.py` (`task.cancel`) and the owned provider
   operation.
-- **Reproduction:** Start an operation and apply `task.cancel`. The command
-  result contains `status=CANCELLED` but no `work_status=DEFERRED`; the
-  operation remains RUNNING and the provider pane is not signalled. The task
-  state stays CANCELLED after the provider eventually returns.
-- **Impact:** The operator cannot tell from the command result that the
-  provider may continue mutating the worktree after cancellation was requested.
-- **Required fix:** Either stop the owned provider through the safe process
-  ownership path, or return an explicit deferred outcome like active
-  `task.pause` and define when the cancellation takes effect.
-- **Verification:** Add an active-task cancellation command test asserting the
-  provider is stopped or the result clearly reports deferred work and its
-  operation remains tracked until exit.
+- **Initial reproduction:** `task.cancel` left a RUNNING operation without a
+  deferred-work result even though it did not signal the provider.
+- **Fix:** Active cancellation now returns `work_status=DEFERRED`, the active
+  operation ID, and a clear boundary description. The operation remains
+  tracked; successful or failed provider exit does not overwrite CANCELLED.
+- **Verification:** `test_task_cancel_reports_the_active_provider_operation_as_deferred`
+  checks the command result and RUNNING operation; store regression
+  `test_successful_child_exit_preserves_operator_task_state` checks exit does
+  not overwrite CANCELLED. The final focused integration command passed.
 
 ## Gate 4 — Ralph hook integration
 
-### O3 — High: a stop racing pre-launch is misreported as controller failure — OPEN
+### O3 — High: a stop or task cancel racing pre-launch is misreported as controller failure — CLOSED
 
 - **Location:** `llm_tools/ralph_robin.py` (`main`) and
   `llm_tools/bridge_runtime.py` (`BridgeMissionHooks.before_launch`).
-- **Fixes:** Ralph now skips the scheduler when `before_launch()` returns False.
-  `begin_operation()` checks mission RUNNING in its transaction, and the hook
-  treats a rejected intent after a concurrent mission stop as a normal launch
-  rejection. `test_before_launch_treats_concurrent_mission_stop_as_rejected_launch`
-  plus `tests/test_bridge_hooks.py` passed (3 tests).
-- **Current reproduction:** A task can be cancelled after selection but before
-  `begin_operation()`. The store correctly rejects `task is not runnable`, but
-  mission status remains RUNNING, so `before_launch()` re-raises the
-  `TransitionError`; the controller then treats it as failure.
-- **Impact:** A valid concurrent task-cancel command can fail the whole mission
-  even though the provider was correctly prevented from launching.
-- **Required fix:** Treat the operation-intent rejection as a normal launch
-  rejection when the task is no longer runnable as well as when the mission is
-  no longer RUNNING. Keep unexpected store errors visible.
-- **Verification:** Add a task-cancel interleaving regression proving no
-  operation/provider launch occurs and the controller does not become FAILED.
+- **Fix:** Ralph skips scheduler launch when the hook rejects the boundary.
+  `begin_operation()` validates mission/task state in its transaction, and
+  `before_launch()` treats a rejected intent as normal when either the mission
+  left RUNNING or the task became PAUSED/CANCELLED; unrelated transition errors
+  still propagate.
+- **Verification:** `test_before_launch_treats_concurrent_mission_stop_as_rejected_launch`
+  covers the mission-stop race. I independently injected task cancellation
+  between selection and `begin_operation()`; the hook returned `False`, left
+  the mission RUNNING/task CANCELLED, and created zero operations. The task
+  cancel interleaving has no dedicated checked-in regression yet.
 
-### O4 — High: stop requests are not polled during Ralph/scheduler waits — OPEN
+### O4 — High: stop requests are not polled during Ralph/scheduler waits — CLOSED
 
 - **Location:** `llm_tools/ralph_robin.py` (`suspend_until_available`,
   `suspend_machine_until`) and `llm_tools/scheduler.py`
   (`wait_until_usable`).
-- **Evidence:** `BridgeMissionHooks.before_iteration()` is the only runtime
-  hook that reads mission lifecycle status. Ralph calls its provider wait and
-  suspend paths without a Bridge callback, and scheduler readiness can sleep
-  until a reset without checking mission state.
-- **Impact:** A graceful stop during an all-rate-limited wait or scheduler
-  readiness wait is not observed until that wait returns; in the suspend path
-  that can be the next provider reset.
-- **Required fix:** Thread a bounded stop/pause check through long waits and
-  suspend wake/resume boundaries, without changing default no-hook behavior of
-  ordinary Ralph/scheduler runs.
-- **Verification:** Add deterministic fake-clock/fake-suspend tests that issue
-  STOPPING during each wait path and prove the loop exits promptly without
-  launching another provider. Do not perform real machine suspend in CI.
+- **Fix:** Bridge supplies an interrupt callback to Ralph awake waits and
+  scheduler readiness/retry waits. Bridge waits remain awake so operator
+  requests stay responsive; no-hook Ralph/scheduler calls retain their default
+  behavior.
+- **Verification:** The Ralph wall-clock wait, Bridge cross-provider wait,
+  scheduler readiness wait, and detached long-capacity-wait tests cover
+  prompt interruption without launching a provider. All passed in the final
+  35-test integrated review command.
 
 ## Gate 5 — Controller recovery and restoration
 
@@ -351,91 +351,331 @@ Reviewed `llm_tools/bridge.py` command application and
   launch fails instead of accepting it. The 94-test execution/restoration
   suite passed.
 
-### O7 — High: graceful stop leaves the private terminal server running — OPEN
+### O7 — High: graceful stop can report STOPPED before terminal cleanup succeeds — OPEN
 
 - **Location:** `llm_tools/bridge_runtime.py` (`run_controller` shutdown) and
   `llm_tools/bridge.py` (`stop` command).
-- **Evidence:** Graceful `stop` only records STOPPING. After Ralph exits,
-  `run_controller()` changes STOPPING to STOPPED but does not stop or detach
-  `backend`/`handle`. The explicit server cleanup exists only in the
-  `stop --force` path.
-- **Impact:** The tmux server and Bridge console pane remain alive after
-  graceful stop; an attached `llm-bridge start` caller remains in tmux instead
-  of returning to its terminal.
-- **Required fix:** After the active operation reaches its safe boundary,
-  clean up the owned terminal station and restore attached clients before
-  marking STOPPED. Preserve detach semantics separately.
-- **Verification:** Add an attached real-PTY stop test: stop during an active
-  fake operation, wait for its boundary, assert the invoking client returns,
-  the private server/socket/config are removed, and mission state is STOPPED.
+- **Evidence:** The normal path now kills the private server in
+  `run_controller()` and the real-tmux test confirms eventual station cleanup.
+  However, `BridgeMissionHooks.before_iteration()` writes STOPPED before the
+  controller's `finally` calls `backend.stop(handle)`. `TmuxTerminalBackend.stop()`
+  treats a non-responsive/unowned probe or failed/timed-out `kill-server` as a
+  no-op, unlinks the socket/config anyway, and does not verify server exit.
+- **Reproduction:** I started a real private tmux server with two 30-second
+  pane processes, injected a nonzero `kill-server` result, then called
+  `backend.stop()`. It returned normally, removed socket and config, and both
+  pane PIDs remained alive.
+- **Impact:** A failed terminal teardown can leave provider/Bridge panes alive
+  while the durable mission already says STOPPED; a start/stop caller has no
+  reliable state indicating cleanup is incomplete.
+- **Required fix:** Keep STOPPING durable through cleanup. Make stop report
+  failure if the owned server cannot be proven gone, and do not remove its
+  ownership files or mark STOPPED until server/session exit is verified.
+- **Verification:** `test_graceful_stop_terminates_tmux_station_and_bridge_ui`
+  proves the success path, but it observes state only after cleanup and does
+  not inject tmux kill failure. Add an ordering/failure regression and, if
+  feasible, assert attached-client return through the CLI stop path.
 
-### O8 — High: resume reuses a live pane after marking its operation uncertain — OPEN
+### O8 — High: recovery can accept an unverified terminal teardown — OPEN
 
 - **Location:** `llm_tools/bridge_runtime.py` (`run_controller` recovery and
   `_open_existing`).
-- **Evidence:** Startup reconciles every PREPARED/RUNNING operation to
-  UNCERTAIN/BLOCKED, then opens an existing private tmux session without
-  checking provider pane liveness or terminating/verifying its owner. Ralph
-  waits because the task is blocked while the old provider pane can remain
-  active.
-- **Impact:** A provider may continue writing after the new controller has
-  marked its operation uncertain and reported the mission resumed. The
-  reconstructed task state and observed station state can contradict each
-  other.
-- **Required fix:** On recovery, inspect the persisted operation and owned
-  station identity before reusing a pane. Either verify and explicitly restore
-  the native session, or safely terminate the owned process before rebuilding
-  context; if identity is unavailable, keep the mission in an explicit recovery
-  state and do not claim a clean resume.
-- **Verification:** Add a real-tmux fake-provider test that kills only the
-  controller while a provider remains alive, then resumes. Assert the provider
-  is verified as restored or terminated before the new controller becomes
-  ready, with the operation remaining UNCERTAIN and never silently replayed.
+- **Fix:** Recovery reconciles the operation to UNCERTAIN/BLOCKED, stops the
+  prior private station or exact persisted headless process group, and the new
+  real-tmux regression confirms the surviving provider is terminated before
+  the replacement controller is ready. Work is not replayed.
+- **Remaining failure path:** Recovery treats a non-`None` `prior_handle` as
+  sufficient even though `TmuxTerminalBackend.stop()` returned normally in the
+  injected kill-failure reproduction while both pane processes remained alive.
+  That bypasses the refusal for an unidentified RUNNING operation and can let a
+  replacement controller become ready while an old provider pane remains alive.
+- **Required fix:** Verify the owned tmux server and provider pane are gone
+  before proceeding or writing readiness; if teardown cannot be proved, keep
+  the mission in explicit recovery and do not start replacement work.
+- **Verification:** `test_resume_reconciles_native_mutator_and_stops_old_station`
+  passes the ordinary success path. Add a kill-failure/unidentified-process
+  regression proving resume refuses readiness and never launches another task.
 
-### O9 — High: native provider restoration has no persisted session identity — OPEN
+### O9 — High: first native session capture can bind an unrelated Codex conversation — CLOSED
 
-- **Location:** `llm_tools/bridge_store.py` operation schema,
-  `llm_tools/bridge_runtime.py` (`BridgeMissionHooks.before_iteration`), and
-  station/status projection.
-- **Evidence:** Operations persist route/model/pane/process identity but no
-  provider conversation/session id. The runtime always labels the next prompt
-  `RECONSTRUCTED`; it has no native resume argv path, and `status_snapshot()`
-  does not project station restoration state. The capability ledger lists
-  resume interfaces for installed providers, while runtime restoration remains
-  NOT VERIFIED.
-- **Impact:** Resume always rebuilds context and cannot restore a provider-native
-  conversation where supported; operators cannot distinguish an observed
-  native restore from reconstructed context in station state.
-- **Required fix:** Capture a typed, provider-specific session id only from
-  structured, validated CLI metadata and use the exact documented resume
-  interface when verified. Otherwise expose RECONSTRUCTED/UNAVAILABLE and keep
-  native restoration explicitly NOT VERIFIED; never use a global most-recent
-  session selector.
-- **Verification:** Use fake provider CLIs to persist an exact session id,
-  verify the resume argv uses only that id, and verify missing/mismatched ids
-  fall back to RECONSTRUCTED. Keep real provider restoration NOT VERIFIED until
-  separately observed.
+- **Location:** `llm_tools/bridge_runtime.py` (`_native_session_argv_transform`,
+  `_record_session_outcome`) and `llm_tools/bridge_sessions.py`.
+- **Initial reproduction:** The earlier Codex path selected a new same-cwd
+  transcript by modification time and could persist an unrelated conversation
+  as `NATIVE_CREATED`.
+- **Fix:** Codex no longer auto-binds a new native session because Bridge cannot
+  choose its ID. Its old saved IDs without `owned_by_bridge: true` are ignored,
+  and Codex continues from reconstructed task context. Claude and Copilot use a
+  Bridge-generated UUID passed through their advertised `--session-id` option;
+  Bridge accepts only the provider's structured metadata for that exact ID and
+  matching cwd, then persists that ID as Bridge-owned. Resume uses the exact
+  persisted ID and is rejected on cwd or capability mismatch. There is no
+  timestamp-based candidate discovery.
+- **Verification:** Independently ran
+  `python -m pytest tests/test_bridge_sessions.py tests/test_bridge_runtime.py
+  tests/test_bridge_store.py tests/test_bridge_wait_interrupt.py -q`:
+  67 passed. The tests cover the Codex unrelated-session fallback, exact
+  Bridge-generated Claude/Copilot IDs, reopening SQLite and a new hook instance,
+  exact-ID resume, and cwd/capability mismatch. These are hermetic fixtures;
+  they do not constitute a live provider restoration test or an OS-level
+  controller restart test. Installed-provider native restore remains
+  **NOT VERIFIED**, and unsupported providers remain reconstructed/unavailable.
+
+### O10 — High: force stop leaves an independent verifier running — OPEN
+
+- **Location:** `llm_tools/bridge_runtime.py` (`_run_bounded_verifier`,
+  `run_configured_verifier`) and `llm_tools/bridge.py` (`stop --force`).
+- **Reproduction:** I started a headless mission with a successful fake
+  provider and a configured verifier that wrote its PID then slept. Once the
+  provider operation was EXITED and verification was running,
+  `llm-bridge stop --force` returned 0 and marked the mission stopped, but the
+  verifier PID remained alive. I terminated that process group during cleanup.
+- **Cause:** The verifier uses `start_new_session=True`, while force stop only
+  reconciles active provider operations and kills the controller process
+  group. The verifier has no persisted PID/start-token ownership record, and
+  its provider operation is already EXITED, so force stop cannot identify its
+  separate process group.
+- **Impact:** Verifier work can keep running after force stop reports success
+  and may continue reading or mutating the mission worktree after cancellation.
+- **Required fix:** Track and validate verifier process ownership during its
+  lifetime, terminate its exact process group on force stop, and wait for that
+  group to exit before marking the mission STOPPED. Keep timeout descendant
+  cleanup intact.
+- **Verification:** Add a real child-process regression that force-stops during
+  verification, asserts the verifier and descendants are gone before STOPPED,
+  and retains the existing bounded-timeout/descendant test.
+
+## Gate 6 — Monitor projection and TUI contract
+
+Reviewed the new `llm_tools/bridge_monitor.py`, its focused tests, and the TUI
+projection adapter. The snapshot is now wired through the CLI and TUI adapters.
+`python -m pytest tests/test_bridge_monitor.py tests/test_bridge_tui.py -q`
+passed (21 tests), including the slow-snapshot keyboard responsiveness check.
+
+### M1 — High: configured station settings can be presented as observed runtime state — CLOSED
+
+- **Location:** `llm_tools/bridge_monitor.py` (`stations.observed`, lines
+  188–204) and operation projection.
+- **Initial evidence:** Runtime stores the scheduler's configured model pin in
+  `operations.model`, not provider-reported model identity. The earlier monitor
+  version presented it as `stations.observed.model` and called persisted
+  operation state observed.
+- **Fix:** The monitor exposes configured model separately and only reports an
+  observed model when a verified `station-observation` event exists. It labels
+  the database operation state separately and leaves provider liveness
+  `unknown` without live evidence.
+- **Verification:** `test_projection_uses_persisted_capacity_and_does_not_invent_opaque_values`
+  checks the configured pin differs from unknown observation, then records an
+  explicit verified observation.
+- **Mode fix:** Snapshot and Systems view show `configured_mode` separately
+  from `actual_mode`. The controller records a verified `controller-mode`
+  event at startup, including the actual CLI override; absent that event, the
+  actual mode remains `unknown`.
+- **Verification:** The monitor test checks configured headless versus verified
+  actual native mode and the unknown case. Actual provider model and liveness
+  remain unknown unless separately observed.
+
+### M2 — Medium: station and lifecycle projection do not match the TUI adapter — CLOSED
+
+- **Location:** `llm_tools/bridge_monitor.py` (`stations`, `lifecycle`) and
+  `llm_tools/bridge_tui.py` (`_bounded_snapshot`).
+- **Initial evidence:** The first monitor version emitted a station mapping,
+  while the adapter accepted only station lists; lifecycle was dropped.
+- **Fix:** `project_snapshot()` now emits a bounded station list and explicit
+  station context; `_bounded_snapshot()` preserves lifecycle and station
+  context fields.
+- **Verification:** `test_projection_uses_persisted_capacity_and_does_not_invent_opaque_values`
+  passes the real monitor snapshot through `_bounded_snapshot()` and checks
+  station rows and lifecycle data survive.
+
+### M3 — Medium: authoritative latest facts disappear after event-history churn — CLOSED
+
+- **Location:** `llm_tools/bridge_monitor.py` (`_latest_event`,
+  `_latest_suspend_event`).
+- **Initial evidence:** The first monitor version searched only the visible
+  latest-100-event page for capacity, progress and controller facts.
+- **Fix:** The visible event history remains bounded, and each authoritative
+  event kind now uses a separate latest-row query. A >100-event churn test
+  confirms selection, wait, task verification, controller and suspend facts
+  remain available.
+- **Index fix:** Schema v4 adds `(mission_id,kind,id)` and the latest-row
+  queries explicitly use it. `_latest_suspend_event()` now performs four
+  independent `ORDER BY id DESC LIMIT 1` lookups, one for each suspend kind,
+  then chooses the greatest returned event ID. Each lookup uses the index
+  without a temporary sort, so work stays bounded as event history grows.
+- **Verification:** Event churn semantics pass in
+  `test_latest_capacity_wait_and_progress_survive_more_than_one_hundred_events`.
+  `test_latest_event_queries_use_mission_kind_id_index` checks each latest-kind
+  query plan has no temporary B-tree. Independently reran the monitor and TUI
+  suites: 21 passed.
+
+### M4 — Medium: an older wait target overrides a newer selection — CLOSED
+
+- **Location:** `llm_tools/bridge_monitor.py` (lines 156–164).
+- **Initial evidence:** The earlier version inferred eligibility as the minimum
+  future reset across all windows.
+- **Fix:** It now uses persisted wait/decision targets rather than arbitrary
+  window reset times. The churn test confirms a persisted wait target is used.
+- **Fix:** The projection compares the event IDs and only uses a wait target
+  when that wait is newer than the selection. A newer usable selection clears
+  `next_eligible_epoch` and the old wait projection.
+- **Verification:** `test_new_usable_selection_clears_older_wait_and_uses_readiness_target`
+  covers stale wait followed by usable selection; the churn test checks the
+  current wait target differs from individual window resets.
 
 ## Gate status
 
-- Persistence gate: **CLOSED at the last frozen checkpoint** — P1-P8 and the
-  verifier/process-identity additions passed the 94-test suite. The later O3
+The final focused integration command
+`python -m pytest tests/test_bridge_runtime.py tests/test_bridge_wait_interrupt.py
+tests/test_bridge_recovery_tmux.py tests/test_bridge_force_stop.py
+tests/test_bridge_native_e2e.py tests/test_bridge_dispatch_atomicity.py -q`
+passed (35 tests). It covers normal O3-O8 lifecycle paths and exact native
+resume across a controller restart; the injected tmux kill failure above is a
+separate manual reproduction.
+
+- Persistence gate: **OPEN** — P1-P9 and verifier/process-identity fixes have
+  targeted coverage; the latest full focused persistence/concurrency gate has
+  not been independently rerun here. P9 is closed.
   hook change has only targeted verification (3 tests).
 - Native terminal gate: **CLOSED** — T1-T6 passed at this checkpoint. CI
   configuration was reviewed locally; no CI run has been reviewed.
-- Operator command dispatch: **OPEN** — O1 and the status-overwrite part of O2
-  are closed; O5 still hides provider work during active task cancellation.
-- Ralph hook integration: **OPEN** — O3 is a high-severity stop/launch race.
-- Stop and wait lifecycle: **OPEN** — O4 is an unpolled-stop risk during long
-  waits.
-- Controller recovery: **OPEN** — O6 is closed; O8 still allows an unverified
-  live pane after recovery.
-- Graceful stop restoration: **OPEN** — O7 leaves the private tmux station alive.
-- Process/session recovery: **OPEN** — O8 can reuse a live provider pane after
-  marking its operation uncertain.
-- Native restoration: **OPEN / NOT VERIFIED** — O9 captures no provider
-  session id or native-resume state; current prompt context is reconstructed.
+- Operator command dispatch: **CLOSED for O1, O2 and O5** — command effects are
+  atomic, active task state survives exit, and cancellation reports deferred
+  work with its operation still tracked.
+- Ralph hook integration: **CLOSED for O3** — concurrent mission stop/task
+  cancellation rejects launch without failing the mission; the task-cancel
+  interleaving has manual evidence but no dedicated checked-in regression.
+- Stop and wait lifecycle: **CLOSED for O4** — Bridge-aware Ralph and scheduler
+  waits poll operator state; no-hook behavior remains unchanged.
+- Controller recovery: **OPEN for O8** — the real-tmux success path terminates
+  the orphan provider before readiness, but failed tmux shutdown is unverified
+  and demonstrably can orphan live panes.
+- Graceful stop restoration: **OPEN for O7** — STOPPED currently precedes
+  verified terminal cleanup; failed tmux shutdown can leave live panes.
+- Verifier cancellation: **OPEN for O10** — force stop demonstrably leaves a
+  verifier in its independently-created process group running after reporting
+  success.
+- Native session identity safety: **CLOSED** — Codex is never auto-bound to a
+  discovered session; Claude/Copilot IDs are Bridge-generated and matched to
+  exact structured metadata before persistence. Actual provider restore remains
+  **NOT VERIFIED**; current evidence is hermetic.
 - Provider handoff, session reconstruction and final integrated gates have not
   yet been reviewed here.
+- Monitor projection: **CLOSED for M1-M4** — configured and observed values are
+  separated, the TUI adapter preserves the snapshot, and authoritative latest
+  event projections use bounded indexed queries. No live model/liveness claim
+  is made without a verified observation.
 - No live provider capability is claimed by this review. Root's capability
   ledger remains authoritative and reports model execution as NOT VERIFIED.
+
+## Independent full-spec audit, 2026-10-26
+
+Reviewer: separate GPT-6.1 Sol context, High effort, as explicitly requested by
+the user. Reviewed the directive, current handover, prior findings and current
+production changes against `066af5c`, including uncommitted Bridge modules.
+This section supersedes older blanket gate-closed claims where a finding below
+reopens the gate. Production code is owned by the implementors.
+
+### A1 — High: rejected mission cancellation commits partial effects — OPEN
+
+- **Location:** `bridge._apply_operator_command`, `_apply_operator_effect`, and
+  `BridgeStore.set_task_status`.
+- **Reproduction:** Create a running mission, commit a task exit with status 1,
+  then cancel the mission. The command is REJECTED for `FAILED -> CANCELLED`,
+  but the mission has already become CANCELLED. A later rejected transition can
+  likewise preserve earlier effects in a multi-task cancellation.
+- **Impact:** Command acknowledgement disagrees with authoritative state;
+  rejected commands are not atomic, and failed work cannot be cancelled.
+- **Required correction:** Permit explicit abandonment of failed tasks and
+  roll back all command effects before committing a rejection acknowledgement.
+- **Verification:** The first two tests in
+  `tests/test_bridge_review_regressions.py` independently failed on the audited
+  working tree. One uses actual failed-task state; one injects a transition
+  rejection after the mission transition to enforce rollback generally.
+
+### A2 — High: complete stop can leave owned descendants running — OPEN
+
+- **Location:** `bridge_runtime._terminate_owned_process_group`.
+- **Reproduction:** An isolated process-group leader creates a child that
+  ignores SIGTERM. The helper sends TERM and returns when the leader disappears;
+  the child remains alive in the original owned process group.
+- **Impact:** Force stop/recovery can report success while provider or verifier
+  descendants continue changing the repository. Leader disappearance is not
+  proof that managed work has stopped.
+- **Required correction:** Verify termination of the established owned process
+  group, with safe escalation for remaining members and PID/group-reuse checks.
+- **Verification:**
+  `test_owned_group_termination_kills_descendant_after_leader_exits` is an actual
+  subprocess regression, independently RED. Its finally block cleans up only
+  the process group created by that test.
+
+### A3 — High: effective launch configuration is lost on restart — OPEN
+
+- **Location:** `bridge.start_mission`, `bridge_runtime.launch_controller`,
+  `run_controller`, and `bridge_refresh.refresh_capacity_observation`.
+- **Evidence:** `start` overrides for providers/routes/mode reach Ralph but do
+  not update durable mission configuration. Refresh reads the original station
+  rotation; a later `resume` restores it. An override from a native mission to
+  headless can also conflict with the originally saved native flag.
+- **Impact:** Capacity observation can describe a different rotation from the
+  controller; shutdown/resume fails the configuration reconstruction contract.
+- **Verification:**
+  `test_controller_start_overrides_survive_complete_shutdown` independently
+  failed after executing the real controller lifecycle with a bounded fake
+  Ralph completion. No provider completion was invoked.
+
+### A4 — High: core operator views do not expose their required information — OPEN
+
+- **Locations:** `bridge_tui._bounded_snapshot`, `_ConsoleState.handle_key/rows`,
+  `bridge_monitor.project_snapshot`.
+- **Evidence:** Orders Enter dispatches an empty command, with no task details,
+  dependencies, amendments or evidence. Ctrl-R opens an empty amendment file.
+  Stations selection only stores a preference; the monitor hard-codes viewed
+  station to `unknown` and renders configured rows without selected station
+  history/restoration. Systems discards capacity decisions/windows during TUI
+  projection, so actual quota/budget scopes never reach its renderer.
+- **Impact:** The named seven views exist, but the required inspect/supervise
+  workflow and provider-capacity presentation are incomplete (§§5–10,13).
+- **Required correction:** Make task selection inspectable, present selected
+  station/session history independently of execution, and preserve/render
+  bounded capacity scopes. Verify via actual monitor-to-TUI projections and
+  outer-PTY keyboard/mouse tests, not manually supplied already-correct rows.
+
+### A5 — Medium: remaining traceability and monitoring gaps — OPEN
+
+- No task-origin/proposal field, proposal acceptance workflow or corresponding
+  test was found, despite §8.3 and the test matrix's assertion that proposals
+  are not automatically scheduled.
+- Stall detection covers committed nonzero exits only. No meaningful-change,
+  repeated-identical-failure, reversal, elapsed-no-progress or provider-cycle
+  detection is implemented beyond that failure count (§9.1).
+- Headless `events --limit` and console `events` load all mission events before
+  slicing/display; older logs cannot be paged through the TUI. The ordinary
+  live snapshot itself correctly uses bounded indexed queries (§§13,18).
+- Console `pause ID` and `resume ID` ignore the ID and affect the mission;
+  task pause/resume are absent from the console dispatcher. `help` advertises
+  `control`, which the dispatcher does not implement (§6).
+- Existing progress and final-gate records remain dated/inconsistent with new
+  modules and findings. Final CI/Python/coverage evidence must be recorded for
+  one frozen production head, and every unverified live capability stays
+  explicitly unverified.
+
+Overall full-spec verdict at this audit checkpoint: **NOT MERGE READY**.
+See `spec-audit.md` for the requirement and acceptance-scenario trace.
+
+### A6 — High: existing attached scheduler loses terminal resize propagation — OPEN
+
+- **Location:** `scheduler.run_fresh_attached`.
+- **Evidence:** The new unconditional `start_new_session=True` separates
+  `script(1)` from the outer terminal's foreground process group. Resizing the
+  real outer PTY from 80x24 to 120x40 and signalling its foreground scheduler
+  group leaves the provider's child PTY at 80x24. Previously `subprocess.run`
+  retained the shared group, so `script` received SIGWINCH and resized its PTY.
+- **Impact:** Existing `llm-scheduler`/Ralph fresh attached behavior regresses;
+  native terminal resize fidelity is a hard invariant, independently of Bridge.
+- **Required correction:** Preserve ordinary attached job-control/resize
+  behavior; isolate an owned process only where necessary and with explicit
+  forwarding if required.
+- **Verification:** Actual outer-PTY test
+  `test_legacy_attached_scheduler_forwards_outer_terminal_resize` independently
+  RED. No provider credentials or model invocation are involved.

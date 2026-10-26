@@ -13,10 +13,18 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import ralph_robin
 from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, utc_now
+from .bridge_refresh import CapacityRefreshWorker
+from .bridge_sessions import (
+    NativeSessionIdentity,
+    confirm_restored,
+    new_session_argv,
+    provider_session_metadata,
+    resume_argv,
+)
 from .terminal import TerminalHandle, TmuxTerminalBackend
 
 
@@ -30,16 +38,24 @@ class BridgeMissionHooks:
         handle: TerminalHandle | None,
         headless: bool,
         native_tui: bool = False,
+        max_provider_failures: int = 8,
         controller_logs: Path,
     ) -> None:
         self.mission_id = mission_id
         self.handle = handle
         self.headless = headless
         self.native_tui = native_tui
+        self.max_provider_failures = max(1, int(max_provider_failures))
         self.controller_logs = controller_logs
         self._store: BridgeStore | None = None
         self._iteration = 0
         self._last_selected_station = ""
+        self._session_restore_expectations: dict[str, NativeSessionIdentity] = {}
+        self._session_baselines: dict[str, dict[str, int]] = {}
+        self._session_started_ns: dict[str, int] = {}
+        self._session_candidates: dict[str, NativeSessionIdentity] = {}
+        self._session_providers: dict[str, str] = {}
+        self._session_cwds: dict[str, str] = {}
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
@@ -112,11 +128,10 @@ class BridgeMissionHooks:
 
     def before_iteration(self) -> dict[str, Any]:
         while True:
+            self._apply_pending_boundary_requests()
             mission = self.store.get_mission(self.mission_id)
             status = mission["status"]
             if status in {"STOPPING", "STOPPED", "CANCELLED", "COMPLETED", "FAILED"}:
-                if status == "STOPPING":
-                    self.store.set_mission_status(self.mission_id, "STOPPED")
                 return {"action": "stop", "reason": f"mission {status.lower()}", "exit_code": 0}
             if status == "PAUSED":
                 time.sleep(0.5)
@@ -170,6 +185,62 @@ class BridgeMissionHooks:
                 return {"action": "stop", "reason": "all tasks verified", "exit_code": 0}
             time.sleep(0.5)
 
+    def _apply_pending_boundary_requests(self) -> None:
+        mission = self.store.get_mission(self.mission_id)
+        config = mission["config"]
+        requests = [int(value) for value in config.get("verification_requests", [])]
+        remaining: list[int] = []
+        for task_id in requests:
+            task = self.store.get_task(task_id)
+            if task["status"] == "VERIFYING":
+                run_configured_verifier(self.store, self.mission_id, task_id, runtime=self.controller_logs.parent)
+                self.store.record_runtime_event(self.mission_id, "steering-verify-applied", {"task_id": task_id})
+            else:
+                remaining.append(task_id)
+        if requests != remaining:
+            self.store.set_mission_config_value(self.mission_id, "verification_requests", remaining, event_kind="steering-verify-drained")
+
+        mission = self.store.get_mission(self.mission_id)
+        config = mission["config"]
+        stop_after = config.get("stop_after_task")
+        if stop_after is not None and self.store.get_task(int(stop_after))["status"] == "COMPLETED":
+            self.store.set_mission_config_value(self.mission_id, "stop_after_task", None, event_kind="steering-stop-task-applied")
+            if mission["status"] == "RUNNING":
+                self.store.set_mission_status(self.mission_id, "STOPPING")
+            return
+        if config.get("pause_after_iteration"):
+            self.store.set_mission_config_value(self.mission_id, "pause_after_iteration", False, event_kind="steering-pause-applied")
+            if mission["status"] == "RUNNING":
+                self.store.set_mission_status(self.mission_id, "PAUSED")
+
+    def apply_handoff_preference(self, selection: dict[str, Any]) -> dict[str, Any]:
+        mission = self.store.get_mission(self.mission_id)
+        preferred = str(mission["config"].get("handoff_preference", ""))
+        if not preferred:
+            return selection
+        decisions = selection.get("decisions")
+        if not isinstance(decisions, list):
+            return selection
+        for index, decision in enumerate(decisions):
+            if not isinstance(decision, dict) or decision.get("usable") is not True:
+                continue
+            candidate = str(decision.get("route") or decision.get("provider") or "")
+            if candidate != preferred:
+                continue
+            updated = dict(selection)
+            updated.update({
+                "index": index,
+                "route": str(decision.get("route") or ""),
+                "provider": str(decision.get("provider") or preferred),
+                "rotation_reason": "operator-handoff",
+                "all_rate_limited": False,
+                "decision": decision,
+            })
+            self.store.set_mission_config_value(self.mission_id, "handoff_preference", "", event_kind="steering-handoff-consumed")
+            self.store.record_runtime_event(self.mission_id, "provider-handoff-selected", {"station": preferred, "index": index})
+            return updated
+        return selection
+
     def before_launch(self, context: dict[str, Any], selection: dict[str, Any], scheduler_config: Any, iteration: int) -> bool:
         mission = self.store.get_mission(self.mission_id)
         if mission["status"] != "RUNNING":
@@ -181,7 +252,8 @@ class BridgeMissionHooks:
         except TransitionError:
             # Mission pause/stop and operation intent serialize in SQLite. If
             # the command won that race, simply reject this launch boundary.
-            if self.store.get_mission(self.mission_id)["status"] != "RUNNING":
+            task_state = self.store.get_task(int(context["task_id"]))["status"]
+            if self.store.get_mission(self.mission_id)["status"] != "RUNNING" or task_state in {"PAUSED", "CANCELLED"}:
                 return False
             raise
         pane_id = ""
@@ -197,17 +269,188 @@ class BridgeMissionHooks:
             scheduler_config.exec_mode = "fresh"
             scheduler_config.headless = True
             scheduler_config.native_tui = False
-        self.store.mark_operation_running(
-            operation_id,
-            pane_id=pane_id,
-            route_id=route_id,
-            model=str(scheduler_config.model or ""),
-        )
+        try:
+            self.store.mark_operation_running(
+                operation_id,
+                pane_id=pane_id,
+                route_id=route_id,
+                model=str(scheduler_config.model or ""),
+            )
+        except TransitionError:
+            task_state = self.store.get_task(int(context["task_id"]))["status"]
+            mission_state = self.store.get_mission(self.mission_id)["status"]
+            if mission_state != "RUNNING" or task_state in {"PAUSED", "CANCELLED"}:
+                self.store.abort_prepared_operation(operation_id, reason="operator state change won before provider launch")
+                return False
+            raise
         context["operation_id"] = operation_id
         context["selected_route"] = route_id
         context["selected_provider"] = provider
+        self._session_providers[operation_id] = provider
+        try:
+            self._session_cwds[operation_id] = str(Path(getattr(scheduler_config, "cwd", mission["cwd"])).expanduser().resolve(strict=True))
+        except (OSError, RuntimeError, ValueError, TypeError):
+            self._session_cwds[operation_id] = str(getattr(scheduler_config, "cwd", mission["cwd"]))
+        log_config = self.store.get_mission(self.mission_id)["config"]
+        scheduler_config.max_output_bytes = int(log_config.get("log_max_bytes", 4 * 1024 * 1024))
+        scheduler_config.max_output_rotations = int(log_config.get("log_rotations", 3))
         scheduler_config.process_started = lambda process_pid: self._record_process(operation_id, process_pid)
+        scheduler_config.should_interrupt_wait = lambda: self._should_interrupt_wait(int(context["task_id"]))
+        scheduler_config.command_argv_transform = self._native_session_argv_transform(operation_id, provider, scheduler_config)
         return True
+
+    def _native_session_argv_transform(self, operation_id: str, provider: str, scheduler_config: Any):
+        if not self.native_tui or getattr(scheduler_config, "command_template", ""):
+            return None
+
+        def transform(argv: list[str]) -> list[str]:
+            if not argv:
+                return argv
+            cwd = self._session_cwds.get(
+                operation_id,
+                str(Path(getattr(scheduler_config, "cwd", Path.cwd())).expanduser().resolve()),
+            )
+            mission = self.store.get_mission(self.mission_id)
+            sessions = mission["config"].get("native_sessions", {})
+            raw_identity = sessions.get(provider) if isinstance(sessions, dict) else None
+            expected: NativeSessionIdentity | None = None
+            if isinstance(raw_identity, dict) and raw_identity.get("owned_by_bridge") is True:
+                try:
+                    expected = NativeSessionIdentity(
+                        provider=str(raw_identity["provider"]),
+                        session_id=str(raw_identity["session_id"]),
+                        cwd=str(raw_identity["cwd"]),
+                        source=str(raw_identity["source"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    expected = None
+            if expected is not None:
+                resume = resume_argv(expected, executable=argv[0]) if expected.provider == provider and expected.cwd == cwd else None
+                if resume:
+                    self._session_restore_expectations[operation_id] = expected
+                    current = provider_session_metadata(provider, expected.session_id, cwd=cwd)
+                    self._session_baselines[operation_id] = {str(current.path): current.modified_ns} if current else {}
+                    self._session_started_ns[operation_id] = time.time_ns()
+                    if provider == "codex":
+                        # Codex treats -C as a global option; retain it before
+                        # the exact resume subcommand and saved session UUID.
+                        return [argv[0], *argv[1:-1], *resume[1:], argv[-1]]
+                    return [*resume, *argv[1:]]
+            if provider not in {"claude", "copilot"} or Path(argv[0]).name != provider:
+                # Codex does not let Bridge own a new session ID. Time/cwd-only
+                # transcript discovery can bind another process's session.
+                return argv
+            candidate = new_session_argv(provider, argv, cwd=cwd)
+            if candidate is None:
+                return argv
+            transformed, session_id = candidate
+            self._session_candidates[operation_id] = NativeSessionIdentity(
+                provider,
+                session_id,
+                cwd,
+                "claude:system.init" if provider == "claude" else "copilot:session.start",
+            )
+            current = provider_session_metadata(provider, session_id, cwd=cwd)
+            self._session_baselines[operation_id] = {str(current.path): current.modified_ns} if current else {}
+            self._session_started_ns[operation_id] = time.time_ns()
+            return transformed
+
+        return transform
+
+    def wait_interrupted(self) -> bool:
+        """Return whether an operator mission boundary should interrupt waits."""
+        mission = self.store.get_mission(self.mission_id)
+        if mission["status"] in {"PAUSED", "STOPPING", "STOPPED", "CANCELLED", "COMPLETED", "FAILED"}:
+            return True
+        config = mission["config"]
+        if config.get("pause_after_iteration"):
+            return True
+        stop_after = config.get("stop_after_task")
+        return stop_after is not None and self.store.get_task(int(stop_after))["status"] == "COMPLETED"
+
+    def _record_session_outcome(self, operation_id: str, provider: str, cwd: str) -> None:
+        expected = self._session_restore_expectations.pop(operation_id, None)
+        candidate = self._session_candidates.pop(operation_id, None)
+        baseline = self._session_baselines.pop(operation_id, {})
+        started_ns = self._session_started_ns.pop(operation_id, 0)
+        identity: NativeSessionIdentity | None = None
+        restoration_state = "UNAVAILABLE"
+        target = expected or candidate
+        if target is not None and started_ns:
+            observed = provider_session_metadata(target.provider, target.session_id, cwd=cwd)
+            prior_mtime = baseline.get(str(observed.path), 0) if observed is not None else 0
+            if observed is not None and observed.modified_ns >= started_ns and observed.modified_ns > prior_mtime:
+                if expected is not None and confirm_restored(expected, observed.identity):
+                    identity = observed.identity
+                    restoration_state = "RESTORED_NATIVE"
+                elif candidate is not None and confirm_restored(candidate, observed.identity):
+                    identity = observed.identity
+                    restoration_state = "NATIVE_CREATED"
+                else:
+                    restoration_state = "RECONSTRUCTED"
+            elif expected is not None:
+                restoration_state = "RECONSTRUCTED"
+        self.store.record_operation_session(
+            operation_id,
+            provider=provider,
+            restoration_state=restoration_state,
+            session_id=identity.session_id if identity else None,
+            cwd=identity.cwd if identity else None,
+            source=identity.source if identity else None,
+        )
+        self._session_providers.pop(operation_id, None)
+        self._session_cwds.pop(operation_id, None)
+
+    def _capture_session_after_launch(self, operation_id: str) -> None:
+        """Wait briefly for exact provider-owned metadata from the live pane."""
+        provider = self._session_providers.get(operation_id, "")
+        cwd = self._session_cwds.get(operation_id, "")
+        started_ns = self._session_started_ns.get(operation_id, 0)
+        expected = self._session_restore_expectations.get(operation_id)
+        candidate = self._session_candidates.get(operation_id)
+        target = expected or candidate
+        if target is None or not cwd or not started_ns:
+            return
+        baseline = self._session_baselines.get(operation_id, {})
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            identity: NativeSessionIdentity | None = None
+            restoration_state = ""
+            observed = provider_session_metadata(target.provider, target.session_id, cwd=cwd)
+            prior_mtime = baseline.get(str(observed.path), 0) if observed is not None else 0
+            if observed is not None and observed.modified_ns >= started_ns and observed.modified_ns > prior_mtime:
+                if expected is not None and confirm_restored(expected, observed.identity):
+                    identity = observed.identity
+                    restoration_state = "RESTORED_NATIVE"
+                elif candidate is not None and confirm_restored(candidate, observed.identity):
+                    identity = observed.identity
+                    restoration_state = "NATIVE_CREATED"
+            if identity is not None:
+                self.store.record_operation_session(
+                    operation_id,
+                    provider=provider,
+                    restoration_state=restoration_state,
+                    session_id=identity.session_id,
+                    cwd=identity.cwd,
+                    source=identity.source,
+                )
+                return
+            if self.wait_interrupted():
+                return
+            time.sleep(0.25)
+        self.store.record_operation_session(operation_id, provider=provider, restoration_state="UNAVAILABLE")
+
+    def _should_interrupt_wait(self, task_id: int) -> bool:
+        mission = self.store.get_mission(self.mission_id)
+        if mission["status"] in {"PAUSED", "STOPPING", "STOPPED", "CANCELLED", "COMPLETED", "FAILED"}:
+            return True
+        if mission["config"].get("pause_after_iteration"):
+            return True
+        stop_after = mission["config"].get("stop_after_task")
+        if stop_after is not None and self.store.get_task(int(stop_after))["status"] == "COMPLETED":
+            return True
+        task = self.store.get_task(task_id)
+        return task["status"] in {"PAUSED", "CANCELLED"}
 
     def _record_process(self, operation_id: str, process_pid: int) -> None:
         token = _process_start_token(process_pid)
@@ -217,6 +460,7 @@ class BridgeMissionHooks:
             # small interval remains uncertain and cannot be force-signalled.
             return
         self.store.record_operation_process(operation_id, process_pid=process_pid, process_start=token)
+        self._capture_session_after_launch(operation_id)
 
     def after_iteration(
         self,
@@ -240,9 +484,38 @@ class BridgeMissionHooks:
         output_files = sorted(run_dir.glob("attempt-*.out")) if run_dir else []
         logs_path = str(output_files[-1]) if output_files else None
         try:
+            self._record_session_outcome(
+                operation_id,
+                str(selection.get("provider") or scheduler_config.provider),
+                str(Path(scheduler_config.cwd).expanduser().resolve(strict=True)),
+            )
             task = self.store.finish_operation(operation_id, exit_code=int(status), logs_path=logs_path)
-            if status == 0 and task["status"] == "VERIFYING":
+            if status != 0:
+                continued = self.store.continue_task_after_provider_failure(
+                    operation_id,
+                    max_failures=self.max_provider_failures,
+                )
+                if continued is not None:
+                    self.store.record_runtime_event(self.mission_id, "task-provider-continuation", {
+                        "task_id": int(task["id"]),
+                        "operation_id": operation_id,
+                        "provider": str(selection.get("provider") or ""),
+                        "exit_code": int(status),
+                        "next_action": "reselect-provider",
+                    })
+            verify_requests = self.store.get_mission(self.mission_id)["config"].get("verification_requests", [])
+            if status == 0 and task["status"] == "VERIFYING" and int(task["id"]) not in verify_requests:
                 run_configured_verifier(self.store, self.mission_id, int(task["id"]), runtime=self.controller_logs.parent)
+            self._apply_pending_boundary_requests()
+            mission_config = self.store.get_mission(self.mission_id)["config"]
+            log_root = getattr(scheduler_config, "log_dir", None)
+            if log_root:
+                _prune_old_run_logs(
+                    self.store,
+                    self.mission_id,
+                    Path(log_root),
+                    retain=int(mission_config.get("log_retained_runs", 20)),
+                )
         except TransitionError:
             # A force stop may have durably reconciled this operation before
             # the scheduler noticed that its owned tmux server disappeared.
@@ -256,6 +529,34 @@ def _private_verifier_dir(runtime: Path) -> Path:
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise PermissionError(f"verifier directory must be private: {directory}")
     return directory
+
+
+def _prune_old_run_logs(store: BridgeStore, mission_id: str, log_root: Path, *, retain: int) -> None:
+    """Retain a bounded number of scheduler run directories with audit digests."""
+    if retain < 1 or not log_root.is_dir():
+        return
+    directories = [path for path in log_root.iterdir() if path.is_dir() and not path.is_symlink()]
+    directories.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
+    for directory in directories[retain:]:
+        try:
+            canonical = directory.resolve(strict=True)
+            canonical.relative_to(log_root.resolve(strict=True))
+        except (OSError, ValueError):
+            continue
+        for operation in store.operation_logs_in_directory(mission_id, canonical):
+            logs_path = Path(str(operation["logs_path"]))
+            try:
+                logs_path.resolve(strict=False).relative_to(canonical)
+            except ValueError:
+                continue
+            try:
+                data = logs_path.read_bytes()
+                digest = hashlib.sha256(data).hexdigest()
+                size = len(data)
+            except OSError:
+                digest, size = "unavailable", 0
+            store.record_pruned_operation_log(mission_id, str(logs_path), size_bytes=size, sha256=digest)
+        shutil.rmtree(canonical, ignore_errors=True)
 
 
 def _artifact_records(cwd: Path, artifacts: Any) -> list[dict[str, str]]:
@@ -284,7 +585,15 @@ def _artifact_records(cwd: Path, artifacts: Any) -> list[dict[str, str]]:
     return result
 
 
-def _run_bounded_verifier(argv: list[str], cwd: str, timeout: float, log_path: Path) -> dict[str, Any]:
+def _run_bounded_verifier(
+    argv: list[str],
+    cwd: str,
+    timeout: float,
+    log_path: Path,
+    *,
+    on_started: Callable[[int, str], None] | None = None,
+    on_finished: Callable[[int], None] | None = None,
+) -> dict[str, Any]:
     """Drain verifier output to a capped private log without unbounded RAM/disk."""
     log_limit = 10 * 1024 * 1024
     result_limit = 1024 * 1024
@@ -296,58 +605,81 @@ def _run_bounded_verifier(argv: list[str], cwd: str, timeout: float, log_path: P
     output_size = 0
     written = 0
     timed_out = False
-    with log_path.open("wb") as log:
-        os.chmod(log_path, 0o600)
-        while True:
-            remaining = timeout - (time.monotonic() - started)
-            if remaining <= 0:
-                timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    proc.wait(timeout=0.5)
-                except subprocess.TimeoutExpired:
+    try:
+        if on_started is not None:
+            process_start = _process_start_token(proc.pid)
+            if not process_start:
+                raise RuntimeError("could not verify verifier process identity after launch")
+            on_started(proc.pid, process_start)
+        with log_path.open("wb") as log:
+            os.chmod(log_path, 0o600)
+            while True:
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    timed_out = True
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        proc.wait()
+                readable, _, _ = select.select([proc.stdout], [], [], min(0.05, max(0, remaining)))
+                if readable:
+                    chunk = os.read(proc.stdout.fileno(), 65536)
+                    if chunk:
+                        digest.update(chunk)
+                        output_size += len(chunk)
+                        if len(captured) <= result_limit:
+                            captured.extend(chunk[: max(0, result_limit + 1 - len(captured))])
+                        if written < log_limit:
+                            allowed = min(len(chunk), log_limit - written)
+                            log.write(chunk[:allowed])
+                            written += allowed
+                        continue
+                    break
+                if proc.poll() is not None and time.monotonic() - started >= timeout:
+                    timed_out = True
                     try:
                         os.killpg(proc.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    proc.wait()
-            readable, _, _ = select.select([proc.stdout], [], [], min(0.05, max(0, remaining)))
-            if readable:
-                chunk = os.read(proc.stdout.fileno(), 65536)
-                if chunk:
-                    digest.update(chunk)
-                    output_size += len(chunk)
-                    if len(captured) <= result_limit:
-                        captured.extend(chunk[: max(0, result_limit + 1 - len(captured))])
-                    if written < log_limit:
-                        allowed = min(len(chunk), log_limit - written)
-                        log.write(chunk[:allowed])
-                        written += allowed
-                    continue
-                break
-            if proc.poll() is not None and time.monotonic() - started >= timeout:
-                timed_out = True
+                    break
+            if output_size > written:
+                log.write(b"\n[verifier output truncated at 10 MiB]\n")
+            log.flush()
+            os.fsync(log.fileno())
+        exit_code = proc.wait()
+        return {
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "output": bytes(captured),
+            "output_size": output_size,
+            "output_sha256": digest.hexdigest(),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "output_truncated": output_size > result_limit,
+        }
+    finally:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                break
-        if output_size > written:
-            log.write(b"\n[verifier output truncated at 10 MiB]\n")
-        log.flush()
-        os.fsync(log.fileno())
-    return {
-        "exit_code": proc.wait(),
-        "timed_out": timed_out,
-        "output": bytes(captured),
-        "output_size": output_size,
-        "output_sha256": digest.hexdigest(),
-        "elapsed_seconds": round(time.monotonic() - started, 3),
-        "output_truncated": output_size > result_limit,
-    }
+                proc.wait()
+        if on_finished is not None and proc.returncode is not None:
+            on_finished(int(proc.returncode))
 
 
 def run_configured_verifier(
@@ -375,7 +707,9 @@ def run_configured_verifier(
     if timeout <= 0 or timeout > 3600:
         raise ValueError("verifier timeout must be between 0 and 3600 seconds")
     directory = _private_verifier_dir(runtime)
-    context_path = directory / f"{task_id}-r{task['revision']}.json"
+    attempt_id = secrets.token_hex(8)
+    attempt_stem = f"{task_id}-r{task['revision']}-a{attempt_id}"
+    context_path = directory / f"{attempt_stem}.json"
     context = {
         "mission_id": mission_id,
         "objective": mission["objective"],
@@ -399,9 +733,34 @@ def run_configured_verifier(
         "{cwd}": str(mission["cwd"]),
     }
     argv = [next((value + arg[len(key):] for key, value in substitutions.items() if arg.startswith(key)), arg) for arg in argv_template]
-    log_path = directory / f"{task_id}.log"
+    log_path = directory / f"{attempt_stem}.log"
+    managed_process_id = store.prepare_managed_process(mission_id, task_id, kind="verifier")
+    managed_started = False
+    managed_finished = False
+
+    def mark_started(pid: int, process_start: str) -> None:
+        nonlocal managed_started
+        store.mark_managed_process_running(managed_process_id, process_pid=pid, process_start=process_start)
+        managed_started = True
+
+    def mark_finished(exit_code: int) -> None:
+        nonlocal managed_finished
+        store.finish_managed_process(
+            managed_process_id,
+            exit_code=exit_code,
+            status="EXITED" if managed_started else "FAILED",
+        )
+        managed_finished = True
+
     try:
-        run_result = _run_bounded_verifier(argv, str(mission["cwd"]), timeout, log_path)
+        run_result = _run_bounded_verifier(
+            argv,
+            str(mission["cwd"]),
+            timeout,
+            log_path,
+            on_started=mark_started,
+            on_finished=mark_finished,
+        )
         output = run_result["output"].decode("utf-8", errors="replace")
         exit_code = int(run_result["exit_code"])
         reason = "timeout" if run_result["timed_out"] else "output-too-large" if run_result["output_truncated"] else "nonzero-exit" if exit_code else "invalid-result"
@@ -412,6 +771,19 @@ def run_configured_verifier(
         output = ""
         exit_code = None
         reason = f"launch-failed: {exc}"
+    finally:
+        if not managed_finished:
+            store.finish_managed_process(
+                managed_process_id,
+                exit_code=None,
+                status="UNCERTAIN" if managed_started else "FAILED",
+            )
+        # The context contains the mission and task prompts. It is only an
+        # invocation input; the immutable result log and digest are retained.
+        try:
+            context_path.unlink()
+        except FileNotFoundError:
+            pass
     outcome: dict[str, Any] = {
         "status": "VERIFYING",
         "passed": False,
@@ -471,6 +843,34 @@ def _runtime_directory(mission_id: str) -> Path:
     return directory
 
 
+def mission_socket_path(mission_id: str, *, env: dict[str, str] | None = None) -> Path:
+    """Return a short, private tmux socket path stable across controller restarts.
+
+    Unix-domain sockets have a small platform-dependent path limit. Durable
+    Bridge state can live below a long XDG state path, so tmux sockets live in
+    a separate user-private runtime directory and use a hash of the mission id.
+    """
+    uid = os.getuid()
+    xdg_runtime = (os.environ if env is None else env).get("XDG_RUNTIME_DIR", "")
+    candidates = [Path(xdg_runtime) / "llm-bridge"] if xdg_runtime else []
+    candidates.append(Path("/tmp") / f"lb-{uid}")
+    digest = hashlib.sha256(mission_id.encode("utf-8")).hexdigest()[:20]
+    for directory in candidates:
+        socket = directory / f"m-{digest}.sock"
+        # Keep below the conservative 100-byte sockaddr_un limit, including
+        # the sibling config filename used by the terminal backend.
+        if len(os.fsencode(str(socket.with_name(socket.name + ".conf")))) >= 96:
+            continue
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = directory.stat()
+        if info.st_uid != uid or info.st_mode & 0o077:
+            if directory.parent == Path("/tmp"):
+                raise PermissionError(f"Bridge runtime socket directory must be private: {directory}")
+            continue
+        return socket
+    raise OSError("could not create a short private runtime directory for the tmux socket")
+
+
 def _session_name(mission_id: str) -> str:
     return f"mission-{mission_id}"
 
@@ -490,6 +890,61 @@ def _process_start_token(process_pid: int) -> str:
     return f"{boot_id}:{tail[19]}" if boot_id else ""
 
 
+def terminate_managed_processes(store: BridgeStore, mission_id: str) -> None:
+    """Terminate persisted verifier groups before controller stop or restart."""
+    for process in store.unresolved_managed_processes(mission_id):
+        process = store.get_managed_process(str(process["id"]))
+        if process["status"] not in {"STARTING", "RUNNING"}:
+            continue
+        pid = process.get("process_pid")
+        expected = str(process.get("process_start") or "")
+        if not pid or not expected:
+            raise RuntimeError(
+                f"managed {process['kind']} process {process['id']} has no verified identity; refusing stop/recovery"
+            )
+        process_pid = int(pid)
+        current = _process_start_token(process_pid)
+        status = "UNCERTAIN"
+        if current == expected:
+            try:
+                _terminate_owned_process_group(process_pid, expected)
+                status = "TERMINATED"
+            except PermissionError:
+                # It may have exited between the preflight and signal check.
+                # A live process with changed identity remains a hard refusal.
+                after = _process_start_token(process_pid)
+                if after:
+                    raise
+        elif not current and _process_alive_but_unverifiable(process_pid):
+            raise PermissionError(f"managed process pid {process_pid} is alive but its identity cannot be verified")
+        try:
+            store.finish_managed_process(process["id"], exit_code=None, status=status)
+        except TransitionError:
+            # The verifier may have reported its exit while teardown was
+            # waiting for the process group. Preserve that committed result.
+            latest = store.get_managed_process(process["id"])
+            if latest["status"] in {"STARTING", "RUNNING"}:
+                raise
+
+
+def _process_alive_but_unverifiable(process_pid: int) -> bool:
+    """Distinguish a vanished process from one whose /proc identity is unreadable."""
+    try:
+        raw = Path(f"/proc/{process_pid}/stat").read_text(encoding="ascii")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        try:
+            os.kill(process_pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+    tail = raw[raw.rfind(")") + 2:].split()
+    return bool(tail and tail[0] != "Z")
+
+
 def _terminate_owned_process_group(process_pid: int, process_start: str, *, timeout: float = 2.0) -> None:
     if process_pid < 2 or not process_start or _process_start_token(process_pid) != process_start:
         raise PermissionError("refusing to signal a process whose persisted identity does not match")
@@ -501,18 +956,41 @@ def _terminate_owned_process_group(process_pid: int, process_start: str, *, time
         return
     deadline = time.monotonic() + max(0.05, timeout)
     while time.monotonic() < deadline:
-        if _process_start_token(process_pid) != process_start:
+        if not _live_process_group_members(process_pid):
             return
         time.sleep(0.05)
-    if _process_start_token(process_pid) != process_start:
+    if not _live_process_group_members(process_pid):
         return
     os.killpg(process_pid, signal.SIGKILL)
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
-        if _process_start_token(process_pid) != process_start:
+        if not _live_process_group_members(process_pid):
             return
         time.sleep(0.05)
     raise TimeoutError(f"owned process group {process_pid} did not exit after SIGKILL")
+
+
+def _live_process_group_members(process_group: int) -> list[int]:
+    """List non-zombie members while the group ID is still allocated."""
+    members: list[int] = []
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        # If procfs cannot establish that the group is gone, fail closed and
+        # let the bounded termination path report its timeout.
+        return [process_group]
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = Path(entry.path, "stat").read_text(encoding="ascii")
+                fields = raw[raw.rfind(")") + 2:].split()
+                if len(fields) > 2 and fields[0] != "Z" and int(fields[2]) == process_group:
+                    members.append(int(entry.name))
+            except (OSError, ValueError):
+                continue
+    return members
 
 
 def _ready_file(runtime: Path) -> Path:
@@ -562,13 +1040,13 @@ def _process_controller_lock(mission_id: str) -> MissionLock:
 
 
 def _open_existing(backend: TmuxTerminalBackend, runtime: Path, mission_id: str) -> TerminalHandle | None:
-    socket = runtime / "tmux.sock"
+    socket = mission_socket_path(mission_id)
     if not socket.exists():
         return None
     return backend.open_existing(socket_path=socket, session_name=_session_name(mission_id), bridge_rows=6)
 
 
-def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool = False, providers: str = "claude,codex,opencode", routes: str = "", startup_token: str = "") -> int:
+def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool = False, providers: str = "", routes: str = "", startup_token: str = "") -> int:
     """Own one mission until it is completed, stopped, or requires recovery."""
     lock = _process_controller_lock(mission_id)
     try:
@@ -584,15 +1062,70 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
 
     with lock, BridgeStore(default_state_dir() / "bridge.sqlite3") as store:
         mission = store.get_mission(mission_id)
+        # A start command's effective overrides become durable mission config
+        # before the controller can launch any provider work. A later resume
+        # therefore uses the same stations and execution mode after a full
+        # controller shutdown.
+        headless = bool(headless or mission["config"].get("headless", False))
+        native_tui = bool(native_tui or mission["config"].get("native_tui", False))
+        providers = str(providers or mission["config"].get("providers", "claude,codex,opencode"))
+        routes = str(routes or mission["config"].get("routes", ""))
+        if headless and native_tui:
+            raise ValueError("--headless and --native cannot be combined")
+        mission = store.set_mission_config_values(
+            mission_id,
+            {"headless": headless, "native_tui": native_tui, "providers": providers, "routes": routes},
+            event_kind="controller-config",
+        )
+        interrupted = [
+            dict(row)
+            for row in store.db.execute(
+                "SELECT * FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
+                (mission_id,),
+            )
+        ]
+        interrupted_managed = store.unresolved_managed_processes(mission_id)
         # Ownership is established before recovery. An unresolved operation is
         # uncertain; its task is blocked and is never replayed automatically.
         store.reconcile_interrupted_operations(mission_id)
+        if interrupted_managed:
+            terminate_managed_processes(store, mission_id)
+        # A controller crash does not kill a native tmux pane or a detached
+        # headless process group. Resolve those exact owned identities before
+        # creating a replacement controller/station, after first making the
+        # durable operation UNCERTAIN so recovery cannot replay it.
+        prior_headless = bool(mission["config"].get("headless", False))
+        prior_handle: TerminalHandle | None = None
+        if not prior_headless and shutil.which("tmux"):
+            prior_handle = _open_existing(TmuxTerminalBackend(), runtime, mission_id)
+            if prior_handle is not None:
+                TmuxTerminalBackend().stop(prior_handle)
+        terminated_pids: set[int] = set()
+        for operation in interrupted:
+            process_pid = operation.get("process_pid")
+            process_start = operation.get("process_start")
+            if process_pid and process_start and int(process_pid) not in terminated_pids:
+                current_identity = _process_start_token(int(process_pid))
+                if current_identity and current_identity != str(process_start):
+                    raise PermissionError(
+                        f"persisted provider pid {process_pid} now belongs to a different process; refusing recovery cleanup"
+                    )
+                if current_identity:
+                    _terminate_owned_process_group(int(process_pid), str(process_start))
+                terminated_pids.add(int(process_pid))
+            elif operation["status"] == "RUNNING" and (prior_headless or prior_handle is None):
+                raise RuntimeError(
+                    f"cannot prove identity of surviving provider operation {operation['id']}; refusing to start replacement work"
+                )
         for command in store.pending_commands(mission_id):
             store.finish_command(command["id"], status="REJECTED", result={"error": "controller restarted; queued command was not replayed"})
         mission = store.get_mission(mission_id)
         if mission["status"] in {"CREATED", "PAUSED", "STOPPED", "FAILED"}:
             store.set_mission_status(mission_id, "RUNNING")
         elif mission["status"] == "STOPPING":
+            # The previous controller may have exited before finalizing its
+            # transition. Its station cleanup was attempted above; only now
+            # is STOPPED truthful.
             store.set_mission_status(mission_id, "STOPPED")
             _write_controller_ready(ready, startup_token, "STOPPED")
             return 0
@@ -600,13 +1133,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             _write_controller_ready(ready, startup_token, mission["status"])
             return 0
 
-        headless = bool(headless or mission["config"].get("headless", False))
-        native_tui = bool(native_tui or mission["config"].get("native_tui", False))
-        if headless and native_tui:
-            raise ValueError("--headless and --native cannot be combined")
         _install_frozen_tool_config(mission, runtime)
-        providers = str(providers or mission["config"].get("providers", "claude,codex,opencode"))
-        routes = str(routes or mission["config"].get("routes", ""))
         backend: TmuxTerminalBackend | None = None
         handle: TerminalHandle | None = None
         if not headless:
@@ -624,15 +1151,30 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                     provider_argv=_provider_station_argv(native_tui, controller_log),
                     bridge_argv=bridge_argv,
                     cwd=mission["cwd"],
-                    socket_path=runtime / "tmux.sock",
+                    socket_path=mission_socket_path(mission_id),
                     session_name=_session_name(mission_id),
                     size=(120, 40),
                 )
 
         _write_controller_ready(ready, startup_token, "RUNNING", tmux=bool(handle))
+        actual_mode = "native" if native_tui else "headless" if headless else "autonomous"
+        store.record_runtime_event(mission_id, "controller-mode", {
+            "verified": True,
+            "actual_mode": actual_mode,
+            "controller_pid": os.getpid(),
+        })
+        refresh_worker: CapacityRefreshWorker | None = None
         try:
-            hooks = BridgeMissionHooks(mission_id, handle=handle, headless=headless, native_tui=native_tui, controller_logs=runtime / "controller.log")
+            configured_routes = routes.split(",") if routes else providers.split(",")
+            handoff_budget = max(2, len([item for item in configured_routes if item.strip()]) * 2)
+            hooks = BridgeMissionHooks(mission_id, handle=handle, headless=headless, native_tui=native_tui, max_provider_failures=handoff_budget, controller_logs=runtime / "controller.log")
             hooks.bind(store)
+            refresh_worker = CapacityRefreshWorker(
+                mission_id,
+                default_state_dir() / "bridge.sqlite3",
+                interval_seconds=int(mission["config"].get("capacity_refresh_seconds", 60)),
+            )
+            refresh_worker.start()
             argv = [
                 "--prompt", mission["objective"],
                 "--cwd", mission["cwd"],
@@ -654,13 +1196,29 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             current = store.get_mission(mission_id)
             if current["status"] in {"RUNNING", "PAUSED", "STOPPING"}:
                 store.set_mission_status(mission_id, "FAILED")
-            with (runtime / "controller.log").open("a", encoding="utf-8") as log:
-                log.write(f"controller failure: {type(exc).__name__}: {exc}\n")
+            print(f"controller failure: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             return int(exc.code) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
         finally:
+            if refresh_worker is not None:
+                refresh_worker.stop()
             current = store.get_mission(mission_id)
+            # Confirm the managed terminal station is gone before claiming the
+            # stop boundary. A cleanup error deliberately leaves STOPPING and
+            # keeps the socket/config coordinates available for retry.
+            if backend is not None and handle is not None and current["status"] in {"STOPPING", "CANCELLED"}:
+                backend.stop(handle)
+                handle = None
             if current["status"] == "STOPPING":
                 store.set_mission_status(mission_id, "STOPPED")
+                current = store.get_mission(mission_id)
+            if current["status"] == "RUNNING":
+                store.record_runtime_event(mission_id, "controller-exited-unexpectedly", {
+                    "reason": "controller returned while the mission remained RUNNING",
+                })
+                store.set_mission_status(mission_id, "FAILED")
+                current = store.get_mission(mission_id)
+            if backend is not None and handle is not None and current["status"] in {"STOPPED", "CANCELLED"}:
+                backend.stop(handle)
 
 
 def launch_controller(

@@ -102,7 +102,49 @@ def test_events_share_transaction_and_mission_lock_is_exclusive(tmp_path: Path) 
 
     with sqlite3.connect(tmp_path / "bridge.sqlite3") as db:
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
+
+
+def test_current_schema_open_preserves_identity_for_removed_worktree(tmp_path: Path) -> None:
+    path = tmp_path / "bridge.sqlite3"
+    live = tmp_path / "live"
+    live.mkdir()
+    store = BridgeStore(path)
+    mission = store.create_mission("historical", "objective", cwd=live)
+    expected_identity = mission["repo_identity"]
+    store.db.execute("UPDATE missions SET cwd=? WHERE id=?", (str(tmp_path / "removed"), mission["id"]))
+    store.close()
+
+    reopened = BridgeStore(path)
+
+    row = reopened.db.execute("SELECT cwd,repo_identity FROM missions WHERE id=?", (mission["id"],)).fetchone()
+    assert row["cwd"] == str(tmp_path / "removed")
+    assert row["repo_identity"] == expected_identity
+
+
+def test_migration_preserves_identity_when_historical_cwd_is_gone(tmp_path: Path) -> None:
+    path = tmp_path / "bridge.sqlite3"
+    missing_cwd = tmp_path / "no-longer-mounted"
+    historical_identity = "/historical/worktree"
+    with sqlite3.connect(path) as db:
+        db.executescript(
+            """
+            CREATE TABLE missions(id TEXT PRIMARY KEY,name TEXT NOT NULL,objective TEXT NOT NULL,cwd TEXT NOT NULL,repo_identity TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE TABLE tasks(id INTEGER PRIMARY KEY AUTOINCREMENT,mission_id TEXT NOT NULL,title TEXT NOT NULL,prompt TEXT NOT NULL,pending_json TEXT NOT NULL DEFAULT '{}',priority INTEGER NOT NULL DEFAULT 0,ordering INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'QUEUED',revision INTEGER NOT NULL DEFAULT 1,acceptance_json TEXT NOT NULL DEFAULT '[]',evidence_json TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE TABLE task_dependencies(task_id INTEGER NOT NULL,depends_on INTEGER NOT NULL,PRIMARY KEY(task_id,depends_on));
+            CREATE TABLE operations(id TEXT PRIMARY KEY,mission_id TEXT NOT NULL,task_id INTEGER NOT NULL,iteration INTEGER NOT NULL,station TEXT NOT NULL,status TEXT NOT NULL,exit_code INTEGER,logs_path TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,mission_id TEXT NOT NULL,task_id INTEGER,operation_id TEXT,kind TEXT NOT NULL,data_json TEXT NOT NULL,created_at TEXT NOT NULL);
+            PRAGMA user_version=3;
+            """
+        )
+        db.execute(
+            "INSERT INTO missions VALUES('old','old','objective',?,?, 'STOPPED','now','now')",
+            (str(missing_cwd), historical_identity),
+        )
+
+    migrated = BridgeStore(path)
+
+    assert migrated.db.execute("SELECT repo_identity FROM missions WHERE id='old'").fetchone()[0] == historical_identity
 
 
 def test_operation_identity_commands_and_worktree_exclusion(tmp_path: Path) -> None:
@@ -221,9 +263,11 @@ def test_version_one_database_migrates_original_prompts_and_new_tables(tmp_path:
         db.execute("INSERT INTO tasks(mission_id,title,prompt,created_at,updated_at) VALUES('old','old task','verbatim old prompt','now','now')")
     store = BridgeStore(path)
     assert store.get_task(1)["original_prompt"] == "verbatim old prompt"
+    assert store.get_task(1)["origin"] == "operator"
+    assert store.get_task(1)["proposal_status"] == "NONE"
     assert store.get_mission("old")["config"] == {}
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_amendment_after_exit_invalidates_verification_and_requeues_task(tmp_path: Path) -> None:
@@ -386,4 +430,118 @@ def test_runtime_events_are_transactional_and_payloads_are_bounded(tmp_path: Pat
     assert event["data"] == {"provider": "codex", "usable": True}
     with pytest.raises(ValueError, match="16 KiB"):
         store.record_runtime_event(mission["id"], "too-large", {"payload": "x" * 17_000})
+
+
+def test_operation_log_directory_lookup_uses_prefix_index_and_excludes_siblings(tmp_path: Path) -> None:
+    with BridgeStore(tmp_path / "bridge.sqlite3") as store:
+        mission = store.create_mission("mission", "objective", cwd=tmp_path)
+        store.set_mission_status(mission["id"], "RUNNING")
+        task = store.add_task(mission["id"], "work")
+        target = store.begin_operation(task, iteration=1, station="codex")
+        store.mark_operation_running(target)
+        store.finish_operation(target, exit_code=0, logs_path=str(tmp_path / "logs" / "run" / "attempt.out"))
+        sibling_task = store.add_task(mission["id"], "sibling")
+        sibling = store.begin_operation(sibling_task, iteration=2, station="codex")
+        store.mark_operation_running(sibling)
+        store.finish_operation(sibling, exit_code=0, logs_path=str(tmp_path / "logs" / "runner" / "attempt.out"))
+
+        rows = store.operation_logs_in_directory(mission["id"], tmp_path / "logs" / "run")
+        plan = store.db.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM operations WHERE mission_id=? AND logs_path>=? AND logs_path<?",
+            (mission["id"], str(tmp_path / "logs" / "run") + "/", str(tmp_path / "logs" / "run") + "0"),
+        ).fetchall()
+
+        assert [row["id"] for row in rows] == [target]
+        assert "operations_mission_logs_path" in " ".join(str(row["detail"]) for row in plan)
+
+
+def test_managed_verifier_process_identity_is_durable_until_exit(tmp_path: Path) -> None:
+    with BridgeStore(tmp_path / "bridge.sqlite3") as store:
+        mission = store.create_mission("mission", "objective", cwd=tmp_path)
+        task = store.add_task(mission["id"], "work")
+        store.set_mission_status(mission["id"], "RUNNING")
+        operation = store.begin_operation(task, iteration=1, station="codex")
+        store.finish_operation(operation, exit_code=0)
+
+        process_id = store.prepare_managed_process(mission["id"], task, kind="verifier")
+        assert store.unresolved_managed_processes(mission["id"])[0]["status"] == "STARTING"
+        store.mark_managed_process_running(process_id, process_pid=1234, process_start="boot:123")
+
+        running = store.get_managed_process(process_id)
+        assert running["status"] == "RUNNING"
+        assert running["process_pid"] == 1234
+        assert running["process_start"] == "boot:123"
+        store.finish_managed_process(process_id, exit_code=0)
+
+        assert store.unresolved_managed_processes(mission["id"]) == []
+        assert store.get_managed_process(process_id)["status"] == "EXITED"
+        assert any(event["kind"] == "managed-process-exited" for event in store.events(mission["id"]))
+
+
+def test_managed_process_rejects_unowned_or_ambiguous_lifecycle_changes(tmp_path: Path) -> None:
+    with BridgeStore(tmp_path / "bridge.sqlite3") as store:
+        mission = store.create_mission("mission", "objective", cwd=tmp_path)
+        task = store.add_task(mission["id"], "verify")
+        other = store.create_mission("other", "other objective", cwd=tmp_path)
+        foreign_task = store.add_task(other["id"], "foreign")
+        store.set_mission_status(mission["id"], "RUNNING")
+        operation = store.begin_operation(task, iteration=1, station="codex")
+        store.finish_operation(operation, exit_code=0)
+
+        with pytest.raises(ValueError, match="unsupported managed process kind"):
+            store.prepare_managed_process(mission["id"], task, kind="shell")
+        with pytest.raises(TransitionError, match="another mission"):
+            store.prepare_managed_process(mission["id"], foreign_task, kind="verifier")
+        process_id = store.prepare_managed_process(mission["id"], task, kind="verifier")
+        with pytest.raises(ValueError, match="valid pid and start token"):
+            store.mark_managed_process_running(process_id, process_pid=1, process_start="")
+        store.mark_managed_process_running(process_id, process_pid=1234, process_start="boot:123")
+        with pytest.raises(TransitionError, match="not starting"):
+            store.mark_managed_process_running(process_id, process_pid=1234, process_start="boot:123")
+        with pytest.raises(ValueError, match="invalid managed process result status"):
+            store.finish_managed_process(process_id, exit_code=0, status="RUNNING")
+
+        store.finish_managed_process(process_id, exit_code=0)
+        assert store.finish_managed_process(process_id, exit_code=0)["status"] == "EXITED"
+        with pytest.raises(TransitionError, match="already resolved"):
+            store.finish_managed_process(process_id, exit_code=2, status="FAILED")
+
+
+def test_agent_proposals_require_operator_acceptance_before_scheduling(tmp_path: Path) -> None:
+    with BridgeStore(tmp_path / "bridge.sqlite3") as store:
+        mission = store.create_mission("mission", "objective", cwd=tmp_path)
+        source_task = store.add_task(mission["id"], "source work")
+        store.set_mission_status(mission["id"], "RUNNING")
+        operation_id = store.begin_operation(source_task, iteration=1, station="codex")
+        store.finish_operation(operation_id, exit_code=0)
+
+        proposed = store.propose_task(
+            mission["id"], "Add focused regression coverage", source_operation_id=operation_id,
+            title="Regression coverage", priority=50,
+        )
+        item = store.get_task(proposed)
+        assert item["origin"] == "agent-proposal"
+        assert item["proposal_status"] == "PENDING"
+        assert item["proposed_by_operation"] == operation_id
+        assert [task["id"] for task in store.list_proposals(mission["id"])] == [proposed]
+        assert proposed not in {task["id"] for task in store.ready_tasks(mission["id"])}
+        with pytest.raises(TransitionError, match="operator acceptance"):
+            store.begin_operation(proposed, iteration=2, station="claude")
+
+        store.decide_proposal(mission["id"], proposed, accept=True)
+        assert store.get_task(proposed)["proposal_status"] == "ACCEPTED"
+        assert proposed in {task["id"] for task in store.ready_tasks(mission["id"])}
+        proposal_operation = store.begin_operation(proposed, iteration=2, station="claude")
+        store.finish_operation(proposal_operation, exit_code=0)
+        store.verify_task(proposed, evidence="accepted proposal complete")
+
+        rejected = store.propose_task(
+            mission["id"], "Unneeded follow-up", source_operation_id=operation_id,
+        )
+        store.decide_proposal(mission["id"], rejected, accept=False, reason="outside scope")
+        rejected_item = store.get_task(rejected)
+        assert rejected_item["proposal_status"] == "REJECTED"
+        assert rejected_item["status"] == "CANCELLED"
+        assert {task["id"] for task in store.list_proposals(mission["id"], status="ALL", limit=1)} == {proposed}
+        assert [task["id"] for task in store.list_proposals(mission["id"], status="REJECTED")] == [rejected]
 

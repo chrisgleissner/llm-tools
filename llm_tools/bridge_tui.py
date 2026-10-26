@@ -8,6 +8,8 @@ dispatcher used by the CLI.
 from __future__ import annotations
 
 import curses
+import inspect
+import json
 import os
 import shlex
 import stat
@@ -22,7 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 
-Snapshot = Callable[[str], dict[str, object]]
+Snapshot = Callable[..., dict[str, object]]
 Dispatch = Callable[[str, str], str]
 
 VIEWS = ("Bridge", "Orders", "Stations", "Systems", "Log", "Sessions", "Palette")
@@ -35,18 +37,19 @@ PALETTE_COMMANDS = (
     "resume",
     "stop",
     "cancel",
-    "add FILE",
-    "amend ID FILE",
-    "priority ID N",
+    "steer help",
 )
 _REFRESH_SECONDS = 0.25
 _MAX_COMMAND_CHARS = 4096
 _MAX_OUTPUT_LINES = 80
 _MAX_OUTPUT_LINE_CHARS = 2000
 _MAX_TASK_ROWS = 200
+_TASK_PAGE_SIZE = _MAX_TASK_ROWS
 _MAX_STATION_ROWS = 32
 _MAX_EVENT_ROWS = 80
-_NAV_HINT = "Tab/←→/F1-F7 view  Ctrl-E add  Ctrl-R amend  Enter runs  Ctrl-D exits"
+_MAX_DETAIL_TEXT = 16000
+_MAX_DETAIL_ITEMS = 12
+_NAV_HINT = "F1-7/Tab views PgUp/Dn pages Ctrl-F search Ctrl-E add Ctrl-R edit Ctrl-D exit"
 
 
 def _text(value: object, limit: int = 1000) -> str:
@@ -59,6 +62,28 @@ def _text(value: object, limit: int = 1000) -> str:
     return " ".join(clean.split())[:limit]
 
 
+def _command_feedback(command: str, response: str) -> str:
+    """Turn known durable command envelopes into compact human acknowledgments."""
+    try:
+        payload = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return _text(response, _MAX_OUTPUT_LINE_CHARS)
+    if not isinstance(payload, dict) or payload.get("status") not in {"APPLIED", "REJECTED", "FAILED"}:
+        return _text(response, _MAX_OUTPUT_LINE_CHARS)
+    status = str(payload["status"])
+    result = _dict(payload.get("result"))
+    if status == "APPLIED":
+        detail = result.get("detail")
+        label = _text(command, 120)
+        if result.get("kind"):
+            label = _text(result.get("kind"), 80) + " steering"
+        if detail:
+            return _text(f"Applied: {label} — {detail}", _MAX_OUTPUT_LINE_CHARS)
+        return _text(f"Applied: {label}", _MAX_OUTPUT_LINE_CHARS)
+    reason = result.get("error") or result.get("detail") or status.lower()
+    return _text(f"Rejected: {reason}", _MAX_OUTPUT_LINE_CHARS)
+
+
 def _dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
@@ -69,9 +94,142 @@ def _items(value: object) -> list[dict[str, object]]:
     return [_dict(item) for item in value if isinstance(item, dict)]
 
 
+def _station_projection(value: object) -> tuple[list[dict[str, object]], dict[str, object]]:
+    if isinstance(value, list):
+        return (
+            _projected_rows(value, _MAX_STATION_ROWS, ("id", "name", "provider", "model", "observed_model", "status", "restoration_state")),
+            {},
+        )
+    station_data = _dict(value)
+    if not station_data:
+        return [], {}
+    configured = _dict(station_data.get("configured"))
+    observed = _dict(station_data.get("observed"))
+    providers = configured.get("providers") if isinstance(configured.get("providers"), list) else []
+    routes = configured.get("routes") if isinstance(configured.get("routes"), list) else []
+    models = _dict(configured.get("models"))
+    efforts = _dict(configured.get("efforts"))
+    names = list(dict.fromkeys(str(name) for name in [*providers, *routes]))
+    observed_name = _text(observed.get("station") or "unknown", 80)
+    if observed_name not in names and observed_name != "unknown":
+        names.append(observed_name)
+    rows = [
+        {
+            "name": name,
+            "id": name,
+            "model": _text(models.get(name) or "unknown", 80),
+            "effort": _text(efforts.get(name) or "unknown", 24),
+            "observed_model": _text(observed.get("model") or "unknown", 80) if name == observed_name else "unknown",
+            "status": _text(observed.get("status") or "configured", 24) if name == observed_name else "configured",
+        }
+        for name in names[:_MAX_STATION_ROWS]
+    ]
+    context = {
+        "mode": _text(configured.get("mode") or "unknown", 24),
+        "executing_operation": _text(station_data.get("executing_operation") or "none", 80),
+        "viewed_station": _text(station_data.get("viewed_station") or "unknown", 80),
+        "observed_station": observed_name,
+        "last_launched_station": _text(station_data.get("last_launched_station") or "unknown", 80),
+        "observed_model": _text(observed.get("model") or "unknown", 80),
+        "observed_effort": _text(observed.get("effort") or "unknown", 24),
+        "operation_status": _text(observed.get("operation_status") or "unknown", 24),
+        "provider_liveness": _text(station_data.get("provider_liveness") or "unknown", 24),
+    }
+    return rows, context
+
+
 def _projected_rows(value: object, limit: int, fields: tuple[str, ...]) -> list[dict[str, object]]:
     rows = _items(value)
     return [{key: _text(row.get(key, ""), 200) for key in fields if key in row} for row in rows[:limit]]
+
+
+def _bounded_task_value(value: object, *, limit: int = _MAX_DETAIL_ITEMS, preserve_newlines: bool = False) -> object:
+    """Keep useful task detail while preventing arbitrary nested payload growth."""
+    if isinstance(value, str):
+        if preserve_newlines:
+            return "".join(
+                char if char == "\n" or unicodedata.category(char) not in {"Cc", "Cs"} else " "
+                for char in value
+            )[:_MAX_DETAIL_TEXT]
+        return _text(value, _MAX_DETAIL_TEXT)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_bounded_task_value(item) for item in value[:limit]]
+    if isinstance(value, dict):
+        allowed = {"prompt", "title", "priority", "acceptance", "evidence", "revision", "status", "changes", "created_at"}
+        return {
+            _text(key, 48): _bounded_task_value(item, preserve_newlines=key == "prompt")
+            for key, item in list(value.items())[:limit]
+            if key in allowed
+        }
+    return _text(value, 200)
+
+
+def _project_tasks(value: object, limit: int = _MAX_TASK_ROWS) -> list[dict[str, object]]:
+    output: list[dict[str, object]] = []
+    for task in _items(value)[:limit]:
+        item: dict[str, object] = {}
+        for key in ("id", "title", "status", "priority", "ordering", "revision", "updated_at", "origin", "proposal_status", "proposed_by_operation"):
+            if key in task:
+                item[key] = _text(task[key], 120)
+        for key in ("prompt", "acceptance", "evidence", "pending", "depends_on", "amendments"):
+            if key in task:
+                item[key] = _bounded_task_value(task[key], preserve_newlines=key == "prompt")
+        output.append(item)
+    return output
+
+
+def _project_capacity(value: object) -> dict[str, object]:
+    capacity = _dict(value)
+    selection = _dict(capacity.get("selection"))
+    result: dict[str, object] = {
+        _text(key, 48): _text(item, 180)
+        for key, item in capacity.items()
+        if isinstance(item, (str, int, float, bool, type(None)))
+    }
+    if selection:
+        selected: dict[str, object] = {
+            _text(key, 48): _text(item, 180)
+            for key, item in selection.items()
+            if key != "decisions" and isinstance(item, (str, int, float, bool, type(None)))
+        }
+        raw_decision = _dict(selection.get("decision"))
+        selected["decision"] = {
+            _text(key, 48): _text(item, 120)
+            for key, item in raw_decision.items()
+            if isinstance(item, (str, int, float, bool, type(None)))
+        }
+        decisions: list[dict[str, object]] = []
+        raw_decisions = selection.get("decisions")
+        for raw in raw_decisions[:8] if isinstance(raw_decisions, list) else []:
+            row = _dict(raw)
+            decision: dict[str, object] = {
+                _text(key, 48): _text(item, 120)
+                for key, item in row.items()
+                if key != "windows" and isinstance(item, (str, int, float, bool, type(None)))
+            }
+            windows: list[dict[str, object]] = []
+            raw_windows = row.get("windows")
+            for raw_window in raw_windows[:8] if isinstance(raw_windows, list) else []:
+                window = _dict(raw_window)
+                windows.append({
+                    _text(key, 48): _text(item, 120)
+                    for key, item in window.items()
+                    if isinstance(item, (str, int, float, bool, type(None)))
+                })
+            decision["windows"] = windows
+            decisions.append(decision)
+        selected["decisions"] = decisions
+        result["selection"] = selected
+    wait = _dict(capacity.get("wait"))
+    if wait:
+        result["wait"] = {
+            _text(key, 48): _text(item, 120)
+            for key, item in wait.items()
+            if isinstance(item, (str, int, float, bool, type(None)))
+        }
+    return result
 
 
 def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
@@ -83,16 +241,33 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
         for key in ("id", "name", "objective", "status", "cwd", "updated_at")
         if key in mission
     }
-    result["tasks"] = _projected_rows(
-        data.get("tasks"),
-        _MAX_TASK_ROWS,
-        ("id", "title", "prompt", "status", "priority", "ordering", "revision"),
-    )
-    result["stations"] = _projected_rows(
-        data.get("stations"),
-        _MAX_STATION_ROWS,
-        ("id", "name", "provider", "model", "observed_model", "status", "restoration_state"),
-    )
+    result["tasks"] = _project_tasks(data.get("tasks"))
+    current_task = _dict(data.get("current_task"))
+    if current_task:
+        result["current_task"] = {
+            key: _text(current_task.get(key, ""), 180)
+            for key in ("id", "title", "status", "revision")
+            if key in current_task
+        }
+    station_rows, station_context = _station_projection(data.get("stations"))
+    result["stations"] = station_rows
+    if not station_context:
+        station_config = _dict(data.get("station_config"))
+        station_observation = _dict(data.get("station_observation"))
+        raw_station_context = _dict(data.get("station_context"))
+        station_context = {
+            "mode": _text(station_config.get("configured_mode") or station_config.get("mode") or "unknown", 24),
+            "executing_operation": _text(raw_station_context.get("executing_operation") or "none", 80),
+            "operation_status": _text(raw_station_context.get("operation_status") or "unknown", 24),
+            "last_launched_station": _text(raw_station_context.get("last_launched_station") or "unknown", 80),
+            "provider_liveness": _text(raw_station_context.get("provider_liveness") or "unknown", 24),
+            "viewed_station": _text(raw_station_context.get("viewed_station") or "unknown", 80),
+            "observed_station": _text(station_observation.get("station") or "unknown", 80),
+            "observed_model": _text(station_observation.get("model") or "unknown", 80),
+            "observed_effort": _text(station_observation.get("effort") or "unknown", 24),
+            "operation_status": _text(raw_station_context.get("operation_status") or "unknown", 24),
+        }
+    result["station_context"] = station_context
     result["events"] = _projected_rows(
         data.get("events"),
         _MAX_EVENT_ROWS,
@@ -101,7 +276,7 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
     result["operations"] = _projected_rows(
         data.get("operations"),
         20,
-        ("id", "operation_id", "task_id", "provider", "station", "route_id", "model", "phase", "status", "created_at"),
+        ("id", "operation_id", "task_id", "provider", "station", "route_id", "model", "native_session_id", "restoration_state", "phase", "status", "exit_code", "created_at"),
     )
     pending = data.get("pending_commands")
     result["pending_command_count"] = len(pending) if isinstance(pending, list) else 0
@@ -110,12 +285,60 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
         for key, count in _dict(data.get("task_counts")).items()
         if isinstance(count, (int, float))
     }
+    result["proposal_counts"] = {
+        _text(key, 32): count
+        for key, count in _dict(data.get("proposal_counts")).items()
+        if isinstance(count, (int, float))
+    }
     total_tasks = data.get("task_total")
     if isinstance(total_tasks, int):
         result["task_total"] = total_tasks
-    for key in ("controller", "capacity", "routes", "execution", "health", "persistence"):
+    for key in ("controller", "routes", "execution"):
         if key in data:
             result[key] = _text(data[key], 240)
+    station_mode = _dict(data.get("station_mode"))
+    if station_mode:
+        result["station_mode"] = {
+            _text(field, 48): _text(value, 120)
+            for field, value in station_mode.items()
+            if isinstance(value, (str, int, float, bool, type(None)))
+        }
+    lifecycle = _dict(data.get("lifecycle"))
+    if lifecycle:
+        lifecycle_projection: dict[str, object] = {
+            _text(field, 48): _text(value, 180)
+            for field, value in lifecycle.items()
+            if field != "heartbeat"
+            if isinstance(value, (str, int, float, bool, type(None)))
+        }
+        heartbeat = _dict(lifecycle.get("heartbeat"))
+        heartbeat_fields = (
+            "reported_state",
+            "observed_at",
+            "age_seconds",
+            "owner_lock_held",
+            "desired_mission_status",
+            "current_liveness",
+            "source",
+        )
+        if heartbeat:
+            lifecycle_projection["heartbeat"] = {
+                field: _text(heartbeat[field], 100)
+                for field in heartbeat_fields
+                if isinstance(heartbeat.get(field), (str, int, float, bool, type(None)))
+            }
+        result["lifecycle"] = lifecycle_projection
+    capacity = _project_capacity(data.get("capacity"))
+    if capacity:
+        result["capacity"] = capacity
+    for key in ("health", "persistence", "criteria", "last_meaningful_progress", "suspend"):
+        value = _dict(data.get(key))
+        if value:
+            result[key] = {
+                _text(field, 48): _text(item, 180)
+                for field, item in value.items()
+                if isinstance(item, (str, int, float, bool, type(None)))
+            }
     return result
 
 
@@ -133,9 +356,10 @@ def _task_label(task: dict[str, object]) -> str:
 
 def _station_label(station: dict[str, object]) -> str:
     name = _text(station.get("name") or station.get("provider") or station.get("id") or "Station", 60)
-    model = _text(station.get("observed_model") or station.get("model") or "model unknown", 60)
+    configured_model = _text(station.get("model") or "unknown", 50)
+    observed_model = _text(station.get("observed_model") or "unknown", 50)
     state = _text(station.get("restoration_state") or station.get("status") or "unknown", 24)
-    return f"{name}  {model}  {state}"
+    return f"{name}  configured model {configured_model}  observed model {observed_model}  {state}"
 
 
 def _nav_labels(view_index: int) -> list[str]:
@@ -172,7 +396,11 @@ class _ConsoleState:
     full: bool
     view_index: int = 0
     selected: int = 0
+    task_offset: int = 0
     command: str = ""
+    search_query: str = ""
+    search_editing: bool = False
+    task_detail: bool = False
     history: deque[str] = field(default_factory=lambda: deque(maxlen=50))
     history_index: int | None = None
     output: deque[str] = field(default_factory=lambda: deque(maxlen=_MAX_OUTPUT_LINES))
@@ -212,7 +440,25 @@ class _ConsoleState:
 
         def read_snapshot() -> None:
             try:
-                data = self.snapshot_reader(self.mission_id)
+                try:
+                    parameters = inspect.signature(self.snapshot_reader).parameters.values()
+                    parameter_list = tuple(parameters)
+                    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameter_list)
+                    parameter_names = {parameter.name for parameter in parameter_list}
+                except (TypeError, ValueError):
+                    accepts_kwargs = False
+                    parameter_names = set()
+                projection = {
+                    "task_offset": self.task_offset,
+                    "task_limit": _TASK_PAGE_SIZE,
+                    "search": self.search_query,
+                }
+                kwargs = {
+                    key: value
+                    for key, value in projection.items()
+                    if accepts_kwargs or key in parameter_names
+                }
+                data = self.snapshot_reader(self.mission_id, **kwargs)
                 if not isinstance(data, dict):
                     raise TypeError("status snapshot must be a mapping")
                 result = (_bounded_snapshot(data), "")
@@ -246,7 +492,8 @@ class _ConsoleState:
         def run_command() -> None:
             try:
                 try:
-                    result = _text(self.dispatch(self.mission_id, text), _MAX_OUTPUT_LINE_CHARS)
+                    raw_result = self.dispatch(self.mission_id, text)
+                    result = _command_feedback(text, raw_result)
                 except Exception as exc:
                     result = f"Command failed: {_text(exc, 180)}"
                 with self._result_lock:
@@ -275,10 +522,18 @@ class _ConsoleState:
             self.selected = 0
             return True
         if key == "\x10":  # Ctrl-P recalls the previous command.
+            if self.search_editing:
+                return True
             self._history(-1)
             return True
         if key == "\x0e":  # Ctrl-N advances through command history.
+            if self.search_editing:
+                return True
             self._history(1)
+            return True
+        if key == "\x06":  # Ctrl-F edits the Orders filter.
+            self.command = self.search_query
+            self.search_editing = True
             return True
         if isinstance(key, str) and key.startswith("KEY_F"):
             try:
@@ -294,19 +549,56 @@ class _ConsoleState:
         if key in {"KEY_UP", "KEY_DOWN"} and not self.command:
             self.selected = max(0, self.selected - 1) if key == "KEY_UP" else self.selected + 1
             return True
+        if key in {"KEY_PPAGE", "KEY_NPAGE"} and not self.command and not self.search_editing:
+            if self.view == "Orders":
+                total = self.snapshot.get("task_total")
+                if key == "KEY_PPAGE":
+                    self.task_offset = max(0, self.task_offset - _TASK_PAGE_SIZE)
+                elif not isinstance(total, int) or self.task_offset + _TASK_PAGE_SIZE < total:
+                    self.task_offset += _TASK_PAGE_SIZE
+                self.selected = 0
+                self.last_refresh = 0.0
+            else:
+                delta = 10 if self.full else 5
+                self.selected = max(0, self.selected - delta) if key == "KEY_PPAGE" else self.selected + delta
+            return True
         if key in {"KEY_BACKSPACE", "\x7f", "\b"}:
             self.command = self.command[:-1]
             return True
         if key == "\x15":  # Ctrl-U clears the current input line.
             self.command = ""
+            if self.search_editing or self.search_query:
+                self.search_query = ""
+                self.search_editing = False
+                self.task_offset = 0
+                self.selected = 0
+                self.last_refresh = 0.0
             return True
         if key == "\x1b":
+            if self.task_detail:
+                self.task_detail = False
+                return True
             self.command = ""
+            self.search_editing = False
             return True
         if key in {"\n", "\r", "KEY_ENTER"}:
+            if self.search_editing:
+                self.search_query = self.command.strip()
+                self.command = ""
+                self.search_editing = False
+                self.task_offset = 0
+                self.selected = 0
+                self.last_refresh = 0.0
+                return True
             if self.view == "Palette" and not self.command:
                 command = PALETTE_COMMANDS[self.selected % len(PALETTE_COMMANDS)]
                 self._dispatch(command)
+            elif self.view == "Orders" and not self.command:
+                self.task_detail = not self.task_detail
+            elif self.view == "Stations" and not self.command:
+                station = self.selected_station_name()
+                if station:
+                    self._dispatch("station " + shlex.quote(station))
             else:
                 if self._dispatch(self.command):
                     self.command = ""
@@ -314,6 +606,10 @@ class _ConsoleState:
         if key in {"KEY_RESIZE", "KEY_MOUSE"}:
             return True
         if key in {"\x03", "\x04"}:
+            if self.search_editing:
+                self.command = ""
+                self.search_editing = False
+                return True
             if self.command:
                 self.command = ""
                 return True
@@ -339,6 +635,25 @@ class _ConsoleState:
             self.view_index = index
             self.selected = 0
 
+    def selected_station_name(self) -> str | None:
+        stations = _items(self.snapshot.get("stations"))
+        if not stations:
+            return None
+        item = stations[min(max(0, self.selected), len(stations) - 1)]
+        value = item.get("name") or item.get("provider") or item.get("id")
+        return str(value) if value else None
+
+    def selected_task(self) -> dict[str, object] | None:
+        tasks = _items(self.snapshot.get("tasks"))
+        if not tasks:
+            return None
+        return tasks[min(max(0, self.selected), len(tasks) - 1)]
+
+    def _selection_row_offset(self) -> int:
+        if self.view == "Stations" and self.full:
+            return 2
+        return 0
+
     def rows(self) -> list[str]:
         data = self.snapshot
         mission = _mission(data)
@@ -349,24 +664,88 @@ class _ConsoleState:
         task_counts = _dict(data.get("task_counts"))
         if self.view == "Bridge":
             next_task = next((task for task in tasks if task.get("status") in {"READY", "QUEUED"}), None)
+            current_task = _dict(data.get("current_task"))
             counts = " ".join(
                 f"{_text(state, 12).lower()} {count}"
                 for state, count in task_counts.items()
                 if isinstance(count, (int, float))
             )
+            proposal_counts = _dict(data.get("proposal_counts"))
+            proposal_summary = " ".join(
+                f"proposal {str(state).lower()} {count}"
+                for state, count in proposal_counts.items()
+                if isinstance(count, (int, float)) and count
+            )
             return [
                 f"Mission: {_text(mission.get('name') or self.mission_id, 90)} [{_text(mission.get('status', 'unknown'), 24)}]",
                 f"Objective: {_text(mission.get('objective', 'No objective recorded'), 180)}",
-                f"Orders: {counts or f'{len(tasks)} visible'}",
+                f"Orders: {counts or f'{len(tasks)} visible'}" + (f" | {proposal_summary}" if proposal_summary else ""),
+                f"Executing: {_task_label(current_task) if current_task else 'none'}",
                 f"Next: {_task_label(next_task) if next_task else 'none ready'}",
                 f"Pending commands: {data.get('pending_command_count', 0)}",
-                f"Operations observed: {len(operations)} | Events loaded: {len(events)}",
+                f"Criteria verified: {_dict(data.get('criteria')).get('verified', '?')}/{_dict(data.get('criteria')).get('total', '?')} | ops {len(operations)} | events {len(events)}",
             ]
         if self.view == "Orders":
+            if self.task_detail:
+                task = self.selected_task()
+                if task is None:
+                    return ["No task selected."]
+                dependencies = task.get("depends_on", [])
+                acceptance = task.get("acceptance", [])
+                evidence = task.get("evidence", [])
+                pending = _dict(task.get("pending"))
+                amendments = task.get("amendments")
+                details = [
+                    f"Order {_text(task.get('id', '?'), 32)}: {_text(task.get('title') or 'Untitled', 100)}",
+                    f"Status {_text(task.get('status', 'unknown'), 24)} | priority {_text(task.get('priority', '?'), 16)} | revision {_text(task.get('revision', '?'), 16)}",
+                    f"Origin {_text(task.get('origin') or 'operator', 24)} | proposal {_text(task.get('proposal_status') or 'not a proposal', 32)} | proposed by {_text(task.get('proposed_by_operation') or 'unknown', 32)}",
+                    "Dependencies: " + (", ".join(_text(item, 32) for item in dependencies) if isinstance(dependencies, list) and dependencies else "none"),
+                    "Acceptance criteria:",
+                    *([f"  {index + 1}. {_text(item, 240)}" for index, item in enumerate(acceptance[:_MAX_DETAIL_ITEMS])] if isinstance(acceptance, list) and acceptance else ["  none recorded"]),
+                    "Verification evidence:",
+                    *([f"  {index + 1}. {_text(item, 240)}" for index, item in enumerate(evidence[:_MAX_DETAIL_ITEMS])] if isinstance(evidence, list) and evidence else ["  none recorded"]),
+                    "Pending amendment: " + (json.dumps(pending, ensure_ascii=False, sort_keys=True)[:400] if pending else "none"),
+                    "Amendment history:",
+                    *([
+                        f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20)}: {_text(json.dumps(item.get('changes', {}), ensure_ascii=False, sort_keys=True), 240)}"
+                        for item in amendments[:5]
+                    ] if isinstance(amendments, list) and amendments else ["  none recorded"]),
+                    "Prompt: " + _text(task.get("prompt") or "", 800),
+                ]
+                return details
             return [_task_label(task) for task in tasks] or ["No tasks recorded."]
         if self.view == "Stations":
             if stations:
-                return [_station_label(item) for item in stations]
+                context = _dict(data.get("station_context"))
+                viewed = _text(context.get("viewed_station") or "unknown", 80)
+                last_launched = _text(context.get("last_launched_station") or "unknown", 80)
+                rows: list[str] = []
+                for item in stations:
+                    name = _text(item.get("name") or item.get("provider") or item.get("id") or "Station", 80)
+                    flags = []
+                    if name == viewed:
+                        flags.append("VIEWED")
+                    if name == last_launched:
+                        flags.append("LAST LAUNCHED")
+                    flags_text = f" [{' '.join(flags)}]" if flags else ""
+                    rows.append(f"{name}  configured {item.get('model', 'unknown')}  observed {item.get('observed_model', 'unknown')}  config {item.get('status', 'unknown')}{flags_text}")
+                selected_name = self.selected_station_name()
+                matching_operations = [
+                    item for item in operations
+                    if selected_name and selected_name in {
+                        str(item.get("station") or ""), str(item.get("route_id") or "")
+                    }
+                ]
+                return [
+                    f"Viewed: {viewed} | last launched: {last_launched} | op record: {_text(context.get('executing_operation', 'none'), 32)} ({_text(context.get('operation_status', 'unknown'), 20)})",
+                    f"Provider liveness: {_text(context.get('provider_liveness', 'unknown'), 20)} | mode: {_text(context.get('mode', 'unknown'), 20)} | model: {_text(context.get('observed_model', 'unknown'), 40)}",
+                    *rows,
+                    f"Recent history for {selected_name or 'selected station'}:",
+                    *([
+                        f"  op {_text(item.get('id') or item.get('operation_id') or '?', 24)} task {_text(item.get('task_id') or '?', 12)} {_text(item.get('status') or 'unknown', 20)} model {_text(item.get('model') or 'unknown', 40)} exit {_text(item.get('exit_code') if item.get('exit_code') is not None else 'unknown', 16)}"
+                        for item in matching_operations[:8]
+                    ] or ["  no recent operations"]),
+                ]
             observed = {
                 (_text(item.get("station") or item.get("provider") or "unknown", 60),
                  _text(item.get("model") or "model unknown", 60),
@@ -375,8 +754,62 @@ class _ConsoleState:
             }
             return [f"{station}  {model}  {status}" for station, model, status in sorted(observed)] or ["No stations recorded."]
         if self.view == "Systems":
-            keys = ("controller", "capacity", "routes", "execution", "health", "persistence")
-            found = [f"{key}: {_text(data[key], 220)}" for key in keys if key in data]
+            keys = ("controller", "station_mode", "lifecycle", "routes", "execution", "health", "persistence", "criteria", "last_meaningful_progress", "suspend")
+            found: list[str] = []
+            for key in keys:
+                if key not in data:
+                    continue
+                section = _dict(data.get(key))
+                if key == "lifecycle" and isinstance(data.get(key), dict):
+                    heartbeat = _dict(section.get("heartbeat"))
+                    lifecycle_values = {field: value for field, value in section.items() if field != "heartbeat"}
+                    if lifecycle_values:
+                        found.append("lifecycle: " + " | ".join(f"{field}={value}" for field, value in lifecycle_values.items()))
+                    if heartbeat:
+                        found.append(
+                            "Controller heartbeat (last observed): "
+                            + " | ".join(f"{field}={value}" for field, value in heartbeat.items())
+                        )
+                    continue
+                if isinstance(data.get(key), dict):
+                    found.append(f"{key}: " + " | ".join(f"{field}={value}" for field, value in section.items()))
+                else:
+                    found.append(f"{key}: {_text(data[key], 220)}")
+            capacity = _dict(data.get("capacity"))
+            selection = _dict(capacity.get("selection"))
+            if capacity:
+                selected_fields = ("provider", "route", "selected_model", "rotation_reason", "all_rate_limited")
+                selection_summary = " | ".join(
+                    f"{field}={selection[field]}" for field in selected_fields if selection.get(field) is not None
+                )
+                found.append(
+                    "capacity: " + " | ".join(
+                        part for part in (f"source={capacity.get('source', 'unknown')}", selection_summary) if part
+                    )
+                )
+            decisions = selection.get("decisions")
+            if isinstance(decisions, list):
+                for decision in decisions[:8]:
+                    row = _dict(decision)
+                    owner = _text(row.get("route") or row.get("provider") or "provider", 60)
+                    windows = row.get("windows")
+                    if isinstance(windows, list):
+                        for window in windows[:8]:
+                            item = _dict(window)
+                            name = _text(item.get("name") or item.get("kind") or "window", 36)
+                            kind = _text(item.get("kind") or "unknown", 24)
+                            remaining = item.get("remaining_percent")
+                            if remaining is None:
+                                amount = item.get("remaining_amount")
+                                currency = _text(item.get("currency") or "", 16)
+                                remaining_text = f"remaining {amount} {currency}".strip() if amount is not None else "remaining unknown"
+                            else:
+                                remaining_text = f"remaining {remaining}%"
+                            reset = item.get("reset_epoch")
+                            reset_text = f"reset epoch {reset}" if reset not in (None, "None", "") else "no reset"
+                            reason = item.get("reason")
+                            suffix = f" ({_text(reason, 80)})" if reason else ""
+                            found.append(f"Quota/budget {owner} {name} [{kind}]: {remaining_text}; {reset_text}{suffix}")
             return found or ["System and capacity status is not available in this snapshot."]
         if self.view == "Log":
             return [
@@ -385,7 +818,8 @@ class _ConsoleState:
             ] or ["No recent mission events."]
         if self.view == "Sessions":
             return [
-                f"{_text(item.get('id') or item.get('operation_id') or '?', 30)}  {_text(item.get('station') or item.get('provider') or 'station unknown', 32)}  {_text(item.get('route_id') or item.get('route') or 'route unknown', 32)}  {_text(item.get('phase') or item.get('status') or 'unknown', 24)}"
+                f"op {_text(item.get('id') or item.get('operation_id') or '?', 24)} task {_text(item.get('task_id') or '?', 12)}  {_text(item.get('station') or item.get('provider') or 'station unknown', 28)} route {_text(item.get('route_id') or item.get('route') or 'unknown', 24)} pinned model {_text(item.get('model') or 'unknown', 28)}  {_text(item.get('status') or 'unknown', 20)}"
+                f" | native session {_text(item.get('native_session_id') or 'unknown', 36)} restoration {_text(item.get('restoration_state') or 'unknown', 24)}"
                 for item in operations
             ] or [_station_label(station) for station in stations] or ["No session activity recorded."]
         if self.view == "Palette":
@@ -405,8 +839,10 @@ class _ConsoleState:
         elif self.full and y >= 3:
             rows = self.rows()
             content_height = max(1, height - 6)
-            start = _scroll_start(self.selected, len(rows), content_height)
-            self.selected = min(max(0, len(rows) - 1), start + y - 3)
+            row_offset = self._selection_row_offset()
+            start = _scroll_start(self.selected + row_offset, len(rows), content_height)
+            row_index = min(max(0, len(rows) - 1), start + y - 3)
+            self.selected = max(0, row_index - row_offset)
 
 
 def _put(window: curses.window, y: int, x: int, value: object, width: int) -> None:
@@ -432,15 +868,46 @@ def _scroll_start(selected: int, row_count: int, visible_rows: int) -> int:
 def _orders_summary(state: _ConsoleState) -> str:
     tasks = _items(state.snapshot.get("tasks"))
     total = state.snapshot.get("task_total")
+    filtered = f" matching /{_text(state.search_query, 40)}/" if state.search_query else ""
     if isinstance(total, int):
-        return f"Orders: {total} total; showing {len(tasks)}"
-    return f"Orders: {len(tasks)} shown"
+        first = state.task_offset + 1 if tasks else 0
+        last = state.task_offset + len(tasks)
+        return f"Orders: {total} total{filtered}; showing {first}-{last}"
+    return f"Orders: {len(tasks)} shown{filtered}"
 
 
 def _command_display(command: str, width: int) -> str:
     if width <= 0:
         return ""
     return command[-width:]
+
+
+def _input_prompt(state: _ConsoleState) -> str:
+    return "/? " if state.search_editing else "> "
+
+
+def _hint(state: _ConsoleState) -> str:
+    if state.view == "Orders":
+        return "Enter inspect Ctrl-R amend Ctrl-E add Ctrl-F find PgUp/Dn pages Ctrl-D exit"
+    if state.view == "Stations":
+        return "Enter choose station; recent history below | F1-7/Tab views | Ctrl-D exit"
+    if state.view == "Palette":
+        return "Enter run selected command | type command | F1-7/Tab views | Ctrl-D exit"
+    return _NAV_HINT
+
+
+def _handle_mouse_event(
+    state: _ConsoleState,
+    y: int,
+    x: int,
+    height: int,
+    width: int,
+    *,
+    activate: bool = False,
+) -> None:
+    state.handle_mouse(y, x, height, width)
+    if activate:
+        state.handle_key("KEY_ENTER")
 
 
 def _draw_compact(window: curses.window, state: _ConsoleState) -> None:
@@ -455,13 +922,14 @@ def _draw_compact(window: curses.window, state: _ConsoleState) -> None:
         nav = _nav_line(state.view_index, " ")
         _put(window, 2, 0, nav, width)
     if height >= 4:
-        selected = state.selected + (1 if state.view == "Bridge" else 0)
+        selected = state.selected + (1 if state.view == "Bridge" else 2 if state.view == "Stations" else 0)
         detail = rows[min(selected, max(0, len(rows) - 1))] if rows else ""
         _put(window, 3, 0, detail, width)
     if height >= 5:
-        _put(window, 4, 0, "> " + _command_display(state.command, width - 2), width - 2)
+        prompt = _input_prompt(state)
+        _put(window, 4, 0, prompt + _command_display(state.command, width - len(prompt)), width - len(prompt))
     if height >= 6:
-        hint = state.snapshot_error or (state.output[-1] if state.output else _NAV_HINT)
+        hint = state.snapshot_error or (state.output[-1] if state.output else _hint(state))
         _put(window, 5, 0, hint, width)
     window.noutrefresh()
     curses.doupdate()
@@ -483,19 +951,28 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
         _put(window, 2, 0, nav, width)
     content_height = max(0, height - 6)
     rows = state.rows()
-    start = _scroll_start(state.selected, len(rows), content_height)
+    row_offset = state._selection_row_offset()
+    selected_row = state.selected + row_offset
+    start = _scroll_start(selected_row, len(rows), content_height)
     for offset, value in enumerate(rows[start : start + content_height]):
-        marker = "> " if start + offset == state.selected else "  "
+        marker = "> " if start + offset == selected_row else "  "
         _put(window, offset + 3, 0, marker + value, width)
     if height >= 2:
-        _put(window, height - 2, 0, "> " + _command_display(state.command, width - 2), width - 2)
-        status = state.snapshot_error or (state.output[-1] if state.output else _NAV_HINT)
+        prompt = _input_prompt(state)
+        _put(window, height - 2, 0, prompt + _command_display(state.command, width - len(prompt)), width - len(prompt))
+        status = state.snapshot_error or (state.output[-1] if state.output else _hint(state))
         _put(window, height - 1, 0, status, width)
     window.noutrefresh()
     curses.doupdate()
 
 
-def _edit_task_prompt(window: curses.window, state: _ConsoleState, task_id: str | None = None) -> None:
+def _edit_task_prompt(
+    window: curses.window,
+    state: _ConsoleState,
+    task_id: str | None = None,
+    *,
+    initial_text: str = "",
+) -> None:
     """Edit multiline task text in a private file, then dispatch it by path."""
     if state.command_pending:
         state.output.append("Wait for the current command before opening the editor.")
@@ -511,6 +988,8 @@ def _edit_task_prompt(window: curses.window, state: _ConsoleState, task_id: str 
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise PermissionError("task editor file is not private and owned by this user")
         os.close(fd)
+        if initial_text:
+            path.write_text(initial_text, encoding="utf-8")
         editor_setting = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         editor = shlex.split(editor_setting)
         if not editor:
@@ -586,11 +1065,12 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool)
                 state.refresh(force=True)
                 continue
             if key == "\x12":
-                task_id = _selected_task_id(state) if state.view == "Orders" else None
-                if task_id is None:
+                task = state.selected_task() if state.view == "Orders" else None
+                task_id = _selected_task_id(state) if task is not None else None
+                if task_id is None or task is None:
                     state.output.append("Select an order in the Orders view before amending it.")
                 else:
-                    _edit_task_prompt(window, state, task_id)
+                    _edit_task_prompt(window, state, task_id, initial_text=str(task.get("prompt") or ""))
                 state.refresh(force=True)
                 continue
             if key == curses.KEY_MOUSE:
@@ -603,7 +1083,9 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool)
                 elif button_state & curses.BUTTON5_PRESSED:
                     state.selected += 1
                 elif button_state & curses.BUTTON1_CLICKED:
-                    state.handle_mouse(y, x, *window.getmaxyx())
+                    _handle_mouse_event(state, y, x, *window.getmaxyx())
+                elif button_state & getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0):
+                    _handle_mouse_event(state, y, x, *window.getmaxyx(), activate=True)
                 continue
             semantic = {
                 curses.KEY_UP: "KEY_UP",
@@ -614,6 +1096,8 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool)
                 curses.KEY_ENTER: "KEY_ENTER",
                 curses.KEY_BTAB: "KEY_BTAB",
                 curses.KEY_RESIZE: "KEY_RESIZE",
+                curses.KEY_PPAGE: "KEY_PPAGE",
+                curses.KEY_NPAGE: "KEY_NPAGE",
             }.get(key, key)
             if isinstance(key, int) and curses.KEY_F0 < key <= curses.KEY_F0 + len(VIEWS):
                 semantic = f"KEY_F{key - curses.KEY_F0}"
