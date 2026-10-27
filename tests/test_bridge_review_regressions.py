@@ -17,6 +17,8 @@ import json
 
 import pytest
 
+from llm_tools import bridge, bridge_tui
+
 from llm_tools.bridge import _apply_operator_command, dispatch_console_command
 from llm_tools.bridge_runtime import BridgeMissionHooks, _process_start_token, _terminate_owned_process_group, run_controller
 from llm_tools.bridge_progress import repository_checkpoint
@@ -313,3 +315,30 @@ def test_unaccepted_proposal_does_not_prevent_verified_mission_completion(tmp_pa
         assert result["action"] == "stop"
         assert store.get_mission(mission_id)["status"] == "COMPLETED"
         assert store.get_task(proposal)["proposal_status"] == "PENDING"
+
+
+def test_log_older_page_stays_older_when_live_events_arrive(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    with bridge.open_store() as store:
+        mission_id = store.create_mission("live log", "Inspect history", cwd=tmp_path)["id"]
+        for index in range(70):
+            store.record_runtime_event(mission_id, "sample", {"index": index})
+    state = bridge_tui._ConsoleState(
+        mission_id, bridge.dispatch_console_command, bridge.console_snapshot, full=True,
+        snapshot=bridge_tui._bounded_snapshot(bridge.console_snapshot(mission_id)),
+    )
+    state.choose_view(4)
+    shown_ids = [int(event["id"]) for event in state.snapshot["events"]]
+    with bridge.open_store() as store:
+        for index in range(25):
+            store.record_runtime_event(mission_id, "sample", {"new": index})
+
+    state.handle_key("KEY_PPAGE")
+    state.refresh(force=True)
+    assert state._snapshot_thread is not None
+    state._snapshot_thread.join(timeout=3)
+    assert not state._snapshot_thread.is_alive()
+    state.refresh(now=state.last_refresh)
+    older_ids = [int(event["id"]) for event in state.snapshot["events"]]
+    assert older_ids
+    assert max(older_ids) < min(shown_ids), "older-page navigation moved forward after live events arrived"

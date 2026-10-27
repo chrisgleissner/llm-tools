@@ -30,3 +30,18 @@ def test_embedded_missing_estimate_is_explicit_and_opaque_has_no_fake_quota(monk
     assert result['rows'][0]['remaining_percent'] is None
     assert result['rows'][0]['estimated_remaining'] is None
     assert result['rows'][1]['estimated_remaining'] is None
+
+
+def test_embedded_dashboard_never_starts_an_ephemeral_usage_process(monkeypatch):
+    from llm_tools import usage_service
+    cfg = usage.Config()
+    cfg.use_service = True
+    starts = []
+    def snapshot(*,env,start_ephemeral):
+        starts.append(start_ephemeral)
+        return None
+    monkeypatch.setattr(usage_service,'request_snapshot',snapshot)
+    monkeypatch.setattr(usage,'_fetch_provider_data',lambda cfg,**kwargs:{})
+    monkeypatch.setattr(usage,'_build_usage_rows',lambda cfg,data:([],False))
+    assert 'LLM Usage' in usage.dashboard_snapshot(cfg)['text']
+    assert starts == [False]

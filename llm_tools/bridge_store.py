@@ -189,6 +189,9 @@ class BridgeStore:
             CREATE INDEX IF NOT EXISTS tasks_mission_state_order ON tasks(mission_id, status, priority DESC, ordering, id);
             CREATE INDEX IF NOT EXISTS commands_mission_queue ON commands(mission_id,status,created_at);
             CREATE INDEX IF NOT EXISTS operations_mission_logs_path ON operations(mission_id,logs_path);
+            CREATE INDEX IF NOT EXISTS operations_mission_history ON operations(mission_id);
+            CREATE INDEX IF NOT EXISTS operations_task_history ON operations(task_id);
+            CREATE INDEX IF NOT EXISTS commands_mission_fifo ON commands(mission_id,status);
             CREATE INDEX IF NOT EXISTS managed_processes_mission_status ON managed_processes(mission_id,status,created_at);
             COMMIT;
             """
@@ -633,7 +636,7 @@ class BridgeStore:
 
     def pending_commands(self, mission_id: str) -> list[dict[str, Any]]:
         self._mission_row(mission_id)
-        return [self.get_command(row[0]) for row in self.db.execute("SELECT id FROM commands WHERE mission_id=? AND status='QUEUED' ORDER BY created_at,id", (mission_id,))]
+        return [self.get_command(row[0]) for row in self.db.execute("SELECT id FROM commands INDEXED BY commands_mission_fifo WHERE mission_id=? AND status='QUEUED' ORDER BY rowid", (mission_id,))]
 
     def finish_command(self, command_id: str, *, status: str, result: dict[str, Any] | None = None) -> dict[str, Any]:
         status = status.upper()

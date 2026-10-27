@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 
+import pytest
+
 from llm_tools.bridge_runtime import run_configured_verifier
 from llm_tools.bridge_store import BridgeStore
 
@@ -88,6 +90,21 @@ def test_verifier_output_memory_and_private_log_are_bounded(tmp_path) -> None:
     assert log.stat().st_size <= 10 * 1024 * 1024 + 64
 
 
+def test_verifier_private_log_caps_disk_output_above_ten_mib(tmp_path) -> None:
+    store, mission, task_id = _verifying_mission(
+        tmp_path,
+        {"argv": [sys.executable, "-c", "import sys; sys.stdout.write('z' * (11 * 1024 * 1024))"], "timeout_seconds": 10},
+    )
+
+    outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    log = Path(outcome["logs_path"])
+    assert outcome["reason"] == "output-too-large"
+    assert outcome["output_size"] == 11 * 1024 * 1024
+    assert log.stat().st_size <= 10 * 1024 * 1024 + 64
+    assert log.read_bytes().endswith(b"[verifier output truncated at 10 MiB]\n")
+
+
 def test_verifier_logs_are_immutable_per_revision_and_attempt(tmp_path) -> None:
     store, mission, task_id = _verifying_mission(
         tmp_path,
@@ -163,3 +180,123 @@ def test_verifier_timeout_kills_descendant_process_group(tmp_path) -> None:
     time.sleep(1)
     assert outcome["reason"] == "timeout"
     assert not marker.exists()
+
+
+def test_verifier_preconditions_do_not_spawn_or_change_nonverifying_task(tmp_path) -> None:
+    store, mission, task_id = _verifying_mission(tmp_path, {"argv": ["true"]})
+    store.set_task_status(task_id, "CANCELLED")
+
+    outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    assert outcome == {"status": "CANCELLED", "reason": "task-no-longer-verifying", "revision": 1}
+    assert store.db.execute("SELECT COUNT(*) FROM managed_processes").fetchone()[0] == 0
+
+
+def test_bounded_verifier_optional_lifecycle_callbacks_can_be_omitted(tmp_path) -> None:
+    from llm_tools.bridge_runtime import _run_bounded_verifier
+
+    outcome = _run_bounded_verifier(
+        [sys.executable, "-c", "print('no callbacks required')"],
+        str(tmp_path),
+        2,
+        tmp_path / "optional.log",
+    )
+
+    assert outcome["exit_code"] == 0
+    assert outcome["output"] == b"no callbacks required\n"
+
+
+@pytest.mark.parametrize(
+    ("verifier", "timeout_override", "message"),
+    [
+        ({"argv": ["bad\x00argv"]}, None, "NUL bytes"),
+        ({"argv": ["true"]}, 0, "timeout must be between"),
+    ],
+)
+def test_verifier_invalid_launch_configuration_fails_before_managed_spawn(tmp_path, verifier, timeout_override, message) -> None:
+    store, mission, task_id = _verifying_mission(tmp_path, verifier)
+
+    with pytest.raises(ValueError, match=message):
+        run_configured_verifier(
+            store, mission["id"], task_id, runtime=tmp_path / "runtime", timeout_override=timeout_override,
+        )
+
+    assert store.db.execute("SELECT COUNT(*) FROM managed_processes").fetchone()[0] == 0
+    assert store.get_task(task_id)["status"] == "VERIFYING"
+
+
+def test_verifier_missing_executable_records_private_failed_attempt(tmp_path) -> None:
+    store, mission, task_id = _verifying_mission(
+        tmp_path,
+        {"argv": [str(tmp_path / "does-not-exist")], "timeout_seconds": 2},
+    )
+
+    outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    assert outcome["status"] == "VERIFYING"
+    assert outcome["reason"].startswith("launch-failed:")
+    assert Path(outcome["logs_path"]).stat().st_mode & 0o777 == 0o600
+    attempt = store.events(mission["id"])[-1]
+    assert attempt["kind"] == "verification-failed"
+    managed = store.db.execute("SELECT status,exit_code FROM managed_processes").fetchone()
+    assert tuple(managed) == ("FAILED", None)
+
+
+def test_verifier_context_is_removed_even_if_child_deletes_it(tmp_path) -> None:
+    code = "from pathlib import Path; Path(__import__('sys').argv[1]).unlink(); print('context consumed')"
+    store, mission, task_id = _verifying_mission(
+        tmp_path,
+        {"argv": [sys.executable, "-c", code, "{context}"], "timeout_seconds": 3},
+    )
+
+    outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    assert outcome["passed"] is True
+    context_files = list((tmp_path / "runtime" / "verifier").glob("*.json"))
+    assert context_files == []
+
+
+def test_verifier_successful_plain_text_becomes_revision_bound_evidence(tmp_path) -> None:
+    store, mission, task_id = _verifying_mission(
+        tmp_path,
+        {"argv": [sys.executable, "-c", "print('all checks passed')"], "timeout_seconds": 3},
+    )
+
+    outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    assert outcome["passed"] is True
+    assert outcome["summary"] == "all checks passed"
+    evidence = store.get_task(task_id)["evidence"][-1]
+    assert evidence["source"] == "verifier"
+    assert evidence["revision"] == 1
+    assert evidence["text"] == "Configured verifier passed: all checks passed"
+
+
+def test_verifier_refuses_unverified_child_identity_and_marks_managed_launch_failed(tmp_path, monkeypatch) -> None:
+    from llm_tools import bridge_runtime
+
+    store, mission, task_id = _verifying_mission(tmp_path, {"argv": [sys.executable, "-c", "import time; time.sleep(30)"]})
+    monkeypatch.setattr(bridge_runtime, "_process_start_token", lambda _pid: "")
+
+    with pytest.raises(RuntimeError, match="could not verify verifier process identity"):
+        run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    managed = store.db.execute("SELECT status,process_pid,process_start FROM managed_processes").fetchone()
+    assert managed["status"] == "FAILED"
+    assert managed["process_pid"] is None and managed["process_start"] is None
+    assert store.get_task(task_id)["status"] == "VERIFYING"
+
+
+def test_verifier_timeout_escalates_when_child_ignores_sigterm(tmp_path) -> None:
+    code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
+    store, mission, task_id = _verifying_mission(
+        tmp_path,
+        {"argv": [sys.executable, "-c", code], "timeout_seconds": 0.05},
+    )
+
+    outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    assert outcome["status"] == "VERIFYING"
+    assert outcome["reason"] == "timeout"
+    managed = store.db.execute("SELECT status,exit_code FROM managed_processes").fetchone()
+    assert managed["status"] == "EXITED" and managed["exit_code"] < 0

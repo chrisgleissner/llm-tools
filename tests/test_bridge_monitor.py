@@ -340,3 +340,17 @@ def test_convergence_uses_bounded_persisted_evidence_and_verified_progress_reset
         recovered = project_snapshot(store,mid)
         assert recovered['health']['identical_failures'] == 0
         assert recovered['health']['stall_warning'] is None
+
+
+def test_mission_log_pages_older_events_without_changing_current_capacity(tmp_path):
+    with BridgeStore(tmp_path/'bridge.sqlite3') as store:
+        mission = store.create_mission('log pages','objective',cwd=tmp_path)
+        mid = mission['id']
+        store.record_runtime_event(mid,'provider-selection',{'provider':'codex','decision':{'usable':True}})
+        for index in range(70): store.record_runtime_event(mid,'sample',{'index':index})
+        newest = project_snapshot(store,mid)
+        older = project_snapshot(store,mid,event_offset=20)
+        assert len(newest['events']) == len(older['events']) == 20
+        assert older['events'][-1]['id'] < newest['events'][0]['id']
+        assert older['capacity']['selection'] == newest['capacity']['selection']
+        assert older['event_page']['offset'] == 20

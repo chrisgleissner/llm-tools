@@ -51,9 +51,9 @@ class _Capability:
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 _OPAQUE_ID = re.compile(r"[A-Za-z0-9_-]{8,128}\Z")
 _SESSION_SOURCES = {
-    "codex": "codex:session_meta",
-    "claude": "claude:system.init",
-    "copilot": "copilot:session.start",
+    "codex": frozenset({"codex:session_meta"}),
+    "claude": frozenset({"claude:system.init", "claude:transcript"}),
+    "copilot": frozenset({"copilot:session.start"}),
 }
 _CODEX_NO_DAEMON = re.compile(r"(?<![A-Za-z0-9_-])--no-daemon(?:\s|[=<]|[\]\)]|$)")
 _CAPABILITIES: dict[str, _Capability] = {
@@ -84,7 +84,7 @@ def _identity_is_valid(identity: NativeSessionIdentity) -> bool:
     if (
         capability is None
         or expected_source is None
-        or identity.source != expected_source
+        or identity.source not in expected_source
         or not capability.id_pattern.fullmatch(identity.session_id)
     ):
         return False
@@ -101,7 +101,7 @@ def _provider_cwd(record: Mapping[str, Any], provider: str) -> object:
 
 
 def _session_fields(provider: str, record: Mapping[str, Any]) -> tuple[str, str, str] | None:
-    """Extract only known structured start records; ignore ordinary messages."""
+    """Extract explicit provider identity fields; never inspect message bodies."""
     if provider == "codex":
         if record.get("type") != "session_meta":
             return None
@@ -113,6 +113,11 @@ def _session_fields(provider: str, record: Mapping[str, Any]) -> tuple[str, str,
         return (str(session_id or ""), str(cwd or ""), "codex:session_meta")
 
     if provider == "claude":
+        sidechain = record.get("isSidechain")
+        if sidechain is not None and sidechain is not False:
+            return None
+        if record.get("type") in ("user", "assistant"):
+            return (str(record.get("sessionId") or ""), str(record.get("cwd") or ""), "claude:transcript")
         if record.get("type") != "system" or record.get("subtype") != "init":
             return None
         session_id = record.get("session_id") or record.get("sessionId")
@@ -120,7 +125,7 @@ def _session_fields(provider: str, record: Mapping[str, Any]) -> tuple[str, str,
         return (str(session_id or ""), str(cwd or ""), "claude:system.init")
 
     if provider == "copilot":
-        if record.get("type") not in {"session.start", "session_start"}:
+        if record.get("type") not in ("session.start", "session_start"):
             return None
         data = record.get("data") if isinstance(record.get("data"), Mapping) else record
         session_id = data.get("session_id") or data.get("sessionId")
@@ -407,21 +412,25 @@ def provider_session_metadata(
     the caller's exact session ID and work directory.
     """
     normalized = provider.strip().lower()
+    capability = _CAPABILITIES.get(normalized)
+    if capability is None or not capability.id_pattern.fullmatch(session_id):
+        return None
+    try:
+        canonical_cwd = _absolute_cwd(cwd)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
     if normalized == "codex":
         codex_home = Path(os.environ.get("CODEX_HOME", str(Path(home or Path.home()) / ".codex"))).expanduser()
-        return next((record for record in codex_session_records(codex_home / "sessions", cwd=cwd, max_files=32, session_id=session_id)
+        return next((record for record in codex_session_records(codex_home / "sessions", cwd=cwd, max_files=4096, session_id=session_id)
                      if record.identity.session_id == session_id), None)
     if normalized == "claude":
         config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path(home or Path.home()) / ".claude"))).expanduser()
-        project = str(Path(cwd).expanduser().resolve(strict=True)).replace("/", "-")
+        project = re.sub(r"[^a-zA-Z0-9]", "-", canonical_cwd)
         path = config_dir / "projects" / project / f"{session_id}.jsonl"
     elif normalized == "copilot":
         state_dir = Path(os.environ.get("COPILOT_CONFIG_DIR", str(Path(home or Path.home()) / ".copilot"))).expanduser()
         path = state_dir / "session-state" / session_id / "events.jsonl"
     else:
-        return None
-    capability = _CAPABILITIES.get(normalized)
-    if capability is None or not capability.id_pattern.fullmatch(session_id):
         return None
     try:
         info = path.stat(follow_symlinks=False)

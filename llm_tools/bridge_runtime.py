@@ -122,7 +122,7 @@ class BridgeMissionHooks:
                     (self.mission_id, current["id"], current["id"]),
                 ).fetchall()
                 operations = self.store.db.execute(
-                    "SELECT id,station,route_id,model,status,exit_code,logs_path FROM operations WHERE task_id=? ORDER BY created_at DESC LIMIT 10",
+                    "SELECT id,station,route_id,model,status,exit_code,logs_path FROM operations INDEXED BY operations_task_history WHERE task_id=? ORDER BY rowid DESC LIMIT 10",
                     (current["id"],),
                 ).fetchall()
                 checkpoint = {
@@ -1433,12 +1433,26 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
 def launch_controller(
     mission_id: str,
     *,
-    headless: bool = False,
+    headless: bool | None = None,
     providers: str | None = None,
     routes: str | None = None,
-    native_tui: bool = False,
+    native_tui: bool | None = None,
 ) -> int:
     """Start a detached mission owner, then attach the terminal if interactive."""
+    if native_tui is True and headless is True:
+        raise ValueError("--headless and --native cannot be combined")
+    with BridgeStore(default_state_dir() / "bridge.sqlite3") as store:
+        mission = store.get_mission(mission_id)
+        saved_headless = bool(mission["config"].get("headless", False))
+        saved_native = bool(mission["config"].get("native_tui", False))
+    if headless is None and native_tui is None:
+        headless, native_tui = saved_headless, saved_native
+    elif headless is True:
+        headless, native_tui = True, False
+    elif native_tui is True:
+        headless, native_tui = False, True
+    else:
+        headless, native_tui = bool(headless), bool(native_tui)
     if native_tui and headless:
         raise ValueError("--headless and --native cannot be combined")
     if not headless and not shutil.which("tmux"):

@@ -36,7 +36,7 @@ def test_native_session_id_survives_full_controller_shutdown(tmp_path, env, fake
     ready = {"available": True, "five_hour": {"remaining": 80}, "week": {"remaining": 80}, "monthly": {"remaining": 80}}
     env["LLM_SCHEDULER_USAGE_JSON"] = json.dumps({provider: ready})
     binary = fake_bin / provider
-    binary.write_text("#!" + sys.executable + "\n" + """import json, os, sys, time
+    binary.write_text("#!" + sys.executable + "\n" + """import json, os, sys, time, re
 from pathlib import Path
 if '--help' in sys.argv:
     print('Usage: --session-id UUID --resume ID --no-daemon\\n  resume  Resume session'); raise SystemExit(0)
@@ -54,8 +54,8 @@ if provider == 'codex':
     path = Path(os.environ['CODEX_HOME'])/'sessions'/('rollout-'+session_id+'.jsonl')
     record = {'type':'session_meta','payload':{'id':session_id,'cwd':cwd}}
 elif provider == 'claude':
-    path = Path(os.environ['CLAUDE_CONFIG_DIR'])/'projects'/cwd.replace('/','-')/(session_id+'.jsonl')
-    record = {'type':'system','subtype':'init','session_id':session_id,'cwd':cwd}
+    path = Path(os.environ['CLAUDE_CONFIG_DIR'])/'projects'/re.sub(r'[^a-zA-Z0-9]','-',cwd)/(session_id+'.jsonl')
+    record = {'type':'user','sessionId':session_id,'cwd':cwd,'isSidechain':False}
 else:
     path = Path(os.environ['COPILOT_CONFIG_DIR'])/'session-state'/session_id/'events.jsonl'
     record = {'type':'session.start','data':{'sessionId':session_id,'context':{'cwd':cwd}}}

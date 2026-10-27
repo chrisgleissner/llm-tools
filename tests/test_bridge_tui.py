@@ -99,6 +99,21 @@ def test_command_feedback_summarizes_durable_envelopes_and_preserves_plain_resul
     assert bridge_tui._command_feedback("status", "human-readable status") == "human-readable status"
 
 
+def test_command_feedback_keeps_help_and_json_results_multiline_and_bounded() -> None:
+    help_text = "usage: task add\n  --prompt TEXT\n  --acceptance CHECK\n"
+    assert bridge_tui._command_feedback("task add --help", help_text) == help_text.rstrip("\n")
+
+    json_text = bridge_tui._command_feedback("task list", '{"tasks":[{"id":1,"title":"first"}]}')
+    assert json_text.startswith("{\n")
+    assert '\n      "id": 1,' in json_text
+
+    too_many_lines = "\n".join(f"option-{index}" for index in range(bridge_tui._MAX_RESPONSE_LINES + 4))
+    bounded = bridge_tui._command_feedback("help", too_many_lines)
+    assert len(bounded.splitlines()) == bridge_tui._MAX_RESPONSE_LINES
+    assert bounded.splitlines()[-1] == "[response truncated to fit the Bridge console limit]"
+    assert "\x1b" not in bridge_tui._command_feedback("help", "\x1b[2Jsafe\x1b[0m")
+
+
 def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     calls: list[str] = []
     state = bridge_tui._ConsoleState("M2", lambda _mission, cmd: calls.append(cmd) or "ok", lambda _id: {}, full=True)
@@ -121,6 +136,48 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["pause"]
+    assert bridge_tui.PALETTE_COMMANDS[8:11] == ("steer --help", "attach", "detach")
+    assert bridge_tui.PALETTE_COMMANDS[11:] == ("usage", "control", "task add --help", "proposal list")
+
+
+def test_multiline_response_overlay_scrolls_and_view_keys_dismiss_without_dispatching_text() -> None:
+    calls: list[str] = []
+    state = bridge_tui._ConsoleState(
+        "M2",
+        lambda _mission, cmd: calls.append(cmd) or "usage: task add\n" + "\n".join(f"--option-{n}" for n in range(30)),
+        lambda _id: {},
+        full=True,
+    )
+    state._dispatch("task add --help")
+    _wait_for(lambda: not state.command_pending and state.response_overlay, state)
+    assert state.expand_requested
+    assert len(state.output) > 20
+    state.response_page_size = 5
+    state.handle_key("KEY_NPAGE")
+    assert state.response_scroll == 5
+    state.handle_key("KEY_UP")
+    assert state.response_scroll == 4
+    state.handle_key("x")
+    assert state.command == ""
+    state.handle_key("KEY_F3")
+    assert not state.response_overlay and state.view == "Stations"
+    state.handle_key("\n")
+    assert calls == ["task add --help"]
+
+
+def test_response_overlay_renders_wrapped_scrolled_and_empty_output(monkeypatch) -> None:
+    monkeypatch.setattr(bridge_tui.curses, "doupdate", lambda: None)
+    state = bridge_tui._ConsoleState("M2", lambda _mission, _command: "", lambda _id: {}, full=True)
+    state.output.extend([f"--option-{index}" for index in range(12)])
+    state.response_scroll = 100
+    window = FakeWindow(8, 16)
+    bridge_tui._draw_response_overlay(window, state)  # type: ignore[arg-type]
+    assert "Command response" in window.lines[0]
+    assert "--option-11" in "\n".join(window.lines)
+    assert window.lines[-1].startswith("8-12/12 response")
+    assert state.response_scroll < 100
+    state.output.clear()
+    assert bridge_tui._response_rows(state, 20) == ["No command response."]
 
 
 def test_full_view_mouse_selects_the_task_row_under_the_pointer() -> None:
@@ -246,6 +303,9 @@ def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt
         }],
     })
     def dispatch(_mission: str, line: str) -> str:
+        if shlex.split(line) == ["task", "show", "--task", "41"]:
+            import json
+            return json.dumps({"id":41,"prompt":"original prompt\nsecond line"})
         calls.append(line)
         sent_prompt.append(Path(shlex.split(line)[-1]).read_text(encoding="utf-8"))
         return "amended"
@@ -661,7 +721,7 @@ def test_editor_amends_selected_order_through_same_dispatch(monkeypatch) -> None
     monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
     state = bridge_tui._ConsoleState(
         "M8",
-        lambda _mission, command: sent.append(shlex.split(command)) or "amended",
+        lambda _mission, command: ('{"id":42,"prompt":"old"}' if shlex.split(command)[:2] == ["task", "show"] else sent.append(shlex.split(command)) or "amended"),
         lambda _id: {},
         full=True,
         snapshot={"tasks": [{"id": 42, "title": "old", "status": "READY"}]},
@@ -670,3 +730,14 @@ def test_editor_amends_selected_order_through_same_dispatch(monkeypatch) -> None
     _wait_for(lambda: not state.command_pending, state)
     assert sent and sent[0][0:2] == ["amend", "42"]
     assert not Path(sent[0][-1]).exists()
+
+
+def test_log_page_keys_request_older_and_newer_snapshots_without_changing_orders():
+    state = bridge_tui._ConsoleState('mission',lambda *_:'',lambda _id:{},full=True)
+    state.choose_view(4)
+    state.handle_key('KEY_PPAGE')
+    assert state.event_offset == 20
+    assert state.task_offset == 0
+    state.handle_key('KEY_NPAGE')
+    state.handle_key('KEY_NPAGE')
+    assert state.event_offset == 0

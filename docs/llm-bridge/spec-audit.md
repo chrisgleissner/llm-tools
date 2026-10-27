@@ -141,3 +141,32 @@ The user-added requirements in `../features/llm-bridge/spec-additions.md` are
 part of this review: prefix/clickable focus, parser parity, model-scope forecasts,
 full embedded Usage, opt-in native probes, separate Bridge90 gate, and actual
 screenshot/dogfood evidence. Native probe outcomes must remain capability-specific.
+
+## Independent changed-surface checkpoint, 2026-10-27
+
+This table supersedes the historical open-finding states above; it does not
+approve the still-changing working tree for merge. Findings A1–A20 are now
+closed with inspected fixes and targeted verification. Related command/handoff
+chronology checks and final whole-suite evidence remain pending root's freeze.
+
+| Requirement / Done / scenario | Current state | Evidence or remaining limit |
+| --- | --- | --- |
+| Durable state, provenance and task mutation (2,3,10; A,D,E,L) | Verified targeted | Atomic rejection, explicit proposal acceptance, terminal-mission admission guards, full verbatim amendment loading and verification gates; A1/A8/A9/A12/A13 closed. |
+| Control UI and monitoring (4,5,9; B,D,E) | Verified targeted | Actual PTY task editor/stdin control; task details and scrolling; viewed versus executing stations; indexed progress/elapsed fields; stable historical event-ID anchor; A4/A5/A14/A15 closed. |
+| Complete stop and recovery (12,13,16; I,J,M,N) | Verified targeted | Same-group/new-session descendants, verifier ownership and teardown fault tests; normal stop now closes a completed controller's retained private station while preserving results; A2/A3/A7/A16 closed. Actual machine reboot is not claimed. |
+| CLI parity and attach (3,5,11; B,D,E,H) | Verified targeted | Standalone and REPL task commands share parser and in-process handler. Explicit mission spellings agree, omitted mission defaults to current, interactive stdin points to Ctrl-E. Real outer-PTY station switching/return and selected writable-client detach pass; curses restores before terminal transitions. Stored start modes survive omitted flags and explicit overrides remain exclusive (A18 closed). |
+| Embedded Usage and forecasts (9; §§10,13) | Verified targeted | Full existing Python renderer, background refresh, configuration error boundary, real shared-history warming and pool labels; embedded service requests explicitly disable ephemeral process launch; A10/A11 closed. |
+| Native restoration (14; K,R) | Codex live verified; Claude metadata A17 closed | Exact-owned Codex UUID, full stop/new controller and context recall are evidenced. Claude native transcript fields/nonalphanumeric path encoding now match bounded installed metadata observations; original anonymized regression and updated fake E2E pass. Live Claude/Copilot completion/resume remain unverified. |
+| Native input and mouse (6,7,22; C,O,R) | Capability-specific evidence | Actual zero-prompt Codex model picker and Claude help render through direct single-pane and Bridge paths. Bridge wheel moves a known history marker with tmux pane mode zero; direct wheel and provider click remain NOT VERIFIED. This does not establish universal mouse parity. |
+| Responsiveness and bounded state (4; P; §§9,18) | Verified targeted, final metrics pending | Bounded projections/logs/events and convergence checkpoints, stream/large-queue tests. Operation history uses indexed insertion chronology even for same-second UUIDs (A19 closed). Owned native panes have no implicit one-hour cutoff; explicit/legacy timeout behavior is preserved (A20 closed). No multiweek runtime claim. |
+| Legacy compatibility / CI (17–21,23; G,O,Q) | Final frozen-head gates pending | Real attached resize regression closed; broader legacy tests, global85 and Bridge90 branch coverage on Python3.11/3.15 are owned by root/main. |
+| Documentation, review and release (24–27; S) | Pending final checkpoint | Review ledger is current, actual screenshot exists and native evidence is capability-specific. Related command/handoff chronology follow-up and final coverage/CI prevent merge approval at this checkpoint. |
+
+The independently rerun changed-surface command passed **50 tests in 6.24s**,
+including the original A14/A15/A16 reproductions. A later integrated native
+metadata/CLI/terminal/controller command passed **85 tests in 19.91s**. The new
+A18 public start-mode cases were then repaired and passed in a **158-test**
+start/CLI/runtime gate. The A19 chronology and related monitor/store/owned-pane
+gate passed **69 tests**; A20 explicit timeout and owned-pane tests passed
+**12 tests**. Exact commands and format-only observation bounds are in
+`review-findings.md`. No paid provider call was made by this reviewer.

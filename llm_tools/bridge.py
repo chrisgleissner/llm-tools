@@ -15,6 +15,7 @@ from typing import Any
 
 from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir
 from . import config as toolconfig
+from .terminal import TerminalAction
 
 
 def state_dir() -> Path:
@@ -38,11 +39,13 @@ def status_snapshot(
     task_limit: int | None = None,
     task_offset: int = 0,
     search: str = "",
+    event_offset: int = 0,
+    event_anchor: int | None = None,
 ) -> dict[str, Any]:
     from .bridge_monitor import project_snapshot
 
     with open_store() as store:
-        return project_snapshot(store, mission_id, task_limit=task_limit, task_offset=task_offset, search=search)
+        return project_snapshot(store, mission_id, task_limit=task_limit, task_offset=task_offset, search=search, event_offset=event_offset, event_anchor=event_anchor)
 
 
 def console_snapshot(
@@ -51,10 +54,12 @@ def console_snapshot(
     task_limit: int = 200,
     task_offset: int = 0,
     search: str = "",
+    event_offset: int = 0,
+    event_anchor: int | None = None,
     view: str = "Bridge",
 ) -> dict[str, Any]:
     """Bound the live control pane projection regardless of mission size."""
-    result = status_snapshot(mission_id, task_limit=task_limit, task_offset=task_offset, search=search)
+    result = status_snapshot(mission_id, task_limit=task_limit, task_offset=task_offset, search=search, event_offset=event_offset, event_anchor=event_anchor)
     if view == "Usage":
         from .bridge_usage import embedded_usage
         result["usage"] = embedded_usage.snapshot()
@@ -274,7 +279,43 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
         raise _RejectedOperatorCommand(str(exc)) from exc
 
 
-def dispatch_console_command(mission_id: str, command_line: str) -> str:
+def _task_result(args: argparse.Namespace) -> Any:
+    """Shared standalone/interactive task parser result and durable handler."""
+    with open_store() as store:
+        if args.task_action == "add":
+            prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+            dep_ids = [int(x) for x in args.depends_on.split(",") if x.strip()]
+            command_result = _apply_operator_command(store, args.mission, {"action": "task.add", "prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": args.acceptance})
+            result = command_result if command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
+        elif args.task_action == "list":
+            result = store.list_tasks(args.mission)
+        elif args.task_action == "show":
+            result = _require_task(store, args.mission, args.task)
+        else:
+            payload: dict[str, Any] = {"task_id": args.task}
+            if args.task_action == "amend":
+                prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+                payload.update(action="task.amend", prompt=prompt)
+            elif args.task_action == "verify":
+                payload.update(action="task.verify", evidence=args.evidence, approved=args.approve)
+            elif args.task_action == "priority":
+                payload.update(action="task.priority", priority=args.value)
+            elif args.task_action == "reorder":
+                payload.update(action="task.reorder", order=args.value)
+            elif args.task_action == "dependencies":
+                payload.update(action="task.dependency", depends_on=args.add)
+            else:
+                payload["action"] = "task." + args.task_action
+            result = _apply_operator_command(store, args.mission, payload)
+    return result
+
+
+class _ConsoleParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ValueError(f"{self.format_usage()}{self.prog}: error: {message}")
+
+
+def dispatch_console_command(mission_id: str, command_line: str) -> str | TerminalAction:
     """Run the public CLI grammar in this mission's shell-free REPL context."""
     try:
         words = shlex.split(command_line)
@@ -285,11 +326,17 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str:
             return (
                 _build_parser().format_help()
                 + "\nConsole examples: task add --priority 5 --acceptance 'tests pass' --file PATH; "
-                + "task amend --task ID --file PATH; pause ID; resume ID; proposal list; proposal accept ID.\n"
+                + "task amend --task ID --file PATH; pause ID; resume ID; proposal list; proposal accept ID; "
+                + "attach [--mission ID] [--client /dev/pts/N]; detach [--client /dev/pts/N].\n"
             )
 
         # Keep the old compact commands while routing every action through the
         # exact same parser and durable command handlers as the standalone CLI.
+        if command in {"attach", "detach"}:
+            if "--help" in words or "-h" in words:
+                return f"Usage: {command} [--mission ID] [--client /dev/pts/N]"
+            args = _build_parser(parser_class=_ConsoleParser, default_mission=mission_id).parse_args(words)
+            return TerminalAction(str(args.mission), getattr(args, "client", None), command)
         if command in {"tasks", "orders"}:
             words = ["task", "list"]
         elif command == "proposals":
@@ -327,31 +374,22 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str:
             return "error: this REPL cannot recursively start a console/controller"
         if words[0] == "control":
             return "Use the Control view keys to switch views inside the active console."
-        if words[0] in {"attach"}:
-            return "Use the terminal's native attach controls from the shell; nested attach would take over this console."
-
-        mission_position: int | None = None
-        if words[0] in {"task", "proposal"}:
-            if len(words) < 2:
-                return _build_parser().format_help()
-            mission_position = 2
-        elif words[0] in {"status", "events", "start", "pause", "resume", "stop", "cancel", "detach", "doctor", "station", "steer"}:
-            mission_position = 1
-        if mission_position is not None:
-            if "--mission" in words:
-                index = words.index("--mission")
-                if index + 1 >= len(words) or words[index + 1] != mission_id:
-                    return "error: console commands are scoped to the active mission"
-            else:
-                words[mission_position:mission_position] = ["--mission", mission_id]
-        if words[:2] == ["task", "add"] and not any(flag in words for flag in ("--file", "--prompt", "-f", "-p")):
-            return "error: task add needs --file PATH or --prompt TEXT; use Ctrl-E to edit multiline task text"
-
         # The public parser is the REPL grammar. JSON mode gives the control
-        # pane a stable response string; commands that take over the terminal
-        # cannot be nested here.
-        if "--help" not in words and "-h" not in words and words[0] not in {"attach", "control", "console", "_controller"} and "--json" not in words:
+        # pane a stable response string; console/controller recursion is rejected.
+        if "--help" not in words and "-h" not in words and words[0] not in {"control", "console", "_controller"} and "--json" not in words:
             words.append("--json")
+        args = None
+        if "--help" not in words and "-h" not in words:
+            args = _build_parser(parser_class=_ConsoleParser, default_mission=mission_id).parse_args(words)
+            if getattr(args, "prompt_file", None) == "-":
+                return "error: press Ctrl-E with these options to enter multiline text; the console cannot read its own terminal as a pipe"
+        if words[0] == "task" and args is not None:
+            result = _task_result(args)
+            if isinstance(result, dict) and result.get("status") == "REJECTED":
+                return "error: " + str((result.get("result") or {}).get("error", "command rejected"))
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        if args is not None and getattr(args, "mission", None):
+            words.extend(["--mission", args.mission])
         env = os.environ.copy()
         package_root = str(Path(__file__).resolve().parent.parent)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, (package_root, env.get("PYTHONPATH", ""))))
@@ -415,8 +453,8 @@ def _frozen_tool_config() -> str:
         return ""
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="llm-bridge", description="Terminal command bridge for persistent LLM engineering missions")
+def _build_parser(*, parser_class: type[argparse.ArgumentParser] = argparse.ArgumentParser, default_mission: str | None = None) -> argparse.ArgumentParser:
+    parser = parser_class(prog="llm-bridge", description="Terminal command bridge for persistent LLM engineering missions")
     sub = parser.add_subparsers(dest="command", required=True)
 
     mission = sub.add_parser("mission", help="create or list missions")
@@ -441,13 +479,13 @@ def _build_parser() -> argparse.ArgumentParser:
     listing.add_argument("--json", action="store_true")
 
     status = sub.add_parser("status")
-    status.add_argument("--mission", required=True)
+    status.add_argument("--mission", required=default_mission is None, default=default_mission)
     status.add_argument("--json", action="store_true")
 
     tasks = sub.add_parser("task")
     task_sub = tasks.add_subparsers(dest="task_action", required=True)
     add = task_sub.add_parser("add")
-    add.add_argument("--mission", required=True)
+    add.add_argument("--mission", required=default_mission is None, default=default_mission)
     _read_prompt_args(add)
     add.add_argument("--title", default="")
     add.add_argument("--priority", type=int, default=0)
@@ -456,20 +494,20 @@ def _build_parser() -> argparse.ArgumentParser:
     add.add_argument("--acceptance", action="append", default=[])
     add.add_argument("--json", action="store_true")
     task_list = task_sub.add_parser("list")
-    task_list.add_argument("--mission", required=True)
+    task_list.add_argument("--mission", required=default_mission is None, default=default_mission)
     task_list.add_argument("--json", action="store_true")
     show = task_sub.add_parser("show")
-    show.add_argument("--mission", required=True)
+    show.add_argument("--mission", required=default_mission is None, default=default_mission)
     show.add_argument("--task", type=int, required=True)
     show.add_argument("--json", action="store_true")
     amend = task_sub.add_parser("amend")
-    amend.add_argument("--mission", required=True)
+    amend.add_argument("--mission", required=default_mission is None, default=default_mission)
     amend.add_argument("--task", type=int, required=True)
     _read_prompt_args(amend)
     amend.add_argument("--json", action="store_true")
     for action in ("priority", "reorder", "dependencies", "pause", "resume", "cancel", "retry", "verify"):
         cmd = task_sub.add_parser(action)
-        cmd.add_argument("--mission", required=True)
+        cmd.add_argument("--mission", required=default_mission is None, default=default_mission)
         cmd.add_argument("--task", type=int, required=True)
         if action == "priority":
             cmd.add_argument("--value", type=int, required=True)
@@ -485,7 +523,7 @@ def _build_parser() -> argparse.ArgumentParser:
     proposals = sub.add_parser("proposal", help="review agent-originated task proposals")
     proposal_sub = proposals.add_subparsers(dest="proposal_action", required=True)
     proposal_create = proposal_sub.add_parser("create", help="record a proposal from an operation")
-    proposal_create.add_argument("--mission", required=True)
+    proposal_create.add_argument("--mission", required=default_mission is None, default=default_mission)
     proposal_create.add_argument("--operation", required=True, dest="source_operation_id")
     _read_prompt_args(proposal_create)
     proposal_create.add_argument("--title", default="")
@@ -494,31 +532,38 @@ def _build_parser() -> argparse.ArgumentParser:
     proposal_create.add_argument("--acceptance", action="append", default=[])
     proposal_create.add_argument("--json", action="store_true")
     proposal_list = proposal_sub.add_parser("list", help="list proposals")
-    proposal_list.add_argument("--mission", required=True)
+    proposal_list.add_argument("--mission", required=default_mission is None, default=default_mission)
     proposal_list.add_argument("--status", choices=("PENDING", "ACCEPTED", "REJECTED", "ALL"), default="PENDING")
     proposal_list.add_argument("--limit", type=int, default=100)
     proposal_list.add_argument("--after", type=int, default=0)
     proposal_list.add_argument("--json", action="store_true")
     for proposal_action in ("accept", "reject"):
         proposal_decision = proposal_sub.add_parser(proposal_action, help=f"{proposal_action} a pending proposal")
-        proposal_decision.add_argument("--mission", required=True)
+        proposal_decision.add_argument("--mission", required=default_mission is None, default=default_mission)
         proposal_decision.add_argument("--task", type=int, required=True)
         if proposal_action == "reject":
             proposal_decision.add_argument("--reason", default="")
         proposal_decision.add_argument("--json", action="store_true")
 
     events = sub.add_parser("events")
-    events.add_argument("--mission", required=True)
+    events.add_argument("--mission", required=default_mission is None, default=default_mission)
     events.add_argument("--after", type=int, default=0)
     events.add_argument("--limit", type=int, default=100)
     events.add_argument("--json", action="store_true")
 
     for action in ("start", "pause", "resume", "stop", "cancel", "attach", "detach"):
         cmd = sub.add_parser(action)
-        cmd.add_argument("--mission", required=True)
+        cmd.add_argument("--mission", required=default_mission is None, default=default_mission)
+        if action in {"attach", "detach"}:
+            client_help = (
+                "select a listed writable source client when switching from the Bridge console"
+                if action == "attach"
+                else "select a writable client to detach; required only when multiple are connected"
+            )
+            cmd.add_argument("--client", help=client_help)
         if action == "start":
-            cmd.add_argument("--headless", action="store_true")
-            cmd.add_argument("--native", dest="native_tui", action="store_true")
+            cmd.add_argument("--headless", action="store_true", default=None)
+            cmd.add_argument("--native", dest="native_tui", action="store_true", default=None)
             cmd.add_argument("--providers")
             cmd.add_argument("--routes")
         if action == "stop":
@@ -526,23 +571,23 @@ def _build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--json", action="store_true")
 
     doctor = sub.add_parser("doctor")
-    doctor.add_argument("--mission")
+    doctor.add_argument("--mission", default=default_mission)
     doctor.add_argument("--json", action="store_true")
 
     console = sub.add_parser("console", help=argparse.SUPPRESS)
-    console.add_argument("--mission", required=True)
+    console.add_argument("--mission", required=default_mission is None, default=default_mission)
     control = sub.add_parser("control", help="open the full Bridge control view")
-    control.add_argument("--mission", required=True)
+    control.add_argument("--mission", required=default_mission is None, default=default_mission)
     usage_view = sub.add_parser("usage", help="show the full llm-usage dashboard inside Bridge")
-    usage_view.add_argument("--mission", required=True)
+    usage_view.add_argument("--mission", required=default_mission is None, default=default_mission)
 
     station = sub.add_parser("station", help="choose the station shown in the control view")
-    station.add_argument("--mission", required=True)
+    station.add_argument("--mission", required=default_mission is None, default=default_mission)
     station.add_argument("name")
     station.add_argument("--json", action="store_true")
 
     steer = sub.add_parser("steer", help="queue typed steering for a task or safe boundary")
-    steer.add_argument("--mission", required=True)
+    steer.add_argument("--mission", required=default_mission is None, default=default_mission)
     steer.add_argument("--kind", required=True, choices=("replace", "review", "verify", "pause-after-iteration", "stop-after-task", "handoff"))
     steer.add_argument("--task", dest="task_id", type=int)
     steer.add_argument("--route")
@@ -551,7 +596,7 @@ def _build_parser() -> argparse.ArgumentParser:
     steer.add_argument("--json", action="store_true")
 
     controller = sub.add_parser("_controller", help=argparse.SUPPRESS)
-    controller.add_argument("--mission", required=True)
+    controller.add_argument("--mission", required=default_mission is None, default=default_mission)
     controller.add_argument("--headless", action="store_true")
     controller.add_argument("--native", dest="native_tui", action="store_true")
     controller.add_argument("--startup-token", default="")
@@ -601,7 +646,7 @@ def _legacy_prompt_mode(argv: list[str]) -> int:
     return start_mission(mission["id"], headless=args.headless, native_tui=args.native_tui, providers=args.providers, routes=args.routes)
 
 
-def start_mission(mission_id: str, *, headless: bool = False, native_tui: bool = False, providers: str | None = None, routes: str | None = None) -> int:
+def start_mission(mission_id: str, *, headless: bool | None = None, native_tui: bool | None = None, providers: str | None = None, routes: str | None = None) -> int:
     from .bridge_runtime import launch_controller
 
     return launch_controller(mission_id, headless=headless, native_tui=native_tui, providers=providers, routes=routes)
@@ -625,6 +670,38 @@ def _print_result(result: Any, as_json: bool) -> None:
         print(result)
     else:
         print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
+    """Close a retained station after a terminal mission has released control."""
+    lock = MissionLock(state_dir() / "locks", mission_id)
+    try:
+        lock.acquire()
+    except BlockingIOError as exc:
+        raise RuntimeError(f"mission {mission_id} still has an active controller; stop is pending") from exc
+    try:
+        with open_store() as store:
+            mission = store.get_mission(mission_id)
+            if mission["status"] not in {"COMPLETED", "FAILED", "CANCELLED", "STOPPED"}:
+                raise RuntimeError(f"mission {mission_id} is no longer terminal; retry stop")
+            from .bridge_runtime import mission_socket_path
+            from .terminal import TmuxTerminalBackend
+
+            socket = mission_socket_path(mission_id)
+            station_status = "ABSENT"
+            if socket.exists():
+                backend = TmuxTerminalBackend()
+                handle = backend.open_existing(socket, f"mission-{mission_id}")
+                backend.stop(handle)
+                station_status = "STOPPED"
+                store.record_runtime_event(
+                    mission_id,
+                    "station-stopped",
+                    {"mission_status": mission["status"], "source": "operator"},
+                )
+            return {"mission": store.get_mission(mission_id), "station_status": station_status}
+    finally:
+        lock.release()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -696,21 +773,32 @@ def main(argv: list[str] | None = None) -> int:
             with open_store() as store:
                 mission = store.get_mission(args.mission)
                 config = mission["config"]
+            requested_headless = getattr(args, "headless", None)
+            requested_native = getattr(args, "native_tui", None)
+            if requested_headless is True:
+                requested_native = False
+            elif requested_native is True:
+                requested_headless = False
             return start_mission(
                 args.mission,
-                headless=bool(getattr(args, "headless", config.get("headless", False))),
-                native_tui=bool(getattr(args, "native_tui", config.get("native_tui", False))),
+                headless=requested_headless,
+                native_tui=requested_native,
                 providers=getattr(args, "providers", None) or config.get("providers"),
                 routes=getattr(args, "routes", None) or config.get("routes"),
             )
         if args.command == "attach":
+            if args.client:
+                print("llm-bridge: --client is only used by attach from an active Bridge console", file=sys.stderr)
+                return 2
             from .terminal import TmuxTerminalBackend
 
             return TmuxTerminalBackend().attach(_load_handle(args.mission))
         if args.command == "detach":
             handle = _load_handle(args.mission)
-            proc = subprocess.run(["tmux", "-S", str(handle.socket_path), "detach-client", "-a", "-t", handle.session_name], check=False)
-            return proc.returncode
+            from .terminal import TmuxTerminalBackend
+
+            TmuxTerminalBackend().detach_client(handle, client_name=args.client)
+            return 0
         if args.command == "mission":
             with open_store() as store:
                 if args.mission_action == "create":
@@ -777,32 +865,7 @@ def main(argv: list[str] | None = None) -> int:
             _print_result(result, bool(getattr(args, "json", False)))
             return 0
         if args.command == "task":
-            with open_store() as store:
-                if args.task_action == "add":
-                    prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-                    dep_ids = [int(x) for x in args.depends_on.split(",") if x.strip()]
-                    command_result = _apply_operator_command(store, args.mission, {"action": "task.add", "prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": args.acceptance})
-                    result = command_result if command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
-                elif args.task_action == "list":
-                    result = store.list_tasks(args.mission)
-                elif args.task_action == "show":
-                    result = _require_task(store, args.mission, args.task)
-                else:
-                    payload: dict[str, Any] = {"task_id": args.task}
-                    if args.task_action == "amend":
-                        prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-                        payload.update(action="task.amend", prompt=prompt)
-                    elif args.task_action == "verify":
-                        payload.update(action="task.verify", evidence=args.evidence, approved=args.approve)
-                    elif args.task_action == "priority":
-                        payload.update(action="task.priority", priority=args.value)
-                    elif args.task_action == "reorder":
-                        payload.update(action="task.reorder", order=args.value)
-                    elif args.task_action == "dependencies":
-                        payload.update(action="task.dependency", depends_on=args.add)
-                    else:
-                        payload["action"] = "task." + args.task_action
-                    result = _apply_operator_command(store, args.mission, payload)
+            result = _task_result(args)
             if isinstance(result, dict) and result.get("status") == "REJECTED":
                 detail = result.get("result") or {}
                 print(f"llm-bridge: {detail.get('error', 'command rejected')}", file=sys.stderr)
@@ -894,7 +957,12 @@ def main(argv: list[str] | None = None) -> int:
                     result = {"mission": store.get_mission(args.mission)}
             else:
                 with open_store() as store:
-                    result = _apply_operator_command(store, args.mission, {"action": args.command})
+                    current_status = store.get_mission(args.mission)["status"]
+                if args.command == "stop" and current_status in {"COMPLETED", "FAILED", "CANCELLED", "STOPPED"}:
+                    result = _stop_terminal_mission_station(args.mission)
+                else:
+                    with open_store() as store:
+                        result = _apply_operator_command(store, args.mission, {"action": args.command})
             _print_result(result, args.json)
             return 0
         if args.command == "doctor":

@@ -1335,8 +1335,13 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         else:
             tmux(["send-keys", "-t", target, invocation, "C-m"], check=False)
     waited = 0
-    timeout = int(os.environ.get("LLM_SCHEDULER_TMUX_TIMEOUT", "3600") or "3600")
-    while (not status_file.is_file() or status_file.stat().st_size == 0) and waited < timeout:
+    configured_timeout = os.environ.get("LLM_SCHEDULER_TMUX_TIMEOUT")
+    # Bridge owns the pane lifecycle and waits for the provider to return or
+    # an operator to stop the mission. The legacy one-hour bound remains for
+    # user-managed tmux targets; an explicit environment value still applies
+    # to either mode.
+    timeout = int(configured_timeout) if configured_timeout else (None if owned_pane else 3600)
+    while (not status_file.is_file() or status_file.stat().st_size == 0) and (timeout is None or waited < timeout):
         if owned_pane and cfg.process_observer is not None:
             cfg.process_observer()
         if cfg.tmux_socket and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:

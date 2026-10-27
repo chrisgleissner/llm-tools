@@ -52,6 +52,19 @@ def _wait_for_record(master: int, process: subprocess.Popen[bytes], record: Path
     return record.read_text(encoding="utf-8") if record.exists() else ""
 
 
+def _wait_for_record_count(process: subprocess.Popen[bytes], record: Path, count: int, timeout: float = 5.0) -> list[str]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if record.exists():
+            rows = record.read_text(encoding="utf-8").splitlines()
+            if len(rows) >= count:
+                return rows
+        if process.poll() is not None:
+            break
+        time.sleep(0.01)
+    return record.read_text(encoding="utf-8").splitlines() if record.exists() else []
+
+
 def _start_console(
     tmp_path: Path,
     *,
@@ -68,10 +81,13 @@ def _start_console(
         "record = os.environ['BRIDGE_TUI_RECORD']\n"
         "def dispatch(mission, command):\n"
         "    argv = shlex.split(command)\n"
-        "    payload = open(argv[-1], encoding='utf-8').read() if argv and (argv[0] == 'add' or argv[:2] == ['task', 'add']) else ''\n"
+        "    payload = open(argv[-1], encoding='utf-8').read() if argv and (argv[0] == 'add' or (argv[:2] == ['task', 'add'] and '--file' in argv)) else ''\n"
         "    with open(record, 'a', encoding='utf-8') as stream: stream.write(repr((mission, command, payload)) + '\\n')\n"
         "    if argv and argv[0] == 'priority':\n"
         "        return '{\"id\":\"private-command-uuid\",\"status\":\"APPLIED\",\"result\":{\"task_id\":42,\"priority\":7}}'\n"
+        "    if argv[:3] == ['task', 'add', '--help']:\n"
+        "        return 'usage: task add [options]\\n' + '\\n'.join('--option-' + str(i) for i in range(30))\n"
+        "    if argv and argv[0] == 'status': return 'status result: RUNNING'\n"
         "    return 'accepted ' + command\n"
         "def snapshot(mission):\n"
         "    return {'mission': {'id': mission, 'name': 'PTY Mission', 'status': 'RUNNING', 'objective': 'exercise actual curses'}}\n"
@@ -124,6 +140,35 @@ def test_real_curses_control_navigation_dispatch_and_exit(tmp_path: Path) -> Non
         assert b"accepted help" in output
         assert b"Applied: priority 42 7" in output
         assert b"private-command-uuid" not in output
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        os.close(master)
+
+
+def test_real_curses_multiline_command_response_scrolls_dismisses_and_accepts_next_command(tmp_path: Path) -> None:
+    process, master, record = _start_console(tmp_path)
+    try:
+        _read_until(master, process, b"PTY Mission")
+        os.write(master, b"task add --help\r")
+        recorded = _wait_for_record_count(process, record, 1)
+        assert len(recorded) == 1
+        _read_until(master, process, b"--option-0")
+        os.write(master, b"\x1b[6~")  # Page Down in xterm.
+        _read_until(master, process, b"--option-29")
+        os.write(master, b"\x1b")
+        time.sleep(0.15)  # Let curses resolve a standalone Escape key.
+        os.write(master, b"status\r")
+        _read_until(master, process, b"status result: RUNNING")
+        records = _wait_for_record_count(process, record, 2)
+        assert records[-2:] == [
+            "('pty-mission', 'task add --help', '')",
+            "('pty-mission', 'status', '')",
+        ]
+        os.write(master, b"\x04")
+        process.wait(timeout=5)
+        assert process.returncode == 0
     finally:
         if process.poll() is None:
             process.kill()
@@ -245,6 +290,9 @@ def test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment(tmp_path: 
         "record = Path(os.environ['BRIDGE_TUI_RECORD'])\n"
         "def dispatch(mission, command):\n"
         "    argv = shlex.split(command)\n"
+        "    if argv[:2] == ['task', 'show']:\n"
+        "        import json\n"
+        "        return json.dumps({'id':73,'prompt':'keep this prompt\\nwith its second line'})\n"
         "    text = Path(argv[-1]).read_text(encoding='utf-8') if argv and argv[0] == 'amend' else ''\n"
         "    record.write_text(repr((mission, command, text)), encoding='utf-8')\n"
         "    return 'amend queued'\n"

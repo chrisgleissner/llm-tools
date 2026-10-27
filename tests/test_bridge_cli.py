@@ -10,6 +10,7 @@ import pytest
 
 from llm_tools.bridge import dispatch_console_command, main, status_snapshot
 from llm_tools.bridge_store import BridgeStore, MissionLock
+from llm_tools.terminal import TerminalAction
 
 
 def test_mission_cli_create_status_tasks_events_and_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -87,6 +88,65 @@ def test_console_cancel_task_id_does_not_cancel_other_mission_work(tmp_path: Pat
         assert store.get_task(active_task)["status"] == "RUNNING"
         assert store.get_operation(operation)["status"] == "RUNNING"
     assert response["status"] == "APPLIED"
+
+
+def test_console_usage_snapshot_adds_embedded_usage_without_changing_task_projection(monkeypatch) -> None:
+    from llm_tools import bridge, bridge_usage
+
+    base = {"mission": {"id": "m"}, "tasks": [{"id": 7}], "events": []}
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(bridge, "status_snapshot", lambda mission_id, **kwargs: calls.append((mission_id, kwargs)) or dict(base))
+    monkeypatch.setattr(bridge_usage.embedded_usage, "snapshot", lambda: {"codex": {"available": False}})
+
+    snapshot = bridge.console_snapshot("mission-7", task_limit=17, task_offset=4, search="needle", event_offset=12, view="Usage")
+
+    assert calls == [("mission-7", {"task_limit": 17, "task_offset": 4, "search": "needle", "event_offset": 12, "event_anchor": None})]
+    assert snapshot == {**base, "usage": {"codex": {"available": False}}}
+
+
+def test_console_usage_snapshot_skips_usage_collection_for_other_views(monkeypatch) -> None:
+    from llm_tools import bridge, bridge_usage
+
+    monkeypatch.setattr(bridge, "status_snapshot", lambda *_args, **_kwargs: {"mission": {"id": "m"}})
+    monkeypatch.setattr(bridge_usage.embedded_usage, "snapshot", lambda: pytest.fail("usage should be lazy"))
+
+    assert bridge.console_snapshot("m", view="Bridge") == {"mission": {"id": "m"}}
+
+
+def test_stop_terminal_mission_without_station_is_idempotent_and_keeps_status(tmp_path: Path, monkeypatch) -> None:
+    from llm_tools import bridge, bridge_runtime
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    absent_socket = tmp_path / "no-station.sock"
+    monkeypatch.setattr(bridge_runtime, "mission_socket_path", lambda _mission_id: absent_socket)
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("failed mission", "objective", cwd=tmp_path)
+        store.set_mission_status(mission["id"], "RUNNING")
+        store.set_mission_status(mission["id"], "FAILED")
+
+    result = bridge._stop_terminal_mission_station(mission["id"])
+
+    assert result["station_status"] == "ABSENT"
+    assert result["mission"]["status"] == "FAILED"
+
+
+def test_stop_terminal_mission_refuses_station_cleanup_while_controller_lock_is_held(tmp_path: Path, monkeypatch) -> None:
+    from llm_tools import bridge
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("failed mission", "objective", cwd=tmp_path)
+        store.set_mission_status(mission["id"], "RUNNING")
+        store.set_mission_status(mission["id"], "FAILED")
+    controller_lock = MissionLock(state / "locks", mission["id"])
+    controller_lock.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="active controller"):
+            bridge._stop_terminal_mission_station(mission["id"])
+    finally:
+        controller_lock.release()
 
 
 def test_mission_create_accepts_stdin_and_persists_verifier_argv(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -458,12 +518,17 @@ def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: P
     assert json.loads(dispatch_console_command(mission_id, f"cancel {added_id}"))["result"]["status"] == "CANCELLED"
     assert json.loads(dispatch_console_command(mission_id, "events 0"))["events"]
     assert json.loads(dispatch_console_command(mission_id, "proposals PENDING"))["proposals"] == []
-    assert "terminal's native attach" in dispatch_console_command(mission_id, "attach")
+    assert dispatch_console_command(mission_id, "attach") == TerminalAction(mission_id)
+    assert dispatch_console_command(mission_id, "attach --mission other --client /dev/pts/7") == TerminalAction("other", "/dev/pts/7")
+    assert dispatch_console_command(mission_id, "detach --client /dev/pts/7") == TerminalAction(mission_id, "/dev/pts/7", "detach")
+    assert "Usage: attach" in dispatch_console_command(mission_id, "attach --help")
+    assert "Usage: detach" in dispatch_console_command(mission_id, "detach --help")
+    assert "error:" in dispatch_console_command(mission_id, "attach --unknown")
     assert "Control view" in dispatch_console_command(mission_id, "control")
     assert "cannot recursively start" in dispatch_console_command(mission_id, "console")
     assert "cannot recursively start" in dispatch_console_command(mission_id, "_controller")
-    assert "needs --file PATH" in dispatch_console_command(mission_id, "task add")
-    assert "scoped to the active mission" in dispatch_console_command(mission_id, "task list --mission another")
+    assert "required" in dispatch_console_command(mission_id, "task add")
+    assert "unknown mission" in dispatch_console_command(mission_id, "task list --mission another")
     assert "error:" in dispatch_console_command(mission_id, "task list --mission")
     assert "error:" in dispatch_console_command(mission_id, "unknown-command")
 
@@ -477,3 +542,102 @@ def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: P
     assert json.loads(dispatch_console_command(mission_id, f"proposal accept --task {proposal_id}"))["status"] == "APPLIED"
     assert json.loads(dispatch_console_command(mission_id, f"verify {first} --approve"))["result"]["status"] == "COMPLETED"
 
+
+def test_main_routes_console_views_and_controller_through_injected_entrypoints(tmp_path, monkeypatch) -> None:
+    from contextlib import nullcontext
+    from llm_tools import bridge_logs, bridge_tui
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("entrypoints", "objective", cwd=tmp_path)
+    mission_id = mission["id"]
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(bridge_tui, "run_console", lambda mid, **kwargs: calls.append(("console", mid)) or 31)
+    monkeypatch.setattr(bridge_tui, "run_control", lambda mid, **kwargs: calls.append((kwargs["initial_view"], mid)) or 32)
+    assert main(["console", "--mission", mission_id]) == 31
+    assert main(["control", "--mission", mission_id]) == 32
+    assert main(["usage", "--mission", mission_id]) == 32
+    assert calls == [("console", mission_id), ("Bridge", mission_id), ("Usage", mission_id)]
+
+    runtime_calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(bridge_logs, "capture_process_output", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("llm_tools.bridge_runtime.run_controller", lambda mid, **kwargs: runtime_calls.append((mid, kwargs)) or 23)
+    assert main(["_controller", "--mission", mission_id, "--headless", "--providers", "codex", "--startup-token", "token"]) == 23
+    assert runtime_calls == [(mission_id, {"headless": True, "native_tui": False, "providers": "codex", "routes": "", "startup_token": "token"})]
+
+
+def test_main_start_resume_attach_and_detach_entrypoints(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    from llm_tools import terminal
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("lifecycle entrypoints", "objective", cwd=tmp_path, config={"headless": True, "providers": "codex"})
+    mission_id = mission["id"]
+    starts: list[tuple[object, ...]] = []
+    monkeypatch.setattr("llm_tools.bridge.start_mission", lambda *args, **kwargs: starts.append((args, kwargs)) or 41)
+    assert main(["start", "--mission", mission_id, "--headless"]) == 41
+    assert starts[-1] == ((mission_id,), {"headless": True, "native_tui": False, "providers": "codex", "routes": None})
+
+    class NoopLock:
+        def __init__(self, *_args): pass
+        def acquire(self): pass
+        def release(self): pass
+
+    monkeypatch.setattr("llm_tools.bridge.MissionLock", NoopLock)
+    assert main(["resume", "--mission", mission_id, "--json"]) == 41
+    assert starts[-1][0] == (mission_id,)
+
+    handle = SimpleNamespace(socket_path=tmp_path / "tmux.sock", session_name="mission-test")
+    monkeypatch.setattr("llm_tools.bridge._load_handle", lambda _mid: handle)
+    class FakeBackend:
+        def attach(self, actual):
+            assert actual is handle
+            return 51
+        def detach_client(self, actual, *, client_name=None):
+            assert actual is handle
+            detached.append(client_name)
+
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    assert main(["attach", "--mission", mission_id]) == 51
+
+    detached: list[str | None] = []
+    assert main(["detach", "--mission", mission_id]) == 0
+    assert main(["detach", "--mission", mission_id, "--client", "/dev/pts/7"]) == 0
+    assert detached == [None, "/dev/pts/7"]
+
+
+def test_attach_client_selector_is_rejected_outside_the_bridge_console(capsys) -> None:
+    assert main(["attach", "--mission", "mission-a", "--client", "/dev/pts/7"]) == 2
+    assert "only used by attach from an active Bridge console" in capsys.readouterr().err
+
+
+
+def test_repl_task_commands_use_the_shared_handler_without_spawning_a_cli(tmp_path, monkeypatch):
+    from llm_tools import bridge
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(tmp_path/'state'))
+    with bridge.open_store() as store:
+        mission = store.create_mission('shared handler','objective',cwd=tmp_path)
+        task = store.add_task(mission['id'],'original')
+    def no_subprocess(*args,**kwargs): raise AssertionError('task REPL must stay in process')
+    monkeypatch.setattr(bridge.subprocess,'run',no_subprocess)
+    result = json.loads(bridge.dispatch_console_command(mission['id'],f'task priority --task {task} --value 5'))
+    assert result['status'] == 'APPLIED'
+    with bridge.open_store() as store:
+        assert store.get_task(task)['priority'] == 5
+
+
+def test_repl_explicit_mission_flag_spellings_choose_the_same_mission(tmp_path, monkeypatch):
+    from llm_tools import bridge
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(tmp_path/'state'))
+    with bridge.open_store() as store:
+        first = store.create_mission('first','one',cwd=tmp_path)
+        other = store.create_mission('other','two',cwd=tmp_path)
+        task = store.add_task(other['id'],'other task')
+    result = bridge.dispatch_console_command(first['id'],f"task priority --mission={other['id']} --task {task} --value 99")
+    assert json.loads(result)['status'] == 'APPLIED'
+    result = bridge.dispatch_console_command(first['id'],f"task priority --mission {other['id']} --task {task} --value 98")
+    assert json.loads(result)['status'] == 'APPLIED'
+    with bridge.open_store() as store: assert store.get_task(task)['priority'] == 98

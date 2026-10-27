@@ -104,6 +104,8 @@ def project_snapshot(
     task_limit: int | None = None,
     task_offset: int = 0,
     search: str = "",
+    event_offset: int = 0,
+    event_anchor: int | None = None,
 ) -> dict[str, Any]:
     """Project monitor state using bounded queries and persisted runtime evidence only.
 
@@ -159,8 +161,14 @@ def project_snapshot(
 
     # Keep histories bounded regardless of mission lifetime. State projections
     # below use indexed latest-kind queries so high event churn cannot hide them.
+    event_where = "mission_id=?"
+    event_params: tuple[Any, ...] = (mission_id,)
+    if event_anchor is not None:
+        event_where += " AND id<=?"
+        event_params += (int(event_anchor),)
     event_rows = store.db.execute(
-        "SELECT * FROM events WHERE mission_id=? ORDER BY id DESC LIMIT 100", (mission_id,)
+        f"SELECT * FROM events WHERE {event_where} ORDER BY id DESC LIMIT 20 OFFSET ?",
+        (*event_params, max(0, int(event_offset))),
     ).fetchall()
     events = [_decode_event(row) for row in reversed(event_rows)]
     latest_selection = _latest_of_kinds(store, mission_id, ("capacity-refresh", "provider-selection"))
@@ -174,7 +182,7 @@ def project_snapshot(
 
     operations = [dict(row) for row in store.db.execute(
         "SELECT id,task_id,iteration,station,route_id,model,status,exit_code,logs_path,created_at,updated_at,native_session_id,restoration_state "
-        "FROM operations WHERE mission_id=? ORDER BY created_at DESC,id DESC LIMIT 100", (mission_id,)
+        "FROM operations INDEXED BY operations_mission_history WHERE mission_id=? ORDER BY rowid DESC LIMIT 100", (mission_id,)
     )]
     for operation in operations:
         operation["configured_model"] = operation["model"] or "unknown"
@@ -290,7 +298,7 @@ def project_snapshot(
     suspend_data = (latest_suspend or {}).get("data", {})
     db = store.db
     pending_rows = store.db.execute(
-        "SELECT id FROM commands WHERE mission_id=? AND status='QUEUED' ORDER BY created_at,id LIMIT 100", (mission_id,)
+        "SELECT id FROM commands INDEXED BY commands_mission_fifo WHERE mission_id=? AND status='QUEUED' ORDER BY rowid LIMIT 100", (mission_id,)
     ).fetchall()
     pending_commands = [store.get_command(str(row[0])) for row in pending_rows]
     timed_operation = active or latest_op or {}
@@ -311,6 +319,7 @@ def project_snapshot(
         "pending_commands": pending_commands,
         "operations": list(reversed(operations[:20])),
         "events": events[-20:],
+        "event_page": {"offset": max(0, int(event_offset)), "limit": 20, "returned": len(events)},
         "stations": stations,
         "station_config": configured,
         "station_mode": {

@@ -88,9 +88,11 @@ with out.open("ab", buffering=0) as log:
             preexec_fn=controlling_terminal,
         )
 
+    client_name: str | None = None
+
     def active_pane() -> str:
         return subprocess.run(
-            ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "#{pane_id}"],
+            ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "-t", client_name or "", "#{pane_id}"],
             check=True,
             text=True,
             capture_output=True,
@@ -150,7 +152,7 @@ with out.open("ab", buffering=0) as log:
 
     def zoomed() -> bool:
         return subprocess.run(
-            ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "#{window_zoomed_flag}"],
+            ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "-t", client_name or "", "#{window_zoomed_flag}"],
             check=True,
             text=True,
             capture_output=True,
@@ -178,6 +180,9 @@ with out.open("ab", buffering=0) as log:
 
     try:
         wait_for(lambda: b"NATIVE READY" in screen)
+        writers = backend.writable_clients(handle)
+        assert len(writers) == 1
+        client_name = writers[0]
         assert b"\x1b[" in screen
         os.write(master, b"keyboard")
         wait_for(lambda: received(provider, b"keyboard"))

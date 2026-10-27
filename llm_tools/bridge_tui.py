@@ -24,9 +24,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .terminal import TerminalAction
+
 
 Snapshot = Callable[..., dict[str, object]]
-Dispatch = Callable[[str, str], str]
+Dispatch = Callable[[str, str], object]
 
 VIEWS = ("Bridge", "Orders", "Stations", "Systems", "Log", "Sessions", "Palette", "Usage")
 PALETTE_COMMANDS = (
@@ -38,12 +40,20 @@ PALETTE_COMMANDS = (
     "resume",
     "stop",
     "cancel",
-    "steer help",
+    "steer --help",
+    "attach",
+    "detach",
+    "usage",
+    "control",
+    "task add --help",
+    "proposal list",
 )
 _REFRESH_SECONDS = 0.25
 _MAX_COMMAND_CHARS = 4096
 _MAX_OUTPUT_LINES = 80
 _MAX_OUTPUT_LINE_CHARS = 2000
+_MAX_RESPONSE_CHARS = 24000
+_MAX_RESPONSE_LINES = _MAX_OUTPUT_LINES
 _MAX_TASK_ROWS = 200
 _TASK_PAGE_SIZE = _MAX_TASK_ROWS
 _MAX_STATION_ROWS = 32
@@ -68,21 +78,52 @@ def _command_feedback(command: str, response: str) -> str:
     try:
         payload = json.loads(response)
     except (TypeError, json.JSONDecodeError):
-        return _text(response, _MAX_OUTPUT_LINE_CHARS)
-    if not isinstance(payload, dict) or payload.get("status") not in {"APPLIED", "REJECTED", "FAILED"}:
-        return _text(response, _MAX_OUTPUT_LINE_CHARS)
-    status = str(payload["status"])
-    result = _dict(payload.get("result"))
-    if status == "APPLIED":
-        detail = result.get("detail")
-        label = _text(command, 120)
-        if result.get("kind"):
-            label = _text(result.get("kind"), 80) + " steering"
-        if detail:
-            return _text(f"Applied: {label} — {detail}", _MAX_OUTPUT_LINE_CHARS)
-        return _text(f"Applied: {label}", _MAX_OUTPUT_LINE_CHARS)
-    reason = result.get("error") or result.get("detail") or status.lower()
-    return _text(f"Rejected: {reason}", _MAX_OUTPUT_LINE_CHARS)
+        payload = None
+    if isinstance(payload, dict) and payload.get("status") in {"APPLIED", "REJECTED", "FAILED"}:
+        status = str(payload["status"])
+        result = _dict(payload.get("result"))
+        if status == "APPLIED":
+            detail = result.get("detail")
+            label = _text(command, 120)
+            if result.get("kind"):
+                label = _text(result.get("kind"), 80) + " steering"
+            if detail:
+                return _text(f"Applied: {label} — {detail}", _MAX_OUTPUT_LINE_CHARS)
+            return _text(f"Applied: {label}", _MAX_OUTPUT_LINE_CHARS)
+        reason = result.get("error") or result.get("detail") or status.lower()
+        return _text(f"Rejected: {reason}", _MAX_OUTPUT_LINE_CHARS)
+
+    rendered = json.dumps(payload, ensure_ascii=False, indent=2) if payload is not None else response
+    lines = rendered.splitlines() or [""]
+    bounded: list[str] = []
+    char_count = 0
+    truncated = False
+    for line in lines:
+        if len(bounded) >= _MAX_RESPONSE_LINES or char_count >= _MAX_RESPONSE_CHARS:
+            truncated = True
+            break
+        clean = "".join(
+            char if unicodedata.category(char) not in {"Cc", "Cs"} or char == "\t" else " "
+            for char in line
+        ).replace("\t", "    ")
+        remaining = _MAX_RESPONSE_CHARS - char_count
+        limit = min(_MAX_OUTPUT_LINE_CHARS, remaining)
+        if len(clean) > limit:
+            clean = clean[: max(0, limit - 1)] + "…"
+            truncated = True
+        bounded.append(clean)
+        char_count += len(clean) + 1
+        if truncated:
+            break
+    if len(bounded) < len(lines):
+        truncated = True
+    if truncated:
+        notice = "[response truncated to fit the Bridge console limit]"
+        if len(bounded) >= _MAX_RESPONSE_LINES:
+            bounded[-1] = notice
+        else:
+            bounded.append(notice)
+    return "\n".join(bounded)
 
 
 def _dict(value: object) -> dict[str, object]:
@@ -429,6 +470,8 @@ class _ConsoleState:
     view_index: int = 0
     selected: int = 0
     task_offset: int = 0
+    event_offset: int = 0
+    event_anchor: int | None = None
     command: str = ""
     search_query: str = ""
     search_editing: bool = False
@@ -444,8 +487,12 @@ class _ConsoleState:
     _snapshot_thread: threading.Thread | None = field(default=None, repr=False)
     _snapshot_result: tuple[dict[str, object] | None, str] | None = field(default=None, repr=False)
     _command_result: str | None = field(default=None, repr=False)
+    terminal_action: TerminalAction | None = field(default=None, repr=False)
     command_pending: bool = False
     expand_requested: bool = False
+    response_overlay: bool = False
+    response_scroll: int = 0
+    response_page_size: int = 10
 
     @property
     def view(self) -> str:
@@ -464,9 +511,21 @@ class _ConsoleState:
                 self.snapshot_error = ""
             else:
                 self.snapshot_error = error
-        if command_result is not None:
+        if isinstance(command_result, TerminalAction):
+            self.terminal_action = command_result
+            self.command_pending = False
+            self.last_refresh = 0.0
+        elif command_result is not None:
             if command_result:
-                self.output.extend(command_result.splitlines() or [command_result])
+                response_lines = command_result.splitlines() or [command_result]
+                if len(response_lines) > 1:
+                    self.output.clear()
+                    self.output.extend(response_lines)
+                    self.response_overlay = True
+                    self.response_scroll = 0
+                    self.expand_requested = True
+                else:
+                    self.output.append(response_lines[0])
             self.command_pending = False
             self.last_refresh = 0.0
         if not force and current - self.last_refresh < _REFRESH_SECONDS:
@@ -484,6 +543,8 @@ class _ConsoleState:
                     parameter_names = set()
                 projection = {
                     "task_offset": self.task_offset,
+                    "event_offset": self.event_offset,
+                    "event_anchor": self.event_anchor,
                     "task_limit": _TASK_PAGE_SIZE,
                     "search": self.search_query,
                     "view": self.view,
@@ -533,7 +594,7 @@ class _ConsoleState:
             try:
                 try:
                     raw_result = self.dispatch(self.mission_id, text)
-                    result = _command_feedback(text, raw_result)
+                    result = raw_result if isinstance(raw_result, TerminalAction) else _command_feedback(text, str(raw_result))
                 except Exception as exc:
                     result = f"Command failed: {_text(exc, 180)}"
                 with self._result_lock:
@@ -553,6 +614,37 @@ class _ConsoleState:
 
     def handle_key(self, key: object) -> bool:
         """Apply one semantic key; return False when the console should exit."""
+        if self.response_overlay:
+            if key in {"\x1b", "\n", "\r", "KEY_ENTER", "\x03", "\x04"}:
+                self.response_overlay = False
+                return True
+            if key == "\t":
+                self.response_overlay = False
+                self.view_index = (self.view_index + 1) % len(VIEWS)
+                self.selected = 0
+                return True
+            if key == "KEY_BTAB":
+                self.response_overlay = False
+                self.view_index = (self.view_index - 1) % len(VIEWS)
+                self.selected = 0
+                return True
+            if isinstance(key, str) and key.startswith("KEY_F"):
+                try:
+                    self.choose_view(int(key[5:]) - 1)
+                except ValueError:
+                    pass
+                self.response_overlay = False
+                return True
+            if key in {"KEY_UP", "KEY_DOWN"}:
+                self.response_scroll = max(0, self.response_scroll - 1) if key == "KEY_UP" else self.response_scroll + 1
+                return True
+            if key in {"KEY_PPAGE", "KEY_NPAGE"}:
+                delta = max(1, self.response_page_size)
+                self.response_scroll = max(0, self.response_scroll - delta) if key == "KEY_PPAGE" else self.response_scroll + delta
+                return True
+            # While a response is open, printable keys cannot enter or execute
+            # commands. Escape, Enter, Tab and view/function keys dismiss it.
+            return True
         if key == "	":
             self.view_index = (self.view_index + 1) % len(VIEWS)
             self.selected = 0
@@ -596,6 +688,16 @@ class _ConsoleState:
             if self.view == "Orders" and self.task_detail:
                 delta = 10 if self.full else 5
                 self.detail_scroll = max(0, self.detail_scroll - delta) if key == "KEY_PPAGE" else self.detail_scroll + delta
+            elif self.view == "Log":
+                if key == "KEY_PPAGE" and self.event_anchor is None:
+                    ids = [int(str(event["id"])) for event in _items(self.snapshot.get("events"))
+                           if str(event.get("id", "")).isdigit()]
+                    self.event_anchor = max(ids) if ids else 0
+                self.event_offset = self.event_offset + 20 if key == "KEY_PPAGE" else max(0, self.event_offset-20)
+                if self.event_offset == 0:
+                    self.event_anchor = None
+                self.selected = 0
+                self.last_refresh = 0.0
             elif self.view == "Orders":
                 total = self.snapshot.get("task_total")
                 if key == "KEY_PPAGE":
@@ -882,6 +984,8 @@ class _ConsoleState:
         return []
 
     def handle_mouse(self, y: int, x: int, height: int, width: int) -> None:
+        if self.response_overlay:
+            return
         if height <= 0 or width <= 0:
             return
         nav_y = 2
@@ -948,6 +1052,8 @@ def _input_prompt(state: _ConsoleState) -> str:
 def _hint(state: _ConsoleState) -> str:
     if state.view == "Orders":
         return "Enter inspect Ctrl-R amend Ctrl-E add Ctrl-F find PgUp/Dn pages Ctrl-D exit"
+    if state.view == "Log":
+        return "PgUp older events PgDn newer events | arrows/wheel scroll | Ctrl-D exit"
     if state.view == "Stations":
         return "Enter choose station; recent history below | F1-8/Tab views | Ctrl-D exit"
     if state.view == "Palette":
@@ -1039,6 +1145,62 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
     curses.doupdate()
 
 
+def _response_rows(state: _ConsoleState, width: int) -> list[str]:
+    available = max(1, width - 2)
+    rows: list[str] = []
+    for line in state.output:
+        safe = "".join(
+            char if unicodedata.category(char) not in {"Cc", "Cs"} else " "
+            for char in line
+        )
+        rows.extend(textwrap.wrap(
+            safe,
+            width=available,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""])
+    return rows or ["No command response."]
+
+
+def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
+    """Show bounded multiline help/query output without losing input context."""
+    height, width = window.getmaxyx()
+    window.erase()
+    _put(window, 0, 0, "Command response", width)
+    if height >= 2:
+        _put(window, 1, 0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-8/Tab switch view", width)
+    rows = _response_rows(state, width)
+    content_top = 2
+    footer_rows = 1 if height >= 4 else 0
+    content_height = max(0, height - content_top - footer_rows)
+    maximum_scroll = max(0, len(rows) - content_height)
+    state.response_scroll = min(maximum_scroll, max(0, state.response_scroll))
+    state.response_page_size = max(1, content_height)
+    for offset, value in enumerate(rows[state.response_scroll : state.response_scroll + content_height]):
+        if width <= 0:
+            break
+        safe = "".join(
+            char if unicodedata.category(char) not in {"Cc", "Cs"} else " "
+            for char in value
+        )
+        try:
+            window.addnstr(content_top + offset, 0, safe, width)
+        except curses.error:
+            pass
+    if footer_rows:
+        if rows:
+            visible_start = state.response_scroll + 1 if content_height else 0
+            visible_end = min(len(rows), state.response_scroll + content_height)
+            counter = f"{visible_start}-{visible_end}/{len(rows)}" if content_height else f"0/{len(rows)}"
+        else:
+            counter = "0/0"
+        _put(window, height - 1, 0, f"{counter} response lines", width)
+    window.noutrefresh()
+    curses.doupdate()
+
+
 def _edit_task_prompt(
     window: curses.window,
     state: _ConsoleState,
@@ -1061,8 +1223,16 @@ def _edit_task_prompt(
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise PermissionError("task editor file is not private and owned by this user")
         os.close(fd)
+        if task_id is not None:
+            # Display projections are intentionally bounded and sanitized.
+            # Mutation input must come from the full verbatim public record.
+            record = json.loads(state.dispatch(state.mission_id, shlex.join(["task", "show", "--task", task_id])))
+            if not isinstance(record, dict) or str(record.get("id")) != task_id or not isinstance(record.get("prompt"), str):
+                raise ValueError("could not load the complete task prompt; amendment cancelled")
+            initial_text = record["prompt"]
         if initial_text:
-            path.write_text(initial_text, encoding="utf-8")
+            with path.open("w", encoding="utf-8", newline="") as stream:
+                stream.write(initial_text)
         editor_setting = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         editor = shlex.split(editor_setting)
         if not editor:
@@ -1115,6 +1285,44 @@ def _selected_task_id(state: _ConsoleState) -> str | None:
     return _text(value, 40) if value is not None else None
 
 
+def _execute_terminal_action(source_mission: str, action: TerminalAction) -> None:
+    """Perform a typed terminal action after curses restores the user's terminal."""
+    from .bridge import _load_handle
+    from .terminal import TmuxTerminalBackend
+
+    backend = TmuxTerminalBackend()
+    destination = _load_handle(action.mission_id)
+    tmux_env = os.environ.get("TMUX", "")
+    pane_env = os.environ.get("TMUX_PANE", "")
+    if not tmux_env:
+        if action.action == "detach":
+            backend.detach_client(destination, client_name=action.client)
+            return
+        if action.mission_id == source_mission:
+            backend.focus(destination, pane="provider")
+        backend.attach(destination)
+        return
+
+    source = _load_handle(source_mission)
+    source_socket = tmux_env.split(",", 1)[0]
+    try:
+        same_socket = Path(source_socket).expanduser().absolute() == source.socket_path.expanduser().absolute()
+    except OSError:
+        same_socket = False
+    if not same_socket or pane_env != source.bridge_pane:
+        raise PermissionError("terminal actions are available only from this mission's owned Bridge pane")
+    if action.action == "detach":
+        if action.mission_id != source_mission:
+            raise PermissionError("detach from an embedded console is limited to its active mission")
+        backend.detach_client(source, client_name=action.client)
+        return
+    if action.mission_id == source_mission:
+        backend.focus(source, pane="provider")
+        return
+
+    backend.switch_client_to(source, destination, client_name=action.client)
+
+
 def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool, initial_view: str = "Bridge") -> int:
     state = _ConsoleState(mission_id, dispatch, snapshot, full)
     state.choose_view(VIEWS.index(initial_view))
@@ -1143,7 +1351,12 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
                         state.output.append(f"Could not expand controls: {type(exc).__name__}")
             state.refresh()
-            if state.full:
+            if state.terminal_action is not None:
+                action, state.terminal_action = state.terminal_action, None
+                return action
+            if state.response_overlay:
+                _draw_response_overlay(window, state)
+            elif state.full:
                 _draw_full(window, state)
             else:
                 _draw_compact(window, state)
@@ -1151,11 +1364,11 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                 key = window.get_wch()
             except curses.error:
                 continue
-            if key == "\x05":
+            if key == "\x05" and not state.response_overlay:
                 _edit_task_prompt(window, state)
                 state.refresh(force=True)
                 continue
-            if key == "\x12":
+            if key == "\x12" and not state.response_overlay:
                 task = state.selected_task() if state.view == "Orders" else None
                 task_id = _selected_task_id(state) if task is not None else None
                 if task_id is None or task is None:
@@ -1195,10 +1408,18 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
             if not state.handle_key(semantic):
                 return 0
 
-    try:
-        return curses.wrapper(loop)
-    except KeyboardInterrupt:
-        return 130
+    while True:
+        try:
+            result = curses.wrapper(loop)
+        except KeyboardInterrupt:
+            return 130
+        if not isinstance(result, TerminalAction):
+            return int(result)
+        try:
+            _execute_terminal_action(mission_id, result)
+        except Exception as exc:
+            state.output.append(f"Attach failed: {_text(exc, 180)}")
+            state.last_refresh = 0.0
 
 
 def run_console(mission_id: str, dispatch: Dispatch, snapshot: Snapshot) -> int:

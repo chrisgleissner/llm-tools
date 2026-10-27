@@ -17,6 +17,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,15 @@ class TerminalHandle:
     provider_pane: str
     bridge_pane: str
     bridge_rows: int
+
+
+@dataclass(frozen=True)
+class TerminalAction:
+    """A requested terminal transition, safe to return from a UI worker."""
+
+    mission_id: str
+    client: str | None = None
+    action: Literal["attach", "detach"] = "attach"
 
 
 class TmuxTerminalBackend:
@@ -291,7 +301,13 @@ class TmuxTerminalBackend:
             # until the operator deliberately sends Ctrl-]. Status-line clicks
             # remain available even while the provider pane is zoomed.
             for key, target in (("B", bridge_pane), ("P", pane)):
-                self._run(socket, "bind-key", "-T", "prefix", key, "select-pane", "-t", target)
+                self._run(
+                    socket,
+                    "bind-key", "-T", "prefix", key,
+                    "if-shell", "-F", "#{window_zoomed_flag}",
+                    f"resize-pane -Z; select-pane -t {target}",
+                    f"select-pane -t {target}",
+                )
             for mouse_key, target in (
                 ("MouseDown1StatusLeft", bridge_pane),
                 ("MouseDown1StatusRight", pane),
@@ -300,7 +316,13 @@ class TmuxTerminalBackend:
                 # the provider target reliable outside the explicit left hitbox.
                 ("MouseDown1Status", pane),
             ):
-                self._run(socket, "bind-key", "-T", "root", mouse_key, "select-pane", "-t", target)
+                self._run(
+                    socket,
+                    "bind-key", "-T", "root", mouse_key,
+                    "if-shell", "-F", "#{window_zoomed_flag}",
+                    f"resize-pane -Z; select-pane -t {target}",
+                    f"select-pane -t {target}",
+                )
             self._run(socket, "select-pane", "-t", pane)
             return TerminalHandle(socket, config_path, session_name, pane, bridge_pane, bridge_rows)
         except Exception:
@@ -355,6 +377,88 @@ class TmuxTerminalBackend:
                                "#{window_zoomed_flag}", capture=True).stdout.strip()
             if zoomed != "1":
                 self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
+
+    def writable_clients(self, handle: TerminalHandle) -> tuple[str, ...]:
+        """List attached, writable, non-control clients on an owned station."""
+        self._require_owned(handle)
+        result = self._run(
+            handle.socket_path,
+            "list-clients",
+            "-F",
+            "#{client_name}\t#{client_readonly}\t#{client_control_mode}",
+            check=False,
+            capture=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("could not list clients on the owned Bridge station")
+        clients: list[str] = []
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if len(fields) != 3:
+                continue
+            client_name, readonly, control_mode = fields
+            # tmux 3.6 does not expose client_id as a format in list-clients;
+            # client_name is the exact client selector (normally /dev/pts/N).
+            if re.fullmatch(r"/dev/[A-Za-z0-9._/-]{1,120}", client_name) and readonly == "0" and control_mode == "0":
+                clients.append(client_name)
+        return tuple(clients)
+
+    def select_writable_client(self, handle: TerminalHandle, client_name: str | None = None) -> str:
+        """Select an explicit client or the only connected writable client."""
+        clients = self.writable_clients(handle)
+        if client_name is not None:
+            if client_name not in clients:
+                raise PermissionError("selected tmux client is not a writable client of the owned Bridge station")
+            return client_name
+        if len(clients) == 1:
+            return clients[0]
+        if not clients:
+            raise RuntimeError("no writable client is attached to the owned Bridge station")
+        raise RuntimeError("multiple writable clients are attached; specify --client from the listed identities")
+
+    def detach_client(self, handle: TerminalHandle, *, client_name: str | None = None) -> None:
+        """Detach one exact writable client without disturbing observers."""
+        self._require_owned(handle)
+        selected = self.select_writable_client(handle, client_name)
+        self._run(handle.socket_path, "detach-client", "-t", selected)
+
+    def switch_client_to(
+        self,
+        source: TerminalHandle,
+        destination: TerminalHandle,
+        *,
+        client_name: str | None = None,
+    ) -> None:
+        """Detach one verified source client into another station, then return.
+
+        Only an explicitly named writable client is detached. The `-E`
+        command attaches to the destination and, after that client detaches,
+        reattaches to the source station so its Bridge console redraws.
+        """
+        self._require_owned(source)
+        self._require_owned(destination)
+        selected_client = self.select_writable_client(source, client_name)
+        destination_attach = shlex.join([
+            "env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux",
+            "-S", str(destination.socket_path), "-f", str(destination.config_path),
+            "attach-session", f"-t={destination.session_name}",
+        ])
+        source_attach = shlex.join([
+            "env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux",
+            "-S", str(source.socket_path), "-f", str(source.config_path),
+            "attach-session", f"-t={source.session_name}",
+        ])
+        return_message = "llm-bridge: destination session unavailable; returning to the source station"
+        shell_script = f"{destination_attach} || printf '%s\\n' {shlex.quote(return_message)} >&2; {source_attach}"
+        shell_command = "exec env -u TMUX -u TMUX_PANE sh -c " + shlex.quote(shell_script)
+        self._run(
+            source.socket_path,
+            "detach-client",
+            "-t",
+            selected_client,
+            "-E",
+            shell_command,
+        )
 
     def resize(self, handle: TerminalHandle, *, cols: int, rows: int) -> None:
         self._require_owned(handle)

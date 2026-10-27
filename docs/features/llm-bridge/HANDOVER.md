@@ -1,5 +1,136 @@
 # LLM Bridge resume handover
 
+## CURRENT — 2026-10-27 publication checkpoint
+
+Resume the existing implementation in `/home/chris/dev/llm-tools`, branch
+`feat/llm-bridge`, draft PR https://github.com/chrisgleissner/llm-tools/pull/26.
+The user explicitly requested this handover and a push of ALL current changes.
+This checkpoint extends parent `37cbc2b35ed8a0d2af5e4f8ed352c700f3cf5951`;
+use `git log -1` for its resulting commit. Preserve the original `prompt.md`.
+Historical records below are superseded by this section.
+
+OBJECTIVE
+Finish the full specification, adversarial review and final verification. User
+authorizes push/PR updates and eventual merge/release, but only after actual
+merge-readiness. Keep PR draft until global85% and Bridge90% coverage, Python
+3.11/3.15 CI, independent review and documentation/build gates pass. Release
+workflow uses plain numeric tags (candidate `1.1.0`), not `v1.1.0`.
+
+RELEVANT FILES
+Production: `llm_tools/bridge*.py`, `terminal.py`, `scheduler.py`, `usage.py`.
+Contracts: `tests/test_bridge*`, `test_terminal*`, scheduler timeout regressions.
+Records: `docs/llm-bridge/{progress,review-findings,spec-audit,test-matrix}.md`,
+`native-input-evidence.md`, native mission/reply/input result JSON files.
+README includes a real running Bridge/native Codex screenshot, not a mockup.
+
+DECISIONS
+Standard-library Python, SQLite WAL/FULL, private tmux native PTYs, flock single
+controller. Ralph owns autonomous iterations/routes/capacity/suspend; scheduler
+owns launching; usage owns quota/history/forecast math. Native supervised mode
+is explicit; autonomous/headless mode is distinct. Actual Python minimum3.11
+and current3.15 supported; never describe3.11 as the maximum. Planner Sol6.1
+Medium, implementors Luna High, final independent reviewer Sol6.1 High (latest
+user requirement). Existing agent contexts may no longer exist after resume.
+
+INVARIANTS
+Unknown interrupted outcomes BLOCKED, never silently replayed or completed.
+Never infer provider ownership from newest unrelated session. Exact owned ID,
+cwd and metadata checks gate native restoration; reconstruction labelled
+explicitly. CLI and REPL share parser/handlers. Provider keys/paste remain
+native; Ctrl-] B/P and persistent mouse targets select Bridge/provider focus.
+No credentials/raw sensitive transcripts in repository. No exclusions or gate
+reductions to manufacture90% coverage. Skipped/unavailable live checks are NOT
+VERIFIED. No paid Claude/Copilot prompts while only Codex has credits.
+
+IMPLEMENTED CHANGES
+- Durable proposals/approval, steering, verifier/process-tree shutdown, explicit
+  restoration states; native mode inheritance on resume and unbounded owned
+  pane waits (legacy timeout semantics preserved).
+- Exact writable-client attach/detach across private servers, typed terminal
+  actions after curses teardown, readonly/multiple-writer safety, explicit
+  unzoom and keyboard/mouse focus bindings. Real outer-PTY A-to-B-to-A tests.
+- Bounded scrollable REPL response overlay for help/JSON, valid palette commands,
+  full verbatim Ctrl-R/Ctrl-E editing (20k+CRLF/tabs preserved); shared in-process
+  task dispatch and safe rejection of curses stdin file reads.
+- In-process full Usage view without even an ephemeral llm-usage process;
+  history sampling and bounded forecast cache; active/alternative 5h/weekly
+  estimates, anchored/indexed log paging and station history.
+- FIFO command/handoff chronology uses insertion order plus indexes rather than
+  timestamps/UUID ordering. Conservative progress/convergence evidence.
+- Actual Claude native user/assistant transcript metadata and canonical project
+  path encoding; malformed metadata/sidechain/absent cwd fail safely. Exact
+  Codex-ID restore scans existing bounded directory budget rather than32 only.
+
+TEST EVIDENCE
+A broad Python3.11 run observed1221PASS in189.37s, but source changed during it:
+this is diagnostic, NOT final frozen-head coverage evidence. Fresh scoped
+runtime92%, CLI90%, store92%, TUI90%, terminal90% were observed by implementors;
+combined final Bridge90% is still NOT VERIFIED. Sessions diagnostic79% preceded
+additional26 passing boundary tests; rerun the complete coverage gate.
+Actual full Bridge Codex0.164.0 native reply and exact-ID resume in a fresh
+controller with recalled context and cleanup passed using two model calls.
+Claude2.1.310 /help and Codex /model propagated in Bridge/direct comparison
+without model calls. Known-marker scrolling observed through Bridge; mouse
+model-picker click has no visible effect on either path and is NOT VERIFIED.
+No paid Claude/Copilot completion/native restoration claim. Check latest
+checkpoint live-probe addendum below for immediate pre-commit retakes.
+Long-run1000tasks/1009attempts passed35.34s (retained2.19MB, peak2.65MB,
+DB5.04MB); instrumented10k-task streaming input gate passed with max409ms,
+CI threshold750ms. These are measured tests, not multiweek reliability proof.
+
+KNOWN RISKS
+Final aggregate coverage and frozen full3.11/3.15 CI-equivalent runs remain
+required. Reviewer closed A13-A20 in the findings ledger; final integrated
+review including latest chronology/response changes still required. README
+native-resume wording and operations docs need reconciliation with verified
+behavior. Rebuild/reinstall final artifacts. First real dogfood mission through
+Bridge completed and its fix was integrated (`dogfood.md`); a second inherited
+profile/commit dogfood was only planned, never started. No merge/tag yet.
+
+NEXT ACTION
+1. Read this CURRENT section, git status/log, progress/review-findings/spec-audit;
+   check `~/.agents/skills/agent-bridge/scripts/bridge inbox codex`. Preserve all
+   existing work; do not restart repository investigation.
+2. Freeze source, run full pytest+coverage on3.11 and3.15, report global85 and
+   scoped Bridge90 exactly as CI defines; fix meaningful gaps, never exclusions.
+3. Complete final Sol6.1/High independent review and targeted remediation;
+   reconcile docs, rebuild/install wheel+sdist and inspect CLI help.
+4. Rerun bounded ad-hoc native reply/resume/input probes before major commits;
+   update evidence truthfully. Push, refresh PR, inspect all CI/review threads.
+5. Only once every required gate passes, mark ready, merge, tag/release1.1.0
+   if still the next available version. Verify published artifacts.
+
+Resume tools: `/tmp/llm-bridge-release-venv/bin/python` (3.11.14),
+`/tmp/llm-bridge-release-315-venv/bin/python` (3.15.1). Recreate if unavailable.
+Use unique COVERAGE_FILE directories and --basetemp; keep pytest log names
+separate from coverage prefix because parallel coverage combine scans suffixes.
+Example full run: `COVERAGE_FILE=/tmp/bridge-final-311/.coverage
+/tmp/llm-bridge-release-venv/bin/python -m coverage run -m pytest -o addopts='' -q
+--basetemp=/tmp/bridge-final-311/tests` (create directory first); combine/report
+using the same COVERAGE_FILE and exact CI scoped90 include expression.
+Live scripts: `python scripts/bridge_native_mission_smoke.py
+--model-call-budget 2 --seconds 35 --output /tmp/native-mission.json` and
+`python scripts/bridge_native_input_probe.py --help` (requires explicitly owned
+Codex UUID/cwd, never an unrelated user session).
+
+### Immediate pre-commit verification (2026-10-27)
+
+54 focused current-source regressions PASS in1.55s: session boundaries,
+chronology, start mode, owned-pane/legacy timeouts, interactive attach, native
+metadata, input-probe oracle and embedded Usage. `git diff --check` passed.
+The ad-hoc two-call-budget native mission retake returned native_reply PASS,
+native_resume NOT VERIFIED, cleanup PASS (script exit1). This is a new unresolved
+verification gate despite the earlier successful resume run. Investigate the
+bounded probe/resume path before release; do not replace this with the earlier
+PASS. Exact structured result: `docs/llm-bridge/checkpoint-native-mission.json`.
+Zero-prompt native input retake passed Codex /model and Claude /help in direct
+and Bridge paths; cleanup PASS. Bridge wheel moved the known marker, direct
+wheel did not; mouse click changed Bridge screen but not direct screen, with
+picker still visible on both. Mouse parity/selection is NOT VERIFIED and needs
+investigation. Exact result: `docs/llm-bridge/checkpoint-native-input.json`.
+
+## Historical records (superseded where CURRENT differs)
+
 ## Latest user requirements (publication update)
 
 - Continue until fully merge-ready, then merge PR #26 and publish a new release.

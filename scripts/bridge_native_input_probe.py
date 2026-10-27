@@ -67,10 +67,39 @@ def mouse_effect(before: str, after: str) -> str:
     return "screen-changed"
 
 
-def wheel_effect(before: str, after: str, *, provider_mode: int | None = None) -> str:
-    if provider_mode not in (None, 0):
-        return "not-tested-tmux-copy-mode-active"
-    return "visible-scroll" if _plain(before) != _plain(after) else "no-visible-effect"
+def marker_rows(screen: str, marker: str = "NATIVE_BRIDGE_OK") -> tuple[int, ...]:
+    """Return visible row indices for the known, non-sensitive smoke marker."""
+    if not marker:
+        return ()
+    return tuple(index for index, line in enumerate(_plain(screen).splitlines()) if marker in line)
+
+
+def wheel_effect(
+    before: str,
+    after: str,
+    *,
+    marker: str = "NATIVE_BRIDGE_OK",
+    pane_mode_before: int | None,
+    pane_mode_after: int | None,
+) -> str:
+    if pane_mode_before != 0 or pane_mode_after != 0:
+        return "NOT VERIFIED: tmux pane mode was not zero on both sides"
+    before_rows, after_rows = marker_rows(before, marker), marker_rows(after, marker)
+    if before_rows and after_rows and before_rows != after_rows:
+        return "PASS: known smoke marker moved within the provider viewport"
+    return "NOT VERIFIED: known smoke marker did not visibly move"
+
+
+def _pane_mode(console) -> int | None:
+    if isinstance(console, _StationPTY):
+        socket_path, target = console.handle.socket_path, console.handle.provider_pane
+    else:
+        socket_path, target = console.socket_path, "direct:0"
+    result = subprocess.run(
+        ["tmux", "-S", str(socket_path), "display-message", "-p", "-t", target, "#{pane_in_mode}"],
+        check=True, capture_output=True, text=True, timeout=3,
+    ).stdout.strip()
+    return int(result) if result.isdigit() else None
 
 
 def _version(executable: str) -> str:
@@ -246,7 +275,7 @@ def _wait_ready(console, *, provider: str, timeout: float) -> str:
     return latest
 
 
-def _run_ui_sequence(console, *, provider: str) -> dict[str, str | bool]:
+def _run_ui_sequence(console, *, provider: str, history_marker: str) -> dict[str, object]:
     if provider == "codex":
         initial = _wait_ready(console, provider=provider, timeout=12)
         if "trust this folder" in initial.lower() or "trust this project" in initial.lower():
@@ -261,7 +290,7 @@ def _run_ui_sequence(console, *, provider: str) -> dict[str, str | bool]:
             if model_picker_visible(picker, before=initial):
                 break
             picker = console.screen(0.4)
-        result: dict[str, str | bool] = {
+        result: dict[str, object] = {
             "keyboard_local_model_picker": "PASS" if model_picker_visible(picker, before=initial) else "NOT VERIFIED",
             "model_picker_signal_observed": model_picker_visible(picker, before=initial),
         }
@@ -278,17 +307,7 @@ def _run_ui_sequence(console, *, provider: str) -> dict[str, str | bool]:
         mouse_before = picker
         result["mouse_click_x"] = x
         result["mouse_click_y"] = y
-        if isinstance(console, _StationPTY):
-            mode_target = console.handle.provider_pane
-            mode_socket = console.handle.socket_path
-        else:
-            mode_target = "direct:0"
-            mode_socket = console.socket_path
-        mode_text = subprocess.run(
-            ["tmux", "-S", str(mode_socket), "display-message", "-p", "-t", mode_target, "#{pane_in_mode}"],
-            check=True, capture_output=True, text=True, timeout=3,
-        ).stdout.strip()
-        mouse_mode = int(mode_text) if mode_text.isdigit() else None
+        mouse_mode = _pane_mode(console)
         result["mouse_pane_in_mode"] = mouse_mode if mouse_mode is not None else "unknown"
         result["model_picker_before_click"] = model_picker_visible(mouse_before, before=initial)
         if mouse_mode not in (None, 0):
@@ -298,27 +317,35 @@ def _run_ui_sequence(console, *, provider: str) -> dict[str, str | bool]:
             mouse_after = console.screen(0.8)
             result["mouse"] = mouse_effect(mouse_before, mouse_after)
             result["model_picker_after_click"] = model_picker_visible(mouse_after, before=initial)
+            result["mouse_pane_in_mode_after"] = _pane_mode(console)
         console.send(b"\x1b")
         console.screen(0.3)
         before_scroll = console.screen(0.1)
-        mode = None
-        if isinstance(console, _StationPTY):
-            mode_text = subprocess.run(
-                ["tmux", "-S", str(console.handle.socket_path), "display-message", "-p", "-t",
-                 console.handle.provider_pane, "#{pane_in_mode}"], check=True, capture_output=True,
-                text=True, timeout=3,
-            ).stdout.strip()
-            mode = int(mode_text) if mode_text.isdigit() else None
-        if mode in (None, 0):
+        wheel_mode_before = _pane_mode(console)
+        result["wheel_pane_in_mode_before"] = wheel_mode_before if wheel_mode_before is not None else "unknown"
+        result["wheel_marker"] = history_marker
+        result["wheel_marker_rows_before"] = marker_rows(before_scroll, history_marker)
+        if wheel_mode_before == 0:
             console.send(b"\x1b[<64;5;5M")
             after_scroll = console.screen(0.5)
-            result["wheel"] = wheel_effect(before_scroll, after_scroll, provider_mode=mode)
+            wheel_mode_after = _pane_mode(console)
+            result["wheel_pane_in_mode_after"] = wheel_mode_after if wheel_mode_after is not None else "unknown"
+            result["wheel_marker_rows_after"] = marker_rows(after_scroll, history_marker)
+            result["wheel"] = wheel_effect(
+                before_scroll, after_scroll, pane_mode_before=wheel_mode_before,
+                pane_mode_after=wheel_mode_after, marker=history_marker,
+            )
         else:
-            result["wheel"] = wheel_effect(before_scroll, before_scroll, provider_mode=mode)
+            result["wheel_pane_in_mode_after"] = wheel_mode_before if wheel_mode_before is not None else "unknown"
+            result["wheel_marker_rows_after"] = marker_rows(before_scroll, history_marker)
+            result["wheel"] = wheel_effect(
+                before_scroll, before_scroll, pane_mode_before=wheel_mode_before,
+                pane_mode_after=wheel_mode_before, marker=history_marker,
+            )
     else:
         ready = _wait_ready(console, provider=provider, timeout=12)
         lower = _plain(ready).lower()
-        result = {"keyboard_help": "NOT VERIFIED", "help_signal_observed": False}
+        result: dict[str, object] = {"keyboard_help": "NOT VERIFIED", "help_signal_observed": False}
         # Never type into a project-trust, login, or startup confirmation view.
         if "trust this folder" in lower or "trust this project" in lower:
             result["keyboard_help"] = "NOT VERIFIED: Claude project trust gate requires operator input"
@@ -338,7 +365,7 @@ def _run_ui_sequence(console, *, provider: str) -> dict[str, str | bool]:
 
 
 def _provider_result(provider: str, argv: list[str], cwd: Path, *, timeout: float,
-                     backend: TmuxTerminalBackend, socket_path: Path) -> dict[str, object]:
+                     backend: TmuxTerminalBackend, socket_path: Path, history_marker: str) -> dict[str, object]:
     provider_deadline = time.monotonic() + timeout
     result: dict[str, object] = {
         "version": _version(provider), "model_calls": 0,
@@ -350,7 +377,7 @@ def _provider_result(provider: str, argv: list[str], cwd: Path, *, timeout: floa
     try:
         direct = _DirectPTY(argv, cwd, timeout=max(1.0, provider_deadline - time.monotonic()),
                             socket_path=socket_path.with_name("direct.sock"))
-        direct_result = _run_ui_sequence(direct, provider=provider)
+        direct_result = _run_ui_sequence(direct, provider=provider, history_marker=history_marker)
         direct.close()
         direct = None
 
@@ -360,7 +387,7 @@ def _provider_result(provider: str, argv: list[str], cwd: Path, *, timeout: floa
             cwd=cwd, socket_path=socket_path, session_name=f"input-{provider}", size=_WINDOW,
         )
         station = _StationPTY(backend, handle, timeout=max(1.0, provider_deadline - time.monotonic()))
-        station_result = _run_ui_sequence(station, provider=provider)
+        station_result = _run_ui_sequence(station, provider=provider, history_marker=history_marker)
         station.close()
         station = None
         result["direct"] = direct_result
@@ -404,9 +431,12 @@ def _provider_result(provider: str, argv: list[str], cwd: Path, *, timeout: floa
     return result
 
 
-def probe(codex_session_id: str, codex_cwd: Path, *, provider_seconds: int = 45) -> dict[str, object]:
+def probe(codex_session_id: str, codex_cwd: Path, *, provider_seconds: int = 45,
+          history_marker: str = "NATIVE_BRIDGE_OK") -> dict[str, object]:
     if not 10 <= provider_seconds <= 60:
         raise ValueError("provider timeout must be between 10 and 60 seconds")
+    if re.fullmatch(r"[A-Z0-9_]{3,80}", history_marker) is None:
+        raise ValueError("history marker must be a non-sensitive uppercase token")
     cwd = codex_cwd.expanduser().resolve(strict=True)
     identity = provider_session_metadata("codex", codex_session_id, cwd=cwd)
     if identity is None or identity.identity.cwd != str(cwd):
@@ -425,12 +455,12 @@ def probe(codex_session_id: str, codex_cwd: Path, *, provider_seconds: int = 45)
         ]
         result["codex"] = _provider_result(
             "codex", codex_argv, cwd, timeout=provider_seconds, backend=backend,
-            socket_path=root / "codex.sock",
+            socket_path=root / "codex.sock", history_marker=history_marker,
         )
         claude_cwd = ROOT
         result["claude"] = _provider_result(
             "claude", ["claude"], claude_cwd, timeout=provider_seconds, backend=backend,
-            socket_path=root / "claude.sock",
+            socket_path=root / "claude.sock", history_marker=history_marker,
         )
         result["cleanup"] = "PASS" if all(
             _dict(provider_result).get("cleanup") == "PASS" for provider_result in (result["codex"], result["claude"])
@@ -447,9 +477,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-session-id", required=True)
     parser.add_argument("--codex-cwd", type=Path, required=True)
     parser.add_argument("--provider-timeout", type=int, choices=range(10, 61), default=45)
+    parser.add_argument("--history-marker", default="NATIVE_BRIDGE_OK",
+                        help="exact non-sensitive smoke marker to track during native history scrolling")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
-    result = probe(args.codex_session_id, args.codex_cwd, provider_seconds=args.provider_timeout)
+    result = probe(args.codex_session_id, args.codex_cwd, provider_seconds=args.provider_timeout,
+                   history_marker=args.history_marker)
     args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result.get("cleanup") == "PASS" else 1

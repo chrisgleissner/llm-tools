@@ -70,3 +70,49 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
                 process.terminate()
                 process.wait(timeout=2)
         os.close(master)
+
+
+def test_real_curses_stdin_file_request_keeps_control_input_available(tmp_path: Path, env: dict[str, str]) -> None:
+    """A REPL command cannot consume the curses process's terminal stdin."""
+    state = tmp_path / "state"
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("Stdin control", "Keep keyboard control", cwd=tmp_path, initial_prompt="Original")
+    env.update(LLM_BRIDGE_STATE_DIR=str(state), TERM="xterm-256color", VISUAL="/bin/true")
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    process = subprocess.Popen(
+        [sys.executable, "-m", "llm_tools.bridge", "control", "--mission", mission["id"]],
+        stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
+    )
+    os.close(slave)
+    try:
+        output = bytearray()
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline and b"Stdin control" not in output:
+            readable, _, _ = select.select([master], [], [], 0.03)
+            if readable:
+                output.extend(os.read(master, 65536))
+        assert b"Stdin control" in output
+        os.write(master, b"task add --file -\r")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([master], [], [], 0.03)
+            if readable:
+                output.extend(os.read(master, 65536))
+            if b"Command submitted" in output:
+                break
+        deadline = time.monotonic() + 2
+        while process.poll() is None and time.monotonic() < deadline:
+            os.write(master, b"\x04")
+            readable, _, _ = select.select([master], [], [], 0.05)
+            if readable:
+                try:
+                    os.read(master, 65536)
+                except OSError:
+                    break
+        assert process.poll() == 0, "task --file - captured terminal input and prevented normal control exit"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)
+        os.close(master)

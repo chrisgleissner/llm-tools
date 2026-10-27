@@ -622,7 +622,7 @@ reopens the gate. Production code is owned by the implementors.
   failed after executing the real controller lifecycle with a bounded fake
   Ralph completion. No provider completion was invoked.
 
-### A4 — High: core operator views do not expose their required information — OPEN
+### A4 — High: core operator views do not expose their required information — CLOSED
 
 - **Locations:** `bridge_tui._bounded_snapshot`, `_ConsoleState.handle_key/rows`,
   `bridge_monitor.project_snapshot`.
@@ -639,7 +639,7 @@ reopens the gate. Production code is owned by the implementors.
   bounded capacity scopes. Verify via actual monitor-to-TUI projections and
   outer-PTY keyboard/mouse tests, not manually supplied already-correct rows.
 
-### A5 — Medium: remaining traceability and monitoring gaps — OPEN
+### A5 — Medium: remaining traceability and monitoring gaps — CLOSED
 
 - No task-origin/proposal field, proposal acceptance workflow or corresponding
   test was found, despite §8.3 and the test matrix's assertion that proposals
@@ -840,7 +840,7 @@ of an unfrozen release head.
   independently fails against actual store/hook state; its wait guard prevents
   a hanging test and does not replace the scheduling/count logic.
 
-### A13 — High: unchanged editor roundtrip silently truncates task instructions — OPEN
+### A13 — High: unchanged editor roundtrip silently truncates task instructions — CLOSED
 
 - **Location:** `bridge_tui._run` Ctrl-R path, `_bounded_task_value` and
   `_edit_task_prompt`.
@@ -883,3 +883,259 @@ tests/test_bridge_refresh.py tests/test_bridge_usage.py tests/test_usage_embedde
 - Selected-station preference, historical operation metadata, elapsed time,
   iteration and progress age now reach the real monitor snapshot. Final TUI
   behavior and A13 editor preservation remain under terminal review.
+
+### Shared-handler/editor/log follow-up at `37cbc2b` plus working tree
+
+- **A13 CLOSED:** the editor now obtains full task text through the shared
+  public task-show path, validates its identity/type, and writes with
+  `newline=''`. The independent actual-curses 20k/tab/CRLF no-op editor
+  regression passes. Display projection remains bounded and sanitized.
+- A focused editor/CLI/refresh/monitor/TUI/outer-PTY run passed **88 tests**;
+  its only failure was the root's already-known explicit-mission grammar
+  interpretation test, which is being replaced to match the user's complete
+  CLI-parity requirement. Both explicit mission spellings should select the
+  requested mission; omitted mission defaults to the active one.
+- Shared `_task_result` is used by standalone and REPL task paths. This removes
+  interpreter startup from common interactive task operations while preserving
+  the same parser, validation, durable transactions and rejection results.
+- New coverage tests were inspected for behavioral assertions. They cover
+  rejection without partial effects, immutable process identity, concurrent
+  command prevention, stale-snapshot retention, editor cleanup, real private
+  socket ownership and bounded projection. These supplement rather than
+  replace actual subprocess/PTY/live evidence.
+
+### A14 — Medium: older log navigation can move forward during live output — CLOSED
+
+- **Location:** `bridge_monitor.project_snapshot` event OFFSET and
+  `bridge_tui._ConsoleState` log paging.
+- OFFSET is relative to the newest event on each refresh. After viewing IDs
+  52–71, 25 new events followed by PgUp returns IDs 57–76: the purported older
+  page is newer than the page the operator was reading. Older views also drift
+  as live events arrive.
+- Anchor historical browsing to the visible event-ID boundary/cursor; return
+  to the live head deliberately when paging back to newest. Keep latest
+  capacity/progress projections independent of the historical event page.
+- `test_log_older_page_stays_older_when_live_events_arrive` independently fails
+  through the real console state, production snapshot callbacks and SQLite.
+  The test asserts user-visible chronological navigation rather than a
+  particular cursor representation.
+- **Independent closure, 2026-10-27:** Historical paging now freezes the visible
+  maximum event ID and applies offsets within that fixed boundary; paging back
+  to offset zero explicitly resumes the live head. The original real
+  console/SQLite append regression passes. Latest capacity/progress queries
+  remain independent of the paged event query.
+
+### A15 — High: in-process task stdin reads capture the control terminal — CLOSED
+
+- **Location:** `dispatch_console_command` in-process `_task_result` branch and
+  `read_verbatim('-')`.
+- The standalone CLI intentionally reads stdin for `--file -`. In the REPL,
+  the new in-process task handler now reads the same raw terminal as curses.
+  The worker waits for EOF while stealing input; command-pending state then
+  prevents normal Ctrl-D exit. Previously the CLI child had stdin DEVNULL.
+- **Independent actual-PTY reproduction:** Start control, type
+  `task add --file -`, then repeated Ctrl-D. The control process remains alive
+  and stuck. `test_real_curses_stdin_file_request_keeps_control_input_available`
+  is independently RED in 2.27s; its finally block terminates only its own
+  disposable control process. No provider is started.
+- Route interactive stdin entry through a deliberate multiline/editor input
+  flow, or reject it clearly before any read and direct the operator to the
+  equivalent supported input flow. Never let a background handler read the
+  active curses stdin. Preserve standalone CLI stdin behavior.
+- **Independent closure, 2026-10-27:** The shared public parser now resolves the
+  command first, and the REPL rejects `prompt_file == '-'` before any handler
+  can read stdin, with a Ctrl-E multiline input hint. The actual curses PTY
+  regression now exits normally using Ctrl-D. Standalone CLI input handling is
+  unchanged; no string-only option guards remain.
+
+### A16 — High: ordinary stop does not stop a completed mission's session — CLOSED
+
+- **Location:** `_apply_operator_effect` stop handling and completed-controller
+  terminal lifecycle.
+- Completion correctly ends the controller while leaving its private terminal
+  available for inspection. A later ordinary stop only changes RUNNING/PAUSED
+  missions; for COMPLETED it returns success without terminating the retained
+  tmux server, Bridge UI or autonomous log-tail process. With no controller
+  remaining, nothing consumes that stop request.
+- **Independent real-controller reproduction:** `/bin/true` provider fixture,
+  local verifier, private tmux, mission COMPLETED and ownership lock released.
+  Ordinary `stop` returns 0 while the session and UI remain alive. The new
+  `tests/test_bridge_completed_stop.py` independently fails in 0.63s; cleanup
+  uses only that disposable mission's forced stop and private backend.
+- Stop must reconcile session resources independently of mission completion
+  state/controller presence. Preserve verified mission results while closing
+  the owned session, rather than requiring an undocumented force-stop step.
+  Also avoid acknowledging a no-op stop for other inactive-owner terminal
+  states. Do not infer absence of owned processes merely from mission status.
+- **Independent closure, 2026-10-27:** Ordinary stop now acquires the mission
+  ownership lock, rechecks terminal status, and stops the exact owned station
+  while retaining the terminal mission result. The original actual-controller,
+  private-tmux completion/stop regression passes. An active owner prevents this
+  separate cleanup path from racing controller resource management.
+
+### Original operator/monitor gap closure
+
+The original A4/A5 implementation gaps are now closed: task detail and separate
+detail scrolling, verbatim amendment loading, selected versus executing station
+projection and history, native restoration metadata, shared public commands,
+proposal provenance, scoped capacity forecasts and the full embedded Usage
+dashboard are implemented with inspected targeted tests. Indexed bounded event
+and convergence queries, elapsed/iteration/progress-age fields and actual
+sample-history warming address the earlier monitoring gaps. The two subsequent
+issues are tracked separately as A14 (stable historical log navigation) and A15
+(terminal-safe interactive stdin). Final ledger/documentation/coverage/CI
+evidence is still required on one frozen release head.
+
+### A17 — High: Claude native transcript format does not match its confirmation parser — CLOSED
+
+- **Location:** `bridge_sessions.provider_session_metadata` and
+  `_session_fields('claude', ...)`.
+- The adapter reads Claude's native `projects/<encoded-cwd>/<planned-uuid>.jsonl`
+  but only recognizes the `system.init` record emitted by the separate
+  stream-JSON output protocol. A bounded, read-only inspection of metadata keys
+  in three installed historical native transcript files found top-level
+  `sessionId` and `cwd` on `user`/`assistant` records. No message content,
+  credential values or session identities were printed or bound to Bridge.
+  The existing parser rejects these records, so the fake-native initialization
+  tests can pass while real Claude confirmation remains unavailable.
+- Project-directory encoding is also different: among eight bounded historical
+  files, slash-only encoding matched five directory names while replacing each
+  non-ASCII-alphanumeric character with `-` matched all eight. The fixture uses
+  an underscore/dot CWD and this observed encoding, rather than perpetuating
+  the fake adapter's slash-only path assumption. Only aggregate match counts
+  were printed; no historical paths or session values were retained.
+- `tests/test_bridge_native_metadata_review.py` supplies an anonymized native
+  transcript-shaped fixture at the exact ID-addressed path. Its positive
+  confirmation assertion independently fails (one failure in 0.08s). The same
+  test requires rejection of mismatched session ID and working directory.
+- Support the observed transcript metadata only with exact planned UUID,
+  matching CWD and provider-file provenance. Retain rejection of generic text,
+  unrelated sessions and filename-only identity inference. The narrower
+  stream-init parser may remain separately valid for stream output. No paid
+  Claude completion is authorized or needed to verify the metadata adapter;
+  live native Claude reply/resume must remain explicitly unverified.
+- Copilot's three bounded historical files expose `session.start`,
+  `data.sessionId` and `data.context`, consistent with the current adapter.
+- **Independent closure, 2026-10-27:** Native Claude user/assistant metadata is
+  now accepted with source `claude:transcript`, exact planned ID and matching
+  canonical CWD, using the observed nonalphanumeric project encoding. Legacy
+  stream-init identity remains valid independently. Sidechain and malformed
+  type records are rejected without exceptions. The original anonymized
+  metadata regression and updated controller/restart fake-native fixtures pass.
+  This verifies the adapter, not live paid Claude reply/resume.
+
+### A18 — Medium: plain start discards a mission's stored execution mode — CLOSED
+
+- **Location:** `bridge._build_parser` start mode defaults and `main` start
+  argument resolution.
+- `mission create --native` and `mission create --headless` persist their
+  execution choices, but later `start --mission ID` always sees both argparse
+  `store_true` fields as `False`. The `getattr(..., config.get(...))` fallback
+  never runs because those fields exist. Plain start consequently launches
+  autonomous tmux mode and overwrites either stored choice. This also affects
+  the shared REPL start command.
+- `tests/test_bridge_start_mode_review.py` independently fails both persisted
+  mode cases (two failures in 0.14s). It uses the real durable store and public
+  parser/handler, replacing only the final launch boundary to avoid provider
+  calls. Existing lifecycle tests covered explicit `--headless`, so they did
+  not exercise omission.
+- Distinguish omission from an explicit mode override. With no mode argument,
+  inherit the stored pair; an explicit `--native` or `--headless` selects that
+  mode exclusively. Retain rejection of explicitly conflicting flags.
+- **Independent closure, 2026-10-27:** Public start flags now preserve omission
+  as `None`, and the launch controller resolves both stored fields together.
+  Explicit native/headless selection clears the opposite stored mode; both
+  explicit flags remain invalid. Updated tests inspect final controller argv
+  across omitted and explicit selections, rather than requiring resolution at
+  a particular helper boundary. Independent start/CLI/runtime gate: **158 tests
+  passed in 4.22s**.
+
+### A19 — Medium: same-second operations can report an older execution as latest — CLOSED
+
+- **Location:** `bridge_monitor.project_snapshot`, bounded operations query.
+- Operation timestamps have second precision and their primary keys are
+  random UUIDs. Sorting by `created_at DESC,id DESC` therefore orders rapid
+  attempts by random ID rather than their insertion/launch sequence. After
+  the second operation exits, the monitor can report iteration 1, the older
+  station/model and an older restoration state. The active-operation filter
+  hides this in tests that leave the second operation RUNNING.
+- `tests/test_bridge_monitor_chronology_review.py` independently fails two
+  same-second cases (different stations and repeated station), using the real
+  store and monitor with deterministically reverse-lexicographic UUIDs. The
+  first failure reports iteration 1 instead of 2; additional assertions cover
+  last-launched station, newest configured model, history order and restoration
+  state. Result: two failures in 0.11s.
+- Use a real insertion sequence for operation chronology. This SQLite table
+  has a TEXT primary key and retains rowid, so a bounded descending rowid query
+  can supply that sequence without guessing chronology from UUID text.
+- **Independent closure, 2026-10-27:** The query now uses descending rowid and
+  a mission-prefix history index to retain bounded lookup. Both original
+  same-second fixtures pass, including latest station/model/restoration state.
+  Independent chronology/monitor/store/start/owned-pane gate: **69 tests passed
+  in 2.29s**. Root is separately checking FIFO command and handoff histories for
+  the same class of timestamp/UUID tie before final freeze.
+
+### A20 — Medium: owned-pane timeout repair changes explicit legacy bounds — CLOSED
+
+- **Location:** `scheduler.run_tmux`, timeout sentinel and wait condition.
+- Root identified the pre-existing implicit one-hour timeout on owned native
+  provider panes. Removing that implicit bound is appropriate because Bridge
+  owns their complete lifecycle. The initial repair uses numeric zero as the
+  unbounded sentinel and treats all `timeout <= 0` as unbounded, which also
+  changes explicit legacy `LLM_SCHEDULER_TMUX_TIMEOUT=0` or `-1` from an
+  immediate timeout to an indefinite wait.
+- `tests/test_scheduler_timeout_review.py` independently fails both explicit
+  legacy values (two failures in 0.11s). A provider fixture completes after one
+  poll so even the erroneous unbounded wait stays finite. The assertion
+  requires the original timeout result 124 before entering a polling wait.
+- Use a distinct absent/unbounded sentinel for the owned-pane default, retaining
+  the numeric comparison for explicitly configured values and the existing
+  legacy default. Existing positive override and long owned-pane tests should
+  continue passing.
+- **Independent closure, 2026-10-27:** The absent owned-pane timeout is now
+  represented by `None`; all explicit integers retain the original numeric
+  comparison. The original zero/negative regressions, positive owned timeout,
+  beyond-one-hour default owned wait and actual owned-pane tests pass:
+  **12 tests in 1.73s**. Only Bridge's implicit native bound is removed; the
+  legacy default and explicit bounds retain their prior behavior.
+
+### Independent delta verification, 2026-10-27
+
+`python -m pytest tests/test_bridge_review_regressions.py tests/test_bridge_long_prompt_editor.py tests/test_bridge_completed_stop.py tests/test_bridge_cli.py tests/test_usage_embedded.py -q -o addopts=''`
+passed **50 tests in 6.24s**. This covers the original A14/A15/A16 reproductions,
+the full verbatim editor, explicit mission argument forms, shared task handler
+and the embedded dashboard's disabled ephemeral service launch. The new A17
+regression remains separately red pending the provider metadata fix. Interactive
+attach is still under implementation and is not approved by this checkpoint.
+
+An additional independent run of monitor/refresh/Usage/progress/native-input
+oracle tests passed **42 tests in 1.00s**:
+`python -m pytest tests/test_bridge_monitor.py tests/test_bridge_refresh.py tests/test_bridge_usage.py tests/test_usage_embedded.py tests/test_bridge_progress.py tests/test_bridge_native_input_probe.py -q -o addopts=''`.
+The new wheel oracle checks movement of a known smoke marker and tmux pane mode
+zero before and after the event. Checked-in evidence honestly distinguishes
+Bridge wheel movement from unverified direct wheel/click behavior; it does not
+claim that a screen redraw alone proves provider mouse support.
+
+### Final integrated delta review, 2026-10-27
+
+The native metadata and completed interactive terminal changes were inspected.
+Terminal transitions are typed worker results, executed after curses restores
+the terminal. Embedded transitions verify the source socket and Bridge pane;
+cross-station attachment detaches only a selected writable client, preserves
+both servers and returns that client to the source when the destination
+detaches. Read-only/control clients are excluded, multiple writers require an
+explicit listed client, and standalone detach uses an exact client selector.
+Prefix/status focus explicitly removes zoom before selecting the target pane.
+
+The independent integrated command passed **85 tests in 19.91s**:
+`python -m pytest tests/test_bridge_native_metadata_review.py tests/test_bridge_session_boundaries.py tests/test_bridge_sessions.py tests/test_bridge_native_e2e.py tests/test_terminal_interactive_attach.py tests/test_terminal_attached.py tests/test_bridge_cli.py tests/test_bridge_long_prompt_editor.py tests/test_bridge_review_regressions.py tests/test_bridge_completed_stop.py -q -o addopts=''`.
+This includes actual outer-PTY cross-station/return and selected-client detach,
+curses restoration, exact owned native IDs, malformed metadata, real completed
+controller stop and original input/prompt regressions. The newer A18 test is
+separately red and is not represented by that passing result.
+
+Added coverage tests were inspected for rejection/state/process assertions;
+they do not replace actual PTY and controller evidence. Remaining release gates
+are A18 resolution, final whole-suite/global85/Bridge90 results on the final
+head, honest documentation and the root-owned bounded live probe. No paid model
+call or production change was made by the reviewer.

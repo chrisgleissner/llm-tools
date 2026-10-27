@@ -2241,13 +2241,13 @@ def render_from_service_payload(cfg: Config, payload: dict[str, Any]) -> bool:
     return True
 
 
-def _provider_data_via_service(cfg: Config) -> tuple[dict[str, Any], str | None] | None:
+def _provider_data_via_service(cfg: Config, *, start_ephemeral: bool = True) -> tuple[dict[str, Any], str | None] | None:
     if not cfg.use_service:
         return None
     try:
         from . import usage_service
 
-        payload = usage_service.request_snapshot(env=os.environ, start_ephemeral=True)
+        payload = usage_service.request_snapshot(env=os.environ, start_ephemeral=start_ephemeral)
     except Exception:
         return None
     if not isinstance(payload, dict):
@@ -2278,8 +2278,8 @@ def _service_hid_visible_provider(cfg: Config, provider_data: dict[str, Any]) ->
     return False
 
 
-def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None) -> tuple[dict[str, Any], str | None]:
-    service_data = _provider_data_via_service(cfg)
+def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None, *, start_ephemeral: bool = True) -> tuple[dict[str, Any], str | None]:
+    service_data = _provider_data_via_service(cfg, start_ephemeral=start_ephemeral)
     if service_data is not None:
         provider_data, generated_at = service_data
         return provider_data, generated_at
@@ -2551,7 +2551,7 @@ def dashboard_snapshot(cfg: Config, *, provider_data: dict[str, Any] | None = No
     from io import StringIO
 
     if provider_data is None:
-        provider_data, _ = _render_data_for_frame(cfg)
+        provider_data, _ = _render_data_for_frame(cfg, start_ephemeral=False)
     rows, show_model = _build_usage_rows(cfg, provider_data)
     cols = fitted_columns_for_rows(cfg, rows, show_model)
     stream = StringIO()

@@ -55,3 +55,37 @@ def test_convergence_requires_repeated_evidence_not_elapsed_build_time():
     reversals = [{'before':'a','after':'b'},{'before':'b','after':'a'},
                  {'before':'a','after':'b'},{'before':'b','after':'a'}]
     assert convergence_signals(reversals)['repeated_reversal'] is True
+
+
+def test_concurrent_file_edit_and_git_timeout_report_unknown(tmp_path, monkeypatch):
+    from llm_tools import bridge_progress as progress
+    subprocess.run(['git','init','-q',str(tmp_path)],check=True)
+    path = tmp_path/'file'
+    path.write_text('original')
+    inode = path.stat().st_ino
+    original_fdopen = progress.os.fdopen
+    def concurrent_edit(fd, *args, **kwargs):
+        stream = original_fdopen(fd,*args,**kwargs)
+        if progress.os.fstat(fd).st_ino == inode:
+            path.write_text('concurrent replacement contents')
+        return stream
+    monkeypatch.setattr(progress.os,'fdopen',concurrent_edit)
+    assert progress.repository_checkpoint(tmp_path)['fingerprint'] is None
+    monkeypatch.setattr(progress.os,'fdopen',original_fdopen)
+    def timeout(*args, **kwargs): raise subprocess.TimeoutExpired('git',2)
+    monkeypatch.setattr(progress.subprocess,'run',timeout)
+    assert progress.repository_checkpoint(tmp_path)['fingerprint'] is None
+
+
+def test_deleted_tracked_file_and_large_file_budget_are_observable(tmp_path):
+    subprocess.run(['git','init','-q',str(tmp_path)],check=True)
+    path = tmp_path/'tracked'
+    path.write_text('content')
+    subprocess.run(['git','-C',str(tmp_path),'add','tracked'],check=True)
+    before = repository_checkpoint(tmp_path)
+    path.unlink()
+    after = repository_checkpoint(tmp_path)
+    assert before['fingerprint'] != after['fingerprint']
+    assert after['files'] == 0
+    (tmp_path/'large').write_bytes(b'x'*65540)
+    assert repository_checkpoint(tmp_path,max_bytes=65536)['fingerprint'] is None
