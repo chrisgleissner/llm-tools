@@ -11,7 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TextIO
 
 from . import common
 from .capacity import ALL_PROVIDERS, CapacityKind, ProviderSnapshot
@@ -959,22 +959,23 @@ def title_separator(cfg: Config) -> str:
     return "·" if cfg.symbols_enabled else "-"
 
 
-def print_dashboard_header(cfg: Config) -> None:
+def print_dashboard_header(cfg: Config, *, stream: TextIO | None = None) -> None:
     stamp = datetime.now().strftime("%H:%M")
-    print(f"LLM Usage {title_separator(cfg)} {stamp}")
-    print()
+    print(f"LLM Usage {title_separator(cfg)} {stamp}", file=stream)
+    print(file=stream)
     if cfg.show_daily_budget:
-        print("Bars: quota rows █ available · ░ spent   ·   $ rows █ spent · ░ budget left")
-        print("Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.")
-        print("          $ rows show spend as a share of the overall monthly budget (green low · red at/over).")
-        print("          ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve")
-        print()
+        print("Bars: quota rows █ available · ░ spent   ·   $ rows █ spent · ░ budget left", file=stream)
+        print("Guidance: 5h rows forecast runout; weekly/monthly/budget rows compare remaining quota to time left.", file=stream)
+        print("          $ rows show spend as a share of the overall monthly budget (green low · red at/over).", file=stream)
+        print("          ✓ lasts until reset · ! empty before reset · × empty · ↑ headroom · = on pace · ↓ conserve", file=stream)
+        print(file=stream)
 
 
 def print_table_header(
     cfg: Config,
     show_model: bool = False,
     cols: list[tuple[str, int]] | None = None,
+    *, stream: TextIO | None = None,
 ) -> None:
     cols = cols or table_columns(cfg, show_model)
     head, rule_parts = [], []
@@ -987,8 +988,8 @@ def print_table_header(
     if cfg.show_source:
         head.append(cell(SOURCE_COL_WIDTH, "Source"))
         rule_parts.append(rule(SOURCE_COL_WIDTH, False, line))
-    print("".join(head))
-    print("".join(rule_parts))
+    print("".join(head), file=stream)
+    print("".join(rule_parts), file=stream)
 
 
 def table_fixed_width(cfg: Config, show_model: bool = False) -> int:
@@ -1149,7 +1150,7 @@ def spend_guidance(amount: float | None, currency: str | None, cfg: Config) -> s
     return f"\033[{spend_color_code(consumed)}m{text}\033[0m"
 
 
-def print_usage_rows(cfg: Config, rows: list[UsageRow], cols: list[tuple[str, int]] | None = None) -> None:
+def print_usage_rows(cfg: Config, rows: list[UsageRow], cols: list[tuple[str, int]] | None = None, *, stream: TextIO | None = None) -> None:
     show_model = any(row.model for row in rows)
     # First pass: build the display values so the column widths can be
     # computed against the actual cell text. Doing this in a separate
@@ -1177,7 +1178,7 @@ def print_usage_rows(cfg: Config, rows: list[UsageRow], cols: list[tuple[str, in
     emitted_blank = True
     for row, values, first_of_provider in rendered:
         if first_of_provider and not emitted_blank:
-            print()
+            print(file=stream)
         emitted_blank = False
         parts = []
         for idx, (label, width) in enumerate(cols):
@@ -1185,7 +1186,7 @@ def print_usage_rows(cfg: Config, rows: list[UsageRow], cols: list[tuple[str, in
             parts.append(cell_clipped(width, values.get(label, ""), gap))
         if cfg.show_source:
             parts.append(row.source or "-")
-        print("".join(parts))
+        print("".join(parts), file=stream)
 
 
 def print_row(cfg: Config, provider: str, window: str, used: Any, reset: Any, source: str, display_provider: str | None = None) -> None:
@@ -2240,13 +2241,13 @@ def render_from_service_payload(cfg: Config, payload: dict[str, Any]) -> bool:
     return True
 
 
-def _provider_data_via_service(cfg: Config) -> tuple[dict[str, Any], str | None] | None:
+def _provider_data_via_service(cfg: Config, *, start_ephemeral: bool = True) -> tuple[dict[str, Any], str | None] | None:
     if not cfg.use_service:
         return None
     try:
         from . import usage_service
 
-        payload = usage_service.request_snapshot(env=os.environ, start_ephemeral=True)
+        payload = usage_service.request_snapshot(env=os.environ, start_ephemeral=start_ephemeral)
     except Exception:
         return None
     if not isinstance(payload, dict):
@@ -2277,8 +2278,8 @@ def _service_hid_visible_provider(cfg: Config, provider_data: dict[str, Any]) ->
     return False
 
 
-def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None) -> tuple[dict[str, Any], str | None]:
-    service_data = _provider_data_via_service(cfg)
+def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None, *, start_ephemeral: bool = True) -> tuple[dict[str, Any], str | None]:
+    service_data = _provider_data_via_service(cfg, start_ephemeral=start_ephemeral)
     if service_data is not None:
         provider_data, generated_at = service_data
         return provider_data, generated_at
@@ -2539,6 +2540,40 @@ def _capture(fn: Any) -> list[str]:
 def render_once(cfg: Config) -> None:
     provider_data = _fetch_provider_data(cfg)
     render_from_provider_data(cfg, provider_data)
+
+
+def dashboard_snapshot(cfg: Config, *, provider_data: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Render the full dashboard to a private stream for an embedded terminal.
+
+    Fetching remains the caller's background responsibility. No subprocess
+    running llm-usage, global stdout redirection or duplicate quota math is used.
+    """
+    from io import StringIO
+
+    if provider_data is None:
+        provider_data, _ = _render_data_for_frame(cfg, start_ephemeral=False)
+    rows, show_model = _build_usage_rows(cfg, provider_data)
+    cols = fitted_columns_for_rows(cfg, rows, show_model)
+    stream = StringIO()
+    if not cfg.no_header:
+        print_dashboard_header(cfg, stream=stream)
+        print_table_header(cfg, show_model, cols, stream=stream)
+    print_usage_rows(cfg, rows, cols, stream=stream)
+    return {
+        "text": stream.getvalue(),
+        "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "rows": [{
+            "provider": row.provider,
+            "provider_label": row.provider_label or row.provider,
+            "model": row.model,
+            "scope": row.scope,
+            "remaining_percent": row.remaining,
+            "estimated_remaining": row.remaining_time if row.remaining_time not in {"", "-"} else None,
+            "reset_epoch": common.parse_epoch(row.reset),
+            "source": row.source,
+            "kind": row.kind,
+        } for row in rows],
+    }
 
 
 def render_watch_frame(cfg: Config) -> None:

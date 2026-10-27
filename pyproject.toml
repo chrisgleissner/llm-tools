@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-tools"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local LLM CLI usage and scheduling tools"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,7 @@ llm-usage = "llm_tools.usage:main"
 llm-scheduler = "llm_tools.scheduler:main"
 ralph-robin = "llm_tools.ralph_robin:main"
 llm-sleep-soak = "llm_tools.sleep_soak:main"
+llm-bridge = "llm_tools.bridge:main"
 
 [tool.setuptools.packages.find]
 include = ["llm_tools*"]

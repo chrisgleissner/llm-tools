@@ -14,6 +14,35 @@
 # Run `<tool> --help` (e.g. `ralph-robin --help`) to see the value each
 # flag expects (numbers, durations like "24h", comma-separated lists, etc.).
 
+# ---------------------------------------------------------------------------
+# LLM Bridge
+# ---------------------------------------------------------------------------
+# Bridge settings are supplied on `llm-bridge` commands. This config parser
+# does not support a [bridge] table. Mission creation flags include
+# --providers, --routes, --headless, and --native; see `llm-bridge mission create
+# --help`. Without --headless, tmux is required for the local control
+# station. --native asks the selected provider CLI to use its interactive UI;
+# otherwise the provider station shows the autonomous activity log. The
+# `--json` option changes output only; mission creation and controller start
+# are separate commands. A configured verifier is supplied as repeated
+# `--verifier-arg` argv elements, with `--verifier-timeout` defaulting to
+# 300 seconds. Provider logs default to 4 MiB with 3 rotations and 20 retained
+# run directories; `--capacity-refresh-seconds` defaults to 60. These limits
+# are per-mission CLI options, not TOML settings.
+#
+# Native session continuation is limited to exact Bridge-owned identities:
+# Claude Code and Copilot use a Bridge-generated UUID when the installed CLI
+# advertises --session-id, and Bridge checks structured provider metadata and
+# working directory before recording or resuming that exact ID. Codex session
+# IDs are not auto-discovered by recency or working directory; new Codex work
+# continues from reconstructed Bridge task/checkpoint/evidence context. A
+# model pin and a controller mode are labelled as configured unless a verified
+# observation supports an actual value. See docs/llm-bridge/operations.md.
+#
+# durable mission database defaults to
+# ${XDG_STATE_HOME:-~/.local/state}/llm-tools/llm-bridge and can be relocated
+# with LLM_BRIDGE_STATE_DIR.
+
 
 # ---------------------------------------------------------------------------
 # Shared defaults applied to all three tools. Each tool can override these
@@ -197,7 +226,6 @@
 # ralph-robin-only settings. Override [defaults] above.
 # ---------------------------------------------------------------------------
 
-[ralph]
 #providers             = ["claude", "codex", "kilo"]
 #scope                 = "auto"
 #min_remaining         = 1

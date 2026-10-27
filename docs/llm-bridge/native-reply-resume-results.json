@@ -1,0 +1,10 @@
+{
+  "provider": "codex",
+  "version": "0.164.0",
+  "native_reply": "PASS: exact native response observed",
+  "session_identity_source": "owned no-daemon descendant writable rollout FD, independently inspected",
+  "session_id": "01a17795-0e6a-7a00-9080-e5db0c68a535",
+  "native_resume": "PASS: exact-ID new native process recalled prior marker",
+  "provider_mouse": "NOT VERIFIED: model picker did not react to SGR click",
+  "model_call_budget": 2
+}

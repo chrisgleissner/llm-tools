@@ -25,8 +25,13 @@ Supported providers include: **Codex, Claude Code, GitHub Copilot, Kilo Code, Mi
 | `llm-scheduler`  | Run one prompt through one selected provider once that provider has usable capacity.             |
 | `ralph-robin`    | Keep autonomous work moving by rotating across providers instead of stopping at the first limit. |
 | `llm-sleep-soak` | Prove suspend/resume is reliable on this machine before trusting unattended overnight runs.      |
+| `llm-bridge`     | Create durable engineering missions, order tasks, inspect evidence, and control provider sessions. |
 
 <img src="./docs/img/llm-usage5.png" alt="LLM Usage"/>
+
+<img src="./docs/img/llm-bridge.png" alt="LLM Bridge with an actual native Codex station, capacity forecasts and persistent Bridge controls"/>
+
+LLM Bridge during native provider acceptance testing. The provider owns its terminal; Bridge keeps mission controls and capacity forecasts visible.
 
 ## Install
 
@@ -57,9 +62,10 @@ Open a new shell, then verify the commands are available:
 command -v llm-usage
 command -v llm-scheduler
 command -v ralph-robin
+command -v llm-bridge
 ```
 
-Other install paths: a release wheel (`pipx install <wheel-url>` from the [releases page](https://github.com/chrisgleissner/llm-tools/releases)), a local checkout (`pipx install .`), or running the scripts straight from a checkout (`./llm-usage`, `./llm-scheduler`, `./ralph-robin`).
+Other install paths: a release wheel (`pipx install <wheel-url>` from the [releases page](https://github.com/chrisgleissner/llm-tools/releases)), a local checkout (`pipx install .`), or running the scripts straight from a checkout (`./llm-usage`, `./llm-scheduler`, `./ralph-robin`, `./llm-bridge`).
 
 ## Quick Start
 
@@ -95,6 +101,50 @@ Follow the latest scheduler run:
 ```bash
 tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
 ```
+
+### LLM Bridge
+
+Create a mission from a verbatim prompt file, inspect its initial task, and start autonomous work:
+
+```bash
+llm-bridge mission create --file task.md --cwd "$PWD" --json
+llm-bridge mission list --json
+llm-bridge start --mission MISSION_ID
+llm-bridge status --mission MISSION_ID --json
+```
+
+The default run opens a private tmux station with an interactive Bridge command pane and a provider activity pane. Install `tmux` for this mode. Use `--headless` on mission creation or `start` to run without a station. Use `--native` to put an interactive provider CLI in the provider pane; `--native` and `--headless` cannot be combined. `--json` changes result formatting only; mission creation does not start the controller.
+
+Add a task from a file or standard input, then use task commands to order or amend it:
+
+```bash
+llm-bridge task add --mission MISSION_ID --file follow-up.md --priority 5 --acceptance "tests pass"
+llm-bridge task list --mission MISSION_ID --json
+llm-bridge task amend --mission MISSION_ID --task TASK_ID --file revised.md
+llm-bridge pause --mission MISSION_ID
+llm-bridge resume --mission MISSION_ID
+llm-bridge attach --mission MISSION_ID
+```
+
+A zero exit from a provider leaves the task in `VERIFYING`. Complete it with explicit operator approval or configure a deterministic verifier on mission creation. Each repeated `--verifier-arg` supplies one argv element; `{context}` is replaced with a private JSON file containing the task revision and acceptance criteria. A configured verifier succeeds on exit code zero. It may print JSON with `summary` and artifact paths relative to the mission working directory; `passed: false` explicitly vetoes success:
+
+```bash
+llm-bridge mission create --file task.md --cwd "$PWD" \
+  --verifier-arg ./verify-task --verifier-arg '{context}' --verifier-timeout 120
+llm-bridge task verify --mission MISSION_ID --task TASK_ID --approve
+```
+
+Verifier output and context files are private local artifacts. A verifier failure or timeout leaves the task awaiting review; it never marks the task complete.
+
+Tasks move through `QUEUED`, `READY`, `RUNNING`, `VERIFYING`, and then an operator or verifier decision; `BLOCKED`, `FAILED`, `PAUSED`, and `CANCELLED` remain visible for recovery. The full terminal control view has Bridge, Orders, Stations, Systems, Log, Sessions, and Palette views. Orders are paged in batches of 200 and searchable with Ctrl-F; task status and acceptance-criteria progress are shown in the mission summary. The Stations view separates the station you are viewing from the last station selected for execution. `llm-bridge station --mission ID NAME` changes only the viewed-station preference; it does not change provider routing.
+
+Bridge labels configured values separately from observations. A model pin shown for an operation is the configured scheduler value, not proof of the provider's active model. The Systems view reports configured mode and verified controller mode separately; provider liveness and observed model remain `unknown` unless supported by an observation event.
+
+`pause` waits for an active provider invocation to return, then holds the controller; it does not sleep the machine. During capacity waits, readiness is reevaluated while the host stays awake, and pause/stop commands interrupt the wait. A separate capacity-observation worker refreshes the monitor every 60 seconds by default. `stop` closes the owned station once stopped; `resume` starts or reconnects the controller. Force stop records unresolved work as uncertain before terminating only validated Bridge-owned processes. See [Bridge operations](./docs/llm-bridge/operations.md) for task states, control keys, verifier behavior, and recovery details.
+
+Native session continuation requires an exact Bridge-owned identity. For Claude Code and Copilot, Bridge supplies its own UUID when the installed CLI supports it, then checks structured provider metadata and the working directory. Codex identities are captured only from writable transcript descriptors in the validated owned process tree; Bridge never selects a session by recency. Resume requires the saved ID, directory, metadata and current CLI capability to agree. Without that evidence, Bridge reconstructs context from durable mission/task/checkpoint/evidence state. The repaired bounded live probe verifies Codex native reply, full controller stop, exact-ID restoration by a new controller, and context recall. Claude/Copilot live completion and restoration remain unverified. See [Bridge operations](./docs/llm-bridge/operations.md) for recovery behavior and evidence limits.
+
+Open the seven-view control screen with `llm-bridge control --mission ID`. The tmux station's compact command pane is available by attaching to the mission. Use `llm-bridge doctor` to check SQLite integrity and whether `tmux` is installed. See the [Bridge operations guide](./docs/llm-bridge/operations.md) for task states, terminal controls, pause/stop behavior, and recovery limits.
 
 ## Provider CLI Requirements
 

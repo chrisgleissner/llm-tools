@@ -1,0 +1,9 @@
+{
+  "provider": "codex",
+  "initial_prompt_budget": 2,
+  "native_reply": "PASS",
+  "native_resume": "NOT VERIFIED",
+  "provider_mouse": "NOT VERIFIED",
+  "cleanup": "PASS",
+  "version": "codex-cli 0.164.0"
+}

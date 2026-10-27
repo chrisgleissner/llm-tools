@@ -8,13 +8,15 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * `llm-scheduler` — submit a prompt to a provider CLI once usage data says it is usable (optionally waking/suspending around a scope reset).
 * `ralph-robin` — keep using one configured provider until it is exhausted, then rotate to the next provider and delegate launch/suspend behavior to `llm-scheduler`. Holds an OS idle inhibitor for the whole run so a desktop idle timer cannot suspend the machine mid-work, and when every provider is rate-limited it sleeps the machine itself via a verified RTC wake (see Suspend/wake reliability below).
 * `llm-sleep-soak` — repeatedly suspend and wake the machine using the exact production suspend path to prove sleep/resume is reliable on this hardware. Real-hardware test; cannot run in CI.
+* `llm-bridge` — create durable local engineering missions, order tasks, inspect verification evidence, and supervise provider work through a terminal control station.
 * `llm_tools/common.py` — shared helpers (provider readers, normalization, time/reset formatting, subprocess execution, usage decisions, PTY capture, wake diagnostics, and common CLI plumbing: argument validation, run-dir logging, prompt loading, argv/JSON conversion).
+* `llm_tools/bridge.py`, `bridge_store.py`, `bridge_runtime.py`, `bridge_monitor.py`, `bridge_sessions.py`, `bridge_logs.py`, `bridge_log_sink.py`, `bridge_refresh.py`, `bridge_tui.py`, and `terminal.py` — Bridge CLI, private SQLite mission state, controller, bounded status projection, typed provider-session identity, bounded operation logs, asynchronous capacity observer and terminal UI, and isolated tmux station.
 * `llm_tools/usage_service.py` — local-only `llm-usage` sampler service (Unix socket, latest snapshot, append-only history; systemd user service / launchd LaunchAgent install helpers).
 * `llm_tools/capacity.py` — generic `ProviderId`, `CapacityKind`, `CapacityScope`, `ProviderSnapshot`, and `UsageDecision` dataclasses plus the `decide`/`validate_scope`/`scope_pace` helpers. All provider-specific reader code lives outside this module.
 * `llm_tools/providers/kilo.py` — Kilo Code CLI adapter (parser for `kilo stats --days <MTD>` output, env-var fallback, command construction).
 * `llm_tools/providers/minimax.py` — MiniMax adapter (parser for `mmx quota show --output json` output, env-var fallback, command construction).
 * Python modules: `llm_tools/usage.py`, `llm_tools/scheduler.py`, `llm_tools/ralph_robin.py`, `llm_tools/sleep_soak.py`, `llm_tools/copilot_refresh.py`, and package marker `llm_tools/__init__.py`.
-* Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`, `llm-sleep-soak`.
+* Public direct-run command files: `llm-usage`, `llm-scheduler`, `ralph-robin`, `llm-sleep-soak`, `llm-bridge`.
 * Regression tests: `tests/` with pytest and fake provider commands.
 * Test helpers: `tests/conftest.py`; main suites: `tests/test_contracts.py`, `tests/test_additional_paths.py`, `tests/test_capacity.py`, `tests/test_kilo.py`, `tests/test_minimax.py`, `tests/test_ralph_kilo.py`, `tests/test_zai.py`, `tests/test_enabled_providers.py`.
 * Project/package config: `pyproject.toml`.
@@ -27,18 +29,24 @@ This repo contains small Linux Python CLIs for Codex, Claude Code, GitHub Copilo
 * Usage service history/logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-usage/service` (`latest.json`, `history.jsonl`, service logs)
 * Usage service socket/pid: `${XDG_RUNTIME_DIR:-/tmp/llm-tools-$UID}` (`llm-usage.sock`, `llm-usage.pid`) so Unix socket paths stay below platform length limits.
 * Copilot background refresh helper: `llm_tools/copilot_refresh.py`, launched by `read_copilot` for detached cache refreshes.
+* Bridge durable state: `${XDG_STATE_HOME:-$HOME/.local/state}/llm-tools/llm-bridge` (override `LLM_BRIDGE_STATE_DIR`); SQLite mission/task/event/operation state, controller runtime files, verifier artifacts, and controller logs are stored below this private state directory. Provider-run logs are bounded by per-mission settings (default 4 MiB per file, three rotations, latest 20 run directories); pruned operation logs retain size and SHA-256 audit metadata.
+* Bridge tmux socket: `${XDG_RUNTIME_DIR}/llm-bridge/m-<mission-hash>.sock` when a suitable private runtime directory is available, otherwise `/tmp/lb-$UID/m-<mission-hash>.sock`. This short private path avoids Unix socket length limits. No network listener is used.
 * Scheduler run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-scheduler/logs`
 * Ralph Robin run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/logs`
 * Ralph Robin state: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/state.json`
 * Suspend cycle ledger (durable, fsync'd; shared by ralph-robin and the soak): `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/ralph-robin/suspend-ledger.jsonl`
 * Sleep-soak run logs: `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools/llm-sleep-soak/logs`
 
-Keep these as dependency-light Python CLIs sharing helper modules. The only supported server process is the explicitly requested, local-only `llm-usage` sampler in `llm_tools/usage_service.py`; keep it Unix-socket based, user-scoped, dependency-free, and optional. Do not add a database, telemetry, broad provider SDK design, or network listener unless explicitly requested. Shared logic belongs in `llm_tools/common.py` and `llm_tools/capacity.py`, not duplicated across CLIs or provider adapters.
+Keep these as dependency-light Python CLIs sharing helper modules. The `llm-usage` sampler is the only local service; it remains Unix-socket based, user-scoped, dependency-free, and optional. Bridge uses a local SQLite database for durable mission state and an isolated, user-owned tmux server for interactive terminals; it does not add a network listener. Do not add telemetry or a broad provider SDK design unless explicitly requested. Shared usage logic belongs in `llm_tools/common.py` and `llm_tools/capacity.py`, not duplicated across CLIs or provider adapters.
 
 ## Fast checks
 
 ```bash
-chmod +x llm-usage llm-scheduler ralph-robin llm-sleep-soak
+chmod +x llm-usage llm-scheduler ralph-robin llm-sleep-soak llm-bridge
+./llm-bridge --help
+./llm-bridge mission create --help
+./llm-bridge task --help
+./llm-bridge steer --help
 ./llm-usage
 ./llm-usage --json
 ./llm-usage --show-source --show-remaining-time
@@ -74,6 +82,7 @@ printf '%s\n' '{"rate_limits":{"five_hour":{"used_percentage":10}}}' | ./llm-usa
 * Ralph Robin rotation: `select_tool`, `scheduler_config_for`, `run_scheduler_inline`, state helpers, status/highlight helpers
 * Suspend/wake reliability (`common.py`): `power_backend`, `IdleSuspendInhibitor`, `arm_rtc_wake`, `read_rtc_wakealarm`, `Watchdog`, `suspend_with_wake`, `wall_clock_wait_until`, ledger helpers (`ledger_record_start`/`ledger_record_done`/`incomplete_suspend_cycles`); ralph wiring: `guard_against_auto_suspend`, `report_prior_suspend_failures`, `SuspendState`, `suspend_block_reason`, `suspend_machine_until`
 * Sleep soak: `llm_tools/sleep_soak.py` (`run_cycle`, `summarize`, `scrape_resume_errors`, `main`)
+* LLM Bridge: `llm_tools/bridge.py` (mission/task CLI and shared command dispatch), `llm_tools/bridge_store.py` (SQLite schema, transitions, events and evidence), `llm_tools/bridge_runtime.py` (controller, Ralph hooks, verifier execution, and recovery), `llm_tools/bridge_monitor.py` (bounded mission/task/status projection), `llm_tools/bridge_refresh.py` (background read-only capacity observation worker), `llm_tools/bridge_sessions.py` (typed provider IDs and exact resume capability checks), `llm_tools/bridge_logs.py` and `bridge_log_sink.py` (bounded private provider logs and pruning metadata), `llm_tools/bridge_tui.py` (asynchronous snapshot refresh, compact console, seven control views, and task editor), `llm_tools/terminal.py` (owned tmux server and PTY input/resize handling)
 
 Prefer changing the smallest relevant function surface. Preserve existing function boundaries unless a helper clearly reduces duplication or risk.
 

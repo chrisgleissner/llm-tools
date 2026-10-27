@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -2554,6 +2554,12 @@ def json_for_copilot(copilot_json: dict[str, Any] | None, show_credits: bool = F
     return out
 
 
+def usage_history_provider(provider: str) -> str:
+    """Canonical aggregate sample label shared with the usage dashboard."""
+    return {"codex": "Codex", "claude": "Claude", "minimax": "MiniMax",
+            "zai": "Z.ai", "opencode": "OpenCode", "kilo": "Kilo"}.get(provider, provider)
+
+
 def log_usage_sample(provider: str, window: str, remaining: Any, env: dict[str, str] | None = None) -> None:
     if remaining in (None, "", "-", "unknown"):
         return
@@ -3258,7 +3264,9 @@ def model_decision_scopes(provider: str, snapshot: dict[str, Any], model: str | 
                 week = entry.get("week")
                 if not isinstance(week, dict):
                     return None
-                return [_window_scope_dict("weekly", week, str(snapshot.get("source", "")))]
+                scope = _window_scope_dict("weekly", week, str(snapshot.get("source", "")))
+                scope["usage_history_provider"] = f"Claude {entry['model']}"
+                return [scope]
         return None
     if provider == "codex":
         # The spark row is the only per-model Codex bucket; any other model maps
@@ -3276,7 +3284,9 @@ def model_decision_scopes(provider: str, snapshot: dict[str, Any], model: str | 
         for name, key in (("5h", "five_hour"), ("weekly", "week")):
             window = spark.get(key)
             if isinstance(window, dict):
-                scopes.append(_window_scope_dict(name, window, source))
+                scope = _window_scope_dict(name, window, source)
+                scope["usage_history_provider"] = str(spark.get("name") or "Codex Spark")
+                scopes.append(scope)
         return scopes or None
     return None
 
@@ -3361,6 +3371,10 @@ def usage_decision_for_provider(
         decision["model_exhausted"] = (
             model_decision.get("usable") is not True if model_decision is not None else False
         )
+    decision["usage_history_provider"] = (
+        model_scopes[0].get("usage_history_provider", usage_history_provider(provider))
+        if model_scopes and not allow_fallback else usage_history_provider(provider)
+    )
     return decision
 
 
@@ -3467,6 +3481,8 @@ def run_pty_capture(
     idle_timeout: int = 0,
     question_idle_timeout: int = 0,
     env: dict[str, str] | None = None,
+    on_process_started: Callable[[int], None] | None = None,
+    max_output_bytes: int = 0,
 ) -> tuple[int, str]:
     safe_prompts = SAFE_TRUST_PROMPTS
     blocking_patterns = BLOCKING_PROMPT_PATTERNS
@@ -3480,6 +3496,20 @@ def run_pty_capture(
         if env is None:
             os.execvp(argv[0], list(argv))
         os.execvpe(argv[0], list(argv), env)
+    if on_process_started is not None:
+        try:
+            on_process_started(pid)
+        except BaseException:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            os.waitpid(pid, 0)
+            os.close(fd)
+            raise
     try:
         if sys.stdout.isatty():
             winsize = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
@@ -3490,6 +3520,26 @@ def run_pty_capture(
         pass
 
     chunks: list[str] = []
+    retained_bytes = 0
+    output_truncated = False
+
+    def append_output(text: str) -> None:
+        nonlocal retained_bytes, output_truncated
+        chunks.append(text)
+        retained_bytes += len(text.encode("utf-8", "replace"))
+        if max_output_bytes <= 0:
+            return
+        while chunks and retained_bytes > max_output_bytes:
+            excess = retained_bytes - max_output_bytes
+            first_bytes = chunks[0].encode("utf-8", "replace")
+            if len(first_bytes) <= excess:
+                retained_bytes -= len(first_bytes)
+                chunks.pop(0)
+            else:
+                trimmed = first_bytes[excess:].decode("utf-8", "replace")
+                chunks[0] = trimmed
+                retained_bytes -= excess
+            output_truncated = True
     trust_sent = False
     exit_code = 124
     start = time.time()
@@ -3509,7 +3559,7 @@ def run_pty_capture(
         abort_reason = reason
         exit_code = AUTONOMY_ABORT_STATUS
         line = f"\nllm-scheduler: autonomous abort: {reason}\n"
-        chunks.append(line)
+        append_output(line)
         if stream:
             os.write(sys.stdout.fileno(), line.encode("utf-8", "replace"))
 
@@ -3536,7 +3586,7 @@ def run_pty_capture(
                     eof = True
                     break
                 text = raw.decode("utf-8", "replace")
-                chunks.append(text)
+                append_output(text)
                 last_progress = time.time()
                 if stream:
                     try:
@@ -3599,6 +3649,9 @@ def run_pty_capture(
                 break
             time.sleep(0.2)
     text = strip_ansi("".join(chunks))
+    if output_truncated:
+        marker = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n"
+        text = marker + text
     if output_path:
         output_path.write_text(text, encoding="utf-8")
     if status_path:
