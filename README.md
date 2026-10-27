@@ -104,6 +104,27 @@ tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
 
 ### LLM Bridge
 
+Run `llm-bridge` from any folder to open its home screen. Choose an existing mission
+or press **N** to create one in the current folder. The form lets you choose the
+working directory, providers and autonomous/native mode. Creation opens the
+controls; it starts no provider until you run `start`. Use `attach` afterward
+to enter the combined Bridge/provider station. **Q** exits the home screen;
+**Ctrl-D** exits the controls. Without a terminal, the bare command prints help.
+
+Bridge uses semantic colours for navigation, selection, status, warnings, errors
+and secondary information while preserving your terminal's background. It detects
+dark/light mode from `COLORFGBG`; set `LLM_BRIDGE_THEME=dark` or
+`LLM_BRIDGE_THEME=light` if your terminal does not advertise its background.
+`NO_COLOR` and `TERM=dumb` retain a readable monochrome interface.
+
+<p>
+<img src="./docs/img/llm-bridge-dark.png" width="49%" alt="Actual Bridge controls in a dark terminal"/>
+<img src="./docs/img/llm-bridge-light.png" width="49%" alt="Actual Bridge controls in a light terminal"/>
+</p>
+
+Actual installed control terminals with an isolated acceptance mission; no provider
+execution is implied by these theme screenshots.
+
 Create a mission from a verbatim prompt file, inspect its initial task, and start autonomous work:
 
 ```bash

@@ -14,6 +14,7 @@ import os
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import textwrap
@@ -24,6 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .bridge_theme import colors_disabled, fit_role_color, resolve_theme, role_sgr, sgr_foreground
+from .common import ANSI_COLOR_ROLES
 from .terminal import TerminalAction
 
 
@@ -55,6 +58,7 @@ PALETTE_COMMANDS = (
     "control",
     "task add --help",
     "proposal list",
+    "start",
 )
 _REFRESH_SECONDS = 0.25
 _MAX_COMMAND_CHARS = 4096
@@ -69,6 +73,81 @@ _MAX_EVENT_ROWS = 80
 _MAX_DETAIL_TEXT = 16000
 _MAX_DETAIL_ITEMS = 12
 _NAV_HINT = "F1-8/Tab views PgUp/Dn pages Ctrl-E add Ctrl-R edit Ctrl-] z expand Ctrl-D exit"
+_COLOR_ROLES = tuple(ANSI_COLOR_ROLES)
+_ROLE_PAIRS: dict[str, int] = {}
+_ROLE_ATTRS: dict[str, int] = {}
+_CURRENT_THEME = "dark"
+
+
+def initialize_colors(env: dict[str, str] | None = None, *, is_tty: bool | None = None) -> bool:
+    """Initialize the Bridge semantic palette for the active curses terminal.
+
+    Colors fall back to monochrome when the output is not a terminal, the
+    terminal is dumb, or NO_COLOR / LLM_USAGE_NO_COLOR is set. The default
+    terminal background is preserved whenever curses supports it.
+    """
+    global _CURRENT_THEME, _ROLE_PAIRS, _ROLE_ATTRS
+    values = os.environ if env is None else env
+    _CURRENT_THEME = resolve_theme(values)
+    _ROLE_PAIRS = {}
+    _ROLE_ATTRS = {}
+    if is_tty is None:
+        is_tty = sys.stdout.isatty()
+    if not is_tty or colors_disabled(values):
+        return False
+    try:
+        if not curses.has_colors():
+            return False
+        curses.start_color()
+    except (AttributeError, curses.error):
+        return False
+
+    default_colors = False
+    try:
+        curses.use_default_colors()
+        default_colors = True
+    except (AttributeError, curses.error):
+        pass
+
+    fallback_bg = -1
+    if not default_colors:
+        fallback_bg = curses.COLOR_WHITE if _CURRENT_THEME == "light" else curses.COLOR_BLACK
+    for pair, role in enumerate(_COLOR_ROLES, start=1):
+        if pair >= curses.COLOR_PAIRS:
+            break
+        sgr = role_sgr(role, theme=_CURRENT_THEME, env=values)
+        foreground, bold, dim, underline = sgr_foreground(sgr)
+        if foreground is None and default_colors:
+            foreground_color = -1
+        else:
+            foreground_color = fit_role_color(foreground, curses.COLORS, _CURRENT_THEME)
+        try:
+            curses.init_pair(pair, foreground_color, fallback_bg)
+        except curses.error:
+            continue
+        _ROLE_PAIRS[role] = pair
+        attr = curses.color_pair(pair)
+        # Eight-color terminals commonly render bold as a brighter ANSI slot.
+        # On a light background that can turn readable dark red into low-
+        # contrast bright red. Selection retains its own reverse/bold cue.
+        if bold and not (_CURRENT_THEME == "light" and curses.COLORS <= 8 and foreground_color >= 0):
+            attr |= curses.A_BOLD
+        if dim:
+            attr |= curses.A_DIM
+        if underline:
+            attr |= curses.A_UNDERLINE
+        _ROLE_ATTRS[role] = attr
+    return bool(_ROLE_PAIRS)
+
+
+def role_attr(role: str) -> int:
+    """Return the current curses attribute for a semantic Bridge color role."""
+    if role == "selected":
+        base = _ROLE_ATTRS.get("brand", 0)
+        return base | curses.A_BOLD | curses.A_REVERSE
+    if role == "secondary":
+        role = "dim"
+    return _ROLE_ATTRS.get(role, 0)
 
 
 def _text(value: object, limit: int = 1000) -> str:
@@ -1021,13 +1100,58 @@ class _ConsoleState:
                 self.selected = max(0, row_index - row_offset)
 
 
-def _put(window: curses.window, y: int, x: int, value: object, width: int) -> None:
+def _put(
+    window: curses.window,
+    y: int,
+    x: int,
+    value: object,
+    width: int,
+    *,
+    role: str | None = None,
+    attr: int = 0,
+    preserve_spacing: bool = False,
+) -> None:
     if width <= 0:
         return
+    if preserve_spacing:
+        rendered = "".join(char if unicodedata.category(char) not in {"Cc", "Cs"} else " " for char in str(value))[:width]
+    else:
+        rendered = _text(value, width)
+    style = attr | (role_attr(role) if role else 0)
     try:
-        window.addnstr(y, x, _text(value, width), width)
+        window.addnstr(y, x, rendered, width, style)
+    except TypeError:
+        # Keep lightweight recording windows compatible with curses' optional
+        # attr argument; real curses windows always accept it.
+        try:
+            window.addnstr(y, x, rendered, width)
+        except curses.error:
+            pass
     except curses.error:
         pass
+
+
+def _status_role(value: str) -> str:
+    """Pick a semantic role for short status and response lines."""
+    lowered = value.lower()
+    if any(token in lowered for token in ("none ready", "no tasks ready")):
+        return "dim"
+    if any(token in lowered for token in ("not ready", "ready=false")):
+        return "warn"
+    if any(token in lowered for token in ("error", "failed", "rejected", "could not", "unavailable")):
+        return "error"
+    if any(token in lowered for token in ("warning", "blocked", "waiting", "rate limit", "paused", "retry")):
+        return "warn"
+    if any(token in lowered for token in ("applied:", "completed", "success", "usable", "ready", "passed")):
+        return "ok"
+    return "dim"
+
+
+def _draw_navigation(window: curses.window, index: int, separator: str, width: int) -> None:
+    labels = _nav_labels(index)
+    _put(window, 2, 0, separator.join(labels), width, role="dim", preserve_spacing=True)
+    offset = sum(len(label) for label in labels[:index]) + len(separator) * index
+    _put(window, 2, offset, labels[index], min(len(labels[index]), width - offset), role="selected")
 
 
 def _header(state: _ConsoleState, width: int) -> str:
@@ -1091,7 +1215,7 @@ def _handle_mouse_event(
 def _draw_compact(window: curses.window, state: _ConsoleState) -> None:
     height, width = window.getmaxyx()
     window.erase()
-    _put(window, 0, 0, _header(state, width), width)
+    _put(window, 0, 0, _header(state, width), width, role="brand")
     rows = state.rows()
     if height >= 2:
         first = _orders_summary(state) if state.view == "Orders" else (rows[0] if rows else "Status unavailable")
@@ -1099,20 +1223,19 @@ def _draw_compact(window: curses.window, state: _ConsoleState) -> None:
             forecasts = _capacity_summaries(state.snapshot)
             if forecasts:
                 first = forecasts[0]
-        _put(window, 1, 0, first, width)
+        _put(window, 1, 0, first, width, role="info")
     if height >= 3:
-        nav = _nav_line(state.view_index, " ")
-        _put(window, 2, 0, nav, width)
+        _draw_navigation(window, state.view_index, " ", width)
     if height >= 4:
         selected = state.selected + (1 if state.view == "Bridge" else 2 if state.view == "Stations" else 0)
         detail = rows[min(selected, max(0, len(rows) - 1))] if rows else ""
-        _put(window, 3, 0, detail, width)
+        _put(window, 3, 0, detail, width, role="selected" if rows else "info")
     if height >= 5:
         prompt = _input_prompt(state)
-        _put(window, 4, 0, prompt + _command_display(state.command, width - len(prompt)), width - len(prompt))
+        _put(window, 4, 0, prompt + _command_display(state.command, width - len(prompt)), width - len(prompt), role="command")
     if height >= 6:
         hint = state.snapshot_error or (state.output[-1] if state.output else _hint(state))
-        _put(window, 5, 0, hint, width)
+        _put(window, 5, 0, hint, width, role=_status_role(hint) if state.snapshot_error or state.output else "dim")
     window.noutrefresh()
     curses.doupdate()
 
@@ -1120,17 +1243,16 @@ def _draw_compact(window: curses.window, state: _ConsoleState) -> None:
 def _draw_full(window: curses.window, state: _ConsoleState) -> None:
     height, width = window.getmaxyx()
     window.erase()
-    _put(window, 0, 0, _header(state, width), width)
+    _put(window, 0, 0, _header(state, width), width, role="brand")
     mission = _mission(state.snapshot)
     if height >= 2:
         if state.view == "Orders":
             context = _orders_summary(state)
         else:
             context = f"Objective: {_text(mission.get('objective', 'No objective recorded'), width - 12)}"
-        _put(window, 1, 0, context, width)
+        _put(window, 1, 0, context, width, role="secondary")
     if height >= 3:
-        nav = _nav_line(state.view_index, "  ")
-        _put(window, 2, 0, nav, width)
+        _draw_navigation(window, state.view_index, "  ", width)
     content_height = max(0, height - 6)
     rows = state.rows()
     if state.view == "Usage":
@@ -1143,17 +1265,16 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
         marker = "> " if start + offset == selected_row else "  "
         if state.view == "Usage":
             clean = "".join(char if unicodedata.category(char) not in {"Cc", "Cs"} else " " for char in value)
-            try:
-                window.addnstr(offset+3, 0, marker+clean, width)
-            except curses.error:
-                pass
+            role = "selected" if start + offset == selected_row else _status_role(clean)
+            _put(window, offset + 3, 0, marker + clean, width, role=role, preserve_spacing=True)
         else:
-            _put(window, offset + 3, 0, marker + value, width)
+            role = "selected" if start + offset == selected_row else _status_role(value)
+            _put(window, offset + 3, 0, marker + value, width, role=role)
     if height >= 2:
         prompt = _input_prompt(state)
-        _put(window, height - 2, 0, prompt + _command_display(state.command, width - len(prompt)), width - len(prompt))
+        _put(window, height - 2, 0, prompt + _command_display(state.command, width - len(prompt)), width - len(prompt), role="command")
         status = state.snapshot_error or (state.output[-1] if state.output else _hint(state))
-        _put(window, height - 1, 0, status, width)
+        _put(window, height - 1, 0, status, width, role=_status_role(status) if state.snapshot_error or state.output else "dim")
     window.noutrefresh()
     curses.doupdate()
 
@@ -1181,9 +1302,9 @@ def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
     """Show bounded multiline help/query output without losing input context."""
     height, width = window.getmaxyx()
     window.erase()
-    _put(window, 0, 0, "Command response", width)
+    _put(window, 0, 0, "Command response", width, role="heading")
     if height >= 2:
-        _put(window, 1, 0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-8/Tab switch view", width)
+        _put(window, 1, 0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-8/Tab switch view", width, role="dim")
     rows = _response_rows(state, width)
     content_top = 2
     footer_rows = 1 if height >= 4 else 0
@@ -1198,10 +1319,7 @@ def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
             char if unicodedata.category(char) not in {"Cc", "Cs"} else " "
             for char in value
         )
-        try:
-            window.addnstr(content_top + offset, 0, safe, width)
-        except curses.error:
-            pass
+        _put(window, content_top + offset, 0, safe, width, role=_status_role(safe), preserve_spacing=True)
     if footer_rows:
         if rows:
             visible_start = state.response_scroll + 1 if content_height else 0
@@ -1209,7 +1327,7 @@ def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
             counter = f"{visible_start}-{visible_end}/{len(rows)}" if content_height else f"0/{len(rows)}"
         else:
             counter = "0/0"
-        _put(window, height - 1, 0, f"{counter} response lines", width)
+        _put(window, height - 1, 0, f"{counter} response lines", width, role="dim")
     window.noutrefresh()
     curses.doupdate()
 
@@ -1342,6 +1460,7 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
     state.refresh(force=True)
 
     def loop(window: curses.window) -> int | TerminalAction | ControlViewAction:
+        initialize_colors()
         window.keypad(True)
         window.timeout(100)
         try:

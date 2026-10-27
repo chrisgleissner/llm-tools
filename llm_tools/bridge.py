@@ -714,6 +714,17 @@ def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"}:
+            from .bridge_launcher import run_launcher
+
+            try:
+                return run_launcher(main)
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"llm-bridge: {exc}", file=sys.stderr)
+                return 2
+        _build_parser().print_help()
+        return 0
     if arguments and arguments[0] in {"--prompt-file", "--file", "--prompt"}:
         try:
             return _legacy_prompt_mode(arguments)

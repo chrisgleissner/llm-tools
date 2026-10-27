@@ -10,6 +10,47 @@ Install `llm-tools` as usual. The console station needs `tmux`; `--headless`
 can run a mission without it. The existing provider CLIs and credentials are
 used by the scheduler. Bridge adds no provider SDK or network service.
 
+Run `llm-bridge` with no arguments from any working directory to open the home
+screen. Use Up/Down and Enter to choose a mission, or **N** for a new mission.
+The creation form defaults to the current folder and Codex, lets you edit the
+folder and provider list, and switches autonomous/native mode with Space.
+Tab/Enter moves between fields, Ctrl-U clears a field, and Esc returns home.
+Creating a mission saves its initial task and opens controls without starting
+provider work. Type `start` in controls when ready, then `attach` to enter the
+combined Bridge/provider station. Ctrl-D leaves controls;
+Q leaves the home screen. Existing explicit subcommands remain available.
+For multiline initial objectives, use `mission create --file` as below.
+
+The installed executable works outside the checkout. After upgrading an older
+local editable installation that lacks the new commands, refresh it with
+`pipx install --force --editable /path/to/llm-tools`; `command -v llm-bridge`
+should resolve the pipx launcher. `llm-bridge doctor --json` checks private
+storage integrity and tmux availability. No-argument use without a terminal
+prints help and does not create mission state.
+
+## Dark and light terminal themes
+
+Bridge applies semantic colour roles to headings, navigation, selected rows,
+command input, success, warnings, errors and secondary text. It preserves the
+terminal's default background; selected rows also use bold/reverse video so
+focus is visible without colour. The native provider continues to own its
+terminal colours and input.
+
+`LLM_BRIDGE_THEME=dark|light` selects a palette explicitly. Otherwise Bridge
+uses `COLORFGBG`, falling back to dark when the terminal does not report a
+background. Use `LLM_TOOLS_COLOR_<ROLE>` to override a shared role with an SGR
+specification, for example `LLM_TOOLS_COLOR_ERROR='1;34'`. `NO_COLOR`,
+`TERM=dumb`, non-terminal output and truthy `LLM_USAGE_NO_COLOR` disable colour.
+If your shell sets `NO_COLOR`, use `env -u NO_COLOR llm-bridge` to request colour
+for one launch while keeping your shell preference unchanged.
+
+[Dark terminal](../img/llm-bridge-dark.png) and
+[light terminal](../img/llm-bridge-light.png) show actual installed control UIs
+with an isolated acceptance mission. No provider execution is implied by those
+screenshots.
+
+## Explicit mission creation
+
 Create a mission from a file (or use `--prompt TEXT` for a short objective):
 
 ```bash

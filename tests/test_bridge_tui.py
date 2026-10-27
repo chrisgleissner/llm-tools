@@ -137,7 +137,7 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["pause"]
     assert bridge_tui.PALETTE_COMMANDS[8:11] == ("steer --help", "attach", "detach")
-    assert bridge_tui.PALETTE_COMMANDS[11:] == ("usage", "control", "task add --help", "proposal list")
+    assert bridge_tui.PALETTE_COMMANDS[11:] == ("usage", "control", "task add --help", "proposal list", "start")
 
 
 def test_multiline_response_overlay_scrolls_and_view_keys_dismiss_without_dispatching_text() -> None:

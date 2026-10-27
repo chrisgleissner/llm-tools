@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .bridge_theme import tmux_role_markup
+
 
 @dataclass(frozen=True)
 class TerminalHandle:
@@ -183,6 +185,8 @@ class TmuxTerminalBackend:
             raise FileExistsError(f"private tmux configuration already exists: {config_path}")
         provider_cmd = self._command(provider_argv)
         bridge_cmd = self._command(bridge_argv)
+        status_left = f"{tmux_role_markup('brand')} Bridge controls [C-] B] #[default]"
+        status_right = f"{tmux_role_markup('ok')} Provider [C-] P] #[default]"
         config = (
             "set-option -g remain-on-exit on\n"
             "set-option -g mouse on\n"
@@ -191,11 +195,11 @@ class TmuxTerminalBackend:
             "set-option -g @llm_bridge_station 1\n"
             'set-option -g default-terminal "screen-256color"\n'
             "set-option -g status on\n"
-            "set-option -g status-style 'bg=colour234,fg=colour250'\n"
+            "set-option -g status-style 'bg=default,fg=default'\n"
             "set-option -g status-left-length 42\n"
             "set-option -g status-right-length 30\n"
-            "set-option -g status-left '#[fg=colour39,bold] Bridge controls [C-] B] #[default]'\n"
-            "set-option -g status-right '#[fg=colour76,bold] Provider [C-] P] #[default]'\n"
+            f"set-option -g status-left {shlex.quote(status_left)}\n"
+            f"set-option -g status-right {shlex.quote(status_right)}\n"
         )
         config += (
             f"bind-key {prefix} send-prefix\n"
@@ -289,12 +293,12 @@ class TmuxTerminalBackend:
             self._run(
                 socket,
                 "set-option", "-g", "status-left",
-                "#[fg=colour39,bold] Bridge controls [C-] B] #[default]",
+                status_left,
             )
             self._run(
                 socket,
                 "set-option", "-g", "status-right",
-                "#[fg=colour76,bold] Provider [C-] P] #[default]",
+                status_right,
             )
             # Use pane IDs captured from this exact launch. Prefix shortcuts
             # are in tmux's prefix table, so native providers receive all keys

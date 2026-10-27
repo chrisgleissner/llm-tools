@@ -87,3 +87,24 @@ environments, and passed CLI help plus private mission create, verbatim prompt,
 pending amendment and task inspection checks from outside the source tree.
 Original directive and user prompt remain unchanged. See `release-verification.md`
 for the source verification record. GitHub CI must pass before publication.
+
+
+## 1.1.1 local startup and semantic themes, 2026-10-27
+
+User-reported local startup was reproduced: pipx metadata0.1.0 lacked the
+Bridge entrypoint, and bare `llm-bridge` failed required-subcommand parsing.
+The local install now exposes all five commands at version1.1.1. Bare TTY use
+opens a mission launcher from any folder; bare non-TTY use prints help.
+Create-only acceptance and harmless full-controller start/verify-gate/stop
+checks pass outside the checkout, including folders with spaces.
+
+Dark/light semantic palettes, active navigation/selection, status roles, shared
+colour overrides and monochrome/limited-terminal fallbacks are implemented.
+Actual installed-terminal screenshots and layout/contrast/real-PTY regressions
+are included. Full Usage spacing and response indentation remain intact.
+
+Final frozen source: **1,299 passed** on3.11.14 in199.94s and3.15.1 in191.83s;
+**global89%, Bridge91%** pass unchanged CI gates. Independent Sol6.1 High source
+review closes A25–A27; no unresolved findings. See
+`release-1.1.1-verification.md`. Numeric1.1.1 publication remains gated on final
+exact-head CI and rebuilt/published artifact checks. Existing1.1.0 is immutable.

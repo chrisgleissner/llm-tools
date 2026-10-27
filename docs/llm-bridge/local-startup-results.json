@@ -1,0 +1,18 @@
+{
+  "installed_controller": "PASS",
+  "unrelated_cwd": "PASS",
+  "zero_provider_calls": true,
+  "task_verification_gate": "PASS",
+  "controller_cleanup": "PASS",
+  "installed_version": "1.1.1",
+  "installed_path_command": "PASS",
+  "bare_home_from_unrelated_folder": "PASS",
+  "folder_with_spaces": "PASS",
+  "dark_and_light_startup": "PASS",
+  "literal_leading_dash_objective": "PASS",
+  "create_only_zero_operations": "PASS",
+  "function_key_navigation": "PASS",
+  "normal_control_exit": "PASS",
+  "storage_integrity": "ok",
+  "tmux_available": true
+}

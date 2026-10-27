@@ -77,6 +77,7 @@ def test_real_curses_stdin_file_request_keeps_control_input_available(tmp_path: 
     state = tmp_path / "state"
     with BridgeStore(state / "bridge.sqlite3") as store:
         mission = store.create_mission("Stdin control", "Keep keyboard control", cwd=tmp_path, initial_prompt="Original")
+        mission_id = mission["id"]
     env.update(LLM_BRIDGE_STATE_DIR=str(state), TERM="xterm-256color", VISUAL="/bin/true")
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -87,30 +88,38 @@ def test_real_curses_stdin_file_request_keeps_control_input_available(tmp_path: 
     os.close(slave)
     try:
         output = bytearray()
-        deadline = time.monotonic() + 4
-        while time.monotonic() < deadline and b"Stdin control" not in output:
-            readable, _, _ = select.select([master], [], [], 0.03)
-            if readable:
-                output.extend(os.read(master, 65536))
+
+        def read_until(marker: bytes, timeout: float) -> None:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline and process.poll() is None:
+                readable, _, _ = select.select([master], [], [], 0.03)
+                if readable:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+                if marker in output:
+                    return
+            assert marker in output, f"real control screen did not render {marker!r}"
+
+        read_until(b"Stdin control", timeout=4)
         assert b"Stdin control" in output
         os.write(master, b"task add --file -\r")
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([master], [], [], 0.03)
-            if readable:
-                output.extend(os.read(master, 65536))
-            if b"Command submitted" in output:
-                break
-        deadline = time.monotonic() + 2
-        while process.poll() is None and time.monotonic() < deadline:
-            os.write(master, b"\x04")
-            readable, _, _ = select.select([master], [], [], 0.05)
-            if readable:
-                try:
-                    os.read(master, 65536)
-                except OSError:
-                    break
-        assert process.poll() == 0, "task --file - captured terminal input and prevented normal control exit"
+        rejection = b"error: press Ctrl-E with these options"
+        read_until(rejection, timeout=4)
+        assert rejection in output
+        with BridgeStore(state / "bridge.sqlite3") as store:
+            assert len(store.list_tasks(mission_id)) == 1, "rejected stdin request must not create a task"
+
+        # PTY EOF/EIO can arrive before Python has completed its final exit
+        # work. Wait for the child itself after sending one control key instead
+        # of treating a closed PTY as proof that the process has exited.
+        os.write(master, b"\x04")
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError("the Bridge control UI stopped accepting Ctrl-D after the stdin request") from exc
+        assert process.returncode == 0
     finally:
         if process.poll() is None:
             process.terminate()

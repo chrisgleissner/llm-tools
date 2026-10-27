@@ -1362,3 +1362,151 @@ Reviewer execution environment: the independent commands above used the local
 default **Python3.14.4**. Root's required Python3.11 and Python3.15 final gates
 are separate evidence and are not claimed as independently executed by this
 reviewer.
+
+
+### A25 — Medium: real-curses stdin test assumes PTY closure proves process exit — CLOSED, final patch gate pending
+
+- **Location:** `tests/test_bridge_long_prompt_editor.py`, stdin/control exit
+  assertion. The post-merge Python 3.11 CI run observed `poll() is None` after
+  the PTY-read loop ended; the release tag matrix separately passed.
+- The original test breaks on PTY read `OSError` and immediately requires
+  `process.poll()==0`. PTY slave closure does not establish that final child
+  process exit is observable yet. It also waits for command submission rather
+  than the actual stdin-request rejection before beginning its exit-key loop.
+- Independent unchanged-node reproduction: **30 consecutive passes** on
+  Python 3.11.14, with unique `/tmp/lb-postmerge-review-original-{1..30}`
+  basetemps. A disposable instrumented copy showed errno5/EIO at ordinary
+  terminal closure in **20/20** runs; all those samples already had exit 0. The
+  exact CI failure was not instrumented and its timing is not retrospectively
+  proven.
+- An independent disposable child explicitly closed descriptors 0/1/2 before
+  0.25s of finalization. The PTY master returned EIO while `poll()` was None;
+  bounded `wait()` then returned 0 after 0.264s. This establishes the invalid
+  lifecycle assumption without attributing a production stdin-capture bug.
+- The repaired test waits for the actual `press Ctrl-E` rejection, asserts the
+  durable task count remains one, sends one Ctrl-D and awaits the child itself.
+  This strengthens the observable contract and removes the shutdown-poll race.
+  Independent updated-file runs passed **2 tests in 2.73s on Python 3.11.14** and
+  **2 tests in 2.74s on Python 3.15.1**, using separate
+  `/tmp/lb-review-a25-fixed-{311,315}` basetemps.
+- No production defect was demonstrated. The repair is test-only. Final CI and
+  release gates for the separately authorized 1.1.1 launcher/theme work remain
+  pending and are not implied by this targeted closure.
+
+
+### A26 — Medium: semantic-color refactor collapses embedded dashboard columns — CLOSED
+
+- **Location:** `bridge_tui._draw_full` Usage branch and response-overlay
+  writer, now routed through `_put` by the 1.1.1 theme refactor.
+- `_put` uses `_text`, which intentionally collapses whitespace for ordinary
+  labels. The prior Usage writer preserved repeated spaces so the full
+  llm-usage renderer's table retained its column alignment. Routing those lines
+  through `_put` converts `Provider       Scope       Remaining` into
+  `Provider Scope Remaining`. Response indentation is similarly lost.
+- An independent actual `_draw_full` call with a controlled Usage snapshot
+  confirmed both header and provider rows lose their spacing. This violates
+  the accepted full embedded-dashboard contract even though labels remain
+  visible and the initial frozen **141-test / 14.14s** changed-surface gate passed.
+- Add a whitespace-preserving, control-sanitized write path for already-formatted
+  Usage and response lines while retaining semantic attributes and bounded
+  width. Regression assertions must check the actual rendered repeated spaces
+  and response indentation, not only label presence or row builders.
+- Parent and theme implementor were notified during the root coverage freeze;
+  the reviewer has not edited production or tests. This blocks approval of the
+  new theme patch until repaired and independently verified.
+
+
+### A27 — Medium: launcher objective can be reinterpreted as a CLI option — CLOSED
+
+- **Location:** `bridge_launcher.run_launcher`, shared mission-create argv.
+- A literal objective such as `--help` is valid nonempty form input, but the
+  launcher passes it as the argument following a separate `--prompt` token.
+  Argparse interprets the objective as an option and raises `SystemExit(2)`
+  before mission creation. Because dispatch runs under captured stderr, this
+  bypasses the normal form error/retry path and can terminate the launcher
+  without an actionable visible error.
+- Independent reproduction validated `Launcher(objective='--help')`, then
+  invoked the exact shared `main` argv shape: it raised SystemExit2. No mission
+  or provider process was created. This is an argument-boundary issue, not
+  shell execution; the launcher correctly uses an argv list.
+- Pass the objective as a literal option value using `--prompt=<objective>` and
+  add a shared-handler regression that stores a leading-dash objective verbatim.
+  Parent was notified during the frozen diagnostic run. No production/test
+  edits were made by the reviewer.
+
+
+**A26/A27 independent closure, 2026-10-27:** The styled writer now has a bounded
+whitespace-preserving path that still replaces control characters. Usage rows,
+response indentation and the navigation background use it. The selected-tab
+overlay and mouse layout now share the actual rendered separator spacing.
+Assertions cover exact rendered columns, indentation and highlight offset. The
+launcher supplies `--prompt=<objective>` and its shared-handler regression stores
+`--help` verbatim. The reviewer independently reran the actual Usage and
+navigation reproductions; both pass.
+
+The independent post-fix command passed **145 tests in 14.10s on Python 3.14.4**:
+
+```text
+python -m pytest tests/test_bridge_launcher.py tests/test_bridge_colors.py tests/test_bridge_long_prompt_editor.py tests/test_bridge_tui.py tests/test_bridge_tui_error_contracts.py tests/test_bridge_tui_projection_contracts.py tests/test_bridge_cli.py tests/test_terminal_backend.py tests/test_terminal_attached.py tests/test_terminal_interactive_attach.py tests/test_terminal_teardown_failure.py -q -o addopts='' --basetemp=/tmp/lb-review-111-final
+```
+
+Independent launcher/color/editor gates also passed **39 tests in 3.78s on
+Python 3.11.14** and **39 tests in 3.82s on Python 3.15.1**, using the three first
+files above with `/tmp/lb-review-111-final-{311,315}` basetemps. These commands
+precede the separately identified limited-color bold adjustment; they are not
+represented as final whole-suite evidence for that later change.
+
+The reviewer also exercised the actual installed
+`/home/chris/.local/bin/llm-bridge` in a real PTY from an unrelated temporary
+folder, with PYTHONPATH/PYTHONHOME removed and HOME/XDG/config/state isolated.
+Both dark and light launches created an objective of `--help` verbatim in the
+chosen folder, remained CREATED with zero operations, and exited 0 after one
+Ctrl-D. This validates the local installed entrypoint independently of module
+tests that deliberately add the repository import path.
+
+The actual dark/light Xvfb control screenshots were independently viewed. The
+first limited-color light screenshot exposes bold promotion of the warning
+color; root is addressing that narrow rendering issue and retaking the main
+screens with explicit 256-color capability. Source review found no further
+Critical/High issue. Final 1.1.1 approval awaits that follow-up, the final frozen
+whole-suite/coverage gates and exact-head CI; capability-specific native limits
+remain as previously recorded.
+
+
+## Final 1.1.1 independent source-review disposition
+
+The complete startup/theme delta and its follow-up were independently reviewed.
+A25 is a test-only shutdown assertion repair; A26 and A27 are closed with
+actual rendered-spacing, navigation-coordinate and literal-objective
+regressions. The later light-theme eight-color adjustment suppresses bold only
+for colored foregrounds, avoiding bright-slot promotion; selection keeps its
+bold/reverse cue and dark-mode emphasis remains. The shared SGR override decoder
+also honors reset and underline-off semantics.
+
+On the final frozen production/test source, the same eleven-file command above
+passed **145 tests in 14.08s on Python 3.14.4**, with
+`--basetemp=/tmp/lb-review-111-release-final`. The launcher/color/editor command
+passed **39 tests in 3.87s on Python 3.15.1**, with
+`--basetemp=/tmp/lb-review-111-release-final-315`. The earlier supported-minimum
+39-test gate passed on Python 3.11.14; root separately owns the final full
+3.11/3.15 matrix and coverage runs for this last attribute adjustment. These
+overlapping gate counts must not be summed as unique tests.
+
+The reviewer viewed the retaken actual installed-control screenshots
+`docs/img/llm-bridge-dark.png` and `docs/img/llm-bridge-light.png`, captured through
+a real Xvfb/xterm with explicit 256-color capability. Navigation/selection,
+warning contrast and dark/light readability have no visual blocker. The capture
+mission's CREATED state and zero provider operations do not claim live model
+execution. The separate installed-entrypoint checks from an unrelated folder
+retain their precise evidence above.
+
+**Source review: approved.** No unresolved Critical, High or Medium finding
+remains in the reviewed 1.1.1 changes. Publication approval remains conditional
+on the exact final-source Python 3.11/3.15 whole-suite/global85/Bridge90 gates,
+artifact installation/version checks and exact-head GitHub CI. Pending runs
+are not labelled passed. Native provider capability limits remain unchanged
+unless the root-owned latest live probes supply stronger evidence.
+
+Only review records were edited by this reviewer. Production/tests remained
+frozen during verification. `git diff --check` passed and the original user
+directive remains untouched.
