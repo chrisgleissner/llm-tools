@@ -111,7 +111,8 @@ def _version(executable: str) -> str:
 class _DirectPTY:
     """Launch the CLI directly in an ordinary one-pane tmux PTY for comparison."""
 
-    def __init__(self, argv: list[str], cwd: Path, *, timeout: float, socket_path: Path) -> None:
+    def __init__(self, argv: list[str], cwd: Path, *, timeout: float, socket_path: Path,
+                 size: tuple[int, int] = _WINDOW) -> None:
         self.socket_path = socket_path
         socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         socket_path.parent.chmod(0o700)
@@ -119,7 +120,7 @@ class _DirectPTY:
         env["TERM"] = "xterm-256color"
         subprocess.run(
             ["tmux", "-S", str(socket_path), "-f", "/dev/null", "new-session", "-d", "-s", "direct",
-             "-x", str(_WINDOW[0]), "-y", str(_WINDOW[1]), shlex.join(argv)],
+             "-x", str(size[0]), "-y", str(size[1]), shlex.join(argv)],
             cwd=cwd, env=env, check=True, capture_output=True, timeout=8,
         )
         for command in (
@@ -131,7 +132,7 @@ class _DirectPTY:
             subprocess.run(["tmux", "-S", str(socket_path), *command], check=True,
                            capture_output=True, text=True, timeout=3)
         self.master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", _WINDOW[1], _WINDOW[0], 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[1], size[0], 0, 0))
 
         def controlling_terminal() -> None:
             os.setsid()
@@ -375,12 +376,6 @@ def _provider_result(provider: str, argv: list[str], cwd: Path, *, timeout: floa
     direct = station = None
     handle = None
     try:
-        direct = _DirectPTY(argv, cwd, timeout=max(1.0, provider_deadline - time.monotonic()),
-                            socket_path=socket_path.with_name("direct.sock"))
-        direct_result = _run_ui_sequence(direct, provider=provider, history_marker=history_marker)
-        direct.close()
-        direct = None
-
         handle = backend.start(
             provider_argv=argv,
             bridge_argv=[sys.executable, "-c", "import time; time.sleep(180)"],
@@ -388,8 +383,24 @@ def _provider_result(provider: str, argv: list[str], cwd: Path, *, timeout: floa
         )
         station = _StationPTY(backend, handle, timeout=max(1.0, provider_deadline - time.monotonic()))
         station_result = _run_ui_sequence(station, provider=provider, history_marker=history_marker)
+        geometry = subprocess.run(
+            ["tmux", "-S", str(socket_path), "display-message", "-p", "-t", handle.provider_pane,
+             "#{pane_width} #{pane_height}"],
+            check=True, capture_output=True, text=True, timeout=3,
+        ).stdout.split()
+        viewport = (int(geometry[0]), int(geometry[1]))
+        result["provider_viewport"] = {"columns": viewport[0], "rows": viewport[1]}
         station.close()
         station = None
+        backend.stop(handle)
+        # Equal provider dimensions matter: history may fit in a taller direct
+        # terminal while scrolling in Bridge's shorter provider viewport.
+        # Run sequentially so two CLIs never write the resumed session at once.
+        direct = _DirectPTY(argv, cwd, timeout=max(1.0, provider_deadline - time.monotonic()),
+                            socket_path=socket_path.with_name("direct.sock"), size=viewport)
+        direct_result = _run_ui_sequence(direct, provider=provider, history_marker=history_marker)
+        direct.close()
+        direct = None
         result["direct"] = direct_result
         result["bridge_tmux"] = station_result
         result["input_parity"] = (
@@ -407,7 +418,7 @@ def _provider_result(provider: str, argv: list[str], cwd: Path, *, timeout: floa
             else:
                 result["mouse_parity"] = f"DIFFERENT: direct={direct_mouse}; bridge={station_mouse}"
             direct_wheel, station_wheel = direct_result.get("wheel"), station_result.get("wheel")
-            if direct_wheel == station_wheel == "visible-scroll":
+            if str(direct_wheel).startswith("PASS:") and str(station_wheel).startswith("PASS:"):
                 result["wheel_parity"] = "PASS: visible history scroll in direct and Bridge paths"
             elif direct_wheel == station_wheel:
                 result["wheel_parity"] = f"NOT VERIFIED: both paths observed {direct_wheel}"

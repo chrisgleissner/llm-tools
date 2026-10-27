@@ -1,8 +1,17 @@
 # Installed provider capability evidence
 
-Observed 2026-10-25 on the implementation host. Version/help inspection is
+Historical discovery below was observed 2026-10-25 on the implementation host. Version/help inspection is
 not proof of authenticated runtime, mouse, model identity, or native restoration.
 No credentials or provider conversation payloads belong in this record.
+
+Current 2026-10-27 evidence supersedes the initial runtime column below:
+Codex 0.164.0 native reply/full-stop/exact-ID resume/context recall and cleanup
+pass (`final-native-mission.json`). Equal 120x32 direct/Bridge provider viewports
+pass Codex local model-menu input and known-marker wheel movement; both paths
+show no visible effect from a current-model click, so selection is unverified.
+Claude 2.1.310 local `/help` input passes; paid reply/native resume for Claude
+and Copilot remain unverified (`final-native-input.json`). Final independent
+review uses `gpt-6.1-sol` / `high`, superseding the earlier reviewer assignment.
 
 | Provider | Installed version | Observed native entry / resume interface | Runtime verification |
 | --- | --- | --- | --- |

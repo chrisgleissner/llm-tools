@@ -1,0 +1,87 @@
+{
+  "model_calls": 0,
+  "codex_session": "exact supplied ID and cwd metadata verified",
+  "codex": {
+    "version": "codex-cli 0.164.0",
+    "model_calls": 0,
+    "direct": {
+      "keyboard_local_model_picker": "PASS",
+      "model_picker_signal_observed": true,
+      "mouse_click_x": 12,
+      "mouse_click_y": 27,
+      "mouse_pane_in_mode": 0,
+      "model_picker_before_click": true,
+      "mouse": "screen-changed",
+      "model_picker_after_click": true,
+      "mouse_pane_in_mode_after": 0,
+      "wheel_pane_in_mode_before": 0,
+      "wheel_marker": "NATIVE_BRIDGE_OK",
+      "wheel_marker_rows_before": [
+        1,
+        4,
+        12
+      ],
+      "wheel_pane_in_mode_after": 0,
+      "wheel_marker_rows_after": [
+        5,
+        8,
+        16
+      ],
+      "wheel": "PASS: known smoke marker moved within the provider viewport"
+    },
+    "bridge_tmux": {
+      "keyboard_local_model_picker": "PASS",
+      "model_picker_signal_observed": true,
+      "mouse_click_x": 12,
+      "mouse_click_y": 27,
+      "mouse_pane_in_mode": 0,
+      "model_picker_before_click": true,
+      "mouse": "no-visible-effect",
+      "model_picker_after_click": true,
+      "mouse_pane_in_mode_after": 0,
+      "wheel_pane_in_mode_before": 0,
+      "wheel_marker": "NATIVE_BRIDGE_OK",
+      "wheel_marker_rows_before": [
+        1,
+        4,
+        12
+      ],
+      "wheel_pane_in_mode_after": 0,
+      "wheel_marker_rows_after": [
+        5,
+        8,
+        16
+      ],
+      "wheel": "PASS: known smoke marker moved within the provider viewport"
+    },
+    "input_parity": "PASS: local command input rendered in both paths",
+    "mouse_parity": "DIFFERENT: direct=screen-changed; bridge=no-visible-effect",
+    "wheel_parity": "PASS: visible history scroll in direct and Bridge paths",
+    "provider_viewport": {
+      "columns": 120,
+      "rows": 32
+    },
+    "cleanup": "PASS"
+  },
+  "claude": {
+    "version": "2.1.310 (Claude Code)",
+    "model_calls": 0,
+    "direct": {
+      "keyboard_help": "PASS",
+      "help_signal_observed": true
+    },
+    "bridge_tmux": {
+      "keyboard_help": "PASS",
+      "help_signal_observed": true
+    },
+    "input_parity": "PASS: local command input rendered in both paths",
+    "mouse_parity": "NOT TESTED",
+    "wheel_parity": "NOT TESTED",
+    "provider_viewport": {
+      "columns": 120,
+      "rows": 32
+    },
+    "cleanup": "PASS"
+  },
+  "cleanup": "PASS"
+}

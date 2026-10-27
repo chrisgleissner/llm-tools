@@ -309,12 +309,16 @@ class TmuxTerminalBackend:
                     f"select-pane -t {target}",
                 )
             for mouse_key, target in (
-                ("MouseDown1StatusLeft", bridge_pane),
-                ("MouseDown1StatusRight", pane),
+                # Handle a status click on release. Unzooming on mouse-down
+                # changes the row under the pointer before tmux classifies the
+                # matching release, so it can be mistaken for a pane click
+                # and steal focus from the requested status target.
+                ("MouseUp1StatusLeft", bridge_pane),
+                ("MouseUp1StatusRight", pane),
                 # tmux versions and terminals differ in how they classify the
                 # right-hand status click. The generic status binding keeps
                 # the provider target reliable outside the explicit left hitbox.
-                ("MouseDown1Status", pane),
+                ("MouseUp1Status", pane),
             ):
                 self._run(
                     socket,

@@ -1,6 +1,58 @@
 # LLM Bridge resume handover
 
-## CURRENT — 2026-10-27 publication checkpoint
+## CURRENT — 2026-10-27 verified publication candidate
+
+Repository `/home/chris/dev/llm-tools`, branch `feat/llm-bridge`, PR26:
+https://github.com/chrisgleissner/llm-tools/pull/26. This checkpoint extends
+`41cff55`; use `git log -1` for its resulting commit. All existing changes are
+preserved, including the original `prompt.md`. The user authorizes push/PR
+updates and merge/release once actual merge-readiness passes. Numeric release
+candidate remains `1.1.0`; latest published version was checked as `1.0.0`.
+
+FINAL LOCAL GATES PASSED
+- Unchanged final production/tests: Python3.11.14 **1,262 passed196.73s**;
+  Python3.15.1 **1,262 passed188.98s**. Exact CI branch-coverage gates both pass:
+  global**89%** >=85%; `bridge*.py,terminal.py` **92%** >=90%.
+- Sol6.1 High independent full-spec/integration review closes A1–A24, with
+  targeted source, actual owned-FD/native-E2E and terminal repetitions. No
+  unresolved findings. Review approval is conditional on final full/CI gates.
+- Final wheel and sdist rebuilt and installed into isolated3.11/3.15 environments;
+  help and private create/verbatim prompt/pending-amendment/show checks passed
+  from outside the source tree. Diffcheck and compileall pass.
+- Repaired bounded native Codex probe passed reply, pause/full stop/lock release,
+  exact owned UUID under a new controller, context recall and cleanup. The
+  reader now parses only the bounded first JSONL record; later records/large
+  transcripts cannot defeat capture. Probe no longer queues work before stop.
+- Equal measured120×32 native viewports pass Codex local `/model`, Claude `/help`
+  and known-marker wheel parity, zero model prompts. Current-model click has
+  no visible effect in either path: selection remains NOT VERIFIED. Paid
+  Claude/Copilot completion/native restoration remain unverified.
+- Real repeated terminal acceptance passes after status targeting moved to
+  mouse release, preventing post-unzoom release focus stealing. Single-click
+  stable focus and unique input delivery are asserted. External kill-server
+  test waits for definite absence instead of treating UNKNOWN as dead.
+- Failed task details survive REPL response rendering; explicit Usage/Control
+  mission options share the public parser and typed terminal transitions.
+
+PUBLICATION
+Push this complete checkpoint and refresh PR26; inspect exact-head Python3.11/
+3.15 push AND PR CI and review threads. No GitHub review threads existed at
+last inspection. Keep draft until those checks pass. Then mark ready, merge,
+and publish1.1.0; verify release workflow and downloaded wheel/sdist. Refer to
+GitHub PR/release state for actions completed after this committed handover.
+No user confirmation is required: publication is already authorized.
+
+EVIDENCE
+`docs/llm-bridge/release-verification.md`, `progress.md`, `review-findings.md`,
+`spec-audit.md`, `final-native-{mission,input}.json`, README actual screenshot.
+Local final logs are `/tmp/bridge-publication-{311,315}/`; built artifacts are
+`/tmp/bridge-publication-artifacts/`. Runtime/session/process safety invariants
+and the earlier architecture decisions below remain in effect. Never claim
+unobserved provider/reboot/multiweek behavior as verified.
+
+All historical records below are superseded by this CURRENT section.
+
+## Previous publication checkpoint — 2026-10-27
 
 Resume the existing implementation in `/home/chris/dev/llm-tools`, branch
 `feat/llm-bridge`, draft PR https://github.com/chrisgleissner/llm-tools/pull/26.

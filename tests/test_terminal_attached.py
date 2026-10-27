@@ -139,6 +139,21 @@ with out.open("ab", buffering=0) as log:
                 screen.extend(os.read(master, 65536))
         assert predicate(), f"timed out; client exit={process.poll()}"
 
+    def wait_for_stable(predicate, timeout: float = 5, stable_for: float = 0.075) -> None:
+        deadline = time.monotonic() + timeout
+        stable_since: float | None = None
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            if predicate():
+                stable_since = stable_since or now
+                if now - stable_since >= stable_for:
+                    return
+            else:
+                stable_since = None
+            if select.select([master], [], [], 0.01)[0]:
+                screen.extend(os.read(master, 65536))
+        raise AssertionError(f"state did not remain stable; client exit={process.poll()}")
+
     def received(path: Path, expected: bytes) -> bool:
         return path.exists() and expected in path.read_bytes()
 
@@ -159,6 +174,7 @@ with out.open("ab", buffering=0) as log:
         ).stdout.strip() == "1"
 
     def prefix_key(key: str) -> None:
+        expected = handle.bridge_pane if key == "B" else handle.provider_pane if key == "P" else None
         for _attempt in range(5):
             wait_for(lambda: not prefix_pending())
             os.write(master, b"\x1d")
@@ -171,12 +187,8 @@ with out.open("ab", buffering=0) as log:
             break
         else:
             raise AssertionError(f"tmux did not accept the configured prefix before {key!r}")
-        expected = handle.bridge_pane if key == "B" else handle.provider_pane if key == "P" else None
         if expected:
-            try:
-                wait_for(lambda: active_pane() == expected)
-            except AssertionError as exc:
-                raise AssertionError(f"prefix {key} target mismatch active={active_pane()} zoom={zoomed()}") from exc
+            wait_for_stable(lambda: active_pane() == expected)
 
     try:
         wait_for(lambda: b"NATIVE READY" in screen)
@@ -232,7 +244,10 @@ with out.open("ab", buffering=0) as log:
         wait_for(zoomed)
         client_height = int(attached_geometry()[0].split("x", 1)[1])
         os.write(master, f"\x1b[<0;3;{client_height}M\x1b[<0;3;{client_height}m".encode("ascii"))
-        wait_for(lambda: active_pane() == handle.bridge_pane and not zoomed())
+        wait_for_stable(
+            lambda: active_pane() == handle.bridge_pane
+            and not zoomed()
+        )
         os.write(master, b"bridge-after-status-click")
         wait_for(lambda: received(controls, b"bridge-after-status-click"))
 
@@ -240,16 +255,13 @@ with out.open("ab", buffering=0) as log:
         wait_for(zoomed)
         client_width, client_height_text = attached_geometry()[0].split("x", 1)
         status_y = int(client_height_text)
-        status_right_x = int(client_width)
-        for status_right_x in range(int(client_width) - 1, int(client_width) - 31, -1):
-            click = f"\x1b[<0;{status_right_x};{status_y}M\x1b[<0;{status_right_x};{status_y}m".encode("ascii")
-            os.write(master, click)
-            deadline = time.monotonic() + 0.15
-            while time.monotonic() < deadline and (active_pane() != handle.provider_pane or zoomed()):
-                select.select([master], [], [], 0.01)
-            if active_pane() == handle.provider_pane and not zoomed():
-                break
-        assert active_pane() == handle.provider_pane and not zoomed(), f"right click state active={active_pane()} zoom={zoomed()} x={status_right_x}"
+        status_right_x = int(client_width) - 3
+        click = f"\x1b[<0;{status_right_x};{status_y}M\x1b[<0;{status_right_x};{status_y}m".encode("ascii")
+        os.write(master, click)
+        wait_for_stable(
+            lambda: active_pane() == handle.provider_pane
+            and not zoomed()
+        )
         print(f"right status target column {status_right_x}")
         os.write(master, b"provider-after-status-click")
         wait_for(lambda: received(provider, b"provider-after-status-click"))

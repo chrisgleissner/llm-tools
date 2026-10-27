@@ -741,3 +741,29 @@ def test_log_page_keys_request_older_and_newer_snapshots_without_changing_orders
     state.handle_key('KEY_NPAGE')
     state.handle_key('KEY_NPAGE')
     assert state.event_offset == 0
+
+
+def test_failed_task_inspection_preserves_failure_details() -> None:
+    task = {"id": 7, "status": "FAILED", "prompt": "inspect trace", "title": "failure evidence"}
+    import json
+    response = bridge_tui._command_feedback("task show --task 7", json.dumps(task))
+    assert json.loads(response) == task
+    assert bridge_tui._command_feedback("cancel 7", '{"status":"FAILED","result":{"error":"blocked"}}') == "Rejected: blocked"
+
+
+def test_parsed_control_transition_opens_requested_view_after_wrapper_returns(monkeypatch) -> None:
+    calls = []
+    actions = iter([bridge_tui.ControlViewAction("other", "Usage"), 0])
+    monkeypatch.setattr(bridge_tui.curses, "wrapper", lambda callback: next(actions))
+    monkeypatch.setattr(bridge_tui, "run_control", lambda mid, dispatch, snapshot, **kwargs: calls.append((mid, kwargs)))
+    assert bridge_tui.run_console("source", lambda *_: "", lambda *_: {}) == 0
+    assert calls == [("other", {"initial_view": "Usage"})]
+
+
+def test_explicit_current_mission_view_command_expands_without_terminal_transition() -> None:
+    state = bridge_tui._ConsoleState("current", lambda *_: "", lambda *_: {}, full=False)
+    state._command_result = bridge_tui.ControlViewAction("current", "Usage")
+    state.command_pending = True
+    state.refresh()
+    assert state.view == "Usage" and state.expand_requested
+    assert not state.command_pending and state.terminal_action is None

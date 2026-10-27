@@ -33,3 +33,23 @@ orchestration/restoration, final integrated implementation. Reviewer records
 severity/location/reproduction/impact/fix/verification; critical/high block
 completion. Every provider starts NOT VERIFIED until observed runtime evidence
 exists. No tests or benchmarks were executed during planning.
+
+
+## 2026-10-27 final remediation coverage
+
+- Owned Codex metadata is parsed as a bounded first JSONL record even after
+  further records or a large transcript are written; malformed/oversized
+  headers and unrelated/read-only/ambiguous FDs remain rejected.
+- A real two-prompt probe pauses before the first operation exits, proves full
+  controller release, then creates the recall task and resumes the same UUID
+  in a new controller. Exact new response/history recall and cleanup pass.
+- Failed-task inspection preserves its full details rather than confusing a
+  task status with a durable-command result envelope. Explicit REPL Usage and
+  Control options use the public parser and return typed UI actions.
+- Status selection occurs on mouse release, so unzoom cannot cause the matching
+  release to steal focus. Actual outer-PTY tests require stable selected focus
+  and unique input delivery after a single status click; the old right-target
+  click search is removed. External-kill teardown waits for definite absence.
+- Equal measured120x32 provider viewports verify known-marker wheel movement
+  in both direct and Bridge paths with pane mode zero. Current-model click has
+  no visible effect on either path and remains NOT VERIFIED for selection.

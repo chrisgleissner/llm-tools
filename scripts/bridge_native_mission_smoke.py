@@ -48,6 +48,7 @@ def probe(seconds: int) -> dict:
     backend = TmuxTerminalBackend()
     result = {'provider':'codex','initial_prompt_budget':2,'native_reply':'NOT VERIFIED',
               'native_resume':'NOT VERIFIED','provider_mouse':'NOT VERIFIED', 'cleanup':'NOT VERIFIED'}
+    phase = 'version-check'
     version = subprocess.run(['codex','--version'], text=True, capture_output=True, timeout=10)
     result['version'] = version.stdout.strip()
     with probe_workspace(result) as root:
@@ -96,29 +97,69 @@ def probe(seconds: int) -> dict:
             if not wait(lambda: task_state(task)=='VERIFYING',10):
                 raise RuntimeError('Native provider did not exit cleanly to VERIFYING')
         try:
+            phase = 'create-mission'
             created = json.loads(cli('mission','create','--prompt',
                 'Reply only with uppercase bridge, underscore, uppercase native, underscore, uppercase ok. Do not use tools or inspect files.',
                 '--cwd',cwd,'--providers','codex','--native','--json'))
             mid, first = created['mission']['id'], created['task']['id']
             cli('start','--mission',mid)
+            phase = 'initial-native-reply'
             handle = get_handle()
-            if not reply('BRIDGE_NATIVE_OK',seconds): return result
+            if not reply('BRIDGE_NATIVE_OK',seconds):
+                result['initial_task_status'] = task_state(first)
+                screen = backend.capture(handle,pane='provider').lower()
+                result['initial_screen_signals'] = {
+                    'trust_prompt': 'trust this folder' in screen,
+                    'rate_limit': any(s in screen for s in ('usage limit', 'rate limit', 'quota exceeded')),
+                    'authentication': any(s in screen for s in ('sign in', 'log in', 'not authenticated')),
+                    'working': any(s in screen for s in ('working', 'thinking', 'esc to interrupt')),
+                }
+                result['failed_phase'] = phase
+                return result
             result['native_reply'] = 'PASS'
-            with BridgeStore(state/'bridge.sqlite3') as store:
-                identity = store.get_mission(mid)['config'].get('native_sessions',{}).get('codex',{})
+            phase = 'capture-owned-session'
+            identity = {}
+            def captured_identity():
+                nonlocal identity
+                with BridgeStore(state/'bridge.sqlite3') as store:
+                    identity = store.get_mission(mid)['config'].get('native_sessions',{}).get('codex',{})
+                return bool(identity.get('session_id'))
+            wait(captured_identity, 5)
             session_id = identity.get('session_id')
-            if not session_id: return result
+            if not session_id:
+                result['native_resume'] = 'NOT VERIFIED: Bridge did not persist an owned Codex session identity'
+                return result
             result['identity_source'] = identity.get('source')
-            second = json.loads(cli('task','add','--mission',mid,'--prompt',
-                'Recall the marker from your first reply. Return only that marker followed by underscore and uppercase resumed. Do not use tools.',
-                '--json'))['id']
+            result['identity_captured'] = True
+            phase = 'stop-first-native-operation'
+            # Hold at the first operation's boundary before queueing more work.
+            # Otherwise the controller can launch task two before stop arrives.
+            cli('pause','--mission',mid)
             exit_provider(first)
             cli('stop','--mission',mid)
             if not wait(released,10): raise RuntimeError('Controller lock retained after stop')
+            result['first_controller_released'] = True
             cli('task','verify','--mission',mid,'--task',first,'--evidence','Native response matched the script oracle')
+            second = json.loads(cli('task','add','--mission',mid,'--prompt',
+                'Recall the marker from your first reply. Return only that marker followed by underscore and uppercase resumed. Do not use tools.',
+                '--json'))['id']
+            phase = 'restart-controller-for-exact-resume'
             cli('resume','--mission',mid)
             handle = get_handle()
-            if not reply('BRIDGE_NATIVE_OK_RESUMED',seconds): return result
+            phase = 'resumed-native-reply'
+            if not reply('BRIDGE_NATIVE_OK_RESUMED',seconds):
+                with BridgeStore(state/'bridge.sqlite3') as store:
+                    operation_rows = store.db.execute(
+                        'SELECT native_session_id,restoration_state FROM operations WHERE mission_id=? ORDER BY rowid',
+                        (mid,),
+                    ).fetchall()
+                    result['resume_task_status'] = store.get_task(second)['status']
+                result['resume_operations'] = [
+                    {'has_session_id': bool(row[0]), 'restoration_state': row[1]}
+                    for row in operation_rows
+                ]
+                result['native_resume'] = 'NOT VERIFIED: resumed response oracle not observed before timeout'
+                return result
             with BridgeStore(state/'bridge.sqlite3') as store:
                 operations = store.db.execute('SELECT native_session_id,restoration_state FROM operations WHERE mission_id=? ORDER BY rowid',(mid,)).fetchall()
             if len(operations)==2 and operations[0][0]==operations[1][0]==session_id and operations[1][1]=='RESTORED_NATIVE':
@@ -126,6 +167,7 @@ def probe(seconds: int) -> dict:
             exit_provider(second)
         except Exception as exc:
             result['error'] = type(exc).__name__
+            result['failed_phase'] = phase
         finally:
             if mid:
                 try:

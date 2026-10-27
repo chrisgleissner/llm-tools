@@ -1,5 +1,9 @@
 # Live Codex probe evidence
 
+The final 2026-10-27 repaired native probe and equal-viewport input retake at the
+end of this record supersede the earlier unverified conclusions. Historical
+observations are retained; no raw provider transcripts are stored.
+
 This note records the Codex runtime evidence that has a saved result. It does
 not convert a chat recollection into a pass. No further Codex prompts were sent
 for this note.
@@ -100,3 +104,22 @@ behaviour and document unsupported provider interactions explicitly.
 Before major native/session changes are committed, rerun the bounded mission
 script and relevant zero-budget startup/input/mouse probe. Live probes are
 ad-hoc only; CI runs deterministic provider transport and oracle contracts.
+
+
+## 2026-10-27 final repaired probe
+
+The checkpoint retake's unverified resume exposed two independent defects:
+owned-FD discovery parsed a JSONL prefix as one object, and the probe queued its
+recall task before proving the first controller stopped. The repaired reader
+bounds only the first record; actual writable-FD regressions cover later records,
+large transcripts and malformed/oversized headers. The probe pauses scheduling
+before exiting task one and adds task two after full stop and lock release.
+
+`python scripts/bridge_native_mission_smoke.py --model-call-budget 2 --seconds 60
+--output /tmp/bridge-resume-native-fixed.json` passed native first response,
+same-owned-UUID restoration in a new controller, history recall and cleanup.
+See [final-native-mission.json](final-native-mission.json). This supersedes the
+checkpoint's unverified result without discarding that historical observation.
+Equal-viewport zero-prompt input/wheel comparisons are recorded in
+[native-input-evidence.md](native-input-evidence.md). Current-model clicking has
+no visible effect in either path, so mouse selection remains unverified.

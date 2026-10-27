@@ -30,6 +30,14 @@ from .terminal import TerminalAction
 Snapshot = Callable[..., dict[str, object]]
 Dispatch = Callable[[str, str], object]
 
+
+@dataclass(frozen=True)
+class ControlViewAction:
+    """Open a parsed control command after restoring the current terminal."""
+
+    mission_id: str
+    view: str
+
 VIEWS = ("Bridge", "Orders", "Stations", "Systems", "Log", "Sessions", "Palette", "Usage")
 PALETTE_COMMANDS = (
     "help",
@@ -79,7 +87,7 @@ def _command_feedback(command: str, response: str) -> str:
         payload = json.loads(response)
     except (TypeError, json.JSONDecodeError):
         payload = None
-    if isinstance(payload, dict) and payload.get("status") in {"APPLIED", "REJECTED", "FAILED"}:
+    if isinstance(payload, dict) and "result" in payload and payload.get("status") in {"APPLIED", "REJECTED", "FAILED"}:
         status = str(payload["status"])
         result = _dict(payload.get("result"))
         if status == "APPLIED":
@@ -486,8 +494,8 @@ class _ConsoleState:
     _result_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _snapshot_thread: threading.Thread | None = field(default=None, repr=False)
     _snapshot_result: tuple[dict[str, object] | None, str] | None = field(default=None, repr=False)
-    _command_result: str | None = field(default=None, repr=False)
-    terminal_action: TerminalAction | None = field(default=None, repr=False)
+    _command_result: str | TerminalAction | ControlViewAction | None = field(default=None, repr=False)
+    terminal_action: TerminalAction | ControlViewAction | None = field(default=None, repr=False)
     command_pending: bool = False
     expand_requested: bool = False
     response_overlay: bool = False
@@ -511,7 +519,12 @@ class _ConsoleState:
                 self.snapshot_error = ""
             else:
                 self.snapshot_error = error
-        if isinstance(command_result, TerminalAction):
+        if isinstance(command_result, ControlViewAction) and command_result.mission_id == self.mission_id:
+            self.choose_view(VIEWS.index(command_result.view))
+            self.expand_requested = True
+            self.command_pending = False
+            self.last_refresh = 0.0
+        elif isinstance(command_result, (TerminalAction, ControlViewAction)):
             self.terminal_action = command_result
             self.command_pending = False
             self.last_refresh = 0.0
@@ -594,7 +607,7 @@ class _ConsoleState:
             try:
                 try:
                     raw_result = self.dispatch(self.mission_id, text)
-                    result = raw_result if isinstance(raw_result, TerminalAction) else _command_feedback(text, str(raw_result))
+                    result = raw_result if isinstance(raw_result, (TerminalAction, ControlViewAction)) else _command_feedback(text, str(raw_result))
                 except Exception as exc:
                     result = f"Command failed: {_text(exc, 180)}"
                 with self._result_lock:
@@ -1328,7 +1341,7 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
     state.choose_view(VIEWS.index(initial_view))
     state.refresh(force=True)
 
-    def loop(window: curses.window) -> int:
+    def loop(window: curses.window) -> int | TerminalAction | ControlViewAction:
         window.keypad(True)
         window.timeout(100)
         try:
@@ -1413,10 +1426,13 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
             result = curses.wrapper(loop)
         except KeyboardInterrupt:
             return 130
-        if not isinstance(result, TerminalAction):
+        if not isinstance(result, (TerminalAction, ControlViewAction)):
             return int(result)
         try:
-            _execute_terminal_action(mission_id, result)
+            if isinstance(result, ControlViewAction):
+                run_control(result.mission_id, dispatch, snapshot, initial_view=result.view)
+            else:
+                _execute_terminal_action(mission_id, result)
         except Exception as exc:
             state.output.append(f"Attach failed: {_text(exc, 180)}")
             state.last_refresh = 0.0

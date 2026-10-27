@@ -1139,3 +1139,226 @@ they do not replace actual PTY and controller evidence. Remaining release gates
 are A18 resolution, final whole-suite/global85/Bridge90 results on the final
 head, honest documentation and the root-owned bounded live probe. No paid model
 call or production change was made by the reviewer.
+
+
+### Final independent integration review of `41cff55`, 2026-10-27
+
+Sol 6.1 High independently reread the original directive and accepted additions,
+inspected the current chronology, shared REPL/response overlay, process/session
+restoration and live evidence oracles. No production or test file was edited
+during the root-owned frozen coverage runs; no paid model call was made by
+this reviewer. Original directive `docs/features/llm-bridge/prompt.md` is preserved.
+
+The independent focused command was:
+
+```text
+python -m pytest tests/test_bridge_chronology_contracts.py tests/test_bridge_monitor_chronology_review.py tests/test_bridge_session_boundaries.py tests/test_bridge_native_metadata_review.py tests/test_bridge_sessions.py tests/test_bridge_native_e2e.py tests/test_bridge_start_mode_review.py tests/test_bridge_cli.py tests/test_bridge_tui_projection_contracts.py tests/test_bridge_tui_error_contracts.py tests/test_bridge_live_probe_contracts.py tests/test_bridge_native_input_probe.py tests/test_terminal_interactive_attach.py tests/test_terminal_attached.py tests/test_bridge_completed_stop.py -q -o addopts='' --basetemp=/tmp/llm-tools-final-review-41cff55
+```
+
+Result: **122 passed in 16.22s**. This confirms targeted chronology, shared
+commands and bounded scrollable responses, effective mode restoration, owned
+metadata checks, real attached/cross-station terminal transport and completed
+controller cleanup. It does not establish paid provider compatibility or replace
+the final global85/Bridge90 and Python 3.11/3.15 gates.
+
+### A21 — High: owned Codex discovery parses multiple JSONL records as one object — CLOSED
+
+- **Location:** `bridge_sessions.discover_owned_codex_session`, bounded
+  `os.pread` and `json.loads` at the first-record read.
+- The function reads up to 65,537 bytes from an owned live transcript descriptor
+  and parses the complete prefix as one JSON object. A normal JSONL transcript
+  with a valid `session_meta` first record and any second record is rejected as
+  extra JSON data. A later large record also makes the total prefix exceed the
+  length guard despite a short valid first record. Session discovery therefore
+  depends on observing the tiny interval before Codex appends another record.
+- An independent disposable actual child held a writable FD below its temporary
+  `CODEX_HOME/sessions`, with validated PID/start token and matching CWD. A
+  132-byte valid header alone returned an identity; appending a single event
+  produced a 191-byte file and returned none; appending a 70k later event also
+  returned none. No historical user transcript was inspected or attributed.
+- Existing owned-FD regression fixtures write only one record, so their passing
+  results mask the native JSONL shape. Earlier isolated live successes cannot
+  close this deterministic failure; the latest root-owned native retake also
+  remains unverified. This blocks exact-owned Codex restoration acceptance.
+- Bound and parse the first newline-delimited record independently of the
+  complete transcript length, preserving inode/FD/process/CWD provenance and
+  rejection of genuinely oversized/malformed headers. Add actual-owned-FD
+  regressions for two records and a transcript larger than 64KiB, then rerun
+  the bounded live reply/full-stop/exact-ID-resume probe.
+
+### A22 — Medium: live mission probe admits task two before its intended full-stop boundary — CLOSED
+
+- **Location:** `scripts/bridge_native_mission_smoke.py`, second task creation
+  before `exit_provider(first)` and subsequent stop request.
+- The second task is ready while task one is active. As soon as task one exits
+  cleanly to VERIFYING, the production `before_iteration` hook can immediately
+  select task two, before the probe's polling client observes VERIFYING and
+  sends stop. This can launch the recall prompt on the first controller, spoil
+  the expected two-operation proof or exceed the intended two-prompt launch
+  sequence. A matching first reply is also followed by one immediate config
+  read rather than a bounded wait for persisted owned identity.
+- A disposable real store/hook reproduction confirms that after task one
+  enters VERIFYING, the already-added second task is immediately eligible and
+  selected while the mission remains RUNNING. This is legal production behavior
+  and a missing synchronization boundary in the probe.
+- Pause or stop scheduling before exiting the first operation, prove controller
+  release and full stop, and add the recall task only after that boundary. Wait
+  boundedly for persisted owned identity after the first response. Preserve
+  strict exact-response, same-ID, new-controller and cleanup oracles; never
+  turn absent responses into startup/geometry passes. Root owns this repair.
+
+
+**A21/A22 independent closure, 2026-10-27:** The owned-FD reader now partitions
+the bounded prefix at the first newline before length checking and JSON parsing.
+Four new actual writable-FD tests cover later second/large records and reject
+oversized/malformed headers. Exact PID/start-token, FD/inode, unique identity and
+CWD checks remain. The probe boundedly waits for persisted identity, pauses
+scheduling before exit, stops and proves controller-lock release, then adds the
+recall task. The independent session/metadata/native-E2E/oracle command passed
+**49 tests in 15.68s**:
+
+```text
+python -m pytest tests/test_bridge_sessions.py tests/test_bridge_session_boundaries.py tests/test_bridge_native_metadata_review.py tests/test_bridge_native_e2e.py tests/test_bridge_live_probe_contracts.py -q -o addopts='' --basetemp=/tmp/lb-final-review-native-fixed
+```
+
+The reviewer inspected root-owned `/tmp/bridge-resume-native-fixed.json`, produced
+by the repaired opt-in live two-prompt probe with Codex 0.164.0: initial reply
+PASS, exact same owned UUID/new-controller/context-recall PASS, first controller
+released, cleanup PASS. The strict response/identity/operation-count oracles
+remain intact; provider mouse is still NOT VERIFIED. The reviewer made no paid
+call and did not infer a universal provider capability from this result.
+
+### A23 — Medium: attached terminal acceptance has a reproducible intermittent focus failure — CLOSED
+
+- **Location:** `tests/test_terminal_attached.py`, real outer-PTY prefix/status
+  focus sequence; final CI terminal gate.
+- Root's PR Python3.15 run failed after one status-left click while zoomed; the
+  push job passed. Its dead-server test also sampled the external kill-server
+  shutdown before death was observable. One successful job does not resolve
+  either timing-sensitive result.
+- The reviewer repeated the unchanged attached-client and dead-server tests
+  with distinct basetemps. Runs 1–6 passed both; run 7 failed earlier at
+  `prefix_key('P')` line220: provider pane `%0` expected, active pane `%1`, zoom
+  false. The fake provider/controls byte logs are retained under
+  `/tmp/lb-final-review-race-7/test_attached_client_input_pas0/`. Teardown passed
+  all seven iterations. This establishes instability broader than a specific
+  status-click assertion, without yet attributing its root cause to production.
+- Investigate actual input/event ordering and terminal readiness; retain a
+  single successful deliberate prefix/click as the acceptance contract. Do not
+  retry focus actions until they happen to pass. The external-death fixture may
+  boundedly wait for its stated dead-server precondition, preserving refusal to
+  discard ownership metadata while state is UNKNOWN. The terminal implementor
+  owns remediation and the reviewer will rerun the corrected test repeatedly.
+
+
+The independent broader integration command passed **80 tests in 46.82s**:
+
+```text
+python -m pytest tests/test_bridge_tui.py tests/test_bridge_long_prompt_editor.py tests/test_bridge_steering.py tests/test_bridge_dispatch_atomicity.py tests/test_bridge_concurrency.py tests/test_bridge_progress.py tests/test_bridge_monitor.py tests/test_bridge_refresh.py tests/test_bridge_usage.py tests/test_bridge_stress.py tests/test_bridge_long_run.py -q -o addopts='' --basetemp=/tmp/lb-final-review-final-integration
+```
+
+This covers response scrolling, durable task edits, concurrent commands,
+convergence, asynchronous capacity/Usage, large queues and simulated iteration
+history. The following independent adversarial response case was not present in
+that passing suite.
+
+### A24 — Medium: failed task inspection is mistaken for a rejected command response — CLOSED
+
+- **Location:** `bridge_tui._command_feedback`, generic status-based envelope
+  detection.
+- Any dictionary with `status` APPLIED/REJECTED/FAILED is summarized as a durable
+  command acknowledgment, without checking that the object is a command
+  envelope. `task show` returns a task object directly. A task in the legitimate
+  FAILED state is therefore reduced to `Rejected: failed`, discarding its ID,
+  prompt, evidence and failure context. The standalone CLI displays those
+  fields, so this also breaks the accepted REPL-response parity requirement.
+- Independent reproduction: pass a JSON task object with `id:7`, `status:FAILED`,
+  title and prompt into `_command_feedback('task show --task 7', ...)`; current
+  output is `Rejected: failed` instead of the inspectable task record.
+- Require actual command-envelope structure before acknowledgment formatting.
+  Retain FAILED task objects as bounded multiline inspection results, and add
+  a regression alongside the existing envelope summaries and response overlay
+  checks. No production/test change was made by the reviewer.
+
+
+**A24 independent closure and REPL option parity, 2026-10-27:** Command feedback
+now requires a `result` member before treating status as a command envelope.
+A FAILED task remains a multiline task record; failed command envelopes retain
+their rejection reason. Explicit `usage`/`control` mission options now use the
+public parser and a typed control-view action. Same-mission actions choose and
+expand the local view; other-mission actions open after curses has restored the
+terminal. Unknown options are rejected and public help remains available.
+The source boundary and new task/mission-option/transition regressions were
+independently inspected.
+
+```text
+python -m pytest tests/test_bridge_cli.py tests/test_bridge_tui.py tests/test_bridge_tui_projection_contracts.py tests/test_bridge_tui_error_contracts.py tests/test_bridge_live_probe_contracts.py tests/test_bridge_native_input_probe.py -q -o addopts='' --basetemp=/tmp/lb-final-review-response-fixed
+```
+
+Result: **89 passed in 2.89s**. `git diff --check` was clean at that checkpoint.
+
+**Native input comparison correction:** The earlier direct/Bridge wheel
+comparison used unequal provider heights, so history could fit in one viewport
+and scroll in the other. The probe now measures Bridge's provider dimensions
+and uses the same dimensions for the direct single-pane tmux comparison, runs
+sequentially to avoid two writers to one session, and recognizes the actual
+strict wheel oracle's PASS result. The reviewer inspected
+`final-native-input.json`: Codex0.164.0, both provider viewports120x32, both known
+marker rows move `(3,6,14)` to `(5,8,16)`, pane mode zero before/after, local model
+picker input PASS, cleanup PASS. This supports observed native wheel parity
+within these tested tmux paths. Provider-click selection still has no visible
+effect in either path and remains NOT VERIFIED; Claude2.1.310 local help only
+is verified, with paid completion/resume and mouse unverified. These limits
+replace the older unequal-geometry DIFFERENT wheel result.
+
+
+**A23 independent closure, 2026-10-27:** Status targets now activate on mouse
+release, keeping the completed click from changing focus again after an unzoom
+operation. Native viewport down/up/wheel bindings remain intact. The real outer
+PTY test waits for stable focus after one action, then proves routing with
+unique bytes at the selected child. Its former scan over right-status columns
+is replaced with one measured click. Stable-wait timeout always fails unless
+the required interval was observed. Exact custom release/unzoom/target bindings
+are asserted independently of tmux defaults. The external kill-server fixture
+boundedly waits for observable death, retaining UNKNOWN refusal in production.
+The event-order diagnosis is supported by source inspection and corrected
+repeat outcomes; no universal timing guarantee is inferred from the test run.
+
+The independent frozen terminal command passed **48 tests in 9.60s**:
+
+```text
+python -m pytest tests/test_terminal_backend.py tests/test_terminal_attached.py tests/test_terminal_interactive_attach.py tests/test_terminal_teardown_failure.py tests/test_terminal_contract_edges.py tests/test_bridge_tui_pty.py tests/test_scheduler_timeout_review.py -q -o addopts='' --basetemp=/tmp/lb-final-review-terminal-fixed
+```
+
+Additionally, the reviewer independently repeated the exact attached-input and
+already-dead-server pair **12 consecutive times**, each **2 passed**, with fresh
+`/tmp/lb-final-review-terminal-fixed-repeat-{1..12}` basetemps. The repeat
+command used the two node IDs `tests/test_terminal_attached.py::test_attached_client_input_paste_mouse_resize_detach_and_reattach` and
+`tests/test_terminal_teardown_failure.py::test_stop_removes_metadata_for_an_already_dead_owned_server`,
+`-q -o addopts=''`. Runs took 2.00–2.26s each. The implementor separately
+reported 12 paired-file passes on each supported Python version; those are
+additional implementor evidence, distinct from the reviewer's own execution.
+
+## Final source-review disposition
+
+A1–A24 are closed with their recorded scope and evidence. No unresolved Critical
+or High finding remains in the reviewed final implementation. Chronology,
+parser/REPL responses, owned native session discovery/restoration, process and
+terminal lifecycle, truthful asynchronous monitoring and bounded behavior have
+substantive independent review and targeted verification. The original
+`docs/features/llm-bridge/prompt.md` remains unchanged.
+
+Source review is approved **conditional on** the root-owned final frozen
+whole-suite/global85/Bridge90 gates on Python3.11/3.15 and final CI succeeding
+for these exact changes. This is not a claim that those in-flight gates passed.
+Live capabilities remain explicitly bounded: Codex0.164.0 reply/exact-ID
+resume/context recall and tested native input/wheel passed; provider click
+selection is unverified; Claude/Copilot paid completion/resume, physical reboot
+and multiweek live execution are unverified. Root owns final gate, publication
+and release actions.
+
+
+Reviewer execution environment: the independent commands above used the local
+default **Python3.14.4**. Root's required Python3.11 and Python3.15 final gates
+are separate evidence and are not claimed as independently executed by this
+reviewer.

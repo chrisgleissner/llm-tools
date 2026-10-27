@@ -524,7 +524,8 @@ def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: P
     assert "Usage: attach" in dispatch_console_command(mission_id, "attach --help")
     assert "Usage: detach" in dispatch_console_command(mission_id, "detach --help")
     assert "error:" in dispatch_console_command(mission_id, "attach --unknown")
-    assert "Control view" in dispatch_console_command(mission_id, "control")
+    from llm_tools.bridge_tui import ControlViewAction
+    assert dispatch_console_command(mission_id, "control") == ControlViewAction(mission_id, "Bridge")
     assert "cannot recursively start" in dispatch_console_command(mission_id, "console")
     assert "cannot recursively start" in dispatch_console_command(mission_id, "_controller")
     assert "required" in dispatch_console_command(mission_id, "task add")
@@ -641,3 +642,12 @@ def test_repl_explicit_mission_flag_spellings_choose_the_same_mission(tmp_path, 
     result = bridge.dispatch_console_command(first['id'],f"task priority --mission {other['id']} --task {task} --value 98")
     assert json.loads(result)['status'] == 'APPLIED'
     with bridge.open_store() as store: assert store.get_task(task)['priority'] == 98
+
+
+def test_console_control_commands_preserve_public_mission_options() -> None:
+    from llm_tools.bridge_tui import ControlViewAction
+    for command, view in (("usage", "Usage"), ("control", "Bridge")):
+        assert dispatch_console_command("current", command) == ControlViewAction("current", view)
+        assert dispatch_console_command("current", f"{command} --mission target") == ControlViewAction("target", view)
+        assert "error:" in dispatch_console_command("current", f"{command} --unknown")
+        assert "--mission" in dispatch_console_command("current", f"{command} --help")

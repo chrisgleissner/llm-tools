@@ -11,11 +11,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir
 from . import config as toolconfig
 from .terminal import TerminalAction
+
+if TYPE_CHECKING:
+    from .bridge_tui import ControlViewAction
 
 
 def state_dir() -> Path:
@@ -315,7 +318,7 @@ class _ConsoleParser(argparse.ArgumentParser):
         raise ValueError(f"{self.format_usage()}{self.prog}: error: {message}")
 
 
-def dispatch_console_command(mission_id: str, command_line: str) -> str | TerminalAction:
+def dispatch_console_command(mission_id: str, command_line: str) -> str | TerminalAction | ControlViewAction:
     """Run the public CLI grammar in this mission's shell-free REPL context."""
     try:
         words = shlex.split(command_line)
@@ -329,6 +332,13 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
                 + "task amend --task ID --file PATH; pause ID; resume ID; proposal list; proposal accept ID; "
                 + "attach [--mission ID] [--client /dev/pts/N]; detach [--client /dev/pts/N].\n"
             )
+
+        if command in {"control", "usage"} and "--help" not in words and "-h" not in words:
+            from .bridge_tui import ControlViewAction
+
+            parser = _build_parser(parser_class=_ConsoleParser, default_mission=mission_id)
+            args = parser.parse_args(words)
+            return ControlViewAction(args.mission, "Usage" if command == "usage" else "Bridge")
 
         # Keep the old compact commands while routing every action through the
         # exact same parser and durable command handlers as the standalone CLI.
@@ -372,8 +382,6 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
 
         if words[0] in {"console", "_controller"}:
             return "error: this REPL cannot recursively start a console/controller"
-        if words[0] == "control":
-            return "Use the Control view keys to switch views inside the active console."
         # The public parser is the REPL grammar. JSON mode gives the control
         # pane a stable response string; console/controller recursion is rejected.
         if "--help" not in words and "-h" not in words and words[0] not in {"control", "console", "_controller"} and "--json" not in words:

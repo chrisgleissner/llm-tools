@@ -47,3 +47,43 @@
 2. Review frozen provider/route/model policy (raw TOML snapshot installed under mission-private runtime); inherited environment capacity/auth overrides remain live.
 3. Finish native supervised checkpoint UX and record exact native restore support versus reconstruction.
 4. Independent runtime/CLI/TUI reviews and remediation, full repository regression and coverage verification.
+
+
+## Final integration checkpoint, 2026-10-27
+
+Frozen production source at `41cff55` passed 1,254 tests on Python 3.11.14
+(199.95s) and 3.15.1 (194.47s). Both passed the exact CI branch-coverage gates:
+global 89% (minimum 85%), Bridge/terminal 92% (minimum 90%). Final remediation
+below requires a new frozen run; these results are not its final-head evidence.
+
+Independent Sol 6.1 High review found a real JSONL owned-FD header parsing bug
+(A21) and a scheduling race in the live probe (A22). The bounded first-record
+read and full-stop probe sequence are repaired with actual owned-FD regressions.
+The repaired two-prompt Codex probe passed native reply, complete controller
+stop/lock release, same owned UUID under a new controller, context recall and
+cleanup (`final-native-mission.json`). Equal measured provider viewports also
+verify native wheel parity (`final-native-input.json`); current-model mouse
+click selection remains unverified on both direct and Bridge paths.
+
+Intermittent actual outer-PTY focus tests and final integrated review remain
+open, as do final rebuilt-artifact installation, fresh full runs and CI. No
+merge or release has occurred. Original `prompt.md` remains unchanged.
+
+
+## Frozen publication source verified, 2026-10-27
+
+Final unchanged production/tests passed **1,262 tests** on Python3.11.14 in
+196.73s and Python3.15.1 in188.98s. Both exact CI branch-coverage reports pass:
+**global89%** (required85%), **Bridge/terminal92%** (required90%). Coverage
+includes `llm_tools/bridge*.py,llm_tools/terminal.py`; no gate/exclusion changed.
+
+Sol6.1 High final source review closes A1–A24. Terminal implementor repeats
+passed12 consecutive7-test runs per version; reviewer independently passed48
+terminal contracts plus12 more attached/dead-server repeats. Final bounded
+Codex reply/full-stop/exact-ID resume/context recall/cleanup retake passed.
+
+Final wheel and sdist build succeeded, installed into isolated Python3.11/3.15
+environments, and passed CLI help plus private mission create, verbatim prompt,
+pending amendment and task inspection checks from outside the source tree.
+Original directive and user prompt remain unchanged. See `release-verification.md`
+for the source verification record. GitHub CI must pass before publication.

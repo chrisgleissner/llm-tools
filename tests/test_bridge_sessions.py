@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 from llm_tools.bridge_sessions import (
     NativeSessionIdentity,
     codex_session_records,
@@ -277,3 +279,33 @@ def test_codex_session_discovery_rejects_unrelated_readonly_and_multiple_fds(tmp
             except ProcessLookupError:
                 pass
             process.wait(timeout=3)
+
+
+@pytest.mark.parametrize("shape", ["second-record", "large-transcript", "oversized-header", "malformed-header"])
+def test_owned_codex_discovery_reads_only_bounded_metadata_header(tmp_path: Path, monkeypatch, shape: str) -> None:
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    transcript = tmp_path / "codex" / "sessions" / "owned.jsonl"
+    _codex_transcript(transcript, CODEX_ID, cwd)
+    if shape == "oversized-header":
+        transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": CODEX_ID, "cwd": str(cwd), "padding": "x" * 65536,
+        }}) + "\n")
+    elif shape == "malformed-header":
+        transcript.write_text('{"type":"session_meta",\n' + transcript.read_text())
+    else:
+        with transcript.open("a") as stream:
+            stream.write(json.dumps({"type": "event_msg", "payload": {
+                "message": "x" * (70000 if shape == "large-transcript" else 8),
+            }}) + "\n")
+    process = _process_holding_fds([transcript])
+    try:
+        identity = discover_owned_codex_session(process.pid, _process_start_token(process.pid), cwd=cwd)
+        if shape in {"second-record", "large-transcript"}:
+            assert identity == NativeSessionIdentity("codex", CODEX_ID, str(cwd.resolve()), "codex:session_meta")
+        else:
+            assert identity is None
+    finally:
+        process.kill()
+        process.wait(timeout=3)

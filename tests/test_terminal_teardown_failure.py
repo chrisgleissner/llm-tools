@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -58,6 +59,23 @@ def test_stop_removes_metadata_for_an_already_dead_owned_server(tmp_path) -> Non
     backend = TmuxTerminalBackend()
     handle = _start(tmp_path, backend)
     subprocess.run(["tmux", "-S", str(handle.socket_path), "kill-server"], check=True, timeout=5)
+
+    # kill-server may return while tmux is still closing its listener. During
+    # that interval the socket is reachable but no longer answers commands,
+    # which is correctly reported as unknown rather than dead. Wait for the
+    # externally requested shutdown to become observable before asserting the
+    # already-dead-server cleanup path.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            if not backend.server_exists(handle):
+                break
+        except RuntimeError as exc:
+            if "cannot determine whether tmux server is alive" not in str(exc):
+                raise
+        time.sleep(0.01)
+    else:
+        pytest.fail("tmux server did not become observably dead after kill-server")
 
     assert not backend.server_exists(handle)
     # The generated private config is the remaining ownership record.

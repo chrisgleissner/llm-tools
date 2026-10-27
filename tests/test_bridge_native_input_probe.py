@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 
 import pytest
@@ -31,9 +32,14 @@ def test_mouse_and_wheel_oracles_do_not_overstate_unobserved_effects() -> None:
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 def test_direct_cli_comparison_harness_delivers_keystrokes_to_a_native_terminal(tmp_path) -> None:
-    process = _DirectPTY(["/bin/cat"], tmp_path, timeout=4, socket_path=tmp_path / "direct.sock")
+    process = _DirectPTY(["/bin/cat"], tmp_path, timeout=4, socket_path=tmp_path / "direct.sock", size=(100, 28))
     try:
         process.send(b"LOCAL_INPUT_ORACLE\r")
         assert "LOCAL_INPUT_ORACLE" in process.screen(0.2)
+        geometry = subprocess.run(
+            ["tmux", "-S", str(process.socket_path), "display-message", "-p", "-t", "direct:0",
+             "#{pane_width} #{pane_height}"], capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert geometry == "100 28"
     finally:
         process.close()

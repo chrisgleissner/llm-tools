@@ -245,21 +245,23 @@ inferred from terminal text or timestamps:
   still advertises exact-ID resume. It reports `RESTORED_NATIVE` only after
   metadata confirms the resumed identity. Capability drift, missing metadata,
   or a directory mismatch prevents exact restoration.
-* Bridge cannot choose a new Codex session ID and will not bind an unrelated
-  Codex transcript because it is recent or has the same working directory. A
-  new Codex session is `UNAVAILABLE` for exact capture; work continues from
-  Bridge's durable mission/task/checkpoint/evidence as `RECONSTRUCTED`. Old
-  session records without explicit Bridge ownership are ignored. An already
-  Bridge-owned exact identity may be resumed only if its ID, directory,
-  provider metadata, and current CLI capability all validate.
+* Bridge cannot choose a new Codex session ID. When the installed CLI supports
+  the owned-process launch mode, Bridge inspects writable transcript descriptors
+  in the validated provider process tree and accepts exactly one structured
+  session identity with the expected directory. It never selects a transcript
+  by recency. Unsupported capture, ambiguity, or missing metadata leaves exact
+  continuity unavailable. Old records without explicit Bridge ownership are
+  ignored. Exact resume requires the saved ID, directory, provider metadata,
+  and current CLI capability to validate.
 
 `RESTORED_NATIVE`, `NATIVE_CREATED`, `RECONSTRUCTED`, and `UNAVAILABLE` are
 distinct records; do not treat a newly created native session as a restored
 conversation. The Claude/Copilot recovery path has hermetic fake-provider
 coverage. Live native restoration has not been verified for those providers.
-A real Codex reply through Bridge verified a headless prompt only, not native
-session restoration. When exact continuity is unavailable, the next prompt is
-reconstructed from durable mission objective, task revision, checkpoints,
+The repaired bounded Codex probe verifies native reply, full controller stop,
+exact-ID restoration by a new controller, and context recall; see
+`final-native-mission.json` and the review ledger. When exact continuity is
+unavailable, the next prompt is reconstructed from durable mission objective, task revision, checkpoints,
 operation records, and verification evidence.
 
 ## Local state and config

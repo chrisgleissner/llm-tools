@@ -16,3 +16,20 @@ python scripts/bridge_native_input_probe.py \
 ```
 
 Observed versions were Codex CLI 0.164.0 and Claude Code 2.1.310. Local Codex model-picker input and Claude `/help` rendered in both the direct single-pane and Bridge terminal paths. Clicking the current Codex model row produced no visible effect in either path, so provider mouse selection remains not verified. With tmux `pane_in_mode=0` before and after the wheel event, the known marker moved from rows 3, 6, 14 to rows 5, 8, 16 through Bridge tmux. The direct single-pane control stayed at rows 5, 8, 16, so direct-path wheel scrolling is not verified. The probe submitted zero model prompts and both private terminal servers were cleaned up. See [native-input-results.json](native-input-results.json) for the machine-readable observations.
+
+
+## Final equal-viewport retake, 2026-10-27
+
+The comparison now measures Bridge's provider viewport (120 columns, 32 rows)
+and gives the direct single-pane control those same dimensions. The earlier
+40-row direct control could display more history without scrolling, so its
+unchanged marker did not establish a transport discrepancy. Providers run
+sequentially, including when resuming the same explicitly owned Codex ID.
+
+The corrected zero-prompt retake passed local Codex `/model` and Claude `/help`
+in both paths. The known marker moved from rows 3, 6, 14 to 5, 8, 16 in both
+Codex paths with pane mode zero. Wheel parity is verified for that observation.
+Clicking the current model row had no visible effect in either path; mouse
+selection remains NOT VERIFIED. Cleanup passed. See
+[final-native-input.json](final-native-input.json). No paid Claude prompt or
+Copilot completion/restoration was attempted.

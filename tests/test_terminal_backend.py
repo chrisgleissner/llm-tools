@@ -118,7 +118,9 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
             text=True,
             capture_output=True,
         ).stdout
-        assert "MouseDown1StatusLeft" in root_bindings and "MouseDown1StatusRight" in root_bindings
+        for key, pane in (("MouseUp1StatusLeft", handle.bridge_pane), ("MouseUp1StatusRight", handle.provider_pane)):
+            binding = next(line for line in root_bindings.splitlines() if key in line)
+            assert "resize-pane -Z" in binding and f"select-pane -t {pane}" in binding
         assert "B" in prefix_bindings and "P" in prefix_bindings
 
         backend.resize(handle, cols=120, rows=40)

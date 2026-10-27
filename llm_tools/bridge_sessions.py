@@ -362,9 +362,13 @@ def discover_owned_codex_session(
                         os.close(read_fd)
                         continue
                     try:
-                        first_line = os.pread(read_fd, 65537, 0)
+                        prefix = os.pread(read_fd, 65537, 0)
                     finally:
                         os.close(read_fd)
+                    # Later JSONL records may already fill this bounded read.
+                    # Only the metadata header is parsed, irrespective of the
+                    # transcript's current size or the provider's write pace.
+                    first_line = prefix.partition(b"\n")[0]
                     if len(first_line) > 65536:
                         continue
                     record = json.loads(first_line)
