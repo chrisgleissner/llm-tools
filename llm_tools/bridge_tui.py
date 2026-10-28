@@ -142,7 +142,7 @@ def compose_document(
                         notice = f"Recovery checkpoint failed: {_text(exc, 100)}"
                 sync_window_size(window)
                 height, width = window.getmaxyx()
-                if not paste_decoder.active:
+                if not paste_decoder.active or paste_decoder.interrupted:
                     lines = buffer.text.split("\n")
                     before = buffer.text[:buffer.cursor]
                     line_no = before.count("\n")
@@ -173,8 +173,8 @@ def compose_document(
                     key = window.get_wch()
                 except curses.error:
                     if paste_decoder.active and time.monotonic() - paste_activity >= 2.0:
-                        paste_decoder.reset()
-                        notice = "Incomplete paste discarded; source buffer unchanged."
+                        paste_decoder.interrupt()
+                        notice = "Incomplete paste quarantined; source unchanged. Ctrl-D keeps recovery and closes."
                     if paste_decoder.waiting and not paste_decoder.active and not escape_pending:
                         paste_decoder.reset()
                         notice = "Unknown or incomplete key sequence ignored."
@@ -187,6 +187,9 @@ def compose_document(
                             retain_draft()
                             return None
                     continue
+                if paste_decoder.interrupted and key == "\x04":
+                    checkpoint()
+                    return None
                 if key == "\x1b" and not paste_decoder.active:
                     escape_pending = True
                     escape_at = time.monotonic()
@@ -2476,8 +2479,6 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
         nonlocal paste_activity
         if not isinstance(key, str):
             if paste_decoder.active:
-                paste_decoder.reset()
-                state.output.append("Incomplete paste discarded; command input is unchanged.")
                 return True
             return False
         encoded = key.encode("utf-8")
@@ -2539,6 +2540,7 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
         except curses.error:
             pass
         window.timeout(100)
+        last_draw = 0.0
         try:
             curses.curs_set(1)
         except curses.error:
@@ -2558,13 +2560,13 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                 _compose_task_prompt(window, state, initial_text=source)
                 state.refresh(force=True)
                 continue
-            if state.edit_document_requested:
+            if state.edit_document_requested and not paste_decoder.active:
                 state.edit_document_requested = False
                 _compose_task_prompt(window, state, task_id=state.document_task_id, initial_text=state.edit_initial_text)
                 state.edit_initial_text = ""
                 state.refresh(force=True)
                 continue
-            if state.expand_requested:
+            if state.expand_requested and not paste_decoder.active:
                 state.expand_requested = False
                 if not state.full:
                     try:
@@ -2573,7 +2575,8 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                         TmuxTerminalBackend().focus(_load_handle(mission_id), pane="bridge", expand=True)
                     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
                         state.output.append(f"Could not expand controls: {type(exc).__name__}")
-            state.refresh()
+            if not paste_decoder.active:
+                state.refresh()
             status_context = _station_status_context(state.snapshot)
             if os.environ.get("TMUX_PANE") and status_context != status_publication["applied"]:
                 status_thread = status_publication["thread"]
@@ -2598,17 +2601,22 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                     )
                     status_publication["thread"] = status_thread
                     status_thread.start()
-            if state.terminal_action is not None:
+            if state.terminal_action is not None and not paste_decoder.active:
                 action, state.terminal_action = state.terminal_action, None
                 return action
-            if state.response_overlay:
-                _draw_response_overlay(window, state)
-            elif state.document_viewer is not None:
-                _draw_document(window, state)
-            elif state.full:
-                _draw_full(window, state)
-            else:
-                _draw_compact(window, state)
+            now = time.monotonic()
+            if not paste_decoder.active or now-last_draw >= .1:
+                if paste_decoder.active and not paste_decoder.interrupted:
+                    state.output.append(f"Receiving paste · {paste_decoder.received_bytes+len(paste_decoder.pending)} bytes; no command dispatched")
+                if state.response_overlay:
+                    _draw_response_overlay(window, state)
+                elif state.document_viewer is not None:
+                    _draw_document(window, state)
+                elif state.full:
+                    _draw_full(window, state)
+                else:
+                    _draw_compact(window, state)
+                last_draw = now
             if replay_keys:
                 key = replay_keys.popleft()
             else:
@@ -2627,9 +2635,12 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                         state.output.append("Unknown or incomplete escape sequence ignored.")
                     continue
                 if paste_decoder.active and time.monotonic() - paste_activity >= 2.0:
-                    paste_decoder.reset()
-                    state.output.append("Incomplete paste discarded; command input is unchanged.")
+                    if not paste_decoder.interrupted:
+                        paste_decoder.interrupt()
+                        state.output.append("Incomplete paste quarantined; input unchanged. Ctrl-D exits when input is empty.")
                 continue
+            if paste_decoder.interrupted and key == "\x04" and not state.command and not state.command_pending:
+                return 0
             if feed_console_paste(key):
                 continue
             if key == "\x05" and state.document_viewer is None and not state.response_overlay and not state.input_focused:

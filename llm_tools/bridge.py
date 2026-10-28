@@ -421,6 +421,15 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             check=False,
             timeout=15,
         )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
+            return f"error: {detail}"
+        if words[0] == "start" and args is not None:
+            with open_store() as store:
+                mission = store.get_mission(args.mission)
+            status = str(mission["status"]).capitalize()
+            detail = f"{status} · use attach to open the provider" if not mission["config"].get("headless") else f"{status} · headless work; inspect status"
+            return json.dumps({"status": "APPLIED", "result": {"detail": detail, "mission_id": args.mission}})
         if result.stdout.strip():
             return result.stdout.strip()
         if result.stderr.strip():

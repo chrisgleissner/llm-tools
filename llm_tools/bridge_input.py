@@ -81,6 +81,7 @@ class BracketedPaste:
         self.pending = bytearray()
         self.active = False
         self.discarding = False
+        self.interrupted = False
         self.done = False
         self.scan_from = 0
         self.received_bytes = 0
@@ -94,10 +95,17 @@ class BracketedPaste:
         self.pending.clear()
         self.active = False
         self.discarding = False
+        self.interrupted = False
         self.done = False
         self.scan_from = 0
         self.received_bytes = 0
         self.error = ""
+
+    def interrupt(self) -> None:
+        """Quarantine unfinished payload until END; never reinterpret its tail."""
+        self.discarding = True
+        self.interrupted = True
+        self.error = "Incomplete paste discarded"
 
     def feed(self, chunk: bytes) -> str | None:
         """Return source only after a complete valid transaction; otherwise None."""
@@ -116,7 +124,7 @@ class BracketedPaste:
         if self.discarding:
             if end >= 0:
                 self.received_bytes += end
-                message = f"paste received {self.received_bytes} bytes; limit is {self.max_bytes}"
+                message = "Incomplete paste discarded" if self.interrupted else f"paste received {self.received_bytes} bytes; limit is {self.max_bytes}"
                 self.reset()
                 self.error = message
                 self.done = True

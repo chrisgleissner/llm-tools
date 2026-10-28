@@ -84,7 +84,13 @@ def test_real_launcher_paste_saves_64kib_objective_verbatim_without_start(tmp_pa
             assert hashlib.sha256(saved.encode("utf-8")).hexdigest() == expected_hash
             assert not store.db.execute("SELECT 1 FROM operations").fetchone()
         assert process.poll() is None  # Save-only must not start paid provider work.
+        wait_for(b"Pending commands:")  # Durable commit precedes control-screen readiness.
         os.write(master, b"\x04")
+        deadline = time.monotonic()+5
+        while process.poll() is None and time.monotonic()<deadline:
+            if select.select([master], [], [], .03)[0]:
+                try: output.extend(os.read(master,65536))
+                except OSError: break
         process.wait(timeout=5)
         assert process.returncode == 0
     finally:

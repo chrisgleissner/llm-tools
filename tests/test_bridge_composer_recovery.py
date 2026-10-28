@@ -138,6 +138,8 @@ def test_incomplete_paste_times_out_without_changing_source(tmp_path, monkeypatc
             if self.calls == 2:
                 clock.now += 2.1
                 raise curses.error()
+            if self.calls == 4:
+                return "\x1b[201~"  # Only the terminator releases quarantined input.
             return "\x13"
 
     window = InterruptedPaste()

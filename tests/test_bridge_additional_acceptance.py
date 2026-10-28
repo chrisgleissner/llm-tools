@@ -169,3 +169,98 @@ def test_orders_paging_and_search_draft_restore_do_not_change_task_source():
     assert state.command_cursor == 3
     assert not state.search_editing
     assert state.snapshot["tasks"][0]["prompt"] == "source"
+
+
+def test_launcher_home_help_returns_to_same_selection_and_draft(tmp_path, monkeypatch):
+    from llm_tools import bridge_viewer
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    states = []
+    windows = iter([Window(["?"]), Window(["n", "d", "?", "\x04"])])
+    monkeypatch.setattr(curses, "wrapper", lambda callback: callback(next(windows)))
+    monkeypatch.setattr(bridge_launcher, "_draw", lambda _window, state: states.append((state.creating, state.objective, state.selected)))
+    help_calls = []
+    monkeypatch.setattr(bridge_viewer, "run_document", lambda source, *, title: help_calls.append((source, title)) or 0)
+    assert bridge_launcher.run_launcher(lambda _args: pytest.fail("help must not dispatch durable work")) == 0
+    assert help_calls and "quickstart" in help_calls[0][1]
+    assert states[0] == (False, "", 0)
+    assert states[-1] == (True, "d?", 0)
+
+
+def test_launcher_incomplete_paste_does_not_submit_and_input_remains_usable(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(bridge_launcher.time, "monotonic", lambda: clock[0])
+    seen = []
+    class PasteWindow(Window):
+        def get_wch(self):
+            key = next(self.keys)
+            if key == "TIMEOUT":
+                clock[0] += 3
+                raise curses.error()
+            return key
+    window = PasteWindow(["n", "\x1b[200~incomplete", "TIMEOUT", "\n", "\t", "\x1b[201~", "X", "\x04"])
+    monkeypatch.setattr(curses, "wrapper", lambda callback: callback(window))
+    monkeypatch.setattr(bridge_launcher, "_draw", lambda _window, state: seen.append((state.objective, state.error)))
+    assert bridge_launcher.run_launcher(lambda _args: pytest.fail("incomplete paste must not dispatch")) == 0
+    assert any("Incomplete paste" in error for _, error in seen)
+    assert seen[-1][0] == "X"
+
+
+def test_launcher_oversize_paste_is_atomic_and_next_edit_works(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    payload = "🙂" * 300_000
+    window = Window(["n", "A", "\x1b[200~" + payload + "\x1b[201~", "B", "\x04"])
+    monkeypatch.setattr(curses, "wrapper", lambda callback: callback(window))
+    monkeypatch.setattr(bridge_launcher, "_draw", lambda _window, state: seen.append((state.objective, state.error)))
+    assert bridge_launcher.run_launcher(lambda _args: pytest.fail("rejected paste must not dispatch")) == 0
+    assert any("limit" in error for _, error in seen)
+    assert seen[-1][0] == "AB"
+
+
+def test_launcher_native_start_is_explicit_and_reopens_controls(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    window = Window(["n", *"Objective", *(["\t"] * 4), "\n"])
+    monkeypatch.setattr(curses, "wrapper", lambda callback: callback(window))
+    monkeypatch.setattr(bridge_launcher, "_draw", lambda *_: None)
+    calls = []
+    def dispatch(args):
+        calls.append(args)
+        if args[0] == "mission":
+            import json
+            print(json.dumps({"mission": {"id": "m1"}}))
+            return 0
+        if args[0] == "start":
+            assert args == ["start", "--mission", "m1", "--native"]
+            return 0
+        assert args == ["control", "--mission", "m1"]
+        return 0
+    assert bridge_launcher.run_launcher(dispatch) == 0
+    assert [args[0] for args in calls] == ["mission", "start", "control"]
+
+
+def test_launcher_failed_start_keeps_saved_mission_and_shows_retry_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    first = Window(["n", *"Objective", *(["\t"] * 4), "\n"])
+    second = Window(["\x04"])
+    windows = iter([first, second])
+    monkeypatch.setattr(curses, "wrapper", lambda callback: callback(next(windows)))
+    errors = []
+    monkeypatch.setattr(bridge_launcher, "_draw", lambda _window, state: errors.append(state.error))
+    calls = []
+    def dispatch(args):
+        calls.append(args[0])
+        if args[0] == "mission":
+            import json
+            print(json.dumps({"mission": {"id": "m1"}}))
+            return 0
+        if args[0] == "start": return 2
+        pytest.fail("failed start must not attach or open control")
+    assert bridge_launcher.run_launcher(dispatch) == 0
+    assert calls == ["mission", "start"]
+    assert any("saved but could not start" in error for error in errors)

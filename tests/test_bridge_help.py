@@ -35,3 +35,20 @@ def test_help_help_uses_public_parser(capsys) -> None:
         main(["help", "--help"])
     assert result.value.code == 0
     assert "topic" in capsys.readouterr().out
+
+
+def test_console_start_feedback_reads_durable_state_and_keeps_log_path_secondary(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from llm_tools import bridge
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(tmp_path/'state'))
+    with bridge.open_store() as store:
+        mission=store.create_mission('Start','Objective',cwd=tmp_path)
+        store.set_mission_status(mission['id'],'RUNNING')
+    monkeypatch.setattr(bridge.subprocess,'run',lambda argv,**kwargs: subprocess.CompletedProcess(argv,0,'mission running; controller log: private/path',''))
+    result=json.loads(bridge.dispatch_console_command(mission['id'],'start'))
+    assert result['status']=='APPLIED'
+    assert result['result']['detail']=='Running · use attach to open the provider'
+    assert 'private/path' not in result['result']['detail']
+    monkeypatch.setattr(bridge.subprocess,'run',lambda argv,**kwargs: subprocess.CompletedProcess(argv,2,'','station unavailable'))
+    assert bridge.dispatch_console_command(mission['id'],'start')=='error: station unavailable'

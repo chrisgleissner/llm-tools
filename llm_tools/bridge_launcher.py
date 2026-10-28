@@ -40,6 +40,8 @@ class Launcher:
     paste_decoder: BracketedPaste = field(default_factory=BracketedPaste, repr=False)
     escape_pending: bool = False
     escape_at: float = 0.0
+    paste_activity: float = 0.0
+    paste_interrupted: bool = False
 
     def validate(self) -> None:
         if not self.objective.strip():
@@ -288,11 +290,15 @@ def run_launcher(dispatch: Callable[[list[str]], int]) -> int:
         except AttributeError:
             pass
         while True:
-            if not state.paste_decoder.active:
+            if not state.paste_decoder.active or state.paste_interrupted:
                 _draw(window, state)
             try:
                 key = window.get_wch()
             except curses.error:
+                if state.paste_decoder.active and time.monotonic()-state.paste_activity >= 2.0:
+                    state.paste_interrupted = True
+                    state.paste_decoder.interrupt()
+                    state.error = "Incomplete paste · waiting for its terminator; Ctrl-D exits safely. Objective unchanged."
                 _discard_incomplete_escape(state)
                 if state.escape_pending and time.monotonic() - state.escape_at >= 0.06:
                     state.escape_pending = False
@@ -306,6 +312,8 @@ def run_launcher(dispatch: Callable[[list[str]], int]) -> int:
                 continue
             sync_window_size(window)
             height, width = window.getmaxyx()
+            if state.paste_interrupted and key in {"\x04", "\x03"}:
+                return "quit"
             if height < 20 or width < 60:
                 if key in {"q", "Q", "\x04", "\x03"}:
                     return "quit"
@@ -326,12 +334,14 @@ def run_launcher(dispatch: Callable[[list[str]], int]) -> int:
                     state.paste_decoder.feed(b"\x1b")
                     state.escape_pending = False
                 if state.paste_decoder.active or state.paste_decoder.waiting or (isinstance(key, str) and key.startswith(("[200~", "\x1b[200~"))):
+                    state.paste_activity = time.monotonic()
                     pasted = state.paste_decoder.feed(key.encode("utf-8") if isinstance(key, str) else b"")
                     if pasted is not None:
                         action = state.paste(pasted)
                     elif state.paste_decoder.done and state.paste_decoder.error:
                         state.error = state.paste_decoder.error + "; objective unchanged"
                         state.paste_decoder.reset()
+                        state.paste_interrupted = False
                         action = None
                     else:
                         action = None

@@ -551,3 +551,29 @@ Current next action: frozen fullplain run final-plain.log (exec75053), coverage
 with allPTYchildren, fix remaining defects/coverage gaps, rebuild installedwheel
 checks/hermeticCLI/native acceptance, pushPR27 update, actualdiff adversarial
 review/fixes, finalCI/merge/tag1.2.0. No completion claimed.
+
+2026-10-28 release gate continuation:
+- Preserved implementation commit175bb89. Fullplain passed1354tests before
+  final artifact/helper coverage additions. Later fullplain passed again;
+  coverage88%overall and89%Bridge (90%required, stillopen). Logs release-*.log
+  under /tmp/bridge-ux-validation-2jKf4a; oldcoverage must not be reinterpreted
+  against shifted source lines. No gate exclusions/reductions.
+- Exactlauncher64KiB SHA256 reproducer found CRLF->doubleLF; fixed curses.nonl.
+  Its coverage-only exit race fixed by waiting for visible control screen
+  before CtrlD and drainingPTY duringexit. Focused instrumented test passed.
+- Added standalone bridge_viewer.py and view --file [--follow], originalsource
+  nonTTY output, explicitfollow pause/newoutput/Endresume/rotation/errorrecovery.
+  Homehelp nowsharedsearchableviewer returnscontext. Sixfunctionaltestspass.
+- Weakeragent gpt6-sol low added17meaningfulacceptance tests plus6viewertests;
+  Luna medium exhausted usage temporarily then finally exhausted until17:44,
+  parent tookremainingintegration. No new liveprovider execution.
+- New incompletepaste test foundlauncherhang and unsafe reset-to-input design.
+  AllBridgeinput surfaces nowquarantine unfinishedpayload throughEND; late
+  Enter/Tab/CtrlS neverdispatch. Previoussource retained, safeexit available.
+  Focused48recovery/input tests pass afterfix. Commandpaste redraw batched10Hz
+  and asyncview/terminalactions deferred untilpastefinishes.
+- Console start reads durablemissionstate for conciseRunning/openprovider
+  feedback; subprocessfailures remainactionableerror andretaininput.
+- Current frozen fullplain+coverage logs review-plain.log/review-tests.log
+  (exec14549). Next: final coverage90Bridge, draftPR27actualdiff independent
+  adversarialreview, finalCI/installedwheel/hermeticCLI, merge/tag1.2.0.
