@@ -19,7 +19,7 @@ def test_real_launcher_paste_saves_64kib_objective_verbatim_without_start(tmp_pa
     state_dir = tmp_path / "state"
     workdir = tmp_path / "unrelated work"
     workdir.mkdir()
-    prefix = "Objective 😀\r\n\tIndented e\u0301\n"
+    prefix = "Objective 😀\r\n\tIndented e\u0301\nLiteral controls: \x1b[A \x1b[<0;1;18M\n"
     tail = "\nTAIL-OBJECTIVE-EXACT\n"
     total_bytes = 64 * 1024
     source = prefix + "x" * (total_bytes - len(prefix.encode()) - len(tail.encode())) + tail

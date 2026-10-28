@@ -621,3 +621,11 @@ wholepacket routing tests. Focused74input/source/PTY tests pass. Priorfull
 professionalrun passedalltests,89overall/90Bridge locally; CI6cbf6b6 tests
 passedbut89Bridge. Latesttests explicitlycoverUIpublicationpreviouslyonly
 measured incidentally underambientTMUX. No exclusions/thresholdchanges.
+
+R10 (P0, real Objective paste): adding literalarrow/mouse-controlescapes to
+64KiBpacket reproduced10byteslost because ncurses decodedpayloadkeys.
+Launcher nowdisableskeypadconversion whiletransactionactive, defersmouse/form
+actions and preservesrawpayload. Exact65536-byteSHA256 testpasses including
+CRLF,tabs,combiningmarks,emoji,ESCsequencesandtail; save-only,nooperations.
+Focused19launcher/inputcontractstests pass. Current input/sourcechecks are
+readyfor frozenfullplain+coverage+latestCI; no gatewaivers introduced.

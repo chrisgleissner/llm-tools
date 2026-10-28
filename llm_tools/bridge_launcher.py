@@ -276,6 +276,7 @@ def run_launcher(dispatch: Callable[[list[str]], int]) -> int:
 
     def loop(window: curses.window) -> str:
         window.keypad(True)
+        paste_keypad = True
         try:
             curses.nonl()
         except curses.error:
@@ -290,6 +291,10 @@ def run_launcher(dispatch: Callable[[list[str]], int]) -> int:
         except AttributeError:
             pass
         while True:
+            wanted_keypad = not state.paste_decoder.active
+            if wanted_keypad != paste_keypad:
+                window.keypad(wanted_keypad)
+                paste_keypad = wanted_keypad
             if not state.paste_decoder.active or state.paste_interrupted:
                 _draw(window, state)
             try:
@@ -314,11 +319,11 @@ def run_launcher(dispatch: Callable[[list[str]], int]) -> int:
             height, width = window.getmaxyx()
             if state.paste_interrupted and key in {"\x04", "\x03"}:
                 return "quit"
-            if height < 20 or width < 60:
+            if (height < 20 or width < 60) and not state.paste_decoder.active:
                 if key in {"q", "Q", "\x04", "\x03"}:
                     return "quit"
                 continue
-            if key == curses.KEY_MOUSE:
+            if key == curses.KEY_MOUSE and not state.paste_decoder.active:
                 try:
                     _, _, y, _, buttons = curses.getmouse()
                     left_click = curses.BUTTON1_CLICKED | curses.BUTTON1_RELEASED | curses.BUTTON1_DOUBLE_CLICKED
