@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import shlex
+import json
 import os
 import stat
 import subprocess
@@ -71,7 +72,8 @@ def test_console_state_dispatches_through_injected_facade_and_refreshes() -> Non
     state = bridge_tui._ConsoleState("M1", dispatch, snapshot, full=False)
     state.refresh(force=True)
     _wait_for(lambda: bool(state.snapshot), state)
-    assert state.rows()[0] == "Mission: M1 [RUNNING]"
+    assert state.rows()[0].startswith("Controller:")
+    assert "M1" in bridge_tui._header(state, 80)
     assert snapshots == ["M1"]
     last_refresh = state.last_refresh
     state.refresh(now=last_refresh + 0.1)
@@ -97,6 +99,22 @@ def test_command_feedback_summarizes_durable_envelopes_and_preserves_plain_resul
         '{"status":"REJECTED","result":{"error":"task is not ready"}}',
     ) == "Rejected: task is not ready"
     assert bridge_tui._command_feedback("status", "human-readable status") == "human-readable status"
+
+
+def test_command_line_supports_midline_edit_and_search_cancel_preserves_draft() -> None:
+    state = bridge_tui._ConsoleState("M1", lambda *_: "", lambda _id: {}, full=True)
+    for char in "ab  c ":
+        state.handle_key(char)
+    state.handle_key("KEY_LEFT")
+    state.handle_key("KEY_LEFT")
+    state.handle_key("X")
+    assert state.command == "ab  Xc "
+    state.handle_key("\x1b")  # Search belongs to body focus.
+    state.handle_key("\x06")
+    state.handle_key("q")
+    state.handle_key("\x1b")
+    assert state.command == "ab  Xc "
+    assert state.command_cursor == 5  # Restore the insertion point as well as text.
 
 
 def test_command_feedback_keeps_help_and_json_results_multiline_and_bounded() -> None:
@@ -130,14 +148,78 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     assert state.view == "Usage"
     state.handle_key("KEY_F7")
     state.handle_mouse(3, 2, 24, 80)
-    assert state.command == "help"  # A click stages an action; Enter runs it.
+    assert state.command == "" and state.selected == 0  # Selection never dispatches.
     state.handle_key("\x15")
+    state.handle_key("\x1b")  # Return from the command widget to the palette.
     state.selected = 4
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["pause"]
     assert bridge_tui.PALETTE_COMMANDS[8:11] == ("steer --help", "attach", "detach")
-    assert bridge_tui.PALETTE_COMMANDS[11:] == ("usage", "control", "task add --help", "proposal list", "start")
+    assert bridge_tui.PALETTE_COMMANDS[11:16] == ("usage", "control", "task add --help", "proposal list", "start")
+
+
+def test_destructive_actions_require_scoped_confirmation_even_from_palette() -> None:
+    calls: list[str] = []
+    state = bridge_tui._ConsoleState("M2", lambda _mission, cmd: calls.append(cmd) or "ok", lambda _id: {}, full=True)
+    state.command = "task cancel --task 4"
+    state.command_cursor = len(state.command)
+    state.handle_key("KEY_ENTER")
+    assert state.response_overlay and state.confirm_command == "task cancel --task 4"
+    assert calls == []
+    state.handle_key("n")
+    assert not state.response_overlay and state.confirm_command is None
+    assert calls == []
+
+    state.view_index = bridge_tui.VIEWS.index("Palette")
+    state.selected = bridge_tui.PALETTE_COMMANDS.index("cancel")
+    state.handle_key("KEY_ENTER")
+    assert state.confirm_command == "cancel"
+    state.handle_key("y")
+    _wait_for(lambda: not state.command_pending, state)
+    assert calls == ["cancel"]
+
+
+def test_draft_cleanup_requires_positive_durable_ack(tmp_path) -> None:
+    from pathlib import Path
+
+    def run(response: str) -> tuple[bridge_tui._ConsoleState, Path]:
+        draft = tmp_path / f"draft-{len(list(tmp_path.iterdir()))}.md"
+        draft.write_text("sensitive source", encoding="utf-8")
+        state = bridge_tui._ConsoleState("M1", lambda *_: response, lambda _id: {}, full=False)
+        state._dispatch("task add --file draft.md", cleanup_path=draft)
+        _wait_for(lambda: not state.command_pending, state)
+        state.refresh(force=True)
+        return state, draft
+
+    state, draft = run("outcome unknown: timed out")
+    assert draft.exists() and state.rejected_draft_path == draft
+    _, accepted = run(json.dumps({"status": "APPLIED", "result": {"id": "1"}}))
+    assert not accepted.exists()
+
+
+def test_capacity_active_means_current_executing_operation_only() -> None:
+    snapshot = {"capacity": {"selection": {"route": "kilo", "decisions": [
+        {"route": "kilo", "usable": True, "windows": []},
+    ]}}}
+    assert bridge_tui._capacity_summaries(snapshot)[0].startswith("Last selected kilo")
+    snapshot["station_context"] = {"executing_operation": "op-2", "operation_status": "RUNNING", "last_launched_station": "kilo"}
+    assert bridge_tui._capacity_summaries(snapshot)[0].startswith("ACTIVE kilo")
+
+
+def test_task_completion_and_click_to_focus_command_entry() -> None:
+    state = bridge_tui._ConsoleState("M1", lambda *_: "", lambda _id: {}, full=True)
+    state.command = "task "
+    state.command_cursor = len(state.command)
+    state.input_focused = True
+    state.handle_key("\t")
+    assert state.command == "task add"
+    state.handle_key("\t")
+    assert state.command == "task list"
+
+    state.input_focused = False
+    state.handle_mouse(22, 30, 24, 80)
+    assert state.input_focused and state.command_cursor == len(state.command)
 
 
 def test_multiline_response_overlay_scrolls_and_view_keys_dismiss_without_dispatching_text() -> None:
@@ -618,7 +700,10 @@ def test_console_printable_commands_are_never_navigation_shortcuts() -> None:
         assert state.command == command
         state.handle_key("KEY_ENTER")
         _wait_for(lambda: not state.command_pending, state)
-    assert calls == list(expected)
+        if command == "help":
+            assert state.document_viewer is not None
+            state.handle_key("q")
+    assert calls == list(expected[1:])
     state.handle_key("\x10")
     assert state.command == expected[-1]
     state.handle_key("\x0e")
@@ -640,7 +725,7 @@ def test_slow_snapshot_and_dispatch_never_block_keyboard_input() -> None:
     state = bridge_tui._ConsoleState("slow", slow_dispatch, slow_snapshot, full=False)
     started = time.monotonic()
     state.refresh(force=True)
-    for char in "help":
+    for char in "status":
         state.handle_key(char)
     state.handle_key("KEY_ENTER")
     assert time.monotonic() - started < 0.25
@@ -649,7 +734,7 @@ def test_slow_snapshot_and_dispatch_never_block_keyboard_input() -> None:
     state.output.extend(str(index) for index in range(1000))
     assert len(state.output) == bridge_tui._MAX_OUTPUT_LINES
     _wait_for(lambda: bool(state.snapshot) and not state.command_pending, state, timeout=1.5)
-    assert state.output[-1] == "help"
+    assert state.output[-1] == "status"
 
 
 def test_private_editor_file_dispatches_multiline_task_and_cleans_up(monkeypatch) -> None:
@@ -673,7 +758,7 @@ def test_private_editor_file_dispatches_multiline_task_and_cleans_up(monkeypatch
     def dispatch(_mission: str, command: str) -> str:
         argv = shlex.split(command)
         calls.append((argv, Path(argv[-1]).read_text(encoding="utf-8")))
-        return "task queued"
+        return json.dumps({"status": "APPLIED", "result": {"detail": "task queued"}})
 
     state = bridge_tui._ConsoleState("M7", dispatch, lambda _id: {}, full=False)
     bridge_tui._edit_task_prompt(FakeWindow(6, 80), state)  # type: ignore[arg-type]
@@ -681,7 +766,7 @@ def test_private_editor_file_dispatches_multiline_task_and_cleans_up(monkeypatch
     assert editor_argv[:2] == ["fake-editor", "--wait"]
     assert calls == [(["add", editor_argv[-1]], "first line\nsecond line\n")]
     assert not Path(editor_argv[-1]).exists()
-    assert state.output[-1] == "task queued"
+    assert state.output[-1].startswith("Applied:")
 
 
 def test_editor_appends_file_to_typed_task_options(monkeypatch) -> None:
@@ -697,7 +782,7 @@ def test_editor_appends_file_to_typed_task_options(monkeypatch) -> None:
     monkeypatch.setattr(bridge_tui.curses, "def_prog_mode", lambda: None)
     monkeypatch.setattr(bridge_tui.curses, "endwin", lambda: None)
     monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
-    state = bridge_tui._ConsoleState("M7", lambda _mission, line: calls.append(shlex.split(line)) or "queued", lambda _id: {}, full=False)
+    state = bridge_tui._ConsoleState("M7", lambda _mission, line: calls.append(shlex.split(line)) or json.dumps({"status": "APPLIED", "result": {}}), lambda _id: {}, full=False)
     state.command = "task add --priority 5 --acceptance 'tests pass'"
     bridge_tui._edit_task_prompt(FakeWindow(6, 80), state)  # type: ignore[arg-type]
     _wait_for(lambda: not state.command_pending, state)
@@ -721,7 +806,7 @@ def test_editor_amends_selected_order_through_same_dispatch(monkeypatch) -> None
     monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
     state = bridge_tui._ConsoleState(
         "M8",
-        lambda _mission, command: ('{"id":42,"prompt":"old"}' if shlex.split(command)[:2] == ["task", "show"] else sent.append(shlex.split(command)) or "amended"),
+        lambda _mission, command: ('{"id":42,"prompt":"old"}' if shlex.split(command)[:2] == ["task", "show"] else sent.append(shlex.split(command)) or json.dumps({"status": "APPLIED", "result": {}})),
         lambda _id: {},
         full=True,
         snapshot={"tasks": [{"id": 42, "title": "old", "status": "READY"}]},

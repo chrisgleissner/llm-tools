@@ -93,7 +93,8 @@ def test_dispatch_errors_and_reentrant_command_are_reported_without_duplicate_wo
     release.set()
     _wait(lambda: state.refresh() is None and not state.command_pending)
     assert any("still running" in line for line in state.output)
-    assert any("Command failed: durable write failed" in line for line in state.output)
+    assert any("Outcome unknown: durable write failed" in line for line in state.output)
+    assert state.command == "priority 1 5"
 
 
 def test_dispatch_cleanup_tolerates_missing_or_unlinkable_editor_files(monkeypatch, tmp_path) -> None:
@@ -116,7 +117,9 @@ def test_dispatch_cleanup_tolerates_missing_or_unlinkable_editor_files(monkeypat
     assert state._dispatch("add FILE", cleanup_path=existing)
     _wait(lambda: state.refresh() is None and not state.command_pending)
     assert existing.read_text(encoding="utf-8") == "contents"
-    assert state.output[-1] == "done"
+    assert any("done" == line for line in state.output)
+    assert state.rejected_draft_path == existing
+    assert any(str(existing) in line for line in state.output)
 
 
 def test_snapshot_reader_signature_failure_falls_back_to_no_projection_kwargs() -> None:

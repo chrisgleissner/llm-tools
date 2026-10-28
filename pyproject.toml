@@ -4,10 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-tools"
-version = "1.1.1"
+version = "1.2.0"
 description = "Local LLM CLI usage and scheduling tools"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = ["rich>=13.7,<15"]
 license = {text = "Apache-2.0"}
 
 [project.scripts]

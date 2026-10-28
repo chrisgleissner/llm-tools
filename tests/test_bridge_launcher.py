@@ -29,7 +29,6 @@ def test_home_selection_creation_and_form_validation(tmp_path):
     state.key("\n")
     state.key("\t")
     state.key("\t")
-    state.key(" ")
     assert state.native
     state.key("\n")
     state.key("\n")
@@ -44,6 +43,8 @@ def test_home_selection_creation_and_form_validation(tmp_path):
     state.key("e")
     for _ in range(4):
         state.key("\t")
+    assert state.key("\n") == "start"
+    state.key("\t")
     assert state.key("\n") == "create"
     assert state.directory == str(tmp_path)
     state.key("\x1b")
@@ -54,6 +55,30 @@ def test_home_selection_creation_and_form_validation(tmp_path):
     state.focus = 0
     state.key("\x15")
     assert not state.objective
+
+
+def test_launcher_objective_is_not_silently_capped_and_supports_insertion(tmp_path):
+    state = Launcher(str(tmp_path), creating=True, focus=0)
+    state.key("a")
+    state.key("b")
+    state.key(curses.KEY_LEFT)
+    state.key("X")
+    assert state.objective == "aXb"
+    state.focus = 0
+    state.cursors[0] = len(state.objective)
+    for char in "z" * 16001:
+        state.key(char)
+    assert len(state.objective.encode("utf-8")) == 16004
+
+
+def test_launcher_discards_unknown_escape_prefix_and_accepts_following_text(tmp_path):
+    state = Launcher(str(tmp_path), creating=True, focus=0)
+    state.paste_decoder.feed(b"\x1b[")
+    assert bridge_launcher._discard_incomplete_escape(state)
+    assert state.error == "Unknown or incomplete escape sequence ignored."
+    assert state.key("a") is None
+    assert state.objective == "a"
+    assert not bridge_launcher._discard_incomplete_escape(state)
 
 
 @pytest.mark.parametrize("providers,directory", [("zai", ""), ("unknown", ""), ("", ""), ("codex", "absent")])
@@ -75,7 +100,7 @@ def test_launcher_uses_shared_create_and_control_handlers_without_start(tmp_path
     def wrapper(callback):
         # Drive the actual UI reducer through a fake terminal's key stream.
         class Window:
-            keys = iter(["n", *objective, "\n", "\n", "\n", " ", "\n", "\n"])
+            keys = iter(["n", *objective, "\n", "\n", "\n", "\n", "\t", "\n"])
             def keypad(self, value): pass
             def getmaxyx(self): return (24, 100)
             def get_wch(self): return next(self.keys)
@@ -156,7 +181,7 @@ def test_bare_command_runs_from_unrelated_folder_and_creates_without_provider(tm
         assert (b"38;5;39m" if theme == "dark" else b"38;5;25m") in output
         os.write(master, b"n")
         wait_for(b"Objective:")
-        os.write(master, b"Any folder mission\r\r\r\r\r")
+        os.write(master, b"Any folder mission\r\r\r\r\t\r")
         wait_for(b"CREATED")
         with BridgeStore(tmp_path / "state" / "bridge.sqlite3") as store:
             mission = store.list_missions()[0]
@@ -185,7 +210,8 @@ def test_scrolled_home_mouse_targets_visible_mission_and_form_submit(tmp_path):
     assert state.selected == 17
     state.creating = True
     state.objective = "objective"
-    assert state.click(15) == "create"
+    assert state.click(15) == "start"
+    assert state.click(17) == "create"
     state.click(9)
     assert state.focus == 1
     assert state.click(2) is None

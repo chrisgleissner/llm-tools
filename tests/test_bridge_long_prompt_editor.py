@@ -31,8 +31,18 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
         mission_id, task_id = mission["id"], mission["initial_task_id"]
     root = str(Path(__file__).resolve().parents[1])
     python_path = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH", ""))))
+    editor = tmp_path / "fake-editor"
+    editor_marker = tmp_path / "editor-finished"
+    editor.write_text(
+        "#!" + sys.executable + "\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path(sys.argv[1]).write_text('finished', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    editor.chmod(0o700)
     command = ["env", "-u", "NO_COLOR", "-u", "LLM_USAGE_NO_COLOR", f"LLM_BRIDGE_STATE_DIR={state}", "TERM=xterm-256color",
-               "VISUAL=/bin/true", f"PYTHONPATH={python_path}"]
+               f"VISUAL={editor} {editor_marker}", f"PYTHONPATH={python_path}"]
     # Forward only known hermetic fixture controls, never serialize ambient
     # credentials into tmux's private command/config metadata.
     for name in ("HOME", "PATH", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
@@ -45,9 +55,17 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
     if no_color:
         command.append("NO_COLOR=1")
     command.extend([sys.executable, "-m", "llm_tools.bridge", "control", "--mission", mission_id])
+    exit_record = tmp_path / "control-exit.txt"
+    # Older tmux releases do not expose pane_dead_status. Observe the actual
+    # child return code rather than confusing a dead pane with a clean exit.
+    command = [sys.executable, "-c",
+               "import pathlib,subprocess,sys; "
+               "result=subprocess.run(sys.argv[2:]); "
+               "pathlib.Path(sys.argv[1]).write_text(str(result.returncode)); "
+               "sys.exit(result.returncode)", str(exit_record), *command]
     backend = TmuxTerminalBackend()
-    # Detached tmux has no outer status row: 31 - 6 control rows - 1 divider
-    # leaves the same real80x24 provider PTY as the original direct-PTY test.
+        # The provider pane opens zoomed, so it receives the whole detached
+        # station height instead of the split layout's shorter pane.
     handle = backend.start(provider_argv=command,
                            bridge_argv=[sys.executable, "-c", "import time; time.sleep(30)"],
                            cwd=tmp_path, socket_path=tmp_path / "editor.sock", session_name="editor", size=(80, 31))
@@ -63,7 +81,7 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
     try:
         geometry = subprocess.check_output(["tmux", "-S", str(handle.socket_path), "display-message", "-p",
                                             "-t", handle.provider_pane, "#{pane_width}x#{pane_height}"], text=True).strip()
-        assert geometry == "80x24"
+        assert geometry == "80x31"
         wait_for(lambda: "Editor preservation" in backend.capture(handle, pane="provider"))
         backend.send_keys(handle, pane="provider", keys="\x1bOQ")
 
@@ -76,6 +94,11 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
         # 'rders:'. Assert rendered cells rather than matching an ANSI delta.
         wait_for(orders_visible)
         backend.send_keys(handle, pane="provider", keys="\x12")
+        wait_for(lambda: "Amend task prompt" in backend.capture(handle, pane="provider"))
+        backend.send_keys(handle, pane="provider", keys="\x0f")  # external editor action in composer
+        wait_for(editor_marker.exists)
+        wait_for(lambda: "Editor changes loaded" in backend.capture(handle, pane="provider"))
+        backend.send_keys(handle, pane="provider", keys="\x13")
         amended = None
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -90,13 +113,15 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
         # A commit can precede publication of the worker result. The UI
         # deliberately rejects exit while a durable command is still pending.
         wait_for(lambda: "Applied:" in backend.capture(handle, pane="provider"))
+        backend.send_keys(handle, pane="provider", keys="Escape")
+        backend.send_keys(handle, pane="provider", keys="C-u")
+        backend.send_keys(handle, pane="provider", keys="Escape")
         backend.send_keys(handle, pane="provider", keys="C-d")
         wait_for(lambda: subprocess.check_output(
             ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "-t", handle.provider_pane,
              "#{pane_dead}"], text=True).strip() == "1")
-        assert subprocess.check_output(
-            ["tmux", "-S", str(handle.socket_path), "display-message", "-p", "-t", handle.provider_pane,
-             "#{pane_dead_status}"], text=True).strip() == "0"
+        wait_for(exit_record.exists)
+        assert exit_record.read_text() == "0"
     finally:
         backend.stop(handle)
 
@@ -143,7 +168,7 @@ def test_real_curses_stdin_file_request_keeps_control_input_available(tmp_path: 
         # PTY EOF/EIO can arrive before Python has completed its final exit
         # work. Wait for the child itself after sending one control key instead
         # of treating a closed PTY as proof that the process has exited.
-        os.write(master, b"\x04")
+        os.write(master, b"\x15\x1b\x04")
         try:
             process.wait(timeout=2)
         except subprocess.TimeoutExpired as exc:

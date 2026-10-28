@@ -185,8 +185,14 @@ class TmuxTerminalBackend:
             raise FileExistsError(f"private tmux configuration already exists: {config_path}")
         provider_cmd = self._command(provider_argv)
         bridge_cmd = self._command(bridge_argv)
-        status_left = f"{tmux_role_markup('brand')} Bridge controls [C-] B] #[default]"
-        status_right = f"{tmux_role_markup('ok')} Provider [C-] P] #[default]"
+        bridge_status = (
+            f"{tmux_role_markup('brand')}"
+            "#{?#{==:#{pane_index},1},▶ ,}Bridge [C-] B] #[default]"
+        )
+        provider_status = (
+            f"{tmux_role_markup('ok')}"
+            "#{?#{==:#{pane_index},0},▶ ,}Provider [C-] P] #[default]"
+        )
         config = (
             "set-option -g remain-on-exit on\n"
             "set-option -g mouse on\n"
@@ -196,10 +202,13 @@ class TmuxTerminalBackend:
             'set-option -g default-terminal "screen-256color"\n'
             "set-option -g status on\n"
             "set-option -g status-style 'bg=default,fg=default'\n"
-            "set-option -g status-left-length 42\n"
-            "set-option -g status-right-length 30\n"
-            f"set-option -g status-left {shlex.quote(status_left)}\n"
-            f"set-option -g status-right {shlex.quote(status_right)}\n"
+            "set-option -g status-left-length 24\n"
+            "set-option -g status-right-length 24\n"
+            "set-option -g @llm_bridge_context 'Bridge ready · no current task'\n"
+            "set-option -g window-status-format '#{@llm_bridge_context}'\n"
+            "set-option -g window-status-current-format '#{@llm_bridge_context}'\n"
+            f"set-option -g status-left {shlex.quote(bridge_status)}\n"
+            f"set-option -g status-right {shlex.quote(provider_status)}\n"
         )
         config += (
             f"bind-key {prefix} send-prefix\n"
@@ -266,21 +275,16 @@ class TmuxTerminalBackend:
             # when an attached client shrinks. Keep the reserved control area
             # at its configured height and let the native pane absorb the
             # remaining rows.
-            resize_command = shlex.join(
-                [
-                    "tmux",
-                    "-S",
-                    str(socket),
-                    "-f",
-                    str(config_path),
-                    "resize-pane",
-                    "-t",
-                    bridge_pane,
-                    "-y",
-                    str(bridge_rows),
-                ]
+            tmux_command = shlex.join(["tmux", "-S", str(socket), "-f", str(config_path)])
+            target_window = shlex.quote(session_name + ":station")
+            resize_after_client = (
+                "sleep 0.05; "
+                f"active_pane=$({tmux_command} display-message -p -t {target_window} '#{{pane_id}}'); "
+                f"was_zoomed=$({tmux_command} display-message -p -t {target_window} '#{{window_zoomed_flag}}'); "
+                f"{tmux_command} resize-pane -t {shlex.quote(bridge_pane)} -y {bridge_rows}; "
+                f"if [ \"$was_zoomed\" = 1 ] && [ -n \"$active_pane\" ]; then "
+                f"{tmux_command} resize-pane -Z -t \"$active_pane\"; fi"
             )
-            resize_after_client = f"sleep 0.05; exec {resize_command}"
             self._run(
                 socket,
                 "set-hook",
@@ -290,28 +294,19 @@ class TmuxTerminalBackend:
             )
             # Native tmux left/right status hitboxes remain outside every
             # provider viewport, including while a pane is zoomed.
-            self._run(
-                socket,
-                "set-option", "-g", "status-left",
-                status_left,
-            )
-            self._run(
-                socket,
-                "set-option", "-g", "status-right",
-                status_right,
-            )
             # Use pane IDs captured from this exact launch. Prefix shortcuts
             # are in tmux's prefix table, so native providers receive all keys
             # until the operator deliberately sends Ctrl-]. Status-line clicks
             # remain available even while the provider pane is zoomed.
-            for key, target in (("B", bridge_pane), ("P", pane)):
+            for key, target in (("B", bridge_pane), ("b", bridge_pane), ("P", pane), ("p", pane)):
                 self._run(
                     socket,
                     "bind-key", "-T", "prefix", key,
-                    "if-shell", "-F", "#{window_zoomed_flag}",
-                    f"resize-pane -Z; select-pane -t {target}",
-                    f"select-pane -t {target}",
+                    "select-pane", "-t", target, "\\;",
+                    "resize-pane", "-Z", "-t", target,
                 )
+            self._run(socket, "bind-key", "-T", "prefix", "?", "display-message",
+                      "Bridge: Ctrl-] B controls · Ctrl-] P provider · Ctrl-] Ctrl-] sends prefix")
             for mouse_key, target in (
                 # Handle a status click on release. Unzooming on mouse-down
                 # changes the row under the pointer before tmux classifies the
@@ -327,11 +322,11 @@ class TmuxTerminalBackend:
                 self._run(
                     socket,
                     "bind-key", "-T", "root", mouse_key,
-                    "if-shell", "-F", "#{window_zoomed_flag}",
-                    f"resize-pane -Z; select-pane -t {target}",
-                    f"select-pane -t {target}",
+                    "select-pane", "-t", target, "\\;",
+                    "resize-pane", "-Z", "-t", target,
                 )
             self._run(socket, "select-pane", "-t", pane)
+            self._run(socket, "resize-pane", "-Z", "-t", pane)
             return TerminalHandle(socket, config_path, session_name, pane, bridge_pane, bridge_rows)
         except Exception:
             if started:
@@ -370,7 +365,7 @@ class TmuxTerminalBackend:
 
     def send_keys(self, handle: TerminalHandle, *, pane: str, keys: str) -> None:
         self._require_owned(handle)
-        if keys in {"Enter", "C-c", "C-d", "Escape", "Tab", "BSpace", "Space"}:
+        if keys in {"Enter", "C-c", "C-d", "C-u", "Escape", "Tab", "BSpace", "Space"}:
             self._run(handle.socket_path, "send-keys", "-t", self._target(handle, pane), keys)
         else:
             self._run(handle.socket_path, "send-keys", "-l", "-t", self._target(handle, pane), keys)
@@ -379,12 +374,23 @@ class TmuxTerminalBackend:
         """Select an owned pane; optionally give its existing UI the full window."""
         self._require_owned(handle)
         target = self._target(handle, pane)
+        zoomed = self._run(handle.socket_path, "display-message", "-p", "-t", target,
+                           "#{window_zoomed_flag}", capture=True).stdout.strip() == "1"
+        if zoomed:
+            self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
         self._run(handle.socket_path, "select-pane", "-t", target)
         if expand:
-            zoomed = self._run(handle.socket_path, "display-message", "-p", "-t", target,
-                               "#{window_zoomed_flag}", capture=True).stdout.strip()
-            if zoomed != "1":
-                self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
+            self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
+        left = f"{tmux_role_markup('brand')}{'▶ ' if pane == 'bridge' else ''}Bridge [C-] B] #[default]"
+        right = f"{tmux_role_markup('ok')}{'▶ ' if pane == 'provider' else ''}Provider [C-] P] #[default]"
+        self._run(handle.socket_path, "set-option", "-g", "status-left", left)
+        self._run(handle.socket_path, "set-option", "-g", "status-right", right)
+
+    def set_status_context(self, handle: TerminalHandle, context: str) -> None:
+        """Set the short, sanitized task/state label in the owned status row."""
+        self._require_owned(handle)
+        safe = re.sub(r"[^\w .:/-]", "", " ".join(str(context).split()), flags=re.UNICODE)[:40]
+        self._run(handle.socket_path, "set-option", "-g", "@llm_bridge_context", safe or "No current task")
 
     def writable_clients(self, handle: TerminalHandle) -> tuple[str, ...]:
         """List attached, writable, non-control clients on an owned station."""
@@ -472,8 +478,14 @@ class TmuxTerminalBackend:
         self._require_owned(handle)
         if cols < 80 or rows < 24:
             raise ValueError("terminal size must be at least 80 columns by 24 rows")
+        active_pane = self._run(handle.socket_path, "display-message", "-p", "-t", handle.session_name,
+                                "#{pane_id}", capture=True).stdout.strip()
+        was_zoomed = self._run(handle.socket_path, "display-message", "-p", "-t", handle.session_name,
+                               "#{window_zoomed_flag}", capture=True).stdout.strip() == "1"
         self._run(handle.socket_path, "resize-window", "-t", handle.session_name, "-x", str(cols), "-y", str(rows))
         self._run(handle.socket_path, "resize-pane", "-t", handle.bridge_pane, "-y", str(handle.bridge_rows))
+        if was_zoomed and active_pane:
+            self._run(handle.socket_path, "resize-pane", "-Z", "-t", active_pane)
 
     def server_exists(self, handle: TerminalHandle) -> bool:
         """Return whether the private tmux server responds on its socket."""

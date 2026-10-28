@@ -96,8 +96,8 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
             text=True,
             capture_output=True,
         ).stdout
-        assert "Bridge controls [C-] B]" in status_left
-        assert "Provider [C-] P]" in status_right
+        assert "Bridge [C-] B]" in status_left and "pane_index" in status_left
+        assert "Provider [C-] P]" in status_right and "pane_index" in status_right
         root_bindings = subprocess.run(
             ["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "root"],
             check=True,
@@ -120,7 +120,7 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
         ).stdout
         for key, pane in (("MouseUp1StatusLeft", handle.bridge_pane), ("MouseUp1StatusRight", handle.provider_pane)):
             binding = next(line for line in root_bindings.splitlines() if key in line)
-            assert "resize-pane -Z" in binding and f"select-pane -t {pane}" in binding
+            assert f"select-pane -t \"{pane}\" \\; resize-pane -Z -t \"{pane}\"" in binding
         assert "B" in prefix_bindings and "P" in prefix_bindings
 
         backend.resize(handle, cols=120, rows=40)
@@ -133,7 +133,7 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
             text=True,
             capture_output=True,
         ).stdout.strip()
-        assert provider_size == "120x33"
+        assert provider_size == "120x40"
         assert handle.config_path.stat().st_mode & 0o777 == 0o600
 
         assert backend.is_alive(handle)

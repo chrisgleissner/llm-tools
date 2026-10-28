@@ -201,8 +201,8 @@ def test_standalone_terminal_action_attaches_after_optional_same_mission_focus(m
     class FakeBackend:
         calls = []
         detached = []
-        def focus(self, handle, *, pane):
-            self.calls.append(("focus", handle, pane))
+        def focus(self, handle, *, pane, expand=False):
+            self.calls.append(("focus", handle, pane, expand))
         def attach(self, handle):
             self.calls.append(("attach", handle))
         def detach_client(self, handle, *, client_name=None):
@@ -217,7 +217,7 @@ def test_standalone_terminal_action_attaches_after_optional_same_mission_focus(m
     _execute_terminal_action("mission-a", TerminalAction("mission-a"))
     _execute_terminal_action("mission-a", TerminalAction("mission-b"))
     assert fake.calls == [
-        ("focus", source, "provider"),
+        ("focus", source, "provider", True),
         ("attach", source),
         ("attach", destination),
     ]
@@ -328,7 +328,7 @@ def test_real_curses_dispatches_terminal_action_after_restoring_terminal(tmp_pat
             except OSError:
                 break
         assert record.read_text() == "mission-a|mission-b|/dev/pts/7|True"
-        os.write(master, b"help\r")
+        os.write(master, b"status\r")
         _wait_for(master, process, b"UI_RESUMED_AFTER_ATTACH")
     finally:
         if process.poll() is None:

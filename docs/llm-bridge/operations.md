@@ -12,14 +12,15 @@ used by the scheduler. Bridge adds no provider SDK or network service.
 
 Run `llm-bridge` with no arguments from any working directory to open the home
 screen. Use Up/Down and Enter to choose a mission, or **N** for a new mission.
-The creation form defaults to the current folder and Codex, lets you edit the
-folder and provider list, and switches autonomous/native mode with Space.
-Tab/Enter moves between fields, Ctrl-U clears a field, and Esc returns home.
-Creating a mission saves its initial task and opens controls without starting
-provider work. Type `start` in controls when ready, then `attach` to enter the
-combined Bridge/provider station. Ctrl-D leaves controls;
-Q leaves the home screen. Existing explicit subcommands remain available.
-For multiline initial objectives, use `mission create --file` as below.
+The creation form defaults to the current folder, Codex, and Native interactive.
+Tab/Enter moves between fields, Space changes Native/Autonomous, Ctrl-E opens the
+multiline objective composer, and Escape keeps a private recovery draft. The
+primary action, **Start and open provider**, saves the mission, starts its
+controller, then attaches to its validated station. **Save mission only** saves
+the first task without starting provider work. Opening an existing mission only
+opens controls. Autonomous runs headless provider work and has no station. Ctrl-D
+leaves controls; Q leaves the home screen. CLI mission creation remains save-only.
+For a multiline objective use the composer or `mission create --file` as below.
 
 The installed executable works outside the checkout. After upgrading an older
 local editable installation that lacks the new commands, refresh it with
@@ -175,8 +176,8 @@ Open the full terminal UI directly with:
 llm-bridge control --mission MISSION_ID
 ```
 
-It offers seven views: Bridge, Orders, Stations, Systems, Log, Sessions, and
-Palette. The Bridge view summarizes mission state, current work, task counts,
+It offers eight views: Bridge, Orders (Tasks), Stations (Providers/routes),
+Systems, Log, Sessions, Palette, and Usage. The Bridge view summarizes mission state, current work, task counts,
 and acceptance-criteria progress. Orders are fetched in pages of 200; Page Up
 and Page Down navigate them, and Ctrl-F opens the Orders filter. Search and
 page controls make tasks past the first page reachable without loading the
@@ -185,28 +186,51 @@ bounded histories. Keyboard and mouse operate those views:
 
 | Input | Action |
 | --- | --- |
-| Tab / Shift-Tab, Left / Right, F1–F7 | Change view |
-| Up / Down | Select a row or palette command when the command line is empty |
+| Tab / Shift-Tab, Left / Right, F1–F8 | Change view while body focus is active |
+| Up / Down, PgUp/PgDn, Home/End | Navigate the selected list or open document |
 | Click a view label | Change view |
 | Click a palette row, then Enter | Select and run that command |
 | Wheel up / down | Move the selection |
 | Page Up / Page Down in Orders | Previous / next 200-task page |
-| Ctrl-F, type query, Enter | Filter Orders by task title or prompt |
-| Ctrl-E | Open `$VISUAL` or `$EDITOR` to add a multiline task |
-| Ctrl-R | Open the editor to amend the selected order |
+| Ctrl-F, type query, Enter | Filter Orders by task title or prompt; Escape cancels and restores the command draft |
+| Orders: `v` | Open the selected task's complete prompt |
+| Body Ctrl-E | Compose a new multiline task |
+| Orders body Ctrl-R | Compose an amendment of the selected order |
+| Composer Ctrl-O | Open `$VISUAL` or `$EDITOR` |
+| Composer F2 / Ctrl-S | Save source; Enter inserts a newline |
+| Bridge body `o` | Open the complete objective |
+| Palette `/` | Filter labelled actions; single click only selects |
 | Enter | Run the command in the input line |
 | Ctrl-P / Ctrl-N | Previous / next command history item |
-| Ctrl-U / Esc | Clear the input line |
+| Ctrl-U / Ctrl-K | Clear input or delete to end |
+| Ctrl-G | Focus the current command draft |
+| Escape | Leave command input and retain its draft |
 | Ctrl-D / Ctrl-C | Exit when the input line is empty |
 
-The editor is launched as an argv (not through a shell) on a private temporary
-file. Saving non-empty text submits the task; cancelling the editor or saving
-an empty file submits nothing. The UI accepts printable command text without
+The composer keeps recoverable source in private state. Ctrl-O launches the
+external editor as argv on a private file; returning from that editor does not
+submit the task. F2/Ctrl-S explicitly saves the composed source. Escape retains
+the draft, while explicit discard is separate. Rejected saves keep their source. The UI accepts printable command text without
 using letters as view shortcuts. Palette actions and keyboard commands use the
 same dispatcher. The command result pane summarizes durable command envelopes
 as a concise applied/rejected message; detailed state remains available in the
 Log view, CLI status, and event history. The station follows terminal resize
 events and is designed to remain usable down to 80 columns by 24 rows.
+
+For long initial objectives, Ctrl-E in the launcher opens the full-screen
+composer. Enter inserts a newline and F2/Ctrl-S saves to the form. Escape retains a
+private recovery draft that can be reopened with Ctrl-E. The interactive limit is
+1 MiB of UTF-8 source bytes; an oversized paste is rejected atomically. Use
+`mission create --file PATH` or `--file -` for larger inputs. In the document
+viewer, `/` searches, `n`/`N` repeat, `m` toggles source/rendered text, `w` toggles
+wrapping, Left/Right scroll long source lines when wrapping is off, and `s`
+exports the complete original source to a new path. Source export never copies a
+rendered or abbreviated preview.
+
+Built-in help works offline: `llm-bridge help TOPIC` supports quickstart, keys,
+prompts, markdown, providers, states, verification, and recovery. Type `help` in
+the console for the same topic guidance. A rendered document uses Rich when
+available; source viewing and CLI help still work if Rich is unavailable.
 
 Stations distinguishes the station selected for viewing from the last station
 selected to execute work. Selecting a station with Enter or running
@@ -244,11 +268,13 @@ closes the terminal view; it does not pause the mission or stop a provider.
 Headless missions have no station to attach to.
 
 The isolated tmux server uses Ctrl-] as its prefix, leaving the provider's
-usual Ctrl-B available as input. Press Ctrl-] then `d` to detach a terminal
-client; press Ctrl-] twice to send a literal Ctrl-] to the provider. Mouse
-clicks select the pane under the pointer and forward the click. Paste, wheel,
-focus, and resize events are forwarded to the native provider terminal when
-its mode requests them. Detaching leaves the controller and panes alive.
+usual Ctrl-B available as input. Prefix B/b opens the full Bridge view; P/p
+returns to the same provider process; z toggles the split view; ? shows the
+shortcut reminder. Press Ctrl-] then d to detach; Ctrl-] twice sends a literal
+prefix to the provider. The status line labels Provider and Bridge targets.
+Clicks, paste, wheel, focus, and resize events are forwarded to the provider
+when its mode requests them. Detaching leaves the controller and panes alive.
+When mouse capture blocks terminal selection, try Shift-drag or tmux copy mode.
 
 `pause` prevents a new provider iteration from starting. If a provider is
 already working, it runs until that invocation returns, then the controller
@@ -326,3 +352,9 @@ mission creation flags above.
 
 See `llm-bridge --help` and the command-specific `--help` output for all
 available CLI operations.
+
+Read a local textual artifact with `llm-bridge view --file notes.md`. Use
+`--follow` explicitly for live output: Up pauses, End resumes; new output and
+file rotation/truncation are labelled. Retention remains bounded, and pruned
+content is unavailable. Without a TTY, `view` prints original source. Home `?`
+opens the same searchable help viewer and returns to the launcher on close.
