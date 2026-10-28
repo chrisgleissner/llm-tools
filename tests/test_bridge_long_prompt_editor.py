@@ -94,7 +94,7 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
         # 'rders:'. Assert rendered cells rather than matching an ANSI delta.
         wait_for(orders_visible)
         backend.send_keys(handle, pane="provider", keys="\x12")
-        wait_for(lambda: "Amend task prompt" in backend.capture(handle, pane="provider"))
+        wait_for(lambda: f"Amend task {task_id} prompt" in backend.capture(handle, pane="provider"))
         backend.send_keys(handle, pane="provider", keys="\x0f")  # external editor action in composer
         wait_for(editor_marker.exists)
         wait_for(lambda: "Editor changes loaded" in backend.capture(handle, pane="provider"))
