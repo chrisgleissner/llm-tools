@@ -577,3 +577,17 @@ review/fixes, finalCI/merge/tag1.2.0. No completion claimed.
 - Current frozen fullplain+coverage logs review-plain.log/review-tests.log
   (exec14549). Next: final coverage90Bridge, draftPR27actualdiff independent
   adversarialreview, finalCI/installedwheel/hermeticCLI, merge/tag1.2.0.
+
+Adversarial review of actualPR27 heada5fe6a2 by independent gpt6-sol low agent:
+R1 (P2, bridge_tui asyncfullread): delayed task read replaced help openedlater
+andreleasedneithercontext. Event-controlledreproducer; fixed documentgeneration
+invalidationsforhelp/close and workerresultguards, priorviewerrelease.
+R2 (P2, bridge_viewer staticmode): changedfile falselyofferedEndresume though
+followwasdisabled. Fixed staticclose/reopenguidance; source remains snapshot.
+R3 (P2, terminal.focus): staticfocusmarkerspersistedafterprefixswitch. Fixed
+dynamicpaneselectionformats; realtmuxregressionverifiescorrectmarkerafterP.
+Independent currentpatchre-review26/26passed, all3findingsresolved,no newfindings.
+Legacy externaleditor/tmphelper audited: no productioncalls; actualCtrlO uses
+privatepersistentstate/drafts. No user-facingdraftloss throughlegacyhelper.
+Finalverificationmustusecurrentfrozencommit; previousoverlappingrun diagnostic
+only. Coverage90Bridge remainsrequired; no exclusions or waivers introduced.

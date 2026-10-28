@@ -1005,6 +1005,7 @@ class _ConsoleState:
     edit_initial_text: str = ""
     paste_source: str | None = None
     _document_result: tuple[str, str, str] | None = field(default=None, repr=False)
+    _document_generation: int = 0
 
     @property
     def view(self) -> str:
@@ -1028,6 +1029,8 @@ class _ConsoleState:
                 self.edit_document_requested = True
                 self.document_edit_pending = False
             else:
+                if self.document_viewer is not None:
+                    self.document_viewer.release()
                 title = f"{self.mission_id[:12]} · objective" if task_id == "objective" else f"{self.mission_id[:12]} · task {task_id} · r{revision} · prompt"
                 self.document_viewer = DocumentViewer(title, prompt)
         if snapshot_result is not None:
@@ -1155,6 +1158,7 @@ class _ConsoleState:
         if help_words and help_words[0] in {"help", "?"} and "--help" not in help_words:
             from .bridge_help import topic_text
             topic = " ".join(help_words[1:]) or "quickstart"
+            self.close_document()
             self.document_task_id = None
             self.document_notice = ""
             self.document_viewer = DocumentViewer(f"Bridge help · {topic}", topic_text(topic))
@@ -1433,6 +1437,8 @@ class _ConsoleState:
             return True
         if key == "o" and self.view == "Bridge" and not self.input_focused:
             if not self.document_pending:
+                self._invalidate_document_read()
+                generation = self._document_generation
                 self.document_pending = True
                 def read_objective() -> None:
                     try:
@@ -1443,7 +1449,8 @@ class _ConsoleState:
                     except Exception as exc:
                         result = ("objective", "?", f"Could not read full objective: {_text(exc, 160)}")
                     with self._result_lock:
-                        self._document_result = result
+                        if generation == self._document_generation:
+                            self._document_result = result
                 threading.Thread(target=read_objective, name="llm-bridge-objective", daemon=True).start()
             return True
         if self.input_focused and key in {"KEY_HOME", "\x01"}:
@@ -1647,6 +1654,7 @@ class _ConsoleState:
             self._confirm_or_dispatch(action.command.format(task=self.selected_task_anchor))
 
     def close_document(self) -> None:
+        self._invalidate_document_read()
         if self.document_viewer is not None:
             self.document_viewer.release()
             self.document_viewer = None
@@ -1654,11 +1662,20 @@ class _ConsoleState:
         self.document_export_editing = False
         self.document_heading_list = False
 
+    def _invalidate_document_read(self) -> None:
+        with self._result_lock:
+            self._document_generation += 1
+            self._document_result = None
+        self.document_pending = False
+        self.document_edit_pending = False
+
     def request_task_document(self, task_id: str, *, for_edit: bool = False) -> None:
         if self.document_pending:
             self.output.append("A full task read is already in progress.")
             return
         task = next((item for item in _items(self.snapshot.get("tasks")) if str(item.get("id")) == task_id), {})
+        self._invalidate_document_read()
+        generation = self._document_generation
         self.document_pending = True
         self.document_edit_pending = for_edit
 
@@ -1672,7 +1689,8 @@ class _ConsoleState:
             except Exception as exc:
                 result = (task_id, "?", f"[Could not read full prompt: {_text(exc, 160)}]")
             with self._result_lock:
-                self._document_result = result
+                if generation == self._document_generation:
+                    self._document_result = result
 
         threading.Thread(target=read_document, name="llm-bridge-document", daemon=True).start()
 

@@ -381,8 +381,8 @@ class TmuxTerminalBackend:
         self._run(handle.socket_path, "select-pane", "-t", target)
         if expand:
             self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
-        left = f"{tmux_role_markup('brand')}{'▶ ' if pane == 'bridge' else ''}Bridge [C-] B] #[default]"
-        right = f"{tmux_role_markup('ok')}{'▶ ' if pane == 'provider' else ''}Provider [C-] P] #[default]"
+        left = tmux_role_markup('brand') + "#{?#{==:#{pane_index},1},▶ ,}Bridge ^]B #[default]"
+        right = tmux_role_markup('ok') + "#{?#{==:#{pane_index},0},▶ ,}Provider ^]P #[default]"
         self._run(handle.socket_path, "set-option", "-g", "status-left", left)
         self._run(handle.socket_path, "set-option", "-g", "status-right", right)
 

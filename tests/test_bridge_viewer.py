@@ -107,3 +107,12 @@ def test_no_follow_keeps_opened_source_after_file_changes(tmp_path, monkeypatch)
     captures = _run(monkeypatch, artifact, [change, "q"], follow=False)
     assert captures[-1][0] == "original\n"
     assert artifact.read_text() == "changed\n"
+
+
+def test_static_view_does_not_offer_unavailable_resume_action(tmp_path, monkeypatch):
+    artifact = tmp_path / "static.log"
+    artifact.write_text("opened source\n")
+    def append(): artifact.write_text("opened source\nnew output\n")
+    captures = _run(monkeypatch, artifact, [append, "KEY_END", "q"], follow=False)
+    assert captures[-1][0] == "opened source\n"
+    assert all("End resumes" not in notice for _, _, notice in captures)

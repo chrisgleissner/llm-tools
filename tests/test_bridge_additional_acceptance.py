@@ -264,3 +264,28 @@ def test_launcher_failed_start_keeps_saved_mission_and_shows_retry_path(tmp_path
     assert bridge_launcher.run_launcher(dispatch) == 0
     assert calls == ["mission", "start"]
     assert any("saved but could not start" in error for error in errors)
+
+
+def test_delayed_task_read_does_not_replace_help_opened_while_waiting():
+    from threading import Event
+    import time
+    entered, release = Event(), Event()
+    def dispatch(_mission, command):
+        assert command == "task show --task 9"
+        entered.set()
+        assert release.wait(1)
+        return '{"id":"9","revision":2,"prompt":"full task source"}'
+    state = bridge_tui._ConsoleState("mission", dispatch, lambda *_: {}, full=True)
+    state.request_task_document("9")
+    assert entered.wait(1)
+    assert state._dispatch("help quickstart")
+    help_viewer = state.document_viewer
+    assert help_viewer is not None and "help" in help_viewer.title
+    release.set()
+    deadline = time.monotonic() + 1
+    while state.document_pending and time.monotonic() < deadline:
+        state.refresh()
+        time.sleep(.001)
+    assert not state.document_pending
+    assert state.document_viewer is help_viewer
+    assert "quickstart" in state.document_viewer.title

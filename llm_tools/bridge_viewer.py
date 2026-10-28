@@ -54,8 +54,10 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
                             viewer.end(max(1,window.getmaxyx()[0]-2))
                             seen=observed
                             state.document_notice='Following · file rotated/truncated; older content unavailable' if rotated else 'Following · Up pauses, End resumes'
-                        else:
+                        elif follow:
                             state.document_notice='Paused · new output available · End resumes'
+                        else:
+                            state.document_notice='File changed · close and reopen to refresh; source snapshot retained'
                     elif follow:
                         state.document_notice='Following · Up pauses' if following else 'Paused · End resumes'
                 except (OSError,UnicodeError) as exc:
