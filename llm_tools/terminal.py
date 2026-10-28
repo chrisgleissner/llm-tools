@@ -214,8 +214,8 @@ class TmuxTerminalBackend:
             f"bind-key {prefix} send-prefix\n"
             "bind-key -T root MouseDown1Pane select-pane -t = \\; send-keys -M \\; select-pane -t =\n"
             "bind-key -T root MouseUp1Pane select-pane -t = \\; send-keys -M\n"
-            'bind-key -T root WheelUpPane select-pane -t = \\; if-shell -F "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}" { send-keys -M } { copy-mode -e }\n'
-            'bind-key -T root WheelDownPane select-pane -t = \\; if-shell -F "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}" { send-keys -M } { send-keys -M }\n'
+            'bind-key -T root WheelUpPane select-pane -t = \\; if-shell -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" { send-keys -M } { copy-mode -e }\n'
+            'bind-key -T root WheelDownPane select-pane -t = \\; if-shell -F "#{||:#{pane_in_mode},#{mouse_any_flag}}" { send-keys -M } { send-keys -M }\n'
         )
         fd = os.open(config_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:

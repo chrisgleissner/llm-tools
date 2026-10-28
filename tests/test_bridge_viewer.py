@@ -116,3 +116,49 @@ def test_static_view_does_not_offer_unavailable_resume_action(tmp_path, monkeypa
     captures = _run(monkeypatch, artifact, [append, "KEY_END", "q"], follow=False)
     assert captures[-1][0] == "opened source\n"
     assert all("End resumes" not in notice for _, _, notice in captures)
+
+
+def test_standalone_viewer_ignores_unknown_escape_without_changing_source(tmp_path,monkeypatch):
+    artifact=tmp_path/'source.md';artifact.write_text('first\nsecond\nTAIL\n')
+    monkeypatch.setattr(curses,'keyname',lambda key:b'KEY_DOWN')
+    captures=_run(monkeypatch,artifact,[curses.KEY_DOWN,'\x1b','[','9','9','9','~','q'],follow=False)
+    assert len(captures)>=3
+    assert all(source=='first\nsecond\nTAIL\n' for source,_,_ in captures)
+
+
+def test_standalone_lone_escape_closes_and_invalid_key_is_ignored(tmp_path,monkeypatch):
+    artifact=tmp_path/'source.md';artifact.write_text('source\n')
+    monkeypatch.setattr(curses,'keyname',lambda key:(_ for _ in ()).throw(ValueError('unknown key')))
+    captures=_run(monkeypatch,artifact,[99999,'\x1b',lambda:None],follow=False)
+    assert len(captures)>=2 and artifact.read_text()=='source\n'
+
+
+def test_standalone_escape_replays_next_ordinary_key_for_the_caller(tmp_path,monkeypatch):
+    artifact=tmp_path/'source.md';artifact.write_text('source\n')
+    replay=[]
+    monkeypatch.setattr(curses,'unget_wch',replay.append)
+    _run(monkeypatch,artifact,['\x1b','x'],follow=False)
+    assert replay==['x']
+
+
+def test_public_tty_view_opens_only_the_requested_document(tmp_path,monkeypatch):
+    artifact=tmp_path/'source.md';artifact.write_bytes('source 中\r\nTAIL\n'.encode())
+    state=tmp_path/'must-not-exist'
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(state))
+    monkeypatch.setattr(bridge.sys.stdin,'isatty',lambda:True)
+    monkeypatch.setattr(bridge.sys.stdout,'isatty',lambda:True)
+    opened=[]
+    monkeypatch.setattr(bridge_viewer,'run_document',lambda source,**kwargs:opened.append((source,kwargs)) or 0)
+    assert bridge.main(['view','--file',str(artifact),'--follow'])==0
+    assert opened[0][0].encode()==artifact.read_bytes()
+    assert opened[0][1]['path']==artifact and opened[0][1]['follow']
+    assert not state.exists()
+
+
+def test_follow_does_not_spawn_replacement_layouts_while_rendering(tmp_path,monkeypatch):
+    from llm_tools.bridge_documents import DocumentViewer
+    artifact=tmp_path/'source.md';artifact.write_text('old source\n')
+    monkeypatch.setattr(DocumentViewer,'rendering',property(lambda self:True))
+    captures=_run(monkeypatch,artifact,[lambda:artifact.write_text('old source\nnew output\n'),'q'])
+    assert captures[-1][0]=='old source\n'
+    assert 'pending' in captures[-1][2]

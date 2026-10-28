@@ -1004,7 +1004,7 @@ class _ConsoleState:
     document_edit_pending: bool = False
     edit_initial_text: str = ""
     paste_source: str | None = None
-    _document_result: tuple[str, str, str] | None = field(default=None, repr=False)
+    _document_result: tuple[str, str, str | None, str] | None = field(default=None, repr=False)
     _document_generation: int = 0
 
     @property
@@ -1021,10 +1021,13 @@ class _ConsoleState:
             snapshot_thread = self._snapshot_thread
         if document_result is not None:
             self.document_notice = ""
-            task_id, revision, prompt = document_result
+            task_id, revision, prompt, error = document_result
             self.document_pending = False
             self.document_task_id = None if task_id == "objective" else task_id
-            if self.document_edit_pending:
+            if prompt is None:
+                self.document_edit_pending = False
+                self.output.append(error or "Full source unavailable; edit cancelled. Retry the full read.")
+            elif self.document_edit_pending:
                 self.edit_initial_text = prompt
                 self.edit_document_requested = True
                 self.document_edit_pending = False
@@ -1330,7 +1333,8 @@ class _ConsoleState:
                     self.edit_document_requested = True
                     self.close_document()
                 else:
-                    self.output.append("Objective is read-only; export its source to reuse it in a new mission.")
+                    self.document_notice = "Task is not editable in a terminal mission; export its source." if self.document_task_id is not None else "Objective is read-only; export its source to reuse it in a new mission."
+                    self.output.append(self.document_notice)
             elif key == "m":
                 viewer.toggle_rendered()
             elif key == "w":
@@ -1445,9 +1449,9 @@ class _ConsoleState:
                         from .bridge import open_store
                         with open_store() as store:
                             source = str(store.get_mission(self.mission_id)["objective"])
-                        result = ("objective", "1", source)
+                        result = ("objective", "1", source, "")
                     except Exception as exc:
-                        result = ("objective", "?", f"Could not read full objective: {_text(exc, 160)}")
+                        result = ("objective", "?", None, f"Could not read full objective: {_text(exc, 160)}")
                     with self._result_lock:
                         if generation == self._document_generation:
                             self._document_result = result
@@ -1685,9 +1689,9 @@ class _ConsoleState:
                 record = json.loads(str(raw))
                 prompt = record.get("prompt") if isinstance(record, dict) else None
                 revision = str(record.get("revision", task.get("revision", "?"))) if isinstance(record, dict) else "?"
-                result = (task_id, revision, prompt) if isinstance(prompt, str) else (task_id, revision, "[Full prompt unavailable]")
+                result = (task_id, revision, prompt, "") if isinstance(prompt, str) else (task_id, revision, None, "Full prompt unavailable; edit cancelled. Retry task show.")
             except Exception as exc:
-                result = (task_id, "?", f"[Could not read full prompt: {_text(exc, 160)}]")
+                result = (task_id, "?", None, f"Could not read full prompt: {_text(exc, 160)}")
             with self._result_lock:
                 if generation == self._document_generation:
                     self._document_result = result
@@ -2383,19 +2387,22 @@ def _compose_task_prompt(
     from .bridge_store import default_state_dir
 
     draft_dir = default_state_dir() / "drafts"
-    draft_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(draft_dir, 0o700)
-    fd, name = tempfile.mkstemp(prefix="task-", suffix=".md", dir=draft_dir)
+    fd: int | None = None
     try:
+        draft_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(draft_dir, 0o700)
+        fd, name = tempfile.mkstemp(prefix="task-", suffix=".md", dir=draft_dir)
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
             stream.write(source)
         os.chmod(name, 0o600)
-    except OSError:
+    except OSError as exc:
         try:
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
         except OSError:
             pass
-        state.output.append(f"Could not save task draft; source remains available in the composer.")
+        state.edit_initial_text = source
+        state.output.append(f"Could not save task draft: {_text(exc, 100)}. Recovery source: {LAST_RECOVERY_DRAFT}")
         return
     path = Path(name)
     if task_id is not None:

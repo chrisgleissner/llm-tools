@@ -591,3 +591,19 @@ Legacy externaleditor/tmphelper audited: no productioncalls; actualCtrlO uses
 privatepersistentstate/drafts. No user-facingdraftloss throughlegacyhelper.
 Finalverificationmustusecurrentfrozencommit; previousoverlappingrun diagnostic
 only. Coverage90Bridge remainsrequired; no exclusions or waivers introduced.
+
+Final failure-path audit additions (actual reproduced defects):
+R4 (P0, bridge_tui fullsource acquisition): failedread could becomeeditable
+errorplaceholder. Typed optional source/error now prevents amendment/composer
+fromopeningonfailedread. Realstorefullobjective+4failedread cases pass.
+R5 (P1, taskdraftcreation): mkdir/mkstemp failure escapedUI despiteintact
+checkpoint. Catchcreation/writes, preservefullsource/checkpointpath, report
+recovery. Exportpermissionfailures keepeditablepath andread-onlysource.
+R6 (P1, terminalwheel): alternate_on withoutmouse request bypassedscrollback.
+Ownedrawfakeprobe observed1/0/0 beforeandafterwheel; fixedbinding toactual
+mouse/panemodeflags. RealPTY regression observescopy-mode entry, qexit, then
+ordinaryq forwardedbyteexactly; requested-mouse/nativepaste suitepasses.
+Threefocusedterminal/cursor tests pass;13source/errorrecoverycases pass.
+PriorCI76ad179 passedtests onbothPythonversions butfailedunchanged90Bridge
+coverage (88%). Nextsourcecommit includesmeaningfulfailed-read/draft/export/
+viewerkey coverage; allgates must be rerun onthis frozenrevision.
