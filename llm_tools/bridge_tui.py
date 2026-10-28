@@ -1693,6 +1693,9 @@ class _ConsoleState:
                 raw = self.dispatch(self.mission_id, shlex.join(["task", "show", "--task", task_id]))
                 record = json.loads(str(raw))
                 prompt = record.get("prompt") if isinstance(record, dict) else None
+                pending = _dict(record.get("pending")) if isinstance(record, dict) else {}
+                if for_edit and isinstance(pending.get("prompt"), str):
+                    prompt = pending["prompt"]
                 revision = str(record.get("revision", task.get("revision", "?"))) if isinstance(record, dict) else "?"
                 result = (task_id, revision, prompt, "") if isinstance(prompt, str) else (task_id, revision, None, "Full prompt unavailable; edit cancelled. Retry task show.")
             except Exception as exc:
@@ -2379,7 +2382,7 @@ def _compose_task_prompt(
     try:
         source = compose_document(
             initial_text,
-            title=f"{'Amend' if task_id else 'Add'} task prompt",
+            title=f"Amend task {task_id} prompt" if task_id else "Add task prompt",
             window=window,
         )
     finally:
@@ -2487,6 +2490,7 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
     paste_candidate = bytearray()
     paste_activity = 0.0
     replay_keys: deque[object] = deque()
+    escape_sequence = False
     status_publication: dict[str, object] = {"applied": None, "thread": None}
     state.choose_view(VIEWS.index(initial_view))
     state.refresh(force=True)
@@ -2497,7 +2501,8 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
             state.output.append("Pasted source opened in the task composer; save it or keep its private recovery draft.")
             return
         command = TextBuffer(state.command, state.command_cursor, _MAX_COMMAND_CHARS)
-        if not command.paste(source):
+        accepted, _received = command.paste(source)
+        if not accepted:
             state.output.append(f"Pasted command is over the {_MAX_COMMAND_CHARS}-byte command limit; previous input is unchanged.")
             return
         state.command = command.text
@@ -2506,7 +2511,13 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
 
     def feed_console_paste(key: object) -> bool:
         """Consume bracketed-paste framing and atomically route completed source."""
-        nonlocal paste_activity
+        nonlocal paste_activity, escape_sequence
+        if escape_sequence:
+            if isinstance(key, str):
+                paste_activity = time.monotonic()
+                if any("@" <= char <= "~" for char in key):
+                    escape_sequence = False
+            return True
         if not isinstance(key, str):
             if paste_decoder.active:
                 return True
@@ -2534,9 +2545,14 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
             # A bare Escape followed by ordinary input is two keystrokes, not
             # an escape sequence. Apply Escape, then replay the following key.
             paste_candidate.clear()
-            if previous == b"\x1b":
+            if previous == b"\x1b" and key == "O":
+                escape_sequence = True
+            elif previous == b"\x1b":
                 state.handle_key("\x1b")
                 replay_keys.append(key)
+            elif previous.startswith((b"\x1b[", b"\x1bO")):
+                escape_sequence = not (len(key) == 1 and "@" <= key <= "~")
+                state.output.append("Unknown escape sequence ignored.")
             elif not isinstance(key, str):
                 replay_keys.append(key)
             else:
@@ -2562,6 +2578,7 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
         return False
 
     def loop(window: curses.window) -> int | TerminalAction | ControlViewAction:
+        nonlocal escape_sequence
         initialize_colors()
         window.keypad(True)
         paste_keypad = True
@@ -2655,6 +2672,9 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                 except curses.error:
                     key = None
             if key is None:
+                if escape_sequence and time.monotonic()-paste_activity >= .12:
+                    escape_sequence = False
+                    state.output.append("Unknown or incomplete escape sequence ignored.")
                 if paste_candidate and time.monotonic() - paste_activity >= 0.12:
                     if paste_candidate == b"\x1b":
                         paste_candidate.clear()

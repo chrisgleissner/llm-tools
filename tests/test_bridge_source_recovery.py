@@ -139,3 +139,17 @@ def test_composer_adjacent_edits_preserve_exact_document(tmp_path,monkeypatch,ke
     mapping={'HOME':curses.KEY_HOME,'DELETE':curses.KEY_DC,'RIGHT':curses.KEY_RIGHT,'LEFT':curses.KEY_LEFT,'UP':curses.KEY_UP,'BACKSPACE':curses.KEY_BACKSPACE,'KILL':'\x0b','CLEAR':'\x15','TAB':'\t','ENTER':'\n'}
     result=tui.compose_document('abc\ndef',window=_Window([mapping.get(key,key) for key in keys]+['\x13']))
     assert result==expected
+
+
+def test_reopening_pending_amendment_edits_latest_desired_source(tmp_path,monkeypatch):
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(tmp_path/'state'))
+    with bridge.open_store() as store:
+        mission=store.create_mission('Pending','Original objective',cwd=tmp_path,initial_prompt='original source')
+        task_id=mission['initial_task_id']
+        store.amend_task(task_id,prompt='new requirements\r\nTAIL\n')
+        record=store.get_task(task_id)
+    state=tui._ConsoleState(mission['id'],lambda *_:json.dumps(record),lambda *_:{},full=True)
+    state.request_task_document(str(task_id),for_edit=True)
+    settle(state,lambda:not state.document_pending)
+    assert state.edit_document_requested
+    assert state.edit_initial_text=='new requirements\r\nTAIL\n'

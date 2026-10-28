@@ -607,3 +607,17 @@ Threefocusedterminal/cursor tests pass;13source/errorrecoverycases pass.
 PriorCI76ad179 passedtests onbothPythonversions butfailedunchanged90Bridge
 coverage (88%). Nextsourcecommit includesmeaningfulfailed-read/draft/export/
 viewerkey coverage; allgates must be rerun onthis frozenrevision.
+
+Boundary-review closure before finalCI:
+R7 (P1): reopeningpendingamendment usedoldactiveprompt andcouldoverwrite queued
+requirements onunchanged save. for_edit nowuses latestpendingprompt; realstore
+regressionpreservesCRLFandTAIL. Read-onlyactiveprompt/publicCLI unchanged.
+R8 (P1): unknownsplitCSI Esc[42~ inserted2~intoretaineddraft. Consumeunknown
+sequenceuntilfinalbyte, boundedtimeout; exactdraftregressionpasses.
+R9 (P1): shortpasteoverflow booleancheckedtuple(False,size), suppressingwarning.
+Use explicitacceptedflag; previouscommandretained withvisiblelimitfeedback.
+Added environment-independentasyncstatuspublication success/failure tests and
+wholepacket routing tests. Focused74input/source/PTY tests pass. Priorfull
+professionalrun passedalltests,89overall/90Bridge locally; CI6cbf6b6 tests
+passedbut89Bridge. Latesttests explicitlycoverUIpublicationpreviouslyonly
+measured incidentally underambientTMUX. No exclusions/thresholdchanges.
