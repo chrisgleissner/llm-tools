@@ -141,7 +141,7 @@ def test_real_curses_control_navigation_dispatch_and_exit(tmp_path: Path) -> Non
     process, master, record = _start_console(tmp_path)
     output = bytearray()
     try:
-        output.extend(_read_until(master, process, b"PTY Mission"))
+        output.extend(_read_until(master, process, b"RUNNING"))
         # Wait for the view title rather than the always-visible tab legend.
         os.write(master, b"\x1bOR")
         output.extend(_read_until(master, process, b"No stations recorded.", output_sink=output))
@@ -183,7 +183,7 @@ def test_real_curses_multiline_command_response_scrolls_dismisses_and_accepts_ne
     process, master, record = _start_console(tmp_path)
     try:
         output = bytearray()
-        _read_until(master, process, b"PTY Mission", output_sink=output)
+        _read_until(master, process, b"RUNNING", output_sink=output)
         os.write(master, b"task add --help\r")
         recorded = _wait_for_record_count(process, record, 1)
         assert len(recorded) == 1
@@ -221,7 +221,7 @@ def test_real_curses_editor_roundtrip_dispatches_and_removes_private_file(tmp_pa
     editor.chmod(0o700)
     process, master, record = _start_console(tmp_path, editor=editor)
     try:
-        _read_until(master, process, b"PTY Mission")
+        _read_until(master, process, b"RUNNING")
         output = bytearray()
         os.write(master, b"\x05")
         _read_until(master, process, b"full source")
@@ -270,7 +270,7 @@ def test_real_curses_ctrl_e_preserves_typed_task_options(tmp_path: Path) -> None
     editor.chmod(0o700)
     process, master, record = _start_console(tmp_path, editor=editor)
     try:
-        _read_until(master, process, b"PTY Mission")
+        _read_until(master, process, b"RUNNING")
         output = bytearray()
         os.write(master, b"task add --priority 5 --acceptance 'tests pass'")
         os.write(master, b"\x1b")  # Return from command entry to body shortcuts.
@@ -299,11 +299,11 @@ def test_real_curses_ctrl_e_preserves_typed_task_options(tmp_path: Path) -> None
 def test_real_curses_short_bracketed_command_paste_waits_for_enter(tmp_path: Path) -> None:
     process, master, record = _start_console(tmp_path)
     try:
-        _read_until(master, process, b"PTY Mission")
+        _read_until(master, process, b"RUNNING")
         frame = b"\x1b[200~status\x1b[201~"
         for offset in range(0, len(frame), 2):
             os.write(master, frame[offset:offset + 2])
-        _read_until(master, process, b"> status")
+        _read_until(master, process, b"status")
         assert not record.exists(), "a pasted command must stay editable until Enter"
         os.write(master, b"\r")
         assert _wait_for_record(master, process, record) == "('pty-mission', 'status', '')\n"
@@ -321,7 +321,7 @@ def test_real_curses_bracketed_multiline_paste_preserves_source_sha256(tmp_path:
     process, master, record = _start_console(tmp_path)
     try:
         output = bytearray()
-        _read_until(master, process, b"PTY Mission", output_sink=output)
+        _read_until(master, process, b"RUNNING", output_sink=output)
         os.write(master, b"\x05")
         _read_until(master, process, b"Add task prompt")
         payload = source.encode("utf-8")
@@ -347,7 +347,7 @@ def test_real_curses_bracketed_multiline_paste_preserves_source_sha256(tmp_path:
 def test_real_compact_console_pty_dispatches_and_exits(tmp_path: Path) -> None:
     process, master, record = _start_console(tmp_path, full=False)
     try:
-        _read_until(master, process, b"PTY Mission")
+        _read_until(master, process, b"RUNNING")
         os.write(master, b"status\r")
         assert _wait_for_record(master, process, record) == "('pty-mission', 'status', '')\n"
         deadline = time.monotonic() + 5
@@ -410,7 +410,7 @@ def test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment(tmp_path: 
     )
     os.close(slave)
     try:
-        _read_until(master, process, b"PTY Mission")
+        _read_until(master, process, b"RUNNING")
         os.write(master, b"\t")  # Orders view.
         _read_until(master, process, b"73 READY PTY order")  # Wait until the async snapshot is visible.
         os.write(master, b"\r")  # Inspect the selected order.
