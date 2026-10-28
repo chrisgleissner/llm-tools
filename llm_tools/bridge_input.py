@@ -49,6 +49,17 @@ def input_view(text: str, cursor: int, width: int) -> tuple[str, int]:
     return cell_slice(text, start, width - 1), min(width - 1, caret - start)
 
 
+def offset_for_cells(text: str, target: int) -> int:
+    """Find an insertion offset at a preferred terminal column."""
+    cells = 0
+    for index, char in enumerate(text):
+        amount = 8-cells % 8 if char == "\t" else cell_width(char)
+        if cells+amount > target:
+            return index
+        cells += amount
+    return len(text)
+
+
 def wrapped_row_for_column(text: str, column: int, width: int) -> tuple[int, int]:
     """Map a source codepoint offset to (visual row, cell column)."""
     width = max(1, width)

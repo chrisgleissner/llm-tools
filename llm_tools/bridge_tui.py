@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice, input_view
+from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice, input_view, offset_for_cells
 from .bridge_documents import DocumentViewer, render_markdown, render_markdown_segments
 from .bridge_theme import colors_disabled, fit_role_color, resolve_theme, role_sgr, sgr_foreground
 from .common import ANSI_COLOR_ROLES
@@ -276,11 +276,13 @@ def compose_document(
                 elif key in {curses.KEY_END, "\x05"}:
                     end = buffer.text.find("\n", buffer.cursor)
                     buffer.move(len(buffer.text) if end < 0 else end)
-                elif key in {curses.KEY_UP, "KEY_UP", curses.KEY_DOWN, "KEY_DOWN"}:
-                    preferred_column = column if preferred_column is None else preferred_column
-                    target_line = min(len(lines) - 1, max(0, line_no + (-1 if key in {curses.KEY_UP, "KEY_UP"} else 1)))
-                    start = sum(len(item) + 1 for item in lines[:target_line])
-                    buffer.move(start + min(preferred_column, len(lines[target_line])))
+                elif key in {curses.KEY_UP, "KEY_UP", curses.KEY_DOWN, "KEY_DOWN", curses.KEY_PPAGE, curses.KEY_NPAGE}:
+                    preferred_column = cell_width(lines[line_no][:column]) if preferred_column is None else preferred_column
+                    direction = -1 if key in {curses.KEY_UP, "KEY_UP", curses.KEY_PPAGE} else 1
+                    step = max(1, height-3) if key in {curses.KEY_PPAGE, curses.KEY_NPAGE} else 1
+                    target_line = min(len(lines)-1, max(0, line_no+direction*step))
+                    start = sum(len(item)+1 for item in lines[:target_line])
+                    buffer.move(start+offset_for_cells(lines[target_line], preferred_column))
                 elif key in {curses.KEY_BACKSPACE, "KEY_BACKSPACE", "\x7f", "\b"}:
                     buffer.backspace()
                 elif key in {curses.KEY_DC, "KEY_DC"}:
@@ -297,13 +299,16 @@ def compose_document(
                     notice = "Enter inserts a newline · Ctrl-S saves · Esc keeps a private recovery draft"
                     if not buffer.insert("\n"):
                         notice = "Paste rejected: document exceeds the 1 MiB interactive limit"
+                elif key == "\t":
+                    if not buffer.insert("\t"):
+                        notice = "Input rejected: document exceeds the 1 MiB interactive limit"
                 elif isinstance(key, str) and key and key.isprintable():
                     if len(key) > 1:
                         accepted, received = buffer.paste(key)
                         notice = "" if accepted else f"Paste rejected: received {received} bytes; limit is 1 MiB. Use an editor or import a file."
                     elif not buffer.insert(key):
                         notice = "Input rejected: document exceeds the 1 MiB interactive limit"
-                if key not in {curses.KEY_UP, "KEY_UP", curses.KEY_DOWN, "KEY_DOWN"}:
+                if key not in {curses.KEY_UP, "KEY_UP", curses.KEY_DOWN, "KEY_DOWN", curses.KEY_PPAGE, curses.KEY_NPAGE}:
                     preferred_column = None
         finally:
             if original is not None:

@@ -102,3 +102,40 @@ def test_failed_task_file_creation_retains_complete_checkpoint_and_reports_it(mo
     assert checkpoint.read_bytes()==source.encode()
     assert state.edit_initial_text==source
     assert 'disk full' in state.output[-1] and str(checkpoint) in state.output[-1]
+
+
+@pytest.mark.parametrize('first',['abcd','中中','e\u0301abc'])
+def test_composer_vertical_moves_keep_preferred_display_column(tmp_path,monkeypatch,first):
+    import curses
+    from tests.test_bridge_composer_recovery import _Window
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(tmp_path/'state'))
+    source=first+'\nx\nabcdef'
+    keys=[curses.KEY_HOME,curses.KEY_UP,curses.KEY_UP,curses.KEY_END,curses.KEY_DOWN,curses.KEY_DOWN,'X','\x13']
+    assert tui.compose_document(source,window=_Window(keys))==first+'\nx\nabcdXef'
+
+
+def test_composer_page_navigation_reaches_other_lines_without_changing_source(tmp_path,monkeypatch):
+    import curses
+    from tests.test_bridge_composer_recovery import _Window
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(tmp_path/'state'))
+    assert tui.compose_document('a\nbbbb\ncccc',window=_Window([curses.KEY_PPAGE,'X','\x13']))=='aX\nbbbb\ncccc'
+    keys=[curses.KEY_HOME,curses.KEY_UP,curses.KEY_UP,curses.KEY_NPAGE,'X','\x13']
+    assert tui.compose_document('a\nbbbb\ncccc',window=_Window(keys))=='a\nbbbb\nXcccc'
+
+
+@pytest.mark.parametrize('keys,expected',[
+    (['HOME','DELETE'],'abc\nef'),
+    (['HOME','RIGHT','BACKSPACE'],'abc\nef'),
+    (['HOME','RIGHT','KILL'],'abc\nd'),
+    (['HOME','UP','RIGHT','KILL'],'a\ndef'),
+    (['CLEAR','TAB','x'],'\tx'),
+    (['HOME','LEFT','X'],'abcX\ndef'),
+    (['HOME','ENTER','X'],'abc\n\nXdef'),
+])
+def test_composer_adjacent_edits_preserve_exact_document(tmp_path,monkeypatch,keys,expected):
+    import curses
+    from tests.test_bridge_composer_recovery import _Window
+    monkeypatch.setenv('LLM_BRIDGE_STATE_DIR',str(tmp_path/'state'))
+    mapping={'HOME':curses.KEY_HOME,'DELETE':curses.KEY_DC,'RIGHT':curses.KEY_RIGHT,'LEFT':curses.KEY_LEFT,'UP':curses.KEY_UP,'BACKSPACE':curses.KEY_BACKSPACE,'KILL':'\x0b','CLEAR':'\x15','TAB':'\t','ENTER':'\n'}
+    result=tui.compose_document('abc\ndef',window=_Window([mapping.get(key,key) for key in keys]+['\x13']))
+    assert result==expected

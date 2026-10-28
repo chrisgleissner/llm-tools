@@ -57,7 +57,7 @@ Escape cancels and restores the command draft. Clear the query to show all tasks
 Palette / filters labelled actions. Single-click selects; Enter/double-click
 activates the selected action. Disabled actions explain their unavailable target.
 
-Composer: Enter inserts a newline; F2/Ctrl-S saves; Ctrl-O opens VISUAL/EDITOR.
+Composer: Enter newline; Tab indent; PgUp/PgDn page; F2/Ctrl-S saves. Ctrl-O opens VISUAL/EDITOR.
 Escape retains a recovery draft. Ctrl-D offers explicit discard confirmation.
 Viewer: Up/Down, PgUp/PgDn or Space page; Home/End go first/last; / searches,
 n/N visit matches; Escape cancels search before closing, q closes the viewer.
