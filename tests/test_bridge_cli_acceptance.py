@@ -84,12 +84,12 @@ def test_console_file_path_and_cli_share_durable_commands(tmp_path, monkeypatch,
     path = tmp_path / "task with spaces.md"
     path.write_text("Additional task\nsecond paragraph\n", encoding="utf-8")
     result = json.loads(dispatch_console_command(mission, f'add "{path}"'))
-    assert result["status"] == "QUEUED"
-    assert result["original_prompt"] == path.read_text()
+    assert result["status"] == "APPLIED"
+    created_task_id = result["result"]["id"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.db.execute("SELECT status FROM commands ORDER BY rowid DESC LIMIT 1").fetchone()[0] == "APPLIED"
         tasks = store.list_tasks(mission)
-        assert len(tasks) == 2 and tasks[1]["prompt"] == path.read_text()
+        assert len(tasks) == 2 and tasks[1]["id"] == created_task_id and tasks[1]["prompt"] == path.read_text()
     assert "invalid choice" in dispatch_console_command(mission, "echo not-a-shell")
     assert main(["doctor", "--mission", mission, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["sqlite_integrity"] == "ok"

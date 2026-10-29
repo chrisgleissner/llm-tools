@@ -43,6 +43,37 @@ def local_command_args(args: list[str]) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
+def _measure_terminal_children(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measure real PTY children that inherit os.environ rather than env()."""
+    if _parent_under_coverage():
+        monkeypatch.setenv("COVERAGE_PROCESS_START", str(ROOT / "pyproject.toml"))
+        paths = [str(ROOT), COVERAGE_SITE, os.environ.get("PYTHONPATH", "")]
+        monkeypatch.setenv("PYTHONPATH", os.pathsep.join(path for path in paths if path))
+
+
+@pytest.fixture(autouse=True)
+def _no_live_provider_launch(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Unexpected provider execution must fail locally, never consume capacity.
+
+    Tests can prepend their own deterministic fake binaries. Keeping the guard
+    ahead of ambient PATH also protects UI tests that accidentally change which
+    action their simulated key stream selects.
+    """
+    guard = tmp_path_factory.mktemp("provider-launch-guard")
+    isolated_home = guard / "home"
+    isolated_home.mkdir()
+    monkeypatch.setenv("HOME", str(isolated_home))
+    for name in ("codex", "claude", "copilot", "kilo", "mmx", "opencode"):
+        path = guard / name
+        path.write_text("#!/bin/sh\necho 'Unexpected live provider launch blocked by test harness' >&2\nexit 123\n")
+        path.chmod(0o700)
+    monkeypatch.setenv("PATH", str(guard) + os.pathsep + os.environ.get("PATH", ""))
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "COPILOT_GITHUB_TOKEN",
+                 "GH_TOKEN", "GITHUB_TOKEN", "ZAI_API_KEY", "MINIMAX_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_power_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never touch real machine power state from the test suite.
 

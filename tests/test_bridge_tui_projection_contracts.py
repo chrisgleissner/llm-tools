@@ -88,6 +88,7 @@ def test_bounded_task_and_capacity_projection_keeps_supported_scalars_only() -> 
 
 def test_capacity_summary_classifies_active_alternate_and_opaque_routes() -> None:
     summaries = bridge_tui._capacity_summaries({
+        "station_context": {"executing_operation": "owned-op", "operation_status": "RUNNING", "last_launched_station": "codex"},
         "capacity": {"selection": {
             "route": "codex",
             "decisions": [
@@ -147,7 +148,7 @@ def test_view_rows_cover_empty_and_legacy_fallbacks() -> None:
     assert "configured model configured" in state.rows()[0]
 
     state.choose_view(6)
-    assert state.rows()[0].startswith("> help")
+    assert state.rows()[0].startswith("Help — Read")
     assert len(state.rows()) == len(bridge_tui.PALETTE_COMMANDS)
     state.choose_view(99)
     assert state.view == "Palette"
@@ -222,14 +223,16 @@ def test_key_state_transitions_cover_pending_search_and_navigation_modes() -> No
 
     state.choose_view(3)
     state.handle_key("KEY_NPAGE")
-    assert state.selected == 5
+    assert state.selected == 0  # The unavailable placeholder is the only row.
     state.handle_key("KEY_PPAGE")
     assert state.selected == 0
     state.command = "typed"
+    state.input_focused = True
     state.handle_key("KEY_RIGHT")
     assert state.view == "Systems"
     state.handle_key("\x04")
-    assert state.command == ""  # First Ctrl-D clears an input line.
+    assert state.command == "typed"  # EOF cannot silently destroy a draft.
+    state.handle_key("\x15")  # Explicitly clear before exit.
     state.command_pending = True
     assert state.handle_key("\x04")
     assert "Wait for the command result" in state.output[-1]

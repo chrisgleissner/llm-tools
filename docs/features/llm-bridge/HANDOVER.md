@@ -1,6 +1,45 @@
 # LLM Bridge resume handover
 
-## CURRENT — 2026-10-27 verified publication candidate
+## CURRENT — 2026-10-27 version1.1.1 patch
+
+User explicitly requires completion without stopping, local `llm-bridge`
+startup from any folder, professional dark/light semantic colours, and a new
+patch release for all changes after thorough testing. Publication/merge/tag
+remain authorized; do not ask again. Preserve original `prompt.md`.
+
+PR26 merged at `4f2327c`;1.1.0 was published with verified wheel/sdist and green
+tag CI. The first main3.11 run exposed a test-only PTY EOF/poll race (A25), now
+repaired with explicit rejection/no-task-created/child-wait assertions.
+
+Current branch `fix/bridge-startup-theme`, patch version1.1.1. Local pipx
+editable metadata was0.1.0 and lackedBridge; refreshed same installation now
+exposes all five commands and reports1.1.1. Bare installed command opens a home
+screen from any folder, creates through shared handlers without provider
+execution, then opens controls. Type `start` then `attach` for the combined
+station. Existing subcommands remain unchanged; bare non-TTY prints help.
+
+Professional semantic colour roles support explicit `LLM_BRIDGE_THEME=dark|light`,
+COLORFGBG detection, common overrides and NO_COLOR/dumb/limited-palette fallbacks.
+Native provider colours remain native. Actual installed dark/light screenshots
+are in docs/img. Reviewed A26 preserves Usage/response/nav whitespace; A27
+preserves literal leading-dash objectives. Independent Sol6.1 High approval
+closes all findings, conditional on final publication gates.
+
+Final frozen local gates PASS: Python3.11.14 **1,299 passed199.94s**;
+Python3.15.1 **1,299 passed191.83s**; global**89%**, Bridge/terminal**91%** with
+unchanged85/90 CI gates and no exclusions. Logs `/tmp/bridge-111-release-{311,315}`.
+Native Codex reply/full-stop/same-owned-ID resume/context recall and cleanup
+PASS; zero-prompt local commands/wheel parity PASS, provider click selection
+NOT VERIFIED. No paid Claude/Copilot completion/restoration claim.
+
+Finish rebuilt wheel/sdist checks, push complete patch, open/update its PR and
+wait for exact-head3.11/3.15 push+PR CI before merging and numeric-tag1.1.1.
+Verify published digests/source/installation, refresh local editable package
+metadata if needed and leave main clean. Read `release-1.1.1-verification.md`,
+review-findings/spec-audit and GitHub PR/release state for newer results.
+All historical checkpoints below are superseded by this CURRENT section.
+
+## Previous 1.1.0 publication checkpoint — 2026-10-27
 
 Repository `/home/chris/dev/llm-tools`, branch `feat/llm-bridge`, PR26:
 https://github.com/chrisgleissner/llm-tools/pull/26. This checkpoint extends

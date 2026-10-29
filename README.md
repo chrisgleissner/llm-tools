@@ -104,6 +104,28 @@ tail -f ~/.cache/llm-tools/llm-scheduler/logs/latest/run.log
 
 ### LLM Bridge
 
+Run `llm-bridge` from any folder to open its home screen. Choose an existing mission
+or press **N** to create one in the current folder. The form lets you choose the
+working directory, providers and native/autonomous mode. Native interactive is
+recommended. Choose **Start and open provider** to save, start, and attach to the
+owned provider station; **Save mission only** leaves it ready to inspect or start
+later. Opening a saved mission does not start provider work. **Q** exits the home screen;
+**Ctrl-D** exits the controls. Without a terminal, the bare command prints help.
+
+Bridge uses semantic colours for navigation, selection, status, warnings, errors
+and secondary information while preserving your terminal's background. It detects
+dark/light mode from `COLORFGBG`; set `LLM_BRIDGE_THEME=dark` or
+`LLM_BRIDGE_THEME=light` if your terminal does not advertise its background.
+`NO_COLOR` and `TERM=dumb` retain a readable monochrome interface.
+
+<p>
+<img src="./docs/img/llm-bridge-dark.png" width="49%" alt="Actual Bridge controls in a dark terminal"/>
+<img src="./docs/img/llm-bridge-light.png" width="49%" alt="Actual Bridge controls in a light terminal"/>
+</p>
+
+Actual installed control terminals with an isolated acceptance mission; no provider
+execution is implied by these theme screenshots.
+
 Create a mission from a verbatim prompt file, inspect its initial task, and start autonomous work:
 
 ```bash
@@ -113,7 +135,7 @@ llm-bridge start --mission MISSION_ID
 llm-bridge status --mission MISSION_ID --json
 ```
 
-The default run opens a private tmux station with an interactive Bridge command pane and a provider activity pane. Install `tmux` for this mode. Use `--headless` on mission creation or `start` to run without a station. Use `--native` to put an interactive provider CLI in the provider pane; `--native` and `--headless` cannot be combined. `--json` changes result formatting only; mission creation does not start the controller.
+Native mode opens a private tmux station with the provider focused across all terminal rows except the status line. Press Ctrl-] then `B`/`b` for Bridge controls and `P`/`p` to return to the same provider process. `Ctrl-] ?` shows shortcuts; `Ctrl-] Ctrl-]` sends a literal prefix to the provider. Prefix `z` toggles the split layout. Install `tmux` for native mode. Autonomous mode runs headless provider work and has no station. `--headless` and `--native` cannot be combined. `--json` changes result formatting only; CLI mission creation remains save-only.
 
 Add a task from a file or standard input, then use task commands to order or amend it:
 
@@ -136,15 +158,15 @@ llm-bridge task verify --mission MISSION_ID --task TASK_ID --approve
 
 Verifier output and context files are private local artifacts. A verifier failure or timeout leaves the task awaiting review; it never marks the task complete.
 
-Tasks move through `QUEUED`, `READY`, `RUNNING`, `VERIFYING`, and then an operator or verifier decision; `BLOCKED`, `FAILED`, `PAUSED`, and `CANCELLED` remain visible for recovery. The full terminal control view has Bridge, Orders, Stations, Systems, Log, Sessions, and Palette views. Orders are paged in batches of 200 and searchable with Ctrl-F; task status and acceptance-criteria progress are shown in the mission summary. The Stations view separates the station you are viewing from the last station selected for execution. `llm-bridge station --mission ID NAME` changes only the viewed-station preference; it does not change provider routing.
+Tasks move through `QUEUED`, `READY`, `RUNNING`, `VERIFYING`, and then an operator or verifier decision; `BLOCKED`, `FAILED`, `PAUSED`, and `CANCELLED` remain visible for recovery. The control view has eight destinations: Bridge, Orders (Tasks), Stations (Providers/routes), Systems, Log, Sessions, Palette, and Usage. Orders are paged in batches of 200 and searchable with Ctrl-F; `v` opens the selected task's full prompt. The Stations view separates the station you are viewing from the last station selected for execution. `llm-bridge station --mission ID NAME` changes only the viewed-station preference; it does not change provider routing.
 
 Bridge labels configured values separately from observations. A model pin shown for an operation is the configured scheduler value, not proof of the provider's active model. The Systems view reports configured mode and verified controller mode separately; provider liveness and observed model remain `unknown` unless supported by an observation event.
 
 `pause` waits for an active provider invocation to return, then holds the controller; it does not sleep the machine. During capacity waits, readiness is reevaluated while the host stays awake, and pause/stop commands interrupt the wait. A separate capacity-observation worker refreshes the monitor every 60 seconds by default. `stop` closes the owned station once stopped; `resume` starts or reconnects the controller. Force stop records unresolved work as uncertain before terminating only validated Bridge-owned processes. See [Bridge operations](./docs/llm-bridge/operations.md) for task states, control keys, verifier behavior, and recovery details.
 
-Native session continuation requires an exact Bridge-owned identity. For Claude Code and Copilot, Bridge supplies its own UUID when the installed CLI supports it, then checks structured provider metadata and the working directory. Codex identities are captured only from writable transcript descriptors in the validated owned process tree; Bridge never selects a session by recency. Resume requires the saved ID, directory, metadata and current CLI capability to agree. Without that evidence, Bridge reconstructs context from durable mission/task/checkpoint/evidence state. The repaired bounded live probe verifies Codex native reply, full controller stop, exact-ID restoration by a new controller, and context recall. Claude/Copilot live completion and restoration remain unverified. See [Bridge operations](./docs/llm-bridge/operations.md) for recovery behavior and evidence limits.
+Native session continuation requires an exact Bridge-owned identity. For Claude Code and Copilot, Bridge supplies its own UUID when the installed CLI supports it, then checks structured provider metadata and the working directory. Codex identities are captured only from writable transcript descriptors in the validated owned process tree; Bridge never selects a session by recency. Resume requires the saved ID, directory, metadata and current CLI capability to agree. Without that evidence, Bridge reconstructs context from durable mission/task/checkpoint/evidence state. The historical 1.1.1 bounded live probe verified Codex native reply, full controller stop, exact-ID restoration by a new controller, and context recall; it is not acceptance evidence for the 1.2.0 UX changes. Claude/Copilot live completion and restoration remain unverified. See [Bridge operations](./docs/llm-bridge/operations.md) for recovery behavior and evidence limits.
 
-Open the seven-view control screen with `llm-bridge control --mission ID`. The tmux station's compact command pane is available by attaching to the mission. Use `llm-bridge doctor` to check SQLite integrity and whether `tmux` is installed. See the [Bridge operations guide](./docs/llm-bridge/operations.md) for task states, terminal controls, pause/stop behavior, and recovery limits.
+Read offline built-in guidance with `llm-bridge help quickstart`, `help keys`, `help prompts`, `help markdown`, `help providers`, `help states`, `help verification`, or `help recovery`. `llm-bridge control --mission ID` opens controls without starting work. Use `llm-bridge doctor` to check SQLite integrity and whether `tmux` is installed. See the [Bridge operations guide](./docs/llm-bridge/operations.md) for task states, terminal controls, pause/stop behavior, and recovery limits.
 
 ## Provider CLI Requirements
 

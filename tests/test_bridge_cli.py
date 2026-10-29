@@ -297,7 +297,7 @@ def test_console_can_review_and_accept_proposals_with_quoted_reason(tmp_path: Pa
     assert result["result"]["status"] == "CANCELLED"
 
     invalid = dispatch_console_command(mission["id"], f"proposal accept {proposal_id} extra")
-    assert "usage:" in invalid
+    assert "unrecognized arguments" in invalid
 
 
 def test_console_preserves_public_proposal_option_grammar(tmp_path: Path, monkeypatch) -> None:
@@ -334,7 +334,8 @@ def test_console_reuses_cli_task_grammar_for_multiline_add_and_amend(tmp_path: P
         mission["id"],
         f"task add --priority 5 --acceptance 'tests pass' --depends-on {dependency} --file {json.dumps(str(objective_file))}",
     ))
-    task_id = int(response["id"])
+    assert response["status"] == "APPLIED"
+    task_id = int(response["result"]["id"])
     with BridgeStore(state / "bridge.sqlite3") as store:
         task = store.get_task(task_id)
         assert task["prompt"] == objective_file.read_text(encoding="utf-8")
@@ -505,8 +506,10 @@ def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: P
     assert json.loads(dispatch_console_command(mission_id, f"reorder {second} -4"))["result"]["ordering"] == -4
     assert json.loads(dispatch_console_command(mission_id, f"dependencies {second} {first}"))["result"]["depends_on"] == [first]
     added = json.loads(dispatch_console_command(mission_id, f"add {shlex.quote(str(prompt_file))}"))
-    added_id = added["id"]
-    assert added["prompt"] == "new task from file\n"
+    assert added["status"] == "APPLIED"
+    added_id = added["result"]["id"]
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        assert store.get_task(added_id)["prompt"] == "new task from file\n"
     amended = json.loads(dispatch_console_command(mission_id, f"amend {added_id} {shlex.quote(str(amendment_file))}"))
     assert amended["result"]["revision"] == 2
     with BridgeStore(state / "bridge.sqlite3") as store:

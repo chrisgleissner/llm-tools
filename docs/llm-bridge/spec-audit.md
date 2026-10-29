@@ -212,3 +212,63 @@ Historical checkpoint failures are retained rather than relabelled as passes.
 Original `docs/features/llm-bridge/prompt.md` is unchanged. Final production
 source remained frozen throughout full-suite/build/native acceptance; later
 record-only updates do not substitute for GitHub CI on the publication head.
+
+
+## Post-merge test follow-up and 1.1.1 review scope
+
+A25 tracks a test-only PTY-closure/process-exit race found by a post-merge
+Python 3.11 run. Independent lifecycle reproduction confirms the assertion's
+assumption is invalid; no production stdin-capture defect was demonstrated.
+The stronger actual-rejection/durable-state/single-key/child-wait regression
+passes independently on Python 3.11.14 and 3.15.1. See the precise evidence and
+limits in `review-findings.md`.
+
+The subsequent user-authorized 1.1.1 work adds bare-command startup from any
+folder and semantic dark/light Bridge themes. That changed surface requires a
+new independent review and complete release gates; the prior 1.1.0 source
+approval does not automatically approve these additions.
+
+
+The 1.1.1 independent changed-surface review found A26 (formatted Usage/response
+spacing collapsed by the color writer) and A27 (leading-dash form objective
+reinterpreted as an option). They are targeted Medium correctness regressions;
+release approval awaits their repairs and new frozen gates. The initial frozen
+changed-surface command passed 141 tests in 14.14s, illustrating why label-only
+and ordinary-objective tests did not establish these edge contracts.
+
+
+### 1.1.1 changed-surface independent closure
+
+A26 and A27 are closed: actual formatted Usage/response spacing and navigation
+overlay coordinates are preserved, and leading-dash objectives cross the shared
+CLI boundary literally. Independent gates passed 145 tests on Python 3.14.4 and
+39 launcher/color/editor tests on each Python 3.11.14 and 3.15.1. The real
+installed PATH executable also passed both dark/light creation from an unrelated
+folder with PYTHONPATH/PYTHONHOME removed, a verbatim `--help` objective, no
+provider operation and clean single-key exit. Exact commands are in the review
+findings ledger. The earlier exploratory module-import test failure was fixed
+by explicitly supplying the repository path in module-entrypoint tests; the
+installed-entrypoint check does not depend on that fixture.
+
+A separate limited-color light-mode bold adjustment and final complete gates
+are still pending. This checkpoint closes the targeted correctness findings; it
+does not approve an untested later delta or label pending publication checks
+passed. Original specification tables and directive remain preserved.
+
+
+### Final 1.1.1 independent source approval
+
+The complete launcher/theme patch is source-approved after A25–A27 closure and
+inspection of the scoped light/eight-color bold adjustment. The final-source
+independent gate passed 145 tests in 14.08s on Python 3.14.4, and the supported
+Python 3.15.1 launcher/color/editor gate passed 39 tests in 3.87s. The actual
+installed executable was exercised outside the checkout without PYTHONPATH,
+creating a verbatim leading-dash objective without provider execution. Retaken
+actual 256-color dark/light screenshots were visually inspected.
+
+No unresolved Critical/High/Medium source finding remains. Final publication
+requires the root-owned exact-source whole-suite/global85/Bridge90 matrix on
+Python 3.11/3.15, built-artifact version/install checks and GitHub CI. Those
+in-flight gates are not asserted as passed here. Native capability bounds and
+the preserved original specification/definition-of-done/scenario tables remain
+authoritative alongside the detailed review ledger.

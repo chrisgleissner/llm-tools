@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shlex
@@ -10,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -282,14 +284,14 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
         raise _RejectedOperatorCommand(str(exc)) from exc
 
 
-def _task_result(args: argparse.Namespace) -> Any:
+def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) -> Any:
     """Shared standalone/interactive task parser result and durable handler."""
     with open_store() as store:
         if args.task_action == "add":
             prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
             dep_ids = [int(x) for x in args.depends_on.split(",") if x.strip()]
             command_result = _apply_operator_command(store, args.mission, {"action": "task.add", "prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": args.acceptance})
-            result = command_result if command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
+            result = command_result if preserve_receipt or command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
         elif args.task_action == "list":
             result = store.list_tasks(args.mission)
         elif args.task_action == "show":
@@ -315,7 +317,7 @@ def _task_result(args: argparse.Namespace) -> Any:
 
 class _ConsoleParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
-        raise ValueError(f"{self.format_usage()}{self.prog}: error: {message}")
+        raise ValueError(f"{message}. Use {self.prog} --help for the required arguments.")
 
 
 def dispatch_console_command(mission_id: str, command_line: str) -> str | TerminalAction | ControlViewAction:
@@ -326,12 +328,20 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             return ""
         command = words[0]
         if command in {"help", "?"}:
-            return (
-                _build_parser().format_help()
-                + "\nConsole examples: task add --priority 5 --acceptance 'tests pass' --file PATH; "
-                + "task amend --task ID --file PATH; pause ID; resume ID; proposal list; proposal accept ID; "
-                + "attach [--mission ID] [--client /dev/pts/N]; detach [--client /dev/pts/N].\n"
-            )
+            from .bridge_help import topic_text
+
+            if len(words) > 1:
+                if words[1] in {"task", "mission", "start", "attach", "pause", "resume", "stop", "cancel", "verify"}:
+                    parser = _build_parser(parser_class=_ConsoleParser, default_mission=mission_id)
+                    output = io.StringIO()
+                    try:
+                        with redirect_stdout(output):
+                            parser.parse_args([*words[1:], "--help"])
+                    except SystemExit:
+                        pass
+                    return output.getvalue() or topic_text(" ".join(words[1:]))
+                return topic_text(" ".join(words[1:]))
+            return topic_text("quickstart") + "\n\n" + _build_parser().format_help()
 
         if command in {"control", "usage"} and "--help" not in words and "-h" not in words:
             from .bridge_tui import ControlViewAction
@@ -392,7 +402,7 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             if getattr(args, "prompt_file", None) == "-":
                 return "error: press Ctrl-E with these options to enter multiline text; the console cannot read its own terminal as a pipe"
         if words[0] == "task" and args is not None:
-            result = _task_result(args)
+            result = _task_result(args, preserve_receipt=True)
             if isinstance(result, dict) and result.get("status") == "REJECTED":
                 return "error: " + str((result.get("result") or {}).get("error", "command rejected"))
             return json.dumps(result, ensure_ascii=False, indent=2)
@@ -409,12 +419,24 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             text=True,
             env=env,
             check=False,
+            timeout=15,
         )
+        if result.returncode:
+            detail = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
+            return f"error: {detail}"
+        if words[0] == "start" and args is not None:
+            with open_store() as store:
+                mission = store.get_mission(args.mission)
+            status = str(mission["status"]).capitalize()
+            detail = f"{status} · use attach to open the provider" if not mission["config"].get("headless") else f"{status} · headless work; inspect status"
+            return json.dumps({"status": "APPLIED", "result": {"detail": detail, "mission_id": args.mission}})
         if result.stdout.strip():
             return result.stdout.strip()
         if result.stderr.strip():
             return result.stderr.strip()
         return f"command exited with status {result.returncode}"
+    except subprocess.TimeoutExpired:
+        return "error: command acknowledgement timed out; outcome unknown. Check `llm-bridge status` before retrying."
     except (ValueError, KeyError, OSError, TransitionError) as exc:
         return f"error: {exc}"
 
@@ -464,6 +486,11 @@ def _frozen_tool_config() -> str:
 def _build_parser(*, parser_class: type[argparse.ArgumentParser] = argparse.ArgumentParser, default_mission: str | None = None) -> argparse.ArgumentParser:
     parser = parser_class(prog="llm-bridge", description="Terminal command bridge for persistent LLM engineering missions")
     sub = parser.add_subparsers(dest="command", required=True)
+    help_parser = sub.add_parser("help", help="show offline Bridge workflow and recovery guidance")
+    help_parser.add_argument("topic", nargs="*", help="quickstart, keys, prompts, markdown, providers, states, verification, recovery, or a command path")
+    view = sub.add_parser("view", help="read a local text artifact without starting work")
+    view.add_argument("--file", required=True, help="UTF-8 text artifact to open; source stays unchanged")
+    view.add_argument("--follow", action="store_true", help="follow changes explicitly; Up pauses, End resumes")
 
     mission = sub.add_parser("mission", help="create or list missions")
     mission_sub = mission.add_subparsers(dest="mission_action", required=True)
@@ -610,6 +637,8 @@ def _build_parser(*, parser_class: type[argparse.ArgumentParser] = argparse.Argu
     controller.add_argument("--startup-token", default="")
     controller.add_argument("--providers", default="claude,codex,opencode")
     controller.add_argument("--routes", default="")
+    from .bridge_help import decorate_parser
+    decorate_parser(parser)
     return parser
 
 
@@ -714,6 +743,22 @@ def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"}:
+            from .bridge_launcher import run_launcher
+
+            try:
+                return run_launcher(main)
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"llm-bridge: {exc}", file=sys.stderr)
+                return 2
+        _build_parser().print_help()
+        return 0
+    if arguments[0] == "help" and not any(arg in {"--help", "-h"} for arg in arguments[1:]):
+        from .bridge_help import topic_text
+
+        print(topic_text(" ".join(arguments[1:]) or "quickstart"))
+        return 0
     if arguments and arguments[0] in {"--prompt-file", "--file", "--prompt"}:
         try:
             return _legacy_prompt_mode(arguments)
@@ -723,6 +768,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(arguments)
     try:
+        if args.command == "view":
+            from .bridge_viewer import read_source, run_document
+            path = Path(args.file).expanduser()
+            source = read_source(path)
+            if not sys.stdin.isatty() or not sys.stdout.isatty():
+                if args.follow:
+                    raise ValueError("--follow needs an interactive terminal; omit it to print original source")
+                sys.stdout.write(source)
+                return 0
+            return run_document(source, title=f"Artifact · {path.name}", path=path, follow=args.follow)
         if args.command == "_controller":
             from .bridge_runtime import run_controller
             from .bridge_logs import capture_process_output

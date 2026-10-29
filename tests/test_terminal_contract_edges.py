@@ -214,7 +214,7 @@ def test_start_failure_after_server_creation_tears_down_only_the_owned_station(t
 
     def fail_once(socket_path, *args, **kwargs):
         nonlocal failed
-        if args and args[0] == "set-option" and not failed:
+        if args and args[0] == "bind-key" and not failed:
             failed = True
             raise subprocess.CalledProcessError(1, ["tmux", *args])
         return real_run(socket_path, *args, **kwargs)

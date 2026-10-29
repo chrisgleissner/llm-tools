@@ -412,3 +412,236 @@ cost modeling implementation. Found and fixed:
 - Tests so far: 160 pass; the 26 new opencode tests have 2 failures
   (PATH=/var/empty + gateway+balance). Coverage: TBD; gate is
   `--fail-under=85`.
+
+2026-10-28 (Bridge UX implementation checkpoint): Required shared agent inbox
+check (`/home/chris/.agents/skills/agent-bridge/scripts/bridge inbox codex`)
+completed with no messages. Checkout was `1871a69f32cd4036e2169e5f56e35a05fcebe2af`
+on `fix/bridge-startup-theme`; the supplied UX plan remains preserved as an
+untracked input at `docs/llm-bridge/ux-implementation-plan.md`.
+
+Implemented a focused command-editing improvement in `bridge_tui.py`: command
+input now tracks an insertion cursor, supports Left/Right, Home/End, Backspace,
+and Delete, preserves the pre-search command on Escape, and restores the draft
+after command-history traversal. Added a regression for mid-line insertion,
+repeated/trailing spaces, and cancelling search. Verification passed:
+`python -m pytest -q tests/test_bridge_tui.py tests/test_bridge_launcher.py
+tests/test_bridge_tui_pty.py` (50 passed).
+
+This is an initial checkpoint only. The six-phase acceptance, full suite and
+coverage gate, packaging verification, PR/review/merge/tag sequence remain
+unfinished. Next action: continue implementing the documented phases, starting
+with explicit input focus/cursor placement and lossless launcher prompt entry.
+
+2026-10-28 verification update: `python -m pytest -q` passed (1301 passed).
+`coverage run -m pytest && coverage combine && coverage report --fail-under=85`
+completed with 90% total coverage, passing the 85% threshold. Coverage emitted a
+warning for a malformed pre-existing `.coverage.mickey...` shard while combining;
+coverage still combined usable data and reported the passing total. The PR and
+release gates have not been attempted because the implementation remains at the
+initial command-editing checkpoint.
+
+2026-10-28 — UX implementation resumed with planner and Luna medium implementor.
+Preserved interrupted changes and full specification. Existing PR #27 targets
+main from fix/bridge-startup-theme; GitHub authentication works, no main branch
+protection configured. Latest release tag is 1.1.0, package baseline 1.1.1;
+planned UX release 1.2.0. CI additionally requires Bridge/terminal coverage 90%.
+Baseline six terminal suites passed locally (32 cases). Full baseline collided
+with active implementation edits and is not valid final evidence. Prior remote
+CI failed on pane_dead_status empty on older tmux; test now records actual child
+returncode via fixture wrapper, pending stable-code verification. Parent owns
+release/review/WORKLOG; implementor owns production/tests/docs. No phase or
+release gate is claimed complete yet. Next: verify implementor phase checkpoints,
+then frozen complete branch, installed wheel, PR adversarial review, CI, merge/tag.
+
+UX acceptance checkpoint: parent-added tests/test_bridge_ux_acceptance.py
+passes nine durable integrity cases: transactional UTF-8 source at 30/32/64/256
+KiB, storage/reopen/amendment/export SHA-256 equality, and overlimit rollback.
+Four viewer single-line tail checks added: ASCII passes, CJK/emoji/combining
+search location fails at width79 (P1, source-offset to display-row mapping).
+Reported to implementor, correction/current-revision verification pending.
+Implementor reports input focus/caret, async full reads, initial viewer/composer,
+provider zoom/prefix and draft-retention integration; these are not yet accepted.
+No broad freeze yet. Next: complete stateful paste parser, Unicode viewer mapping,
+Rich styled draw/cache lifetime, help/package/docs and isolated terminal tests.
+
+Parent acceptance milestone: tests/test_bridge_ux_acceptance.py now15 passed.
+Fixed helper defects verified on current source: Unicode tail-search viewport
+(CJK, emoji, combining accents) and oversize paste ownership retained until
+terminator. Every single split point of a UTF-8/control-containing protocol packet
+passes. These are helper-level evidence, not real terminal acceptance. Shared
+bridge_help.py now contains all8 topics and command-path lookup through argparse;
+creation, verification, verifier argv and boundary-steer examples parse correctly.
+Outstanding: integrated paste batching/cursor/viewport, full viewer actions,
+launcher save-only/start separation, all phase5 navigation/status/action contracts,
+packaging/docs/mandatory frozen tests/CI/review/merge/tag.
+
+Validation incident (user notified): implementor ran launcher tests after changing
+the final action to start work, before introducing Save-only. Unmocked test
+dispatch launched real Codex with fixture objectives A local mission, --help,
+and Any folder mission (dark/light). This violated the explicit no-live-paid-
+provider constraint. Cannot claim no prompt/capacity usage. Implementor is mapping
+and stopping only identified test-owned controllers/stations (four unique mission
+IDs in pytest-18 temporary state); exact cleanup evidence pending. All future
+launcher runs must guard unexpected start and use hermetic fake providers for
+intended launch. This incident does not count as live acceptance evidence.
+
+Incident cleanup: implementor identified test missions
+6d6cdefad8ce4669bb76cdaaec03206f, 458baa384c9448fc86b4a3cd66d0c3b8,
+6829c00946724695916563d7b41a3fb4, 35289f7702444ac689cd9c8a8c293ec4
+in pytest-18 temporary state. Applied stop where state survived, then targeted
+only remaining matching controller PIDs/private tmux servers. Parent independently
+checked process args for all four IDs: none present. Test harness now autouse
+blocks ambient provider binaries, isolates HOME and strips common auth env;
+explicit fixture fake_bin paths can override blockers. Initial68 helper/capacity/
+enabled-provider checks passed before final HOME isolation addition. Full suite
+verification of guard compatibility remains required. User notified of both
+incident and cleanup; no live result is acceptance evidence.
+
+2026-10-28 diagnostic/review progress (not completion):
+- First frozen diagnostic coverage run:41 failures, primary terminal.py stale
+  status_left/status_right NameError; guard files inside test cwd broke2progress
+  checks. Fixed station variables and moved provider guard outside testcwd.
+- Second frozen plain run:12failures, log /tmp/bridge-ux-validation-2jKf4a/second-tests.log.
+  Most remaining geometry/editor expectations delegated to Luna implementor.
+- Parent changed shared help/argparse: root24lines, all public descriptions and
+  parser-valid examples, internal entries hidden without removing entrypoints;
+  help --help fixed; tests/test_bridge_help.py3pass. CLI/progress39pass.
+- Candidate wheel+sdist built in /tmp/bridge-ux-validation-2jKf4a/dist; installed
+  cleanly with Rich14.3.4 into installed/venv from unrelated cwd. All8topics
+  offline without state, real structured rendering and deliberately blockedRich
+  fallback preserve source. Must rebuild/reverify final reviewed revision.
+- Parent fixed body/input focus contracts, retainedCtrlD draft, search apply
+  preserving command, cell-based caret viewport/tabs/blankcell, all8tabs at80
+  with selected-tab overflow at60 and shared mouse geometry.
+- Parent replaced palette strings with bridge_actions.py descriptions/effects/
+  targets/availability, searchablefilter, boundedselection, scrolledclick mapping,
+  singleclickselection only, target-scopedcancel/force/approve confirmations.
+- Parent fixed typederror/unknown draft restoration, recoverypath visibility;
+  overview duplicates removed, PAUSING header, Lastselected vs verifiedACTIVE,
+  normal body styling independent of arbitraryprompt words. Full objective read
+  on demand via body o uses authoritative store. Viewer has read-onlytitle, input
+  caret, horizontalRich spans and approximate source/render anchor restoration.
+- Local performance (243024BMarkdown): source70.1ms, synchronousRich795.8ms,
+  cachedpages0.04msmean. LargeRich layout nowasync with source/progress fallback;
+  one worker and bounded instancecache, release prevents repopulation. Needs
+  current performance/recovery tests plus final full/coverage.
+Luna had a temporary usage-limit interruption, recovered after user continue;
+continues terminal focus/-Z/status, rawTTY ownership, composer/taskeditor PTY,
+statefulinput decoding and crashdraft/visibleSave work. Parent owns document/UI
+state/help and finalrelease. No PR updates/merge/tag performed yet. Next: finish
+remaining P0/P1 acceptance, freeze and rerun fullplain+coverage(85overall/90Bridge),
+package/hermeticCLI/native evidence, adversarial actualPR review, CI, merge1.2.0.
+
+2026-10-28 acceptance checkpoint after user requested lower token churn:
+Batch validation and concise updates; no gates waived. Frozen coverage diagnostic
+reported7 failures, overall85%, Bridge80%; logs current-tests.log/report.log/
+bridge-report.log under /tmp/bridge-ux-validation-2jKf4a. Composer PTY children
+weren't measured by env-only coverage; added autouse measurement for inherited
+PTY environments. No exclusions/gate reductions. Real64/256KiB CRLF paste now
+passes after curses.nonl; exact byte hashes retained. Nestedcurses.wrapper caused
+return-to-controls cookedTTY restoration; shared ownedwindow composer fixed
+three failing exit checks. Console taskadd preserves durable receipt internally
+while standalone publicCLIJSON remains unchanged. Receipt assertions updated.
+Parent root helper/doc/help28tests pass; expanded focus/state set84passed before
+latest helpviewer routing, followed by focused reruns. Help now uses searchable
+sharedDocumentViewer, no rootparserdump on invalid console input. Async large
+Markdown usableviewport3.9ms with source/progress; background768.5ms for243024B.
+Export feedback/path correction stays in viewer. History/search restore caret.
+Current next action: frozen fullplain run final-plain.log (exec75053), coverage
+with allPTYchildren, fix remaining defects/coverage gaps, rebuild installedwheel
+checks/hermeticCLI/native acceptance, pushPR27 update, actualdiff adversarial
+review/fixes, finalCI/merge/tag1.2.0. No completion claimed.
+
+2026-10-28 release gate continuation:
+- Preserved implementation commit175bb89. Fullplain passed1354tests before
+  final artifact/helper coverage additions. Later fullplain passed again;
+  coverage88%overall and89%Bridge (90%required, stillopen). Logs release-*.log
+  under /tmp/bridge-ux-validation-2jKf4a; oldcoverage must not be reinterpreted
+  against shifted source lines. No gate exclusions/reductions.
+- Exactlauncher64KiB SHA256 reproducer found CRLF->doubleLF; fixed curses.nonl.
+  Its coverage-only exit race fixed by waiting for visible control screen
+  before CtrlD and drainingPTY duringexit. Focused instrumented test passed.
+- Added standalone bridge_viewer.py and view --file [--follow], originalsource
+  nonTTY output, explicitfollow pause/newoutput/Endresume/rotation/errorrecovery.
+  Homehelp nowsharedsearchableviewer returnscontext. Sixfunctionaltestspass.
+- Weakeragent gpt6-sol low added17meaningfulacceptance tests plus6viewertests;
+  Luna medium exhausted usage temporarily then finally exhausted until17:44,
+  parent tookremainingintegration. No new liveprovider execution.
+- New incompletepaste test foundlauncherhang and unsafe reset-to-input design.
+  AllBridgeinput surfaces nowquarantine unfinishedpayload throughEND; late
+  Enter/Tab/CtrlS neverdispatch. Previoussource retained, safeexit available.
+  Focused48recovery/input tests pass afterfix. Commandpaste redraw batched10Hz
+  and asyncview/terminalactions deferred untilpastefinishes.
+- Console start reads durablemissionstate for conciseRunning/openprovider
+  feedback; subprocessfailures remainactionableerror andretaininput.
+- Current frozen fullplain+coverage logs review-plain.log/review-tests.log
+  (exec14549). Next: final coverage90Bridge, draftPR27actualdiff independent
+  adversarialreview, finalCI/installedwheel/hermeticCLI, merge/tag1.2.0.
+
+Adversarial review of actualPR27 heada5fe6a2 by independent gpt6-sol low agent:
+R1 (P2, bridge_tui asyncfullread): delayed task read replaced help openedlater
+andreleasedneithercontext. Event-controlledreproducer; fixed documentgeneration
+invalidationsforhelp/close and workerresultguards, priorviewerrelease.
+R2 (P2, bridge_viewer staticmode): changedfile falselyofferedEndresume though
+followwasdisabled. Fixed staticclose/reopenguidance; source remains snapshot.
+R3 (P2, terminal.focus): staticfocusmarkerspersistedafterprefixswitch. Fixed
+dynamicpaneselectionformats; realtmuxregressionverifiescorrectmarkerafterP.
+Independent currentpatchre-review26/26passed, all3findingsresolved,no newfindings.
+Legacy externaleditor/tmphelper audited: no productioncalls; actualCtrlO uses
+privatepersistentstate/drafts. No user-facingdraftloss throughlegacyhelper.
+Finalverificationmustusecurrentfrozencommit; previousoverlappingrun diagnostic
+only. Coverage90Bridge remainsrequired; no exclusions or waivers introduced.
+
+Final failure-path audit additions (actual reproduced defects):
+R4 (P0, bridge_tui fullsource acquisition): failedread could becomeeditable
+errorplaceholder. Typed optional source/error now prevents amendment/composer
+fromopeningonfailedread. Realstorefullobjective+4failedread cases pass.
+R5 (P1, taskdraftcreation): mkdir/mkstemp failure escapedUI despiteintact
+checkpoint. Catchcreation/writes, preservefullsource/checkpointpath, report
+recovery. Exportpermissionfailures keepeditablepath andread-onlysource.
+R6 (P1, terminalwheel): alternate_on withoutmouse request bypassedscrollback.
+Ownedrawfakeprobe observed1/0/0 beforeandafterwheel; fixedbinding toactual
+mouse/panemodeflags. RealPTY regression observescopy-mode entry, qexit, then
+ordinaryq forwardedbyteexactly; requested-mouse/nativepaste suitepasses.
+Threefocusedterminal/cursor tests pass;13source/errorrecoverycases pass.
+PriorCI76ad179 passedtests onbothPythonversions butfailedunchanged90Bridge
+coverage (88%). Nextsourcecommit includesmeaningfulfailed-read/draft/export/
+viewerkey coverage; allgates must be rerun onthis frozenrevision.
+
+Boundary-review closure before finalCI:
+R7 (P1): reopeningpendingamendment usedoldactiveprompt andcouldoverwrite queued
+requirements onunchanged save. for_edit nowuses latestpendingprompt; realstore
+regressionpreservesCRLFandTAIL. Read-onlyactiveprompt/publicCLI unchanged.
+R8 (P1): unknownsplitCSI Esc[42~ inserted2~intoretaineddraft. Consumeunknown
+sequenceuntilfinalbyte, boundedtimeout; exactdraftregressionpasses.
+R9 (P1): shortpasteoverflow booleancheckedtuple(False,size), suppressingwarning.
+Use explicitacceptedflag; previouscommandretained withvisiblelimitfeedback.
+Added environment-independentasyncstatuspublication success/failure tests and
+wholepacket routing tests. Focused74input/source/PTY tests pass. Priorfull
+professionalrun passedalltests,89overall/90Bridge locally; CI6cbf6b6 tests
+passedbut89Bridge. Latesttests explicitlycoverUIpublicationpreviouslyonly
+measured incidentally underambientTMUX. No exclusions/thresholdchanges.
+
+R10 (P0, real Objective paste): adding literalarrow/mouse-controlescapes to
+64KiBpacket reproduced10byteslost because ncurses decodedpayloadkeys.
+Launcher nowdisableskeypadconversion whiletransactionactive, defersmouse/form
+actions and preservesrawpayload. Exact65536-byteSHA256 testpasses including
+CRLF,tabs,combiningmarks,emoji,ESCsequencesandtail; save-only,nooperations.
+Focused19launcher/inputcontractstests pass. Current input/sourcechecks are
+readyfor frozenfullplain+coverage+latestCI; no gatewaivers introduced.
+
+2026-10-29 final production acceptance: ee749531 passes all1,426 localtests;
+coverage89%overall and90%Bridge, both requiredgates. All exact-head GitHubActions
+Python3.11/3.15 jobs andCodeCovchecks green. Finalindependentre-review foundno
+newblockingdefect; GitHub unresolvedthreads empty. Installedwheel verifiesall
+8offline topics, Rich/sourcefallback, exactUTF8/CRLFartifactview andnoDBcreation;
+16hermeticCLIchecks pass. RealrenderedRUNNING/PAUSING/COMPLETEDcaptures recorded.
+See docs/llm-bridge/release-1.2.0-verification.md for complete evidence/limitations.
+Next: documentation-onlyCI head, markPR27ready, merge normally, tagmergedbase1.2.0,
+verifyremote tag/release workflow andartifacts. No sourcechanges remain.
+
+Full-row acceptance: isolated attached rawfakechild verifiedstatusoff gives
+80x24, statuson returns80x23, prefixb/p works withrowhidden andPIDunchanged.
+Operations guide documents standardtmuxstatuscommands. ff5bc4c documentation
+head passedbothCI matricesandCodeCov; finaldocumentationfollow-up changesno
+production/tests. Next: exact-headCI, mergePR27, tagmergedcommit1.2.0.
