@@ -17,7 +17,8 @@ records exact-head CI, merge and release publication.
 | Missing/broken Rich | Readable source and exact tail retained |
 | Installed artifact view | UTF-8/CRLF source exact; non-TTY follow rejected explicitly |
 | Hermetic CLI smoke matrix | 16 checks passed; suspension disabled |
-| Wheel Python source comparison | All packaged Python files match the checkout |
+| Wheel Python source comparison | All 38 packaged Python files match the checkout |
+| Full-row status toggle | 80×23 → 80×24 → 80×23, prefix b/p keeps the same PID |
 
 The package declares Rich as its only new direct runtime dependency, loaded only
 for Markdown. Help and source reading work without it, tmux or mission state.

@@ -639,3 +639,9 @@ newblockingdefect; GitHub unresolvedthreads empty. Installedwheel verifiesall
 See docs/llm-bridge/release-1.2.0-verification.md for complete evidence/limitations.
 Next: documentation-onlyCI head, markPR27ready, merge normally, tagmergedbase1.2.0,
 verifyremote tag/release workflow andartifacts. No sourcechanges remain.
+
+Full-row acceptance: isolated attached rawfakechild verifiedstatusoff gives
+80x24, statuson returns80x23, prefixb/p works withrowhidden andPIDunchanged.
+Operations guide documents standardtmuxstatuscommands. ff5bc4c documentation
+head passedbothCI matricesandCodeCov; finaldocumentationfollow-up changesno
+production/tests. Next: exact-headCI, mergePR27, tagmergedcommit1.2.0.

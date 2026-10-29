@@ -358,3 +358,10 @@ Read a local textual artifact with `llm-bridge view --file notes.md`. Use
 file rotation/truncation are labelled. Retention remains bounded, and pruned
 content is unavailable. Without a TTY, `view` prints original source. Home `?`
 opens the same searchable help viewer and returns to the launcher on close.
+
+For a child that needs every terminal row, press `Ctrl-] :`, enter
+`set -g status off`, and press Enter. Restore the status row with `Ctrl-] :`
+then `set -g status on`. Bridge's `b`/`p` focus and `d` detach shortcuts still
+work while the status row is hidden. An attached 80×24 acceptance session
+verified the child changes from 80×23 to 80×24 and back, and prefix focus changes
+preserve its process identity.
