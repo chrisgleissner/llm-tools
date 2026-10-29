@@ -135,7 +135,7 @@ llm-bridge start --mission MISSION_ID
 llm-bridge status --mission MISSION_ID --json
 ```
 
-Native mode opens a private tmux station with the provider focused across all terminal rows except the status line. Press Ctrl-] then `B`/`b` for Bridge controls and `P`/`p` to return to the same provider process. `Ctrl-] ?` shows shortcuts; `Ctrl-] Ctrl-]` sends a literal prefix to the provider. Prefix `z` toggles the split layout. Install `tmux` for native mode. Autonomous mode runs headless provider work and has no station. `--headless` and `--native` cannot be combined. `--json` changes result formatting only; CLI mission creation remains save-only.
+Native mode opens a private tmux station with the provider focused across all terminal rows except the status line. The station uses **Ctrl-]** as its tmux prefix: hold Control and press the right square bracket `]`, release both keys, then press the next key. Press **Ctrl-]**, then **B** to open Bridge controls; press **Ctrl-]**, then **P** to return to the same provider process. Press **Ctrl-]**, then **?** for the shortcut explanation. To send a literal Ctrl-] to the provider, press Ctrl-] twice. Prefix `z` toggles the split layout. Install `tmux` for native mode. Autonomous mode runs headless provider work and has no station. `--headless` and `--native` cannot be combined. `--json` changes result formatting only; CLI mission creation remains save-only.
 
 Add a task from a file or standard input, then use task commands to order or amend it:
 

@@ -187,11 +187,11 @@ class TmuxTerminalBackend:
         bridge_cmd = self._command(bridge_argv)
         bridge_status = (
             f"{tmux_role_markup('brand')}"
-            "#{?#{==:#{pane_index},1},▶ ,}Bridge [C-] B] #[default]"
+            "#{?#{==:#{pane_index},1},▶ ,}Bridge: Ctrl-] then B #[default]"
         )
         provider_status = (
             f"{tmux_role_markup('ok')}"
-            "#{?#{==:#{pane_index},0},▶ ,}Provider [C-] P] #[default]"
+            "#{?#{==:#{pane_index},0},▶ ,}Provider: Ctrl-] then P #[default]"
         )
         config = (
             "set-option -g remain-on-exit on\n"
@@ -202,8 +202,8 @@ class TmuxTerminalBackend:
             'set-option -g default-terminal "screen-256color"\n'
             "set-option -g status on\n"
             "set-option -g status-style 'bg=default,fg=default'\n"
-            "set-option -g status-left-length 24\n"
-            "set-option -g status-right-length 24\n"
+            "set-option -g status-left-length 32\n"
+            "set-option -g status-right-length 32\n"
             "set-option -g @llm_bridge_context 'Bridge ready · no current task'\n"
             "set-option -g window-status-format '#{@llm_bridge_context}'\n"
             "set-option -g window-status-current-format '#{@llm_bridge_context}'\n"
@@ -306,7 +306,7 @@ class TmuxTerminalBackend:
                     "resize-pane", "-Z", "-t", target,
                 )
             self._run(socket, "bind-key", "-T", "prefix", "?", "display-message",
-                      "Bridge: Ctrl-] B controls · Ctrl-] P provider · Ctrl-] Ctrl-] sends prefix")
+                      "Bridge controls: press Ctrl-] (Control + ]) then B. Return to provider: Ctrl-] then P. Send Ctrl-] to provider: press Ctrl-] twice.")
             for mouse_key, target in (
                 # Handle a status click on release. Unzooming on mouse-down
                 # changes the row under the pointer before tmux classifies the
@@ -381,8 +381,8 @@ class TmuxTerminalBackend:
         self._run(handle.socket_path, "select-pane", "-t", target)
         if expand:
             self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
-        left = tmux_role_markup('brand') + "#{?#{==:#{pane_index},1},▶ ,}Bridge ^]B #[default]"
-        right = tmux_role_markup('ok') + "#{?#{==:#{pane_index},0},▶ ,}Provider ^]P #[default]"
+        left = tmux_role_markup('brand') + "#{?#{==:#{pane_index},1},▶ ,}Bridge: Ctrl-] then B #[default]"
+        right = tmux_role_markup('ok') + "#{?#{==:#{pane_index},0},▶ ,}Provider: Ctrl-] then P #[default]"
         self._run(handle.socket_path, "set-option", "-g", "status-left", left)
         self._run(handle.socket_path, "set-option", "-g", "status-right", right)
 

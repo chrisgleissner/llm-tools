@@ -96,8 +96,8 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
             text=True,
             capture_output=True,
         ).stdout
-        assert "Bridge [C-] B]" in status_left and "pane_index" in status_left
-        assert "Provider [C-] P]" in status_right and "pane_index" in status_right
+        assert "Bridge: Ctrl-] then B" in status_left and "pane_index" in status_left
+        assert "Provider: Ctrl-] then P" in status_right and "pane_index" in status_right
         root_bindings = subprocess.run(
             ["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "root"],
             check=True,
