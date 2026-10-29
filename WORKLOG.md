@@ -629,3 +629,13 @@ actions and preservesrawpayload. Exact65536-byteSHA256 testpasses including
 CRLF,tabs,combiningmarks,emoji,ESCsequencesandtail; save-only,nooperations.
 Focused19launcher/inputcontractstests pass. Current input/sourcechecks are
 readyfor frozenfullplain+coverage+latestCI; no gatewaivers introduced.
+
+2026-10-29 final production acceptance: ee749531 passes all1,426 localtests;
+coverage89%overall and90%Bridge, both requiredgates. All exact-head GitHubActions
+Python3.11/3.15 jobs andCodeCovchecks green. Finalindependentre-review foundno
+newblockingdefect; GitHub unresolvedthreads empty. Installedwheel verifiesall
+8offline topics, Rich/sourcefallback, exactUTF8/CRLFartifactview andnoDBcreation;
+16hermeticCLIchecks pass. RealrenderedRUNNING/PAUSING/COMPLETEDcaptures recorded.
+See docs/llm-bridge/release-1.2.0-verification.md for complete evidence/limitations.
+Next: documentation-onlyCI head, markPR27ready, merge normally, tagmergedbase1.2.0,
+verifyremote tag/release workflow andartifacts. No sourcechanges remain.
