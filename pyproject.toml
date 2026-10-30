@@ -25,6 +25,7 @@ include = ["llm_tools*"]
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
+  "fuzz: seeded chaotic-input tests for LLM Bridge (tests/fuzz); deselect with -m 'not fuzz' for the fast inner loop",
   "tmux: starts a real tmux server (applied automatically by tests/conftest.py)",
   "pty: allocates a real pseudo-terminal (applied automatically by tests/conftest.py)",
   "subprocess: spawns real child processes such as CLIs, controllers or fake providers (applied automatically by tests/conftest.py)",

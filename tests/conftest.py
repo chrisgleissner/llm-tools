@@ -178,7 +178,7 @@ def _hermetic_cache_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
 # --- Resource markers ---------------------------------------------------------
 #
 # ``tmux``, ``pty``, ``subprocess`` and ``slow`` are applied from ``tests/markers.json`` so the fast
-# inner loop (``-m "not tmux and not pty and not subprocess and not slow"``) runs only in-process tests.
+# inner loop (``-m "not tmux and not pty and not subprocess and not slow and not fuzz"``) runs only in-process tests.
 # The manifest is measured, not guessed: ``python -m pytest --record-markers`` runs the whole suite
 # serially, notes which tests really start a child process, allocate a pseudo-terminal or run tmux,
 # and rewrites the manifest. Keys are test ids without parametrisation. A test missing from the

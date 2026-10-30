@@ -108,12 +108,15 @@ def middle_clip(text: str, width: int, *, unicode: bool = True) -> str:
         return mark[:width]
     head = (width - 1) * 2 // 5
     tail_room = width - 1 - head
-    tail = ""
+    kept: list[str] = []
+    used = 0
     for char in reversed(value):
-        if cell_width(tail) + cell_width(char) > tail_room:
+        amount = cell_width(char)
+        if used + amount > tail_room:
             break
-        tail = char + tail
-    return cell_slice(value, 0, head) + mark + tail
+        kept.append(char)
+        used += amount
+    return cell_slice(value, 0, head) + mark + "".join(reversed(kept))
 
 
 def mission_label(name: object, cwd: object, limit: int = LABEL_CELLS) -> str:

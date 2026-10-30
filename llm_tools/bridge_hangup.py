@@ -90,6 +90,10 @@ class TerminalWatch:
         started = self.clock()
         try:
             key = window.get_wch()
+        except ValueError as exc:
+            # ncurses cannot decode a UTF-8 sequence beyond U+10FFFF and Python reports that as ValueError;
+            # every screen treats curses.error as "no key", so report undecodable input the same way.
+            raise curses.error("undecodable input") from exc
         except curses.error:
             self.note_error(self.clock() - started, window)
             raise

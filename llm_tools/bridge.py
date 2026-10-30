@@ -308,11 +308,24 @@ def _dependency_ids(store: BridgeStore, mission_id: str, raw: str) -> list[int]:
     return ids
 
 
+def _db_int(text: str) -> int:
+    """argparse type for a number the database stores: SQLite integers are 64-bit, and a larger one is an OverflowError."""
+    import argparse
+
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {text!r}") from None
+    if not -(2 ** 63) <= value < 2 ** 63:
+        raise argparse.ArgumentTypeError(f"{text[:24]!r} is outside the range of whole numbers Bridge can store")
+    return value
+
+
 def _add_task_selector(parser: argparse.ArgumentParser, *, required: bool = True, noun: str = "task", note: str = "") -> None:
     """``--task N`` (the mission's own number) and the advanced ``--task-id`` (global ID)."""
     group = parser.add_mutually_exclusive_group(required=required)
-    group.add_argument("--task", metavar="N", dest="task", type=int, help=f"{noun} number within the mission, as shown by task list{note}")
-    group.add_argument("--task-id", metavar="ID", dest="task_by_id", type=int, help=f"advanced: the {noun}'s global ID, unique across all missions (task JSON field id)")
+    group.add_argument("--task", metavar="N", dest="task", type=_db_int, help=f"{noun} number within the mission, as shown by task list{note}")
+    group.add_argument("--task-id", metavar="ID", dest="task_by_id", type=_db_int, help=f"advanced: the {noun}'s global ID, unique across all missions (task JSON field id)")
 
 
 def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1094,10 +1107,10 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the command that checks a finished task; repeat per argument; supports {context}, {cwd}, {mission_id}, {task_id}, {revision}")
     create.add_argument("--verifier-file", dest="verifier_files", metavar="PATH", action="append", default=[], help="a file the verifier depends on, relative to --cwd; repeat per file; if it changes after the mission is created a passing verifier no longer completes a task without your approval (the verifier program and the script it interprets are tracked automatically)")
     create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=300, help="seconds before a verifier run is treated as failed (default: 300)")
-    create.add_argument("--log-max-bytes", metavar="BYTES", type=int, default=4 * 1024 * 1024, help="size at which one provider log file rotates (default: 4194304, 4 MiB)")
-    create.add_argument("--log-rotations", metavar="COUNT", type=int, default=3, help="rotated log files kept per provider run (default: 3)")
-    create.add_argument("--log-retained-runs", metavar="COUNT", type=int, default=20, help="newest provider-run log directories kept; older ones are pruned (default: 20)")
-    create.add_argument("--capacity-refresh-seconds", metavar="SECONDS", type=int, default=60, help="seconds between background provider-capacity observations (default: 60)")
+    create.add_argument("--log-max-bytes", metavar="BYTES", type=_db_int, default=4 * 1024 * 1024, help="size at which one provider log file rotates (default: 4194304, 4 MiB)")
+    create.add_argument("--log-rotations", metavar="COUNT", type=_db_int, default=3, help="rotated log files kept per provider run (default: 3)")
+    create.add_argument("--log-retained-runs", metavar="COUNT", type=_db_int, default=20, help="newest provider-run log directories kept; older ones are pruned (default: 20)")
+    create.add_argument("--capacity-refresh-seconds", metavar="SECONDS", type=_db_int, default=60, help="seconds between background provider-capacity observations (default: 60)")
     create.add_argument("--auto-continue", action="store_true", help="native missions: start the next task as soon as a provider run ends, instead of holding until you approve or reject the reviewed task (background and headless missions never hold)")
     create.add_argument("--trust-folder", action="store_true", help="answer the provider's workspace-trust dialog for the mission folder automatically in Headless and Background modes; without it a run that stops at that dialog is aborted (trust the folder in the provider CLI once instead)")
     create.add_argument("--command-template", metavar="ARGV", help="launch command template for tests or custom providers, in Ralph/scheduler syntax")
@@ -1182,16 +1195,16 @@ def _build_parser(
     _add_mission_arg(add, default_mission)
     _read_prompt_args(add)
     add.add_argument("--title", metavar="TEXT", default="", help="short task title shown in lists (default: first line of the prompt)")
-    add.add_argument("--priority", metavar="N", type=int, default=0, help="scheduling priority; higher runs first (default: 0)")
-    add.add_argument("--order", metavar="N", type=int, help="ordering value among equal priorities; lower runs first (default: appended last)")
+    add.add_argument("--priority", metavar="N", type=_db_int, default=0, help="scheduling priority; higher runs first (default: 0)")
+    add.add_argument("--order", metavar="N", type=_db_int, help="ordering value among equal priorities; lower runs first (default: appended last)")
     add.add_argument("--depends-on", metavar="IDS", default="", help="comma-separated task numbers that must complete first")
     add.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the task; repeat for several")
     _add_json_arg(add)
     task_list = task_sub.add_parser("list")
     _add_mission_arg(task_list, default_mission)
     task_list.add_argument("--all", action="store_true", help=f"list every task, however many (default: the first {TASK_LIST_PAGE})")
-    task_list.add_argument("--limit", metavar="N", type=int, default=TASK_LIST_PAGE, help=f"list at most N tasks (default: {TASK_LIST_PAGE})")
-    task_list.add_argument("--offset", metavar="N", type=int, default=0, help="skip the first N tasks of the list")
+    task_list.add_argument("--limit", metavar="N", type=_db_int, default=TASK_LIST_PAGE, help=f"list at most N tasks (default: {TASK_LIST_PAGE})")
+    task_list.add_argument("--offset", metavar="N", type=_db_int, default=0, help="skip the first N tasks of the list")
     _add_json_arg(task_list)
     show = task_sub.add_parser("show")
     _add_mission_arg(show, default_mission)
@@ -1218,11 +1231,11 @@ def _build_parser(
         _add_mission_arg(cmd, default_mission)
         _add_task_selector(cmd)
         if action == "priority":
-            cmd.add_argument("--value", metavar="N", type=int, required=True, help="new priority; higher runs first")
+            cmd.add_argument("--value", metavar="N", type=_db_int, required=True, help="new priority; higher runs first")
         elif action == "reorder":
-            cmd.add_argument("--value", metavar="N", type=int, required=True, help="new ordering value; lower runs first")
+            cmd.add_argument("--value", metavar="N", type=_db_int, required=True, help="new ordering value; lower runs first")
         elif action == "dependencies":
-            cmd.add_argument("--add", metavar="N", type=int, required=True, help="number of the task this task must wait for")
+            cmd.add_argument("--add", metavar="N", type=_db_int, required=True, help="number of the task this task must wait for")
         elif action == "verify":
             cmd.add_argument("--evidence", metavar="TEXT", default="", help="verification evidence, for example a test summary; shown by task show")
             cmd.add_argument("--approve", action="store_true", help="approve the task as complete; without it, --evidence is only recorded and the task keeps awaiting approval")
@@ -1237,28 +1250,28 @@ def _build_parser(
     proposal_create.add_argument("--operation", metavar="OPERATION_ID", required=True, dest="source_operation_id", help="ID of the provider operation that made the proposal")
     _read_prompt_args(proposal_create, "proposed task")
     proposal_create.add_argument("--title", metavar="TEXT", default="", help="short title for the proposed task")
-    proposal_create.add_argument("--priority", metavar="N", type=int, default=0, help="priority the task gets if accepted; higher runs first (default: 0)")
+    proposal_create.add_argument("--priority", metavar="N", type=_db_int, default=0, help="priority the task gets if accepted; higher runs first (default: 0)")
     proposal_create.add_argument("--depends-on", metavar="IDS", default="", help="comma-separated task numbers the proposed task depends on")
     proposal_create.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the proposed task; repeat for several")
     _add_json_arg(proposal_create)
     proposal_list = proposal_sub.add_parser("list", help="list proposals")
     _add_mission_arg(proposal_list, default_mission)
     proposal_list.add_argument("--status", choices=("PENDING", "ACCEPTED", "REJECTED", "ALL"), default="PENDING", help="only proposals in this state (default: PENDING)")
-    proposal_list.add_argument("--limit", metavar="N", type=int, default=100, help="maximum proposals returned (default: 100)")
-    proposal_list.add_argument("--after", metavar="N", type=int, default=0, help="only proposals with a task number above this (default: 0)")
+    proposal_list.add_argument("--limit", metavar="N", type=_db_int, default=100, help="maximum proposals returned (default: 100)")
+    proposal_list.add_argument("--after", metavar="N", type=_db_int, default=0, help="only proposals with a task number above this (default: 0)")
     _add_json_arg(proposal_list)
     for proposal_action in ("accept", "reject"):
         proposal_decision = proposal_sub.add_parser(proposal_action, help=f"{proposal_action} a pending proposal")
         _add_mission_arg(proposal_decision, default_mission)
-        proposal_decision.add_argument("--task", metavar="N", type=int, required=True, help="task number of the proposal, as shown by proposal list")
+        proposal_decision.add_argument("--task", metavar="N", type=_db_int, required=True, help="task number of the proposal, as shown by proposal list")
         if proposal_action == "reject":
             proposal_decision.add_argument("--reason", metavar="TEXT", default="", help="why the proposal is rejected")
         _add_json_arg(proposal_decision)
 
     events = sub.add_parser("events")
     _add_mission_arg(events, default_mission)
-    events.add_argument("--after", metavar="EVENT", type=int, default=0, help="only events with an ID above this (default: 0)")
-    events.add_argument("--limit", metavar="N", type=int, default=100, help="maximum events returned (default: 100)")
+    events.add_argument("--after", metavar="EVENT", type=_db_int, default=0, help="only events with an ID above this (default: 0)")
+    events.add_argument("--limit", metavar="N", type=_db_int, default=100, help="maximum events returned (default: 100)")
     _add_json_arg(events)
 
     for action in ("start", "pause", "resume", "continue", "stop", "cancel", "attach", "detach"):

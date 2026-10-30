@@ -2,12 +2,42 @@
 
 from __future__ import annotations
 
+import curses
 from dataclasses import dataclass
 from functools import lru_cache
 import re
+import sys
 import unicodedata
+from typing import Any, Callable
 
 _LONE_CR = re.compile(r"\r(?!\n)")
+
+
+def without_flow_control(callback: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """Wrap a curses callback so Ctrl-S and Ctrl-Q reach the screen instead of stopping and starting its output (IXON)."""
+    def run(window: Any) -> Any:
+        saved = None
+        try:
+            import termios
+
+            saved = termios.tcgetattr(sys.stdin.fileno())
+            changed = list(saved)
+            changed[0] &= ~termios.IXON
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, changed)
+        except Exception:  # not a terminal, or no termios: nothing to change
+            saved = None
+        try:
+            return callback(window)
+        finally:
+            if saved is not None:
+                try:
+                    import termios
+
+                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, saved)
+                except Exception:  # the terminal went away; nothing to restore
+                    pass
+
+    return run
 
 
 def cell_width(text: str) -> int:

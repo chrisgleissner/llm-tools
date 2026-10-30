@@ -8,7 +8,17 @@ import threading
 
 from .bridge_input import wrapped_row_for_column, cell_width
 
-_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
+_HEADING_START = re.compile(r"^\s{0,3}#{1,6}\s+")
+
+
+def heading_label(line: str) -> str | None:
+    """The text of an ATX heading line without its closing ``#`` marks or blanks, else ``None``.
+
+    The label is cut with ``rstrip`` rather than a lazy ``(.+?)\\s*#*\\s*$`` pattern, which
+    backtracks cubically on a heading followed by a long run of blanks.
+    """
+    start = _HEADING_START.match(line)
+    return None if start is None else line[start.end():].rstrip().rstrip("#").rstrip()
 # A source longer than this (characters) gets its first wrapped layout computed on a worker thread.
 LAYOUT_ASYNC_CHARS = 262_144
 
@@ -61,7 +71,9 @@ class DocumentViewer:
     def rich_lines(self, width: int | None = None) -> tuple[tuple[tuple[str, str], ...], ...]:
         key = (max(20, width or self.width), self.wrap)
         if key not in self._rich_cache:
-            if len(self.source.encode("utf-8")) > 32768:
+            # Rich takes seconds for one very long line (4 600 tabs) or for many lines of a highlighted block (about 4 ms a line),
+            # so those render in the background like a source over 32 KB.
+            if len(self.source.encode("utf-8")) > 32768 or len(self.source_lines) > 300 or any(len(line) > 2000 for line in self.source_lines):
                 if not self._rich_pending and not self._released:
                     self._rich_pending.add(key)
                     source = self.source
@@ -105,9 +117,9 @@ class DocumentViewer:
             visual = 0
             for number, line in enumerate(self.source_lines, 1):
                 if "#" in line:
-                    match = _HEADING.match(line)
-                    if match:
-                        result.append((number, match.group(2), visual))
+                    label = heading_label(line)
+                    if label:
+                        result.append((number, label, visual))
                 visual += _wrap_count(line, width) if self.wrap else 1
             cached = tuple(result)
             if len(self._heading_cache) >= 4:
@@ -367,17 +379,14 @@ def _wrap_cells(line: str, width: int) -> list[str]:
     row = ""
     cells = 0
     for char in line:
-        if char == "\t":
-            amount = 8 - cells % 8
-            chars = " " * amount
-        else:
-            amount = cell_width(char)
-            chars = char
+        # A tab is padding to the next multiple of eight, never wider than the row itself.
+        amount = min(8 - cells % 8, width) if char == "\t" else cell_width(char)
         if cells and cells + amount > width:
             rows.append(row)
             row, cells = "", 0
             if char == "\t":
-                amount = 8
+                amount = min(8, width)
+        chars = " " * amount if char == "\t" else char
         row += chars
         cells += amount
         if cells >= width:

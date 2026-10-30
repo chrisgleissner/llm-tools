@@ -129,8 +129,9 @@ def test_status_formats_keep_explicit_hint_wording_and_separators() -> None:
     assert "@llm_bridge_context" in STATUS_CONTEXT_FORMAT and "client_width" in STATUS_CONTEXT_FORMAT
 
 
-def _attached_status_row(backend, handle, tmp_path: Path, width: int, context: str) -> str:
-    backend.set_status_context(handle, context)
+def _attached_status_row(backend, handle, tmp_path: Path, width: int, context: str | None = None, *, wait_for: str = "Provider") -> str:
+    if context is not None:
+        backend.set_status_context(handle, context)
     outer = tmp_path / f"outer{width}.sock"
     base = ["tmux", "-S", str(outer), "-f", "/dev/null"]
     subprocess.run([*base, "new-session", "-d", "-s", "o", "-x", str(width), "-y", "24",
@@ -141,7 +142,7 @@ def _attached_status_row(backend, handle, tmp_path: Path, width: int, context: s
             screen = subprocess.run([*base, "capture-pane", "-p", "-t", "o"],
                                     text=True, capture_output=True).stdout.rstrip("\n").split("\n")
             return screen[-1]
-        assert _wait_for(lambda: "Provider: Ctrl-] then P" in row(), timeout=8.0)
+        assert _wait_for(lambda: wait_for in row(), timeout=8.0)
         return row()
     finally:
         subprocess.run([*base, "kill-server"], check=False, capture_output=True)
@@ -151,7 +152,7 @@ def test_status_row_separates_context_and_truncates_long_context_at_80_columns(t
     backend = TmuxTerminalBackend()
     handle = _start(backend, tmp_path, "layout", size=(120, 30))
     try:
-        short = _attached_status_row(backend, handle, tmp_path, 80, "Task 1 RUNNING")
+        short = _attached_status_row(backend, handle, tmp_path, 80, "Task 1 RUNNING", wait_for="Provider: Ctrl-] then P")
         assert short.count("│") == 2
         assert "Bridge: Ctrl-] then B │" in short and "│ ▶ Provider: Ctrl-] then P" in short
         assert "Task 1 RUNNING" in short and len(short) <= 80
@@ -159,9 +160,10 @@ def test_status_row_separates_context_and_truncates_long_context_at_80_columns(t
         long = _attached_status_row(backend, handle, tmp_path, 80,
                                     "Task 12345678 VERIFYING / Mission COMPLETED with a very long tail")
         assert len(long) <= 80
-        assert "…" in long and "Provider: Ctrl-] then P" in long and "Bridge: Ctrl-] then B" in long
+        # Too long for the full hints: they give way to the pane names, and the text is cut with an ellipsis.
+        assert "…" in long and "Provider" in long and "Bridge" in long and "Ctrl-]" not in long and "<" not in long
 
-        wide = _attached_status_row(backend, handle, tmp_path, 140, "Task 1 RUNNING / Mission RUNNING")
+        wide = _attached_status_row(backend, handle, tmp_path, 140, "Task 1 RUNNING / Mission RUNNING", wait_for="Provider: Ctrl-] then P")
         assert "Task 1 RUNNING / Mission RUNNING" in wide and "…" not in wide
     finally:
         backend.stop(handle)
@@ -200,5 +202,75 @@ def test_modified_keys_reach_a_provider_that_requests_them(tmp_path: Path) -> No
         assert _wait_for(lambda: out.exists() and "27;2;13~" in out.read_text())
         _tmux(handle, "send-keys", "-t", handle.provider_pane, "Escape")
         assert _wait_for(lambda: out.read_text().rstrip().endswith("b'\\x1b'"), timeout=1.0)
+    finally:
+        backend.stop(handle)
+
+
+_TASK_SEGMENTS = [("Task 1 ", "info"), ("● RUNNING", "state_running")]
+
+
+def test_status_tier_drops_hints_first_then_shortens_the_state_text() -> None:
+    from llm_tools.terminal import status_tier
+
+    one = "Task 1 RUNNING"  # the plain @llm_bridge_context: 14 cells, 16 with the state glyph
+    assert [status_tier(width, one) for width in (140, 120, 80, 70, 69, 60, 41, 40, 36)] == [
+        "full", "full", "full", "full", "hints-short", "hints-short", "hints-short", "compact", "compact",
+    ]
+    two = "Task 12 RUNNING · STOPPING"  # two state glyphs: 30 cells
+    assert status_tier(84, two) == "full" and status_tier(83, two) == "hints-short"
+    assert status_tier(55, two) == "hints-short" and status_tier(54, two) == "compact"
+    assert status_tier(54, two.replace("·", "|")) == "compact"
+
+
+def test_compact_status_segments_keep_task_number_and_state_glyph() -> None:
+    from llm_tools.terminal import compact_status_segments
+
+    assert compact_status_segments(_TASK_SEGMENTS) == [("T1 ", "info"), ("●", "state_running")]
+    both = [("Task 12 ", "info"), ("● RUNNING", "state_running"), (" · ", "dim"), ("‖ STOPPING", "state_waiting")]
+    assert compact_status_segments(both) == [("T12 ", "info"), ("●", "state_running")]
+    assert compact_status_segments([("Task 3 ", "info"), ("o WAITING", "state_waiting")]) == [("T3 ", "info"), ("o", "state_waiting")]
+    assert compact_status_segments([("Task 3 ", "info"), ("no output for 30s", "muted")]) == [("T3 ", "info")]
+    assert compact_status_segments([("Task 3 ", "info"), ("idle 12m", "muted")]) == [("T3 ", "info"), ("idle 12m", "muted")]
+    assert compact_status_segments([("No task", "muted"), (" · ", "dim"), ("● PAUSED", "state_paused")]) == [("No task", "muted")]
+    assert compact_status_segments([]) == []
+
+
+def test_status_formats_switch_hints_on_the_same_threshold_as_the_state_text() -> None:
+    left, right = station_status_formats()
+    from llm_tools.terminal import _STATUS_IS_FULL
+
+    assert left.startswith("#{?" + _STATUS_IS_FULL + ",") and right.startswith("#{?" + _STATUS_IS_FULL + ",")
+    assert STATUS_CONTEXT_FORMAT.startswith("#{?" + _STATUS_IS_FULL + ",")
+    assert "@llm_bridge_context_compact" in STATUS_CONTEXT_FORMAT
+
+
+@pytest.mark.parametrize("width", (60, 80, 120))
+def test_status_row_never_shows_scroll_markers_or_cut_words(tmp_path: Path, width: int) -> None:
+    backend = TmuxTerminalBackend()
+    handle = _start(backend, tmp_path, f"narrow{width}", size=(120, 30))
+    try:
+        backend.publish_status(handle, label="release", context="Task 1 RUNNING", chip=3, segments=_TASK_SEGMENTS)
+        row = _attached_status_row(backend, handle, tmp_path, width, wait_for="Provider")
+        assert "<" not in row and ">" not in row and len(row) <= width
+        assert "Task 1 ● RUNNING" in row and "release" in row
+        assert ("Ctrl-] then B" in row) == (width >= 70)  # the hints are the first thing to go
+        two = [("Task 12 ", "info"), ("● RUNNING", "state_running"), (" · ", "dim"), ("‖ STOPPING", "state_waiting")]
+        backend.publish_status(handle, label="release-mission", context="Task 12 RUNNING · STOPPING", chip=3, segments=two)
+        row = _attached_status_row(backend, handle, tmp_path, width, wait_for="Provider")
+        assert "<" not in row and ">" not in row and len(row) <= width
+        assert "Task 12 ● RUNNING · ‖ STOPPING" in row
+    finally:
+        backend.stop(handle)
+
+
+def test_status_row_shortens_the_state_text_when_even_short_hints_leave_no_room(tmp_path: Path) -> None:
+    backend = TmuxTerminalBackend()
+    handle = _start(backend, tmp_path, "tiny", size=(120, 30))
+    try:
+        two = [("Task 12 ", "info"), ("● RUNNING", "state_running"), (" · ", "dim"), ("‖ STOPPING", "state_waiting")]
+        backend.publish_status(handle, label="release-mission", context="Task 12 RUNNING · STOPPING", chip=3, segments=two)
+        row = _attached_status_row(backend, handle, tmp_path, 44, wait_for="Provider")
+        assert "T12 ●" in row and "Task" not in row and "RUNNING" not in row
+        assert "<" not in row and ">" not in row and len(row) <= 44
     finally:
         backend.stop(handle)

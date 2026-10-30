@@ -90,15 +90,13 @@ def old_wrap(line: str, width: int) -> list[str]:
     rows: list[str] = []
     row, cells = "", 0
     for char in line:
-        if char == "\t":
-            amount, chars = 8 - cells % 8, " " * (8 - cells % 8)
-        else:
-            amount, chars = cell_width(char), char
+        amount = min(8 - cells % 8, width) if char == "\t" else cell_width(char)  # a tab never outgrows the row
         if cells and cells + amount > width:
             rows.append(row)
             row, cells = "", 0
             if char == "\t":
-                amount = 8
+                amount = min(8, width)
+        chars = " " * amount if char == "\t" else char
         row += chars
         cells += amount
         if cells >= width:
@@ -315,8 +313,8 @@ def test_headings_are_cached_per_width_and_wrap(monkeypatch):
     viewer.width = 20
     first = viewer.headings()
     matches = []
-    real = documents._HEADING.match
-    monkeypatch.setattr(documents, "_HEADING", type("Spy", (), {"match": staticmethod(lambda line: matches.append(line) or real(line))}))
+    real = documents.heading_label
+    monkeypatch.setattr(documents, "heading_label", lambda line: matches.append(line) or real(line))
     assert viewer.headings() == first
     assert matches == []
     viewer.width = 40

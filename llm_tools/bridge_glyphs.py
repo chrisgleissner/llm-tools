@@ -102,6 +102,33 @@ def localize(text: str) -> str:
     return "".join(out)
 
 
+# One-cell forms for text laid out in fixed columns (the Usage table).  The words
+# ``localize`` uses ("Down") are wider than the glyph, which shifts every column
+# to the right of the cell, so the table needs a form that is one cell wide.
+_CELL_FORMS = {"✓": "+", "↑": "^", "↓": "v", "…": ".", "—": "-", "–": "-", "→": ">", "←": "<"}
+
+
+def localize_cells(text: str) -> str:
+    """``localize`` that maps every character to exactly one ASCII character, so columns keep their width."""
+    if not ascii_mode() or text.isascii():
+        return text
+    single = {utf8: plain for utf8, plain in GLYPHS.values() if len(utf8) == 1 and len(plain) == 1}
+    out = []
+    for char in text:
+        if char.isascii():
+            out.append(char)
+        elif char in _CELL_FORMS:
+            out.append(_CELL_FORMS[char])
+        elif char in single:
+            out.append(single[char])
+        elif char in SPINNER_UTF8:
+            out.append(SPINNER_ASCII[0])
+        else:
+            folded = unicodedata.normalize("NFKD", char).encode("ascii", "ignore").decode("ascii")
+            out.append(folded[:1] or "?")
+    return "".join(out)
+
+
 # State vocabulary shared by the console, the home screen and the mission picker:
 # status word -> (glyph name, theme role).  The glyph and the word are the
 # non-colour cue; the role only adds colour.

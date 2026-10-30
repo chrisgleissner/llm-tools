@@ -584,10 +584,14 @@ def parse_sgr(sgr: str, *, strict: bool = False) -> Style:
         elif code in (38, 48):
             target: int | None = None
             if index + 2 < len(codes) and codes[index + 1] == 5:
+                if strict and codes[index + 2] > 255:
+                    raise ValueError(f"colour index {codes[index + 2]} is above 255 in SGR {sgr!r}")
                 target = max(0, min(255, codes[index + 2]))
                 index += 2
             elif index + 4 < len(codes) and codes[index + 1] == 2:
-                rgb = tuple(max(0, min(255, channel)) for channel in codes[index + 2 : index + 5])
+                if strict and max(codes[index + 2 : index + 5]) > 255:
+                    raise ValueError(f"colour channel above 255 in SGR {sgr!r}")
+                rgb =tuple(max(0, min(255, channel)) for channel in codes[index + 2 : index + 5])
                 target = nearest_256(rgb)  # type: ignore[arg-type]
                 index += 4
             elif strict:
@@ -880,7 +884,7 @@ def _macos_prefers_dark(values: Mapping[str, str]) -> bool | None:
 
 def _background_is_light(colorfgbg: str) -> bool | None:
     parts = colorfgbg.split(";")
-    if not parts or not parts[-1].isdigit():
+    if not parts or not parts[-1].isdecimal() or not parts[-1].isascii() or len(parts[-1]) > 4:
         return None
     index = int(parts[-1])
     if index < 16:

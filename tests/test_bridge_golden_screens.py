@@ -31,6 +31,7 @@ import curses
 import datetime as dt
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -490,6 +491,16 @@ def _home_saved(case: Case) -> FakeScreen:
     return _draw_launcher(case, state)
 
 
+def _home_saved_with_note(case: Case) -> FakeScreen:
+    """A running mission (it has a controller note) right after save: the saved notice owns the row, the note is not drawn over it."""
+    state = _launcher(case, selected=1)
+    mission = state.view()[0]
+    assert bridge_launcher.controller_note(mission, state.controller_state(mission), state.review_task(mission)) is not None
+    state.notice = f"Saved {str(mission['id'])[:8]} {bridge_glyphs.glyph('sep')} S start {bridge_glyphs.glyph('sep')} o controls"
+    state.notice_id = str(mission["id"])
+    return _draw_launcher(case, state)
+
+
 def _picker_entries() -> list[bridge_switcher.MissionEntry]:
     def entry(index: int, name: str, status: str, folder: str, provider: str, **changes: Any) -> bridge_switcher.MissionEntry:
         base = dict(
@@ -542,6 +553,7 @@ SCREENS: dict[str, Callable[[Case], FakeScreen]] = {
     "home-list": _home_list,
     "home-form": _home_form,
     "home-saved": _home_saved,
+    "home-saved-note": _home_saved_with_note,
     "mission-picker": _mission_picker,
 }
 
@@ -641,3 +653,29 @@ def test_role_decoder_round_trips() -> None:
         assert roles.decode(attr & ~curses.A_BOLD) == (role + ".quiet", ())
         assert roles.decode(attr | curses.A_UNDERLINE) == (role, ("underline",))
     assert roles.decode(0) == ("none", ())
+
+
+# --- Usage table alignment -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("glyphs", GLYPH_MODES)
+@pytest.mark.parametrize("columns", (80, 100, 140))
+def test_usage_table_columns_stay_aligned(glyphs: str, columns: int, seeded_snapshot: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every cell of a column starts where its header starts, with or without the ASCII glyph forms."""
+    _set_glyphs(monkeypatch, glyphs)
+    state = Case(24, columns, glyphs, monkeypatch, tmp_path, seeded_snapshot).console_state("Usage")
+    state.content_width = columns - 2
+    rows = state._usage_rows()
+    header = next(row for row in rows if row.lstrip().startswith("Provider"))
+    rule = rows[rows.index(header) + 1]
+    body = [row for row in rows[rows.index(header) + 2:] if row.strip() and not row.lstrip().startswith("l shows")]
+    assert len(body) == 4
+    starts = [match.start() for match in re.finditer(r"\S+(?: \S+)*", header)]
+    assert "Guidance" in header and "Resets in" in header
+    for row in body:
+        assert bridge_tui.cell_width(row) <= bridge_tui.cell_width(rule) + 1
+        for key, start in (("Guidance", header.index("Guidance")), ("Resets in", header.index("Resets in"))):
+            assert start in starts
+            assert row[start - 1] == " " and row[start] != " ", f"{key} cell is not at column {start}: {row!r}"
+    if glyphs == "ascii":
+        assert all(row.isascii() for row in rows[1:])  # the status row is localised when drawn

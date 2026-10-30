@@ -267,13 +267,16 @@ def waiting_message(waiting: dict[str, Any], now: float) -> str:
     """The sentence shown in an empty provider pane while the mission waits."""
     parts = []
     for entry in waiting.get("entries", []):
-        if entry.get("reset_epoch") is not None:
+        name = entry.get("name") or entry.get("provider") or "?"
+        reset = _number(entry.get("reset_epoch"))
+        if reset is not None:
             quota = f"{entry['window']} quota " if entry.get("window") else ""
-            parts.append(f"{entry['name']} {quota}resets in {countdown(entry['reset_epoch'] - now)}")
+            parts.append(f"{name} {quota}resets in {countdown(reset - now)}")
         else:
-            parts.append(f"{entry['name']} {entry.get('reason') or 'is unavailable'}")
-    if not parts and waiting.get("until_epoch") is not None:
-        parts.append(f"next provider ready in {countdown(waiting['until_epoch'] - now)}")
+            parts.append(f"{name} {entry.get('reason') or 'is unavailable'}")
+    until = _number(waiting.get("until_epoch"))
+    if not parts and until is not None:
+        parts.append(f"next provider ready in {countdown(until - now)}")
     subject = "capacity" if waiting.get("reason") == "capacity" else "a usable provider"
     return f"Waiting for {subject}: {'; '.join(parts) or 'no provider is ready yet'}. Ctrl-] then B for options."
 

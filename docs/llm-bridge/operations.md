@@ -837,3 +837,55 @@ Nm` once the provider screen has been quiet for 30 seconds. `Ctrl-]` then `[`
 enters tmux copy mode (`q` leaves it), and `Ctrl-]` twice sends a literal
 Ctrl-] to the provider. The Bridge viewer's `c` copy uses a local helper
 (`wl-copy`, `xclip`, `xsel` or `pbcopy`) and is separate from OSC 52.
+
+## Testing with chaotic input (fuzzing)
+
+Bridge is fuzzed with standard-library generators only (`random.Random(seed)`;
+no Hypothesis or Atheris). The generators, fake curses windows and targets live
+in `tests/fuzz/`:
+
+* `generators.py`: random Unicode (combining marks, wide CJK, emoji and ZWJ
+  sequences, bidi controls, C0/C1 controls, lone surrogates, NUL, very long
+  lines, CR/LF mixes), invalid UTF-8 bytes, key and escape streams (truncated
+  CSI, nested, unterminated and split bracketed pastes, SGR mouse reports with
+  absurd coordinates, function keys), terminal sizes and resize storms, console
+  command lines, CLI arguments and damaged snapshots.
+* `harness.py`: a sandbox (private state directory, `HOME`, `PATH` with inert
+  provider stubs, working directory), a curses window double that records every
+  write outside its bounds, a fake clock for the escape and paste timers, a
+  watchdog for hangs, and a database fingerprint.
+* `targets_pure.py`, `targets_ui.py`, `targets_cli.py`: one target per surface
+  (input primitives, bracketed paste, text buffer, document viewer, Markdown,
+  theme and config parsing, event summaries, text helpers, regular-expression
+  timing, console keys/drawing/whole loop, document viewer loop, home screen
+  keys and loop, paste into the home screen, mission picker, console command
+  lines, CLI parser, store state machine and chaotic stored text).
+
+Each target checks invariants: no exception, no write outside the window, no
+command dispatched except by an explicit Enter or a confirming Y (or a
+composer Ctrl-S/F2), a pasted block reaches its destination byte for byte, read
+only commands leave the database unchanged, store transitions follow a
+reference model, and wrapped or clipped rows never exceed the width in cells.
+
+Run them like this:
+
+```bash
+python -m pytest -q -m fuzz                       # fixed seeds, about a minute
+python -m pytest -q -m "not fuzz"                 # everything else
+python scripts/bridge_fuzz.py --list              # the targets
+python scripts/bridge_fuzz.py --seconds 600 --seed 5000000 --target console_loop
+python scripts/bridge_fuzz.py --seconds 120       # every target, time shared equally
+python scripts/bridge_fuzz.py --case console_loop:1234        # replay one seed
+python scripts/bridge_fuzz.py --replay ~/.cache/llm-tools/bridge-fuzz/cases/X.json
+```
+
+`--seconds` is the total budget shared equally by the selected targets. Every
+failing case is saved once per distinct failure as JSON (default
+`${XDG_CACHE_HOME:-~/.cache}/llm-tools/bridge-fuzz/cases/`, override with
+`--out`) with its target, seed, traceback and the generated inputs; the case
+reproduces from the seed. `tests/test_bridge_fuzz_pty.py` additionally feeds
+two seconds of seeded terminal noise and resize signals to the control view and
+the home screen in a real pseudo-terminal, then requires the process to be
+alive, to leave on Ctrl-D with status 0, to print no traceback and to leave the
+database unchanged. Each defect the fuzzers found has a minimal regression test
+in `tests/test_bridge_fuzz_regressions.py`.

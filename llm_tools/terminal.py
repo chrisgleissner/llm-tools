@@ -14,6 +14,7 @@ import shlex
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -30,23 +31,78 @@ from .bridge_theme import mission_chip_style, resolve_cached, tmux_role_markup, 
 # Columns taken by the fixed status chrome: "▶ Bridge: Ctrl-] then B │ " on the
 # left and " │ ▶ Provider: Ctrl-] then P" on the right, plus a little breathing
 # room. The task/mission context gets the rest of the client width.
-_STATUS_CHROME_COLUMNS = 56
+_STATUS_CHROME_COLUMNS = 54
+# The same chrome without the key hints: "▶ Bridge │ " and " │ ▶ Provider ".
+_STATUS_SHORT_CHROME_COLUMNS = 25
 _STATUS_CONTEXT_MIN_COLUMNS = 8
-_STATUS_CONTEXT_LIMIT = (
-    "#{?#{e|>:#{e|-:#{client_width}," + str(_STATUS_CHROME_COLUMNS) + "}," + str(_STATUS_CONTEXT_MIN_COLUMNS) + "},"
-    "#{e|-:#{client_width}," + str(_STATUS_CHROME_COLUMNS) + "}," + str(_STATUS_CONTEXT_MIN_COLUMNS) + "}"
+# Cells reserved for the compact state text ("T1 ●") when the mission label is sized.
+_STATUS_COMPACT_COLUMNS = 10
+# The styled state text adds a state glyph and a space to the plain @llm_bridge_context,
+# twice when a mission state follows the task state (" · " or " | " in ASCII mode).
+_STATUS_GLYPH_COLUMNS = 2
+_STATUS_TWO_STATES = ("\u00b7", "|")
+
+
+def status_context_cells(context: str) -> int:
+    """Width of the coloured state text for the plain `context`: its length plus the state glyphs."""
+    two = any(f" {mark} " in context for mark in _STATUS_TWO_STATES)
+    return len(context) + _STATUS_GLYPH_COLUMNS * (2 if two else 1)
+
+
+def status_tier(client_width: int, context: str) -> str:
+    """Which form the status row takes for a client of `client_width` cells and the plain state text `context`.
+
+    * ``full``: the key hints on both sides and the whole state text;
+    * ``hints-short``: the hints are dropped (``▶ Bridge │`` and ``│ ▶ Provider``), the state text stays whole;
+    * ``compact``: the hints are dropped and the state text is shortened to ``T1 ●``.
+
+    The tmux formats below apply the same thresholds, so the row never gets wider than the room
+    tmux leaves between the two sides (when it would, tmux shows ``<`` and ``>`` and cuts mid-word).
+    """
+    need = status_context_cells(context)
+    if client_width - _STATUS_CHROME_COLUMNS >= need:
+        return "full"
+    if client_width - _STATUS_SHORT_CHROME_COLUMNS >= need:
+        return "hints-short"
+    return "compact"
+
+
+_STATUS_NEED = (
+    "#{e|+:#{n:@llm_bridge_context},#{?#{||:#{m:* \u00b7 *,#{@llm_bridge_context}},#{m:* | *,#{@llm_bridge_context}}},"
+    + str(2 * _STATUS_GLYPH_COLUMNS) + "," + str(_STATUS_GLYPH_COLUMNS) + "}}"
 )
-# The mission label (@llm_bridge_label) leads the state text. When the client is
-# narrow the label shrinks first and disappears below four cells, so the task
-# and state text stay whole.
-_STATUS_LABEL_LIMIT = "#{e|-:#{e|-:" + _STATUS_CONTEXT_LIMIT + ",#{n:@llm_bridge_context}},3}"
+_STATUS_IS_FULL = "#{e|>=:#{e|-:#{client_width}," + str(_STATUS_CHROME_COLUMNS) + "}," + _STATUS_NEED + "}"
+_STATUS_IS_SHORT = "#{e|>=:#{e|-:#{client_width}," + str(_STATUS_SHORT_CHROME_COLUMNS) + "}," + _STATUS_NEED + "}"
+
+
+def _context_limit(chrome: int) -> str:
+    return (
+        "#{?#{e|>:#{e|-:#{client_width}," + str(chrome) + "}," + str(_STATUS_CONTEXT_MIN_COLUMNS) + "},"
+        "#{e|-:#{client_width}," + str(chrome) + "}," + str(_STATUS_CONTEXT_MIN_COLUMNS) + "}"
+    )
+
+
+def _context_format(chrome: int, body: str, reserve: str) -> str:
+    """The centre text: the mission label as a chip (it shrinks first and disappears below four cells), then `body`."""
+    # The label gets what is left after the state text (`reserve` cells) and the chip's padding.
+    label_limit = "#{e|-:#{e|-:" + _context_limit(chrome) + "," + reserve + "},3}"
+    return (
+        "#{?#{@llm_bridge_label},"
+        "#{?#{e|>=:" + label_limit + ",4},#{@llm_bridge_chip} #{=/" + label_limit + "/…:@llm_bridge_label} #[default] ,},"
+        "}#{=/" + _context_limit(chrome) + "/…:" + body + "}"
+    )
+
+
 # The label is drawn as a filled chip in the mission's identity colour
 # (@llm_bridge_chip holds its tmux style). The state text is @llm_bridge_context,
-# or its coloured form @llm_bridge_context_styled when the console published one.
+# or its coloured form @llm_bridge_context_styled when the console published one;
+# @llm_bridge_context_compact is the short coloured form ("T1 ●") for narrow clients.
+_STATUS_FULL_BODY = "#{?#{@llm_bridge_context_styled},#{@llm_bridge_context_styled},#{@llm_bridge_context}}"
+_STATUS_COMPACT_BODY = "#{?#{@llm_bridge_context_compact},#{@llm_bridge_context_compact}," + _STATUS_FULL_BODY + "}"
 STATUS_CONTEXT_FORMAT = (
-    "#{?#{@llm_bridge_label},"
-    "#{?#{e|>=:" + _STATUS_LABEL_LIMIT + ",4},#{@llm_bridge_chip} #{=/" + _STATUS_LABEL_LIMIT + "/…:@llm_bridge_label} #[default] ,},"
-    "}#{=/" + _STATUS_CONTEXT_LIMIT + "/…:#{?#{@llm_bridge_context_styled},#{@llm_bridge_context_styled},#{@llm_bridge_context}}}"
+    "#{?" + _STATUS_IS_FULL + "," + _context_format(_STATUS_CHROME_COLUMNS, _STATUS_FULL_BODY, _STATUS_NEED) + ","
+    "#{?" + _STATUS_IS_SHORT + "," + _context_format(_STATUS_SHORT_CHROME_COLUMNS, _STATUS_FULL_BODY, _STATUS_NEED) + ","
+    + _context_format(_STATUS_SHORT_CHROME_COLUMNS, _STATUS_COMPACT_BODY, str(_STATUS_COMPACT_COLUMNS)) + "}}"
 )
 # Longest context kept in the option itself; the status row truncates further
 # to the attached client's width.
@@ -158,16 +214,25 @@ def station_status_formats() -> tuple[str, str]:
     play, bar = glyph("play"), glyph("vbar")
     # The hint reads "<verb> <key>": the key names are `key`, the words `muted`;
     # the pane that has focus gets the `accent` marker.
+    accent = tmux_role_markup("accent")
+    left_marker = f"{accent}#{{?#{{==:#{{pane_index}},1}},{play} ,}}"
+    right_marker = f"{accent}#{{?#{{==:#{{pane_index}},0}},{play} ,}}"
     left = (
-        f"{tmux_role_markup('accent')}#{{?#{{==:#{{pane_index}},1}},{play} ,}}"
-        f"{muted}Bridge: {key}Ctrl-] {muted}then {key}B "
+        f"{left_marker}{muted}Bridge: {key}Ctrl-] {muted}then {key}B "
         f"{dim}{bar} #[default]"
     )
     right = (
-        f"{dim} {bar} {tmux_role_markup('accent')}#{{?#{{==:#{{pane_index}},0}},{play} ,}}"
+        f"{dim} {bar} {right_marker}"
         f"{muted}Provider: {key}Ctrl-] {muted}then {key}P #[default]"
     )
-    return left, right
+    # On a narrow client the hints go first: "▶ Bridge │" and "│ ▶ Provider" keep the
+    # focus marker and the pane names, and leave the room to the task and state text.
+    left_short = f"{left_marker}{muted}Bridge {dim}{bar} #[default]"
+    right_short = f"{dim} {bar} {right_marker}{muted}Provider #[default]"
+    return (
+        "#{?" + _STATUS_IS_FULL + "," + left + "," + left_short + "}",
+        "#{?" + _STATUS_IS_FULL + "," + right + "," + right_short + "}",
+    )
 
 
 def _clean_status_text(text: object, limit: int) -> str:
@@ -192,6 +257,34 @@ def _styled_status_value(segments: list[tuple[str, str]]) -> str:
             parts.append(" ")
     value = "".join(parts)
     return value + "#[default]" if value else value
+
+
+_TASK_SEGMENT_RE = re.compile(r"Task (\S+)\s*$")
+_COMPACT_PHRASE_MAX_CELLS = 12
+
+
+def compact_status_segments(segments: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The state text for a narrow client: ``Task 1 ● RUNNING`` becomes ``T1 ●``.
+
+    The task number stays, the state keeps its glyph and colour but loses the word, and
+    everything after the task state (the mission state) is left out. A state that has no
+    glyph (a silent provider's ``no output for 30s``) stays whole when it is short and is
+    left out otherwise, so the text is never cut inside a word. Text without a task
+    (``No task``) is returned unchanged.
+    """
+    first = segments[0] if segments else None
+    match = _TASK_SEGMENT_RE.fullmatch(first[0]) if first else None
+    if first is None or match is None:
+        return list(segments[:1])
+    out = [(f"T{match.group(1)} ", first[1])]
+    if len(segments) > 1:
+        text, role = segments[1]
+        lead, _space, rest = text.partition(" ")
+        if len(lead) == 1 and rest.isupper():  # "● RUNNING", or "o WAITING" in ASCII mode
+            out.append((lead, role))
+        elif len(text) <= _COMPACT_PHRASE_MAX_CELLS:
+            out.append((text, role))
+    return out
 
 
 @dataclass(frozen=True)
@@ -437,6 +530,7 @@ class TmuxTerminalBackend:
             "set-option -g @llm_bridge_label ''\n"
             "set-option -g @llm_bridge_chip ''\n"
             "set-option -g @llm_bridge_context_styled ''\n"
+            "set-option -g @llm_bridge_context_compact ''\n"
             "set-option -g status-justify centre\n"
             f"set-option -g window-status-format {shlex.quote(STATUS_CONTEXT_FORMAT)}\n"
             f"set-option -g window-status-current-format {shlex.quote(STATUS_CONTEXT_FORMAT)}\n"
@@ -582,9 +676,12 @@ class TmuxTerminalBackend:
         keep_height = f"resize-pane -t {bridge_pane} -y {bridge_rows}"
         if version is not None and version >= (3, 2):
             # ``##`` survives run-shell's own format expansion so that if-shell evaluates the flag.
+            # Nothing is touched while the command pane already has its height: resizing a zoomed
+            # window unzooms it, which sends the provider a resize it would have to repaint for.
             inner = (
-                f"if-shell -F -t {window} '##{{window_zoomed_flag}}' "
-                f"'{keep_height} ; resize-pane -Z -t {window}' '{keep_height}'"
+                f"if-shell -F -t {bridge_pane} '##{{!=:##{{pane_height}},{bridge_rows}}}' "
+                f"\"if-shell -F -t {window} '##{{window_zoomed_flag}}' "
+                f"'{keep_height} ; resize-pane -Z -t {window}' '{keep_height}'\""
             )
             return f"run-shell -b -C -d 0.05 {shlex.quote(inner)}"
         tmux_command = shlex.join([resolve_executable("tmux"), "-S", tmux_literal(str(socket)), "-f", tmux_literal(str(config_path))])
@@ -593,6 +690,8 @@ class TmuxTerminalBackend:
             "sleep 0.05; "
             f"active_pane=$({tmux_command} display-message -p -t {target_window} '#{{pane_id}}'); "
             f"was_zoomed=$({tmux_command} display-message -p -t {target_window} '#{{window_zoomed_flag}}'); "
+            f"height=$({tmux_command} display-message -p -t {shlex.quote(bridge_pane)} '#{{pane_height}}'); "
+            f"[ \"$height\" = {bridge_rows} ] && exit 0; "
             f"{tmux_command} resize-pane -t {shlex.quote(bridge_pane)} -y {bridge_rows}; "
             f"if [ \"$was_zoomed\" = 1 ] && [ -n \"$active_pane\" ]; then "
             f"{tmux_command} resize-pane -Z -t \"$active_pane\"; fi"
@@ -690,19 +789,31 @@ class TmuxTerminalBackend:
             self._run(handle.socket_path, "send-keys", "-l", "-t", self._target(handle, pane), keys)
 
     def focus(self, handle: TerminalHandle, *, pane: str, expand: bool = False) -> None:
-        """Select an owned pane; optionally give its existing UI the full window."""
+        """Select an owned pane; optionally give its existing UI the full window.
+
+        The layout changes go to tmux as one command list, so an attached client is drawn once,
+        and nothing is sent when the pane is already in the requested state: unzooming and zooming
+        again would resize the provider twice and repaint a two-pane screen in between.
+        """
         self._require_owned(handle)
         target = self._target(handle, pane)
-        zoomed = self._run(handle.socket_path, "display-message", "-p", "-t", target,
-                           "#{window_zoomed_flag}", capture=True).stdout.strip() == "1"
-        if zoomed:
-            self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
-        self._run(handle.socket_path, "select-pane", "-t", target)
-        if expand:
-            self._run(handle.socket_path, "resize-pane", "-Z", "-t", target)
+        state = self._run(handle.socket_path, "display-message", "-p", "-t", target,
+                          "#{window_zoomed_flag} #{pane_active}", capture=True).stdout.split()
+        zoomed, active = state[:1] == ["1"], state[1:] == ["1"]
+        commands: list[list[str]] = []
+        if expand and zoomed and active:
+            pass  # already the full-window pane
+        elif expand:
+            if zoomed:
+                commands.append(["resize-pane", "-Z", "-t", target])
+            commands += [["select-pane", "-t", target], ["resize-pane", "-Z", "-t", target]]
+        else:
+            if zoomed:
+                commands.append(["resize-pane", "-Z", "-t", target])
+            commands.append(["select-pane", "-t", target])
         left, right = station_status_formats()
-        self._run(handle.socket_path, "set-option", "-g", "status-left", left)
-        self._run(handle.socket_path, "set-option", "-g", "status-right", right)
+        commands += [["set-option", "-g", "status-left", left], ["set-option", "-g", "status-right", right]]
+        self._run(handle.socket_path, *self._chain(commands))
 
     def set_status_context(self, handle: TerminalHandle, context: str) -> None:
         """Set the short, sanitized task/state label in the owned status row."""
@@ -739,6 +850,7 @@ class TmuxTerminalBackend:
         the resolved theme, so mission-supplied text can never inject markup.
         """
         self._require_owned(handle)
+        self._run(handle.socket_path, "set-option", "-g", "@llm_bridge_context_compact", _styled_status_value(compact_status_segments(segments)))
         self._run(handle.socket_path, "set-option", "-g", "@llm_bridge_context_styled", _styled_status_value(segments))
 
     def publish_status(
@@ -764,6 +876,7 @@ class TmuxTerminalBackend:
             "@llm_bridge_context": _clean_status_text(context, _STATUS_CONTEXT_MAX_CHARS) or "No current task",
             "@llm_bridge_chip": tmux_style_markup(mission_chip_style(chip, resolve_cached())),
             "@llm_bridge_context_styled": _styled_status_value(segments),
+            "@llm_bridge_context_compact": _styled_status_value(compact_status_segments(segments)),
         }
         key = str(handle.socket_path)
         identity = _socket_identity(handle.socket_path)
@@ -1326,6 +1439,39 @@ class TmuxTerminalBackend:
             return None
         return epoch, (None if epoch == (seen_epoch or 0) else screen)
 
+    def _fit_window_to_terminal(self, handle: TerminalHandle) -> None:
+        """Give a station that has no client the size of the terminal that is about to attach.
+
+        The attach would otherwise resize the window, and the ``client-resized`` hook would then
+        restore the command pane's height by unzooming and zooming the window, 50 ms after the
+        first frame. The provider is resized and repaints twice while the user watches. Done here,
+        before the client exists, the layout is settled when the first frame is drawn and the hook
+        finds nothing to correct. ``resize-window`` switches the window to a fixed size, so the
+        window option is removed again to keep following the latest client.
+        """
+        size = os.get_terminal_size(sys.stdin.fileno())
+        cols, rows = size.columns, size.lines - 1  # the status row belongs to tmux
+        if cols < 80 or rows < 23:
+            return
+        window = f"{handle.session_name}:station"
+        listing = self._run(
+            handle.socket_path, "list-panes", "-t", window, "-F",
+            "#{pane_id} #{pane_active} #{window_zoomed_flag} #{window_width} #{window_height} #{session_attached}",
+            capture=True,
+        ).stdout.splitlines()
+        panes = [line.split() for line in listing if len(line.split()) == 6]
+        active = next((fields for fields in panes if fields[1] == "1"), None)
+        if active is None or active[5] != "0" or (active[3], active[4]) == (str(cols), str(rows)):
+            return  # another client is attached (the window follows it), or nothing to change
+        commands = [
+            ["resize-window", "-t", window, "-x", str(cols), "-y", str(rows)],
+            ["resize-pane", "-t", handle.bridge_pane, "-y", str(handle.bridge_rows)],
+        ]
+        if active[2] == "1":
+            commands.append(["resize-pane", "-Z", "-t", active[0]])
+        commands.append(["set-option", "-w", "-u", "-t", window, "window-size"])
+        self._run(handle.socket_path, *self._chain(commands))
+
     def attach(self, handle: TerminalHandle) -> int:
         """Attach the current real terminal to the station's native PTYs.
 
@@ -1336,6 +1482,10 @@ class TmuxTerminalBackend:
         passed through unchanged.
         """
         self._require_owned(handle)
+        try:
+            self._fit_window_to_terminal(handle)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            pass  # only avoids a repaint; attaching works at any size
         result = subprocess.run(
             [resolve_executable("tmux"), "-S", str(handle.socket_path), "-f", str(handle.config_path), "attach-session", "-t", handle.session_name],
             check=False,

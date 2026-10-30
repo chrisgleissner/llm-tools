@@ -208,8 +208,8 @@ def test_publish_status_sends_only_changed_options_in_one_invocation(tmp_path: P
         segments = [("Task 1 ", "info"), ("RUNNING", "ok")]
         calls = TmuxCalls(monkeypatch)
         assert backend.publish_status(handle, label="repo", context="Task 1 RUNNING", chip=1, segments=segments)
-        assert calls.subcommands() == ["set-option"]  # four options, one process
-        assert calls.argvs[0].count("set-option") == 4
+        assert calls.subcommands() == ["set-option"]  # five options, one process
+        assert calls.argvs[0].count("set-option") == 5
 
         calls.clear()
         assert not backend.publish_status(handle, label="repo", context="Task 1 RUNNING", chip=1, segments=segments)
@@ -218,7 +218,7 @@ def test_publish_status_sends_only_changed_options_in_one_invocation(tmp_path: P
         assert backend.publish_status(handle, label="repo", context="Task 1 no output for 30s", chip=1,
                                       segments=[("Task 1 ", "info"), ("no output for 30s", "muted")])
         assert calls.subcommands() == ["set-option"]
-        assert calls.argvs[0].count("set-option") == 2  # the plain and the coloured text; label and chip are unchanged
+        assert calls.argvs[0].count("set-option") == 3  # the plain, coloured and compact text; label and chip are unchanged
 
         def option(name: str) -> str:
             return subprocess.run(["tmux", "-S", str(handle.socket_path), "show-options", "-gqv", name], capture_output=True, text=True).stdout.strip()

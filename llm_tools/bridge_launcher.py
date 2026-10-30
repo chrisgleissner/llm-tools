@@ -25,7 +25,7 @@ from .bridge_store import BridgeStore, default_state_dir, store_path
 from .bridge_store import controller_running as _controller_running
 from .common import KNOWN_PROVIDERS
 from .bridge_format import printable
-from .bridge_input import cell_slice, cell_width
+from .bridge_input import cell_slice, cell_width, without_flow_control
 from .bridge_input import BracketedPaste
 from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
 from .bridge_glyphs import (  # noqa: F401 - several names are re-exported
@@ -1431,7 +1431,7 @@ def _draw(window: curses.window, state: Launcher) -> None:
         elif count:
             mission = shown[state.selected - 1]
             line(height - 3, mission_detail(mission, width - 1), "muted")
-            if not state.error:
+            if not state.error and not state.active_notice():  # the error or the saved notice owns the row below the detail
                 note = controller_note(mission, controllers.get(state.selected), state.review_task(mission))
                 if note:
                     line(height - 2, note[0], "muted" if note[1] == "dim" else note[1])
@@ -1749,7 +1749,7 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
         _set_bracketed_paste(True)
         reloader.invalidate()  # re-read the list as soon as the screen is shown again
         try:
-            action = bridge_hangup.run_curses(loop)
+            action = bridge_hangup.run_curses(without_flow_control(loop))
         except (KeyboardInterrupt, EOFError):
             return 0
         except curses.error as exc:

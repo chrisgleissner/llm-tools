@@ -15,6 +15,7 @@ import functools
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import shlex
@@ -33,11 +34,11 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice, input_view, offset_for_cells
-from .bridge_documents import DocumentViewer
+from .bridge_documents import DocumentViewer, heading_label
 from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, STARTED_MISSION_STATUSES
 from . import bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
 from .bridge_format import plain_reason
-from .bridge_glyphs import FINISHED_STATES, glyph, localize, provider_role, spinner_frames, state_look, state_text
+from .bridge_glyphs import FINISHED_STATES, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
 from .bridge_theme import ROLES as THEME_ROLES, Style, fit_style
 from .common import fmt_duration
 from .terminal import TerminalAction
@@ -1232,12 +1233,12 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
     result["task_counts"] = {
         _text(key, 32): count
         for key, count in _dict(data.get("task_counts")).items()
-        if isinstance(count, (int, float))
+        if isinstance(count, (int, float)) and math.isfinite(count)
     }
     result["proposal_counts"] = {
         _text(key, 32): count
         for key, count in _dict(data.get("proposal_counts")).items()
-        if isinstance(count, (int, float))
+        if isinstance(count, (int, float)) and math.isfinite(count)
     }
     total_tasks = data.get("task_total")
     if isinstance(total_tasks, int):
@@ -1338,7 +1339,7 @@ def _clip(text: str, width: int) -> str:
 def _int_or_none(value: object) -> int | None:
     try:
         return int(float(str(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # not a number, or infinite
         return None
 
 
@@ -1363,7 +1364,7 @@ def _relative_epoch(value: object, now: float | None = None) -> str | None:
     """`in 4h 59m` / `3m ago` for an epoch or ISO timestamp, else None."""
     from . import common
 
-    epoch = common.parse_epoch(value)
+    epoch = common.parse_epoch(value, use_date=False)
     if epoch is None:
         return None
     current = common.now_epoch() if now is None else now
@@ -1394,10 +1395,13 @@ def _local_clock(value: object) -> str:
     """Local HH:MM:SS for an ISO/epoch timestamp."""
     from . import common
 
-    epoch = common.parse_epoch(value)
+    epoch = common.parse_epoch(value, use_date=False)
     if epoch is None:
         return "--:--:--"
-    return time.strftime("%H:%M:%S", time.localtime(epoch))
+    try:
+        return time.strftime("%H:%M:%S", time.localtime(epoch))
+    except (OverflowError, OSError, ValueError):  # a timestamp outside the platform's range
+        return "--:--:--"
 
 
 def _short_id(value: object, length: int = 8) -> str:
@@ -1426,6 +1430,8 @@ _DURATION_UNITS = {"d": 86400, "h": 3600, "m": 60, "s": 1}
 def _duration_seconds(value: object) -> int | None:
     """Seconds in text like `2d 10h 35m`, or None when it is not a plain duration."""
     text = str(value).strip().lstrip("~").strip()
+    if len(text) > 80:  # far longer than any duration; the pattern is quadratic on a long run of digits
+        return None
     parts = _DURATION_PART.findall(text)
     if not parts or _DURATION_PART.sub("", text).strip():
         return None
@@ -1448,7 +1454,7 @@ def _window_summary(window: dict[str, object], now: float) -> str:
     else:
         text = f"{name} remaining unknown"
     estimate = window.get("estimated_remaining")
-    reset = common.parse_epoch(window.get("reset_epoch"))
+    reset = common.parse_epoch(window.get("reset_epoch"), use_date=False)
     if _known(estimate) and str(estimate).strip().lower() not in _ESTIMATE_MISSING and any(char.isdigit() for char in str(estimate)):
         runout = _duration_seconds(estimate)
         if runout is not None and reset is not None and reset > now and runout > reset - now:
@@ -1562,7 +1568,7 @@ def _count_phrase(counts: dict[str, object]) -> str:
     pairs = [
         (str(state).upper(), count)
         for state, count in counts.items()
-        if isinstance(count, (int, float)) and count
+        if isinstance(count, (int, float)) and count and math.isfinite(count)
     ]
     pairs.sort(key=lambda item: (_ORDER_STATE_RANK.get(item[0], 99), item[0]))
     return _SEP.join(f"{int(count)} {_text(state, 12).lower()}" for state, count in pairs)
@@ -2505,7 +2511,6 @@ def _orders_list_height(content_height: int, width: int, count: int) -> int | No
 
 
 _FENCE = re.compile(r"^\s*(```|~~~)")
-_HEADING_LINE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 _LIST_ITEM = re.compile(r"^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$")
 
 
@@ -2521,6 +2526,23 @@ def _reflow_markdown(text: str, width: int, limit: int) -> list[tuple[str, str]]
             _REFLOW_CACHE.pop(next(iter(_REFLOW_CACHE)))
         rows = _REFLOW_CACHE[key] = tuple(_reflow_markdown_rows(text, width, limit))
     return list(rows)
+
+
+def _fit_cells(row: str, width: int, hang: str) -> list[str]:
+    """Split a row wider than `width` cells at a cell boundary; `textwrap` counts characters, so wide text overflows it."""
+    if cell_width(row) <= width:
+        return [row]
+    pieces: list[str] = []
+    current, used = "", 0
+    for char in row:
+        amount = cell_width(char)
+        if used and used + amount > width:
+            pieces.append(current)
+            current, used = hang, cell_width(hang)
+        current += char
+        used += amount
+    pieces.append(current)
+    return pieces
 
 
 def _reflow_markdown_rows(text: str, width: int, limit: int) -> list[tuple[str, str]]:
@@ -2542,10 +2564,11 @@ def _reflow_markdown_rows(text: str, width: int, limit: int) -> list[tuple[str, 
         if paragraph:
             joined = " ".join(paragraph)
             hang = " " * len(item_prefix)
-            out.extend((line, "info") for line in textwrap.wrap(
+            wrapped = textwrap.wrap(
                 joined, width=width, initial_indent=item_prefix, subsequent_indent=hang,
                 break_long_words=True, break_on_hyphens=False,
-            ) or [item_prefix + joined])
+            ) or [item_prefix + joined]
+            out.extend((piece, "info") for line in wrapped for piece in _fit_cells(line, width, hang))
         paragraph.clear()
         item_prefix = ""
 
@@ -2567,16 +2590,17 @@ def _reflow_markdown_rows(text: str, width: int, limit: int) -> list[tuple[str, 
             flush()
             out.append((_clip(stripped, width), "secondary"))
             continue
-        heading = _HEADING_LINE.match(line)
-        if heading:
+        heading = heading_label(line)
+        if heading is not None:
             flush()
-            out.append((_clip(heading.group(1), width), "heading"))
+            out.append((_clip(heading, width), "heading"))
             continue
         item = _LIST_ITEM.match(line)
         if item:
             flush()
-            indent = min(len(item.group(1)), 6)
-            item_prefix = " " * indent + item.group(2) + " "
+            room = max(2, width // 2)  # at least half the row stays for the item's text
+            marker = item.group(2) + " "
+            item_prefix = (" " * min(len(item.group(1)), 6, max(0, room - len(marker))) + marker)[:room]
             paragraph.append(item.group(3).strip())
             continue
         paragraph.append(stripped)
@@ -2726,7 +2750,7 @@ def _provider_state(
             exhausted = float(str(window.get("remaining_percent"))) <= 0
         except ValueError:
             exhausted = False
-        reset = common.parse_epoch(window.get("reset_epoch"))
+        reset = common.parse_epoch(window.get("reset_epoch"), use_date=False)
         if exhausted and reset is not None and reset > now:
             resets.append(reset)
     if resets:
@@ -3697,6 +3721,7 @@ class _ConsoleState:
         if key == "\x15":  # Ctrl-U clears the current input line.
             self.input_focused = True
             self.command = ""
+            self.command_cursor = 0
             if self.search_editing or self.search_query:
                 self.search_query = ""
                 self.search_editing = False
@@ -3756,6 +3781,7 @@ class _ConsoleState:
         if key in {"\x03", "\x04"}:
             if self.search_editing:
                 self.command = ""
+                self.command_cursor = 0
                 self.search_editing = False
                 return True
             if self.command:
@@ -4095,7 +4121,8 @@ class _ConsoleState:
         parts.append(f"updated {_age(age)} ago" if age is not None else "first sample pending")
         if usage.get("error"):
             parts.append(f"last refresh failed: {_text(usage.get('error'), 60)}")
-        lines = str(usage.get("text") or "Loading full llm-usage dashboard...").splitlines()
+        # One cell per character before the columns are cut, so an ASCII locale keeps them aligned.
+        lines = localize_cells(str(usage.get("text") or "Loading full llm-usage dashboard...")).splitlines()
         table, legend = _split_usage_text(lines)
         if table is None:
             return [_SEP.join(parts), *lines]
@@ -4177,7 +4204,7 @@ class _ConsoleState:
             "Amendment history:",
             *([
                 f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20)}: {_cut_text(json.dumps(item.get('changes', {}), ensure_ascii=False, sort_keys=True), 240)}"
-                for item in amendments[:5]
+                for item in amendments[:5] if isinstance(item, dict)
             ] if isinstance(amendments, list) and amendments else ["  none recorded"]),
             "Prompt preview (v opens full prompt): " + _cut_text(task.get("prompt") or "", 800),
         ]
@@ -5745,6 +5772,8 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
     def feed_console_paste(key: object) -> bool:
         """Consume bracketed-paste framing and atomically route completed source."""
         nonlocal paste_activity, escape_sequence
+        if escape_sequence and key == "\x1b":
+            escape_sequence = False  # ESC aborts an unfinished sequence and starts the next one (a paste marker may follow)
         if escape_sequence:
             if isinstance(key, str):
                 paste_activity = time.monotonic()
@@ -5784,8 +5813,11 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                 state.handle_key("\x1b")
                 replay_keys.append(key)
             elif previous.startswith((b"\x1b[", b"\x1bO")):
-                escape_sequence = not (len(key) == 1 and "@" <= key <= "~")
                 state.output.append("Unknown escape sequence ignored.")
+                if key == "\x1b":
+                    paste_candidate.extend(encoded)  # ESC aborts the unfinished sequence and starts the next one
+                else:
+                    escape_sequence = not (len(key) == 1 and "@" <= key <= "~")
             elif not isinstance(key, str):
                 replay_keys.append(key)
             else:

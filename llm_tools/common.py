@@ -200,14 +200,21 @@ def now_epoch(env: dict[str, str] | None = None) -> int:
     return int(time.time())
 
 
-def parse_epoch(value: Any) -> int | None:
+def parse_epoch(value: Any, *, use_date: bool = True) -> int | None:
+    """Epoch seconds for a number or a timestamp text; ``use_date=False`` never starts a process for text Python cannot parse."""
     if value is None or value == "" or value == "null":
         return None
     if isinstance(value, (int, float)):
-        return int(value)
+        try:
+            return int(value)
+        except (OverflowError, ValueError):  # infinity or NaN is not a moment in time
+            return None
     text = str(value)
     if re.fullmatch(r"[0-9]+(?:[.][0-9]+)?", text):
-        return int(float(text))
+        try:
+            return int(float(text))
+        except OverflowError:  # hundreds of digits
+            return None
     normalized = re.sub(r"\.[0-9]+", "", text)
     normalized = re.sub(r"[+-]00:00$", "Z", normalized)
     try:
@@ -216,7 +223,7 @@ def parse_epoch(value: Any) -> int | None:
         return int(datetime.fromisoformat(normalized).timestamp())
     except ValueError:
         pass
-    if have_cmd("date"):
+    if use_date and have_cmd("date"):
         proc = subprocess.run(
             ["date", "-d", text, "+%s"],
             stdout=subprocess.PIPE,
@@ -268,7 +275,7 @@ def fmt_duration(seconds: Any) -> str:
         return "-"
     try:
         total = int(seconds)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return "-"
     if total <= 0:
         return "0m"

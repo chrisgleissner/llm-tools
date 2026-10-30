@@ -2314,6 +2314,23 @@
    "subprocess"
   ]
  },
+ "tests/test_terminal_attach_frames.py": {
+  "test_attach_does_not_leave_the_window_at_a_fixed_size": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_attach_lands_on_the_provider_pane_with_one_resize_and_one_clear": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_focus_on_the_pane_that_is_already_shown_does_not_resize_the_provider": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
  "tests/test_terminal_attached.py": {
   "test_attached_client_input_paste_mouse_resize_detach_and_reattach": [
    "tmux",
@@ -2461,7 +2478,15 @@
    "tmux",
    "subprocess"
   ],
+  "test_status_row_never_shows_scroll_markers_or_cut_words": [
+   "tmux",
+   "subprocess"
+  ],
   "test_status_row_separates_context_and_truncates_long_context_at_80_columns": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_status_row_shortens_the_state_text_when_even_short_hints_leave_no_room": [
    "tmux",
    "subprocess"
   ],

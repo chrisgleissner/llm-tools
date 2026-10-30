@@ -97,7 +97,10 @@ def duration(seconds: float) -> str:
 
 def countdown(seconds: float) -> str:
     """Time until an event with two units where useful: ``2d 9h``, ``3h 5m``, ``12m``, ``<1m``."""
-    total = int(seconds)
+    try:
+        total = int(seconds)
+    except (OverflowError, ValueError):  # infinity or NaN
+        return "-"
     if total < 60:
         return "now" if total <= 0 else "<1m"
     days, rest = divmod(total, 86400)
