@@ -414,7 +414,7 @@ cost modeling implementation. Found and fixed:
   `--fail-under=85`.
 
 2026-10-28 (Bridge UX implementation checkpoint): Required shared agent inbox
-check (`/home/chris/.agents/skills/agent-bridge/scripts/bridge inbox codex`)
+check (`~/.agents/skills/agent-bridge/scripts/bridge inbox codex`)
 completed with no messages. Checkout was `1871a69f32cd4036e2169e5f56e35a05fcebe2af`
 on `fix/bridge-startup-theme`; the supplied UX plan remains preserved as an
 untracked input at `docs/llm-bridge/ux-implementation-plan.md`.
@@ -435,7 +435,7 @@ with explicit input focus/cursor placement and lossless launcher prompt entry.
 2026-10-28 verification update: `python -m pytest -q` passed (1301 passed).
 `coverage run -m pytest && coverage combine && coverage report --fail-under=85`
 completed with 90% total coverage, passing the 85% threshold. Coverage emitted a
-warning for a malformed pre-existing `.coverage.mickey...` shard while combining;
+warning for a malformed pre-existing `.coverage.<host>...` shard while combining;
 coverage still combined usable data and reported the passing total. The PR and
 release gates have not been attempted because the implementation remains at the
 initial command-editing checkpoint.

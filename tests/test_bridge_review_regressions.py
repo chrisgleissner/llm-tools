@@ -23,6 +23,7 @@ from llm_tools.bridge import _apply_operator_command, dispatch_console_command
 from llm_tools.bridge_runtime import BridgeMissionHooks, _process_start_token, _terminate_owned_process_group, run_controller
 from llm_tools.bridge_progress import repository_checkpoint
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import scaled
 
 
 def test_cancel_failed_task_has_atomic_successful_acknowledgement(tmp_path: Path) -> None:
@@ -84,7 +85,7 @@ def test_owned_group_termination_kills_descendant_after_leader_exits(tmp_path: P
         assert token
 
         _terminate_owned_process_group(process.pid, token, timeout=0.2)
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))
 
         assert not _process_start_token(child_pid), "TERM-ignoring owned descendant survived complete stop"
     finally:
@@ -92,7 +93,7 @@ def test_owned_group_termination_kills_descendant_after_leader_exits(tmp_path: P
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))
 
 
 def test_controller_start_overrides_survive_complete_shutdown(tmp_path: Path, monkeypatch) -> None:
@@ -149,7 +150,7 @@ def test_complete_stop_terminates_owned_descendant_in_a_new_session(tmp_path: Pa
         assert token
 
         _terminate_owned_process_group(process.pid, token, timeout=0.2)
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))
 
         assert not _process_start_token(child_pid), "owned independent-session tool survived complete stop"
     finally:
@@ -159,7 +160,7 @@ def test_complete_stop_terminates_owned_descendant_in_a_new_session(tmp_path: Pa
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))
 
 
 def test_legacy_attached_scheduler_forwards_outer_terminal_resize(tmp_path: Path) -> None:
@@ -327,7 +328,7 @@ def test_log_older_page_stays_older_when_live_events_arrive(tmp_path: Path, monk
         mission_id, bridge.dispatch_console_command, bridge.console_snapshot, full=True,
         snapshot=bridge_tui._bounded_snapshot(bridge.console_snapshot(mission_id)),
     )
-    state.choose_view(4)
+    state.choose_view(bridge_tui.VIEWS.index("Activity"))
     shown_ids = [int(event["id"]) for event in state.snapshot["events"]]
     with bridge.open_store() as store:
         for index in range(25):
@@ -336,7 +337,7 @@ def test_log_older_page_stays_older_when_live_events_arrive(tmp_path: Path, monk
     state.handle_key("KEY_PPAGE")
     state.refresh(force=True)
     assert state._snapshot_thread is not None
-    state._snapshot_thread.join(timeout=3)
+    state._snapshot_thread.join(timeout=scaled(3))
     assert not state._snapshot_thread.is_alive()
     state.refresh(now=state.last_refresh)
     older_ids = [int(event["id"]) for event in state.snapshot["events"]]

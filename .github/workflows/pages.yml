@@ -1,0 +1,91 @@
+name: pages
+
+# Publishes the static site in docs/site/ (HTML, CSS and assets, no build step) to
+# GitHub Pages. Only site files are uploaded: the checker, the README and the
+# asset sources stay out of the published artifact.
+# One-time setup in the repository: Settings > Pages > Source: "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/site/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "docs/site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Read-only by default. The deploy job alone adds pages and id-token.
+permissions:
+  contents: read
+
+# Let a running deployment finish; keep only the newest queued one.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Checks that every relative reference resolves, that no asset is orphaned,
+      # and that no file, screenshot or video frame contains a private path,
+      # address, token or host name. OCR needs tesseract; frames need ffmpeg.
+      - name: Install tesseract and ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr ffmpeg
+
+      - name: Check the site
+        run: python3 docs/site/check_site.py
+
+  deploy:
+    name: deploy
+    needs: check
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/configure-pages@v5
+
+      # Copy only what the page loads. check_site.py, README.md and assets/src
+      # are repository tooling and sources, not part of the site.
+      - name: Stage the site files
+        run: |
+          mkdir -p _site
+          rsync -a \
+            --exclude 'check_site.py' \
+            --exclude 'README.md' \
+            --exclude '__pycache__/' \
+            --exclude 'assets/src/' \
+            docs/site/ _site/
+          for tooling in check_site.py README.md assets/src; do
+            if [ -e "_site/$tooling" ]; then
+              echo "::error::$tooling must not be published"
+              exit 1
+            fi
+          done
+          test -f _site/index.html
+          find _site -type f | sort
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

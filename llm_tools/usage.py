@@ -213,6 +213,8 @@ Shows remaining capacity per scope for:
   - Copilot AI credits (optional, with --show-copilot-credits)
   - Kilo balance, monthly budget, and BYOK/local/ungated state
   - MiniMax 5-hour and weekly windows (when the mmx CLI is on PATH)
+  - OpenCode balance, monthly budget, and BYOK/local/ungated state
+  - Z.ai 5-hour and weekly windows (needs a Z.ai API key)
 
 Options:
   -j, --json                               Emit JSON instead of a table.
@@ -274,6 +276,7 @@ class Config:
         self.visible_providers = _load_visible_providers(env)
         self.copilot_spend_limit, self.copilot_spend_currency = _load_copilot_spend_limit(env)
         self.use_service = env.get("LLM_USAGE_NO_SERVICE", "0") != "1"
+        self.first_table_wait = first_table_wait_seconds(env)
         self.service_action = ""
         self.service_interval = env.get("LLM_USAGE_SERVICE_INTERVAL", "60")
 
@@ -400,6 +403,9 @@ class UsageRow:
     # pipeline (e.g. "pay-as-you-go" on Copilot's exhausted-but-funded
     # allowance row, where the runout/pace guidance would be misleading).
     guidance_override: str | None = None
+    # True while the provider is still being read. The row renders as
+    # ``reading…`` with blank Ready/Guidance/Resets cells until real data lands.
+    pending: bool = False
 
 
 @dataclass
@@ -523,6 +529,27 @@ def parse_args(argv: list[str]) -> Config:
         common.err("--watch requires numeric seconds")
         raise SystemExit(2)
     return cfg
+
+
+FIRST_TABLE_WAIT_DEFAULT = 3.0
+READING_TEXT = "reading…"
+
+
+def first_table_wait_seconds(env: dict[str, str] | None = None) -> float:
+    """Seconds an interactive one-shot waits before drawing the table.
+
+    Providers still unfinished at that point are drawn as ``reading…`` and the
+    table is redrawn in place when they finish. ``0`` disables the early draw
+    (the table waits for every provider).
+    """
+    env = env if env is not None else os.environ
+    raw = env.get("LLM_USAGE_FIRST_TABLE_WAIT", "")
+    if raw == "":
+        return FIRST_TABLE_WAIT_DEFAULT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return FIRST_TABLE_WAIT_DEFAULT
 
 
 def provider_parallelism(env: dict[str, str] | None = None) -> int:
@@ -1067,6 +1094,17 @@ def row_values(
     ready_text: str,
     display_model: str = "",
 ) -> dict[str, str]:
+    if row.pending:
+        return {
+            "Provider": display_provider,
+            "Model": display_model,
+            "Ready": "",
+            "Scope": row.scope,
+            "Remaining": READING_TEXT,
+            "Guidance": "",
+            "Remaining Time": "",
+            "Resets in": "",
+        }
     # Opaque rows carry their own short label ("✓ usable" / "! retry
     # in Xm") so they do not flow through the standard guidance
     # pipeline (which would emit "no rate data" for a row with no
@@ -1123,7 +1161,11 @@ def fitted_columns_for_rows(
         if first_of_provider:
             previous_model = ""
         display_provider = (row.provider_label or row.provider) if first_of_provider else ""
-        ready_text = render_ready(1 if provider_ready(rows, row.provider) else 0, cfg) if display_provider else ""
+        ready_text = (
+            render_ready(1 if provider_ready(rows, row.provider) else 0, cfg)
+            if display_provider and not row.pending
+            else ""
+        )
         display_model = row.model if (row.model and row.model != previous_model) else ""
         previous_provider = row.provider
         previous_model = row.model
@@ -2084,7 +2126,7 @@ def read_provider(name: str, reader: Any, fallback: Any) -> Any:
         return fallback() if callable(fallback) else fallback
 
 
-def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = None) -> dict[str, Any]:
+def _provider_readers() -> dict[str, tuple[Any, Any]]:
     from .providers import (
         read_claude_snapshot,
         read_copilot_snapshot,
@@ -2094,7 +2136,7 @@ def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = No
         read_zai,
     )
 
-    readers: dict[str, tuple[Any, Any]] = {
+    return {
         "codex": (
             common.read_codex,
             lambda: {"provider": "codex", "available": False, "reason": "reader-error", "source": "~/.codex/sessions"},
@@ -2124,27 +2166,64 @@ def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = No
             lambda: unavailable_snapshot("zai", "z.ai api"),
         ),
     }
-    hidden = {name: fallback for name, (_reader, fallback) in readers.items() if not provider_visible(cfg, name)}
-    readers = {name: pair for name, pair in readers.items() if name not in hidden}
-    if progress is not None:
-        progress.begin(len(readers))
-    out = {name: _hidden_provider_data(name, fallback) for name, fallback in hidden.items()}
-    if cfg.provider_parallelism <= 1:
+
+
+class ProviderReads:
+    """Provider reads started in parallel that the caller can wait on in stages.
+
+    Every visible provider is read on its own worker thread (at most
+    ``cfg.provider_parallelism`` at once, so a pool of one reads them serially).
+    ``wait`` returns once all reads finish or the timeout passes, which lets the
+    interactive table appear with the providers that are ready and mark the rest
+    as ``reading…``. Hidden providers are filled in immediately.
+    """
+
+    def __init__(self, cfg: Config, progress: "ProgressReporter | None" = None) -> None:
+        readers = _provider_readers()
+        hidden = {name: fallback for name, (_reader, fallback) in readers.items() if not provider_visible(cfg, name)}
+        readers = {name: pair for name, pair in readers.items() if name not in hidden}
+        self.progress = progress
+        self.results: dict[str, Any] = {name: _hidden_provider_data(name, fallback) for name, fallback in hidden.items()}
+        self.names = list(readers)
+        self._lock = threading.Lock()
+        self._done: set[str] = set()
+        self._all_done = threading.Event()
+        if progress is not None:
+            progress.begin(len(readers))
+        if not readers:
+            self._all_done.set()
+        self._pool = ThreadPoolExecutor(max_workers=max(1, cfg.provider_parallelism))
         for name, (reader, fallback) in readers.items():
-            out[name] = read_provider(name, reader, fallback)
-            if progress is not None:
-                progress.advance()
-        return out
-    with ThreadPoolExecutor(max_workers=cfg.provider_parallelism) as pool:
-        futures = {
-            pool.submit(read_provider, name, reader, fallback): name
-            for name, (reader, fallback) in readers.items()
-        }
-        for future in as_completed(futures):
-            out[futures[future]] = future.result()
-            if progress is not None:
-                progress.advance()
-    return out
+            self._pool.submit(self._run, name, reader, fallback)
+        self._pool.shutdown(wait=False)
+
+    def _run(self, name: str, reader: Any, fallback: Any) -> None:
+        value = read_provider(name, reader, fallback)
+        with self._lock:
+            self.results[name] = value
+            self._done.add(name)
+            finished = len(self._done) == len(self.names)
+        if self.progress is not None:
+            self.progress.advance()
+        if finished:
+            self._all_done.set()
+
+    def pending(self) -> list[str]:
+        with self._lock:
+            return [name for name in self.names if name not in self._done]
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._all_done.wait(timeout)
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self.results)
+
+
+def read_all_provider_data(cfg: Config, progress: "ProgressReporter | None" = None) -> dict[str, Any]:
+    reads = ProviderReads(cfg, progress)
+    reads.wait()
+    return reads.snapshot()
 
 
 def _hidden_provider_data(name: str, fallback: Any) -> Any:
@@ -2220,11 +2299,16 @@ def _emit_json(cfg: Config, provider_data: dict[str, Any], generated_at: str | N
     print(json.dumps(obj, separators=(",", ":")))
 
 
-def render_from_provider_data(cfg: Config, provider_data: dict[str, Any], generated_at: str | None = None) -> None:
+def render_from_provider_data(
+    cfg: Config,
+    provider_data: dict[str, Any],
+    generated_at: str | None = None,
+    pending: "set[str] | None" = None,
+) -> None:
     if cfg.json_output:
         _emit_json(cfg, provider_data, generated_at)
         return
-    rows, show_model = _build_usage_rows(cfg, provider_data)
+    rows, show_model = _build_usage_rows(cfg, provider_data, pending) if pending else _build_usage_rows(cfg, provider_data)
     cols = fitted_columns_for_rows(cfg, rows, show_model)
     if not cfg.no_header:
         print_dashboard_header(cfg)
@@ -2278,7 +2362,7 @@ def _service_hid_visible_provider(cfg: Config, provider_data: dict[str, Any]) ->
     return False
 
 
-def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None, *, start_ephemeral: bool = True) -> tuple[dict[str, Any], str | None]:
+def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None, *, start_ephemeral: bool = False) -> tuple[dict[str, Any], str | None]:
     service_data = _provider_data_via_service(cfg, start_ephemeral=start_ephemeral)
     if service_data is not None:
         provider_data, generated_at = service_data
@@ -2288,7 +2372,11 @@ def _render_data_for_frame(cfg: Config, anchor: tuple[int, int] | None = None, *
 
 
 def render_once_via_service(cfg: Config) -> bool:
-    service_data = _provider_data_via_service(cfg)
+    # An interactive one-shot never starts a sampler just for itself: that
+    # sampler reads the same providers, shows no progress, and its first sample
+    # can outlast the socket wait, so reading in-process (with the spinner and
+    # the early table) is faster. Piped and JSON runs keep the ephemeral sampler.
+    service_data = _provider_data_via_service(cfg, start_ephemeral=not _progressive_table_enabled(cfg))
     if service_data is None:
         return False
     provider_data, generated_at = service_data
@@ -2296,7 +2384,28 @@ def render_once_via_service(cfg: Config) -> bool:
     return True
 
 
-def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[Any], bool]:
+PENDING_ROW_LABELS: dict[str, tuple[str, str]] = {
+    "claude": ("Claude", "5h"),
+    "codex": ("Codex", "5h"),
+    "copilot": ("Copilot", "monthly"),
+    "kilo": ("Kilo", "balance"),
+    "minimax": (MINIMAX_DISPLAY_NAME, "5h"),
+    "opencode": ("OpenCode", "balance"),
+    "zai": (ZAI_DISPLAY_NAME, "5h"),
+}
+
+
+def pending_row(name: str) -> UsageRow:
+    label, scope = PENDING_ROW_LABELS.get(name, (name, "5h"))
+    return UsageRow(label, scope, None, READING_TEXT, None, "reading", pending=True)
+
+
+def _build_usage_rows(
+    cfg: Config,
+    provider_data: dict[str, Any],
+    pending: "frozenset[str] | set[str] | None" = None,
+) -> tuple[list[Any], bool]:
+    pending = pending or frozenset()
     builders: list[tuple[str, Any]] = [
         ("claude", lambda: claude_rows(cfg, provider_data["claude"])),
         ("codex", lambda: codex_rows(cfg, provider_data["codex"])),
@@ -2308,8 +2417,9 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
     ]
     rows: list[UsageRow] = []
     for name, build in builders:
-        if provider_visible(cfg, name):
-            rows.extend(build())
+        if not provider_visible(cfg, name):
+            continue
+        rows.extend([pending_row(name)] if name in pending else build())
     # Route rows are appended in their declared config order so the
     # caller controls grouping. They sit beneath the per-provider
     # aggregate rows; an empty / unconfigured route table is a
@@ -2321,7 +2431,9 @@ def _build_usage_rows(cfg: Config, provider_data: dict[str, Any]) -> tuple[list[
     except FileNotFoundError:
         pass
     rows.sort(key=usage_row_sort_key)
-    budget_row = budget_total_row(cfg, rows)
+    # A total over an incomplete set of providers would read as final, so it is
+    # added only once every provider has reported.
+    budget_row = None if pending else budget_total_row(cfg, rows)
     if budget_row is not None:
         rows.append(budget_row)
     show_model = any(row.model for row in rows)
@@ -2537,7 +2649,84 @@ def _capture(fn: Any) -> list[str]:
     return text.split("\n")
 
 
+def _terminal_rows() -> int:
+    return shutil.get_terminal_size(fallback=(80, 24)).lines
+
+
+def _progressive_table_enabled(cfg: Config) -> bool:
+    """Whether an interactive one-shot may draw the table before every provider is done."""
+    return cfg.first_table_wait > 0 and not cfg.json_output and not cfg.log_only and sys.stdout.isatty()
+
+
+def _wait_for_reads(reads: "ProviderReads", progress: "ProgressReporter", timeout: float | None) -> bool:
+    """Wait for ``reads`` (up to ``timeout``), naming the unfinished providers in the spinner."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while True:
+        pending = reads.pending()
+        if not pending:
+            return True
+        progress.label = "waiting for " + ", ".join(pending)
+        remaining = 0.1 if deadline is None else min(0.1, deadline - time.monotonic())
+        if remaining <= 0:
+            return False
+        if reads.wait(remaining):
+            return True
+
+
+def _render_once_progressive(cfg: Config) -> None:
+    """Draw the table as soon as it is useful, then fill in slow providers.
+
+    Providers that have not finished after ``cfg.first_table_wait`` seconds show
+    ``reading…``. When they finish, the table is redrawn in place. If the partial
+    table would not fit on the screen, there is nothing to redraw over, so the
+    table waits for every provider instead.
+    """
+    def new_progress() -> ProgressReporter:
+        return ProgressReporter(
+            enabled=cfg.progress_enabled and not cfg.log_only,
+            symbols=cfg.symbols_enabled,
+        )
+
+    progress = new_progress()
+    reads = ProviderReads(cfg, progress)
+    progress.start()
+    try:
+        finished = _wait_for_reads(reads, progress, cfg.first_table_wait)
+    finally:
+        progress.stop()
+    if finished:
+        render_from_provider_data(cfg, reads.snapshot())
+        return
+    pending = set(reads.pending())
+    partial = _capture(lambda: render_from_provider_data(cfg, reads.snapshot(), pending=pending))
+    if len(partial) + 2 >= _terminal_rows():
+        progress = new_progress()
+        progress.start()
+        try:
+            _wait_for_reads(reads, progress, None)
+        finally:
+            progress.stop()
+        render_from_provider_data(cfg, reads.snapshot())
+        return
+    for line in partial:
+        print(line)
+    sys.stdout.flush()
+    progress = new_progress()
+    progress.start()
+    try:
+        _wait_for_reads(reads, progress, None)
+    finally:
+        progress.stop()
+    # Back over the partial table and replace it with the complete one.
+    sys.stdout.write(f"\033[{len(partial)}A\r\033[J")
+    sys.stdout.flush()
+    render_from_provider_data(cfg, reads.snapshot())
+
+
 def render_once(cfg: Config) -> None:
+    if _progressive_table_enabled(cfg):
+        _render_once_progressive(cfg)
+        return
     provider_data = _fetch_provider_data(cfg)
     render_from_provider_data(cfg, provider_data)
 

@@ -1,6 +1,5 @@
 """Exact native IDs across real controller subprocesses and private tmux PTYs."""
 import json
-import os
 import subprocess
 import sys
 import time
@@ -8,17 +7,18 @@ import time
 import pytest
 
 from llm_tools.bridge_store import BridgeStore, MissionLock
+from tests.conftest import scaled
 
 
 def cli(env, *args):
     result = subprocess.run([sys.executable, "-m", "llm_tools.bridge", *map(str, args)],
-                            env=env, text=True, capture_output=True, timeout=20)
+                            env=env, text=True, capture_output=True, timeout=scaled(20))
     assert result.returncode == 0, result.stderr + result.stdout
     return result.stdout
 
 
 def wait(predicate, timeout=15):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         if predicate():
             return

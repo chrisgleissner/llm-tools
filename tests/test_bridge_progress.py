@@ -1,5 +1,4 @@
 """Conservative repository activity and convergence evidence contracts."""
-from pathlib import Path
 import subprocess
 from llm_tools.bridge_progress import repository_checkpoint, convergence_signals
 

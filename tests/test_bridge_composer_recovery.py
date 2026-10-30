@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import curses
 import time
-from pathlib import Path
 
 import pytest
 

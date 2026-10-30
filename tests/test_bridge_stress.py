@@ -9,22 +9,18 @@ import time
 from llm_tools.bridge_runtime import mission_socket_path
 from llm_tools.bridge_store import BridgeStore, MissionLock
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import scaled, wait_for as _shared_wait_for
 
 
 def call(env, *args):
     completed = subprocess.run([sys.executable, "-m", "llm_tools.bridge", *map(str, args)],
-                               env=env, text=True, capture_output=True, timeout=15)
+                               env=env, text=True, capture_output=True, timeout=scaled(15))
     assert completed.returncode == 0, completed.stderr + completed.stdout
     return completed.stdout
 
 
 def wait_for(predicate, timeout=15):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(.01)
-    assert predicate(), "streaming mission did not reach expected state"
+    return _shared_wait_for(predicate, timeout, .01, message="streaming mission did not reach expected state")
 
 
 def controller_released(state, mission):
@@ -63,8 +59,10 @@ Path('stream-count.json').write_text(json.dumps({'bytes':count,'seconds':time.mo
     latencies = []
     try:
         with BridgeStore(state / "bridge.sqlite3") as store:
-            for index in range(10000):
-                store.add_task(mid, f"queued stress order {index}")
+            # One outer transaction: add_task nests as savepoints instead of committing 10,000 times.
+            with store._transaction():
+                for index in range(10000):
+                    store.add_task(mid, f"queued stress order {index}")
         call(env, "start", "--mission", mid)
         wait_for(lambda: (tmp_path / "streaming").exists())
         handle = backend.open_existing(mission_socket_path(mid, env=env), f"mission-{mid}")
@@ -90,7 +88,7 @@ Path('stream-count.json').write_text(json.dumps({'bytes':count,'seconds':time.mo
         (tmp_path / "stress-results.json").write_text(json.dumps(metrics, indent=2))
         assert load["bytes"] >= 128 * 1024
         # A CI regression guard; local measurements also report the 250ms target.
-        assert max(latencies) < .75, metrics
+        assert max(latencies) < scaled(.75), metrics
     finally:
         (tmp_path / "release").touch()
         call(env, "stop", "--mission", mid)

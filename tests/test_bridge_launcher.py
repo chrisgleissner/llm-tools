@@ -2,7 +2,6 @@
 
 import curses
 import fcntl
-import json
 import os
 from pathlib import Path
 import pty
@@ -18,6 +17,7 @@ import pytest
 from llm_tools import bridge, bridge_launcher, bridge_tui
 from llm_tools.bridge_launcher import Launcher
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import scaled
 
 
 def test_home_selection_creation_and_form_validation(tmp_path):
@@ -43,9 +43,9 @@ def test_home_selection_creation_and_form_validation(tmp_path):
     state.key("e")
     for _ in range(4):
         state.key("\t")
-    assert state.key("\n") == "start"
+    assert state.key("\n") == "create"  # Save comes first
     state.key("\t")
-    assert state.key("\n") == "create"
+    assert state.key("\n") == "start"
     assert state.directory == str(tmp_path)
     state.key("\x1b")
     assert not state.creating
@@ -97,10 +97,12 @@ def test_launcher_uses_shared_create_and_control_handlers_without_start(tmp_path
     monkeypatch.chdir(work)
     calls = []
 
+    stream = iter(["n", *objective, "\n", "\n", "\n", "\n", "\n", "o"])  # type, save with Enter, then o opens the controls
+
     def wrapper(callback):
         # Drive the actual UI reducer through a fake terminal's key stream.
         class Window:
-            keys = iter(["n", *objective, "\n", "\n", "\n", "\n", "\t", "\n"])
+            keys = stream
             def keypad(self, value): pass
             def getmaxyx(self): return (24, 100)
             def get_wch(self): return next(self.keys)
@@ -176,12 +178,14 @@ def test_bare_command_runs_from_unrelated_folder_and_creates_without_provider(tm
 
     try:
         wait_for(b"New mission in this folder")
-        assert b"Working directory:" in output
-        assert str(work).encode()[:60] in output
+        assert b"here:" in output and work.name.encode() in output
         assert (b"38;5;39m" if theme == "dark" else b"38;5;25m") in output
         os.write(master, b"n")
         wait_for(b"Objective:")
-        os.write(master, b"Any folder mission\r\r\r\r\t\r")
+        os.write(master, b"Any folder mission")
+        for chunk in (b"\r", b"\r", b"\r", b"\r", b"\r"):
+            time.sleep(scaled(0.25))  # human pace: the launcher ignores Enter inside an input burst
+            os.write(master, chunk)
         wait_for(b"CREATED")
         with BridgeStore(tmp_path / "state" / "bridge.sqlite3") as store:
             mission = store.list_missions()[0]
@@ -189,11 +193,11 @@ def test_bare_command_runs_from_unrelated_folder_and_creates_without_provider(tm
             assert mission["status"] == "CREATED"
             assert not store.db.execute("SELECT 1 FROM operations").fetchone()
         os.write(master, b"\x04")
-        assert process.wait(timeout=5) == 0
+        assert process.wait(timeout=scaled(5)) == 0
     finally:
         if process.poll() is None:
             process.terminate()
-            process.wait(timeout=3)
+            process.wait(timeout=scaled(3))
         os.close(master)
 
 
@@ -206,13 +210,13 @@ def test_bare_noninteractive_command_prints_help_without_creating_state(tmp_path
 
 def test_scrolled_home_mouse_targets_visible_mission_and_form_submit(tmp_path):
     state = Launcher(str(tmp_path), missions=[{"id": str(i)} for i in range(30)], selected=30)
-    assert state.click(7, height=24, activate=True) == "open"
-    assert state.selected == 17
+    assert state.click(5, height=24, activate=True) == "open"
+    assert state.selected == 16
     state.creating = True
     state.objective = "objective"
+    assert state.click(13) == "create"
     assert state.click(15) == "start"
-    assert state.click(17) == "create"
-    state.click(9)
+    state.click(7)
     assert state.focus == 1
     assert state.click(2) is None
 

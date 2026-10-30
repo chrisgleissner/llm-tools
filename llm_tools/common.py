@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import calendar
 import errno
 import fcntl
-import hashlib
 import json
 import math
 import os
@@ -23,12 +21,47 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from urllib.error import HTTPError
+
+from .fileio import open_regular_file  # noqa: F401  (re-exported)
 
 
 AUTONOMY_ABORT_STATUS = 75
+# Synthetic status: the operator declined the provider's own first-run trust prompt
+# and the provider exited. Retrying would only show the same prompt again.
+OPERATOR_DECLINED_STATUS = 76
+# A declined prompt is the last screen of a provider that never started working.
+# The bound leaves time for the operator to read the prompt before choosing.
+TRUST_DECLINE_MAX_SECONDS = 900
+TRUST_PROMPT_TAIL_LINES = 20
+_TRUST_PROMPT_PATTERNS = (
+    re.compile(r"project you created or one you trust", re.IGNORECASE),
+    re.compile(r"\bis this a project you (?:created or one you )?trust", re.IGNORECASE),
+    re.compile(r"do you trust the files in this folder", re.IGNORECASE),
+    re.compile(r"\bI trust this folder\b", re.IGNORECASE),
+)
+_TRUST_DECLINE_CHOICE = re.compile(r"\bno,\s*exit\b", re.IGNORECASE)
+
+
+def output_shows_declined_trust_prompt(output: str) -> bool:
+    """Whether the end of a provider's output is its folder-trust prompt with "No, exit".
+
+    Claude Code leaves the prompt on screen when the operator chooses ``No, exit``
+    (it then exits with status 1). Only the last lines are examined, so a session
+    that passed the prompt and later printed other output does not match.
+    """
+    lines = [line for line in strip_ansi(output).splitlines() if line.strip()]
+    tail = "\n".join(lines[-TRUST_PROMPT_TAIL_LINES:])
+    return bool(_TRUST_DECLINE_CHOICE.search(tail)) and any(pattern.search(tail) for pattern in _TRUST_PROMPT_PATTERNS)
+# The provider command was refused before launch because it cannot be executed
+# as built (for example a prompt larger than the kernel allows in one argument).
+# Retrying or rotating to another provider cannot help.
+LAUNCH_REFUSED_STATUS = 78
+# Linux limits one exec argument to 32 pages (MAX_ARG_STRLEN), terminator included.
+MAX_ARG_STRLEN = 131072
 TRANSIENT_COPILOT_CACHE_REASONS = {"capture-error", "format-changed", "refresh-pending", "timeout"}
 DEFAULT_LOCAL_SNAPSHOT_MAX_AGE_SECONDS = 60
 DEFAULT_CLAUDE_RATE_LIMIT_CACHE_MAX_AGE_SECONDS = 300
@@ -103,6 +136,43 @@ def soak_log_dir(env: dict[str, str] | None = None) -> Path:
 
 def have_cmd(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+_RESOLVED_EXECUTABLES: dict[tuple[str, str], str] = {}
+
+
+def resolve_executable(name: str) -> str:
+    """Absolute path of ``name`` on the current PATH, looked up once per PATH value.
+
+    ``subprocess`` given a bare name tries every PATH directory on each exec.
+    Bridge runs tmux several times a second, so it resolves the path once and
+    keeps using it until PATH changes. Falls back to the bare name when the
+    command is not found, so callers still get the usual FileNotFoundError.
+    """
+    search_path = trusted_path(os.environ.get("PATH", ""))  # relative entries would resolve inside the mission folder
+    key = (name, search_path)
+    found = _RESOLVED_EXECUTABLES.get(key)
+    if found is None:
+        found = shutil.which(name, path=search_path) or name
+        if len(_RESOLVED_EXECUTABLES) > 16:
+            _RESOLVED_EXECUTABLES.clear()
+        _RESOLVED_EXECUTABLES[key] = found
+    return found
+
+
+def unix_socket_accepts(path: str | os.PathLike[str], timeout: float = 0.2) -> bool:
+    """Whether a listener accepts a connection on the Unix socket ``path`` (no process is started)."""
+    import socket as _socket
+
+    connection = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        connection.settimeout(timeout)
+        connection.connect(os.fspath(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        connection.close()
 
 
 def require_cmd(name: str) -> None:
@@ -1243,6 +1313,27 @@ def live_fetch_retry_max_delay(env: dict[str, str] | None = None) -> float:
         return 10.0
 
 
+# urllib.request pulls in http.client, ssl and email (about 100 ms of start-up) and is
+# only needed by the few live-usage reads, so it is imported on first use. These
+# module-level names stay patchable, as the plain imports were.
+def Request(*args: Any, **kwargs: Any) -> Any:  # noqa: N802
+    from urllib.request import Request as _Request
+
+    return _Request(*args, **kwargs)
+
+
+def urlopen(*args: Any, **kwargs: Any) -> Any:
+    from urllib.request import urlopen as _urlopen
+
+    return _urlopen(*args, **kwargs)
+
+
+def _http_error() -> type[BaseException]:
+    from urllib.error import HTTPError as _HTTPError
+
+    return _HTTPError
+
+
 def _retry_after_seconds(exc: HTTPError, env: dict[str, str], fallback: float, *, capped: bool = True) -> float:
     """Seconds before retrying a 429; optionally cap the in-process wait."""
     raw = None
@@ -1352,7 +1443,7 @@ def _fetch_claude_oauth_usage_result(access_token: str, env: dict[str, str] | No
         try:
             with urlopen(req, timeout=20) as resp:
                 return ClaudeOAuthUsageFetchResult(text=resp.read().decode("utf-8", "replace"))
-        except HTTPError as exc:
+        except _http_error() as exc:
             # 400/401 are authoritative (bad/expired token): do not retry, let the
             # caller refresh the OAuth token instead.
             if exc.code in {400, 401}:
@@ -1438,7 +1529,7 @@ def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any
             with urlopen(req, timeout=20) as resp:
                 raw = json.loads(resp.read().decode("utf-8", "replace"))
             break
-        except HTTPError as exc:
+        except _http_error() as exc:
             if 400 <= exc.code < 500:
                 return None
             if attempt + 1 < attempts and delay:
@@ -1460,7 +1551,7 @@ def _refresh_claude_oauth_access_token(cred_path: Path, cred_data: dict[str, Any
         oauth["expiresAt"] = int((time.time() + expires_in) * 1000)
     try:
         cred_path.parent.mkdir(parents=True, exist_ok=True)
-        cred_path.write_text(json.dumps(cred_data, indent=2) + "\n", encoding="utf-8")
+        atomic_write_text(cred_path, json.dumps(cred_data, indent=2) + "\n")
     except OSError:
         pass
     return access_token
@@ -1553,6 +1644,48 @@ def find_copilot_cli(env: dict[str, str] | None = None) -> str | None:
     return shutil.which("copilot", path=path) or shutil.which("github-copilot", path=path)
 
 
+def atomic_write_text(path: Path, text: str, *, default_mode: int = 0o600) -> None:
+    """Replace ``path`` with ``text`` without ever exposing a partial file.
+
+    The text goes to a temporary file in the same directory (so the rename is
+    atomic), is fsynced, and takes the mode of the file it replaces, or
+    ``default_mode`` for a new file. A symlinked ``path`` is followed so the link
+    survives. On any failure the original is untouched and the temporary file is
+    removed.
+    """
+    import tempfile
+
+    target = Path(os.path.realpath(path))
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = default_mode
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), mode)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    try:
+        dir_fd = os.open(target.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 def copilot_config_dir(env: dict[str, str] | None = None) -> Path:
     env = env or os.environ
     return Path(env.get("COPILOT_HOME") or (Path.home() / ".copilot"))
@@ -1598,9 +1731,7 @@ def ensure_copilot_footer_settings(env: dict[str, str] | None = None) -> None:
             return
         data["footer"] = footer
         settings_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = settings_path.with_name(f"{settings_path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(settings_path)
+        atomic_write_text(settings_path, json.dumps(data, indent=2) + "\n", default_mode=0o644)
     except (OSError, json.JSONDecodeError, ValueError):
         return
 
@@ -1701,8 +1832,48 @@ def copilot_capture_block_reason(status: str, screen: str) -> str | None:
     return None
 
 
+def _copilot_monthly_from_billing(env: dict[str, str]) -> tuple[dict[str, float], str] | None:
+    """Monthly used/remaining from the Copilot quota or GitHub billing REST read.
+
+    Returns ``(result, source)`` or ``None`` when no token, user, or usable
+    figure is available.
+    """
+    fallback = read_copilot_monthly_used(env)
+    if not isinstance(fallback, dict) or num(fallback.get("used")) is None:
+        return None
+    used = float(num(fallback["used"]))
+    remaining = fallback.get("remaining")
+    remaining_float = float(num(remaining)) if num(remaining) is not None else max(0.0, 100.0 - used)
+    return {"used": used, "remaining": remaining_float}, str(fallback.get("source") or "github billing")
+
+
+def _copilot_live_is_real_cli(env: dict[str, str]) -> bool:
+    """Whether a live read would drive the real Copilot CLI (no fixture or helper)."""
+    return (
+        env.get("LLM_USAGE_DISABLE_COPILOT", "0") != "1"
+        and "LLM_USAGE_COPILOT_CAPTURE_TEXT" not in env
+        and not env.get("LLM_USAGE_COPILOT_CAPTURE_CMD")
+        and bool(find_copilot_cli(env))
+    )
+
+
 def read_copilot_live(env: dict[str, str] | None = None) -> dict[str, Any]:
     env = env or os.environ
+    if _copilot_live_is_real_cli(env):
+        # The real CLI (>= 1.0.57) no longer prints the monthly figure, so the
+        # PTY capture below would burn its whole timeout (10 s by default) only
+        # to fall back to this same REST read. Ask the quota/billing endpoints
+        # first (about 1 s) and drive the PTY only when they cannot answer.
+        billing = _copilot_monthly_from_billing(env)
+        if billing is not None:
+            monthly_result, source = billing
+            return {
+                "provider": "copilot",
+                "source": source,
+                "capture_status": "skipped",
+                "monthly": monthly_result,
+                "ai_credits": None,
+            }
     status, screen = capture_copilot_screen(env)
     monthly_used = parse_copilot_monthly_used(screen)
     ai_credits = parse_copilot_ai_credits(screen)
@@ -1717,33 +1888,12 @@ def read_copilot_live(env: dict[str, str] | None = None) -> dict[str, Any]:
             "remaining": min(100.0, max(0.0, 100.0 - monthly_used)),
         }
     if monthly_result is None:
-        # The new Copilot CLI (>= 1.0.57) no longer prints the
-        # ``Plan: N% used`` figure in its footer — the only monthly signal
-        # visible from inside the CLI is the per-session "AI Credits" counter
-        # and the token summary, neither of which represents the user's
-        # remaining monthly allowance. When the live footer is missing the
-        # monthly figure, fall back to the GitHub
-        # ``premium_request/usage`` REST endpoint, which always reports the
-        # current month's premium request consumption and lets us draw a
-        # real quota bar instead of collapsing to ``unavailable``. The
-        # fallback is best-effort: when no GitHub token is available, no
-        # user is logged in, or the API returns nothing for the current
-        # month, we still report ``format-changed`` so the user knows the
-        # live footer is the reason.
-        monthly_fallback = read_copilot_monthly_used(env)
-        if (
-            isinstance(monthly_fallback, dict)
-            and num(monthly_fallback.get("used")) is not None
-        ):
-            used = float(num(monthly_fallback["used"]))
-            remaining = monthly_fallback.get("remaining")
-            remaining_float = (
-                float(num(remaining))
-                if num(remaining) is not None
-                else max(0.0, 100.0 - used)
-            )
-            monthly_result = {"used": used, "remaining": remaining_float}
-            source = str(monthly_fallback.get("source") or "github billing")
+        # The footer carries no monthly figure: fall back to the GitHub
+        # ``premium_request/usage`` REST endpoint. Best-effort: with no token,
+        # no user, or no usage for the month, report ``format-changed``.
+        billing = _copilot_monthly_from_billing(env)
+        if billing is not None:
+            monthly_result, source = billing
     if monthly_result is not None or ai_credits is not None:
         return {
             "provider": "copilot",
@@ -1875,9 +2025,12 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
     except OSError:
         pass
     if refresh_started:
-        refresh_env = dict(env)
+        # `-P` keeps the working directory off sys.path, so the package
+        # location comes from PYTHONPATH. The child removes it again before it
+        # starts the Copilot CLI (see copilot_refresh.main).
+        refresh_env = with_package_root(env)
         subprocess.Popen(
-            [sys.executable, "-m", "llm_tools.copilot_refresh", str(cache)],
+            python_module_argv("llm_tools.copilot_refresh", str(cache)),
             env=refresh_env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -1985,7 +2138,7 @@ def _github_api_get(path: str, token: str, env: dict[str, str] | None = None) ->
         try:
             with urlopen(req, timeout=15) as resp:
                 return json.loads(resp.read().decode("utf-8", "replace"))
-        except HTTPError as exc:
+        except _http_error() as exc:
             # 4xx (bad/wrong-scoped token, missing user) is authoritative.
             if 400 <= exc.code < 500:
                 return None
@@ -2900,6 +3053,8 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
         dest.chmod(0o600)
     except OSError:
         pass
+    import hashlib  # only for the prompt copy digest; keeps CLI start-up lean
+
     digest = hashlib.sha256(dest.read_bytes()).hexdigest()
     logs.prompt_sha = digest
     return text, digest
@@ -2921,7 +3076,127 @@ def usage_snapshot_for_provider(provider: str, env: dict[str, str] | None = None
     Kilo has no session windows.
     """
     env = env or os.environ
+    max_age = getattr(_SHARED_READS, "max_age", None)
+    if max_age and not env.get("LLM_SCHEDULER_USAGE_JSON"):
+        return shared_usage_snapshot(provider, env, float(max_age), lambda: _live_usage_snapshot(provider, env))
+    return _live_usage_snapshot(provider, env)
+
+
+_SHARED_READS = threading.local()
+SHARED_SNAPSHOT_LOCK_WAIT_SECONDS = 45.0
+
+
+class shared_usage_reads:
+    """Context manager: provider reads in this thread reuse a cross-process cache.
+
+    Inside the block, ``usage_snapshot_for_provider`` serves a snapshot younger
+    than ``max_age`` seconds from ``shared_snapshot_dir`` instead of querying
+    the provider, and a single process refreshes it under a file lock. Many
+    Bridge controllers observing capacity once a minute therefore cause one
+    live read per provider per interval, not one per controller.
+    """
+
+    def __init__(self, max_age: float) -> None:
+        self.max_age = float(max_age)
+        self._previous: object = None
+
+    def __enter__(self) -> "shared_usage_reads":
+        self._previous = getattr(_SHARED_READS, "max_age", None)
+        _SHARED_READS.max_age = self.max_age
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        _SHARED_READS.max_age = self._previous
+
+
+def shared_snapshot_dir(env: Mapping[str, str] | None = None) -> Path:
+    return cache_root(dict(env) if env is not None else None) / "shared-usage"
+
+
+def _read_shared_snapshot(path: Path, max_age: float) -> dict[str, Any] | None:
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        fetched = float(record["fetched_at"])
+        snapshot = record["snapshot"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(snapshot, dict) or not 0 <= time.time() - fetched < max_age:
+        return None
+    return snapshot
+
+
+def shared_usage_snapshot(
+    provider: str,
+    env: Mapping[str, str],
+    max_age: float,
+    reader: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    """A snapshot no older than ``max_age`` seconds, read live by at most one process at a time.
+
+    The cache file and its lock live in a private per-user directory. A process
+    that finds the entry stale takes the provider's lock, re-checks (another
+    process may have refreshed it while this one waited), and only then calls
+    ``reader``. A cache directory that cannot be used degrades to a direct read.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", provider):
+        return reader()
+    directory = shared_snapshot_dir(env)
+    try:
+        old_umask = os.umask(0o077)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        finally:
+            os.umask(old_umask)
+        directory.chmod(0o700)
+        lock_fd = os.open(directory / f"{provider}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        return reader()
+    path = directory / f"{provider}.json"
+    try:
+        cached = _read_shared_snapshot(path, max_age)
+        if cached is not None:
+            return cached
+        deadline = time.monotonic() + SHARED_SNAPSHOT_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return reader()
+                time.sleep(0.1)
+        cached = _read_shared_snapshot(path, max_age)
+        if cached is not None:
+            return cached
+        snapshot = reader()
+        temporary = directory / f".{provider}.{os.getpid()}.tmp"
+        try:
+            temporary.unlink(missing_ok=True)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps({"fetched_at": time.time(), "snapshot": snapshot}))
+            os.replace(temporary, path)
+        except (OSError, TypeError, ValueError):
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        return snapshot
+    finally:
+        os.close(lock_fd)  # also releases the lock
+
+
+def _live_usage_snapshot(provider: str, env: dict[str, str]) -> dict[str, Any]:
     injected = env.get("LLM_SCHEDULER_USAGE_JSON")
+    # Demo/test hook, inert unless set: a file that holds the same JSON and is
+    # read again on every call, so a long-running process (a Bridge controller)
+    # sees capacity change over time. An unreadable file falls back to the env value.
+    injected_file = env.get("LLM_SCHEDULER_USAGE_JSON_FILE")
+    if injected_file:
+        try:
+            injected = Path(injected_file).read_text(encoding="utf-8") or injected
+        except OSError:
+            pass
     if injected:
         raw = json.loads(injected)
         if isinstance(raw, dict) and provider in raw:
@@ -3422,8 +3697,220 @@ def usage_snapshot_and_decision(
     return snapshot, decision
 
 
+# Credential environment variables, grouped by the service that issues them.
+# Each entry is (exact names, name prefixes).  A provider process keeps the
+# groups listed for it in PROVIDER_CREDENTIAL_GROUPS and loses every other
+# group, so one provider cannot read another provider's token.  A denylist
+# (rather than an allowlist) is used so unrelated variables such as PATH, HOME
+# and proxy settings are never removed from a tool that needs them.
+CREDENTIAL_GROUPS: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {
+    "claude-cli": (frozenset({"CLAUDE_CODE_OAUTH_TOKEN"}), ()),
+    "anthropic-api": (frozenset(), ("ANTHROPIC_",)),
+    "codex-cli": (frozenset(), ("CODEX_",)),
+    "openai-api": (frozenset(), ("OPENAI_",)),
+    "github": (frozenset({"COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}), ()),
+    "kilo": (frozenset(), ("KILO_", "KILOCODE_")),
+    "opencode": (frozenset(), ("OPENCODE_",)),
+    "zai": (frozenset({"ZAI_API_KEY", "LLM_USAGE_ZAI_API_KEY"}), ()),
+    "minimax": (frozenset({"MINIMAX_API_KEY", "LLM_USAGE_MINIMAX_API_KEY"}), ("MMX_",)),
+    # Cloud and package-registry credentials. Only gateway CLIs that can use
+    # these vendors keep them; no provider keeps the registry tokens.
+    "aws": (frozenset(), ("AWS_",)),
+    "google": (frozenset(), ("GOOGLE_", "GEMINI_")),
+    "azure": (frozenset(), ("AZURE_",)),
+    "openrouter": (frozenset(), ("OPENROUTER_",)),
+    "huggingface": (frozenset({"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}), ("HUGGINGFACE_",)),
+    "package-registry": (frozenset({"NPM_TOKEN", "NODE_AUTH_TOKEN", "PYPI_TOKEN", "TWINE_PASSWORD", "CARGO_REGISTRY_TOKEN"}), ()),
+}
+PROVIDER_CREDENTIAL_GROUPS: dict[str, frozenset[str]] = {
+    # Claude Code can run on Amazon Bedrock and Google Vertex AI with the
+    # standard AWS and Google credential variables; Codex can use Azure OpenAI.
+    "claude": frozenset({"claude-cli", "anthropic-api", "aws", "google"}),
+    "codex": frozenset({"codex-cli", "openai-api", "azure"}),
+    "copilot": frozenset({"github"}),
+    # Kilo and OpenCode are multi-vendor gateways: they may use bring-your-own API keys
+    # and z.ai or MiniMax keys, but never another CLI's subscription login or GitHub token.
+    "kilo": frozenset({"kilo", "zai", "minimax", "anthropic-api", "openai-api", "aws", "google", "azure", "openrouter", "huggingface"}),
+    "opencode": frozenset({"opencode", "zai", "minimax", "anthropic-api", "openai-api", "aws", "google", "azure", "openrouter", "huggingface"}),
+    "minimax": frozenset({"minimax"}),
+}
+
+
+def credential_variables_to_remove(env: Mapping[str, str], provider: str | None) -> list[str]:
+    """Names in `env` that belong to credential groups `provider` does not use.
+
+    `provider=None` is for processes that need no provider credential at all,
+    such as task verifiers.  A provider this table does not know (a custom
+    command template) is left untouched, because its needs cannot be known.
+    """
+    if provider is not None and provider not in PROVIDER_CREDENTIAL_GROUPS:
+        return []
+    keep = PROVIDER_CREDENTIAL_GROUPS.get(provider or "", frozenset())
+    doomed: list[str] = []
+    for name in env:
+        for group, (exact, prefixes) in CREDENTIAL_GROUPS.items():
+            if group not in keep and (name in exact or name.startswith(prefixes)):
+                doomed.append(name)
+                break
+    return doomed
+
+
+def credential_variables_unused_by(env: Mapping[str, str], providers: Iterable[str] | None) -> list[str]:
+    """Names in `env` that no provider in `providers` uses.
+
+    `providers=None` means every provider may run, so only credentials that no
+    known provider keeps are listed. A provider this table does not know
+    (a custom command template) may need anything, so nothing is listed.
+    """
+    names = set(PROVIDER_CREDENTIAL_GROUPS) if providers is None else {str(p).lower() for p in providers}
+    if names - set(PROVIDER_CREDENTIAL_GROUPS):
+        return []
+    keep: set[str] = set()
+    for name in names:
+        keep |= PROVIDER_CREDENTIAL_GROUPS[name]
+    doomed: list[str] = []
+    for name in env:
+        for group, (exact, prefixes) in CREDENTIAL_GROUPS.items():
+            if group not in keep and (name in exact or name.startswith(prefixes)):
+                doomed.append(name)
+                break
+    return doomed
+
+
+def scrubbed_environment(env: Mapping[str, str], provider: str | None) -> dict[str, str]:
+    """Copy of `env` without the credentials `provider` does not own.
+
+    The Bridge package root is also removed from PYTHONPATH: Bridge adds it so
+    its own `python -P -m` launches find the package, and providers and
+    verifiers have no use for it.
+
+    This is hygiene, not a security boundary. Processes of the same user can
+    still read each other's environment (`/proc/<pid>/environ`) and the
+    credential files under the home directory.
+    """
+    doomed = set(credential_variables_to_remove(env, provider))
+    return without_package_root({name: value for name, value in env.items() if name not in doomed})
+
+
+def tmux_literal(text: str) -> str:
+    """Escape `text` so tmux's format expansion leaves it unchanged.
+
+    tmux expands `#(command)` and `#{...}` in directory arguments (`-c`, `-d`)
+    and in `run-shell` / `pipe-pane` command strings before using them. A
+    mission folder named `#(touch x)` would therefore run a command as the
+    operator. Doubling every `#` makes tmux produce the original text.
+    """
+    return text.replace("#", "##")
+
+
+def package_root() -> str:
+    """Directory that contains the ``llm_tools`` package."""
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def with_package_root(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy of `env` whose PYTHONPATH starts with the package root.
+
+    Needed by processes started with `python_module_argv`, because `-P` removes
+    the working directory (where a checkout would otherwise be found).
+    """
+    out = dict(env)
+    root = package_root()
+    entries = [entry for entry in out.get("PYTHONPATH", "").split(os.pathsep) if entry and entry != root]
+    out["PYTHONPATH"] = os.pathsep.join([root, *entries])
+    return out
+
+
+def without_package_root(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy of `env` without the package root in PYTHONPATH (other entries stay)."""
+    out = dict(env)
+    root = package_root()
+    entries = [entry for entry in out.get("PYTHONPATH", "").split(os.pathsep) if entry and entry != root]
+    if entries:
+        out["PYTHONPATH"] = os.pathsep.join(entries)
+    else:
+        out.pop("PYTHONPATH", None)
+    return out
+
+
+def trusted_path(path: str | None = None) -> str:
+    """PATH without empty or relative entries.
+
+    An empty entry, `.` or any other relative directory resolves against the
+    working directory, which for a provider is the mission folder. A program
+    placed there would run in place of the real command.
+    """
+    raw = os.environ.get("PATH", os.defpath) if path is None else path
+    return os.pathsep.join(entry for entry in raw.split(os.pathsep) if entry and os.path.isabs(entry))
+
+
+def resolve_trusted_executable(name: str, path: str | None = None) -> str:
+    """Absolute path of `name` found through trusted PATH entries only.
+
+    Names that already contain a directory, and names that are not found, are
+    returned unchanged.
+    """
+    if os.sep in name:
+        return name
+    return shutil.which(name, path=trusted_path(path)) or name
+
+
+def rooted_module_argv(module: str, *args: str) -> list[str]:
+    """`python_module_argv` for a command a tmux server runs.
+
+    The station's tmux server does not carry the package root in its
+    environment (providers started from it would inherit it), so the command
+    sets it for itself.
+    """
+    return ["env", f"PYTHONPATH={package_root()}", *python_module_argv(module, *args)]
+
+
+def python_module_argv(module: str, *args: str) -> list[str]:
+    """Return an argv that runs `module` without trusting the working directory.
+
+    `-P` keeps the current directory (and the script directory) off `sys.path`.
+    Bridge launches these commands with the mission folder as the working
+    directory, so without it a repository containing `llm_tools/__init__.py`
+    or `sitecustomize.py` would execute as the operator.  Callers supply the
+    package location through `PYTHONPATH`, which `-P` leaves in effect.
+    """
+    return [sys.executable, "-P", "-m", module, *args]
+
+
 def argv_to_command_line(argv: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv)
+
+
+def command_line_limit_violation(argv: Sequence[str], environ: Mapping[str, str] | None = None) -> str:
+    """Explain why ``argv`` cannot be exec'd, or return ``""`` when it fits.
+
+    ``execve`` fails with E2BIG for any single argument of ``MAX_ARG_STRLEN``
+    bytes or more, and for an argument list plus environment above ``ARG_MAX``.
+    Detecting that before launch turns a pane that dies with exit 126 into a
+    clear, non-retryable task failure.
+    """
+    sizes = [len(os.fsencode(part)) for part in argv]
+    for size in sizes:
+        if size >= MAX_ARG_STRLEN:
+            return (
+                f"prompt too large for the provider command line ({size} bytes); "
+                f"the operating system accepts at most {MAX_ARG_STRLEN - 1} bytes in one argument. "
+                "Shorten the task prompt or objective, or use a mission command template that reads {prompt_file}."
+            )
+    try:
+        limit = int(os.sysconf("SC_ARG_MAX"))
+    except (OSError, ValueError, AttributeError):
+        limit = 0
+    if limit > 0:
+        env_size = sum(len(os.fsencode(k)) + len(os.fsencode(v)) + 2 for k, v in (os.environ if environ is None else environ).items())
+        total = sum(sizes) + len(sizes) + env_size
+        if total > limit - 4096:
+            return (
+                f"prompt too large for the provider command line ({total} bytes of arguments and environment); "
+                f"the operating system accepts at most {limit} bytes. "
+                "Shorten the task prompt or objective, or use a mission command template that reads {prompt_file}."
+            )
+    return ""
 
 
 def template_argv(template: str, *, provider: str, prompt: str, prompt_file: Path, cwd: str) -> list[str]:
@@ -3439,6 +3926,25 @@ def template_argv(template: str, *, provider: str, prompt: str, prompt_file: Pat
 
 # Prompts ralph-robin/llm-scheduler may safely auto-acknowledge.
 SAFE_TRUST_PROMPTS = ("Confirm folder trust", "Do you trust the files in this folder?")
+
+# A prompt counts only while it is the end of the output: inside the last few
+# non-empty lines, with nothing printed after it for PROMPT_QUIET_SECONDS. Text
+# that merely appears in repository content, a tool result or an earlier part of
+# the stream is followed by more output and never qualifies.
+PROMPT_QUIET_SECONDS = 0.5
+TRUST_CONFIRM_TAIL_LINES = 3
+BLOCKING_PROMPT_TAIL_LINES = 8
+
+
+def tail_lines(text: str, count: int) -> str:
+    """The last ``count`` non-empty lines of ``text`` (screen-like tail)."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    return "\n".join(lines[-count:])
+
+
+def trust_prompt_at_tail(text: str) -> bool:
+    tail = tail_lines(text, TRUST_CONFIRM_TAIL_LINES)
+    return any(phrase in tail for phrase in SAFE_TRUST_PROMPTS)
 
 # Interactive prompts that mean the CLI has stopped to wait for a human decision
 # (e.g. it ran out of credit and is offering to wait/upgrade). Matching any of
@@ -3468,6 +3974,18 @@ QUESTION_LINE_RE = re.compile(
 )
 
 
+def blocking_tail(text: str) -> str:
+    return tail_lines(text, BLOCKING_PROMPT_TAIL_LINES)
+
+
+def prompt_abort_reason(text: str, default: str = "interactive prompt detected", *, auto_confirm: bool = False) -> str:
+    """Why a run is aborted at a prompt; a folder-trust prompt says how to proceed."""
+    if not auto_confirm and trust_prompt_at_tail(text):
+        return ("the provider asks to trust the folder and automatic acknowledgement is off; "
+                "trust the folder in the provider CLI once, or recreate the Bridge mission with --trust-folder")
+    return default
+
+
 def run_pty_capture(
     argv: Sequence[str],
     cwd: Path,
@@ -3483,6 +4001,7 @@ def run_pty_capture(
     env: dict[str, str] | None = None,
     on_process_started: Callable[[int], None] | None = None,
     max_output_bytes: int = 0,
+    stdin_path: Path | None = None,
 ) -> tuple[int, str]:
     safe_prompts = SAFE_TRUST_PROMPTS
     blocking_patterns = BLOCKING_PROMPT_PATTERNS
@@ -3493,6 +4012,13 @@ def run_pty_capture(
             os.chdir(cwd)
         except OSError:
             pass
+        if stdin_path is not None:
+            try:
+                prompt_fd = os.open(stdin_path, os.O_RDONLY)
+                os.dup2(prompt_fd, 0)
+                os.close(prompt_fd)
+            except OSError:
+                os._exit(126)
         if env is None:
             os.execvp(argv[0], list(argv))
         os.execvpe(argv[0], list(argv), env)
@@ -3541,6 +4067,8 @@ def run_pty_capture(
                 retained_bytes -= excess
             output_truncated = True
     trust_sent = False
+    pending_prompt: str | None = None
+    combined = ""
     exit_code = 124
     start = time.time()
     last_progress = start
@@ -3573,17 +4101,19 @@ def run_pty_capture(
                 record_abort(f"no output progress for {idle_timeout}s")
                 break
             if question_idle_timeout > 0 and question_seen_at is not None and now - question_seen_at > question_idle_timeout:
-                record_abort(f"question required a response for {question_idle_timeout}s")
+                record_abort(prompt_abort_reason(combined, f"question required a response for {question_idle_timeout}s", auto_confirm=auto_confirm))
                 break
             ready, _, _ = select.select([fd], [], [], 0.2)
             if fd in ready:
                 try:
                     raw = os.read(fd, 65536)
                 except OSError:
-                    eof = True
-                    break
+                    raw = b""
                 if not raw:
                     eof = True
+                    if pending_prompt == "blocking":
+                        # The output ended on the prompt; nothing more will follow.
+                        record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
                     break
                 text = raw.decode("utf-8", "replace")
                 append_output(text)
@@ -3594,15 +4124,22 @@ def run_pty_capture(
                     except OSError:
                         stream = False
                 combined = strip_ansi("".join(chunks))
-                if auto_confirm and not trust_sent and any(p in combined for p in safe_prompts):
+                pending_prompt = None
+                if auto_confirm and not trust_sent and trust_prompt_at_tail(combined):
+                    pending_prompt = "trust"
+                elif detect_prompts and any(pattern.search(blocking_tail(combined)) for pattern in blocking_patterns):
+                    pending_prompt = "blocking"
+                if pending_prompt is None and detect_prompts and question_line.search(combined[-4000:]):
+                    question_seen_at = time.time()
+            if pending_prompt is not None and time.time() - last_progress >= PROMPT_QUIET_SECONDS:
+                if pending_prompt == "trust":
                     os.write(fd, b"\r")
                     trust_sent = True
                     question_seen_at = None
-                elif detect_prompts and any(pattern.search(combined) for pattern in blocking_patterns):
-                    record_abort("interactive prompt detected")
+                    pending_prompt = None
+                else:
+                    record_abort(prompt_abort_reason(combined, auto_confirm=auto_confirm))
                     break
-                elif detect_prompts and question_line.search(combined[-4000:]):
-                    question_seen_at = time.time()
             try:
                 done, status = os.waitpid(pid, os.WNOHANG)
             except ChildProcessError:

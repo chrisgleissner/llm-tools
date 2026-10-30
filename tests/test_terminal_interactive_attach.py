@@ -22,12 +22,13 @@ import pytest
 from llm_tools.terminal import TerminalAction, TmuxTerminalBackend
 from llm_tools import terminal
 from llm_tools.bridge_tui import _execute_terminal_action
+from tests.conftest import scaled
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 
 
 def _wait_for(master: int, process: subprocess.Popen[bytes], marker: bytes, timeout: float = 5.0) -> bytes:
-    end = time.monotonic() + timeout
+    end = time.monotonic() + scaled(timeout)
     output = bytearray()
     while time.monotonic() < end and process.poll() is None:
         ready, _, _ = select.select([master], [], [], 0.05)
@@ -40,6 +41,15 @@ def _wait_for(master: int, process: subprocess.Popen[bytes], marker: bytes, time
                 return bytes(output)
     assert marker in output, f"missing terminal marker {marker!r}: {bytes(output)[-800:]!r}"
     return bytes(output)
+
+
+def _drain(master: int) -> None:
+    ready, _, _ = select.select([master], [], [], 0.05)
+    if ready:
+        try:
+            os.read(master, 65536)
+        except OSError:
+            pass
 
 
 def _pty_attach(backend: TmuxTerminalBackend, handle, *, readonly: bool = False):
@@ -80,7 +90,7 @@ def _capture_switch_error(backend, source, destination, client_name, errors) -> 
         errors.append(exc)
 
 
-def test_real_outer_pty_switches_station_and_returns_to_persistent_source(tmp_path: Path) -> None:
+def test_real_outer_pty_switches_station_and_one_detach_returns_to_the_launch_point(tmp_path: Path) -> None:
     backend = TmuxTerminalBackend()
     source = _station(backend, tmp_path, "source")
     destination = _station(backend, tmp_path, "destination")
@@ -99,29 +109,33 @@ def test_real_outer_pty_switches_station_and_returns_to_persistent_source(tmp_pa
         )
         switch.start()
         _wait_for(master, client, b"PROVIDER_destination_READY")
-        switch.join(timeout=2)
+        switch.join(timeout=scaled(2))
         assert not switch.is_alive(), "attach command must return to the Bridge UI while the destination is attached"
         assert switch_errors == []
         assert backend.server_exists(source) and backend.server_exists(destination)
         assert backend.session_exists(source) and backend.session_exists(destination)
 
-        # Ctrl-] d detaches from the destination; its -E return command restores
-        # the exact source session so its native provider/control panes remain usable.
+        # Ctrl-] d detaches from the destination. The terminal returns to where it
+        # was launched from (here: the attach process ends) instead of stacking
+        # the source station back underneath; both stations keep running.
         os.write(master, b"\x1dd")
-        _wait_for(master, client, b"PROVIDER_source_READY", timeout=8.0)
-        switch.join(timeout=5)
+        deadline = time.monotonic() + 8.0
+        while client.poll() is None and time.monotonic() < deadline:
+            _drain(master)
+        assert client.poll() is not None, "detaching from the destination must end the attach command"
+        switch.join(timeout=scaled(5))
         assert not switch.is_alive()
         assert backend.session_exists(source)
         assert backend.session_exists(destination)
-        assert len(backend.writable_clients(source)) == 1
+        assert backend.writable_clients(source) == () and backend.writable_clients(destination) == ()
     finally:
         if client is not None and client.poll() is None:
             client.send_signal(signal.SIGTERM)
             try:
-                client.wait(timeout=2)
+                client.wait(timeout=scaled(2))
             except subprocess.TimeoutExpired:
                 client.kill()
-                client.wait(timeout=2)
+                client.wait(timeout=scaled(2))
         if master is not None:
             os.close(master)
         for handle in (destination, source):
@@ -168,10 +182,10 @@ def test_readonly_and_control_clients_are_not_writable_choices(tmp_path: Path) -
             if process.poll() is None:
                 process.send_signal(signal.SIGTERM)
                 try:
-                    process.wait(timeout=2)
+                    process.wait(timeout=scaled(2))
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    process.wait(timeout=2)
+                    process.wait(timeout=scaled(2))
             os.close(master)
         try:
             backend.stop(source)
@@ -261,6 +275,9 @@ def test_embedded_attach_requires_exact_owned_source_and_explicit_multi_client(m
         def focus(self, handle, *, pane, **_kwargs):
             self.focused = handle, pane
 
+        def server_owned(self, socket):
+            return True  # any other tmux server in this test is another Bridge station
+
         def attach(self, *_args):
             raise AssertionError("embedded terminal should not start a nested attach")
 
@@ -291,7 +308,7 @@ def test_embedded_attach_requires_exact_owned_source_and_explicit_multi_client(m
     with pytest.raises(PermissionError, match="terminal actions"):
         _execute_terminal_action("mission-a", TerminalAction("mission-b", "/dev/pts/7"))
     monkeypatch.setenv("TMUX_PANE", source.bridge_pane)
-    monkeypatch.setenv("TMUX", f"{tmp_path / 'foreign.sock'},1234,0")
+    monkeypatch.setenv("TMUX", f"{tmp_path / 'other-station.sock'},1234,0")
     with pytest.raises(PermissionError, match="terminal actions"):
         _execute_terminal_action("mission-a", TerminalAction("mission-b", "/dev/pts/7"))
 
@@ -320,8 +337,9 @@ def test_real_curses_dispatches_terminal_action_after_restoring_terminal(tmp_pat
     try:
         _wait_for(master, process, b"Attach Action Mission")
         os.write(master, b"attach --mission mission-b --client /dev/pts/7\r")
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not record.exists():
+        deadline = time.monotonic() + scaled(5)
+        # write_text() creates the file before it writes the content, so wait for the content.
+        while time.monotonic() < deadline and not (record.exists() and record.read_text()):
             select.select([master], [], [], 0.05)
             try:
                 os.read(master, 65536)
@@ -333,6 +351,6 @@ def test_real_curses_dispatches_terminal_action_after_restoring_terminal(tmp_pat
     finally:
         if process.poll() is None:
             process.terminate()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>llm-tools social card</title>
+<!-- Rendered to ../social-card.png (1200x630):
+     google-chrome --headless=new --window-size=1200,630 --hide-scrollbars \
+       --screenshot=docs/site/assets/social-card.png file:///.../docs/site/assets/src/social-card.html
+     The terminal text is real llm-usage output (see scripts/site_terminal.py). -->
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    position: relative;
+    font-family: ui-sans-serif, system-ui, "Segoe UI", Roboto, "Noto Sans", Arial, sans-serif;
+    color: #eaf0f5;
+    background:
+      radial-gradient(800px 420px at 12% -10%, rgba(77, 184, 255, .22), transparent 70%),
+      radial-gradient(rgba(160, 190, 220, .14) 1px, transparent 1.2px) 0 0 / 24px 24px,
+      #090d12;
+  }
+  .brand { position: absolute; left: 72px; top: 56px; display: flex; align-items: center; gap: 16px;
+    font: 700 30px ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace; letter-spacing: -.01em; }
+  .chip { width: 44px; height: 44px; border-radius: 11px; background: #17202a; border: 1px solid #35465a; display: grid; place-items: center; }
+  .chip::after { content: ""; width: 11px; height: 22px; border-radius: 2px; background: #4db8ff; transform: translateX(-5px); }
+  h1 { position: absolute; left: 72px; top: 140px; width: 520px; margin: 0;
+    font-size: 72px; line-height: 1.03; font-weight: 800; letter-spacing: -.045em; }
+  h1 span { background: linear-gradient(95deg, #4db8ff, #5fd7af); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { position: absolute; left: 72px; top: 392px; width: 480px; font-size: 25px; line-height: 1.42; color: #a2b3c2; margin: 0; }
+  .url { position: absolute; left: 72px; bottom: 44px; font: 500 22px ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace; color: #8a9cac; }
+  .win { position: absolute; right: 40px; top: 150px; width: 560px; border-radius: 16px; overflow: hidden;
+    background: #1e1e1e; border: 1px solid #2c3947; box-shadow: 0 30px 80px rgba(0, 0, 0, .55), 0 0 120px rgba(77, 184, 255, .12); }
+  .bar { height: 40px; background: #262a2f; border-bottom: 1px solid #2c3947; display: flex; align-items: center; gap: 10px; padding: 0 18px; }
+  .bar i { width: 13px; height: 13px; border-radius: 50%; background: #ff5f56; }
+  .bar i:nth-child(2) { background: #ffbd2e; }
+  .bar i:nth-child(3) { background: #27c93f; }
+  pre { margin: 0; padding: 22px 22px 26px; font: 14px/1.65 ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace; color: #d8dde2; }
+  .c-dim { color: #8a949e; } .c-ok { color: #5fd787; } .c-warn { color: #ffaf00; } .c-bad { color: #ff6b6b; } .c-info { color: #5fd7d7; }
+</style>
+</head>
+<body>
+  <div class="brand"><span class="chip"></span>llm-tools</div>
+  <h1>Run out of tokens, <span>not momentum.</span></h1>
+  <p class="sub">See every Claude Code, Codex and Copilot limit in one table. When one runs dry, the work moves to the next provider.</p>
+  <div class="url">chrisgleissner.github.io/llm-tools</div>
+  <div class="win">
+    <div class="bar"><i></i><i></i><i></i></div>
+<pre><span class="c-dim">$</span> llm-usage
+Provider   Scope     Remaining         Guidance           
+────────   ───────   ───────────────   ───────────────────
+Claude     5h        <span class="c-ok"> 40% ████░░░░░░</span>   <span class="c-warn">! empty in 1h 20m</span>  
+           weekly    <span class="c-ok"> 59% ██████░░░░</span>   <span class="c-warn">↓ conserve</span>         
+
+Codex      5h        <span class="c-ok"> 63% ██████░░░░</span>   <span class="c-info">✓ lasts until reset</span>
+           weekly    <span class="c-ok"> 34% ███░░░░░░░</span>   <span class="c-warn">↓ conserve</span>         
+
+Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</span>   <span class="c-warn">↓ conserve</span>         </pre>
+  </div>
+</body>
+</html>

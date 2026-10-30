@@ -27,9 +27,9 @@ def test_large_composition_survives_storage_amendment_and_export(tmp_path: Path,
         store.amend_task(task_id, prompt=buffer.text)
     with BridgeStore(database) as store:
         record = store.get_task(task_id)
-        assert record["pending"]["prompt"] == source
+        assert record["prompt"] == source and record["pending"] == {}
         exported = tmp_path / "export.md"
-        exported.write_bytes(record["pending"]["prompt"].encode("utf-8"))
+        exported.write_bytes(record["prompt"].encode("utf-8"))
     assert hashlib.sha256(exported.read_bytes()).hexdigest() == digest
 
 
@@ -110,10 +110,9 @@ def test_scrolled_palette_click_and_keyboard_share_target_and_never_single_click
     assert state.selected == start+1
     assert not calls and not state.command
     assert not state.rows()[state.selected].startswith(">")
-    state.handle_key("/")
+    state.handle_key("\x0b")  # Ctrl-K: letters filter the actions
     for char in "cancel":
         state.handle_key(char)
-    state.handle_key("\n")
     assert len(state.palette_actions()) == 1
     state.handle_key("\n")
     assert state.confirm_command == "cancel" and not calls
@@ -122,10 +121,12 @@ def test_scrolled_palette_click_and_keyboard_share_target_and_never_single_click
 
 
 def test_terminal_mission_palette_explains_disabled_edit() -> None:
+    from llm_tools import bridge_actions
     from llm_tools.bridge_tui import _ConsoleState
     state = _ConsoleState("mission", lambda *_: None, lambda _: {}, full=True)
     state.snapshot = {"mission": {"status": "COMPLETED"}}
-    action = next(item for item in state.palette_actions() if item.label == "Add task")
+    assert "Add task" not in [item.label for item in state.palette_actions()]  # terminal missions list read-only actions
+    action = next(item for item in bridge_actions.ACTIONS if item.label == "Add task")
     state.activate_action(action)
     assert not state.edit_document_requested
     assert "mission completed" in state.output[-1]

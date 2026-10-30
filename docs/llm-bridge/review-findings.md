@@ -1457,7 +1457,7 @@ precede the separately identified limited-color bold adjustment; they are not
 represented as final whole-suite evidence for that later change.
 
 The reviewer also exercised the actual installed
-`/home/chris/.local/bin/llm-bridge` in a real PTY from an unrelated temporary
+`~/.local/bin/llm-bridge` in a real PTY from an unrelated temporary
 folder, with PYTHONPATH/PYTHONHOME removed and HOME/XDG/config/state isolated.
 Both dark and light launches created an objective of `--help` verbatim in the
 chosen folder, remained CREATED with zero operations, and exited 0 after one

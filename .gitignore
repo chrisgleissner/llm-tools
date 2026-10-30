@@ -21,3 +21,6 @@ dist/
 
 .ci-bin/
 llm-usage.log
+
+# Personal strings for docs/site/check_site.py (see its docstring); never commit
+.site-private-patterns

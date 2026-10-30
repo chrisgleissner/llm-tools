@@ -82,7 +82,7 @@ def test_export_permission_failure_keeps_path_source_and_read_only_context(monke
     state.handle_key('\x1b')
     state.handle_key('e')
     assert not state.edit_document_requested
-    assert 'terminal mission' in state.document_notice
+    assert 'finished mission' in state.document_notice
     assert state.document_viewer.source==source
 
 

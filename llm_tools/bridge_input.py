@@ -3,13 +3,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import re
 import unicodedata
+
+_LONE_CR = re.compile(r"\r(?!\n)")
 
 
 def cell_width(text: str) -> int:
     """Return terminal cell width for common Unicode text (not grapheme shaping)."""
+    if text.isascii() and text.isprintable():
+        return len(text)  # no tabs, controls or wide characters: one cell per character
+    if len(text) <= _CACHED_WIDTH_MAX:
+        return _cached_cell_width(text)
+    return _measure_cell_width(text)
+
+
+_CACHED_WIDTH_MAX = 512
+
+
+@lru_cache(maxsize=4096)
+def _cached_cell_width(text: str) -> int:
+    return _measure_cell_width(text)
+
+
+def _measure_cell_width(text: str) -> int:
     width = 0
     for char in text:
+        if " " <= char <= "~":
+            width += 1  # printable ASCII
+            continue
         if char == "\t":
             width += 8 - width % 8
             continue
@@ -21,6 +44,12 @@ def cell_width(text: str) -> int:
 
 def cell_slice(text: str, start: int, width: int) -> str:
     """Clip display cells without splitting a wide character or combining mark."""
+    if start >= 0 and text.isascii() and text.isprintable():
+        return text[start:start + max(0, width)]  # one cell per character: plain slicing
+    return _cell_slice_measured(text, start, width)
+
+
+def _cell_slice_measured(text: str, start: int, width: int) -> str:
     result: list[str] = []
     position = 0
     included = False
@@ -79,6 +108,16 @@ def wrapped_row_for_column(text: str, column: int, width: int) -> tuple[int, int
             row += 1
             cells = 0
     return row, cells
+
+
+def normalize_paste_newlines(text: str) -> str:
+    """Translate a terminal's bare-CR newline encoding to LF.
+
+    xterm-compatible terminals and ``tmux paste-buffer -p`` send each pasted
+    newline as a lone carriage return. Only a CR that is not immediately
+    followed by LF is converted; CRLF, LF, and every other character are kept.
+    """
+    return _LONE_CR.sub("\n", text) if "\r" in text else text
 
 
 class BracketedPaste:
@@ -163,7 +202,6 @@ class BracketedPaste:
             self.scan_from = len(self.pending)
             return None
         payload = bytes(self.pending[:end])
-        tail = bytes(self.pending[end + len(self.END):])
         received = len(payload)
         self.reset()
         if received > self.max_bytes:
@@ -173,7 +211,7 @@ class BracketedPaste:
         try:
             result = payload.decode("utf-8", errors="strict")
             self.done = True
-            return result
+            return normalize_paste_newlines(result)
         except UnicodeDecodeError:
             self.error = "paste ended with incomplete or invalid UTF-8"
             self.done = True

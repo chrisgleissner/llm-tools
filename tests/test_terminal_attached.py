@@ -18,6 +18,7 @@ import uuid
 import pytest
 
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import scaled
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 
@@ -128,11 +129,13 @@ with out.open("ab", buffering=0) as log:
         prefix_key("d")
         wait_for(lambda: process.poll() is not None)
 
+    # Marks that tmux has run (and so started the shell job of) the station's client-resized hook.
+    subprocess.run(["tmux", "-S", str(handle.socket_path), "set-hook", "-ga", "client-resized", "set-option -g @resize_hook_fired 1"], check=True)
     process = attach()
     screen = bytearray()
 
     def wait_for(predicate, timeout: float = 5) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + scaled(timeout)
         while time.monotonic() < deadline:
             if predicate():
                 return
@@ -141,7 +144,7 @@ with out.open("ab", buffering=0) as log:
         assert predicate(), f"timed out; client exit={process.poll()}"
 
     def wait_for_stable(predicate, timeout: float = 5, stable_for: float = 0.075) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + scaled(timeout)
         stable_since: float | None = None
         while time.monotonic() < deadline:
             now = time.monotonic()
@@ -174,27 +177,91 @@ with out.open("ab", buffering=0) as log:
             capture_output=True,
         ).stdout.strip() == "1"
 
-    def prefix_key(key: str) -> None:
-        expected = handle.bridge_pane if key == "B" else handle.provider_pane if key == "P" else None
-        for _attempt in range(5):
+    def count(path: Path, token: bytes) -> int:
+        return path.read_bytes().count(token) if path.exists() else 0
+
+    def pane_state() -> tuple[str, bool]:
+        return active_pane(), zoomed()
+
+    def press_prefix() -> None:
+        """Send Ctrl-] and wait until tmux reports the prefix as pending.
+
+        Returns only once ``#{client_prefix}`` is 1. A byte that tmux never
+        acted on (observed under heavy load: it neither becomes pending nor
+        reaches a pane, even 20 s later) is sent again; this is safe because
+        the prefix is not pending, so a second Ctrl-] cannot turn into a
+        literal prefix.
+        """
+        for _attempt in range(4):
             wait_for(lambda: not prefix_pending())
             os.write(master, b"\x1d")
             try:
-                wait_for(prefix_pending, timeout=0.5)
+                wait_for(prefix_pending, timeout=2.5)
+                return
             except AssertionError:
-                continue
+                if prefix_pending():
+                    return
+        raise AssertionError("tmux did not accept the configured prefix")
+
+    def prefix_key(key: str) -> None:
+        """Press Ctrl-] then ``key`` and wait for the resulting state, not just for the keystroke.
+
+        The B/P bindings select a pane and then zoom it as two commands, and
+        z toggles zoom, so the effect lands after ``#{client_prefix}`` clears.
+        If the key cleared the prefix but changed nothing, the whole chord is
+        sent again from the unchanged state.
+        """
+        expected = handle.bridge_pane if key == "B" else handle.provider_pane if key == "P" else None
+        before = pane_state() if key in {"B", "P", "z"} else None
+
+        def settled() -> bool:
+            if key in {"B", "P"}:
+                return pane_state() == (expected, True)
+            if key == "z":
+                return zoomed() != before[1]
+            return True
+
+        for _attempt in range(3):
+            press_prefix()
             os.write(master, key.encode("ascii"))
             wait_for(lambda: not prefix_pending())
-            break
-        else:
-            raise AssertionError(f"tmux did not accept the configured prefix before {key!r}")
-        if expected:
+            if key == "d":
+                return
             try:
-                wait_for_stable(lambda: active_pane() == expected)
-            except AssertionError as exc:
-                binding = subprocess.run(["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "prefix", key], check=True, text=True, capture_output=True).stdout.strip()
-                messages = subprocess.run(["tmux", "-S", str(handle.socket_path), "show-messages", "-J"], text=True, capture_output=True).stdout[-2000:]
-                raise AssertionError(f"{exc}; active={active_pane()} expected={expected}; binding={binding}; messages={messages}") from exc
+                wait_for_stable(settled, timeout=3)
+                return
+            except AssertionError:
+                if pane_state() != before:
+                    break  # something did change: report it below rather than repeat a toggle
+        binding = subprocess.run(["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "prefix", key], check=True, text=True, capture_output=True).stdout.strip()
+        messages = subprocess.run(["tmux", "-S", str(handle.socket_path), "show-messages", "-J"], text=True, capture_output=True).stdout[-2000:]
+        raise AssertionError(f"prefix {key!r} had no effect; state={pane_state()} before={before} expected={expected}; binding={binding}; messages={messages}")
+
+    def click_until(sequence: bytes, delivered) -> None:
+        """Send a click and wait for ``delivered``; a click tmux never acted on is sent again (it is idempotent)."""
+        for _attempt in range(3):
+            os.write(master, sequence)
+            try:
+                wait_for(delivered, timeout=3)
+                return
+            except AssertionError:
+                continue
+        wait_for(delivered)
+
+    def wait_for_resize_hook() -> None:
+        """Wait for the station's asynchronous ``client-resized`` job (it re-zooms later) to finish.
+
+        The attach fires ``client-resized``; its shell job reads the zoom flag,
+        sleeps, resizes the panes and zooms again, all outside tmux's command
+        queue. A chord pressed in that window is undone by the job.
+        """
+        wait_for(lambda: subprocess.run(["tmux", "-S", str(handle.socket_path), "show-options", "-gqv", "@resize_hook_fired"], text=True, capture_output=True).stdout.strip() == "1", timeout=scaled(10))
+        pid = subprocess.run(["tmux", "-S", str(handle.socket_path), "display-message", "-p", "#{pid}"], check=True, text=True, capture_output=True).stdout.strip()
+
+        def idle() -> bool:
+            return subprocess.run(["pgrep", "-P", pid, "-f", "sleep 0.05"], capture_output=True).returncode != 0
+
+        wait_for_stable(idle, timeout=10, stable_for=0.3)
 
     try:
         wait_for(lambda: b"NATIVE READY" in screen)
@@ -202,6 +269,7 @@ with out.open("ab", buffering=0) as log:
         assert len(writers) == 1
         client_name = writers[0]
         assert b"\x1b[" in screen
+        wait_for_resize_hook()
         os.write(master, b"keyboard")
         wait_for(lambda: received(provider, b"keyboard"))
         os.write(master, b"\x1b[200~multiline\npaste\x1b[201~")
@@ -218,11 +286,12 @@ with out.open("ab", buffering=0) as log:
         # the documented optional split before clicking its actual row.
         prefix_key("z")
         wait_for(lambda: not zoomed())
-        os.write(master, b"\x1b[<0;3;3M\x1b[<0;3;3m")
-        wait_for(lambda: received(provider, b"\x1b[<0;3;3M"))
+        click_until(b"\x1b[<0;3;3M\x1b[<0;3;3m", lambda: received(provider, b"\x1b[<0;3;3M"))
         bridge_click_y = pane_top(handle.bridge_pane) + 3
-        os.write(master, f"\x1b[<0;3;{bridge_click_y}M\x1b[<0;3;{bridge_click_y}m".encode("ascii"))
-        wait_for(lambda: received(controls, b"\x1b[<0;3;3M"))
+        click_until(
+            f"\x1b[<0;3;{bridge_click_y}M\x1b[<0;3;{bridge_click_y}m".encode("ascii"),
+            lambda: received(controls, b"\x1b[<0;3;3M"),
+        )
         os.write(master, b"controls")
         wait_for(lambda: received(controls, b"controls"))
         assert not received(provider, b"controls")
@@ -239,7 +308,7 @@ with out.open("ab", buffering=0) as log:
         # Bridge panes while the provider owns raw input and alternate screen.
         prefix_key("P")
         assert zoomed()
-        assert attached_geometry()[1][handle.provider_pane] == "120x39"
+        wait_for(lambda: attached_geometry()[1][handle.provider_pane] == "120x39")
         provider_pid = provider.with_suffix(".pid").read_text(encoding="utf-8")
         os.write(master, b"provider-shortcut-path")
         wait_for(lambda: received(provider, b"provider-shortcut-path"))
@@ -249,7 +318,7 @@ with out.open("ab", buffering=0) as log:
         wait_for(lambda: received(controls, b"bridge-shortcut-path"))
         prefix_key("P")
         assert provider.with_suffix(".pid").read_text(encoding="utf-8") == provider_pid
-        assert attached_geometry()[1][handle.provider_pane] == "120x39"
+        wait_for(lambda: attached_geometry()[1][handle.provider_pane] == "120x39")
 
         # The native tmux zoom toggle remains available while either pane is active.
         prefix_key("z")
@@ -294,10 +363,16 @@ with out.open("ab", buffering=0) as log:
         os.write(master, b"\x02")
         wait_for(lambda: received(provider, b"\x02"))
         wait_for(lambda: not prefix_pending())
+        literal_before = count(provider, b"\x1d")
+        press_prefix()
         os.write(master, b"\x1d")
-        wait_for(prefix_pending)
-        os.write(master, b"\x1d")
-        wait_for(lambda: received(provider, b"\x1d"))
+        try:
+            wait_for(lambda: count(provider, b"\x1d") > literal_before, timeout=3)
+        except AssertionError:
+            if not prefix_pending():
+                raise
+            os.write(master, b"\x1d")  # the second byte was never acted on; the prefix is still pending
+            wait_for(lambda: count(provider, b"\x1d") > literal_before)
         prefix_key("z")
         wait_for(lambda: not zoomed())
 
@@ -351,7 +426,7 @@ with out.open("ab", buffering=0) as log:
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
+            process.wait(timeout=scaled(5))
         backend.stop(handle)
         os.close(master)
         os.close(slave)

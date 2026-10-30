@@ -17,6 +17,7 @@ from llm_tools import common, copilot_refresh, ralph_robin, scheduler, usage, us
 from llm_tools.capacity import CapacityKind, CapacityScope, ProviderSnapshot
 
 from .conftest import ROOT, run_cmd, write_exe
+from tests.conftest import scaled
 
 
 def test_usage_option_branches_and_unavailable(env: dict[str, str], tmp_path: Path) -> None:
@@ -225,7 +226,7 @@ def test_usage_service_ephemeral_client(env: dict[str, str]) -> None:
         "PATH": f"{env['PATH'].split(':', 1)[0]}:{Path(sys.executable).parent}:{ROOT}",
     }
     live_env.pop("LLM_USAGE_NO_SERVICE", None)
-    result = run_cmd(["./llm-usage", "--json"], live_env, timeout=20)
+    result = run_cmd(["./llm-usage", "--json"], live_env, timeout=scaled(20))
     assert result.returncode == 0, result.stderr
     obj = json.loads(result.stdout)
     assert obj["codex"]["available"] is False
@@ -233,7 +234,7 @@ def test_usage_service_ephemeral_client(env: dict[str, str]) -> None:
     assert (svc_dir / "latest.json").is_file()
     assert (svc_dir / "history.jsonl").is_file()
 
-    status = run_cmd(["./llm-usage", "--service-status", "--json"], live_env, timeout=10)
+    status = run_cmd(["./llm-usage", "--service-status", "--json"], live_env, timeout=scaled(10))
     assert status.returncode == 0, status.stderr
     assert json.loads(status.stdout)["running"] is False
 
@@ -1233,6 +1234,10 @@ def test_scheduler_tmux_missing_and_template_error(env: dict[str, str], tmp_path
 
 
 def test_ralph_and_scheduler_highlight_helpers(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    for name in scheduler.common.credential_variables_to_remove(os.environ, None):
+        monkeypatch.delenv(name, raising=False)
+    # Bridge's package root in PYTHONPATH is removed for providers, which makes the environment differ.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
     assert scheduler.provider_env(scheduler.SchedulerConfig()) is None
     env = scheduler.provider_env(scheduler.SchedulerConfig(provider="codex", ralph_robin_active=True, ralph_robin_providers="claude,codex"))
     assert env is not None

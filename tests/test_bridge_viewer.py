@@ -4,7 +4,6 @@ from __future__ import annotations
 import curses
 from pathlib import Path
 
-import pytest
 
 from llm_tools import bridge, bridge_viewer
 

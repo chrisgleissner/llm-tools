@@ -13,6 +13,7 @@ import termios
 import time
 
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import scaled
 
 
 def test_real_launcher_paste_saves_64kib_objective_verbatim_without_start(tmp_path, env):
@@ -35,7 +36,7 @@ def test_real_launcher_paste_saves_64kib_objective_verbatim_without_start(tmp_pa
     output = bytearray()
 
     def wait_for(marker: bytes, timeout: float = 8) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + scaled(timeout)
         while time.monotonic() < deadline and process.poll() is None:
             if marker in output:
                 return
@@ -56,7 +57,10 @@ def test_real_launcher_paste_saves_64kib_objective_verbatim_without_start(tmp_pa
         wait_for(f"{total_bytes}/1048576 bytes".encode("ascii"), timeout=12)
         os.write(master, b"\x13")  # Save the complete composer source to the form.
         wait_for(b"Save mission only")
-        os.write(master, b"\t\t\t\t\t\r")
+        os.write(master, b"\t\t\t\t")
+        wait_for(b"save \xc2\xb7 no provider is started")  # focus reached Save mission only
+        time.sleep(scaled(0.25))  # human pace: the launcher ignores Enter inside an input burst
+        os.write(master, b"\r")
         deadline = time.monotonic() + 10
         mission = None
         while time.monotonic() < deadline:
@@ -84,17 +88,19 @@ def test_real_launcher_paste_saves_64kib_objective_verbatim_without_start(tmp_pa
             assert hashlib.sha256(saved.encode("utf-8")).hexdigest() == expected_hash
             assert not store.db.execute("SELECT 1 FROM operations").fetchone()
         assert process.poll() is None  # Save-only must not start paid provider work.
-        wait_for(b"Pending commands:")  # Durable commit precedes control-screen readiness.
+        wait_for(b"Saved ")  # the home screen stays and says what to press next
+        os.write(master, b"o")
+        wait_for(b"Controller")  # Durable commit precedes control-screen readiness.
         os.write(master, b"\x04")
         deadline = time.monotonic()+5
         while process.poll() is None and time.monotonic()<deadline:
             if select.select([master], [], [], .03)[0]:
                 try: output.extend(os.read(master,65536))
                 except OSError: break
-        process.wait(timeout=5)
+        process.wait(timeout=scaled(5))
         assert process.returncode == 0
     finally:
         if process.poll() is None:
             process.terminate()
-            process.wait(timeout=3)
+            process.wait(timeout=scaled(3))
         os.close(master)

@@ -18,6 +18,7 @@ import pytest
 
 from llm_tools.bridge_store import BridgeStore
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import scaled, wait_for as _shared_wait_for
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for rendered terminal assertions")
@@ -71,12 +72,8 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
                            cwd=tmp_path, socket_path=tmp_path / "editor.sock", session_name="editor", size=(80, 31))
 
     def wait_for(predicate) -> None:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if predicate():
-                return
-            time.sleep(.03)
-        assert predicate(), "real rendered terminal did not reach the expected state: " + backend.capture(handle, pane="provider")
+        if not _shared_wait_for(predicate, 5, 0.03):
+            raise AssertionError("real rendered terminal did not reach the expected state: " + backend.capture(handle, pane="provider"))
 
     try:
         geometry = subprocess.check_output(["tmux", "-S", str(handle.socket_path), "display-message", "-p",
@@ -87,11 +84,10 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
 
         def orders_visible() -> bool:
             lines = backend.capture(handle, pane="provider").splitlines()
-            return (len(lines) > 1 and lines[0].rstrip().endswith(" Orders")
-                    and lines[1].startswith("Orders: 1 total"))
+            return (len(lines) > 3 and "[Tasks]" in lines[2]
+                    and lines[3].startswith("> 1"))
 
-        # Curses can retain the first 'O' from Objective and repaint only
-        # 'rders:'. Assert rendered cells rather than matching an ANSI delta.
+        # Curses repaints only changed cells. Assert rendered cells rather than matching an ANSI delta.
         wait_for(orders_visible)
         backend.send_keys(handle, pane="provider", keys="\x12")
         wait_for(lambda: f"Amend task {task_id} prompt" in backend.capture(handle, pane="provider"))
@@ -105,14 +101,14 @@ def test_real_curses_amendment_preserves_long_prompt_and_whitespace(tmp_path: Pa
             with BridgeStore(database) as store:
                 task = store.get_task(task_id)
             if task["revision"] > 1:
-                amended = task["pending"].get("prompt")
+                amended = task["pending"].get("prompt") or task["prompt"]  # applied at once when nothing runs the task
                 break
             time.sleep(.03)
         assert amended is not None, "the real editor command did not persist an amendment"
         assert amended == original, "an unchanged edit lost task text or significant whitespace"
         # A commit can precede publication of the worker result. The UI
         # deliberately rejects exit while a durable command is still pending.
-        wait_for(lambda: "Applied:" in backend.capture(handle, pane="provider"))
+        wait_for(lambda: "amended" in backend.capture(handle, pane="provider"))
         backend.send_keys(handle, pane="provider", keys="Escape")
         backend.send_keys(handle, pane="provider", keys="C-u")
         backend.send_keys(handle, pane="provider", keys="Escape")
@@ -144,7 +140,7 @@ def test_real_curses_stdin_file_request_keeps_control_input_available(tmp_path: 
         output = bytearray()
 
         def read_until(marker: bytes, timeout: float) -> None:
-            deadline = time.monotonic() + timeout
+            deadline = time.monotonic() + scaled(timeout)
             while time.monotonic() < deadline and process.poll() is None:
                 readable, _, _ = select.select([master], [], [], 0.03)
                 if readable:
@@ -170,12 +166,12 @@ def test_real_curses_stdin_file_request_keeps_control_input_available(tmp_path: 
         # of treating a closed PTY as proof that the process has exited.
         os.write(master, b"\x15\x1b\x04")
         try:
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         except subprocess.TimeoutExpired as exc:
             raise AssertionError("the Bridge control UI stopped accepting Ctrl-D after the stdin request") from exc
         assert process.returncode == 0
     finally:
         if process.poll() is None:
             process.terminate()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)

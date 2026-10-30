@@ -1,6 +1,6 @@
 # Handover — Kilo Code for ralph-robin + PR #7 convergence
 
-Date: 2026-06-14. Repo: `/home/chris/dev/llm-tools`.
+Date: 2026-06-14. Repo: `~/dev/llm-tools`.
 Branch: `fix/opencode-ralph-robin` → PR [#7](https://github.com/chrisgleissner/llm-tools/pull/7)
 (`fix: use opencode --dir for headless runs`).
 
@@ -59,7 +59,7 @@ Kilo Code is an **OpenCode fork**. `kilo run` is the headless entry point.
 
 Headless Kilo now uses `kilo run --dir <cwd> <prompt>` and injects **no**
 permission flag. Permissions are governed by the user's Kilo config. Because
-chris's config already allows bash/read/edit/etc. within the project,
+the user's config already allows bash/read/edit/etc. within the project,
 autonomous `ralph-robin` runs still work, while honoring the
 `external_directory: ask` boundary. Attached/interactive Kilo is unchanged
 (`kilo run <prompt>`; relies on the subprocess cwd) — not the ralph-robin path.

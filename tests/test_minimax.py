@@ -18,7 +18,6 @@ from llm_tools.capacity import (
 )
 from llm_tools.providers import (
     minimax_cli,
-    minimax_command_argv,
     minimax_model,
     read_minimax,
 )
@@ -280,16 +279,6 @@ def test_read_minimax_handles_invalid_json(env: dict[str, str], fake_bin: Path) 
 
 
 # --- Command construction -----------------------------------------------------
-
-
-def test_minimax_command_argv_attached() -> None:
-    argv = minimax_command_argv(cfg_attached=True, cwd="/tmp/work", prompt="hello world")
-    assert argv == ["mmx"]
-
-
-def test_minimax_command_argv_headless() -> None:
-    argv = minimax_command_argv(cfg_attached=False, cwd="/tmp/work", prompt="hello world")
-    assert argv == ["mmx", "run", "--auto", "-C", "/tmp/work", "hello world"]
 
 
 def test_minimax_cli_returns_none_when_missing(env: dict[str, str]) -> None:

@@ -413,23 +413,9 @@ def _env_fallback_present(env: dict[str, str]) -> bool:
     )
 
 
-def minimax_command_argv(cfg_attached: bool, cwd: str, prompt: str) -> list[str]:
-    """Build the default argv for launching MiniMax.
-
-    The ``mmx`` CLI does not yet have a documented autonomous mode, so
-    headless runs invoke ``mmx run --auto <prompt>`` mirroring the
-    Kilo / OpenCode pattern. Attached/interactive runs use the bare
-    ``mmx`` binary in the configured working directory.
-    """
-    if cfg_attached:
-        return ["mmx"]
-    return ["mmx", "run", "--auto", "-C", cwd, prompt]
-
-
 __all__ = [
     "DEFAULT_MINIMAX_MODEL",
     "minimax_cli",
-    "minimax_command_argv",
     "minimax_model",
     "read",
     "read_minimax",

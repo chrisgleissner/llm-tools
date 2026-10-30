@@ -16,12 +16,20 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from . import ralph_robin
-from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, utc_now
+from . import common
+from .common import LAUNCH_REFUSED_STATUS, python_module_argv, rooted_module_argv, scrubbed_environment
+from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, store_path
+from .bridge_states import (
+    ACTIVE_OPERATION_STATUSES,
+    CONTROLLED_MISSION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, HALTED_MISSION_STATUSES,
+    OPERATOR_DECLINED_EXIT_CODE, STATION_CLOSING_MISSION_STATUSES,
+)
 from .bridge_refresh import CapacityRefreshWorker
 from .bridge_progress import repository_checkpoint
 from .bridge_sessions import (
     NativeSessionIdentity,
+    boot_id,
+    child_pids,
     confirm_restored,
     codex_owned_argv,
     discover_owned_codex_session,
@@ -29,7 +37,82 @@ from .bridge_sessions import (
     provider_session_metadata,
     resume_argv,
 )
-from .terminal import TerminalHandle, TmuxTerminalBackend
+from .terminal import DeadStationError, TerminalHandle, TmuxTerminalBackend
+
+
+def __getattr__(name: str) -> Any:
+    # ``ralph_robin`` (and the scheduler behind it) is only needed by the controller; importing it here would
+    # slow every command that merely locates a station socket. It stays readable as ``bridge_runtime.ralph_robin``.
+    if name == "ralph_robin":
+        from . import ralph_robin
+
+        globals()[name] = ralph_robin
+        return ralph_robin
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+NATIVE_COMPLETION_NOTE = (
+    "When the task is complete, summarise what you did and ask the operator to exit this CLI "
+    "(for example /exit) so Bridge can verify the work."
+)
+_CHECKPOINT_LIMIT = 12000
+_EVENT_LINE_LIMIT = 300
+
+
+def _compact(value: Any, limit: int = _EVENT_LINE_LIMIT) -> str:
+    """One bounded line for a scalar or nested value."""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _format_acceptance(acceptance: Any) -> str:
+    """Acceptance criteria as a numbered list, or ``none recorded``."""
+    items = acceptance if isinstance(acceptance, (list, tuple)) else ([acceptance] if acceptance else [])
+    lines = [f"{number}. {_compact(item, 1000)}" for number, item in enumerate(items, 1) if item not in (None, "")]
+    return "\n".join(lines) or "none recorded"
+
+
+def _event_summary(data: Any) -> str:
+    if isinstance(data, dict):
+        if isinstance(data.get("summary"), str) and data["summary"].strip():
+            others = {key: value for key, value in data.items() if key != "summary" and value not in (None, "")}
+            extra = ", ".join(f"{key}={_compact(value, 80)}" for key, value in others.items())
+            return _compact(data["summary"]) + (f" ({extra})" if extra else "")
+        return ", ".join(f"{key}={_compact(value, 80)}" for key, value in data.items() if value not in (None, "")) or "no details"
+    return _compact(data) if data not in (None, "") else "no details"
+
+
+def _format_checkpoint(checkpoint: dict[str, Any]) -> str:
+    """Readable, deterministic, bounded text for the durable checkpoint."""
+    lines = [
+        f"restoration: {checkpoint.get('restoration')}",
+        f"task revision: {checkpoint.get('task_revision')}",
+    ]
+    evidence = checkpoint.get("evidence")
+    if isinstance(evidence, (list, tuple)):
+        evidence_lines = [_compact(item) for item in evidence if item not in (None, "")]
+    else:
+        evidence_lines = [_compact(evidence)] if evidence not in (None, "", {}, []) else []
+    if evidence_lines:
+        lines.append("evidence:")
+        lines.extend(f"- {line}" for line in evidence_lines)
+    else:
+        lines.append("evidence: none recorded")
+    operations = checkpoint.get("operations") or []
+    lines.append("operations (newest first):" if operations else "operations: none")
+    for operation in operations:
+        fields = (("station", "station"), ("route", "route_id"), ("model", "model"), ("status", "status"), ("exit", "exit_code"), ("logs", "logs_path"))
+        detail = ", ".join(f"{label} {_compact(operation[key], 200)}" for label, key in fields if operation.get(key) not in (None, ""))
+        lines.append(f"- operation {operation.get('id')}: {detail or 'no details'}")
+    events = checkpoint.get("recent_events") or []
+    lines.append("recent events (oldest first):" if events else "recent events: none")
+    for event in events:
+        lines.append(f"- {event.get('kind')}: {_event_summary(event.get('data'))} (event {event.get('id')}, {event.get('at')})")
+    return "\n".join(lines)[:_CHECKPOINT_LIMIT]
 
 
 class BridgeMissionHooks:
@@ -61,6 +144,12 @@ class BridgeMissionHooks:
         self._session_providers: dict[str, str] = {}
         self._session_cwds: dict[str, str] = {}
         self._codex_owned_operations: set[str] = set()
+        self._codex_observe_schedule: dict[str, tuple[int, float]] = {}  # operation -> (backoff step or -1 once found, next look)
+        # The (providers, routes) pair the running Ralph loop currently uses.
+        self.applied_rotation: tuple[str, str] | None = None
+        self._waiting_message = ""
+        self._hold_message = ""
+        self._hold_message_tried = 0.0
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
@@ -88,12 +177,88 @@ class BridgeMissionHooks:
 
     def on_wait(self, selection: dict[str, Any], target_epoch: int | None) -> None:
         projection = self._selection_projection(selection)
-        self.store.record_runtime_event(self.mission_id, "provider-wait", {
+        data = {
             "target_epoch": target_epoch,
             "all_rate_limited": projection["all_rate_limited"],
             "reason": projection["decision"].get("reason", projection["rotation_reason"]),
             "decisions": projection["decisions"],
-        })
+        }
+        self.store.record_runtime_event(self.mission_id, "provider-wait", data)
+        self._show_waiting_message(data)
+
+    def _show_waiting_message(self, wait_data: dict[str, Any]) -> None:
+        """Tell the operator why an idle native provider pane stays empty.
+
+        Only a pane with nothing in it is written to; a live provider, or the
+        output of a previous provider, is never replaced. The scheduler
+        respawns the pane when a provider launches, which removes the message.
+        """
+        if self.handle is None or not self.native_tui:
+            return
+        from .bridge_monitor import waiting_from_wait, waiting_message
+
+        now = time.time()
+        message = waiting_message(waiting_from_wait(wait_data, now), now)
+        if message == self._waiting_message:
+            return
+        try:
+            if TmuxTerminalBackend().show_provider_message(self.handle, message):
+                self._waiting_message = message
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass  # the message is a courtesy; the wait itself must continue
+
+    def _show_review_hold(self, hold: dict[str, Any]) -> None:
+        """Tell the operator, in the provider pane, which task waits for their decision."""
+        if self.handle is None or not self.native_tui:
+            return
+        message = f"Task {hold['task_ordinal']} is waiting for your review. Ctrl-] then B, then /approve or /reject."
+        now = time.monotonic()
+        if message == self._hold_message or now - self._hold_message_tried < 5.0:
+            return
+        self._hold_message_tried = now
+        try:
+            # Only an empty provider pane takes the placeholder text; a pane that
+            # still holds the finished provider's output is left alone (see
+            # ``_publish_review_hint`` for its footer).
+            if TmuxTerminalBackend().show_provider_message(self.handle, message):
+                self._hold_message = message
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass  # a courtesy message; the hold itself must continue
+
+    def _publish_review_hint(self, mission: dict[str, Any], task_id: int) -> None:
+        """Prepare the footer tmux prints in the provider pane when this run exits cleanly.
+
+        tmux formats that footer once, when the pane's process dies, so the text
+        has to be in place before the provider is launched. A clean exit moves
+        the task to review, so the hint names it; it is left out when a
+        configured verifier may complete the task, or when the mission starts
+        the next task without waiting.
+        """
+        if self.handle is None or not self.native_tui:
+            return
+        config = mission["config"]
+        text = ""
+        if not self.store.auto_continue_default(config) and not (config.get("verifier") or {}).get("argv"):
+            ordinal = self.store.get_task(task_id)["ordinal"]
+            text = f"Task {ordinal} is waiting for your review. Ctrl-] then B, then /approve or /reject."
+        try:
+            TmuxTerminalBackend().set_review_hint(self.handle, text)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass  # a courtesy footer; the launch must continue
+
+    def rotation_update(self) -> tuple[str, str] | None:
+        """The saved rotation when it differs from the one the loop is using."""
+        config = self.store.get_mission(self.mission_id)["config"]
+        saved = (str(config.get("providers", "")), str(config.get("routes", "")))
+        if self.applied_rotation is None or saved == self.applied_rotation:
+            return None
+        return saved
+
+    def rotation_applied(self, rotation: tuple[str, str], error: str) -> None:
+        """Record whether the loop switched to a changed rotation."""
+        self.applied_rotation = rotation
+        kind = "rotation-rejected" if error else "rotation-applied"
+        self.store.record_runtime_event(self.mission_id, kind, {"providers": rotation[0], "routes": rotation[1], "error": error})
 
     @property
     def store(self) -> BridgeStore:
@@ -112,15 +277,21 @@ class BridgeMissionHooks:
                 time.sleep(0.5)
                 continue
 
-            tasks = self.store.ready_tasks(self.mission_id)
+            hold = self.store.sync_review_hold_events(self.mission_id)
+            if hold is not None:
+                # A native operator is at the station: do not start the next
+                # task (and its paid run) until they decide on the reviewed one.
+                self._show_review_hold(hold)
+                time.sleep(0.5)
+                continue
+            self._hold_message = ""
+
+            tasks = self.store.ready_tasks(self.mission_id, limit=1)
             if tasks:
                 task = tasks[0]
                 current = self.store.begin_iteration(int(task["id"]))
                 self._iteration += 1
-                history = self.store.db.execute(
-                    "SELECT id,kind,data_json,created_at FROM events WHERE mission_id=? AND (task_id=? OR operation_id IN (SELECT id FROM operations WHERE task_id=?)) ORDER BY id DESC LIMIT 20",
-                    (self.mission_id, current["id"], current["id"]),
-                ).fetchall()
+                history = self.store.recent_task_history(self.mission_id, int(current["id"]))
                 operations = self.store.db.execute(
                     "SELECT id,station,route_id,model,status,exit_code,logs_path FROM operations INDEXED BY operations_task_history WHERE task_id=? ORDER BY rowid DESC LIMIT 10",
                     (current["id"],),
@@ -135,15 +306,25 @@ class BridgeMissionHooks:
                         for row in reversed(history)
                     ],
                 }
+                rejection = self.store.latest_rejection_reason(self.mission_id, int(current["id"]))
+                rejection_text = (
+                    f"Previous attempt was rejected by the operator: {rejection}\n"
+                    "Address this feedback in this attempt before finishing.\n\n"
+                    if rejection
+                    else ""
+                )
                 prompt = (
                     "LLM Bridge mission context. Provider session continuity is RECONSTRUCTED from durable state; "
                     "this is not an exact native conversation restore.\n\n"
                     f"Mission objective:\n{mission['objective']}\n\n"
-                    f"Task {current['id']} ({current['title']}), revision {current['revision']}:\n{current['prompt']}\n\n"
-                    f"Acceptance criteria:\n{json.dumps(current['acceptance'], ensure_ascii=False)}\n\n"
-                    f"Durable checkpoint (latest bounded history):\n{json.dumps(checkpoint, ensure_ascii=False, default=str)[:12000]}\n\n"
+                    f"Task {current['ordinal']} ({current['title']}), revision {current['revision']}:\n{current['prompt']}\n\n"
+                    f"Acceptance criteria:\n{_format_acceptance(current['acceptance'])}\n\n"
+                    f"{rejection_text}"
+                    f"Durable checkpoint (latest bounded history):\n{_format_checkpoint(checkpoint)}\n\n"
                     "Continue from this state. Do not claim work from an earlier provider session unless supported by the evidence above."
                 )
+                if self.native_tui and not self.headless:
+                    prompt += f" {NATIVE_COMPLETION_NOTE}"
                 return {
                     "action": "run",
                     "task_id": int(current["id"]),
@@ -247,6 +428,7 @@ class BridgeMissionHooks:
             scheduler_config.native_tui = True
             scheduler_config.headless = False
             pane_id = self.handle.provider_pane
+            self._publish_review_hint(mission, int(context["task_id"]))
         else:
             scheduler_config.exec_mode = "fresh"
             scheduler_config.headless = True
@@ -272,8 +454,6 @@ class BridgeMissionHooks:
         task_revision = int(context.get("revision") or self.store.get_task(task_id)["revision"])
         controls = {
             "status": f"llm-bridge status --mission {self.mission_id}",
-            "pause": f"llm-bridge pause --mission {self.mission_id}",
-            "stop": f"llm-bridge stop --mission {self.mission_id}",
             "propose_follow_up": (
                 f"llm-bridge proposal create --mission {self.mission_id} "
                 f"--operation {operation_id} --file PATH"
@@ -407,7 +587,7 @@ class BridgeMissionHooks:
     def wait_interrupted(self) -> bool:
         """Return whether an operator mission boundary should interrupt waits."""
         mission = self.store.get_mission(self.mission_id)
-        if mission["status"] in {"PAUSED", "STOPPING", "STOPPED", "CANCELLED", "COMPLETED", "FAILED"}:
+        if mission["status"] in HALTED_MISSION_STATUSES | ENDED_MISSION_STATUSES:
             return True
         config = mission["config"]
         if config.get("pause_after_iteration"):
@@ -448,12 +628,25 @@ class BridgeMissionHooks:
         self._session_providers.pop(operation_id, None)
         self._session_cwds.pop(operation_id, None)
         self._codex_owned_operations.discard(operation_id)
+        self._codex_observe_schedule.pop(operation_id, None)
 
-    def _observe_owned_codex_session(self, operation_id: str) -> None:
+    # Seconds between looks for a Codex session while none has been found: the
+    # session file is opened within the first moments of a run, so the search
+    # starts fast and slows to a rarely-repeated check.
+    CODEX_OBSERVE_BACKOFF = (1.0, 2.0, 5.0, 15.0)
+
+    def _observe_owned_codex_session(self, operation_id: str, *, force: bool = False) -> None:
         if operation_id not in self._codex_owned_operations:
             return
+        now = time.monotonic()
+        step, next_at = self._codex_observe_schedule.get(operation_id, (0, 0.0))
+        if step < 0 or (not force and now < next_at):
+            return  # found already, or not yet due
+        backoff = self.CODEX_OBSERVE_BACKOFF
+        self._codex_observe_schedule[operation_id] = (min(step + 1, len(backoff) - 1), now + backoff[min(step, len(backoff) - 1)])
         operation = self.store.get_operation(operation_id)
         if operation.get("restoration_state") in {"NATIVE_CREATED", "RESTORED_NATIVE"}:
+            self._codex_observe_schedule[operation_id] = (-1, 0.0)
             return
         pid = int(operation.get("process_pid") or 0)
         token = str(operation.get("process_start") or "")
@@ -469,6 +662,7 @@ class BridgeMissionHooks:
         self.store.record_operation_session(operation_id, provider="codex",
             restoration_state="RESTORED_NATIVE" if expected else "NATIVE_CREATED",
             session_id=identity.session_id, cwd=identity.cwd, source=identity.source)
+        self._codex_observe_schedule[operation_id] = (-1, 0.0)  # found: stop looking
 
     def _capture_session_after_launch(self, operation_id: str) -> None:
         """Wait briefly for exact provider-owned metadata from the live pane."""
@@ -510,16 +704,10 @@ class BridgeMissionHooks:
         self.store.record_operation_session(operation_id, provider=provider, restoration_state="UNAVAILABLE")
 
     def _should_interrupt_wait(self, task_id: int) -> bool:
-        mission = self.store.get_mission(self.mission_id)
-        if mission["status"] in {"PAUSED", "STOPPING", "STOPPED", "CANCELLED", "COMPLETED", "FAILED"}:
+        """A scheduler wait stops at any mission boundary or when this task is paused or cancelled."""
+        if self.wait_interrupted():
             return True
-        if mission["config"].get("pause_after_iteration"):
-            return True
-        stop_after = mission["config"].get("stop_after_task")
-        if stop_after is not None and self.store.get_task(int(stop_after))["status"] == "COMPLETED":
-            return True
-        task = self.store.get_task(task_id)
-        return task["status"] in {"PAUSED", "CANCELLED"}
+        return self.store.get_task(task_id)["status"] in {"PAUSED", "CANCELLED"}
 
     def _record_process(self, operation_id: str, process_pid: int) -> None:
         token = _process_start_token(process_pid)
@@ -530,7 +718,7 @@ class BridgeMissionHooks:
             return
         self.store.record_operation_process(operation_id, process_pid=process_pid, process_start=token)
         if operation_id in self._codex_owned_operations:
-            self._observe_owned_codex_session(operation_id)
+            self._observe_owned_codex_session(operation_id, force=True)
         else:
             self._capture_session_after_launch(operation_id)
 
@@ -550,7 +738,7 @@ class BridgeMissionHooks:
             operation = self.store.get_operation(operation_id)
         except KeyError:
             return
-        if operation["status"] not in {"PREPARED", "RUNNING", "INTENT"}:
+        if operation["status"] not in ACTIVE_OPERATION_STATUSES:
             return
         run_dir = scheduler_config.run_dir
         output_files = sorted(run_dir.glob("attempt-*.out")) if run_dir else []
@@ -574,7 +762,29 @@ class BridgeMissionHooks:
                 "exit_code": int(status),
                 "output_sha256": _bounded_output_digest(output_files[-1]) if output_files else None,
             })
-            if status != 0:
+            if status == OPERATOR_DECLINED_EXIT_CODE:
+                provider_name = str(selection.get("provider") or scheduler_config.provider)
+                self.store.record_runtime_event(self.mission_id, "provider-declined", {
+                    "operation_id": operation_id,
+                    "task_id": int(task["id"]),
+                    "provider": provider_name,
+                    "reason": "folder-trust-declined",
+                    "next_action": "operator",
+                })
+            elif status == LAUNCH_REFUSED_STATUS:
+                reason = ""
+                if logs_path:
+                    try:
+                        reason = Path(logs_path).read_text(encoding="utf-8", errors="replace").strip()[:500]
+                    except OSError:
+                        pass
+                self.store.record_runtime_event(self.mission_id, "task-launch-refused", {
+                    "task_id": int(task["id"]),
+                    "operation_id": operation_id,
+                    "provider": str(selection.get("provider") or ""),
+                    "reason": reason or "the provider command could not be launched",
+                })
+            elif status != 0:
                 continued = self.store.continue_task_after_provider_failure(
                     operation_id,
                     max_failures=self.max_provider_failures,
@@ -700,6 +910,24 @@ def _artifact_records(cwd: Path, artifacts: Any) -> list[dict[str, str]]:
     return result
 
 
+def _signal_process_group(process_group: int, sig: int) -> None:
+    """Send ``sig`` to a process group, ignoring a group that has already exited."""
+    try:
+        os.killpg(process_group, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _kill_process_group(proc: subprocess.Popen[bytes], grace: float = 0.5) -> None:
+    """Stop a process started in its own session: SIGTERM, then SIGKILL after ``grace`` seconds, then reap it."""
+    _signal_process_group(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+
 def _run_bounded_verifier(
     argv: list[str],
     cwd: str,
@@ -713,7 +941,7 @@ def _run_bounded_verifier(
     log_limit = 10 * 1024 * 1024
     result_limit = 1024 * 1024
     started = time.monotonic()
-    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, env=scrubbed_environment(os.environ, None))
     assert proc.stdout is not None
     digest = hashlib.sha256()
     captured = bytearray()
@@ -723,27 +951,21 @@ def _run_bounded_verifier(
     try:
         if on_started is not None:
             process_start = _process_start_token(proc.pid)
-            if not process_start:
+            if process_start:
+                on_started(proc.pid, process_start)
+            elif proc.poll() is None:
                 raise RuntimeError("could not verify verifier process identity after launch")
-            on_started(proc.pid, process_start)
+            # else: the verifier already exited (and was reaped by poll), so
+            # /proc has no identity to record. That is a normal fast exit, the
+            # same tolerance _record_process has for short providers; its
+            # output and exit code are collected below.
         with log_path.open("wb") as log:
             os.chmod(log_path, 0o600)
             while True:
                 remaining = timeout - (time.monotonic() - started)
                 if remaining <= 0:
                     timed_out = True
-                    try:
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        proc.wait(timeout=0.5)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(proc.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        proc.wait()
+                    _kill_process_group(proc)
                 readable, _, _ = select.select([proc.stdout], [], [], min(0.05, max(0, remaining)))
                 if readable:
                     chunk = os.read(proc.stdout.fileno(), 65536)
@@ -760,10 +982,7 @@ def _run_bounded_verifier(
                     break
                 if proc.poll() is not None and time.monotonic() - started >= timeout:
                     timed_out = True
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    _signal_process_group(proc.pid, signal.SIGKILL)
                     break
             if output_size > written:
                 log.write(b"\n[verifier output truncated at 10 MiB]\n")
@@ -781,18 +1000,7 @@ def _run_bounded_verifier(
         }
     finally:
         if proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                proc.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                proc.wait()
+            _kill_process_group(proc)
         if on_finished is not None and proc.returncode is not None:
             on_finished(int(proc.returncode))
 
@@ -818,6 +1026,22 @@ def run_configured_verifier(
     argv_template = verifier["argv"]
     if not all(isinstance(arg, str) and "\x00" not in arg for arg in argv_template):
         raise ValueError("verifier argv must contain only strings without NUL bytes")
+    from .bridge_verifier_guard import changed_verifier_files
+
+    changed = changed_verifier_files(verifier, str(mission["cwd"]))
+    if changed:
+        # The provider can edit these files, so a pass from them proves nothing:
+        # do not run them and leave the task for the operator to approve.
+        outcome = {
+            "status": "VERIFYING",
+            "passed": False,
+            "reason": "verifier-modified",
+            "detail": "verifier files changed since the mission was created: " + ", ".join(changed[:10]) + "; operator approval required",
+            "changed_files": changed[:50],
+            "revision": int(task["revision"]),
+        }
+        store.record_verification_attempt(task_id, outcome)
+        return outcome
     timeout = float(timeout_override if timeout_override is not None else verifier.get("timeout_seconds", 300))
     if timeout <= 0 or timeout > 3600:
         raise ValueError("verifier timeout must be between 0 and 3600 seconds")
@@ -863,7 +1087,10 @@ def run_configured_verifier(
         store.finish_managed_process(
             managed_process_id,
             exit_code=exit_code,
-            status="EXITED" if managed_started else "FAILED",
+            # A verifier that exited before its identity could be read ran to
+            # completion (exit code >= 0); one killed because its identity
+            # could not be verified did not.
+            status="EXITED" if managed_started or exit_code >= 0 else "FAILED",
         )
         managed_finished = True
 
@@ -958,29 +1185,99 @@ def _runtime_directory(mission_id: str) -> Path:
     return directory
 
 
+_RUN_USER_ROOT = Path("/run/user")
+_TMP_ROOT = Path("/tmp")
+
+
+def _socket_candidate_dirs(uid: int, env: dict[str, str] | None) -> tuple[list[Path], list[Path]]:
+    """Return (lookup, creation) socket directories, most specific first."""
+    source = os.environ if env is None else env
+    xdg_runtime = source.get("XDG_RUNTIME_DIR", "")
+    primary = [Path(xdg_runtime) / "llm-bridge"] if xdg_runtime else []
+    tmp = _tmp_fallback_dirs(uid)
+    last_resort = [_cache_runtime_dir(source)]
+    creation = [*primary, *tmp, *last_resort]
+    # A second login (sudo -iu, some SSH/cron setups) may lack or differ in
+    # XDG_RUNTIME_DIR; the per-user runtime directory is still discoverable.
+    lookup = [*primary, _RUN_USER_ROOT / str(uid) / "llm-bridge", *tmp, *last_resort]
+    return list(dict.fromkeys(lookup)), creation
+
+
+def _cache_runtime_dir(env: dict[str, str]) -> Path:
+    """Private per-user directory used when every shared ``/tmp`` name is taken by someone else."""
+    base = env.get("XDG_CACHE_HOME") or str(Path(env.get("HOME") or os.path.expanduser("~")) / ".cache")
+    return Path(base) / "llm-tools" / "runtime"
+
+
+def _tmp_fallback_dirs(uid: int) -> list[Path]:
+    """Short ``/tmp`` socket directories, tried in order.
+
+    ``/tmp`` is shared, so another user can pre-create ``/tmp/lb-<uid>`` (or
+    replace it with a symlink). A directory that is not a real, private
+    directory owned by this user is skipped and the next numbered name is used;
+    the names are fixed so later commands find the same station.
+    """
+    return [_TMP_ROOT / f"lb-{uid}", *(_TMP_ROOT / f"lb-{uid}-{index}" for index in range(1, 5))]
+
+
+def _trusted_tmp_directory(directory: Path, uid: int) -> bool:
+    """Create ``directory`` (mode 0700) if absent; accept it only if it is ours and private."""
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return False
+    return _private_owned_directory(directory, uid)
+
+
+def _short_enough(socket: Path) -> bool:
+    # Keep below the conservative 100-byte sockaddr_un limit, including the
+    # sibling config filename used by the terminal backend.
+    return len(os.fsencode(str(socket.with_name(socket.name + ".conf")))) < 96
+
+
+def _private_owned_directory(directory: Path, uid: int) -> bool:
+    try:
+        info = directory.lstat()  # a symlink is never accepted, even to a directory we own
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == uid and not info.st_mode & 0o077
+
+
 def mission_socket_path(mission_id: str, *, env: dict[str, str] | None = None) -> Path:
     """Return a short, private tmux socket path stable across controller restarts.
 
     Unix-domain sockets have a small platform-dependent path limit. Durable
     Bridge state can live below a long XDG state path, so tmux sockets live in
     a separate user-private runtime directory and use a hash of the mission id.
+
+    An already existing socket for this mission is found in any candidate
+    directory (``$XDG_RUNTIME_DIR/llm-bridge``, ``/run/user/<uid>/llm-bridge``,
+    ``/tmp/lb-<uid>``) so a login with a different environment still reaches a
+    running station. Only when none exists is a creation directory chosen.
     """
     uid = os.getuid()
-    xdg_runtime = (os.environ if env is None else env).get("XDG_RUNTIME_DIR", "")
-    candidates = [Path(xdg_runtime) / "llm-bridge"] if xdg_runtime else []
-    candidates.append(Path("/tmp") / f"lb-{uid}")
+    lookup, creation = _socket_candidate_dirs(uid, env)
     digest = hashlib.sha256(mission_id.encode("utf-8")).hexdigest()[:20]
-    for directory in candidates:
+    for directory in lookup:
         socket = directory / f"m-{digest}.sock"
-        # Keep below the conservative 100-byte sockaddr_un limit, including
-        # the sibling config filename used by the terminal backend.
-        if len(os.fsencode(str(socket.with_name(socket.name + ".conf")))) >= 96:
+        if _short_enough(socket) and _private_owned_directory(directory, uid) and socket.exists():
+            return socket
+    for directory in creation:
+        socket = directory / f"m-{digest}.sock"
+        if not _short_enough(socket):
             continue
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = directory.stat()
+        if directory.parent == _TMP_ROOT:
+            if _trusted_tmp_directory(directory, uid):
+                return socket
+            continue
+        try:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = directory.stat()
+        except OSError:
+            continue
         if info.st_uid != uid or info.st_mode & 0o077:
-            if directory.parent == Path("/tmp"):
-                raise PermissionError(f"Bridge runtime socket directory must be private: {directory}")
             continue
         return socket
     raise OSError("could not create a short private runtime directory for the tmux socket")
@@ -1001,16 +1298,55 @@ def _proc_process_info(process_pid: int) -> dict[str, Any] | None:
         tail = raw[raw.rfind(")") + 2:].split()
         if len(tail) <= 19:
             return None
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        boot = boot_id()
         return {
             "pid": int(process_pid),
             "state": tail[0],
             "ppid": int(tail[1]),
             "pgid": int(tail[2]),
-            "start": f"{boot_id}:{tail[19]}" if boot_id else "",
+            "start": f"{boot}:{tail[19]}" if boot else "",
         }
     except (OSError, ValueError, IndexError):
         return None
+
+
+def _current_owned_tree(root_pid: int, root_start: str) -> dict[int, dict[str, Any]]:
+    """``_owned_process_tree`` for repeated polling: follows child lists instead of scanning all of ``/proc``.
+
+    Falls back to the scan when the kernel does not provide child lists or the
+    root is not a live process. A root whose start token changed is refused,
+    exactly as the scan refuses it.
+    """
+    root = _proc_process_info(root_pid)
+    if root is None or child_pids(root_pid) is None:
+        return _owned_process_tree(root_pid, root_start)
+    if root["start"] != root_start:
+        raise PermissionError("provider PID no longer matches its persisted process identity")
+    owned: dict[int, dict[str, Any]] = {root_pid: root}
+    pending = [root_pid]
+    while pending:
+        children = child_pids(pending.pop())
+        if children is None:
+            return _owned_process_tree(root_pid, root_start)
+        for child_pid in children:
+            if child_pid in owned:
+                continue
+            info = _proc_process_info(child_pid)
+            if info and info["start"]:
+                owned[child_pid] = info
+                pending.append(child_pid)
+    return owned
+
+
+def _process_group_absent(process_group: int) -> bool:
+    """True when no process, not even an unreaped zombie, belongs to the group (one syscall)."""
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _owned_process_tree(root_pid: int, root_start: str) -> dict[int, dict[str, Any]]:
@@ -1129,7 +1465,12 @@ def _process_alive_but_unverifiable(process_pid: int) -> bool:
 
 
 def _terminate_owned_process_group(process_pid: int, process_start: str, *, timeout: float = 2.0) -> None:
-    if process_pid < 2 or not process_start or _process_start_token(process_pid) != process_start:
+    if process_pid < 2 or not process_start:
+        raise PermissionError("refusing to signal a process whose persisted identity does not match")
+    current = _process_start_token(process_pid)
+    if current != process_start:
+        if not current and not _process_alive_but_unverifiable(process_pid):
+            return  # already exited (no /proc entry, or an unreaped zombie): nothing to signal
         raise PermissionError("refusing to signal a process whose persisted identity does not match")
     try:
         if os.getpgid(process_pid) != process_pid:
@@ -1142,23 +1483,23 @@ def _terminate_owned_process_group(process_pid: int, process_start: str, *, time
     _signal_owned_process_tree(owned, signal.SIGTERM)
     deadline = time.monotonic() + max(0.05, timeout)
     while time.monotonic() < deadline:
-        current = _owned_process_tree(process_pid, process_start)
+        current = _current_owned_tree(process_pid, process_start)
         owned.update(current)
         _signal_owned_process_tree(current, signal.SIGTERM)
-        if not _live_process_group_members(process_pid) and not _owned_process_records_alive(owned):
+        if (_process_group_absent(process_pid) or not _live_process_group_members(process_pid)) and not _owned_process_records_alive(owned):
             return
         time.sleep(0.05)
-    current = _owned_process_tree(process_pid, process_start)
+    current = _current_owned_tree(process_pid, process_start)
     owned.update(current)
     _signal_owned_process_tree(owned, signal.SIGKILL)
-    if not _live_process_group_members(process_pid) and not _owned_process_records_alive(owned):
+    if (_process_group_absent(process_pid) or not _live_process_group_members(process_pid)) and not _owned_process_records_alive(owned):
         return
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
-        current = _owned_process_tree(process_pid, process_start)
+        current = _current_owned_tree(process_pid, process_start)
         owned.update(current)
         _signal_owned_process_tree(owned, signal.SIGKILL)
-        if not _live_process_group_members(process_pid) and not _owned_process_records_alive(owned):
+        if (_process_group_absent(process_pid) or not _live_process_group_members(process_pid)) and not _owned_process_records_alive(owned):
             return
         time.sleep(0.05)
     raise TimeoutError(f"owned process tree rooted at {process_pid} did not exit after SIGKILL")
@@ -1237,6 +1578,122 @@ def _provider_station_argv(native_tui: bool, controller_log: Path) -> list[str]:
     return ["tail", "-n", "50", "-F", str(controller_log)]
 
 
+
+
+def _clean_line(text: Any, limit: int = 300) -> str:
+    line = " ".join(str(text).split())
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _last_logged_error(log_path: Path) -> str:
+    """The last ``error:`` line in the tail of the controller log, if the log has one yet."""
+    try:
+        sys.stderr.flush()
+        time.sleep(0.2)  # the log sink drains the controller's stderr pipe asynchronously
+        with log_path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 4096))
+            lines = stream.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    errors = [line.strip() for line in lines if line.strip().startswith("error:")]
+    return errors[-1][len("error:"):].strip() if errors else ""
+
+
+def controller_failure_reason(exc: BaseException, log_path: Path) -> str:
+    """One line saying why the controller failed."""
+    if isinstance(exc, SystemExit):
+        logged = _last_logged_error(log_path)
+        return _clean_line(logged or f"ralph-robin exited with status {exc.code}; see {log_path}")
+    text = str(exc).strip()
+    return _clean_line(text if text else type(exc).__name__)
+
+
+def record_controller_failure(store: BridgeStore, mission_id: str, reason: str) -> None:
+    """Persist why the controller failed so status and the station can show it."""
+    try:
+        store.record_runtime_event(mission_id, "controller-failed", {"reason": _clean_line(reason), "controller_pid": os.getpid()})
+    except (ValueError, TransitionError, OSError):
+        pass  # recording the reason must not mask the failure itself
+
+
+def rotation_problem(mission: dict[str, Any], providers: str, routes: str) -> str | None:
+    """Why this rotation can never launch under the mission's frozen config, or ``None``."""
+    from . import bridge_rotation
+
+    conf = bridge_rotation.parse_frozen(mission["config"].get("frozen_tool_config"))
+    return bridge_rotation.check_rotation(
+        bridge_rotation.frozen_enabled(conf), conf, providers, routes, config_label="", explicit=False,
+    )
+
+
+def station_detach_argv(mission_id: str) -> list[str]:
+    """Command the station's tmux server runs whenever a client detaches."""
+    package_root = str(Path(__file__).resolve().parent.parent)
+    return [
+        "env",
+        f"LLM_BRIDGE_STATE_DIR={default_state_dir()}",
+        "PYTHONPATH=" + os.pathsep.join(filter(None, (package_root, os.environ.get("PYTHONPATH", "")))),
+        *python_module_argv("llm_tools.bridge", "_station-gc", "--mission", mission_id, "--exclude-client", "{client}"),
+    ]
+
+
+def close_finished_station(
+    store: BridgeStore,
+    backend: TmuxTerminalBackend,
+    handle: TerminalHandle,
+    mission_id: str,
+    *,
+    exclude_clients: tuple[str, ...] = (),
+) -> str:
+    """Close the station of a finished mission once nobody is using it.
+
+    Returns ``closed``, ``not-finished``, ``provider-alive`` (a native provider
+    process still runs in its pane) or ``clients-attached``. A station that is
+    kept is closed later, when its last client detaches (see
+    ``station_detach_argv``).
+    """
+    mission = store.get_mission(mission_id)
+    if mission["status"] not in STATION_CLOSING_MISSION_STATUSES:
+        return "not-finished"
+    if mission["config"].get("native_tui") and backend.pane_runs_provider(handle):
+        return "provider-alive"
+    if backend.attached_clients(handle, exclude=exclude_clients):
+        return "clients-attached"
+    backend.stop(handle)
+    store.record_runtime_event(mission_id, "station-stopped", {"mission_status": mission["status"], "source": "finished-mission"})
+    return "closed"
+
+
+def gc_finished_station(mission_id: str, exclude_clients: tuple[str, ...] = ()) -> str:
+    """Close a finished mission's idle station from outside its controller."""
+    lock = _process_controller_lock(mission_id)
+    try:
+        lock.acquire()
+    except BlockingIOError:
+        return "controller-active"
+    try:
+        with BridgeStore(store_path()) as store:
+            if store.get_mission(mission_id)["status"] not in STATION_CLOSING_MISSION_STATUSES:
+                return "not-finished"
+            socket = mission_socket_path(mission_id)
+            if not socket.exists():
+                return "no-station"
+            backend = TmuxTerminalBackend()
+            try:
+                handle = backend.open_existing(socket, _session_name(mission_id))
+            except DeadStationError:
+                return "no-station"
+            return close_finished_station(store, backend, handle, mission_id, exclude_clients=exclude_clients)
+    finally:
+        lock.release()
+
+
+# Liveness probes in other processes briefly hold the lock; wait them out
+# before concluding that another controller owns the mission.
+_LOCK_STARTUP_WAIT_SECONDS = 0.5
+
+
 def _process_controller_lock(mission_id: str) -> MissionLock:
     return MissionLock(default_state_dir() / "locks", mission_id)
 
@@ -1245,14 +1702,60 @@ def _open_existing(backend: TmuxTerminalBackend, runtime: Path, mission_id: str)
     socket = mission_socket_path(mission_id)
     if not socket.exists():
         return None
-    return backend.open_existing(socket_path=socket, session_name=_session_name(mission_id), bridge_rows=6)
+    try:
+        return backend.open_existing(socket_path=socket, session_name=_session_name(mission_id), bridge_rows=6)
+    except DeadStationError:
+        # The previous station is gone and its dead socket has been removed.
+        return None
 
 
-def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool = False, providers: str = "", routes: str = "", startup_token: str = "") -> int:
+def station_server_environment(config: dict[str, Any]) -> dict[str, str]:
+    """Environment of the station's tmux server, and so of every pane it starts.
+
+    Credentials of providers this mission cannot use are removed, and so is the
+    Bridge package root from PYTHONPATH. Credentials of providers the mission may
+    rotate to stay: the launch script of each run removes the ones that belong
+    to the other providers.
+    """
+    from . import bridge_rotation
+
+    enabled = bridge_rotation.frozen_enabled(bridge_rotation.parse_frozen(config.get("frozen_tool_config"))).names
+    env = common.without_package_root(os.environ)
+    doomed = set(common.credential_variables_unused_by(env, enabled))
+    return {name: value for name, value in env.items() if name not in doomed}
+
+
+def ralph_argv(mission: dict[str, Any], runtime: Path, *, providers: str, routes: str) -> list[str]:
+    """The ralph-robin arguments for one mission controller.
+
+    Provider workspace-trust dialogs are acknowledged only for a mission created
+    with ``--trust-folder``; otherwise a run that stops at one is aborted.
+    """
+    config = mission.get("config") or {}
+    argv = [
+        "--prompt", mission["objective"],
+        "--cwd", mission["cwd"],
+        "--providers", providers,
+        "--max-iterations", "0",
+        "--max-duration", "0",
+        "--min-iteration-seconds", "0",
+        "--log-dir", str(runtime / "ralph-logs"),
+        "--state-file", str(runtime / "ralph-state.json"),
+        "--auto-confirm" if config.get("trust_folder") else "--no-auto-confirm",
+    ]
+    if routes:
+        argv.extend(["--routes", routes])
+    command_template = str(config.get("command_template", ""))
+    if command_template:
+        argv.extend(["--command-template", command_template])
+    return argv
+
+
+def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool = False, providers: str | None = None, routes: str | None = None, startup_token: str = "") -> int:
     """Own one mission until it is completed, stopped, or requires recovery."""
     lock = _process_controller_lock(mission_id)
     try:
-        lock.acquire()
+        lock.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
     except BlockingIOError:
         return 2
     runtime = _runtime_directory(mission_id)
@@ -1262,7 +1765,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
     except FileNotFoundError:
         pass
 
-    with lock, BridgeStore(default_state_dir() / "bridge.sqlite3") as store:
+    with lock, BridgeStore(store_path()) as store:
         mission = store.get_mission(mission_id)
         # Recovery must use the mode that owned the previous station. A new
         # explicit mode takes effect only after old owned resources are cleaned
@@ -1279,7 +1782,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             effective_headless, effective_native_tui = prior_headless, prior_native_tui
         headless, native_tui = effective_headless, effective_native_tui
         providers = str(providers or mission["config"].get("providers", "claude,codex,opencode"))
-        routes = str(routes or mission["config"].get("routes", ""))
+        routes = str(mission["config"].get("routes", "")) if routes is None else str(routes)
         interrupted = [
             dict(row)
             for row in store.db.execute(
@@ -1321,6 +1824,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                 )
         for command in store.pending_commands(mission_id):
             store.finish_command(command["id"], status="REJECTED", result={"error": "controller restarted; queued command was not replayed"})
+        store.release_declined_tasks(mission_id)
         mission = store.get_mission(mission_id)
         if mission["status"] in {"CREATED", "PAUSED", "STOPPED", "FAILED"}:
             store.set_mission_status(mission_id, "RUNNING")
@@ -1331,22 +1835,32 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             store.set_mission_status(mission_id, "STOPPED")
             _write_controller_ready(ready, startup_token, "STOPPED")
             return 0
-        elif mission["status"] in {"COMPLETED", "CANCELLED"}:
+        elif mission["status"] in FINISHED_MISSION_STATUSES:
             _write_controller_ready(ready, startup_token, mission["status"])
             return 0
 
+        # A start that names a different rotation changes the mission's saved
+        # rotation; record it so the Activity view shows the change.
+        store.set_rotation(mission_id, providers=providers, routes=routes, source="start")
         mission = store.set_mission_config_values(
             mission_id,
-            {"headless": headless, "native_tui": native_tui, "providers": providers, "routes": routes},
+            {"headless": headless, "native_tui": native_tui},
             event_kind="controller-config",
         )
         prior_headless = bool(mission["config"].get("headless", False))
 
         _install_frozen_tool_config(mission, runtime)
+        problem = rotation_problem(mission, providers, routes)
+        if problem:
+            record_controller_failure(store, mission_id, problem)
+            store.set_mission_status(mission_id, "FAILED")
+            print(f"controller failure: {problem}", file=sys.stderr, flush=True)
+            return 2
         backend: TmuxTerminalBackend | None = None
         handle: TerminalHandle | None = None
         if not headless:
             if not shutil.which("tmux"):
+                record_controller_failure(store, mission_id, "tmux is required for native mode; retry with --headless")
                 store.set_mission_status(mission_id, "FAILED")
                 raise RuntimeError("tmux is required for native mode; retry with --headless")
             backend = TmuxTerminalBackend()
@@ -1355,16 +1869,23 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                 controller_log = runtime / "controller.log"
                 controller_log.touch(mode=0o600, exist_ok=True)
                 os.chmod(controller_log, 0o600)
-                bridge_argv = [sys.executable, "-m", "llm_tools.bridge", "console", "--mission", mission_id]
+                bridge_argv = rooted_module_argv("llm_tools.bridge", "console", "--mission", mission_id)
                 handle = backend.start(
                     provider_argv=_provider_station_argv(native_tui, controller_log),
                     bridge_argv=bridge_argv,
+                    picker_argv=rooted_module_argv("llm_tools.bridge", "missions", "--pick", "--from", mission_id),
                     cwd=mission["cwd"],
                     socket_path=mission_socket_path(mission_id),
                     session_name=_session_name(mission_id),
                     size=(120, 40),
+                    server_env=station_server_environment(mission["config"]),
                 )
 
+        if backend is not None and handle is not None:
+            try:
+                backend.set_detach_command(handle, station_detach_argv(mission_id))
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass  # without the hook a finished station is closed by `llm-bridge stop`
         _write_controller_ready(ready, startup_token, "RUNNING", tmux=bool(handle))
         actual_mode = "native" if native_tui else "headless" if headless else "autonomous"
         store.record_runtime_event(mission_id, "controller-mode", {
@@ -1378,32 +1899,22 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             handoff_budget = max(2, len([item for item in configured_routes if item.strip()]) * 2)
             hooks = BridgeMissionHooks(mission_id, handle=handle, headless=headless, native_tui=native_tui, max_provider_failures=handoff_budget, controller_logs=runtime / "controller.log")
             hooks.bind(store)
+            hooks.applied_rotation = (providers, routes)
             refresh_worker = CapacityRefreshWorker(
                 mission_id,
-                default_state_dir() / "bridge.sqlite3",
+                store_path(),
                 interval_seconds=int(mission["config"].get("capacity_refresh_seconds", 60)),
             )
             refresh_worker.start()
-            argv = [
-                "--prompt", mission["objective"],
-                "--cwd", mission["cwd"],
-                "--providers", providers,
-                "--max-iterations", "0",
-                "--max-duration", "0",
-                "--min-iteration-seconds", "0",
-                "--log-dir", str(runtime / "ralph-logs"),
-                "--state-file", str(runtime / "ralph-state.json"),
-            ]
-            if routes:
-                argv.extend(["--routes", routes])
-            command_template = str(mission["config"].get("command_template", ""))
-            if command_template:
-                argv.extend(["--command-template", command_template])
+            argv = ralph_argv(mission, runtime, providers=providers, routes=routes)
+            from . import ralph_robin
+
             return ralph_robin.main(argv, bridge_hooks=hooks)
         except BaseException as exc:
             store.reconcile_interrupted_operations(mission_id)
             current = store.get_mission(mission_id)
-            if current["status"] in {"RUNNING", "PAUSED", "STOPPING"}:
+            if current["status"] in CONTROLLED_MISSION_STATUSES:
+                record_controller_failure(store, mission_id, controller_failure_reason(exc, runtime / "controller.log"))
                 store.set_mission_status(mission_id, "FAILED")
             print(f"controller failure: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             return int(exc.code) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
@@ -1424,10 +1935,31 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                 store.record_runtime_event(mission_id, "controller-exited-unexpectedly", {
                     "reason": "controller returned while the mission remained RUNNING",
                 })
+                record_controller_failure(store, mission_id, "the controller stopped while the mission was still running")
                 store.set_mission_status(mission_id, "FAILED")
                 current = store.get_mission(mission_id)
             if backend is not None and handle is not None and current["status"] in {"STOPPED", "CANCELLED"}:
                 backend.stop(handle)
+            elif backend is not None and handle is not None and current["status"] in {"COMPLETED", "FAILED"}:
+                # Close the finished mission's station unless someone is still
+                # attached; the client-detached hook closes it later.
+                try:
+                    close_finished_station(store, backend, handle, mission_id)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    pass
+
+
+def _recorded_failure(mission_id: str) -> str:
+    """`: <reason>` from the latest controller-failed event, or an empty string."""
+    try:
+        with BridgeStore(store_path()) as store:
+            row = store.db.execute(
+                "SELECT data_json FROM events WHERE mission_id=? AND kind='controller-failed' ORDER BY id DESC LIMIT 1", (mission_id,)
+            ).fetchone()
+        reason = json.loads(row[0]).get("reason") if row else None
+    except (OSError, ValueError, TypeError):
+        return ""
+    return f": {reason}" if reason else ""
 
 
 def launch_controller(
@@ -1441,7 +1973,7 @@ def launch_controller(
     """Start a detached mission owner, then attach the terminal if interactive."""
     if native_tui is True and headless is True:
         raise ValueError("--headless and --native cannot be combined")
-    with BridgeStore(default_state_dir() / "bridge.sqlite3") as store:
+    with BridgeStore(store_path()) as store:
         mission = store.get_mission(mission_id)
         saved_headless = bool(mission["config"].get("headless", False))
         saved_native = bool(mission["config"].get("native_tui", False))
@@ -1459,26 +1991,34 @@ def launch_controller(
         raise RuntimeError("tmux is required for native mode; retry with --headless")
     lock = _process_controller_lock(mission_id)
     try:
-        lock.acquire()
+        lock.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
     except BlockingIOError:
+        # A controller that is already running is holding a task after the operator
+        # declined the provider's trust prompt: starting again releases it.
+        with BridgeStore(store_path()) as store:
+            released = store.release_declined_tasks(mission_id)
+        if released:
+            label = ", ".join(str(ordinal) for ordinal in released)
+            print(f"mission {mission_id[:8]} · released task {label} · the provider starts again", file=sys.stderr)
+            return 0
         if not headless and sys.stdin.isatty() and sys.stdout.isatty():
             runtime = _runtime_directory(mission_id)
             backend = TmuxTerminalBackend()
             handle = _open_existing(backend, runtime, mission_id)
             if handle is not None:
                 return backend.attach(handle)
-        print(f"mission {mission_id} already has a controller; use attach or status", file=sys.stderr)
+        print(f"mission {mission_id[:8]} already has a controller; use: llm-bridge attach --mission {mission_id[:8]} or llm-bridge status --mission {mission_id[:8]}", file=sys.stderr)
         return 2
     lock.release()
 
-    with BridgeStore(default_state_dir() / "bridge.sqlite3") as store:
+    with BridgeStore(store_path()) as store:
         mission = store.get_mission(mission_id)
         if providers:
             providers_value = providers
         else:
             providers_value = str(mission["config"].get("providers", "claude,codex,opencode"))
-        if routes:
-            routes_value = routes
+        if routes is not None:
+            routes_value = routes  # an empty string is an explicit "no routes" for this start
         else:
             routes_value = str(mission["config"].get("routes", ""))
     runtime = _runtime_directory(mission_id)
@@ -1490,12 +2030,12 @@ def launch_controller(
         pass
     startup_token = secrets.token_hex(16)
     env = os.environ.copy()
+    env.pop("LLM_BRIDGE_MANAGED", None)  # a controller is the operator, never a managed provider
     env["LLM_BRIDGE_STATE_DIR"] = str(default_state_dir())
     package_root = str(Path(__file__).resolve().parent.parent)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (package_root, env.get("PYTHONPATH", ""))))
-    command = [sys.executable, "-m", "llm_tools.bridge", "_controller", "--mission", mission_id, "--providers", providers_value, "--startup-token", startup_token]
-    if routes_value:
-        command += ["--routes", routes_value]
+    command = python_module_argv("llm_tools.bridge", "_controller", "--mission", mission_id, "--providers", providers_value, "--startup-token", startup_token)
+    command += ["--routes", routes_value]
     if headless:
         command.append("--headless")
     if native_tui:
@@ -1514,16 +2054,24 @@ def launch_controller(
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
         if proc.poll() is not None:
-            raise RuntimeError(f"mission controller exited with status {proc.returncode}; inspect {log_path}")
+            raise RuntimeError(f"mission controller exited with status {proc.returncode}{_recorded_failure(mission_id)}; inspect {log_path}")
         time.sleep(0.05)
     else:
         raise RuntimeError(f"mission controller did not become ready; inspect {log_path}")
 
     if headless or not (sys.stdin.isatty() and sys.stdout.isatty()):
-        print(f"mission {mission_id} running; controller log: {log_path}")
+        if headless:
+            print(f"mission {mission_id[:8]} running without a terminal station · inspect with: llm-bridge status --mission {mission_id[:8]} · controller log: {log_path}")
+        else:
+            print(f"mission {mission_id[:8]} running · attach with: llm-bridge attach --mission {mission_id[:8]} · when the provider finishes, llm-bridge status --mission {mission_id[:8]} shows how to approve · controller log: {log_path}")
         return 0
     backend = TmuxTerminalBackend()
     handle = _open_existing(backend, runtime, mission_id)
     if handle is None:
+        with BridgeStore(store_path()) as store:
+            final = store.get_mission(mission_id)["status"]
+        if final in STATION_CLOSING_MISSION_STATUSES:
+            print(f"mission {mission_id[:8]} {final.lower()}; its station closed on its own · details: llm-bridge status --mission {mission_id[:8]}")
+            return 0
         raise RuntimeError(f"mission is running but its terminal station is unavailable; inspect {log_path}")
     return backend.attach(handle)

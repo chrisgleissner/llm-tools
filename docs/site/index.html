@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>llm-tools: run out of tokens, not momentum</title>
+<meta name="description" content="See every Claude Code, Codex and Copilot limit in one table. When one runs dry, the work moves to the next provider. Local, no telemetry, works over SSH.">
+<meta name="color-scheme" content="dark light">
+<link rel="canonical" href="https://chrisgleissner.github.io/llm-tools/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="llm-tools">
+<meta property="og:title" content="llm-tools: run out of tokens, not momentum">
+<meta property="og:description" content="See every Claude Code, Codex and Copilot limit in one table. When one runs dry, the work moves to the next provider. Local, no telemetry, works over SSH.">
+<meta property="og:url" content="https://chrisgleissner.github.io/llm-tools/">
+<meta property="og:image" content="https://chrisgleissner.github.io/llm-tools/assets/social-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="llm-tools: Run out of tokens, not momentum. A terminal shows llm-usage output with the 5-hour and weekly limits of Claude, Codex and Copilot, including the forecast that Claude will be empty in 1 hour 20 minutes.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="llm-tools: run out of tokens, not momentum">
+<meta name="twitter:description" content="See every Claude Code, Codex and Copilot limit in one table. When one runs dry, the work moves to the next provider. Local, no telemetry, works over SSH.">
+<meta name="twitter:image" content="https://chrisgleissner.github.io/llm-tools/assets/social-card.png">
+<meta name="theme-color" content="#090d12" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f8fa" media="(prefers-color-scheme: light)">
+<meta name="twitter:image:alt" content="llm-tools: Run out of tokens, not momentum. A terminal shows llm-usage output with the 5-hour and weekly limits of Claude, Codex and Copilot, including the forecast that Claude will be empty in 1 hour 20 minutes.">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "llm-tools",
+  "description": "Command-line tools that show the remaining limits of Claude Code, Codex and Copilot CLI, move a prompt to the next provider when one runs dry, and supervise longer missions with explicit approval.",
+  "url": "https://chrisgleissner.github.io/llm-tools/",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS",
+  "softwareRequirements": "Python 3.11 or newer; tmux for llm-bridge; a signed-in provider CLI",
+  "license": "https://www.apache.org/licenses/LICENSE-2.0",
+  "codeRepository": "https://github.com/chrisgleissner/llm-tools",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
+<script>
+/* Apply the saved or requested theme before first paint. Dark is the default. */
+(function () {
+  var d = document.documentElement;
+  d.className += " js";
+  var t = null;
+  try { t = new URLSearchParams(location.search).get("theme"); } catch (e) {}
+  if (t !== "dark" && t !== "light") {
+    try { t = localStorage.getItem("llm-tools-theme"); } catch (e) { t = null; }
+  }
+  if (t === "dark" || t === "light") { d.setAttribute("data-theme", t); }
+})();
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body id="top">
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="llm-tools, back to top"><span class="brand-chip" aria-hidden="true"></span>llm-tools</a>
+    <nav class="site-nav" aria-label="Primary">
+      <span class="links">
+        <a href="#limits">Limits</a>
+        <a href="#handoff">Hand-off</a>
+        <a href="#bridge">Bridge</a>
+        <a href="#control">Control</a>
+        <a href="#first-run">Install</a>
+      </span>
+      <button type="button" class="icon-btn theme-toggle" id="theme-toggle" aria-label="Switch to light theme" title="Switch to light theme">
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <a class="icon-btn" href="https://github.com/chrisgleissner/llm-tools" aria-label="llm-tools on GitHub">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.5 7.5 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span class="label">GitHub</span>
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+<!-- ============ Hero ============ -->
+<section class="hero" aria-labelledby="hero-title">
+  <div class="wrap">
+    <p class="eyebrow" aria-label="Works with"><span><i class="sq claude" aria-hidden="true"></i>Claude Code</span><span><i class="sq codex" aria-hidden="true"></i>Codex</span><span><i class="sq copilot" aria-hidden="true"></i>Copilot CLI</span></p>
+    <h1 id="hero-title">Run out of tokens, <span class="grad">not momentum.</span></h1>
+    <p class="lede">See every Claude Code, Codex and Copilot limit in one table. When one runs dry, the work moves to the next provider. Longer jobs run as missions you approve.</p>
+
+    <div class="install hero-install" data-tabs>
+      <div class="tablist" role="tablist" aria-label="Install method">
+        <button type="button" role="tab" id="tab-hero-pipx" aria-controls="panel-hero-pipx" aria-selected="true">pipx</button>
+        <button type="button" role="tab" id="tab-hero-src" aria-controls="panel-hero-src" aria-selected="false" tabindex="-1">From source</button>
+      </div>
+      <div role="tabpanel" id="panel-hero-pipx" aria-labelledby="tab-hero-pipx">
+        <p class="pl">pipx</p>
+        <div class="cmd"><code id="cmd-hero-pipx" class="wrap"><span class="prompt">$ </span><span class="cp first">pipx install</span> <span class="cp">git+https://github.com/<wbr>chrisgleissner/<wbr><span class="nb">llm-tools.git</span></span><span class="cp">@1.3.0</span></code><button type="button" class="copy" data-copy="cmd-hero-pipx" aria-label="Copy install command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+      </div>
+      <div role="tabpanel" id="panel-hero-src" aria-labelledby="tab-hero-src">
+        <p class="pl">From source</p>
+        <div class="cmd"><code id="cmd-hero-src" class="multi"><span class="ln"><span class="prompt">$ </span>git clone --branch 1.3.0 https://github.com/<wbr>chrisgleissner/<wbr><span class="nb">llm-tools.git</span></span><span class="ln"><span class="prompt">$ </span>cd llm-tools</span><span class="ln"><span class="prompt">$ </span>pipx install .</span></code><button type="button" class="copy" data-copy="cmd-hero-src" aria-label="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+      </div>
+    </div>
+    <p class="hero-note">Python 3.11+ &middot; Linux (full) &middot; macOS best effort &middot; <code>tmux</code> for Bridge<br>Local, no telemetry, works over SSH &middot; Apache-2.0</p>
+    <p class="hero-cta"><a class="btn" href="#first-run">Your first run in four steps</a></p>
+
+    <figure class="hero-visual">
+      <div class="win">
+        <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">terminal</span></div>
+        <div class="win-body">
+<pre class="only-wide" role="img" aria-label="Terminal. llm-usage shows Claude's 5-hour window at 0%, empty for 51 more minutes, and Codex's at 63%."><span class="c-dim">$</span> llm-usage
+Provider   Ready   Scope     Remaining         Guidance              Resets in 
+────────   ─────   ───────   ───────────────   ───────────────────   ──────────
+Claude     <span class="c-bad">no</span>      5h        <span class="c-bad">  0% ░░░░░░░░░░</span>   <span class="c-bad">× empty</span>               51m       
+                   weekly    <span class="c-ok"> 59% ██████░░░░</span>   <span class="c-warn">↓ conserve</span>            5d        
+
+Codex      yes     5h        <span class="c-ok"> 63% ██████░░░░</span>   <span class="c-info">✓ lasts until reset</span>   4h 30m    
+                   weekly    <span class="c-ok"> 34% ███░░░░░░░</span>   <span class="c-warn">↓ conserve</span>            4d 2h     </pre>
+<pre class="only-narrow" role="img" aria-label="Terminal. llm-usage shows Claude's 5-hour window at 0%, resetting in 51 minutes, and Codex's at 63%."><span class="c-dim">$</span> llm-usage
+Provider   Scope     Remaining         Resets in
+────────   ───────   ───────────────   ─────────
+Claude     5h        <span class="c-bad">  0% ░░░░░░░░░░</span>   51m      
+           weekly    <span class="c-ok"> 59% ██████░░░░</span>   5d       
+
+Codex      5h        <span class="c-ok"> 63% ██████░░░░</span>   4h 30m   
+           weekly    <span class="c-ok"> 34% ███░░░░░░░</span>   4d 2h    </pre>
+<pre class="flow" role="img" aria-label="Then ralph-robin reports claude rate-limited and codex usable, selects codex and relays three scripted lines from it."><span class="c-dim">$</span> ralph-robin --prompt-file task.md
+<span class="c-dim">[06:56:13] </span><span class="c-brand">◆ ralph-robin</span>: <span class="c-dim">·</span> usage <span class="c-claude">claude</span>: rate-limited (5h 0% left, weekly 59% left, until 2026-10-30 07:47:13 GMT) | <span class="c-codex">codex</span>: usable (5h 63% left, weekly 34% left)
+<span class="c-dim">[06:56:13] </span><span class="c-brand">◆ ralph-robin</span>: <span class="c-codex">✓</span> selected codex (advanced-to-usable)
+[06:56:13 codex] scripted codex: read task.md
+[06:56:14 codex] scripted codex: editing src/server.py
+[06:56:14 codex] scripted codex: tests pass, increment done
+<span class="c-dim">[06:56:14] </span><span class="c-brand">◆ ralph-robin</span>: <span class="c-codex">✓</span> completed 1 iteration(s); stopping (--max-iterations)</pre>
+        </div>
+      </div>
+      <figcaption class="hero-caption"><span>Real output from <code>llm-usage</code> and <code>ralph-robin</code>, on sample numbers and with a scripted provider.</span> <a href="#handoff">How the hand-off works</a></figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ See every limit ============ -->
+<section id="limits" aria-labelledby="limits-title">
+  <div class="wrap">
+    <div class="split has-head">
+      <div class="split-head">
+        <p class="kicker">llm-usage</p>
+        <h2 id="limits-title">See every limit in one table.</h2>
+        <p class="sub">Know before you start, not when it stops.</p>
+      </div>
+      <div class="split-body">
+        <ul class="points">
+          <li><b>One table for every provider.</b> Claude Code, Codex and Copilot, with their 5-hour, weekly and monthly limits, a bar for each and the time until it resets. Kilo, OpenCode, MiniMax and Z.ai show up when you use them.</li>
+          <li><b>A forecast, not only a number.</b> The Guidance column compares your recent burn rate with the reset time, for example <code>! empty in 1h 20m</code>. It appears after a few minutes of readings.</li>
+          <li><b>Fits your tooling.</b> <code>--json</code> for scripts, <code>--statusline</code> for Claude Code, a live view with <code>--watch</code>, and an optional background sampler (<code>--service-install</code>) that keeps burn-rate history.</li>
+        </ul>
+        <div class="cmd"><code id="cmd-usage"><span class="prompt">$ </span>llm-usage --watch 60</code><button type="button" class="copy" data-copy="cmd-usage" aria-label="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+        <p class="more"><a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-usage.md">llm-usage docs</a></p>
+      </div>
+      <figure class="win-fig">
+        <div class="win">
+          <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">llm-usage</span></div>
+          <div class="win-body">
+<pre class="only-wide" role="img" aria-label="llm-usage output. Claude: 5-hour window 40% left with the forecast empty in 1 hour 20 minutes, resetting in 2 hours 50 minutes; weekly 59% left. Codex: 5-hour 63% left, lasts until reset; weekly 34% left. Copilot: monthly 62% left.">Provider   Ready   Scope     Remaining         Guidance              Resets in 
+────────   ─────   ───────   ───────────────   ───────────────────   ──────────
+Claude     yes     5h        <span class="c-ok"> 40% ████░░░░░░</span>   <span class="c-warn">! empty in 1h 20m</span>     2h 50m    
+                   weekly    <span class="c-ok"> 59% ██████░░░░</span>   <span class="c-warn">↓ conserve</span>            5d        
+
+Codex      yes     5h        <span class="c-ok"> 63% ██████░░░░</span>   <span class="c-info">✓ lasts until reset</span>   4h 30m    
+                   weekly    <span class="c-ok"> 34% ███░░░░░░░</span>   <span class="c-warn">↓ conserve</span>            4d 2h     
+
+Copilot    yes     monthly   <span class="c-ok"> 62% ██████░░░░</span>   <span class="c-warn">↓ conserve</span>            29d 23h   </pre>
+<pre class="only-narrow" role="img" aria-label="llm-usage output, trimmed to four columns. Claude: 5-hour window 40% left, resets in 2 hours 50 minutes; weekly 59% left, resets in 5 days. Codex: 5-hour 63% left, weekly 34% left. Copilot: monthly 62% left.">Provider   Scope     Remaining         Resets in
+────────   ───────   ───────────────   ─────────
+Claude     5h        <span class="c-ok"> 40% ████░░░░░░</span>   2h 50m   
+           weekly    <span class="c-ok"> 59% ██████░░░░</span>   5d       
+
+Codex      5h        <span class="c-ok"> 63% ██████░░░░</span>   4h 30m   
+           weekly    <span class="c-ok"> 34% ███░░░░░░░</span>   4d 2h    
+
+Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</span>   29d 23h  </pre>
+          </div>
+        </div>
+        <figcaption class="shot-cap">Real <code>llm-usage</code> output on sample numbers (legend lines left out). On a narrow screen the Ready and Guidance columns are trimmed.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============ When one runs dry ============ -->
+<section id="handoff" class="band" aria-labelledby="handoff-title">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="kicker">ralph-robin</p>
+      <h2 id="handoff-title">When one runs dry, the work moves on.</h2>
+      <p><code>ralph-robin</code> runs your prompt in a loop. Before every step it re-reads the limits and picks a provider that still has room. If every provider is blocked, it waits for the earliest reset. <a href="#bridge">See the same hand-off inside a Bridge mission.</a></p>
+    </div>
+
+    <figure class="tl" aria-labelledby="tl-title">
+      <p class="tl-title" id="tl-title">One night, as an example</p>
+      <div class="tl-chart" role="img" aria-label="Timeline from 23:00 to 05:00. Claude Code works from 23:00 to 00:20, is blocked until 04:00, then works again. Codex works from 00:20 to 02:10, then is blocked. The machine is awake until 02:10, asleep until 04:00, then awake.">
+        <div class="tl-axis" aria-hidden="true"><span style="left:0">23:00</span><span class="alt" style="left:16.67%">00:00</span><span style="left:33.33%">01:00</span><span class="alt" style="left:50%">02:00</span><span style="left:66.67%">03:00</span><span class="alt" style="left:83.33%">04:00</span><span style="left:100%">05:00</span></div>
+        <div class="tl-row" aria-hidden="true"><span class="tl-name">Claude Code</span><div class="tl-track">
+          <i class="seg run claude" style="left:0;width:22.22%"><em>works</em></i><i class="seg block" style="left:22.22%;width:61.11%"><em>5-hour window empty</em></i><i class="seg run claude" style="left:83.33%;width:16.67%"><em>works</em></i></div></div>
+        <div class="tl-row" aria-hidden="true"><span class="tl-name">Codex</span><div class="tl-track">
+          <i class="seg run codex" style="left:22.22%;width:30.56%"><em>takes over</em></i><i class="seg block" style="left:52.78%;width:47.22%"><em>window empty</em></i></div></div>
+        <div class="tl-row" aria-hidden="true"><span class="tl-name">Machine</span><div class="tl-track">
+          <i class="seg awake" style="left:0;width:52.78%"></i><i class="seg asleep" style="left:52.78%;width:30.56%"><em>asleep</em></i><i class="seg awake" style="left:83.33%;width:16.67%"></i></div></div>
+        <div class="tl-marks" aria-hidden="true"><b style="left:0">1</b><b style="left:22.22%">2</b><b style="left:52.78%">3</b><b style="left:83.33%">4</b></div>
+      </div>
+      <ol class="tl-steps">
+        <li><b>23:00</b><span>You start <code>ralph-robin</code>. It reads every limit and picks a provider with room, here Claude Code.</span></li>
+        <li><b>00:20</b><span>Claude Code's 5-hour window reaches 0%. Before the next step, <code>ralph-robin</code> re-reads the limits and continues the same prompt on Codex.</span></li>
+        <li><b>02:10</b><span>Codex is empty too. <code>ralph-robin</code> arms a wake alarm for 04:00, the earliest reset, and suspends the machine.</span></li>
+        <li><b>04:00</b><span>The machine wakes. <code>ralph-robin</code> checks that it woke on time, re-reads the limits and continues on Claude Code.</span></li>
+      </ol>
+      <figcaption class="tl-note">Illustrative times. Suspend and wake need Linux with systemd; elsewhere <code>ralph-robin</code> waits with the machine awake.</figcaption>
+    </figure>
+
+    <ul class="points cols">
+          <li><b>It chooses by headroom.</b> By default it prefers the provider with the most room left against its weekly or monthly plan, so use is spread out and none runs dry first. You choose which providers are in the rotation (<code>--providers claude,codex</code>).</li>
+          <li><b>It never suspends without a wake alarm.</b> If it cannot arm one, it waits with the machine awake. It also stops your desktop's idle timer from suspending the machine mid-run.</li>
+          <li><b>Test the wake path first.</b> <code>llm-sleep-soak</code> suspends and wakes your machine repeatedly through the same code and reports late wakes and resume errors. It really suspends the machine.</li>
+          <li><b>Need a prompt to start exactly at a reset?</b> <code>llm-scheduler</code> waits for the real reset time and then launches it.</li>
+        </ul>
+    <div class="out-cmd">
+      <div class="cmd"><code id="cmd-ralph"><span class="prompt">$ </span>ralph-robin --prompt-file task.md</code><button type="button" class="copy" data-copy="cmd-ralph" aria-label="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+        <p class="more"><a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/ralph-robin.md">ralph-robin docs</a> <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-scheduler.md">llm-scheduler docs</a></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Bridge ============ -->
+<section id="bridge" aria-labelledby="bridge-title">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="kicker">LLM Bridge</p>
+      <h2 id="bridge-title">Plan it. Run it. Review it.</h2>
+      <p>For longer work, <code>llm-bridge</code> keeps missions. A mission is a goal and its task list, stored in a local database, so it survives a closed laptop, a dropped SSH session and a provider that hits its limit. You write the plan, the provider does the work in its own terminal, and nothing counts as done until you say so.</p>
+    </div>
+
+    <figure class="bridge-clip">
+      <div class="win bare only-dark">
+        <div class="hero-video-wrap">
+          <video muted loop playsinline controls preload="none" width="1108" height="708" data-poster="assets/demo-limits-dark.webp" data-poster-mobile="assets/demo-limits-mobile-dark.webp" aria-label="Recording with captions: Claude hits its 5-hour limit, and Bridge hands the same task to Codex, which finishes it for you to approve.">
+            <source src="assets/demo-limits-mobile-dark.mp4" type="video/mp4" media="(max-width: 600px)">
+            <source src="assets/demo-limits-mobile-dark.webm" type="video/webm" media="(max-width: 600px)">
+            <source src="assets/demo-limits-dark.mp4" type="video/mp4">
+            <source src="assets/demo-limits-dark.webm" type="video/webm">
+          </video>
+          <button type="button" class="play-overlay" aria-label="Play the limit hand-off clip"><span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 1v10l9-5z"/></svg></span></button>
+        </div>
+        <div class="vid-progress" aria-hidden="true"><span></span></div>
+      </div>
+      <div class="win bare only-light">
+        <div class="hero-video-wrap">
+          <video muted loop playsinline controls preload="none" width="1108" height="708" data-poster="assets/demo-limits-light.webp" data-poster-mobile="assets/demo-limits-mobile-light.webp" aria-label="Recording with captions: Claude hits its 5-hour limit, and Bridge hands the same task to Codex, which finishes it for you to approve.">
+            <source src="assets/demo-limits-mobile-light.mp4" type="video/mp4" media="(max-width: 600px)">
+            <source src="assets/demo-limits-mobile-light.webm" type="video/webm" media="(max-width: 600px)">
+            <source src="assets/demo-limits-light.mp4" type="video/mp4">
+            <source src="assets/demo-limits-light.webm" type="video/webm">
+          </video>
+          <button type="button" class="play-overlay" aria-label="Play the limit hand-off clip"><span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 1v10l9-5z"/></svg></span></button>
+        </div>
+        <div class="vid-progress" aria-hidden="true"><span></span></div>
+      </div>
+      <figcaption class="hero-caption"><span>Claude hits its 5-hour limit; Bridge hands the same task to Codex. Scripted providers, real Bridge.</span><button type="button" class="vid-toggle" id="vid-toggle" aria-label="Pause the demo"><svg viewBox="0 0 12 12" aria-hidden="true"><rect x="1.5" y="1" width="3" height="10" rx="1"/><rect x="7.5" y="1" width="3" height="10" rx="1"/></svg><span>Pause</span></button></figcaption>
+    </figure>
+
+    <div class="tabs bridge-tabs" data-tabs>
+      <div class="tabbar">
+      <div class="tablist" role="tablist" aria-label="Plan, run, review">
+        <button type="button" role="tab" id="tab-plan" aria-controls="panel-plan" aria-selected="true"><b>1</b>Plan</button>
+        <button type="button" role="tab" id="tab-run" aria-controls="panel-run" aria-selected="false" tabindex="-1"><b>2</b>Run</button>
+        <button type="button" role="tab" id="tab-review" aria-controls="panel-review" aria-selected="false" tabindex="-1"><b>3</b>Review</button>
+      </div>
+      <a class="demo-link" id="full-demo" href="assets/demo-dark.mp4" data-dark="assets/demo-dark.mp4" data-light="assets/demo-light.mp4">Watch the full 60-second run (scripted provider)</a>
+      </div>
+
+      <article class="step" role="tabpanel" id="panel-plan" aria-labelledby="tab-plan">
+        <div class="step-text">
+          <h3>Write the goal once.</h3>
+          <p>Add the follow-up tasks, with priorities and dependencies. Opening Bridge starts no provider. Keep several missions in different repositories and jump between them.</p>
+          <p class="step-keys"><span><code>llm-bridge</code> opens the home screen</span><span><kbd>N</kbd> creates a mission</span><span><kbd>Ctrl-]</kbd> <kbd>M</kbd> picks another mission</span></p>
+        </div>
+        <figure class="win-fig pan">
+          <div class="win only-dark">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">Bridge controls: Tasks</span></div>
+            <div class="win-body"><img src="assets/step-plan-dark-1x.png" srcset="assets/step-plan-dark-1x.png 700w, assets/step-plan-dark.png 1372w" sizes="(min-width: 861px) 700px, 560px" width="1372" height="544" loading="lazy" decoding="async"
+              alt="Tasks view of the Bridge controls for a mission whose first task is Add per-client rate limiting to the REST API. Three tasks are listed: one running, two queued. The selected task is previewed below with revision, acceptance criteria and prompt."></div>
+          </div>
+          <div class="win only-light">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">Bridge controls: Tasks</span></div>
+            <div class="win-body"><img src="assets/step-plan-light-1x.png" srcset="assets/step-plan-light-1x.png 700w, assets/step-plan-light.png 1372w" sizes="(min-width: 861px) 700px, 560px" width="1372" height="544" loading="lazy" decoding="async"
+              alt="Tasks view in a light terminal: three tasks, one running and two queued, with the selected task previewed below."></div>
+          </div>
+        </figure>
+      </article>
+
+      <article class="step" role="tabpanel" id="panel-run" aria-labelledby="tab-run">
+        <div class="step-text">
+          <h3>The provider keeps its own terminal.</h3>
+          <p>Claude Code, Codex or Copilot runs with its normal interface in a private tmux session. Paste, mouse and resize reach it. Bridge keeps one key, and the status line shows the way back.</p>
+          <p class="step-keys"><span><kbd>Ctrl-]</kbd> <kbd>B</kbd> Bridge controls</span><span><kbd>Ctrl-]</kbd> <kbd>P</kbd> back to the provider</span></p>
+        </div>
+        <figure class="win-fig pan">
+          <div class="win only-dark">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">provider terminal</span></div>
+            <div class="win-body"><img src="assets/step-run-dark-1x.png" srcset="assets/step-run-dark-1x.png 700w, assets/step-run-dark.png 1372w" sizes="(min-width: 861px) 700px, 560px" width="1372" height="928" loading="lazy" decoding="async"
+              alt="A provider session inside Bridge's private tmux session. The provider reads two files, writes a rate limiter, edits the server and starts the tests. The status line at the bottom reads Bridge: Ctrl-] then B, acme-api Task 1 RUNNING, Provider: Ctrl-] then P."></div>
+          </div>
+          <div class="win only-light">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">provider terminal</span></div>
+            <div class="win-body"><img src="assets/step-run-light-1x.png" srcset="assets/step-run-light-1x.png 700w, assets/step-run-light.png 1372w" sizes="(min-width: 861px) 700px, 560px" width="1372" height="928" loading="lazy" decoding="async"
+              alt="The same provider session in a light terminal, with the Bridge status line at the bottom."></div>
+          </div>
+        </figure>
+      </article>
+
+      <article class="step" role="tabpanel" id="panel-review" aria-labelledby="tab-review">
+        <div class="step-text">
+          <h3>A finished task waits for you.</h3>
+          <p>When the provider exits cleanly, the task moves to <code>VERIFYING</code> and appears under <em>Needs you</em>. Approve it, or send it back with a reason; the reason goes into the next attempt's prompt. The next paid run waits until you decide. A verifier command that you configure can check the task first.</p>
+          <p class="step-keys"><span><kbd class="slash">/approve</kbd> accept</span><span><kbd class="slash">/reject 2 needs tests</kbd> send back</span><span><kbd class="slash">/continue</kbd> start the next task now</span></p>
+        </div>
+        <figure class="win-fig pan">
+          <div class="win only-dark">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">Bridge controls: Overview</span></div>
+            <div class="win-body"><img src="assets/step-review-dark-1x.png" srcset="assets/step-review-dark-1x.png 700w, assets/step-review-dark.png 1372w" sizes="(min-width: 861px) 700px, 560px" width="1372" height="864" loading="lazy" decoding="async"
+              alt="Overview view of the Bridge controls. Task 2 is running and task 1 awaits your approval, with the hint to type /approve 1. Capacity shows the codex provider with 66% of its 5-hour window left and 81% of its weekly window left. The command line holds a typed /approve."></div>
+          </div>
+          <div class="win only-light">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">Bridge controls: Overview</span></div>
+            <div class="win-body"><img src="assets/step-review-light-1x.png" srcset="assets/step-review-light-1x.png 700w, assets/step-review-light.png 1372w" sizes="(min-width: 861px) 700px, 560px" width="1372" height="864" loading="lazy" decoding="async"
+              alt="Overview view in a light terminal: task 1 awaits your approval, capacity shows 66% of the 5-hour window left, and /approve is typed in the command line."></div>
+          </div>
+        </figure>
+      </article>
+    </div>
+
+    <ul class="feats" aria-label="More in Bridge">
+      <li><b>Many repositories, one picker.</b> <kbd>Ctrl-]</kbd> <kbd>M</kbd> lists every mission, live ones first. Each mission has its own colour, and one detach returns you where you started.</li>
+      <li><b>Finish cleanly.</b> <kbd class="slash">/finish</kbd> asks the provider to exit with its own command, so the task moves to review. Typing <code>/exit</code> in the provider does the same.</li>
+      <li><b>Change the rotation on the way.</b> <code>llm-bridge rotation --set claude,codex</code> applies from the next provider selection. Out of capacity everywhere, the mission waits and says when.</li>
+      <li><b>Light, dark and plain.</b> The theme follows your terminal; <code>llm-bridge theme</code> previews the others. <code>NO_COLOR</code> and ASCII under <code>LANG=C</code> work, and every state has a word as well as a colour.</li>
+      <li><b>Mouse wheel and paste.</b> The wheel scrolls and selects in the controls. Inside the provider, paste, wheel and resize go to the provider.</li>
+      <li><b>People and scripts.</b> Commands print readable text, and <code>--json</code> gives a stable machine-readable form. <code>llm-bridge doctor</code> checks tmux, storage and sign-ins offline and ends with your next step.</li>
+    </ul>
+    <p class="fine"><kbd>?</kbd> opens help in every view. <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/operations.md">Key reference and operations guide</a></p>
+  </div>
+</section>
+
+<!-- ============ Control ============ -->
+<section id="control" class="band" aria-labelledby="control-title">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="kicker">Built to be left alone</p>
+      <h2 id="control-title">Leave it running. Stay in charge.</h2>
+      <p>Agents that run unattended need a few guarantees. These are the ones <code>llm-tools</code> keeps.</p>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <h3>Missions outlive your session.</h3>
+        <p>Tasks, evidence and history live in a local SQLite database, and a native-mode provider runs in a private tmux session. A closed laptop, a dropped SSH session or a provider at its limit does not lose the plan. After a reboot, open the mission and type <code>resume</code>.</p>
+      </article>
+      <article class="card">
+        <h3>Nothing is accepted behind your back.</h3>
+        <p>A clean exit is not a finished task. It waits for <kbd class="slash">/approve</kbd>, or you send it back with <kbd class="slash">/reject</kbd> and a reason. The next paid run holds until you decide. If you configure a verifier, Bridge records a hash of its files when the mission is created and does not run a changed one without your approval.</p>
+      </article>
+      <article class="card">
+        <h3>Know the burn before it happens.</h3>
+        <p>The table forecasts when a limit will run out. <code>ralph-robin</code> spreads use across providers by remaining headroom, you choose the rotation, and when every provider is empty it sleeps until the earliest reset, never without a wake alarm.</p>
+      </article>
+      <article class="card">
+        <h3>No server, no account, no telemetry.</h3>
+        <p>Plain Python and tmux in your terminal, over SSH as well as locally. It uses the sign-ins your provider CLIs already hold and opens no network listener. Apache-2.0. Each person runs their own copy; there is no shared server or dashboard.</p>
+      </article>
+    </div>
+    <p class="fine"><a href="#privacy">What it reads, calls and writes</a> &middot; <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/operations.md#native-missions-hold-for-review">How the review hold works</a></p>
+  </div>
+</section>
+
+<!-- ============ First run ============ -->
+<section id="first-run" class="first-run" aria-labelledby="first-title">
+  <div class="wrap">
+    <div class="install-box">
+      <p class="kicker">Install</p>
+      <h2 id="first-title">From install to your first approved task.</h2>
+      <p class="req"><b>You need:</b> Python 3.11+ and <code>pipx</code>; at least one provider CLI that is installed and signed in (<code>claude</code>, <code>codex</code> or <code>copilot</code>); <code>tmux</code> for Bridge. Linux is fully supported, macOS is best effort. Prefer scripts? The same flow runs without a terminal: see the <a href="https://github.com/chrisgleissner/llm-tools#your-first-bridge-mission">README</a>.</p>
+
+      <ol class="run-steps">
+        <li>
+          <h3><span class="n">1</span>Install</h3>
+          <div class="install" data-tabs>
+            <div class="tablist" role="tablist" aria-label="Install method">
+              <button type="button" role="tab" id="tab-main-pipx" aria-controls="panel-main-pipx" aria-selected="true">pipx</button>
+              <button type="button" role="tab" id="tab-main-src" aria-controls="panel-main-src" aria-selected="false" tabindex="-1">From source</button>
+            </div>
+            <div role="tabpanel" id="panel-main-pipx" aria-labelledby="tab-main-pipx">
+              <p class="pl">pipx</p>
+              <div class="cmd"><code id="cmd-main-pipx" class="wrap"><span class="prompt">$ </span><span class="cp first">pipx install</span> <span class="cp">git+https://github.com/<wbr>chrisgleissner/<wbr><span class="nb">llm-tools.git</span></span><span class="cp">@1.3.0</span></code><button type="button" class="copy" data-copy="cmd-main-pipx" aria-label="Copy install command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+            </div>
+            <div role="tabpanel" id="panel-main-src" aria-labelledby="tab-main-src">
+              <p class="pl">From source</p>
+              <div class="cmd"><code id="cmd-main-src" class="multi"><span class="ln"><span class="prompt">$ </span>git clone --branch 1.3.0 https://github.com/<wbr>chrisgleissner/<wbr><span class="nb">llm-tools.git</span></span><span class="ln"><span class="prompt">$ </span>cd llm-tools</span><span class="ln"><span class="prompt">$ </span>pipx install .</span></code><button type="button" class="copy" data-copy="cmd-main-src" aria-label="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+            </div>
+          </div>
+        </li>
+        <li>
+          <h3><span class="n">2</span>Check your setup</h3>
+          <div class="cmd"><code id="cmd-n1"><span class="prompt">$ </span>llm-bridge doctor</code><button type="button" class="copy" data-copy="cmd-n1" aria-label="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+          <p>It reads local files only and starts no provider. It checks <code>tmux</code> and your provider sign-ins, and its last line, <code>Next</code>, says what to fix or what to do next.</p>
+        </li>
+        <li>
+          <h3><span class="n">3</span>Start a mission</h3>
+          <p>Use a folder you are happy for an agent to edit, such as a new empty git repository.</p>
+          <div class="cmd"><code id="cmd-n2" class="multi"><span class="ln"><span class="prompt">$ </span>cd your-project</span><span class="ln"><span class="prompt">$ </span>llm-bridge</span></code><button type="button" class="copy" data-copy="cmd-n2" aria-label="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
+          <p>Press <kbd>N</kbd> and type the task, for example <em>Create a file named hello.txt containing the word hello, then stop.</em> The form selects the first provider that is installed and signed in. Press <kbd>Tab</kbd> five times to reach <b>Start and open provider</b>, then <kbd>Enter</kbd>. This starts the provider and uses its capacity.</p>
+          <p>Claude Code first asks whether you trust the folder. Choose <b>Yes, I trust this folder</b>. The first option is <b>No, exit</b>: if you pick it, Claude exits and Bridge starts it again about a minute later, so you can choose Yes.</p>
+        </li>
+        <li>
+          <h3><span class="n">4</span>Finish and approve</h3>
+          <p>When the provider says it is done, exit it with its own command (<kbd class="slash">/exit</kbd> in Claude Code). Or press <kbd>Ctrl-]</kbd> then <kbd>B</kbd> and type <kbd class="slash">/finish</kbd>, and Bridge does it for you. Bridge then reports that task 1 is waiting for your review.</p>
+          <p>In the controls (<kbd>Ctrl-]</kbd> <kbd>B</kbd>), type <kbd class="slash">/approve</kbd>, press <kbd>Enter</kbd>, then <kbd>y</kbd> to confirm. The task shows <code>COMPLETED</code> and <code>hello.txt</code> is in your folder. Leave with <kbd>Ctrl-]</kbd> <kbd>D</kbd>, then <kbd>Ctrl-D</kbd>.</p>
+        </li>
+      </ol>
+      <p class="timing"><b>How long it takes.</b> In the recorded walk-through with Claude Code, <code>pipx install</code> took 13 seconds and <code>llm-bridge doctor</code> 0.1 seconds. From Start to a completed task took 31 seconds, about half of it spent typing and choosing. Your provider's own speed will differ.</p>
+      <p class="optional"><b>Optional: see all your limits.</b> Run <code>llm-usage</code>. It reads every installed provider at once. On the machine we measured, the first table appeared after about 3 seconds and slower providers filled in by 9 seconds. An installed background sampler makes later runs quick.</p>
+      <p class="req">Other install routes are in the <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/reference.md#install-paths">reference</a>, settings in <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/configuration.md">configuration</a>, and details in the <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/operations.md">Bridge operations guide</a>.</p>
+    </div>
+  </div>
+  <span id="copy-status" class="sr-only" role="status" aria-live="polite"></span>
+</section>
+
+<!-- ============ Built with itself ============ -->
+<section id="built" class="proof" aria-labelledby="proof-title">
+  <div class="wrap">
+    <div class="proof-box">
+      <div>
+        <p class="kicker">Built with itself</p>
+        <h2 id="proof-title">LLM Bridge helped build LLM Bridge.</h2>
+        <p class="proof-lede">During development it ran 12 provider sessions (9 Claude Code on Sonnet, 3 Codex) across two repositories, completing 9 missions and 10 approved tasks.</p>
+        <p class="proof-src">Counted from the author's local Bridge database on 30 October 2026.</p>
+        <a class="proof-link" href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/dogfood.md">Notes from an earlier mission, including what went wrong</a>
+      </div>
+      <ol class="facts">
+        <li>
+          <span class="fact-n" aria-hidden="true">01</span>
+          <p>Bridge's own provider-inactivity indicator, the <code>no output for 2m</code> line you see when a provider goes quiet, was implemented by Claude Code and Codex inside a Bridge mission.</p>
+        </li>
+        <li>
+          <span class="fact-n" aria-hidden="true">02</span>
+          <p>A mission rewrote the README and the pages behind it into a short tour with reference pages.</p>
+        </li>
+        <li>
+          <span class="fact-n" aria-hidden="true">03</span>
+          <p>A mission audited and fixed password handling in a second repository: <a href="https://github.com/chrisgleissner/c64bridge/pull/161">c64bridge PR #161</a>, which redacts the network password and config credentials.</p>
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Before you install ============ -->
+<section id="edges" class="band" aria-labelledby="edges-title">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="kicker">Know the limits</p>
+      <h2 id="edges-title">What it does, and what it does not.</h2>
+    </div>
+    <div class="edges">
+      <div class="edge">
+        <h3>It drives CLIs you already have.</h3>
+        <p>It is not a provider and not a proxy. It uses the sign-ins your provider CLIs already hold. Bridge starts each provider without the other providers' credential variables, but it does not sandbox a provider: providers run as you, in your project folder.</p>
+      </div>
+      <div class="edge">
+        <h3>Linux first, macOS best effort.</h3>
+        <p>Suspend and wake use systemd, so they are Linux only. Elsewhere the tools wait with the machine awake. Continuous integration runs on Linux.</p>
+      </div>
+      <div class="edge">
+        <h3>Resume is exact for Codex only.</h3>
+        <p>Exact session resume is verified for Codex. Claude Code and Copilot continue from rebuilt context. Providers run as you, so read the diff before you approve.</p>
+      </div>
+      <div class="edge">
+        <h3>Numbers can break.</h3>
+        <p>Usage endpoints are rate limited, and providers change their formats without notice. A figure that cannot be read shows as <code>unavailable</code> with a reason, never as a guess. After an HTTP 429 from Claude, readers share a cool-down of at least 60 seconds.</p>
+      </div>
+    </div>
+
+    <div class="privacy" id="privacy">
+      <h3>Privacy: what it reads, calls and writes</h3>
+      <dl>
+        <div><dt>Reads from disk</dt><dd>Claude Code's <code>~/.claude/.credentials.json</code> (to call the usage endpoint) and its project files under <code>~/.claude/projects</code> as a fallback. Codex's <code>~/.codex/auth.json</code> (checked for sign-in) and session files under <code>~/.codex/sessions</code>. For Copilot, a GitHub token from <code>COPILOT_GITHUB_TOKEN</code>, <code>GH_TOKEN</code>, <code>GITHUB_TOKEN</code> or <code>gh auth token</code>. If you configure z.ai, its key from Kilo's or OpenCode's auth file.</dd></div>
+        <div><dt>Calls</dt><dd><code>api.anthropic.com</code> for Claude usage and token refresh. <code>api.github.com</code> for Copilot quota and billing. Codex is queried through the Codex CLI itself (<code>codex app-server</code>). The z.ai quota endpoint, only if you use z.ai. Nothing is sent to any server of ours: there is none.</dd></div>
+        <div><dt>Writes</dt><dd>Caches and logs under <code>~/.cache/llm-tools</code> and Bridge's database under <code>~/.local/state/llm-tools</code>. One change outside them: before reading Copilot's footer it enables two status-line items in <code>~/.copilot/settings.json</code>. Set <code>LLM_USAGE_COPILOT_NO_SETTINGS_WRITE=1</code> to prevent that.</dd></div>
+        <div><dt>Never</dt><dd>No telemetry and no network listener. The optional usage sampler listens on a Unix socket owned by you; Bridge uses a local SQLite file and a private tmux socket. This page loads no scripts, fonts or analytics from other hosts; the badges at the bottom are images from GitHub and shields.io.</dd></div>
+      </dl>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section id="faq" aria-labelledby="faq-title">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="kicker">FAQ</p>
+      <h2 id="faq-title">Questions engineers ask first.</h2>
+    </div>
+    <div class="faq">
+      <details>
+        <summary>How is this different from usage readers or agent session managers?</summary>
+        <div class="answer">
+          <p>By capability, <code>llm-tools</code> does three things together. It reads the quota that remains, with a reset time and a forecast, rather than only the tokens you spent. It acts on that: it moves a prompt to another provider or waits for the reset. And for longer work, it keeps a task list with explicit approval in a local database while each provider keeps its own terminal.</p>
+          <p>If you need only one of these, a smaller tool may fit you better. Each part works on its own: you can use <code>llm-usage</code> and nothing else.</p>
+        </div>
+      </details>
+      <details>
+        <summary>What does it read from disk?</summary>
+        <div class="answer">
+          <p>Provider sign-in and session files, to find a token or a number: Claude Code's credentials and project files, Codex's <code>auth.json</code> and session files, and a GitHub token for Copilot. The full list, with what it calls and writes, is under <a href="#privacy">Privacy</a>. <code>llm-bridge doctor</code> checks sign-in files by reading local files only; it sends no request.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Will quota reads get my account flagged?</summary>
+        <div class="answer">
+          <p>It reads your own quota, with your own sign-in, from the quota endpoints that the provider CLIs use for the same information. It keeps the rate low: Claude readings are shared for up to 60 seconds, retries are bounded, and a 429 response starts a cool-down. Provider terms are the provider's to define and they can change, so read yours. To stop reading a provider, remove it from <code>[usage].providers</code> in the config.</p>
+        </div>
+      </details>
+      <details>
+        <summary>What happens when a provider changes its output?</summary>
+        <div class="answer">
+          <p>The affected row shows <code>unavailable</code> with a reason, for example <code>not-authenticated</code> or <code>rate-limited</code>, and the other providers keep working. <code>ralph-robin</code> does not treat an unreadable limit as proof of capacity: it waits a bounded time (15 minutes by default) and then tries that provider anyway, so one broken reader cannot stall a run. The fix is a new release.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Which providers work?</summary>
+        <div class="answer">
+          <p>Claude Code, Codex and Copilot CLI are first-class: <code>llm-usage</code> reads them and Bridge supervises them. Kilo Code and OpenCode work as configured routes (a named pairing of a CLI and a model), which is also how z.ai models are launched. MiniMax works only for runs without a terminal session. You do not need every CLI: a missing provider shows as unavailable and the rest keep working.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Will ralph-robin suspend my computer?</summary>
+        <div class="answer">
+          <p>Only when every provider in the rotation is blocked, and never without an armed wake alarm. It checks how far each wake lands from its target and falls back to waiting awake if it cannot arm one. Run <code>llm-sleep-soak</code> first to test your hardware.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Does it spend my capacity on its own?</summary>
+        <div class="answer">
+          <p>No. <code>llm-usage</code> only reads. Opening <code>llm-bridge</code> starts no provider; capacity is used when you choose <b>Start and open provider</b>, run <code>llm-bridge start</code>, or launch <code>ralph-robin</code> or <code>llm-scheduler</code>.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Is it for teams?</summary>
+        <div class="answer">
+          <p>It is a per-user tool. Missions, caches and sign-ins belong to your account, and there is no shared server or dashboard. It runs on a remote machine over SSH, and Apache-2.0 allows internal use. Each person needs their own provider sign-ins.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Is this an official billing dashboard?</summary>
+        <div class="answer">
+          <p>No. It uses local data and locally signed-in CLIs, and provider formats can change. Missing or inconclusive data is shown as unavailable rather than guessed.</p>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p class="badges">
+      <a href="https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml"><img src="https://github.com/chrisgleissner/llm-tools/actions/workflows/test.yml/badge.svg?branch=main" alt="Build status" width="90" height="20" loading="lazy"></a>
+      <a href="https://codecov.io/gh/chrisgleissner/llm-tools"><img src="https://codecov.io/gh/chrisgleissner/llm-tools/graph/badge.svg" alt="Code coverage" width="100" height="20" loading="lazy"></a>
+      <a href="https://github.com/chrisgleissner/llm-tools/releases"><img src="https://img.shields.io/github/v/release/chrisgleissner/llm-tools" alt="Latest release" width="100" height="20" loading="lazy"></a>
+      <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0" width="100" height="20" loading="lazy"></a>
+    </p>
+    <div class="footer-grid">
+      <div>
+        <p><strong>llm-tools</strong></p>
+        <p class="small">Apache License 2.0. No analytics on this page.</p>
+      </div>
+      <ul>
+        <li><a href="https://github.com/chrisgleissner/llm-tools">GitHub</a></li>
+        <li><a href="https://github.com/chrisgleissner/llm-tools#readme">README</a></li>
+        <li><a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/operations.md">Bridge operations</a></li>
+        <li><a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/colour-guide.md">Colour guide</a></li>
+        <li><a href="https://github.com/chrisgleissner/llm-tools/releases">Releases</a></li>
+        <li><a href="https://github.com/chrisgleissner/llm-tools/blob/main/LICENSE">Apache-2.0 licence</a></li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<dialog class="demo-dialog" id="demo-dialog" aria-label="Full LLM Bridge demo">
+  <div class="dialog-bar"><span>llm-bridge: full demo (scripted provider)</span><button type="button" data-close>Close</button></div>
+  <video controls playsinline preload="none" width="1128" height="648"></video>
+</dialog>
+
+<script src="site.js"></script>
+</body>
+</html>

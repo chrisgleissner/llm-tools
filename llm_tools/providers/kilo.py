@@ -329,6 +329,8 @@ def _kilo_source_label(
     parts: list[str] = []
     if saw_stats:
         parts.append("kilo stats + kilo db" if rendered_db_cost else "kilo stats")
+    elif rendered_db_cost:
+        parts.append("kilo db")
     if saw_env_overrides:
         parts.append("env")
     if not parts:
@@ -422,6 +424,35 @@ def _budget_from_env(env: dict[str, str]) -> tuple[float | None, float | None]:
     return budget, spent
 
 
+def _local_db_stats(
+    env: dict[str, str],
+    mode: str,
+    balance: float | None,
+    budget_total: float | None,
+) -> dict[str, Any] | None:
+    """Month-to-date spend straight from Kilo's local database, skipping the CLI.
+
+    ``kilo stats`` takes several seconds to start (a full Node/Bun runtime) and
+    its cost is replaced by this exact database sum whenever the database is
+    readable. When the row will be a plain spend row (no configured balance or
+    budget, gateway mode), the database answer is final, so the CLI is not
+    launched. The CLI prints costs with a ``$`` prefix; that symbol is used when
+    no currency is configured. Returns ``None`` to fall back to the CLI.
+    """
+    if mode in ("byok", "local", "ungated") or balance is not None:
+        return None
+    if budget_total is not None and budget_total > 0:
+        return None
+    if env.get("LLM_USAGE_KILO_MONTHLY_BUDGET") or env.get("LLM_USAGE_KILO_BALANCE"):
+        return None
+    if not kilo_cli(env):
+        return None
+    cost = _exact_kilo_mtd_cost(env)
+    if cost is None:
+        return None
+    return {"cost": cost, "currency": "$", "_exact_cost_from_db": True}
+
+
 def _scopes_for_mode(
     mode: str,
     *,
@@ -433,7 +464,11 @@ def _scopes_for_mode(
     env: dict[str, str],
 ) -> list[CapacityScope]:
     scopes: list[CapacityScope] = []
-    stats = _run_kilo_stats(env)
+    stats = _local_db_stats(env, mode, balance, budget_total)
+    cli_skipped = stats is not None
+    if stats is None:
+        stats = _run_kilo_stats(env)
+    saw_stats = stats is not None and not cli_skipped
     has_env_overrides = any(
         env.get(k)
         for k in (
@@ -468,7 +503,7 @@ def _scopes_for_mode(
             )
         )
         source = _kilo_source_label(
-            saw_stats=stats is not None,
+            saw_stats=saw_stats,
             saw_env_overrides=has_env_overrides,
             rendered_db_cost=False,
         )
@@ -534,7 +569,7 @@ def _scopes_for_mode(
         )
 
     source = _kilo_source_label(
-        saw_stats=stats is not None,
+        saw_stats=saw_stats,
         saw_env_overrides=has_env_overrides,
         rendered_db_cost=rendered_db_cost,
     )

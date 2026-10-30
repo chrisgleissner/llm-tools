@@ -8,18 +8,26 @@ import sys
 import pytest
 
 from llm_tools.bridge_tui import _station_status_context
-from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend
+from llm_tools.terminal import STATUS_CONTEXT_FORMAT, TerminalHandle, TmuxTerminalBackend
 
 
 def test_station_context_reports_current_task_and_mission_state() -> None:
     assert _station_status_context({
         "mission": {"status": "PAUSED"},
         "current_task": {"id": 17, "status": "RUNNING", "title": "ignored from compact line"},
-    }) == "Task 17 RUNNING / Mission PAUSED"
+    }) == "Task 17 RUNNING · PAUSED"
 
 
 def test_station_context_reports_no_current_task() -> None:
-    assert _station_status_context({"mission": {"status": "COMPLETED"}}) == "No active task / Mission COMPLETED"
+    assert _station_status_context({"mission": {"status": "COMPLETED"}}) == "No task · COMPLETED"
+
+
+def test_station_context_is_short_when_mission_is_running() -> None:
+    running = {"mission": {"status": "RUNNING"}, "current_task": {"id": 1, "status": "RUNNING"}}
+    assert _station_status_context(running) == "Task 1 RUNNING"
+    assert _station_status_context({"mission": {"status": "RUNNING"}}) == "No task · RUNNING"
+    assert _station_status_context({}) == "No task"
+    assert _station_status_context({**running, "mission": {"status": "STOPPING"}}) == "Task 1 RUNNING · STOPPING"
 
 
 def test_status_context_is_sanitized_and_written_to_owned_server(monkeypatch) -> None:
@@ -56,6 +64,6 @@ def test_status_context_appears_in_real_station_window_label(tmp_path) -> None:
         status_format = backend._run(handle.socket_path, "show-options", "-gv", "window-status-current-format",
                                      capture=True).stdout.strip()
         assert rendered == "Task 7 VERIFYING / Mission PAUSED"
-        assert status_format == "#{@llm_bridge_context}"
+        assert status_format == STATUS_CONTEXT_FORMAT
     finally:
         backend.stop(handle)

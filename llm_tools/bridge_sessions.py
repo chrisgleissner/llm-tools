@@ -18,6 +18,8 @@ import stat
 from typing import Any, Mapping
 import uuid
 
+from .fileio import open_regular_file
+
 
 @dataclass(frozen=True)
 class NativeSessionIdentity:
@@ -49,7 +51,7 @@ class _Capability:
 
 
 _UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
-_OPAQUE_ID = re.compile(r"[A-Za-z0-9_-]{8,128}\Z")
+_OPAQUE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{7,127}\Z")  # a leading dash would be read as an option by the provider CLI
 _SESSION_SOURCES = {
     "codex": frozenset({"codex:session_meta"}),
     "claude": frozenset({"claude:system.init", "claude:transcript"}),
@@ -222,7 +224,7 @@ def codex_session_records(
                 continue
             if baseline is not None and info.st_mtime_ns <= previous_mtime:
                 continue
-            with path.open("rb") as stream:
+            with open_regular_file(path, follow_symlinks=False) as stream:
                 first_line = stream.readline(65537)
             if len(first_line) > 65536 or not first_line.strip():
                 continue
@@ -237,6 +239,45 @@ def codex_session_records(
     return records
 
 
+_BOOT_ID = ""
+
+
+def boot_id() -> str:
+    """This boot's ID, read once: it cannot change while the machine is up."""
+    global _BOOT_ID
+    if not _BOOT_ID:
+        _BOOT_ID = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    return _BOOT_ID
+
+
+def child_pids(process_pid: int) -> list[int] | None:
+    """Direct children of a process from ``/proc/<pid>/task/*/children``, or ``None`` when unavailable.
+
+    Following children touches only the processes in one tree, where scanning
+    ``/proc`` reads every process on the machine. The files exist when the
+    kernel is built with ``CONFIG_PROC_CHILDREN``; callers fall back to a scan
+    when this returns ``None``.
+    """
+    children: list[int] = []
+    task_dir = f"/proc/{int(process_pid)}/task"
+    try:
+        threads = os.listdir(task_dir)
+    except FileNotFoundError:
+        return []  # the process is gone: it has no children
+    except OSError:
+        return None
+    for thread in threads:
+        try:
+            text = Path(f"{task_dir}/{thread}/children").read_text(encoding="ascii")
+            children.extend(int(word) for word in text.split())
+        except FileNotFoundError:
+            if Path(f"{task_dir}/{thread}").exists():
+                return None  # the thread is alive but the kernel has no child lists
+        except (OSError, ValueError):
+            return None
+    return children
+
+
 def _proc_stat(process_pid: int) -> tuple[str, int, int, str] | None:
     """Return state, parent pid, process group and boot-scoped start token."""
     try:
@@ -244,16 +285,48 @@ def _proc_stat(process_pid: int) -> tuple[str, int, int, str] | None:
         fields = raw[raw.rfind(")") + 2:].split()
         if len(fields) <= 19:
             return None
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-        if not boot_id:
+        boot = boot_id()
+        if not boot:
             return None
-        return fields[0], int(fields[1]), int(fields[2]), f"{boot_id}:{fields[19]}"
+        return fields[0], int(fields[1]), int(fields[2]), f"{boot}:{fields[19]}"
     except (OSError, ValueError, IndexError):
         return None
 
 
+def _owned_processes_by_children(process_pid: int, start_token: str) -> dict[int, str] | None:
+    """The process and its descendants found by following child lists, or ``None`` to scan ``/proc`` instead.
+
+    An empty result means the root is gone or no longer matches ``start_token``.
+    """
+    root = _proc_stat(process_pid)
+    if root is None:
+        return None
+    if root[3] != start_token:
+        return {}
+    if child_pids(process_pid) is None:
+        return None
+    owned: dict[int, str] = {process_pid: start_token}
+    pending = [process_pid]
+    while pending:
+        parent = pending.pop()
+        children = child_pids(parent)
+        if children is None:
+            return None
+        for child in children:
+            if child in owned:
+                continue
+            parsed = _proc_stat(child)
+            if parsed is not None:
+                owned[child] = parsed[3]
+                pending.append(child)
+    return owned
+
+
 def _owned_processes(process_pid: int, start_token: str) -> dict[int, str] | None:
     """Bound inspection to exact live PID ancestry, including new sessions."""
+    tree = _owned_processes_by_children(process_pid, start_token)
+    if tree is not None:
+        return tree or None
     try:
         entries = os.scandir("/proc")
     except OSError:
@@ -354,11 +427,11 @@ def discover_owned_codex_session(
                         # Opening the proc descriptor binds reads to the exact
                         # live FD. For write-only provider FDs, fall back to
                         # the link target only after verifying device/inode.
-                        read_fd = os.open(proc_fd, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                        read_fd = os.open(proc_fd, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
                     except OSError:
-                        read_fd = os.open(link, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                        read_fd = os.open(link, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
                     opened = os.fstat(read_fd)
-                    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
                         os.close(read_fd)
                         continue
                     try:
@@ -440,7 +513,7 @@ def provider_session_metadata(
         info = path.stat(follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or path.is_symlink():
             return None
-        with path.open("rb") as stream:
+        with open_regular_file(path, follow_symlinks=False) as stream:
             for _ in range(256):
                 line = stream.readline(65537)
                 if not line:

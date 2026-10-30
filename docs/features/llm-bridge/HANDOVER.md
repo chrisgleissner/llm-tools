@@ -41,7 +41,7 @@ All historical checkpoints below are superseded by this CURRENT section.
 
 ## Previous 1.1.0 publication checkpoint — 2026-10-27
 
-Repository `/home/chris/dev/llm-tools`, branch `feat/llm-bridge`, PR26:
+Repository `~/dev/llm-tools`, branch `feat/llm-bridge`, PR26:
 https://github.com/chrisgleissner/llm-tools/pull/26. This checkpoint extends
 `41cff55`; use `git log -1` for its resulting commit. All existing changes are
 preserved, including the original `prompt.md`. The user authorizes push/PR
@@ -93,7 +93,7 @@ All historical records below are superseded by this CURRENT section.
 
 ## Previous publication checkpoint — 2026-10-27
 
-Resume the existing implementation in `/home/chris/dev/llm-tools`, branch
+Resume the existing implementation in `~/dev/llm-tools`, branch
 `feat/llm-bridge`, draft PR https://github.com/chrisgleissner/llm-tools/pull/26.
 The user explicitly requested this handover and a push of ALL current changes.
 This checkpoint extends parent `37cbc2b35ed8a0d2af5e4f8ed352c700f3cf5951`;
@@ -288,7 +288,7 @@ Updated 2026-10-25. Implementation is NOT complete. Preserve adjacent user-owned
 
 ## Objective and decisions
 
-Complete production `llm-bridge` in `/home/chris/dev/llm-tools` while preserving
+Complete production `llm-bridge` in `~/dev/llm-tools` while preserving
 existing tools. Continue current work; do not repeat M0 investigation.
 Architecture: stdlib SQLite WAL/FULL, private tmux PTYs, durable Bridge
 tasks/commands/evidence; Ralph retains iteration/selection/suspend, scheduler
@@ -350,8 +350,8 @@ Unfinished execution/recovery gate (check latest review dispositions):
 ## Verification and exact resume procedure
 
 ```bash
-cd /home/chris/dev/llm-tools
-/home/chris/.agents/skills/agent-bridge/scripts/bridge inbox codex
+cd ~/dev/llm-tools
+~/.agents/skills/agent-bridge/scripts/bridge inbox codex
 git status --short
 git log -6 --oneline
 cat docs/features/llm-bridge/HANDOVER.md

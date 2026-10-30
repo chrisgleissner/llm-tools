@@ -15,6 +15,7 @@ import time
 from llm_tools.bridge_store import BridgeStore, MissionLock
 from llm_tools.bridge_runtime import mission_socket_path
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import scaled, wait_for as _shared_wait_for
 
 
 def call(env: dict[str, str], *args: object) -> str:
@@ -23,19 +24,14 @@ def call(env: dict[str, str], *args: object) -> str:
         env=env,
         text=True,
         capture_output=True,
-        timeout=20,
+        timeout=scaled(20),
     )
     assert result.returncode == 0, result.stderr + result.stdout
     return result.stdout
 
 
-def wait_for(predicate, timeout: float = 15) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.05)
-    assert predicate(), "Bridge recovery condition was not reached"
+def wait_for(predicate, timeout: float = 15):
+    return _shared_wait_for(predicate, timeout, 0.05, message="Bridge recovery condition was not reached")
 
 
 def controller_released(state: Path, mission_id: str) -> bool:
@@ -225,5 +221,20 @@ def test_resume_reconciles_native_mutator_and_stops_old_station(tmp_path: Path, 
                 os.kill(provider_pid, signal.SIGTERM)
             except (ProcessLookupError, ValueError):
                 pass
+        # `resume` starts a fresh controller that idles on the RUNNING mission;
+        # stop it so each run does not leak a live controller process.
+        ready_path = runtime / "controller-ready.json"
+        if ready_path.exists():
+            try:
+                resumed_pid = int(json.loads(ready_path.read_text(encoding="utf-8"))["pid"])
+            except (OSError, ValueError, KeyError, TypeError):
+                resumed_pid = -1
+            if resumed_pid > 1 and _pid_alive(resumed_pid):
+                os.kill(resumed_pid, signal.SIGTERM)
+                deadline = time.monotonic() + 10
+                while _pid_alive(resumed_pid) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if _pid_alive(resumed_pid):
+                    os.kill(resumed_pid, signal.SIGKILL)
         if old_handle is not None:
             backend.stop(old_handle)

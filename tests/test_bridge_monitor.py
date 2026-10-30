@@ -16,14 +16,14 @@ def test_projection_paginates_tasks_and_search_without_loading_full_queue(tmp_pa
     for index in range(120):
         store.add_task(mission["id"], f"task body {index}", title=f"Task {index:03}")
     calls = 0
-    original = store._task_dict
+    original = store._task_dicts
 
-    def counted(row):
+    def counted(rows):
         nonlocal calls
-        calls += 1
-        return original(row)
+        calls += len(rows)
+        return original(rows)
 
-    store._task_dict = counted
+    store._task_dicts = counted
     page = project_snapshot(store, mission["id"], task_limit=7, task_offset=21)
     assert [task["title"] for task in page["tasks"]] == [f"Task {index:03}" for index in range(21, 28)]
     assert page["task_total"] == 120
@@ -354,3 +354,48 @@ def test_mission_log_pages_older_events_without_changing_current_capacity(tmp_pa
         assert older['events'][-1]['id'] < newest['events'][0]['id']
         assert older['capacity']['selection'] == newest['capacity']['selection']
         assert older['event_page']['offset'] == 20
+
+
+HEARTBEATS = 30_000
+
+
+def test_operator_events_skip_controller_plumbing_and_stay_fast_with_many_heartbeats(tmp_path) -> None:
+    from llm_tools.bridge_monitor import PLUMBING_EVENT_KINDS, latest_operator_events
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission_id = store.create_mission("busy", "objective", cwd=tmp_path, initial_prompt="work")["id"]
+    for index in range(25):
+        store.record_runtime_event(mission_id, "task-status" if index % 2 else "provider-selection", {"n": index})
+    store.record_runtime_event(mission_id, "brand-new-kind", {"n": 99})
+    plumbing = sorted(PLUMBING_EVENT_KINDS)
+    store.db.executemany(
+        "INSERT INTO events(mission_id,task_id,operation_id,kind,data_json,created_at) VALUES(?,?,?,?,?,?)",
+        [(mission_id, None, None, plumbing[index % len(plumbing)], "{}", "2026-01-01T00:00:00Z") for index in range(HEARTBEATS)],
+    )
+    store.db.commit()
+
+    # Bound the work, not the wall clock: SQLite counts virtual-machine steps, so the
+    # limit does not move with host load. Scanning every heartbeat row needs at least
+    # several steps per row, far above the bound; the indexed lookups need a few hundred.
+    steps = [0]
+
+    def count_steps() -> int:
+        steps[0] += 1000
+        return 0
+
+    store.db.set_progress_handler(count_steps, 1000)
+    try:
+        snapshot = project_snapshot(store, mission_id)
+    finally:
+        store.db.set_progress_handler(None, 0)
+    recent = snapshot["operator_events"]
+    assert len(recent) == 20 and not PLUMBING_EVENT_KINDS & {event["kind"] for event in recent}
+    assert [event["id"] for event in recent] == sorted(event["id"] for event in recent)
+    assert recent[-1]["kind"] == "brand-new-kind" and recent[-1]["data"] == {"n": 99}
+    assert all(event["kind"] in PLUMBING_EVENT_KINDS for event in snapshot["events"]), "events stays the unfiltered latest 20 for compatibility"
+    assert steps[0] < HEARTBEATS, f"snapshot ran ~{steps[0]} SQLite steps with {HEARTBEATS} heartbeats; it must not scan them"
+    pinned = latest_operator_events(store, mission_id, anchor=recent[0]["id"])
+    assert pinned[-1]["id"] == recent[0]["id"]
+    plan = " ".join(str(row[3]) for row in store.db.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM events INDEXED BY events_mission_kind_id WHERE mission_id=? AND kind=? ORDER BY id DESC LIMIT 20", (mission_id, "task-status")))
+    assert "events_mission_kind_id" in plan and "TEMP B-TREE" not in plan

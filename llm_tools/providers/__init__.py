@@ -50,7 +50,6 @@ from .kilo import (
 from .minimax import (
     PROVIDER_MINIMAX,
     minimax_cli,
-    minimax_command_argv,
     minimax_model,
     read_minimax,
 )
@@ -110,7 +109,6 @@ __all__ = [
     "kilo_monthly_reset_epoch",
     "minimax",
     "minimax_cli",
-    "minimax_command_argv",
     "minimax_model",
     "opencode",
     "opencode_cli",

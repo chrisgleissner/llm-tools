@@ -22,6 +22,7 @@ from llm_tools.bridge_runtime import BridgeMissionHooks, terminate_managed_proce
 from llm_tools.bridge_runtime import _provider_station_argv, _process_start_token, _terminate_owned_process_group, launch_controller, mission_socket_path, run_controller
 from llm_tools.bridge_store import BridgeStore, MissionLock, TransitionError
 from llm_tools.terminal import TerminalHandle
+from tests.conftest import scaled
 
 
 def test_pause_command_reports_active_provider_work_is_deferred(tmp_path, monkeypatch) -> None:
@@ -203,7 +204,7 @@ def test_managed_process_recovery_does_not_signal_reused_pid(tmp_path, monkeypat
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
 
 
 def test_managed_process_recovery_skips_a_process_already_marked_exited(tmp_path, monkeypatch) -> None:
@@ -229,7 +230,7 @@ def test_managed_process_recovery_skips_a_process_already_marked_exited(tmp_path
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
 
 
 def test_frozen_config_install_is_private_and_sets_child_config_path(tmp_path, monkeypatch) -> None:
@@ -334,11 +335,11 @@ def test_owned_process_group_escalates_when_provider_ignores_sigterm(tmp_path) -
         assert token
 
         _terminate_owned_process_group(process.pid, token, timeout=0.05)
-        assert process.wait(timeout=2) < 0
+        assert process.wait(timeout=scaled(2)) < 0
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
 
 
 def test_owned_process_group_refuses_to_claim_success_after_bounded_kill_timeout(monkeypatch) -> None:
@@ -959,6 +960,7 @@ def test_controller_cleans_owned_station_when_ralph_already_committed_stopped(tm
         def start(self, **_kwargs): return handle
         def open_existing(self, **_kwargs): return None
         def stop(self, actual): stopped.append(actual)
+        def set_detach_command(self, *_args): pass
 
     monkeypatch.setattr("llm_tools.bridge_runtime.shutil.which", lambda name: "/usr/bin/tmux" if name == "tmux" else None)
     monkeypatch.setattr("llm_tools.bridge_runtime.TmuxTerminalBackend", Backend)
@@ -998,14 +1000,14 @@ def test_recovery_terminates_a_persisted_verifier_by_start_token(tmp_path) -> No
 
         terminate_managed_processes(store, mission["id"])
 
-        assert process.wait(timeout=2) < 0
+        assert process.wait(timeout=scaled(2)) < 0
         managed = store.get_managed_process(process_id)
         assert managed["status"] == "TERMINATED"
         assert managed["process_start"] == token
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
 
 
 def test_controller_restart_rejects_queued_command_without_replaying_its_effect(tmp_path, monkeypatch) -> None:
@@ -1050,7 +1052,7 @@ def test_headless_restart_marks_provider_operation_uncertain_and_kills_verified_
         def exit_after_recovery(_argv, *, bridge_hooks):
             assert store.get_operation(operation_id)["status"] == "UNCERTAIN"
             assert store.get_task(task_id)["status"] == "BLOCKED"
-            assert process.wait(timeout=2) < 0
+            assert process.wait(timeout=scaled(2)) < 0
             store.set_mission_status(mission["id"], "STOPPING")
             return 0
 
@@ -1061,7 +1063,7 @@ def test_headless_restart_marks_provider_operation_uncertain_and_kills_verified_
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
 
 
 def test_headless_restart_refuses_running_operation_without_identity(tmp_path, monkeypatch) -> None:
@@ -1110,7 +1112,7 @@ def test_headless_restart_refuses_reused_provider_pid_without_signalling(tmp_pat
     finally:
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
 
 
 @pytest.mark.parametrize(
@@ -1300,6 +1302,8 @@ def test_controller_tears_down_station_before_marking_mission_stopped(tmp_path, 
             config_path.write_text("owned station config", encoding="ascii")
             return TerminalHandle(socket_path, config_path, kwargs["session_name"], "%0", "%1", 6)
 
+        def set_detach_command(self, *_args): pass
+
         def open_existing(self, socket_path, session_name, *, bridge_rows=6):
             socket_path = Path(socket_path)
             if not socket_path.exists():
@@ -1397,7 +1401,7 @@ def test_controller_recovery_terminates_unresolved_verifier_without_completing_t
 
     try:
         assert run_controller(mission["id"], headless=True) == 0
-        process.wait(timeout=4)
+        process.wait(timeout=scaled(4))
         assert store.get_managed_process(managed_id)["status"] == "TERMINATED"
         assert store.get_mission(mission["id"])["status"] == "FAILED"
         task = store.get_task(task_id)
@@ -1406,7 +1410,7 @@ def test_controller_recovery_terminates_unresolved_verifier_without_completing_t
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=3)
+            process.wait(timeout=scaled(3))
 
 
 def test_unidentified_starting_verifier_blocks_cleanup_instead_of_claiming_stopped(tmp_path) -> None:
@@ -1962,7 +1966,7 @@ def test_force_stop_checks_persisted_start_token_and_owned_process_group(tmp_pat
             raise AssertionError("must refuse a mismatched process identity")
         assert process.poll() is None
         _terminate_owned_process_group(process.pid, token, timeout=0.5)
-        assert process.wait(timeout=2) in {-15, -9}
+        assert process.wait(timeout=scaled(2)) in {-15, -9}
     finally:
         if process.poll() is None:
             os.killpg(process.pid, 9)
@@ -1986,7 +1990,7 @@ def test_force_stop_marks_uncertain_then_terminates_only_recorded_headless_group
         assert bridge.main(["stop", "--mission", mission["id"], "--force", "--json"]) == 0
         output = json.loads(capsys.readouterr().out)
         assert output["mission"]["status"] == "STOPPED"
-        assert process.wait(timeout=2) in {-15, -9}
+        assert process.wait(timeout=scaled(2)) in {-15, -9}
         assert store.get_operation(operation)["status"] == "UNCERTAIN"
         assert store.get_task(task)["status"] == "BLOCKED"
     finally:

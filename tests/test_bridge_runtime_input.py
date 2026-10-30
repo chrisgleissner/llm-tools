@@ -1,6 +1,5 @@
 """Deterministic control-loop ownership and asynchronous feedback contracts."""
 import curses
-import json
 from types import SimpleNamespace
 import time
 
