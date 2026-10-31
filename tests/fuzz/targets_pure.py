@@ -256,9 +256,11 @@ def target_theme_config(rng: random.Random, sb: Sandbox) -> None:
     lines = ["[bridge.theme]"]
     expectations: dict[str, bool] = {}  # role -> should warn
     if rng.random() < 0.6:
-        lines.append(f"name = {rng.choice(['\"dark\"', '\"light\"', '\"mono\"', '\"nonsense\"', '5', '\"hc\"', '[1]', _toml_string(gen.plain_text(rng, 10))])}")
+        name_value = rng.choice(['"dark"', '"light"', '"mono"', '"nonsense"', '5', '"hc"', '[1]', _toml_string(gen.plain_text(rng, 10))])
+        lines.append(f"name = {name_value}")
     if rng.random() < 0.4:
-        lines.append(f"background = {rng.choice(['\"dark\"', '\"light\"', '\"purple\"', '3', 'true'])}")
+        background_value = rng.choice(['"dark"', '"light"', '"purple"', '3', 'true'])
+        lines.append(f"background = {background_value}")
     if rng.random() < 0.8:
         lines.append("[bridge.theme.roles]")
         for role in rng.sample(_ROLES, rng.randint(0, min(6, len(_ROLES)))):
@@ -273,7 +275,8 @@ def target_theme_config(rng: random.Random, sb: Sandbox) -> None:
                 lines.append(f'{role} = {{ color = "#aabbcc", bold = true }}')
                 expectations[role] = False
             elif kind == "table_bad":
-                lines.append(f'{role} = {rng.choice(["{ colour = \"red\" }", "{ color = 5 }", "{ bold = \"yes\" }", "{ bg = 3 }"])}')
+                bad_table = rng.choice(['{ colour = "red" }', "{ color = 5 }", '{ bold = "yes" }', "{ bg = 3 }"])
+                lines.append(f"{role} = {bad_table}")
                 expectations[role] = True
             else:
                 lines.append(f"{role} = {rng.choice(['42', 'true', '[1, 2]', '1.5'])}")

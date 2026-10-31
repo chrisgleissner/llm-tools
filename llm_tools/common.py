@@ -2981,41 +2981,69 @@ class RunLogs:
     prompt_sha: str = ""
 
 
-def setup_run_logs(log_dir: Path, suffix: str, provider_link: str = "", run_dir: Path | None = None) -> RunLogs:
-    old_umask = os.umask(0o077)
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            log_dir.chmod(0o700)
-        except OSError:
-            pass
-        if run_dir is None:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            import tempfile
+def make_private_dirs(path: Path) -> None:
+    """Create ``path`` and any missing parents as 0700 directories without touching the process umask.
 
-            run = Path(tempfile.mkdtemp(prefix=f"{stamp}-{suffix}-", dir=str(log_dir)))
-        else:
-            run = run_dir
-            run.mkdir(parents=True, exist_ok=True)
+    The umask is shared by every thread, so changing it around a mkdir gives files created
+    concurrently by other threads the wrong mode. Each missing component is created with an
+    explicit mode and then chmod'ed, so an unusual umask cannot remove owner bits either.
+    """
+    missing: list[Path] = []
+    current = path
+    while not current.exists() and current != current.parent:
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
         try:
-            run.chmod(0o700)
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            continue
+        try:
+            os.chmod(directory, 0o700)
         except OSError:
             pass
-        text_log = run / "run.log"
-        event_log = run / "events.jsonl"
-        text_log.touch(exist_ok=True)
-        event_log.touch(exist_ok=True)
-        for p in (text_log, event_log):
-            try:
-                p.chmod(0o600)
-            except OSError:
-                pass
-        _symlink(run, log_dir / "latest")
-        if provider_link:
-            _symlink(run, log_dir / f"latest-{provider_link}")
-        return RunLogs(run, text_log, event_log)
+    if not path.is_dir():
+        raise NotADirectoryError(str(path))
+
+
+def touch_private_file(path: Path) -> None:
+    """Create ``path`` (if absent) with mode 0600 from the start and enforce 0600 on an existing file."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
     finally:
-        os.umask(old_umask)
+        os.close(fd)
+
+
+def setup_run_logs(log_dir: Path, suffix: str, provider_link: str = "", run_dir: Path | None = None) -> RunLogs:
+    make_private_dirs(log_dir)
+    try:
+        log_dir.chmod(0o700)
+    except OSError:
+        pass
+    if run_dir is None:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        import tempfile
+
+        run = Path(tempfile.mkdtemp(prefix=f"{stamp}-{suffix}-", dir=str(log_dir)))
+    else:
+        run = run_dir
+        make_private_dirs(run)
+    try:
+        run.chmod(0o700)
+    except OSError:
+        pass
+    text_log = run / "run.log"
+    event_log = run / "events.jsonl"
+    for p in (text_log, event_log):
+        touch_private_file(p)
+    _symlink(run, log_dir / "latest")
+    if provider_link:
+        _symlink(run, log_dir / f"latest-{provider_link}")
+    return RunLogs(run, text_log, event_log)
 
 
 def _symlink(target: Path, link: Path) -> None:
@@ -3149,11 +3177,7 @@ def shared_usage_snapshot(
         return reader()
     directory = shared_snapshot_dir(env)
     try:
-        old_umask = os.umask(0o077)
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-        finally:
-            os.umask(old_umask)
+        make_private_dirs(directory)
         directory.chmod(0o700)
         lock_fd = os.open(directory / f"{provider}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError:

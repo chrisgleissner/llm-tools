@@ -60,7 +60,7 @@ chmod +x llm-usage llm-scheduler ralph-robin llm-sleep-soak llm-bridge
 ./ralph-robin --prompt x --dry-run --command-template true
 LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1 ./llm-sleep-soak --cycles 2 --period 5s --gap 0   # simulated; real runs actually suspend
 python -m pytest -q
-coverage run -m pytest && coverage combine && coverage report --fail-under=85
+python -m coverage run -m pytest && python -m coverage combine && python -m coverage report --fail-under=85
 ```
 
 Statusline mode reads Claude statusline JSON from stdin:
@@ -344,8 +344,10 @@ When changing behavior:
 1. Add or update the narrowest fixture assertion.
 2. Run a targeted command for the changed path.
 3. Run `python -m pytest -q`.
-4. Run coverage and require at least 85% total coverage: `coverage run -m pytest && coverage combine && coverage report --fail-under=85`.
+4. Run coverage and require at least 85% total coverage: `python -m coverage run -m pytest && python -m coverage combine && python -m coverage report --fail-under=85`.
 5. Update `README.md` for user-visible changes.
+
+Always invoke coverage as `python -m coverage ...`, never as the bare `coverage` script. The script's shebang pins the interpreter it was installed with (on this host `~/.local/bin/coverage` runs `/usr/bin/python3.12`), while `python` and the packages the tests import (for example PIL's C extension) belong to a different interpreter. Under the bare script `tests/test_bridge_demo_limits.py` fails with `ImportError: cannot import name '_imaging' from 'PIL'`. `python -m coverage` measures the same interpreter that `python -m pytest` uses. CI runs the same form. The Bridge gate is `python -m coverage report --include='llm_tools/bridge*.py,llm_tools/terminal.py' --fail-under=90`.
 
 Do not consider work done, even for small changes, unless the coverage gate has run and passed at `--fail-under=85`. If `coverage` is not installed in the active interpreter, use a temporary virtual environment or otherwise report the dependency/environment blocker explicitly.
 
@@ -388,7 +390,7 @@ A change is complete only when:
 * `./llm-usage --json` emits valid JSON.
 * `./llm-usage --show-source --show-remaining-time` has aligned columns and no empty cells.
 * `python -m pytest -q` passes.
-* `coverage run -m pytest && coverage combine && coverage report --fail-under=85` passes with total coverage at or above 85%; this is mandatory for completion.
+* `python -m coverage run -m pytest && python -m coverage combine && python -m coverage report --fail-under=85` passes with total coverage at or above 85%; this is mandatory for completion.
 * Missing-provider and timeout paths degrade gracefully.
 * Table, JSON, README, and tests are consistent for any user-visible change.
 * Generated files such as `llm-usage.log` are not committed.

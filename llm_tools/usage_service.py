@@ -265,15 +265,30 @@ class ThreadingUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSe
     def __init__(self, sock: str, sampler: UsageSampler, stop_event: threading.Event) -> None:
         self.sampler = sampler
         self.stop_event = stop_event
-        previous = os.umask(0o177)  # the socket is never briefly reachable by other users
+        # Bind inside a fresh 0700 directory next to the final path and rename the socket into
+        # place after chmod 0600, so it is never reachable by other users. The process umask is
+        # shared by every thread, so it must not be changed for this.
+        final = Path(sock)
+        staging = Path(tempfile.mkdtemp(prefix=".b", dir=str(final.parent)))
         try:
-            super().__init__(sock, UsageRequestHandler)
+            super().__init__(str(staging / "s"), UsageRequestHandler)
+            try:
+                os.chmod(staging / "s", 0o600)
+            except OSError:
+                pass
+            os.replace(staging / "s", final)
+            self.server_address = str(final)
+        except BaseException:
+            try:
+                (staging / "s").unlink()
+            except OSError:
+                pass
+            raise
         finally:
-            os.umask(previous)
-        try:
-            os.chmod(sock, 0o600)
-        except OSError:
-            pass
+            try:
+                staging.rmdir()
+            except OSError:
+                pass
 
 
 class UsageRequestHandler(socketserver.StreamRequestHandler):

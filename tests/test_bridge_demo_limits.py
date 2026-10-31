@@ -171,6 +171,7 @@ def test_walk_rows_follow_the_screen_and_not_its_wording() -> None:
 @pytest.mark.parametrize("theme", ["dark", "light"])
 @pytest.mark.parametrize("width", [748, 1108])
 def test_caption_band_is_legible_and_fits(theme: str, width: int) -> None:
+    pytest.importorskip("PIL.Image", reason="Pillow is an optional dependency of the demo recorder")
     band = demo.CaptionBand(width, demo.THEMES[theme])
     assert band.height % 2 == 0
     for beat, text in enumerate(demo.CAPTIONS):

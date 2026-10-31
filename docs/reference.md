@@ -57,9 +57,9 @@ Wake and suspend features (`--wake`, `--suspend-until-ready`) require Linux with
 
 ```bash
 python -m pip install -e . pytest coverage
-coverage run -m pytest
-coverage combine
-coverage report --fail-under=85
+python -m coverage run -m pytest
+python -m coverage combine
+python -m coverage report --fail-under=85
 ```
 
 Tests use fixtures and mock commands. They do not require real provider installations, credentials, network access, or the user's real home directory. For manual end-to-end checks, run the examples above against installed and authenticated providers.
@@ -69,7 +69,7 @@ Tests use fixtures and mock commands. They do not require real provider installa
 Small, focused pull requests are welcome. Before opening a PR, make sure total coverage is at or above `85%`:
 
 ```bash
-coverage run -m pytest && coverage combine && coverage report --fail-under=85
+python -m coverage run -m pytest && python -m coverage combine && python -m coverage report --fail-under=85
 ```
 
 Adding a new provider follows a small adapter contract — see the provider-adapter steps and implementation map in [AGENTS.md](../AGENTS.md).

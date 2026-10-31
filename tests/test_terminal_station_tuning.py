@@ -16,6 +16,7 @@ from llm_tools.terminal import (
     STATUS_REMAIN_ON_EXIT_FORMAT,
     TmuxTerminalBackend,
     station_status_formats,
+    tmux_version,
 )
 from tests.conftest import wait_for as _shared_wait_for
 
@@ -199,7 +200,10 @@ def test_modified_keys_reach_a_provider_that_requests_them(tmp_path: Path) -> No
     try:
         assert _wait_for(lambda: Path(str(out) + ".ready").exists(), timeout=10.0)  # raw mode and key request are set
         _tmux(handle, "send-keys", "-t", handle.provider_pane, "S-Enter")
-        assert _wait_for(lambda: out.exists() and "27;2;13~" in out.read_text())
+        # tmux 3.5 added extended-keys-format and made the xterm form the default; 3.4 and older send CSI-u.
+        version = tmux_version()
+        expected = "27;2;13~" if version is not None and version >= (3, 5) else "13;2u"
+        assert _wait_for(lambda: out.exists() and expected in out.read_text())
         _tmux(handle, "send-keys", "-t", handle.provider_pane, "Escape")
         assert _wait_for(lambda: out.read_text().rstrip().endswith("b'\\x1b'"), timeout=1.0)
     finally:

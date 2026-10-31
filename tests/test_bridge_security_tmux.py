@@ -32,7 +32,8 @@ def hostile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path
 def pane_paths(handle) -> list[str]:
     out = subprocess.run(["tmux", "-S", str(handle.socket_path), "list-panes", "-a", "-F", "#{pane_current_path}"],
                          capture_output=True, text=True, check=True).stdout
-    return out.split("\n")[:-1]
+    # tmux 3.4 and older print a `$` in command output as `\$` (vis(3) double-quote escaping).
+    return [line.replace("\\$", "$") for line in out.split("\n")[:-1]]
 
 
 def wait_for(predicate, timeout: float = 5.0) -> bool:
@@ -82,7 +83,7 @@ def test_detach_hook_does_not_run_commands_embedded_in_its_arguments(tmp_path: P
         backend.set_detach_command(handle, ["/bin/sh", "-c", 'echo "$1" > "$2"', "sh", "{client}", str(out)])
         pid, fd = pty.fork()
         if pid == 0:
-            os.execvp("tmux", ["tmux", "-S", str(handle.socket_path), "-f", str(handle.config_path), "attach-session", "-t", handle.session_name])
+            os.execvpe("tmux", ["tmux", "-S", str(handle.socket_path), "-f", str(handle.config_path), "attach-session", "-t", handle.session_name], {**os.environ, "TERM": "xterm-256color"})  # tmux refuses to attach without a usable TERM, which CI runners do not set
         assert wait_for(lambda: backend.attached_clients(handle))
         subprocess.run(["tmux", "-S", str(handle.socket_path), "detach-client", "-s", handle.session_name], check=True)
         assert wait_for(out.exists), "the detach hook did not run its command from the literal path"

@@ -39,6 +39,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . pytest coverage
 
+      - name: Byte-compile every module with this interpreter
+        run: python -m compileall -q -f llm_tools scripts tests docs
+
       - name: Check installed Bridge entry point
         run: |
           cd "$(mktemp -d)"
@@ -48,11 +51,11 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          coverage run -m pytest
-          coverage combine
-          coverage report --fail-under=85
-          coverage report --include='llm_tools/bridge*.py,llm_tools/terminal.py' --fail-under=90
-          coverage xml
+          python -m coverage run -m pytest
+          python -m coverage combine
+          python -m coverage report --fail-under=85
+          python -m coverage report --include='llm_tools/bridge*.py,llm_tools/terminal.py' --fail-under=90
+          python -m coverage xml
 
       - name: Keep the coverage report for the upload job
         uses: actions/upload-artifact@v4
