@@ -88,6 +88,20 @@ def test_version_loads_neither_parser_nor_store_engine(state: dict[str, str]) ->
     assert not (_NEVER | _NO_STORE_ENGINE | _NO_PARSER) & loaded
 
 
+def test_checkout_version_is_read_from_pyproject(state: dict[str, str]) -> None:
+    import tomllib
+
+    expected = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+    # -S keeps site-packages off sys.path, so an installed llm-tools cannot answer before the checkout does.
+    result = subprocess.run(
+        [sys.executable, "-S", "-m", "llm_tools.bridge", "--version"],
+        cwd=state["STARTUP_TEST_WORK"], env=state, capture_output=True, text=True, check=True,
+    )
+    assert result.stdout == f"llm-bridge {expected}\n"
+    loaded = _modules(state, "--version")
+    assert not (_NEVER | _NO_STORE_ENGINE | _NO_PARSER) & loaded
+
+
 @pytest.mark.parametrize(
     "arguments",
     [

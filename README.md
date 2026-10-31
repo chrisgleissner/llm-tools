@@ -147,7 +147,7 @@ In a station, `Ctrl-]` is the prefix:
 | `Ctrl-]` then `B` | Bridge controls |
 | `Ctrl-]` then `P` | Back to the provider |
 | `Ctrl-]` then `m` | Mission picker |
-| `Ctrl-]` then `z` | Split view |
+| `Ctrl-]` then `z` | Toggle zoom |
 | `Ctrl-]` then `d` | Detach; the mission keeps running |
 | `Ctrl-]` then `?` | Help |
 

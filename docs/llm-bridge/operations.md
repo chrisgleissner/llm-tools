@@ -402,7 +402,7 @@ exports the complete original source to a new path. Source export never copies a
 rendered or abbreviated preview.
 
 Built-in help works offline: `llm-bridge help TOPIC` supports quickstart, keys,
-prompts, markdown, providers, states, verification, and recovery. Type `help` in
+remote, prompts, markdown, providers, states, verification, and recovery. Type `help` in
 the console for the same topic guidance. A rendered document uses Rich when
 available; source viewing and CLI help still work if Rich is unavailable.
 
@@ -468,7 +468,7 @@ viewer's `c` copy uses a local helper (`wl-copy`, `xclip`, `xsel` or `pbcopy`)
 and is separate. With clients of different sizes attached, the window
 follows the most recently active client. When the provider exits, the pane
 shows a short message rather than tmux's "Pane is dead" banner. Prefix B/b opens the full Bridge controls; P/p
-returns to the same provider process; z toggles the split view; ? shows the
+returns to the same provider process; z toggles zoom of the provider pane; ? shows the
 shortcut reminder. Press Ctrl-] then d to detach; Ctrl-] twice sends a literal
 prefix to the provider. The status line shows `Bridge: Ctrl-] then B` on the left, `Provider:
 Ctrl-] then P` on the right and the current task context in the middle.

@@ -4,6 +4,7 @@ import time
 
 from llm_tools import bridge_documents as documents
 from llm_tools.bridge_input import cell_slice
+from tests.conftest import wait_for
 
 
 def test_large_render_stays_navigable_and_close_releases_worker_result(monkeypatch):
@@ -192,6 +193,8 @@ def test_casefold_global_search_repeats_and_reverse_keep_original_unicode_offset
     assert viewer.search('not present') is None
     assert viewer.search('') is None and viewer.search_count==0
     viewer.rendered=True
+    viewer.visible(5,60)  # starts the background Markdown render of this 500-line source
+    wait_for(lambda: not viewer.rendering, 30, 0.01, message='the Markdown render did not finish')
     viewer.search('SECOND')
     assert 'SECOND' in ''.join(viewer.visible(5,60))
     viewer.search('SECOND',reverse=True)

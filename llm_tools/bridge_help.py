@@ -56,7 +56,7 @@ to leave your own session. Detaching or exiting Bridge does not stop the mission
 Pause waits at the current invocation boundary and never suspends the host.
 Stop and cancel are separate explicit operations.
 
-More: help keys, prompts, markdown, providers, states, verification, recovery.
+More: help keys, remote, prompts, markdown, providers, states, verification, recovery.
 Every public command also has --help. ID and task numbers are placeholders.
 --mission accepts a unique ID prefix (4+ characters) and may be omitted when you
 run the command inside the mission's folder.""",

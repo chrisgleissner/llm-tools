@@ -131,11 +131,11 @@ def test_snapshot_from_a_peer_with_another_uid_is_ignored_by_client_and_server(t
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(2.0)
             client.connect(str(sock))
-            client.sendall(b'{"op":"snapshot"}\n')
             try:
+                client.sendall(b'{"op":"snapshot"}\n')
                 assert client.recv(1024) == b""
-            except ConnectionResetError:
-                pass  # the server closed with our request unread; also "no answer"
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the server closed first (before or after our request); also "no answer"
     finally:
         server.shutdown()
         server.server_close()

@@ -103,6 +103,8 @@ def run_chaos(argv: list[str], work: Path, state: Path, rng: random.Random, *, l
     env.pop("NO_COLOR", None)
     env.pop("TMUX", None)
     env.pop("TMUX_PANE", None)
+    env.pop("DISPLAY", None)  # random input can trigger a copy; it must not reach the real X clipboard
+    env.pop("WAYLAND_DISPLAY", None)
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 110, 0, 0))
     errors = work / "stderr.txt"
@@ -117,7 +119,10 @@ def run_chaos(argv: list[str], work: Path, state: Path, rng: random.Random, *, l
         started = time.monotonic()
         index = 0
         while time.monotonic() - started < seconds and index < len(data):
-            chunk = data[index:index + rng.randint(1, 96)]
+            end = index + rng.randint(1, 96)
+            while launcher and end < len(data) and data[end - 1:end] == b"\x1b":
+                end += 1  # a terminal delivers an escape sequence in one piece; a split ESC followed by a pause is a lone Escape, which quits the home screen
+            chunk = data[index:end]
             index += len(chunk)
             os.write(master, chunk)
             if rng.random() < 0.08:

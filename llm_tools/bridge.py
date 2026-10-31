@@ -1079,7 +1079,7 @@ def _build_parser(
     if only is not None:
         sub = _OnlyCommand(sub, only)
     help_parser = sub.add_parser("help", help="show offline Bridge workflow and recovery guidance")
-    help_parser.add_argument("topic", nargs="*", help="quickstart, keys, prompts, markdown, providers, states, verification, recovery, or a command path")
+    help_parser.add_argument("topic", nargs="*", help="quickstart, keys, remote, prompts, markdown, providers, states, verification, recovery, or a command path")
     view = sub.add_parser("view", help="read a local text artifact without starting work")
     view.add_argument("--file", required=True, metavar="PATH", help="UTF-8 text artifact to open; the source stays unchanged")
     view.add_argument("--follow", action="store_true", help="follow changes explicitly; Up pauses, End resumes")
@@ -1713,7 +1713,7 @@ def _managed_allows(args: argparse.Namespace) -> bool:
 
 
 def _installed_version_from_path() -> str | None:
-    """Version recorded in an ``llm_tools-*.dist-info`` folder on ``sys.path``, or ``unknown`` when none exists.
+    """Version recorded in an ``llm_tools-*.dist-info`` folder on ``sys.path``, or ``""`` when none exists.
 
     ``None`` means the answer needs the full metadata machinery (a zipped or unreadable path entry, or a
     record without a version). ``importlib.metadata`` is a heavy import for a one-line answer.
@@ -1741,20 +1741,37 @@ def _installed_version_from_path() -> str | None:
                 except OSError:
                     continue
             return None
-    return "unknown"
+    return ""
+
+
+def _checkout_version() -> str:
+    """Version in the ``pyproject.toml`` beside the ``llm_tools`` package, or ``unknown`` when it cannot be read."""
+    try:
+        text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return "unknown"
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return match.group(1) if match else "unknown"
 
 
 def package_version() -> str:
-    """Installed llm-tools version, or ``unknown`` when run from an uninstalled checkout."""
-    found = _installed_version_from_path()
-    if found is not None:
-        return found
-    from importlib import metadata
+    """The running llm-tools version: a source checkout's ``pyproject.toml`` first, else installed metadata.
 
-    try:
-        return metadata.version("llm-tools")
-    except metadata.PackageNotFoundError:
-        return "unknown"
+    The checkout comes first because another, older install can leave its
+    dist-info on ``sys.path`` while the code actually running is the checkout.
+    """
+    checkout = _checkout_version()
+    if checkout != "unknown":
+        return checkout
+    found = _installed_version_from_path()
+    if found is None:
+        from importlib import metadata
+
+        try:
+            return metadata.version("llm-tools")
+        except metadata.PackageNotFoundError:
+            return _checkout_version()
+    return found or _checkout_version()
 
 
 def _managed_scope_violation(args: argparse.Namespace) -> bool:

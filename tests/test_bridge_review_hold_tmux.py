@@ -12,6 +12,7 @@ from pathlib import Path
 from llm_tools.bridge_runtime import mission_socket_path
 from llm_tools.bridge_store import BridgeStore
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import recorded_exit_status
 from tests.test_bridge_recovery_tmux import call, controller_released, wait_for
 
 
@@ -23,6 +24,10 @@ def _statuses(database: Path, mission_id: str) -> list[str]:
 def _runs(directory: Path) -> list[str]:
     log = directory / "provider-runs"
     return log.read_text(encoding="utf-8").split() if log.exists() else []
+
+
+def _review_hint(backend: TmuxTerminalBackend, handle) -> str:
+    return backend._run(handle.socket_path, "show-options", "-gqv", "@llm_bridge_review_hint", check=False, capture=True).stdout.strip()
 
 
 def test_second_task_waits_for_approval_of_the_first(tmp_path: Path, env: dict[str, str]) -> None:
@@ -68,8 +73,11 @@ def test_second_task_waits_for_approval_of_the_first(tmp_path: Path, env: dict[s
             assert [event["kind"] for event in store.events(mission_id) if event["kind"].startswith("review-hold")] == ["review-hold"]
         handle = backend.open_existing(socket_path, f"mission-{mission_id}")
         footer = "Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject."
-        wait_for(lambda: footer in backend.capture(handle, pane="provider"), timeout=15)
-        assert "Provider exited (status 0)" in backend.capture(handle, pane="provider")  # the finished output is kept
+        # The controller sets the footer text before it launches the provider; this holds on every tmux version.
+        assert _review_hint(backend, handle) == footer
+        if recorded_exit_status(backend, handle, timeout=15) == "0":
+            wait_for(lambda: footer in backend.capture(handle, pane="provider"), timeout=15)
+            assert "Provider exited (status 0)" in backend.capture(handle, pane="provider")  # the finished output is kept
 
         call(env, "task", "verify", "--mission", mission_id, "--task", "1", "--approve")
         wait_for(lambda: len(_runs(tmp_path)) == 2, timeout=30)
@@ -104,12 +112,17 @@ def test_review_hint_replaces_the_footer_only_after_a_clean_exit(tmp_path: Path)
     )
     try:
         assert backend.set_review_hint(handle, "Task #2 is waiting\nfor your review.")
+        assert _review_hint(backend, handle) == "Task ##2 is waiting for your review."
         backend._run(handle.socket_path, "respawn-pane", "-k", "-t", handle.provider_pane, "sh -c true")
-        wait_for(lambda: "Provider exited (status 0) · Task #2 is waiting for your review." in backend.capture(handle, pane="provider"))
+        if recorded_exit_status(backend, handle) == "0":
+            wait_for(lambda: "Provider exited (status 0) · Task #2 is waiting for your review." in backend.capture(handle, pane="provider"))
         backend._run(handle.socket_path, "respawn-pane", "-k", "-t", handle.provider_pane, "sh -c 'exit 3'")
-        wait_for(lambda: "Provider exited (status 3) · Ctrl-] then B for Bridge controls" in backend.capture(handle, pane="provider"))
+        if recorded_exit_status(backend, handle) == "3":
+            wait_for(lambda: "Provider exited (status 3) · Ctrl-] then B for Bridge controls" in backend.capture(handle, pane="provider"))
         assert backend.set_review_hint(handle, "")
+        assert _review_hint(backend, handle) == ""
         backend._run(handle.socket_path, "respawn-pane", "-k", "-t", handle.provider_pane, "sh -c true")
-        wait_for(lambda: "Provider exited (status 0) · Ctrl-] then B for Bridge controls" in backend.capture(handle, pane="provider"))
+        if recorded_exit_status(backend, handle) == "0":
+            wait_for(lambda: "Provider exited (status 0) · Ctrl-] then B for Bridge controls" in backend.capture(handle, pane="provider"))
     finally:
         backend.stop(handle)

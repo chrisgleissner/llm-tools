@@ -62,6 +62,27 @@ def scaled(seconds: float) -> float:
     return seconds * timeout_scale()
 
 
+def recorded_exit_status(backend: Any, handle: Any, timeout: float = 3.0) -> str:
+    """The exit status tmux recorded for the dead provider pane of ``handle``, or "" when it recorded none.
+
+    tmux 3.4 sometimes marks a pane dead without recording a status (reproduced with a plain
+    ``new-session 'sleep 0.5; exit 0'`` on 3.4 in an Ubuntu 24.04 container, 5 to 10 runs in 30;
+    not seen on 3.6). It then draws no remain-on-exit footer at all, so a test cannot assert the
+    footer text for that pane.
+    """
+    def status() -> str:
+        result = backend._run(handle.socket_path, "display-message", "-p", "-t", handle.provider_pane,
+                              "#{pane_dead}\t#{pane_dead_status}", check=False, capture=True)
+        dead, _, code = result.stdout.rstrip("\n").partition("\t")
+        return code if dead == "1" else ""
+
+    try:
+        wait_for(lambda: status() != "", timeout=timeout)
+    except AssertionError:
+        return ""
+    return status()
+
+
 def wait_for(
     predicate: Callable[[], Any],
     timeout: float = 5.0,
