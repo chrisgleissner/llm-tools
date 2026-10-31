@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import json
 import stat
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 import uuid
 
 from .fileio import open_regular_file
@@ -129,9 +129,9 @@ def _session_fields(provider: str, record: Mapping[str, Any]) -> tuple[str, str,
     if provider == "copilot":
         if record.get("type") not in ("session.start", "session_start"):
             return None
-        data = record.get("data") if isinstance(record.get("data"), Mapping) else record
+        data = cast("Mapping[str, Any]", record.get("data") if isinstance(record.get("data"), Mapping) else record)
         session_id = data.get("session_id") or data.get("sessionId")
-        context = data.get("context") if isinstance(data.get("context"), Mapping) else {}
+        context = cast("Mapping[str, Any]", data.get("context") if isinstance(data.get("context"), Mapping) else {})
         cwd = context.get("cwd") or _provider_cwd(data, provider)
         return (str(session_id or ""), str(cwd or ""), "copilot:session.start")
 
@@ -557,6 +557,7 @@ def _installed_help(
     except (OSError, subprocess.SubprocessError):
         return None
     help_text = (result.stdout + "\n" + result.stderr)[:128 * 1024]
+    pattern: re.Pattern[str] | None
     if option == "resume":
         pattern = capability.help_pattern
     elif option == "new-session":

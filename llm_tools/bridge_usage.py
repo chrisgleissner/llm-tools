@@ -32,7 +32,7 @@ class EmbeddedUsage:
         self._lock = threading.Lock()
         self._running = False
         self._next_refresh = 0.0
-        self._observed = None
+        self._observed: float | None = None
         self._data: dict[str, Any] = {}
         self._error = ''
 

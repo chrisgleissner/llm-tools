@@ -6,6 +6,8 @@ mission and task state, so the first row is what the operator most likely needs.
 """
 from dataclasses import dataclass, replace
 
+from collections.abc import Mapping
+
 from .bridge_states import ENDED_MISSION_STATUSES
 
 
@@ -29,7 +31,7 @@ class Action:
 # is missing from the mapping hides the action in that state.
 _LIVE = ("CREATED", "RUNNING", "PAUSED", "STOPPING", "STOPPED")
 
-_REGISTRY: tuple[tuple[Action, dict[str, float]], ...] = (
+_REGISTRY: tuple[tuple[Action, Mapping[str, float]], ...] = (
     (Action("start", "Start", "Launch the provider on the first ready task", mutable=True),
      {"CREATED": 0, "STOPPED": 0}),
     (Action("resume", "Resume", "Continue after a pause or a stop", mutable=True),

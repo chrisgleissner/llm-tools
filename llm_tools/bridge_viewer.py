@@ -80,7 +80,7 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
         enable_mouse()
         checked=0.0
         if following:
-            state.document_viewer.end(max(1,window.getmaxyx()[0]-2))
+            state.document_viewer.end(max(1,window.getmaxyx()[0]-2))  # type: ignore[union-attr]  # set before this loop
         while state.document_viewer is not None:
             viewer=state.document_viewer
             now=time.monotonic()

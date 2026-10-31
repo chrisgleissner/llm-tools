@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from llm_tools import bridge_theme, bridge_tui
+from llm_tools import bridge_draw, bridge_theme, bridge_tui
 from llm_tools.bridge_store import BridgeStore
 from tests.conftest import scaled
 
@@ -92,7 +92,7 @@ def test_eight_color_fallback_keeps_semantic_roles_legible(theme) -> None:
 
 
 def test_selected_role_is_high_contrast_and_monochrome_keeps_emphasis(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "_ROLE_ATTRS", {"brand": 16})
+    monkeypatch.setattr(bridge_draw, "_ROLE_ATTRS", {"brand": 16})
     assert bridge_tui.role_attr("selected") & bridge_tui.curses.A_REVERSE
     assert bridge_tui.role_attr("selected") & bridge_tui.curses.A_BOLD
     assert bridge_tui.role_attr("selected") == (
@@ -141,7 +141,7 @@ class _RecordingWindow:
 
 
 def test_put_applies_semantic_role_attributes(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: {"error": 123}.get(role, 0))
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: {"error": 123}.get(role, 0))
     window = _RecordingWindow()
     bridge_tui._put(window, 2, 3, "Rejected: no capacity", 80, role="error")
     assert window.calls == [(2, 3, "Rejected: no capacity", 80, 123)]
@@ -228,7 +228,7 @@ def test_styled_usage_and_response_keep_column_spacing_and_indentation(monkeypat
 
 
 def test_active_navigation_and_negative_readiness_have_unambiguous_emphasis(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: 100 if role == "accent" else 10)
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: 100 if role == "accent" else 10)
     window = _RecordingWindow()
     bridge_tui._draw_navigation(window, 1, "  ", 100)
     assert window.calls[-1][2] == "[2 Tasks]"

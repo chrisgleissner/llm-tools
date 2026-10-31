@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from llm_tools import bridge_tui
+from llm_tools import bridge_draw, bridge_tui
 from llm_tools.bridge_input import cell_width
 
 
@@ -232,7 +232,7 @@ def test_controller_line_is_derived_from_lifecycle(snapshot, expected) -> None:
 
 
 def test_overview_rows_are_not_selectable_and_scroll_without_markers(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda _role: 0)
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda _role: 0)
     state = make_state(full_snapshot())
     assert not state.selectable
     screen = Screen(34, 120)

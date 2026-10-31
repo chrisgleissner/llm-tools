@@ -1187,7 +1187,7 @@ def list_footer(state: Launcher) -> str:
 
 def footer_segments(text: str) -> list[tuple[str, str]]:
     """Footer hints as segments: key names in `key`, the verbs in `muted`, separators in `dim`."""
-    from .bridge_tui import _split_hint
+    from .bridge_draw import _split_hint
 
     sep = f" {glyph('sep')} "
     out: list[tuple[str, str]] = []
@@ -1281,7 +1281,8 @@ def _mission_row(state: Launcher, mission: dict[str, Any], cols: ListColumns, co
 
 
 def _draw(window: curses.window, state: Launcher) -> None:
-    from .bridge_tui import role_attr, sync_window_size
+    from .bridge_draw import role_attr
+    from .bridge_tui import sync_window_size
     from .bridge_input import input_view
 
     sync_window_size(window)
@@ -1353,7 +1354,7 @@ def _draw(window: curses.window, state: Launcher) -> None:
             "Save mission only",
             "Start and open provider" if state.native else "Start headless work",
         )
-        for index, text in enumerate(rows):
+        for index, text in enumerate(rows):  # type: ignore[assignment]  # rows holds strings; `text` also names a str | None earlier
             focused = index == state.focus
             role = "selected" if focused else "info"
             y = layout.ys[index]

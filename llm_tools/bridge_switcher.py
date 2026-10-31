@@ -17,7 +17,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from . import bridge_hangup, bridge_redraw
 from .bridge_format import printable
@@ -29,7 +29,7 @@ from .bridge_theme import mission_role
 from .bridge_states import CONTROLLED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, STATION_CLOSING_MISSION_STATUSES
 
 if TYPE_CHECKING:
-    from .bridge_tui import ControlViewAction
+    from .bridge_draw import ControlViewAction
     from .terminal import TerminalAction
 
 LABEL_CELLS = 14
@@ -320,9 +320,9 @@ def collect_entries(
         "AND (origin!='agent-proposal' OR proposal_status='ACCEPTED')"
     ):
         key = (_TASK_RANK[str(row["status"])], -int(row["priority"] or 0), int(row["ordering"] or 0), int(row["id"]))
-        mission = str(row["mission_id"])
-        if mission not in current or key < current[mission][0]:
-            current[mission] = (key, dict(row))
+        owner = str(row["mission_id"])
+        if owner not in current or key < current[owner][0]:
+            current[owner] = (key, dict(row))
     review: dict[str, int] = {}
     for row in store.db.execute(
         "SELECT mission_id,MIN(ordinal) AS ordinal FROM tasks WHERE status IN ('RUNNING','VERIFYING','READY') AND status='VERIFYING' "
@@ -332,7 +332,7 @@ def collect_entries(
     entries: list[MissionEntry] = []
     for mission in store.list_missions():
         mission_id = str(mission["id"])
-        config = mission.get("config") if isinstance(mission.get("config"), dict) else {}
+        config = cast("dict[str, Any]", mission.get("config") if isinstance(mission.get("config"), dict) else {})
         task = current.get(mission_id, (None, None))[1]
         entries.append(MissionEntry(
             mission_id=mission_id,
@@ -423,7 +423,7 @@ def action_for(entry: MissionEntry, source_mission: str | None) -> "TerminalActi
         return TerminalAction(entry.mission_id, None, "attach")
     if entry.mission_id == source_mission:
         return None
-    from .bridge_tui import ControlViewAction
+    from .bridge_draw import ControlViewAction
 
     return ControlViewAction(entry.mission_id, "Bridge")
 
@@ -680,7 +680,7 @@ class MissionPicker:
             list_rows = len(window)
         for _ in range(list_height - list_rows):
             out.append(([("", "info")], "normal"))
-        entry = self.selected_entry()
+        entry = self.selected_entry()  # type: ignore[assignment]  # may be None; the next lines test it
         folder = middle_clip(short_home(entry.cwd, self.home), max(10, width // 2), unicode=self.unicode) if entry is not None else ""
         if self.confirming is not None:
             detail = [(f"Close the idle station of {self.confirming.name or self.confirming.short_id}? Y close{sep}N keep", "warn")]
@@ -761,7 +761,8 @@ def mouse_outcome(picker: MissionPicker, row: int, buttons: int) -> str | None:
 
 def run_picker(entries: list[MissionEntry], *, current: str | None = None, unicode: bool | None = None) -> MissionEntry | None:
     """Show the picker full screen; return the chosen mission or ``None``."""
-    from .bridge_tui import _put, _put_segments, initialize_colors, sync_window_size
+    from .bridge_draw import _put, _put_segments
+    from .bridge_tui import initialize_colors, sync_window_size
 
     picker = MissionPicker(entries, current=current, unicode=unicode_ok() if unicode is None else unicode)
     os.environ.setdefault("ESCDELAY", "25")

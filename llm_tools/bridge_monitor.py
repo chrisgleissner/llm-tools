@@ -7,10 +7,12 @@ import threading
 import time
 from collections import OrderedDict
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from .bridge_format import countdown, needs_attention
 from .bridge_store import BridgeStore
+from .bridge_events import recent_hidden_kinds
+from .bridge_projection import ProjectionParams, Snapshot
 from .bridge_states import ACTIVE_OPERATION_STATUSES
 
 
@@ -62,11 +64,7 @@ def _latest_suspend_event(store: BridgeStore, mission_id: str) -> dict[str, Any]
 # view on a long mission (a heartbeat every few seconds), so the "recent
 # activity" projection leaves them out. Every other kind, including kinds added
 # later, counts as operator-meaningful.
-PLUMBING_EVENT_KINDS = frozenset({
-    "controller-heartbeat", "capacity-refresh", "operation-process", "repository-checkpoint",
-    "controller-mode", "controller-config", "command-queued", "command-applied", "operation-progress",
-    "events-pruned",
-})
+PLUMBING_EVENT_KINDS = recent_hidden_kinds()  # classified in bridge_events.EVENTS
 OPERATOR_EVENT_LIMIT = 20
 
 
@@ -302,19 +300,25 @@ def project_snapshot(
     event_offset: int = 0,
     event_anchor: int | None = None,
     prompt_chars: int | None = None,
-) -> dict[str, Any]:
+    *,
+    params: ProjectionParams | None = None,
+) -> Snapshot:
     """The bounded status projection plus ``needs_you``: what the operator has to do next, or ``None``.
 
     ``prompt_chars`` limits the task prompt text read from SQLite to that many
     characters (the console only previews prompts; `task show` has the full text).
+    ``params`` carries the same six values as one object and, when given, replaces them.
     """
+    if params is not None:
+        task_limit, task_offset, search = params.task_limit, params.task_offset, params.search
+        event_offset, event_anchor, prompt_chars = params.event_offset, params.event_anchor, params.prompt_chars
     snapshot = _project_snapshot(store, mission_id, task_limit, task_offset, search, event_offset, event_anchor, prompt_chars)
     hold = store.review_hold(mission_id)
     # ``hold`` is set while the controller waits for the operator's decision on a
     # reviewed task before it starts the next one: {"reason": "review",
     # "task_ordinal", "tasks", "since"}; ``None`` otherwise.
     snapshot["hold"] = {key: value for key, value in hold.items() if key not in {"marker", "task_id"}} if hold else None
-    snapshot["needs_you"] = needs_attention(snapshot)
+    snapshot["needs_you"] = needs_attention(cast("dict[str, Any]", snapshot))  # a TypedDict is a plain dict at run time
     return snapshot
 
 
@@ -327,7 +331,7 @@ def _project_snapshot(
     event_offset: int = 0,
     event_anchor: int | None = None,
     prompt_chars: int | None = None,
-) -> dict[str, Any]:
+) -> Snapshot:
     """Project monitor state using bounded queries and persisted runtime evidence only.
 
     `task_limit=None` still uses a bounded default page. Aggregate counts are SQL
@@ -405,7 +409,7 @@ def _project_snapshot(
     active = next((op for op in operations if op["status"] in ACTIVE_OPERATION_STATUSES), None)
     latest_op = operations[0] if operations else None
     if active is not None:
-        active_task = store.get_task(int(active["task_id"]))
+        active_task: dict[str, Any] | None = store.get_task(int(active["task_id"]))
     else:
         current_row = store.db.execute(
             "SELECT * FROM tasks WHERE mission_id=? AND status IN ('RUNNING','VERIFYING','READY') "

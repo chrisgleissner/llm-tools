@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from llm_tools import bridge_glyphs as glyphs, bridge_launcher as launcher, bridge_redraw, bridge_tui as tui
+from llm_tools import bridge_draw, bridge_glyphs as glyphs, bridge_launcher as launcher, bridge_redraw, bridge_tui as tui
 from llm_tools.bridge_input import cell_width
 from llm_tools.bridge_launcher import Launcher, MissionStats
 from llm_tools.bridge_store import BridgeStore
@@ -189,7 +189,7 @@ def test_rows_never_exceed_the_terminal_width_and_stay_aligned_at_80_columns(tmp
 
 def test_rows_are_grouped_live_then_waiting_then_finished_and_finished_rows_are_dim(tmp_path, monkeypatch):
     roles = {}
-    monkeypatch.setattr(tui, "role_attr", lambda role: roles.setdefault(role, len(roles) + 1))
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: roles.setdefault(role, len(roles) + 1))
 
     class Recording(Grid):
         def addnstr(self, y, x, text, count, *attrs):

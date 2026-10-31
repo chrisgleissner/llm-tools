@@ -11,22 +11,31 @@ import sys
 import time
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING
+from typing import Any, Callable, NoReturn, TYPE_CHECKING, cast
 
 from . import bridge_format as fmt
 from .bridge_format import NATIVE_STOP_HINT
 from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_title, prune_old_drafts, rotation_label, store_path
 from .bridge_store import controller_running as _controller_running
 from .bridge_states import (
-    ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES, LIVE_MISSION_STATUSES,
+    ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
     STARTED_MISSION_STATUSES,
 )
 from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES, THEME_CHOICES
+from .bridge_missions import (  # noqa: F401  (re-exported: the CLI and tests reach these through bridge)
+    MIN_MISSION_PREFIX,
+    MissionNotFound,
+    mission_choices as _mission_choices,
+    mission_live as _mission_live,
+    order_missions,
+    resolve_mission_ref,
+    station_live as _station_live,
+)
 
 if TYPE_CHECKING:
     import argparse
 
-    from .bridge_tui import ControlViewAction
+    from .bridge_draw import ControlViewAction
     from .terminal import TerminalAction
 
 # Start-up keeps this module light: the CLI parser, theme, rotation checks, config and terminal backend are
@@ -81,7 +90,7 @@ def read_verbatim(path: str | Path) -> str:
 
 def controller_running(mission_id: str) -> bool:
     """Whether a live process holds this mission's controller lock; an unreadable lock raises."""
-    return _controller_running(mission_id)
+    return _controller_running(mission_id)  # type: ignore[return-value]  # the default on_error raises, so the result is a bool
 
 
 def status_snapshot(
@@ -95,13 +104,15 @@ def status_snapshot(
     prompt_chars: int | None = None,
 ) -> dict[str, Any]:
     from .bridge_monitor import project_snapshot
+    from .bridge_projection import ProjectionParams
 
+    params = ProjectionParams(task_limit, task_offset, search, event_offset, event_anchor, prompt_chars)
     with open_store(readonly=True) as store:
-        snapshot = project_snapshot(store, mission_id, task_limit=task_limit, task_offset=task_offset, search=search, event_offset=event_offset, event_anchor=event_anchor, prompt_chars=prompt_chars)
+        snapshot = project_snapshot(store, mission_id, params=params)
     lifecycle = snapshot.get("lifecycle")
     if isinstance(lifecycle, dict):
         lifecycle["controller_running"] = controller_running(mission_id)
-    return snapshot
+    return cast("dict[str, Any]", snapshot)  # a TypedDict is a plain dict at run time
 
 
 def console_snapshot(
@@ -143,100 +154,6 @@ def strip_frozen_config(value: Any) -> Any:
 
 TASK_LIST_PAGE = 200
 BUILTIN_PROVIDERS = "claude,codex,opencode"
-MIN_MISSION_PREFIX = 4
-
-
-class MissionNotFound(ValueError):
-    """No saved mission matches the given ID or prefix."""
-
-
-def _station_live(mission_id: str) -> bool:
-    """Whether a Bridge-owned provider station is running for this mission."""
-    from . import bridge_switcher
-
-    return bool(bridge_switcher.default_station_probe(mission_id))
-
-
-def _mission_live(mission_id: str) -> bool:
-    return controller_running(mission_id) or _station_live(mission_id)
-
-
-def order_missions(rows: list[Any]) -> list[Any]:
-    """Missions with a controller or station first, then unfinished before finished, newest first.
-
-    ``mission list``, ``missions`` and the ambiguity errors share this order.
-    """
-    newest = sorted(rows, key=lambda row: (str(row["updated_at"]), str(row["id"])), reverse=True)
-    return sorted(newest, key=lambda row: (not _mission_live(str(row["id"])), str(row["status"]) in FINISHED_MISSION_STATUSES))
-
-
-def _mission_choices(rows: list[Any]) -> str:
-    return "\n".join(
-        f"  {str(row['id'])[:8]}  {str(row['name'])[:40]}  {row['status']}" + ("  (live)" if _mission_live(str(row["id"])) else "")
-        for row in order_missions(rows)
-    )
-
-
-def resolve_mission_ref(
-    store: BridgeStore,
-    ref: str | None,
-    *,
-    cwd: str | Path | None = None,
-    read_only: bool = False,
-    prefer_station: bool = False,
-) -> str:
-    """Return the full mission ID for an ID, a unique ID prefix, or the current folder.
-
-    With no ``ref`` the single unfinished mission whose folder equals or
-    contains the current directory is used. A live mission (created, running,
-    paused or stopping) wins over stopped or failed ones in the same folder.
-    ``prefer_station`` narrows several matches to the ones with a running
-    station (attach and detach). ``read_only`` lets a folder whose only
-    missions are finished resolve to the finished one, so ``status`` and
-    ``task list`` still work after completion.
-    """
-    if ref:
-        exact = store.db.execute("SELECT id FROM missions WHERE id=?", (ref,)).fetchone()
-        if exact is not None:
-            return str(exact["id"])
-        if len(ref) < MIN_MISSION_PREFIX:
-            raise ValueError(f"mission ID prefix {ref!r} is too short (use at least {MIN_MISSION_PREFIX} characters); run llm-bridge mission list")
-        rows = store.db.execute("SELECT id,name,status,updated_at FROM missions WHERE substr(id,1,?)=?", (len(ref), ref)).fetchall()
-        if not rows:
-            raise MissionNotFound(f"no mission matches {ref!r}; run llm-bridge mission list")
-        if len(rows) > 1:
-            raise ValueError(f"mission ID prefix {ref!r} is ambiguous; matches:\n{_mission_choices(rows)}")
-        return str(rows[0]["id"])
-    here = Path(cwd if cwd is not None else Path.cwd()).expanduser().resolve()
-    in_folder = [
-        row
-        for row in store.db.execute("SELECT id,name,status,cwd,updated_at FROM missions ORDER BY updated_at DESC,id")
-        if here == Path(row["cwd"]) or Path(row["cwd"]) in here.parents
-    ]
-    candidates = [row for row in in_folder if row["status"] not in FINISHED_MISSION_STATUSES]
-    live = [row for row in candidates if row["status"] in LIVE_MISSION_STATUSES]
-    pool = live or candidates
-    if prefer_station and len(pool) > 1:
-        with_station = [row for row in pool if _station_live(str(row["id"]))]
-        pool = with_station or pool
-    if len(pool) == 1:
-        return str(pool[0]["id"])
-    if not pool:
-        finished = [row for row in in_folder if row["status"] in FINISHED_MISSION_STATUSES]
-        if read_only and len(finished) == 1:
-            return str(finished[0]["id"])
-        if read_only and finished:
-            raise ValueError(f"several finished missions match folder {here}; pass --mission ID:\n{_mission_choices(finished)}")
-        if finished:
-            newest = order_missions(finished)[0]
-            short = str(newest["id"])[:8]
-            if newest["status"] == "COMPLETED":
-                follow_up = f"add follow-up work with: llm-bridge task add --mission {short} --prompt \"...\" or create a new mission with: llm-bridge mission create --prompt \"...\""
-            else:
-                follow_up = "create a new mission with: llm-bridge mission create --prompt \"...\""
-            raise ValueError(f"mission {short} in folder {here} is finished ({str(newest['status']).lower()}); {follow_up}")
-        raise ValueError(f"no unfinished mission for folder {here}; pass --mission ID (see llm-bridge mission list) or create one with: llm-bridge mission create --prompt \"...\"")
-    raise ValueError(f"several missions match folder {here}; pass --mission ID:\n{_mission_choices(pool)}")
 
 
 def _is_read_only(args: argparse.Namespace) -> bool:
@@ -430,7 +347,7 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
             kind = str(payload.get("kind", "")).strip().lower()
             if kind not in {"replace", "review", "verify", "pause-after-iteration", "stop-after-task", "handoff"}:
                 raise ValueError("steering kind must be replace, review, verify, pause-after-iteration, stop-after-task, or handoff")
-            task_id = int(payload["task_id"]) if payload.get("task_id") is not None else None
+            task_id = int(payload["task_id"]) if payload.get("task_id") is not None else None  # type: ignore[assignment]  # name reused across the branches of this handler
             if kind in {"replace", "review", "verify", "stop-after-task"} and task_id is None:
                 raise ValueError(f"{kind} steering requires --task")
             task = _require_task(store, mission_id, task_id) if task_id is not None else None
@@ -621,7 +538,7 @@ def _console_parser_class() -> type[argparse.ArgumentParser]:
     import difflib
 
     class _ConsoleParser(argparse.ArgumentParser):
-        def error(self, message: str) -> None:
+        def error(self, message: str) -> NoReturn:
             unknown = re.search(r"invalid choice: '([^']*)'", message)
             if unknown:
                 word = unknown.group(1)
@@ -796,7 +713,7 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             return json.dumps({"status": "APPLIED", "result": {"detail": finished.detail, "mission_id": args.mission}})
 
         if command in {"control", "usage"} and "--help" not in words and "-h" not in words:
-            from .bridge_tui import ControlViewAction
+            from .bridge_draw import ControlViewAction
 
             parser = _build_parser(parser_class=_console_parser_class(), default_mission=mission_id)
             args = parser.parse_args(words)
@@ -810,7 +727,7 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
                 return f"Usage: {command} [--mission ID] [--client /dev/pts/N]"
             args = _build_parser(parser_class=_console_parser_class(), default_mission=mission_id).parse_args(words)
             _resolve_parsed_mission(args, lenient=True)
-            return TerminalAction(str(args.mission), getattr(args, "client", None), command)
+            return TerminalAction(str(args.mission), getattr(args, "client", None), command)  # type: ignore[arg-type]  # command is attach or detach in this branch
         if command in {"tasks", "orders"}:
             words = ["task", "list"]
         elif command == "proposals":
@@ -872,7 +789,7 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
         human = not typed_json and _console_human(words)
         if "--help" not in words and "-h" not in words and words[0] not in {"control", "console", "_controller"} and "--json" not in words and not human:
             words.append("--json")
-        args = None
+        args = None  # type: ignore[assignment]  # stays None when only help was asked for; later branches read args
         if "--help" not in words and "-h" not in words:
             args = _build_parser(parser_class=_console_parser_class(), default_mission=mission_id).parse_args(words)
             _resolve_parsed_mission(args)
@@ -2067,7 +1984,7 @@ def _main(argv: list[str] | None = None) -> int:
             if args.pick:
                 if not sys.stdin.isatty() or not sys.stdout.isatty():
                     raise ValueError("missions --pick needs an interactive terminal; use llm-bridge missions to list")
-                source = None
+                source = None  # type: ignore[assignment]  # separate branch of the command handler
                 with open_store(readonly=True) as store:
                     if args.from_mission:
                         source = resolve_mission_ref(store, args.from_mission)
@@ -2219,7 +2136,7 @@ def _main(argv: list[str] | None = None) -> int:
                     handle = _load_handle(args.mission)
                 except (OSError, RuntimeError):
                     backend = None
-                    handle = None
+                    handle = None  # type: ignore[assignment]  # checked on the next line
                 if handle is not None and backend is not None:
                     backend.stop(handle)
                 elif operations:
@@ -2290,7 +2207,7 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "doctor":
             with open_store() as store:
-                mission = store.get_mission(args.mission) if args.mission else None
+                mission = store.get_mission(args.mission) if args.mission else None  # type: ignore[assignment]  # name reused; None means no mission was given
                 providers = _doctor_provider_checks(mission)
                 import shutil
 

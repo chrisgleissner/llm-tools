@@ -8,6 +8,8 @@ native process.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import os
 import re
 import shlex
@@ -19,10 +21,10 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, Literal
 
-from .bridge_glyphs import glyph
+from .bridge_glyphs import glyph, localize
 from .bridge_states import ENDED_MISSION_STATUSES
 from .common import resolve_executable, tmux_literal, unix_socket_accepts
 from .bridge_theme import mission_chip_style, resolve_cached, tmux_role_markup, tmux_style_markup
@@ -420,7 +422,7 @@ class TmuxTerminalBackend:
         capture: bool = False,
         env: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        self._validate_socket_path(socket_path, allow_missing=args and args[0] == "new-session")
+        self._validate_socket_path(socket_path, allow_missing=bool(args and args[0] == "new-session"))
         if config_path is not None and config_path != Path("/dev/null"):
             self._validate_config_path(socket_path, config_path)
         command = [resolve_executable("tmux"), "-S", str(socket_path), "-f", str(config_path or "/dev/null"), *args]
@@ -1574,3 +1576,155 @@ class TmuxTerminalBackend:
             raise error
         raise RuntimeError(f"tmux server remains alive after kill-server; preserving metadata: {handle.socket_path}")
 
+
+
+# --- station policy ------------------------------------------------------------------------------
+# Which tmux server a console may act on, and what a terminal action does there. The console
+# (``bridge_tui``) and the mission switcher call these; they hold no curses or projection code.
+
+ACTIVITY_SEEN: dict[str, tuple[int, str]] = {}  # mission id -> (epoch, digest) of the last screen capture
+
+
+def read_provider_activity(mission_id: str, load_handle: Callable[[str], TerminalHandle]) -> tuple[int, str] | None:
+    """Read the provider pane's tmux activity epoch and a digest of its screen.
+
+    tmux activity is per window and the Bridge pane shares the window, so the
+    digest lets the caller ignore activity that did not change provider output.
+    One `display-message` reads the epoch; the screen is captured (the costly
+    call) only when that epoch differs from the one captured last time.
+    Raises whatever the handle lookup or tmux raises; callers treat observation as best effort.
+    """
+    backend = TmuxTerminalBackend()
+    handle = load_handle(mission_id)
+    seen = ACTIVITY_SEEN.get(mission_id)
+    # One tmux invocation: the epoch, plus the screen only when the epoch differs from `seen`.
+    reading = backend.pane_activity_screen(handle, pane="provider", seen_epoch=seen[0] if seen is not None else None)
+    if reading is None:
+        ACTIVITY_SEEN.pop(mission_id, None)
+        return None
+    epoch, screen = reading
+    if screen is None and seen is not None:
+        return seen
+    result = (epoch, hashlib.sha1((screen or "").encode("utf-8", "replace")).hexdigest())
+    ACTIVITY_SEEN[mission_id] = result
+    return result
+
+
+def inside_station() -> bool:
+    """True when this console runs in a Bridge-owned tmux station, not any tmux."""
+    socket_path = Path(os.environ.get("TMUX", "").split(",")[0])
+    return socket_path.name.startswith("m-") and (socket_path.parent.name == "llm-bridge" or socket_path.parent.name.startswith("lb-"))
+
+
+@contextlib.contextmanager
+def outside_tmux_client() -> Iterator[None]:
+    """Run a tmux client call as if started from a plain terminal.
+
+    tmux refuses to attach from inside another tmux pane while ``$TMUX`` is
+    set. A nested attach to a Bridge station is deliberate, so the variables
+    are removed for the duration of the call and restored afterwards.
+    """
+    saved = {name: os.environ.pop(name) for name in ("TMUX", "TMUX_PANE") if name in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
+_STATION_SOCKET_NAME = re.compile(r"m-[0-9a-f]{20}\.sock")
+
+
+def is_bridge_station_socket(backend: object, socket_path: Path) -> bool:
+    """Whether a tmux socket belongs to a Bridge station.
+
+    The server's own marker decides. When the server cannot be queried (for
+    example the socket lives in a directory Bridge would not trust), only a
+    Bridge-style socket name counts as a station; other servers are the
+    user's own tmux.
+    """
+    try:
+        return bool(backend.server_owned(socket_path))  # type: ignore[attr-defined]
+    except (OSError, RuntimeError, subprocess.SubprocessError, AttributeError):
+        return _STATION_SOCKET_NAME.fullmatch(socket_path.name) is not None
+
+
+def execute_terminal_action(source_mission: str, action: TerminalAction, load_handle: Callable[[str], TerminalHandle]) -> None:
+    """Perform a typed terminal action after curses restores the user's terminal.
+
+    A console inside a Bridge station may act only from its own Bridge pane;
+    a console inside the user's own tmux (or no tmux) attaches like a plain terminal.
+    """
+    backend = TmuxTerminalBackend()
+    destination = load_handle(action.mission_id)
+    tmux_env = os.environ.get("TMUX", "")
+    pane_env = os.environ.get("TMUX_PANE", "")
+    source = None
+    if tmux_env:
+        source = load_handle(source_mission)
+        try:
+            tmux_socket = Path(tmux_env.split(",", 1)[0]).expanduser().absolute()
+            same_socket = tmux_socket == source.socket_path.expanduser().absolute()
+        except OSError:
+            tmux_socket, same_socket = None, False
+        if not same_socket and (tmux_socket is None or is_bridge_station_socket(backend, tmux_socket)):
+            raise PermissionError("terminal actions are available only from this mission's owned Bridge pane")
+        if not same_socket:
+            # The console runs inside the user's own tmux: behave like a plain
+            # terminal and attach (or detach) the current client of that tmux.
+            source = None
+    if source is None:
+        if action.action == "detach":
+            backend.detach_client(destination, client_name=action.client)
+            return
+        if action.mission_id == source_mission:
+            backend.focus(destination, pane="provider", expand=True)
+        with outside_tmux_client():
+            backend.attach(destination)
+        return
+
+    if pane_env != source.bridge_pane:
+        raise PermissionError("terminal actions are available only from this mission's owned Bridge pane")
+    if action.action == "detach":
+        if action.mission_id != source_mission:
+            raise PermissionError("detach from an embedded console is limited to its active mission")
+        backend.detach_client(source, client_name=action.client)
+        return
+    if action.mission_id == source_mission:
+        backend.focus(source, pane="provider", expand=True)
+        return
+
+    backend.switch_client_to(source, destination, client_name=action.client)
+
+
+def publish_station_status(
+    mission_id: str,
+    load_handle: Callable[[str], TerminalHandle],
+    *,
+    where: str,
+    text: str,
+    chip: str,
+    segments: list[tuple[str, str]],
+) -> None:
+    """Write the console's status label, state text and chip to its own station's tmux status line.
+
+    Does nothing unless the calling pane is this mission's Bridge pane. ``where`` and ``text`` are
+    plain strings and ``segments`` are (text, role) pairs; all are localised here.
+    """
+    handle = load_handle(mission_id)
+    if os.environ.get("TMUX_PANE") != handle.bridge_pane:
+        return
+    backend = TmuxTerminalBackend()
+    localized = [(localize(part), part_role) for part, part_role in segments]
+    publish = getattr(backend, "publish_status", None)
+    if publish is not None:
+        # One tmux invocation, and only for values that changed.
+        publish(handle, label=localize(where), context=localize(text), chip=chip, segments=localized)
+        return
+    set_label = getattr(backend, "set_status_label", None)
+    if set_label is not None:
+        set_label(handle, localize(where))
+    backend.set_status_context(handle, localize(text))
+    for method, argument in (("set_status_chip", chip), ("set_status_styled", localized)):
+        setter = getattr(backend, method, None)
+        if setter is not None:
+            setter(handle, argument)

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from . import common
@@ -513,7 +514,7 @@ class BridgeMissionHooks:
         return True
 
     def _native_session_argv_transform(self, operation_id: str, provider: str, scheduler_config: Any):
-        if not self.native_tui or getattr(scheduler_config, "command_template", ""):
+        if not self.native_tui or getattr(scheduler_config, "command_template", ""):  # type: ignore[arg-type]  # mypy picks the bool overload of getattr in a boolean context
             return None
 
         def transform(argv: list[str]) -> list[str]:
@@ -1126,7 +1127,7 @@ def run_configured_verifier(
             context_path.unlink()
         except FileNotFoundError:
             pass
-    outcome: dict[str, Any] = {
+    outcome: dict[str, Any] = {  # type: ignore[no-redef]  # the name is already bound earlier in this function
         "status": "VERIFYING",
         "passed": False,
         "reason": reason,
@@ -1203,7 +1204,7 @@ def _socket_candidate_dirs(uid: int, env: dict[str, str] | None) -> tuple[list[P
     return list(dict.fromkeys(lookup)), creation
 
 
-def _cache_runtime_dir(env: dict[str, str]) -> Path:
+def _cache_runtime_dir(env: Mapping[str, str]) -> Path:
     """Private per-user directory used when every shared ``/tmp`` name is taken by someone else."""
     base = env.get("XDG_CACHE_HOME") or str(Path(env.get("HOME") or os.path.expanduser("~")) / ".cache")
     return Path(base) / "llm-tools" / "runtime"
@@ -1483,21 +1484,21 @@ def _terminate_owned_process_group(process_pid: int, process_start: str, *, time
     _signal_owned_process_tree(owned, signal.SIGTERM)
     deadline = time.monotonic() + max(0.05, timeout)
     while time.monotonic() < deadline:
-        current = _current_owned_tree(process_pid, process_start)
-        owned.update(current)
-        _signal_owned_process_tree(current, signal.SIGTERM)
+        owned_now = _current_owned_tree(process_pid, process_start)
+        owned.update(owned_now)
+        _signal_owned_process_tree(owned_now, signal.SIGTERM)
         if (_process_group_absent(process_pid) or not _live_process_group_members(process_pid)) and not _owned_process_records_alive(owned):
             return
         time.sleep(0.05)
-    current = _current_owned_tree(process_pid, process_start)
-    owned.update(current)
+    owned_now = _current_owned_tree(process_pid, process_start)
+    owned.update(owned_now)
     _signal_owned_process_tree(owned, signal.SIGKILL)
     if (_process_group_absent(process_pid) or not _live_process_group_members(process_pid)) and not _owned_process_records_alive(owned):
         return
     deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline:
-        current = _current_owned_tree(process_pid, process_start)
-        owned.update(current)
+        owned_now = _current_owned_tree(process_pid, process_start)
+        owned.update(owned_now)
         _signal_owned_process_tree(owned, signal.SIGKILL)
         if (_process_group_absent(process_pid) or not _live_process_group_members(process_pid)) and not _owned_process_records_alive(owned):
             return

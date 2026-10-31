@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from llm_tools import bridge, bridge_launcher as launcher, bridge_tui as tui
+from llm_tools import bridge_draw, bridge, bridge_launcher as launcher, bridge_tui as tui
 from llm_tools.bridge_input import cell_width
 from llm_tools.bridge_launcher import Launcher
 from llm_tools.bridge_store import MissionLock
@@ -266,7 +266,7 @@ def test_unknown_liveness_is_not_reported_as_stale(tmp_path):
 
 def test_status_roles_for_live_and_stale_rows_use_ok_and_warn(tmp_path, monkeypatch):
     roles: dict[str, str] = {}
-    monkeypatch.setattr(tui, "role_attr", lambda role: roles.setdefault(role, len(roles)) or 0)
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: roles.setdefault(role, len(roles)) or 0)
 
     class Recording(Grid):
         def addnstr(self, y, x, text, count, *attrs):

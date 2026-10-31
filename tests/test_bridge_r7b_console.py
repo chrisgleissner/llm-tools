@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge, bridge_help, bridge_tui
+from llm_tools import bridge_draw, bridge, bridge_help, bridge_tui
 from llm_tools.bridge_input import cell_width
 from llm_tools.bridge_store import BridgeStore
 
@@ -486,7 +486,7 @@ def test_usage_rows_colour_only_the_status_line_and_header(monkeypatch) -> None:
     snapshot = {"usage": {"status": "ready", "age_seconds": 3, "text": USAGE_TEXT}}
     state = make_state(snapshot, view="Usage")
     screen = Screen(30, 120)
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: {"heading": 1, "dim": 2, "info": 3, "ok": 4}.get(role, 0))
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: {"heading": 1, "dim": 2, "info": 3, "ok": 4}.get(role, 0))
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
     seen = {text.split()[0]: attr for _y, _x, text, attr in screen.writes if text.strip()}
     assert seen["Usage"] == 4 and seen["Provider"] == 1 and seen["────────"] == 2 and seen["Claude"] == 3

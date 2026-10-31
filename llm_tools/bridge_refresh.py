@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from .bridge_store import BridgeStore, utc_now
 
@@ -107,7 +107,7 @@ def _safe_decision(selection: dict[str, Any]) -> dict[str, Any]:
                 window.get("reset_epoch"), os.fspath(common.usage_cache_dir()), common.now_epoch()//30)
         decisions.append(item)
     common.prune_usage_log()
-    selected = selection.get("decision") if isinstance(selection.get("decision"), dict) else {}
+    selected = cast("dict[str, Any]", selection.get("decision") if isinstance(selection.get("decision"), dict) else {})
     return {
         "provider": str(selection.get("provider") or selected.get("provider") or ""),
         "route": str(selection.get("route") or ""),

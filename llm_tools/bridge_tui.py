@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import ast
 import collections
-import contextlib
 import curses
 import functools
-import hashlib
 import inspect
 import json
 import math
@@ -31,18 +29,47 @@ import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable
 
 from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice, input_view, offset_for_cells
 from .bridge_documents import DocumentViewer, heading_label
 from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, STARTED_MISSION_STATUSES
-from . import bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
+from . import bridge_events, bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
+from .bridge_projection import ProjectionParams
+from .bridge_vocab import EventKind
 from .bridge_format import plain_reason
 from .bridge_glyphs import FINISHED_STATES, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
-from .bridge_theme import ROLES as THEME_ROLES, Style, fit_style
 from .common import fmt_duration
+from . import terminal
 from .terminal import TerminalAction
 from .bridge_actions import ACTIONS, Action, actions_for
+from . import bridge_draw
+from .bridge_draw import (  # noqa: F401  (re-exported: other modules and tests reach these through bridge_tui)
+    QUIET,
+    VIEWS,
+    ControlViewAction,
+    Segment,
+    _clip_segments,
+    _merge_segments,
+    _put,
+    _put_segments,
+    _scrub,
+    _segments_text,
+    _segments_width,
+    _split_hint,
+    _VIEW_ALIASES,
+    initialize_colors,
+    normalize_view,
+    role_attr,
+    sync_window_size,
+)
+
+
+def __getattr__(name: str) -> object:
+    """Answer reads of the colour state, which lives in ``bridge_draw``, so ``bridge_tui._CURRENT_THEME`` still resolves."""
+    if name in {"_ROLE_ATTRS", "_ROLE_PAIRS", "_CURRENT_THEME", "_COLOR_ROLES"}:
+        return getattr(bridge_draw, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 Snapshot = Callable[..., dict[str, object]]
@@ -60,17 +87,6 @@ def _set_escape_delay() -> None:
     try:
         curses.set_escdelay(_ESCDELAY_MS)
     except (AttributeError, curses.error):
-        pass
-
-
-def sync_window_size(window: curses.window) -> None:
-    """Use the owned tty geometry even when ncurses cached a detached size."""
-    try:
-        size = os.get_terminal_size(sys.stdin.fileno())
-        if window.getmaxyx() != (size.lines, size.columns):
-            curses.resizeterm(size.lines, size.columns)
-            window.resize(size.lines, size.columns)
-    except (OSError, ValueError, AttributeError, curses.error):
         pass
 
 
@@ -500,31 +516,10 @@ def _clipboard_argv() -> list[str] | None:
     return None
 
 
-@dataclass(frozen=True)
-class ControlViewAction:
-    """Open a parsed control command after restoring the current terminal."""
-
-    mission_id: str
-    view: str
-
-    def __post_init__(self) -> None:
-        # Callers may still pass a pre-rename view name ("Bridge", "Orders", ...).
-        object.__setattr__(self, "view", normalize_view(self.view))
-
-
-VIEWS = ("Overview", "Tasks", "Providers", "Activity", "Sessions", "Health", "Actions", "Usage")
 PALETTE_COMMANDS = tuple(action.command for action in ACTIONS)
 # F1-F8 select the views in this order. Activity and Sessions (history) sit
 # together after the working views; Health (diagnostics) is next to Actions.
 # Names used before the 1.3 rename stay accepted everywhere a view is named.
-_VIEW_ALIASES = {
-    "bridge": "Overview", "control": "Overview",
-    "orders": "Tasks", "tasks": "Tasks",
-    "stations": "Providers", "providers": "Providers",
-    "log": "Activity", "events": "Activity",
-    "systems": "Health", "system": "Health",
-    "palette": "Actions",
-}
 # Words typed in the command line that switch view (the rest are CLI commands).
 _VIEW_COMMANDS = {
     "overview": "Overview", "control": "Overview", "providers": "Providers", "activity": "Activity",
@@ -533,13 +528,6 @@ _VIEW_COMMANDS = {
 }
 
 
-def normalize_view(name: str) -> str:
-    """Map a current or pre-rename view name (any case) to a name in VIEWS."""
-    text = str(name).strip()
-    for view in VIEWS:
-        if text.casefold() == view.casefold():
-            return view
-    return _VIEW_ALIASES.get(text.casefold(), text)
 _REFRESH_SECONDS = 0.25
 _ACTIVITY_POLL_SECONDS = 2.0
 _FULL_REFRESH_SECONDS = 5.0  # a full snapshot at least this often: lock files, usage and clocks change without a database commit
@@ -562,135 +550,6 @@ _SELECTABLE_VIEWS = frozenset({"Tasks", "Providers", "Actions"})
 _BRIDGE_LABEL = 12
 _SYSTEM_LABEL = 22
 _SESSION_COLUMNS = ("op", "task", "provider", "model", "status", "native session", "restoration")
-_COLOR_ROLES = THEME_ROLES
-_ROLE_PAIRS: dict[str, int] = {}
-_ROLE_ATTRS: dict[str, int] = {}
-_CURRENT_THEME = "dark"
-
-
-def _style_attrs(style: Style) -> int:
-    attr = curses.A_BOLD if style.bold else 0
-    if style.dim:
-        attr |= curses.A_DIM
-    if style.underline:
-        attr |= curses.A_UNDERLINE
-    if style.reverse:
-        attr |= curses.A_REVERSE
-    return attr
-
-
-def initialize_colors(env: dict[str, str] | None = None, *, is_tty: bool | None = None) -> bool:
-    """Initialize the Bridge semantic palette for the active curses terminal.
-
-    The theme comes from ``bridge_theme`` (explicit env/config choice, else the
-    detected terminal background).  With ``NO_COLOR`` / ``LLM_USAGE_NO_COLOR``
-    or a terminal without colour, roles keep monochrome attributes (bold,
-    underline, reverse); ``TERM=dumb`` and non-terminals get no styling at all.
-    The terminal's own background is preserved except for the ``selected`` bar.
-    """
-    global _CURRENT_THEME, _ROLE_PAIRS, _ROLE_ATTRS
-    values = os.environ if env is None else env
-    resolved = bridge_theme.resolve_cached() if env is None else bridge_theme.resolve(values)
-    _CURRENT_THEME = resolved.polarity
-    _ROLE_PAIRS = {}
-    _ROLE_ATTRS = {}
-    if is_tty is None:
-        is_tty = sys.stdout.isatty()
-    if not is_tty or values.get("TERM", "") == "dumb":
-        return False
-    plain = bridge_theme.resolve_cached() if env is None else bridge_theme.resolve(values)
-    if plain.name != "mono":
-        plain = bridge_theme.resolve(None if env is None else values, theme_name="mono")
-    mono = {role: _style_attrs(plain.style(role)) for role in _COLOR_ROLES}
-    # `curses.wrapper` has already called start_color(), which makes the default
-    # pair white-on-black and paints a black slab on a light terminal. Mono
-    # (attributes only) must keep the terminal's own colours, so default colours
-    # are enabled before any decision to draw without colour.
-    try:
-        capable = curses.has_colors()
-        if capable:
-            curses.start_color()
-    except (AttributeError, curses.error):
-        capable = False
-        started = False
-    else:
-        started = True
-    if capable:
-        try:
-            curses.use_default_colors()
-        except (AttributeError, curses.error):
-            pass
-    if bridge_theme.colors_disabled(values) or not capable or not started:
-        _ROLE_ATTRS = mono
-        return False
-
-    default_colors = False
-    try:
-        curses.use_default_colors()
-        default_colors = True
-    except (AttributeError, curses.error):
-        pass
-
-    neutral = curses.COLOR_WHITE if _CURRENT_THEME == "dark" else curses.COLOR_BLACK
-    fallback_bg = -1 if default_colors else (curses.COLOR_WHITE if _CURRENT_THEME == "light" else curses.COLOR_BLACK)
-    for pair, role in enumerate(_COLOR_ROLES, start=1):
-        if pair >= curses.COLOR_PAIRS:
-            _ROLE_ATTRS[role] = mono[role]
-            continue
-        style = fit_style(resolved.style(role), curses.COLORS, _CURRENT_THEME)
-        foreground_color = -1 if style.fg is None else style.fg
-        if foreground_color < 0 and not default_colors:
-            foreground_color = neutral
-        background_color = fallback_bg if style.bg is None else style.bg
-        try:
-            curses.init_pair(pair, foreground_color, background_color)
-        except curses.error:
-            _ROLE_ATTRS[role] = mono[role]
-            continue
-        _ROLE_PAIRS[role] = pair
-        _ROLE_ATTRS[role] = curses.color_pair(pair) | _style_attrs(style)
-    return bool(_ROLE_PAIRS)
-
-
-QUIET = ".quiet"
-
-
-def role_attr(role: str) -> int:
-    """Return the current curses attribute for a semantic Bridge color role.
-
-    `ROLE.quiet` is the same colour without bold. Historical failures and the
-    blocked tasks inside a `Needs you` row use it, so that the one bold amber
-    `Needs you` label stays the only element drawing the eye (colour guide rule 4).
-    """
-    if role.endswith(QUIET):
-        return role_attr(role[: -len(QUIET)]) & ~curses.A_BOLD
-    if role == "selected" and "selected" not in _ROLE_ATTRS:
-        base = _ROLE_ATTRS.get("brand", 0)
-        return base | curses.A_BOLD | curses.A_REVERSE
-    if role == "secondary":
-        role = "muted" if "muted" in _ROLE_ATTRS else "dim"
-    return _ROLE_ATTRS.get(role, 0)
-
-
-def _scrub(text: str, *, keep_newline: bool = False, drop_format: bool = True) -> str:
-    """Replace control and surrogate characters with spaces and (optionally) drop format characters.
-
-    Only the distinct characters of `text` are classified, so the cost does not
-    grow with the length of repetitive text.
-    """
-    if text.isascii() and text.isprintable():
-        return text  # printable ASCII has no control or format characters
-    table: dict[int, str | None] = {}
-    for char in set(text):
-        if char.isascii() and char.isprintable():
-            continue
-        category = unicodedata.category(char)
-        if category in {"Cc", "Cs"}:
-            if not (keep_newline and char == "\n"):
-                table[ord(char)] = " "
-        elif drop_format and category == "Cf":
-            table[ord(char)] = None  # bidi overrides, zero-width marks
-    return text.translate(table) if table else text
 
 
 def _text(value: object, limit: int = 1000) -> str:
@@ -1044,7 +903,7 @@ def _station_projection(value: object) -> tuple[list[dict[str, object]], dict[st
     routes = configured.get("routes") if isinstance(configured.get("routes"), list) else []
     models = _dict(configured.get("models"))
     efforts = _dict(configured.get("efforts"))
-    names = list(dict.fromkeys(str(name) for name in [*providers, *routes]))
+    names = list(dict.fromkeys(str(name) for name in [*providers, *routes]))  # type: ignore[misc]  # providers and routes come from a projection typed object
     observed_name = _text(observed.get("station") or "unknown", 80)
     if observed_name not in names and observed_name != "unknown":
         names.append(observed_name)
@@ -1070,7 +929,7 @@ def _station_projection(value: object) -> tuple[list[dict[str, object]], dict[st
         "operation_status": _text(observed.get("operation_status") or "unknown", 24),
         "provider_liveness": _text(station_data.get("provider_liveness") or "unknown", 24),
     }
-    return rows, context
+    return rows, context  # type: ignore[return-value]  # dict[str, str] rows are accepted as dict[str, object] (invariant value type only)
 
 
 def _projected_rows(value: object, limit: int, fields: tuple[str, ...]) -> list[dict[str, object]]:
@@ -1180,7 +1039,7 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
         for key in ("id", "name", "objective", "status", "cwd", "updated_at")
         if key in mission
     }
-    result["mission"]["role"] = bridge_theme.mission_role(mission.get("id"), _dict(mission.get("config")))
+    result["mission"]["role"] = bridge_theme.mission_role(mission.get("id"), _dict(mission.get("config")))  # type: ignore[index]  # projection values are typed object; the surrounding code builds them as dicts
     result["tasks"] = _project_tasks(data.get("tasks"))
     current_task = _dict(data.get("current_task"))
     if current_task:
@@ -1214,7 +1073,7 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
     if waiting:
         result["waiting"] = {
             "reason": _text(waiting.get("reason"), 24),
-            "providers": [_text(item, 60) for item in waiting.get("providers", [])[:8]] if isinstance(waiting.get("providers"), list) else [],
+            "providers": [_text(item, 60) for item in waiting.get("providers", [])[:8]] if isinstance(waiting.get("providers"), list) else [],  # type: ignore[index]  # projection values are typed object; this line checks the list
             "entries": [
                 {key: item.get(key) if isinstance(item.get(key), (int, float, type(None))) else _text(item.get(key), 100)
                  for key in ("name", "window", "remaining_percent", "reset_epoch", "reason", "provider") if key in item}
@@ -1248,7 +1107,7 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
             if key == "execution" and isinstance(data[key], dict):
                 result[key] = {
                     _text(field, 48): _text(item, 180) if isinstance(item, str) else item
-                    for field, item in data[key].items()
+                    for field, item in data[key].items()  # type: ignore[attr-defined]  # projection values are typed object; the shape is checked by the surrounding code
                     if isinstance(item, (str, int, float, bool, type(None)))
                 }
             else:
@@ -1658,37 +1517,29 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
     return rows[:5]
 
 
-_ACTIVITY_SEEN: dict[str, tuple[int, str]] = {}  # mission id -> (epoch, digest) of the last screen capture
+# --- tmux policy lives in ``terminal``; these thin names keep the console's call sites and the
+# tests that replace them (``_execute_terminal_action``, ``_read_provider_activity``) unchanged.
+_ACTIVITY_SEEN = terminal.ACTIVITY_SEEN
+_inside_station = terminal.inside_station
+_outside_tmux_client = terminal.outside_tmux_client
+_is_bridge_station_socket = terminal.is_bridge_station_socket
 
 
 def _read_provider_activity(mission_id: str) -> tuple[int, str] | None:
-    """Read the provider pane's tmux activity epoch and a digest of its screen.
-
-    tmux activity is per window and the Bridge pane shares the window, so the
-    digest lets the caller ignore activity that did not change provider output.
-    One `display-message` reads the epoch; the screen is captured (the costly
-    call) only when that epoch differs from the one captured last time.
-    """
+    """The provider pane's tmux activity epoch and screen digest, or None when it cannot be observed."""
     try:
         from .bridge import _load_handle
-        from .terminal import TmuxTerminalBackend
 
-        backend = TmuxTerminalBackend()
-        handle = _load_handle(mission_id)
-        seen = _ACTIVITY_SEEN.get(mission_id)
-        # One tmux invocation: the epoch, plus the screen only when the epoch differs from `seen`.
-        reading = backend.pane_activity_screen(handle, pane="provider", seen_epoch=seen[0] if seen is not None else None)
-        if reading is None:
-            _ACTIVITY_SEEN.pop(mission_id, None)
-            return None
-        epoch, screen = reading
-        if screen is None and seen is not None:
-            return seen
-        result = (epoch, hashlib.sha1((screen or "").encode("utf-8", "replace")).hexdigest())
-        _ACTIVITY_SEEN[mission_id] = result
-        return result
+        return terminal.read_provider_activity(mission_id, _load_handle)
     except Exception:  # Observation is best effort; never surface an error.
         return None
+
+
+def _execute_terminal_action(source_mission: str, action: TerminalAction) -> None:
+    """Perform a typed terminal action after curses restores the user's terminal."""
+    from .bridge import _load_handle
+
+    terminal.execute_terminal_action(source_mission, action, _load_handle)
 
 
 def _idle_phrase(snapshot: dict[str, object]) -> str:
@@ -1921,19 +1772,9 @@ def _event_summary(event: dict[str, object]) -> str:
     return " ".join(pairs)
 
 
-_COLLAPSED_EVENTS = frozenset({
-    "controller-heartbeat", "controller-heartbeat-error", "capacity-refresh", "capacity-refresh-error",
-})
-
-# Bookkeeping the controller writes for itself. Activity shows these dimmed (and
-# can hide them); the Overview's Recent list never includes them.
-_PLUMBING_EVENTS = _COLLAPSED_EVENTS | frozenset({
-    "operation-prepared", "operation-process", "operation-progress", "operation-log-pruned",
-    "managed-process-prepared", "repository-checkpoint", "controller-mode", "controller-config",
-    "controller-ownership", "command-queued", "command-applied", "provider-selection",
-    "station-observation", "native-session-restoration", "task-provider-continuation",
-    "after-verification-result", "events-pruned",
-})
+# Derived from the event registry (`bridge_events.EVENTS`), which holds the classification of every kind.
+_COLLAPSED_EVENTS = bridge_events.collapsed_kinds()
+_PLUMBING_EVENTS = bridge_events.plumbing_kinds()
 
 _TASK_STATE_WORDS = {
     "READY": "ready", "QUEUED": "waiting", "RUNNING": "running", "VERIFYING": "awaiting approval",
@@ -1990,10 +1831,319 @@ def _task_numbers(snapshot: dict[str, object]) -> dict[str, str]:
     return {str(task["id"]): str(task_number(task)) for task in _items(snapshot.get("tasks")) if task.get("id") is not None}
 
 
+@dataclass(frozen=True)
+class _EventContext:
+    """What a humaniser needs to phrase one event."""
+
+    kind: str
+    data: dict[str, object]
+    event: dict[str, object]
+    task: str  # `Task 3`, or `Task` when the event names none
+    on_task: str  # ` on task 3`, or empty
+    reason: str  # ` (reason)`, or empty
+    owner: str  # route, provider or station named by the data
+    model: str
+    new_state: str
+    old_state: str
+
+
+# One phrase function per event kind. A handler returns the phrase, or `(phrase, is_plumbing)` when the
+# flag depends on the event; otherwise the flag comes from `bridge_events.EVENTS`.
+_HUMANIZERS: dict[str, Callable[[_EventContext], str | tuple[str, bool]]] = {}
+
+
+def _humanizer(*kinds: EventKind) -> Callable[[Callable[[_EventContext], str | tuple[str, bool]]], Callable[[_EventContext], str | tuple[str, bool]]]:
+    def register(function: Callable[[_EventContext], str | tuple[str, bool]]) -> Callable[[_EventContext], str | tuple[str, bool]]:
+        for kind in kinds:
+            _HUMANIZERS[str(kind)] = function
+        return function
+
+    return register
+
+
+def _with_reason(label: str, data: dict[str, object], limit: int = 100) -> str:
+    return label + (f" · {_text(data['reason'], limit)}" if _known(data.get("reason")) else "")
+
+
+@_humanizer(EventKind.REVIEW_HOLD, EventKind.REVIEW_HOLD_RELEASED)
+def _h_review_hold(ctx: _EventContext) -> str:
+    summary = _text(ctx.data.get("summary") or "", 160)
+    fallback = "Holding the next task for your review" if ctx.kind == "review-hold" else "Review hold released"
+    return summary[:1].upper() + summary[1:] if summary else fallback
+
+
+@_humanizer(EventKind.MISSION_COLOUR)
+def _h_mission_colour(ctx: _EventContext) -> str:
+    value = ctx.data.get("value")
+    if isinstance(value, int) and 1 <= value <= bridge_theme.MISSION_COUNT:
+        return f"Mission colour set to {value} ({bridge_theme.MISSION_HUE_NAMES[value - 1]})"
+    return "Mission colour back to automatic"
+
+
+@_humanizer(EventKind.MISSION_CREATED)
+def _h_mission_created(ctx: _EventContext) -> str:
+    return f"Mission created · {_text(ctx.data.get('name') or '', 60)}".rstrip(" ·")
+
+
+@_humanizer(EventKind.MISSION_STATUS)
+def _h_mission_status(ctx: _EventContext) -> str:
+    if ctx.new_state == "RUNNING":
+        return "Resumed" if ctx.old_state == "PAUSED" else "Mission started"
+    return f"{_MISSION_STATE_WORDS.get(ctx.new_state, 'Mission ' + (ctx.new_state.lower() or 'changed'))}{ctx.reason}"
+
+
+@_humanizer(EventKind.TASK_ADDED)
+def _h_task_added(ctx: _EventContext) -> str:
+    title = _text(ctx.data.get("title") or "", 60)
+    return f"{ctx.task} added" + (f" · {title}" if title else "")
+
+
+@_humanizer(EventKind.TASK_READY, EventKind.TASK_STATUS)
+def _h_task_status(ctx: _EventContext) -> tuple[str, bool]:
+    if ctx.new_state == "QUEUED" and ctx.data.get("reason") == "dependency-added":
+        return f"{ctx.task} waiting on a new dependency", False
+    word = _TASK_STATE_WORDS.get(ctx.new_state, ctx.new_state.lower() or "updated")
+    return f"{ctx.task} {word}{ctx.reason}", ctx.new_state == "RUNNING"
+
+
+@_humanizer(EventKind.OPERATION_RUNNING)
+def _h_operation_running(ctx: _EventContext) -> str:
+    return f"Started {ctx.owner or 'provider'}" + (f" ({ctx.model})" if ctx.model else "") + ctx.on_task
+
+
+@_humanizer(EventKind.OPERATION_EXITED)
+def _h_operation_exited(ctx: _EventContext) -> str:
+    return f"Provider exited ({_text(ctx.data.get('exit_code', '?'), 8)}){ctx.on_task}"
+
+
+@_humanizer(EventKind.OPERATION_UNCERTAIN)
+def _h_operation_uncertain(ctx: _EventContext) -> str:
+    return "Provider outcome unknown" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
+
+
+@_humanizer(EventKind.OPERATION_ABORTED_BEFORE_LAUNCH)
+def _h_operation_aborted(ctx: _EventContext) -> str:
+    return "Launch aborted" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
+
+
+@_humanizer(EventKind.OPERATION_PREPARED)
+def _h_operation_prepared(ctx: _EventContext) -> str:
+    return f"Preparing {ctx.owner or 'provider'}{ctx.on_task}"
+
+
+@_humanizer(EventKind.PROVIDER_SELECTION)
+def _h_provider_selection(ctx: _EventContext) -> str:
+    return f"Selected {ctx.owner}".rstrip() + (f" ({ctx.model})" if ctx.model else "")
+
+
+@_humanizer(EventKind.CAPACITY_REFRESH)
+def _h_capacity_refresh(ctx: _EventContext) -> str:
+    brief = _text(ctx.data.get("capacity_brief") or "", 80)
+    return f"Capacity: {ctx.owner or 'providers'} {brief}".rstrip() if brief else f"Capacity refreshed: {ctx.owner or 'providers'}"
+
+
+@_humanizer(EventKind.CAPACITY_REFRESH_ERROR)
+def _h_capacity_refresh_error(ctx: _EventContext) -> str:
+    return "Capacity refresh failed" + (f" ({_text(ctx.data['reason'], 60)})" if _known(ctx.data.get("reason")) else "")
+
+
+@_humanizer(EventKind.CONTROLLER_HEARTBEAT)
+def _h_controller_heartbeat(ctx: _EventContext) -> str:
+    return "controller alive"
+
+
+@_humanizer(EventKind.CONTROLLER_HEARTBEAT_ERROR)
+def _h_controller_heartbeat_error(ctx: _EventContext) -> str:
+    return "controller heartbeat failed" + (f" ({_text(ctx.data['reason'], 40)})" if _known(ctx.data.get("reason")) else "")
+
+
+@_humanizer(EventKind.CONTROLLER_EXITED_UNEXPECTEDLY)
+def _h_controller_exited(ctx: _EventContext) -> str:
+    return "Controller exited unexpectedly" + ctx.reason
+
+
+@_humanizer(EventKind.COMMAND_APPLIED, EventKind.COMMAND_FAILED, EventKind.COMMAND_QUEUED, EventKind.COMMAND_REJECTED)
+def _h_command(ctx: _EventContext) -> str:
+    return f"Command {ctx.kind[len('command-'):]}: {_text(ctx.data.get('command') or '', 60)}".rstrip(": ")
+
+
+@_humanizer(EventKind.STATION_HANDOFF, EventKind.PROVIDER_SWITCHED)
+def _h_provider_switched(ctx: _EventContext) -> str:
+    return f"Switched provider {_text(ctx.data.get('from') or '?', 30)} → {_text(ctx.data.get('to') or '?', 30)}{ctx.reason}"
+
+
+@_humanizer(EventKind.ROTATION_CHANGED)
+def _h_rotation_changed(ctx: _EventContext) -> str:
+    return f"Rotation changed to {_rotation_text(ctx.data.get('to'))}"
+
+
+@_humanizer(EventKind.ROTATION_APPLIED)
+def _h_rotation_applied(ctx: _EventContext) -> str:
+    return f"Rotation applied: {_rotation_text(ctx.data.get('routes') or ctx.data.get('providers'))}"
+
+
+@_humanizer(EventKind.ROTATION_REJECTED)
+def _h_rotation_rejected(ctx: _EventContext) -> str:
+    return "Rotation change rejected" + (f" · {_text(ctx.data['error'], 100)}" if _known(ctx.data.get("error")) else "")
+
+
+@_humanizer(EventKind.TASK_REJECTED)
+def _h_task_rejected(ctx: _EventContext) -> str:
+    return f"{ctx.task} sent back" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
+
+
+@_humanizer(EventKind.MISSION_REOPENED)
+def _h_mission_reopened(ctx: _EventContext) -> str:
+    return _with_reason("Mission reopened", ctx.data)
+
+
+@_humanizer(EventKind.CONTROLLER_FAILED)
+def _h_controller_failed(ctx: _EventContext) -> str:
+    return _with_reason("Controller failed", ctx.data)
+
+
+@_humanizer(EventKind.STATION_STOPPED)
+def _h_station_stopped(ctx: _EventContext) -> str:
+    return "Provider station stopped"
+
+
+@_humanizer(EventKind.PROVIDER_HANDOFF)
+def _h_provider_handoff(ctx: _EventContext) -> str:
+    return (f"{ctx.task} handed off after exit {_text(ctx.data.get('exit_code', '?'), 8)} "
+            f"(failure {_text(ctx.data.get('failure_count', '?'), 6)}/{_text(ctx.data.get('max_failures', '?'), 6)})")
+
+
+@_humanizer(EventKind.PROVIDER_HANDOFF_SELECTED)
+def _h_provider_handoff_selected(ctx: _EventContext) -> str:
+    return f"Handing off to {_text(ctx.data.get('station') or '?', 40)}"
+
+
+@_humanizer(EventKind.PROVIDER_HANDOFF_EXHAUSTED)
+def _h_provider_handoff_exhausted(ctx: _EventContext) -> str:
+    return f"{ctx.task} out of handoffs ({_text(ctx.data.get('failures', '?'), 6)} failures, limit {_text(ctx.data.get('max_failures', '?'), 6)})"
+
+
+@_humanizer(EventKind.PROVIDER_WAIT)
+def _h_provider_wait(ctx: _EventContext) -> str:
+    until = _relative_epoch(ctx.data.get("target_epoch"))
+    return "Waiting for capacity" + (f", resumes {until}" if until else "") + (f" · {_text(ctx.data['reason'], 60)}" if _known(ctx.data.get("reason")) else "")
+
+
+@_humanizer(EventKind.TASK_VERIFIED)
+def _h_task_verified(ctx: _EventContext) -> str:
+    return f"{ctx.task} verified" + (" (approved by you)" if ctx.data.get("approved") else "")
+
+
+@_humanizer(EventKind.VERIFICATION_FAILED)
+def _h_verification_failed(ctx: _EventContext) -> str:
+    return f"{ctx.task} verification failed"
+
+
+@_humanizer(EventKind.TASK_EVIDENCE_RECORDED)
+def _h_task_evidence(ctx: _EventContext) -> str:
+    count = ctx.data.get("evidence_count")
+    return f"{ctx.task} evidence recorded" + (f" ({_text(count, 6)} item{'s' if count != 1 else ''})" if _known(count) else "")
+
+
+@_humanizer(EventKind.TASK_AMENDED)
+def _h_task_amended(ctx: _EventContext) -> str:
+    return f"{ctx.task} amended"
+
+
+@_humanizer(EventKind.TASK_AMENDMENT_APPLIED)
+def _h_task_amendment_applied(ctx: _EventContext) -> str:
+    return f"{ctx.task} amendment applied"
+
+
+@_humanizer(EventKind.TASK_PRIORITY)
+def _h_task_priority(ctx: _EventContext) -> str:
+    return f"{ctx.task} priority changed"
+
+
+@_humanizer(EventKind.TASK_REORDERED)
+def _h_task_reordered(ctx: _EventContext) -> str:
+    return f"{ctx.task} reordered"
+
+
+@_humanizer(EventKind.DEPENDENCY_ADDED)
+def _h_dependency_added(ctx: _EventContext) -> str:
+    deps = ctx.data.get("depends_on")
+    wait = ", ".join(_text(item, 12) for item in deps) if isinstance(deps, list) else _text(deps or "", 40)
+    return f"{ctx.task} now waits for {wait}".rstrip()
+
+
+@_humanizer(EventKind.TASK_PROPOSED)
+def _h_task_proposed(ctx: _EventContext) -> str:
+    return f"Agent proposed {ctx.task.lower()}"
+
+
+@_humanizer(EventKind.TASK_PROPOSAL_ACCEPTED)
+def _h_task_proposal_accepted(ctx: _EventContext) -> str:
+    return f"Proposal accepted: {ctx.task.lower()}"
+
+
+@_humanizer(EventKind.TASK_PROPOSAL_REJECTED)
+def _h_task_proposal_rejected(ctx: _EventContext) -> str:
+    return f"Proposal rejected: {ctx.task.lower()}"
+
+
+@_humanizer(EventKind.NATIVE_SESSION_RESTORATION)
+def _h_native_session(ctx: _EventContext) -> str:
+    state = _text(ctx.data.get("restoration_state") or "unknown", 30).lower().replace("_", " ")
+    return f"Session {state}" + (f" · {_text(ctx.data['provider'], 20)}" if _known(ctx.data.get("provider")) else "")
+
+
+@_humanizer(EventKind.REPOSITORY_CHECKPOINT)
+def _h_repository_checkpoint(ctx: _EventContext) -> str:
+    return "Repository checkpoint saved"
+
+
+@_humanizer(EventKind.OPERATION_PROCESS)
+def _h_operation_process(ctx: _EventContext) -> str:
+    return "Provider process started"
+
+
+@_humanizer(EventKind.OPERATION_PROGRESS)
+def _h_operation_progress(ctx: _EventContext) -> str:
+    return "Provider progress noted"
+
+
+@_humanizer(EventKind.CONTROLLER_MODE)
+def _h_controller_mode(ctx: _EventContext) -> str:
+    return f"Controller mode: {_text(ctx.data.get('actual_mode') or 'unknown', 20)}"
+
+
+@_humanizer(EventKind.CONTROLLER_CONFIG)
+def _h_controller_config(ctx: _EventContext) -> str:
+    return "Controller configured"
+
+
+@_humanizer(EventKind.CONTROLLER_OWNERSHIP)
+def _h_controller_ownership(ctx: _EventContext) -> str:
+    return "Controller ownership verified"
+
+
+@_humanizer(EventKind.STATION_OBSERVATION)
+def _h_station_observation(ctx: _EventContext) -> str:
+    return "Provider screen observed"
+
+
+@_humanizer(
+    EventKind.STEERING_HANDOFF_CONSUMED, EventKind.STEERING_HANDOFF_REQUESTED, EventKind.STEERING_PAUSE_APPLIED,
+    EventKind.STEERING_PAUSE_REQUESTED, EventKind.STEERING_STOP_TASK_APPLIED, EventKind.STEERING_STOP_TASK_REQUESTED,
+    EventKind.STEERING_VERIFY_APPLIED, EventKind.STEERING_VERIFY_DRAINED, EventKind.STEERING_VERIFY_REQUESTED,
+)
+def _h_steering(ctx: _EventContext) -> str:
+    return "Steering " + ctx.kind[len("steering-"):].replace("-", " ")
+
+
 def _humanize_event(event: dict[str, object], numbers: dict[str, str] | None = None) -> tuple[str, bool]:
     """(operator-facing phrase, is_plumbing) for one durable event.
 
-    `numbers` maps task ids to the number shown for them, when that differs.
+    `numbers` maps task ids to the number shown for them, when that differs. The phrase comes from
+    the kind's entry in `_HUMANIZERS`; the flag from `bridge_events.EVENTS` unless the handler
+    returns its own. A kind without a handler (including a stored kind this build does not know)
+    reads `Label · detail`.
     """
     kind = _event_kind(event)
     raw = event.get("data")
@@ -2003,137 +2153,28 @@ def _humanize_event(event: dict[str, object], numbers: dict[str, str] | None = N
         task_id = event["task_ordinal"]
     elif numbers and _known(task_id):
         task_id = numbers.get(str(task_id), task_id)
-    task = f"Task {_text(task_id, 12)}" if _known(task_id) else "Task"
-    on_task = f" on task {_text(task_id, 12)}" if _known(task_id) else ""
-    plumbing = kind in _PLUMBING_EVENTS or (
-        kind.startswith("steering-") and kind.rsplit("-", 1)[-1] in {"applied", "drained", "consumed"}
-    )
-    reason = f" ({_text(plain_reason(data['reason']), 60)})" if _known(data.get("reason")) else ""
-    owner = _text(data.get("route_id") or data.get("route") or data.get("provider") or data.get("station") or "", 40)
     model_value = data.get("model") if _known(data.get("model")) else data.get("selected_model")
-    model = _text(model_value, 40) if _known(model_value) else ""
-    new_state = str(data.get("to") or "").upper()
-    old_state = str(data.get("from") or "").upper()
-
-    if kind in _REVIEW_HOLD_EVENTS:
-        summary = _text(data.get("summary") or "", 160)
-        fallback = "Holding the next task for your review" if kind == "review-hold" else "Review hold released"
-        return (summary[:1].upper() + summary[1:] if summary else fallback), False
-    if kind == "mission-colour":
-        value = data.get("value")
-        if isinstance(value, int) and 1 <= value <= bridge_theme.MISSION_COUNT:
-            return f"Mission colour set to {value} ({bridge_theme.MISSION_HUE_NAMES[value - 1]})", False
-        return "Mission colour back to automatic", False
-    if kind == "mission-created":
-        return f"Mission created · {_text(data.get('name') or '', 60)}".rstrip(" ·"), False
-    if kind == "mission-status":
-        if new_state == "RUNNING":
-            return ("Resumed" if old_state == "PAUSED" else "Mission started"), False
-        return f"{_MISSION_STATE_WORDS.get(new_state, 'Mission ' + (new_state.lower() or 'changed'))}{reason}", False
-    if kind == "task-added":
-        title = _text(data.get("title") or "", 60)
-        return f"{task} added" + (f" · {title}" if title else ""), False
-    if kind in {"task-ready", "task-status"}:
-        if new_state == "QUEUED" and data.get("reason") == "dependency-added":
-            return f"{task} waiting on a new dependency", False
-        word = _TASK_STATE_WORDS.get(new_state, new_state.lower() or "updated")
-        return f"{task} {word}{reason}", new_state == "RUNNING"
-    if kind == "operation-running":
-        return f"Started {owner or 'provider'}" + (f" ({model})" if model else "") + on_task, False
-    if kind == "operation-exited":
-        return f"Provider exited ({_text(data.get('exit_code', '?'), 8)}){on_task}", False
-    if kind == "operation-uncertain":
-        return "Provider outcome unknown" + (f" · {_text(data['reason'], 100)}" if _known(data.get("reason")) else ""), False
-    if kind == "operation-aborted-before-launch":
-        return "Launch aborted" + (f" · {_text(data['reason'], 100)}" if _known(data.get("reason")) else ""), False
-    if kind == "operation-prepared":
-        return f"Preparing {owner or 'provider'}{on_task}", True
-    if kind == "provider-selection":
-        return f"Selected {owner}".rstrip() + (f" ({model})" if model else ""), True
-    if kind == "capacity-refresh":
-        brief = _text(data.get("capacity_brief") or "", 80)
-        return (f"Capacity: {owner or 'providers'} {brief}".rstrip() if brief else f"Capacity refreshed: {owner or 'providers'}"), True
-    if kind == "capacity-refresh-error":
-        return "Capacity refresh failed" + (f" ({_text(data['reason'], 60)})" if _known(data.get("reason")) else ""), True
-    if kind == "controller-heartbeat":
-        return "controller alive", True
-    if kind == "controller-heartbeat-error":
-        return "controller heartbeat failed" + (f" ({_text(data['reason'], 40)})" if _known(data.get("reason")) else ""), True
-    if kind == "controller-exited-unexpectedly":
-        return "Controller exited unexpectedly" + reason, False
-    if kind.startswith("command-"):
-        verb = kind[len("command-"):]
-        return f"Command {verb}: {_text(data.get('command') or '', 60)}".rstrip(": "), plumbing
-    if kind in {"station-handoff", "provider-switched"}:
-        return f"Switched provider {_text(data.get('from') or '?', 30)} → {_text(data.get('to') or '?', 30)}{reason}", False
-    if kind == "rotation-changed":
-        return f"Rotation changed to {_rotation_text(data.get('to'))}", False
-    if kind == "rotation-applied":
-        return f"Rotation applied: {_rotation_text(data.get('routes') or data.get('providers'))}", False
-    if kind == "rotation-rejected":
-        return "Rotation change rejected" + (f" · {_text(data['error'], 100)}" if _known(data.get("error")) else ""), False
-    if kind == "task-rejected":
-        return f"{task} sent back" + (f" · {_text(data['reason'], 100)}" if _known(data.get("reason")) else ""), False
-    if kind == "mission-reopened":
-        return "Mission reopened" + (f" · {_text(data['reason'], 100)}" if _known(data.get("reason")) else ""), False
-    if kind == "controller-failed":
-        return "Controller failed" + (f" · {_text(data['reason'], 100)}" if _known(data.get("reason")) else ""), False
-    if kind == "station-stopped":
-        return "Provider station stopped", True
-    if kind == "provider-handoff":
-        return (f"{task} handed off after exit {_text(data.get('exit_code', '?'), 8)} "
-                f"(failure {_text(data.get('failure_count', '?'), 6)}/{_text(data.get('max_failures', '?'), 6)})"), False
-    if kind == "provider-handoff-selected":
-        return f"Handing off to {_text(data.get('station') or '?', 40)}", False
-    if kind == "provider-handoff-exhausted":
-        return f"{task} out of handoffs ({_text(data.get('failures', '?'), 6)} failures, limit {_text(data.get('max_failures', '?'), 6)})", False
-    if kind == "provider-wait":
-        until = _relative_epoch(data.get("target_epoch"))
-        return "Waiting for capacity" + (f", resumes {until}" if until else "") + (f" · {_text(data['reason'], 60)}" if _known(data.get("reason")) else ""), False
-    if kind == "task-verified":
-        return f"{task} verified" + (" (approved by you)" if data.get("approved") else ""), False
-    if kind == "verification-failed":
-        return f"{task} verification failed", False
-    if kind == "task-evidence-recorded":
-        count = data.get("evidence_count")
-        return f"{task} evidence recorded" + (f" ({_text(count, 6)} item{'s' if count != 1 else ''})" if _known(count) else ""), False
-    if kind == "task-amended":
-        return f"{task} amended", False
-    if kind == "task-amendment-applied":
-        return f"{task} amendment applied", False
-    if kind == "task-priority":
-        return f"{task} priority changed", False
-    if kind == "task-reordered":
-        return f"{task} reordered", False
-    if kind == "dependency-added":
-        deps = data.get("depends_on")
-        wait = ", ".join(_text(item, 12) for item in deps) if isinstance(deps, list) else _text(deps or "", 40)
-        return f"{task} now waits for {wait}".rstrip(), False
-    if kind == "task-proposed":
-        return f"Agent proposed {task.lower()}", False
-    if kind == "task-proposal-accepted":
-        return f"Proposal accepted: {task.lower()}", False
-    if kind == "task-proposal-rejected":
-        return f"Proposal rejected: {task.lower()}", False
-    if kind == "native-session-restoration":
-        state = _text(data.get("restoration_state") or "unknown", 30).lower().replace("_", " ")
-        return f"Session {state}" + (f" · {_text(data['provider'], 20)}" if _known(data.get("provider")) else ""), True
-    if kind == "repository-checkpoint":
-        return "Repository checkpoint saved", True
-    if kind == "operation-process":
-        return "Provider process started", True
-    if kind == "operation-progress":
-        return "Provider progress noted", True
-    if kind == "controller-mode":
-        return f"Controller mode: {_text(data.get('actual_mode') or 'unknown', 20)}", True
-    if kind == "controller-config":
-        return "Controller configured", True
-    if kind == "controller-ownership":
-        return "Controller ownership verified", True
-    if kind == "station-observation":
-        return "Provider screen observed", True
-    if kind.startswith("steering-"):
-        return "Steering " + kind[len("steering-"):].replace("-", " "), plumbing
+    context = _EventContext(
+        kind=kind,
+        data=data,
+        event=event,
+        task=f"Task {_text(task_id, 12)}" if _known(task_id) else "Task",
+        on_task=f" on task {_text(task_id, 12)}" if _known(task_id) else "",
+        reason=f" ({_text(plain_reason(data['reason']), 60)})" if _known(data.get("reason")) else "",
+        owner=_text(data.get("route_id") or data.get("route") or data.get("provider") or data.get("station") or "", 40),
+        model=_text(model_value, 40) if _known(model_value) else "",
+        new_state=str(data.get("to") or "").upper(),
+        old_state=str(data.get("from") or "").upper(),
+    )
+    plumbing = bridge_events.is_plumbing(kind)
+    handler = _HUMANIZERS.get(kind)
+    if handler is None and kind.startswith("command-"):
+        handler = _h_command
+    elif handler is None and kind.startswith("steering-"):
+        handler = _h_steering
+    if handler is not None:
+        result = handler(context)
+        return result if isinstance(result, tuple) else (result, plumbing)
     detail = _event_summary(event)
     label = kind.replace("-", " ").capitalize()
     return (f"{label} · {detail}" if detail else label), plumbing
@@ -3087,7 +3128,18 @@ class _ConsoleState:
         reading = self.change_probe()
         if reading is None:
             return None
-        return (reading, self.task_offset, self.event_offset, self.event_anchor, self.search_query, self.view)
+        return (reading, self.projection_params(), self.view)
+
+    def projection_params(self) -> ProjectionParams:
+        """The slice of the mission this console is showing: task page, event page and search text."""
+        return ProjectionParams(
+            task_limit=_TASK_PAGE_SIZE,
+            task_offset=self.task_offset,
+            search=self.search_query,
+            event_offset=self.event_offset,
+            event_anchor=self.event_anchor,
+            prompt_chars=_MAX_DETAIL_TEXT + 1,  # the console previews prompts; `task show` has the full text
+        )
 
     def refresh(self, now: float | None = None, *, force: bool = False) -> None:
         global LAST_RECOVERY_DRAFT
@@ -3243,15 +3295,7 @@ class _ConsoleState:
                 except (TypeError, ValueError):
                     accepts_kwargs = False
                     parameter_names = set()
-                projection = {
-                    "task_offset": self.task_offset,
-                    "event_offset": self.event_offset,
-                    "event_anchor": self.event_anchor,
-                    "task_limit": _TASK_PAGE_SIZE,
-                    "search": self.search_query,
-                    "view": self.view,
-                    "prompt_chars": _MAX_DETAIL_TEXT + 1,  # the console previews prompts; `task show` has the full text
-                }
+                projection = {**self.projection_params().as_kwargs(), "view": self.view}
                 kwargs = {
                     key: value
                     for key, value in projection.items()
@@ -3268,7 +3312,7 @@ class _ConsoleState:
                         pass  # advisory data; the view keeps its own wording
                 result = (_bounded_snapshot(data), "")
             except Exception as exc:  # UI remains usable while a projection is unavailable.
-                result = (None, _text(exc, 160) or type(exc).__name__)
+                result = (None, _text(exc, 160) or type(exc).__name__)  # type: ignore[assignment]  # None marks a failed read, which the reader of `result` tests
             with self._result_lock:
                 self._snapshot_result = result
 
@@ -3336,12 +3380,12 @@ class _ConsoleState:
                     except (TypeError, json.JSONDecodeError):
                         envelope = None
                     status = envelope.get("status") if isinstance(envelope, dict) else None
-                    outcome = {"APPLIED": "applied", "REJECTED": "rejected", "FAILED": "failed"}.get(status, "unknown")
+                    outcome = {"APPLIED": "applied", "REJECTED": "rejected", "FAILED": "failed"}.get(status, "unknown")  # type: ignore[arg-type]  # status comes from a projected row typed Any | None
                     if raw_text.lstrip().lower().startswith("error:"):
                         outcome = "rejected"
-                    result = _CommandResult(_command_feedback(text, raw_text), outcome)
+                    result = _CommandResult(_command_feedback(text, raw_text), outcome)  # type: ignore[assignment]  # `result` is reused in this method with a different type
             except Exception as exc:
-                result = _CommandResult(f"Outcome unknown: {_text(exc, 180)}", "unknown")
+                result = _CommandResult(f"Outcome unknown: {_text(exc, 180)}", "unknown")  # type: ignore[assignment]  # `result` is reused in this method with a different type
             with self._result_lock:
                 self._command_result = result
         thread = threading.Thread(target=run_command, name="llm-bridge-command", daemon=False)
@@ -3648,7 +3692,7 @@ class _ConsoleState:
                             source = str(store.get_mission(self.mission_id)["objective"])
                         result = ("objective", "1", source, "")
                     except Exception as exc:
-                        result = ("objective", "?", None, f"Could not read full objective: {_text(exc, 160)}")
+                        result = ("objective", "?", None, f"Could not read full objective: {_text(exc, 160)}")  # type: ignore[assignment]  # None stands for a missing value in this row
                     with self._result_lock:
                         if generation == self._document_generation:
                             self._document_result = result
@@ -4526,120 +4570,6 @@ class _ConsoleState:
                 self.selected = row_index
 
 
-def _put(
-    window: curses.window,
-    y: int,
-    x: int,
-    value: object,
-    width: int,
-    *,
-    role: str | None = None,
-    attr: int = 0,
-    preserve_spacing: bool = False,
-) -> int:
-    """Draw one clipped single-line run and return the terminal cells it used."""
-    if width <= 0:
-        return 0
-    # Spacing is layout (columns, separators): sanitize control characters but
-    # never collapse runs of spaces. `_text` is for untrusted values only.
-    # `localize` runs first so an ASCII locale clips by the cells it really draws.
-    text = value if isinstance(value, str) else str(value)
-    size = width * 4 + 256
-    while True:
-        # Only the first `width` cells are drawn. Clean a bounded prefix and grow
-        # it when zero-width or removed characters left the prefix too narrow.
-        safe = localize(_scrub(text[:size].expandtabs(8)))
-        if size >= len(text) or cell_width(safe) > width:
-            break
-        size *= 4
-    rendered = cell_slice(safe, 0, width)
-    style = attr | (role_attr(role) if role else 0)
-    try:
-        window.addnstr(y, x, rendered, width, style)
-    except TypeError:
-        # Keep lightweight recording windows compatible with curses' optional
-        # attr argument; real curses windows always accept it.
-        try:
-            window.addnstr(y, x, rendered, width)
-        except curses.error:
-            pass
-    except curses.error:
-        pass
-    return cell_width(rendered)
-
-
-# --- multi-segment lines --------------------------------------------------------
-# A segment is (text, role). Colour is applied to the smallest element that
-# carries the meaning, so a task row is several segments, not one role.
-
-Segment = tuple[str, str]
-
-
-def _segments_text(segments: list[Segment]) -> str:
-    return "".join(text for text, _role in segments)
-
-
-def _segments_width(segments: list[Segment]) -> int:
-    return sum(cell_width(localize(text)) for text, _role in segments)
-
-
-def _clip_segments(segments: list[Segment], width: int, *, mark: bool = True) -> list[Segment]:
-    """Clip segments to `width` cells; with `mark`, the cut ends in an ellipsis."""
-    if width <= 0:
-        return []
-    if _segments_width(segments) <= width:
-        return segments
-    ellipsis = glyph("ellipsis") if mark else ""
-    room = max(0, width - cell_width(ellipsis))
-    out: list[Segment] = []
-    used = 0
-    for text, role in segments:
-        text = localize(text)
-        amount = cell_width(text)
-        if used + amount <= room:
-            out.append((text, role))
-            used += amount
-            continue
-        piece = cell_slice(text, 0, room - used)
-        if piece:
-            out.append((piece, role))
-        if mark:
-            out.append((ellipsis, out[-1][1] if out else "info"))
-        break
-    return out
-
-
-def _put_segments(
-    window: curses.window,
-    y: int,
-    x: int,
-    segments: list[Segment],
-    width: int,
-    *,
-    attr: int = 0,
-) -> int:
-    """Draw (text, role) segments left to right, clipped by cell width; return cells used."""
-    used = 0
-    for text, role in segments:
-        if used >= width:
-            break
-        if text:
-            used += _put(window, y, x + used, text, width - used, role=role, attr=attr)
-    return used
-
-
-def _merge_segments(segments: list[Segment]) -> list[Segment]:
-    merged: list[Segment] = []
-    for text, role in segments:
-        if not text:
-            continue
-        if merged and merged[-1][1] == role:
-            merged[-1] = (merged[-1][0] + text, role)
-        else:
-            merged.append((text, role))
-    return merged
-
-
 _FINISHED_STATES = FINISHED_STATES
 _state_look = state_look
 _state_text = state_text
@@ -4926,12 +4856,6 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     return items, "? help"
 
 
-def _inside_station() -> bool:
-    """True when this console runs in a Bridge-owned tmux station, not any tmux."""
-    socket = Path(os.environ.get("TMUX", "").split(",")[0])
-    return socket.name.startswith("m-") and (socket.parent.name == "llm-bridge" or socket.parent.name.startswith("lb-"))
-
-
 def _hint_chosen(state: _ConsoleState, width: int) -> list[str]:
     """The hint items that fit `width` (lowest-value ones dropped first), closing hint last."""
     items, closing = _hint_items(state)
@@ -4947,27 +4871,6 @@ def _hint_chosen(state: _ConsoleState, width: int) -> list[str]:
 def _hint(state: _ConsoleState, width: int = 100) -> str:
     """`key action · key action · ? help`, dropping the lowest-value items to fit."""
     return _SEP.join(_hint_chosen(state, width))
-
-
-_HINT_KEY = re.compile(
-    r"^(?P<key>(?:Ctrl-\](?: [A-Za-z])?|Ctrl-[A-Za-z0-9]|Shift-\S+|F\d|PgUp|PgDn|Enter|Esc|Tab|\u2191\u2193|\?|/[a-z]+|/|[A-Za-z])"
-    r"(?:/(?:Ctrl-\S|F[\d-]+|PgUp|PgDn|PgDn|\u2191\u2193|Shift-\S+|\S))*)(?:\s+(?P<verb>.*))?$"
-)
-_HINT_PLAIN = ("type ",)
-
-
-def _split_hint(item: str) -> tuple[str, str]:
-    """(key, action) of one hint item; text that names no key is all action."""
-    if item.startswith(_HINT_PLAIN):
-        return "", item
-    match = _HINT_KEY.match(item)
-    if not match:
-        return "", item
-    key = match.group("key")
-    verb = match.group("verb") or ""
-    if len(key) == 1 and key.isalpha() and not verb:
-        return "", item  # a lone word, not a key
-    return key, verb
 
 
 def _hint_segments(state: _ConsoleState, width: int) -> list[Segment]:
@@ -5505,7 +5408,7 @@ def _edit_task_prompt(
         if task_id is not None:
             # Display projections are intentionally bounded and sanitized.
             # Mutation input must come from the full verbatim public record.
-            record = json.loads(state.dispatch(state.mission_id, shlex.join(["task", "show", *_task_ref(state.snapshot, task_id), "--json"])))
+            record = json.loads(state.dispatch(state.mission_id, shlex.join(["task", "show", *_task_ref(state.snapshot, task_id), "--json"])))  # type: ignore[arg-type]  # the dispatcher returns object; this call expects the JSON text of `task show`
             if not isinstance(record, dict) or str(task_number(record)) != task_id or not isinstance(record.get("prompt"), str):
                 raise ValueError("could not load the complete task prompt; amendment cancelled")
             initial_text = record["prompt"]
@@ -5642,85 +5545,6 @@ def _selected_task_id(state: _ConsoleState) -> str | None:
     index = min(max(0, state.selected), len(tasks) - 1)
     value = task_number(tasks[index])
     return _text(value, 40) if value is not None else None
-
-
-@contextlib.contextmanager
-def _outside_tmux_client() -> Iterator[None]:
-    """Run a tmux client call as if started from a plain terminal.
-
-    tmux refuses to attach from inside another tmux pane while ``$TMUX`` is
-    set. A nested attach to a Bridge station is deliberate, so the variables
-    are removed for the duration of the call and restored afterwards.
-    """
-    saved = {name: os.environ.pop(name) for name in ("TMUX", "TMUX_PANE") if name in os.environ}
-    try:
-        yield
-    finally:
-        os.environ.update(saved)
-
-
-_STATION_SOCKET_NAME = re.compile(r"m-[0-9a-f]{20}\.sock")
-
-
-def _is_bridge_station_socket(backend: object, socket: Path) -> bool:
-    """Whether a tmux socket belongs to a Bridge station.
-
-    The server's own marker decides. When the server cannot be queried (for
-    example the socket lives in a directory Bridge would not trust), only a
-    Bridge-style socket name counts as a station; other servers are the
-    user's own tmux.
-    """
-    try:
-        return bool(backend.server_owned(socket))  # type: ignore[attr-defined]
-    except (OSError, RuntimeError, subprocess.SubprocessError, AttributeError):
-        return _STATION_SOCKET_NAME.fullmatch(socket.name) is not None
-
-
-def _execute_terminal_action(source_mission: str, action: TerminalAction) -> None:
-    """Perform a typed terminal action after curses restores the user's terminal."""
-    from .bridge import _load_handle
-    from .terminal import TmuxTerminalBackend
-
-    backend = TmuxTerminalBackend()
-    destination = _load_handle(action.mission_id)
-    tmux_env = os.environ.get("TMUX", "")
-    pane_env = os.environ.get("TMUX_PANE", "")
-    source = None
-    if tmux_env:
-        source = _load_handle(source_mission)
-        try:
-            tmux_socket = Path(tmux_env.split(",", 1)[0]).expanduser().absolute()
-            same_socket = tmux_socket == source.socket_path.expanduser().absolute()
-        except OSError:
-            tmux_socket, same_socket = None, False
-        if not same_socket and (tmux_socket is None or _is_bridge_station_socket(backend, tmux_socket)):
-            raise PermissionError("terminal actions are available only from this mission's owned Bridge pane")
-        if not same_socket:
-            # The console runs inside the user's own tmux: behave like a plain
-            # terminal and attach (or detach) the current client of that tmux.
-            source = None
-    if source is None:
-        if action.action == "detach":
-            backend.detach_client(destination, client_name=action.client)
-            return
-        if action.mission_id == source_mission:
-            backend.focus(destination, pane="provider", expand=True)
-        with _outside_tmux_client():
-            backend.attach(destination)
-        return
-
-    if pane_env != source.bridge_pane:
-        raise PermissionError("terminal actions are available only from this mission's owned Bridge pane")
-    if action.action == "detach":
-        if action.mission_id != source_mission:
-            raise PermissionError("detach from an embedded console is limited to its active mission")
-        backend.detach_client(source, client_name=action.client)
-        return
-    if action.mission_id == source_mission:
-        backend.focus(source, pane="provider", expand=True)
-        return
-
-    backend.switch_client_to(source, destination, client_name=action.client)
 
 
 def _terminal_outcome(source_mission: str, action: TerminalAction) -> str:
@@ -5913,25 +5737,8 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                                        segments: list[Segment] = status_segments, chip: str = status_chip) -> None:
                         try:
                             from .bridge import _load_handle
-                            from .terminal import TmuxTerminalBackend
 
-                            handle = _load_handle(mission_id)
-                            if os.environ.get("TMUX_PANE") == handle.bridge_pane:
-                                backend = TmuxTerminalBackend()
-                                localized = [(localize(part), part_role) for part, part_role in segments]
-                                publish = getattr(backend, "publish_status", None)
-                                if publish is not None:
-                                    # One tmux invocation, and only for values that changed.
-                                    publish(handle, label=localize(where), context=localize(text), chip=chip, segments=localized)
-                                    return
-                                set_label = getattr(backend, "set_status_label", None)
-                                if set_label is not None:
-                                    set_label(handle, localize(where))
-                                backend.set_status_context(handle, localize(text))
-                                for method, argument in (("set_status_chip", chip), ("set_status_styled", localized)):
-                                    setter = getattr(backend, method, None)
-                                    if setter is not None:
-                                        setter(handle, argument)
+                            terminal.publish_station_status(mission_id, _load_handle, where=where, text=text, chip=chip, segments=segments)
                         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
                             pass
                         finally:
@@ -6038,7 +5845,7 @@ def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool,
                 elif button_state & getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0):
                     _handle_mouse_event(state, y, x, *window.getmaxyx(), activate=True)
                 continue
-            semantic = {
+            semantic = {  # type: ignore[call-overload]  # projection values are typed object
                 curses.KEY_UP: "KEY_UP",
                 curses.KEY_DOWN: "KEY_DOWN",
                 curses.KEY_LEFT: "KEY_LEFT",

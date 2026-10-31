@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_glyphs as glyphs, bridge_launcher as launcher, bridge_switcher as sw, bridge_theme as theme, bridge_tui
+from llm_tools import bridge_draw, bridge_glyphs as glyphs, bridge_launcher as launcher, bridge_switcher as sw, bridge_theme as theme, bridge_tui
 from llm_tools.bridge_launcher import Launcher
 from llm_tools.terminal import STATUS_CONTEXT_FORMAT, TmuxTerminalBackend
 from tests.test_bridge_launcher_home import Grid, mission
@@ -143,7 +143,7 @@ def home_rows(tmp_path, *, probe=lambda ident: True, **kw) -> tuple[Grid, dict]:
 def test_home_rows_pin_the_chip_and_move_the_here_marker_to_the_folder(tmp_path, monkeypatch) -> None:
     seen: dict[tuple[int, str], str] = {}
     roles: dict[str, str] = {}
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: roles.setdefault(role, len(roles) + 1))
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: roles.setdefault(role, len(roles) + 1))
 
     class Recording(Grid):
         def addnstr(self, y, x, text, count, *attrs):

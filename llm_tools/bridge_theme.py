@@ -88,6 +88,7 @@ import zlib
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Mapping
 
+from .bridge_vocab import ColorRole
 from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES, THEME_CHOICES, THEME_NAMES  # noqa: F401  (re-exported; shared with the CLI parser)
 
 try:  # POSIX only; detection simply skips the terminal query elsewhere.
@@ -151,7 +152,7 @@ ROLE_DESCRIPTIONS: dict[str, str] = {
     "provider_other": "any other provider",
     **{f"mission_{n}": f"mission identity hue {n} of {MISSION_COUNT}" for n in range(1, MISSION_COUNT + 1)},
 }
-ROLES: tuple[str, ...] = tuple(ROLE_DESCRIPTIONS)
+ROLES: tuple[str, ...] = tuple(str(role) for role in ColorRole)  # the enum fixes the order; ROLE_DESCRIPTIONS must list the same names
 
 # Roles that are separators or disabled text rather than something to read.
 DECORATIVE_ROLES: frozenset[str] = frozenset({"dim"})

@@ -13,7 +13,7 @@ from collections import Counter
 
 import pytest
 
-from llm_tools import bridge_glyphs, bridge_theme as theme, bridge_tui
+from llm_tools import bridge_glyphs, bridge_draw, bridge_theme as theme, bridge_tui
 from tests.test_bridge_theme import _FakeCurses
 from tests.test_bridge_tui_experience import Screen, full_snapshot, make_state, orders_snapshot
 from tests.test_bridge_tui_experience import _quiet_curses  # noqa: F401 - autouse fixture
@@ -24,7 +24,7 @@ from tests.test_bridge_tui_overhaul import running_snapshot
 def roles(monkeypatch):
     """Give every role its own attribute value and return the attribute -> role map."""
     table = {role: (index + 1) << 24 for index, role in enumerate(theme.ROLES)}
-    monkeypatch.setattr(bridge_tui, "_ROLE_ATTRS", table)
+    monkeypatch.setattr(bridge_draw, "_ROLE_ATTRS", table)
     inverse = {value: role for role, value in table.items()}
     return inverse
 

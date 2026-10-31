@@ -13,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Iterator
 
 from .bridge_states import (
@@ -80,7 +81,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def default_state_dir(env: dict[str, str] | None = None) -> Path:
+def default_state_dir(env: Mapping[str, str] | None = None) -> Path:
     env = os.environ if env is None else env
     override = env.get("LLM_BRIDGE_STATE_DIR")
     if override:
@@ -557,6 +558,21 @@ class BridgeStore:
             (mission_id, task_id, operation_id, kind, self._json(data), utc_now()),
         )
 
+    def mission_id_if_exists(self, mission_id: str) -> str | None:
+        """The ID itself when a mission has exactly this ID, else ``None``."""
+        row = self.db.execute("SELECT id FROM missions WHERE id=?", (mission_id,)).fetchone()
+        return None if row is None else str(row["id"])
+
+    def missions_with_id_prefix(self, prefix: str) -> list[sqlite3.Row]:
+        """Missions (id, name, status, updated_at) whose ID starts with ``prefix``."""
+        return self.db.execute(
+            "SELECT id,name,status,updated_at FROM missions WHERE substr(id,1,?)=?", (len(prefix), prefix)
+        ).fetchall()
+
+    def missions_newest_first(self) -> list[sqlite3.Row]:
+        """Every mission (id, name, status, cwd, updated_at), most recently updated first."""
+        return self.db.execute("SELECT id,name,status,cwd,updated_at FROM missions ORDER BY updated_at DESC,id").fetchall()
+
     def _mission_row(self, mission_id: str) -> sqlite3.Row:
         row = self.db.execute("SELECT * FROM missions WHERE id=?", (mission_id,)).fetchone()
         if row is None:
@@ -660,7 +676,7 @@ class BridgeStore:
                         "INSERT INTO tasks(mission_id,ordinal,title,original_prompt,prompt,acceptance_json,created_at,updated_at) VALUES(?,1,?,?,?,?,?,?)",
                         (mid, task_title, initial_prompt, initial_prompt, self._json(list(initial_acceptance)), now, now),
                     )
-                    task_id = int(cur.lastrowid)
+                    task_id = int(cur.lastrowid)  # type: ignore[arg-type]  # lastrowid is set after INSERT
                     self._event(mid, "task-added", {"title": task_title, "priority": 0}, task_id=task_id)
         except sqlite3.IntegrityError as exc:
             if "one_active_mission_per_worktree" in str(exc) or "missions.cwd" in str(exc):
@@ -726,7 +742,7 @@ class BridgeStore:
                 "INSERT INTO tasks(mission_id,ordinal,title,original_prompt,prompt,priority,ordering,acceptance_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (mission_id, self._next_ordinal(mission_id), title or derive_title(prompt), prompt, prompt, int(priority), next_order if order is None else int(order), self._json(list(acceptance)), now, now),
             )
-            task_id = int(cur.lastrowid)
+            task_id = int(cur.lastrowid)  # type: ignore[arg-type]  # lastrowid is set after INSERT
             for dep in depends_on:
                 self._add_dependency_locked(mission_id, task_id, int(dep))
             self._event(mission_id, "task-added", {"title": title or derive_title(prompt), "priority": int(priority)}, task_id=task_id)
@@ -789,7 +805,7 @@ class BridgeStore:
                 "INSERT INTO tasks(mission_id,ordinal,title,original_prompt,prompt,priority,ordering,acceptance_json,origin,proposal_status,proposed_by_operation,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (mission_id, self._next_ordinal(mission_id), task_title, prompt, prompt, int(priority), next_order, self._json(list(acceptance)), "agent-proposal", "PENDING", source_operation_id, now, now),
             )
-            task_id = int(cur.lastrowid)
+            task_id = int(cur.lastrowid)  # type: ignore[arg-type]  # lastrowid is set after INSERT
             for dependency in depends_on:
                 self._add_dependency_locked(mission_id, task_id, int(dependency))
             self._event(mission_id, "task-proposed", {

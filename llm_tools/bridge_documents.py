@@ -303,8 +303,8 @@ class DocumentViewer:
                 if len(rows) >= self.viewport_height:
                     break  # the rest of the document is off screen
             return rows[:self.viewport_height]
-        rows = self._layout(self.width)
-        return [_slice_cells(row, self.horizontal) if not self.wrap else row for row in rows[self.top:self.top + self.viewport_height]]
+        laid_out = self._layout(self.width)
+        return [_slice_cells(row, self.horizontal) if not self.wrap else row for row in laid_out[self.top:self.top + self.viewport_height]]
 
     @property
     def search_count(self) -> int:

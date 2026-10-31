@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from llm_tools import bridge_actions, bridge_tui, common
+from llm_tools import bridge_draw, bridge_actions, bridge_tui, common
 from llm_tools.bridge_input import cell_width
 from llm_tools.bridge_tui import ControlViewAction, VIEWS, normalize_view
 from llm_tools.terminal import TerminalAction
@@ -385,7 +385,7 @@ def test_activity_with_only_bookkeeping_explains_how_to_see_it() -> None:
 
 
 def test_activity_rows_are_drawn_with_their_role(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: {"dim": 1, "error.quiet": 2, "info": 3}.get(role, 0))
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: {"dim": 1, "error.quiet": 2, "info": 3}.get(role, 0))
     state = make_state({"events": activity_events()}, view="Activity")
     screen = Screen(30, 100)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
@@ -481,7 +481,7 @@ def test_preview_uses_reflowed_prompt_and_heading_role() -> None:
 
 
 def test_preview_draws_headings_with_the_heading_role(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: {"heading": 7}.get(role, 0))
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: {"heading": 7}.get(role, 0))
     snapshot = full_snapshot()
     snapshot["tasks"] = [{"id": 5, "title": "T", "status": "READY", "prompt": "# Plan\nbody text"}]
     state = make_state(snapshot, view="Tasks")

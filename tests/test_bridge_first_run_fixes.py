@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge, bridge_format
+from llm_tools import bridge_missions, bridge, bridge_format
 from llm_tools.bridge import dispatch_console_command, main
 from llm_tools.bridge_store import SCHEMA_VERSION, BridgeStore
 
@@ -24,7 +24,7 @@ def state(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(directory))
     monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "no-config.toml"))
-    monkeypatch.setattr(bridge, "_station_live", lambda _mission_id: False)
+    monkeypatch.setattr(bridge_missions, "station_live", lambda _mission_id: False)
     return directory
 
 
@@ -598,7 +598,7 @@ def _touch(state, mission_id, stamp):
 def test_attach_prefers_the_single_mission_with_a_live_station(tmp_path, state, capsys, monkeypatch) -> None:
     folder, ids = _folder_missions(tmp_path, capsys)
     live = ids[0]
-    monkeypatch.setattr(bridge, "_station_live", lambda mission_id: mission_id == live)
+    monkeypatch.setattr(bridge_missions, "station_live", lambda mission_id: mission_id == live)
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert bridge.resolve_mission_ref(store, None, cwd=folder, prefer_station=True) == live
         with pytest.raises(ValueError, match="several missions match folder"):
@@ -614,7 +614,7 @@ def test_attach_prefers_the_single_mission_with_a_live_station(tmp_path, state, 
 
 def test_attach_is_ambiguous_only_among_live_stations(tmp_path, state, capsys, monkeypatch) -> None:
     folder, ids = _folder_missions(tmp_path, capsys)
-    monkeypatch.setattr(bridge, "_station_live", lambda mission_id: mission_id in ids[:2])
+    monkeypatch.setattr(bridge_missions, "station_live", lambda mission_id: mission_id in ids[:2])
     monkeypatch.chdir(folder)
     err = _run(capsys, "attach", code=2)
     assert "several missions match folder" in err
@@ -625,7 +625,7 @@ def test_mission_list_and_ambiguity_errors_share_one_order(tmp_path, state, caps
     folder, ids = _folder_missions(tmp_path, capsys)
     for index, mission_id in enumerate(ids):
         _touch(state, mission_id, f"2026-01-0{index + 1}T00:00:00+00:00")  # ids[2] is the newest
-    monkeypatch.setattr(bridge, "_station_live", lambda mission_id: mission_id == ids[0])  # the oldest is live
+    monkeypatch.setattr(bridge_missions, "station_live", lambda mission_id: mission_id == ids[0])  # the oldest is live
     expected = [ids[0], ids[2], ids[1]]  # live first, then newest first
     listed = json.loads(_run(capsys, "mission", "list", "--json"))["missions"]
     assert [m["id"] for m in listed] == expected

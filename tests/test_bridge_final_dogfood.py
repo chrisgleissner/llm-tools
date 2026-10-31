@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from llm_tools import bridge, bridge_logs, bridge_tui
+from llm_tools import bridge_draw, bridge, bridge_logs, bridge_tui
 from llm_tools.bridge import main, resolve_rotation
 from llm_tools.bridge_runtime import (
     NATIVE_COMPLETION_NOTE,
@@ -192,7 +192,7 @@ def test_confirmation_overlay_shows_its_hint_once_after_the_question(monkeypatch
 
 def test_objective_is_not_repeated_on_line_one_and_stays_unchanged(monkeypatch) -> None:
     monkeypatch.setattr(bridge_tui.curses, "doupdate", lambda: None)
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda _role: 0)
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda _role: 0)
     objective = "## Acceptance demo\n\nBuild the thing"
     state = bridge_tui._ConsoleState("M1", lambda *_: "ok", lambda *_: {}, full=True)
     state.snapshot = bridge_tui._bounded_snapshot({"mission": {"id": "M1", "objective": objective, "status": "RUNNING"}})

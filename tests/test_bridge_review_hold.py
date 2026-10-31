@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 import pytest
 
-from llm_tools import bridge, bridge_format, bridge_runtime
+from llm_tools import bridge_missions, bridge, bridge_format, bridge_runtime
 from llm_tools.bridge import main
 from llm_tools.bridge_monitor import project_snapshot
 from llm_tools.bridge_runtime import BridgeMissionHooks
@@ -312,7 +312,7 @@ def state(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(directory))
     monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "no-config.toml"))
-    monkeypatch.setattr(bridge, "_station_live", lambda _mission_id: False)
+    monkeypatch.setattr(bridge_missions, "station_live", lambda _mission_id: False)
     return directory
 
 

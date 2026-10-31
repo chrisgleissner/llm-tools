@@ -32,6 +32,14 @@ markers = [
   "slow: takes more than a few seconds even on an idle host (applied automatically by tests/conftest.py)",
 ]
 
+[tool.mypy]
+# Dev-only type check of the Bridge modules (CI runs `python -m mypy`; mypy is not a runtime dependency).
+# Other modules are followed silently so their own findings are not reported here.
+python_version = "3.11"
+files = ["llm_tools/bridge*.py", "llm_tools/terminal.py"]
+follow_imports = "silent"
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["llm_tools"]
 branch = true
