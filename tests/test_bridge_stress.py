@@ -76,6 +76,10 @@ Path('stream-count.json').write_text(json.dumps({'bytes':count,'seconds':time.mo
                 backend.send_keys(handle, pane="bridge", keys="Enter")
                 wait_for(lambda: store.get_task(task)["priority"] == value, timeout=2)
                 latencies.append(time.perf_counter() - started)
+                # The console rejects a command typed while the previous one is pending ("A command is still
+                # running"), and it clears that state only when it applies the result, which it prints. The
+                # database row changes earlier, on the worker thread, so wait for the printed result.
+                wait_for(lambda: f"Applied: priority {task} {value}" in backend.capture(handle, pane="bridge"))
         assert not (tmp_path / "stream-count.json").exists(), "load must still be active during input measurements"
         while time.monotonic() - loaded_at < 3:
             time.sleep(.02)

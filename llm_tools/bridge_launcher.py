@@ -1714,6 +1714,9 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
             if (height < _MIN_ROWS or width < _MIN_COLUMNS) and not state.paste_decoder.active:
                 if key in {"q", "Q", "\x04", "\x03"}:
                     return "quit"
+                # The key is dropped, and with it the rest of any escape sequence that began before the
+                # terminal became too small: a pending Escape must not time out later as a lone Escape.
+                state.escape_pending = False
                 continue
             if key == curses.KEY_MOUSE:
                 # A mouse event inside a bracketed paste or an incomplete escape

@@ -536,3 +536,38 @@ def test_mouse_click_on_provider_toggles_it_in_the_running_launcher(tmp_path, mo
     assert launcher.run_launcher(lambda args: pytest.fail(args)) == 0
     row = [line for line in recorder.screens[-1].splitlines() if "Providers:" in line][0]
     assert "[1] codex" in row and "[2] claude" in row
+
+
+class ScriptedWindow(Grid):
+    """A window whose get_wch plays a script: a key, curses.error (no input), or a callable that may resize first."""
+
+    def __init__(self, steps):
+        super().__init__()
+        self.steps = list(steps)
+
+    def get_wch(self):
+        step = self.steps.pop(0)
+        if callable(step):
+            step = step(self)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def test_escape_pending_when_the_terminal_shrinks_does_not_time_out_into_quit(tmp_path, monkeypatch):
+    """An Escape read while the terminal was large, followed by keys dropped because it became too small, is not a lone Escape."""
+    prepare(tmp_path, monkeypatch)
+    monkeypatch.setattr(launcher, "_ESCAPE_SECONDS", 0.0)  # the pending Escape counts as timed out at the next idle read
+
+    def shrink(window):
+        window.size = (10, 40)
+        return "["
+
+    def enlarge(window):
+        window.size = (34, 120)
+        return "j"  # harmless on the list; proves the home screen is still running
+
+    window = ScriptedWindow(["\x1b", shrink, curses.error("no input"), enlarge, "q"])
+    monkeypatch.setattr(curses, "wrapper", lambda callback: callback(window))
+    assert launcher.run_launcher(lambda args: 0) == 0
+    assert window.steps == [], "the home screen quit on the stale Escape before reading the remaining keys"
