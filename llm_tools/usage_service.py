@@ -20,10 +20,13 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
 import socketserver
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -33,6 +36,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 from . import common
 
@@ -79,6 +83,63 @@ def systemd_unit_path(env: dict[str, str] | None = None) -> Path:
 def launchd_plist_path(env: dict[str, str] | None = None) -> Path:
     home = common.home_dir(env)
     return home / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
+
+
+def _private_owned_directory(path: Path, uid: int) -> bool:
+    """A real directory (never a symlink) owned by ``uid`` that no one else can enter."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == uid and not info.st_mode & 0o077
+
+
+def trusted_directory(path: Path) -> bool:
+    """Create ``path`` (mode 0700) if absent and accept it only if it is ours and private.
+
+    The socket directory can be ``/tmp/llm-tools-$UID`` where another user may
+    have created the name first; serving or reading snapshots there would let
+    that user spoof capacity data. A directory that is a symlink or owned by
+    someone else is refused. A loose mode on our own directory (left by an
+    older release) is tightened to 0700.
+    """
+    uid = os.getuid()
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    except OSError:
+        return False
+    if _private_owned_directory(path, uid):
+        return True
+    try:
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == uid:
+            os.chmod(path, 0o700)
+    except OSError:
+        return False
+    return _private_owned_directory(path, uid)
+
+
+def trusted_socket_path(env: dict[str, str] | None = None) -> Path | None:
+    """The service socket path, or ``None`` when its directory cannot be trusted."""
+    sock = socket_path(env)
+    return sock if trusted_directory(sock.parent) else None
+
+
+def peer_uid(sock: socket.socket) -> int | None:
+    """UID of the process at the other end of a Unix socket (Linux ``SO_PEERCRED``); ``None`` elsewhere."""
+    option = getattr(socket, "SO_PEERCRED", None)
+    if option is None:
+        return None
+    try:
+        creds = sock.getsockopt(socket.SOL_SOCKET, option, struct.calcsize("3i"))
+        return int(struct.unpack("3i", creds)[1])
+    except (OSError, struct.error):
+        return None
+
+
+def _peer_is_us(sock: socket.socket) -> bool:
+    uid = peer_uid(sock)
+    return uid is None or uid == os.getuid()
 
 
 def _mkdir_private(path: Path) -> None:
@@ -204,11 +265,36 @@ class ThreadingUnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSe
     def __init__(self, sock: str, sampler: UsageSampler, stop_event: threading.Event) -> None:
         self.sampler = sampler
         self.stop_event = stop_event
-        super().__init__(sock, UsageRequestHandler)
+        # Bind inside a fresh 0700 directory next to the final path and rename the socket into
+        # place after chmod 0600, so it is never reachable by other users. The process umask is
+        # shared by every thread, so it must not be changed for this.
+        final = Path(sock)
+        staging = Path(tempfile.mkdtemp(prefix=".b", dir=str(final.parent)))
+        try:
+            super().__init__(str(staging / "s"), UsageRequestHandler)
+            try:
+                os.chmod(staging / "s", 0o600)
+            except OSError:
+                pass
+            os.replace(staging / "s", final)
+            self.server_address = str(final)
+        except BaseException:
+            try:
+                (staging / "s").unlink()
+            except OSError:
+                pass
+            raise
+        finally:
+            try:
+                staging.rmdir()
+            except OSError:
+                pass
 
 
 class UsageRequestHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
+        if not _peer_is_us(self.request):
+            return  # another user's process connected: answer nothing
         raw = self.rfile.readline(1024 * 1024)
         try:
             req = json.loads(raw.decode("utf-8"))
@@ -265,7 +351,9 @@ def run_service(*, interval: int, ephemeral: bool = False, env: dict[str, str] |
     env = dict(env or os.environ)
     p = paths(env)
     _mkdir_private(p.service_dir)
-    _mkdir_private(p.socket.parent)
+    if not trusted_directory(p.socket.parent):
+        print(f"llm-usage service: refusing untrusted socket directory {p.socket.parent} (must be a private directory you own)", file=sys.stderr)
+        return 1
     if p.socket.exists() and _stale_socket(p.socket):
         try:
             p.socket.unlink()
@@ -326,6 +414,8 @@ def _request(sock: Path, request: dict[str, Any], timeout: float = SOCKET_TIMEOU
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
             client.connect(str(sock))
+            if not _peer_is_us(client):
+                return None  # the socket is served by another user: never trust its data
             client.sendall(json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n")
             chunks: list[bytes] = []
             while True:
@@ -374,7 +464,9 @@ def request_snapshot(
     timeout: float = SOCKET_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     env = dict(env or os.environ)
-    sock = socket_path(env)
+    sock = trusted_socket_path(env)
+    if sock is None:
+        return None  # untrusted socket directory: the caller reads providers directly
     resp = _request(sock, {"op": "snapshot"}, timeout)
     if isinstance(resp, dict) and resp.get("ok") is True and isinstance(resp.get("snapshot"), dict):
         return resp["snapshot"]
@@ -406,24 +498,20 @@ def request_snapshot(
 def start_ephemeral_service(env: dict[str, str], timeout: float = SOCKET_TIMEOUT_SECONDS) -> subprocess.Popen[str] | None:
     p = paths(env)
     _mkdir_private(p.service_dir)
-    _mkdir_private(p.socket.parent)
+    if not trusted_directory(p.socket.parent):
+        return None
     if p.socket.exists() and _stale_socket(p.socket):
         try:
             p.socket.unlink()
         except OSError:
             pass
-    cmd = [
-        sys.executable,
-        "-m",
+    cmd = common.python_module_argv(
         "llm_tools.usage_service",
         "--ephemeral",
         "--interval",
         str(_parse_interval(env.get("LLM_USAGE_SERVICE_INTERVAL"))),
-    ]
-    run_env = dict(env)
-    root = str(Path(__file__).resolve().parent.parent)
-    if root not in run_env.get("PYTHONPATH", ""):
-        run_env["PYTHONPATH"] = os.pathsep.join(p for p in (root, run_env.get("PYTHONPATH", "")) if p)
+    )
+    run_env = common.with_package_root(env)
     try:
         proc = subprocess.Popen(
             cmd,
@@ -448,7 +536,8 @@ def start_ephemeral_service(env: dict[str, str], timeout: float = SOCKET_TIMEOUT
 
 def running_status(env: dict[str, str] | None = None) -> dict[str, Any]:
     env = dict(env or os.environ)
-    resp = _request(socket_path(env), {"op": "status"}, timeout=1.0)
+    trusted = trusted_socket_path(env)
+    resp = _request(trusted, {"op": "status"}, timeout=1.0) if trusted is not None else None
     if isinstance(resp, dict) and resp.get("ok") is True:
         return {"running": True, **resp}
     return {"running": False, "socket": str(socket_path(env))}
@@ -481,6 +570,8 @@ def _service_path(env: dict[str, str] | None = None) -> str:
         if raw == "~" or raw.startswith("~/"):
             raw = home + raw[1:]
         path = os.path.expanduser(raw)
+        if any(ch in path for ch in "\n\r\x00%"):
+            return  # cannot be written into a unit file; skip it rather than fail
         if path not in seen and os.path.isdir(path):
             seen.add(path)
             parts.append(path)
@@ -496,22 +587,61 @@ def _service_path(env: dict[str, str] | None = None) -> str:
     return os.pathsep.join(parts)
 
 
+def _unit_value(value: object, what: str) -> str:
+    """A path or value for a unit file; refuses text that systemd or launchd would interpret."""
+    text = str(value)
+    if any(ch in text for ch in "\n\r\x00%"):
+        raise ValueError(f"cannot write {what} into a service definition: it contains a newline, NUL or '%' ({text!r})")
+    return text
+
+
+def _systemd_word(value: object, what: str) -> str:
+    """One ExecStart argument, quoted so spaces, quotes and `$` stay literal."""
+    text = _unit_value(value, what)
+    if re.fullmatch(r"[A-Za-z0-9_./:=@+,-]+", text):
+        return text
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "$$") + '"'
+
+
+def _systemd_assignment(name: str, value: str) -> str:
+    """An `Environment=` line; quoted when the value contains spaces or quotes."""
+    text = f"{name}={value}"
+    if re.fullmatch(r"[A-Za-z0-9_./:=@+,-]+", text):
+        return f"Environment={text}"
+    return 'Environment="' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _service_home(env: dict[str, str] | None) -> str:
+    """Working directory of the service: the home directory, never the install-time cwd.
+
+    The folder `--install-service` is run from may be a repository checkout
+    that someone else controls; a service must not run with it as its cwd.
+    """
+    return _unit_value(common.home_dir(env or os.environ), "the home directory")
+
+
 def systemd_unit_text(interval: int, env: dict[str, str] | None = None) -> str:
-    python = sys.executable
-    cache = str(service_dir(env))
-    path = _service_path(env)
+    exec_start = " ".join(
+        _systemd_word(part, "the service command")
+        for part in common.python_module_argv("llm_tools.usage_service", "--foreground", "--interval", str(interval))
+    )
+    cache = _unit_value(service_dir(env), "the service directory")
+    path = _unit_value(_service_path(env), "PATH")
+    root = _unit_value(common.package_root(), "the package directory")
+    home = _service_home(env)
     return f"""[Unit]
 Description=llm-usage background sampler
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart={python} -m llm_tools.usage_service --foreground --interval {interval}
+ExecStart={exec_start}
 Restart=on-failure
 RestartSec=10
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH={path}
-WorkingDirectory={Path.cwd()}
+{_systemd_assignment("PATH", path)}
+{_systemd_assignment("PYTHONPATH", root)}
+WorkingDirectory={home}
 StandardOutput=append:{cache}/service.log
 StandardError=append:{cache}/service.err
 
@@ -521,9 +651,17 @@ WantedBy=default.target
 
 
 def launchd_plist_text(interval: int, env: dict[str, str] | None = None) -> str:
-    python = sys.executable
-    root = service_dir(env)
-    path = _service_path(env)
+    def xml(value: object, what: str) -> str:
+        return xml_escape(_unit_value(value, what))
+
+    program = "\n".join(
+        f"    <string>{xml(part, 'the service command')}</string>"
+        for part in common.python_module_argv("llm_tools.usage_service", "--foreground", "--interval", str(interval))
+    )
+    root = xml(service_dir(env), "the service directory")
+    path = xml(_service_path(env), "PATH")
+    package = xml(common.package_root(), "the package directory")
+    home = xml(_service_home(env), "the home directory")
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -532,12 +670,7 @@ def launchd_plist_text(interval: int, env: dict[str, str] | None = None) -> str:
   <key>Label</key><string>{SERVICE_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{python}</string>
-    <string>-m</string>
-    <string>llm_tools.usage_service</string>
-    <string>--foreground</string>
-    <string>--interval</string>
-    <string>{interval}</string>
+{program}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -545,8 +678,9 @@ def launchd_plist_text(interval: int, env: dict[str, str] | None = None) -> str:
   <dict>
     <key>PATH</key><string>{path}</string>
     <key>PYTHONUNBUFFERED</key><string>1</string>
+    <key>PYTHONPATH</key><string>{package}</string>
   </dict>
-  <key>WorkingDirectory</key><string>{Path.cwd()}</string>
+  <key>WorkingDirectory</key><string>{home}</string>
   <key>StandardOutPath</key><string>{root}/service.log</string>
   <key>StandardErrorPath</key><string>{root}/service.err</string>
 </dict>
@@ -631,7 +765,8 @@ def start_service(env: dict[str, str] | None = None) -> int:
 
 
 def stop_service(env: dict[str, str] | None = None) -> int:
-    resp = _request(socket_path(env), {"op": "shutdown"}, timeout=1.0)
+    trusted = trusted_socket_path(env)
+    resp = _request(trusted, {"op": "shutdown"}, timeout=1.0) if trusted is not None else None
     if isinstance(resp, dict) and resp.get("ok") is True:
         return 0
     system = platform.system().lower()

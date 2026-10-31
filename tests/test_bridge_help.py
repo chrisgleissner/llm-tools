@@ -52,3 +52,25 @@ def test_console_start_feedback_reads_durable_state_and_keeps_log_path_secondary
     assert 'private/path' not in result['result']['detail']
     monkeypatch.setattr(bridge.subprocess,'run',lambda argv,**kwargs: subprocess.CompletedProcess(argv,2,'','station unavailable'))
     assert bridge.dispatch_console_command(mission['id'],'start')=='error: station unavailable'
+
+
+def test_keys_help_states_osc52_clipboard_and_detach_choice() -> None:
+    keys = " ".join(topic_text("keys").split())
+    assert "OSC 52" in keys and "including over SSH" in keys and "set-clipboard external" in keys
+    assert "automatic OSC52 clipboard transmission is promised" not in keys
+    assert "d detaches only your own terminal" in keys
+    assert "--client /dev/pts/N" in keys and "single connected writable client" in keys
+    assert "/start, /attach, /approve [N] and /help" in keys
+
+
+def test_quickstart_help_matches_default_rotation_slash_commands_and_detach() -> None:
+    from llm_tools.bridge import BUILTIN_PROVIDERS
+
+    quickstart = " ".join(topic_text("quickstart").split())
+    assert BUILTIN_PROVIDERS == "claude,codex,opencode"
+    assert "[ralph] wins over [defaults]" in quickstart and f"built-in {BUILTIN_PROVIDERS}" in quickstart
+    assert "/start, /attach, /pause, /status and /approve [N]" in quickstart
+    assert "Ctrl-] then d" in quickstart and "llm-bridge detach is different" in quickstart
+    detach = " ".join(topic_text("detach").split())
+    assert "normally another terminal's" in detach and "--client /dev/pts/N" in detach
+    assert "Ctrl-] then d" in detach

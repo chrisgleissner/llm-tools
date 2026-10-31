@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools.bridge_store import BridgeStore, MissionLock, TransitionError
+from llm_tools.bridge_store import SCHEMA_VERSION, BridgeStore, MissionLock, TransitionError
 
 
 def _activate(store: BridgeStore, mission: dict[str, object]) -> None:
@@ -25,7 +25,9 @@ def test_task_order_dependencies_and_boundary_amendment_are_durable(tmp_path: Pa
     assert [task["id"] for task in store.ready_tasks(mission["id"])] == [parallel, first]
     revision = store.amend_task(first, prompt="replacement objective")
     assert revision == 2
-    assert store.get_task(first)["prompt"] == "first task"
+    # No provider step uses the old text, so the amendment applies at once.
+    assert store.get_task(first)["prompt"] == "replacement objective"
+    assert store.get_task(first)["pending"] == {}
     started = store.begin_iteration(first)
     assert started["prompt"] == "replacement objective"
     assert started["revision"] == 2
@@ -102,7 +104,7 @@ def test_events_share_transaction_and_mission_lock_is_exclusive(tmp_path: Path) 
 
     with sqlite3.connect(tmp_path / "bridge.sqlite3") as db:
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_current_schema_open_preserves_identity_for_removed_worktree(tmp_path: Path) -> None:
@@ -187,7 +189,7 @@ def test_completion_requires_evidence_and_all_tasks_verified(tmp_path: Path) -> 
     task = store.add_task(mission["id"], "one task")
     op = store.begin_operation(task, iteration=1, station="codex")
     store.finish_operation(op, exit_code=0)
-    with pytest.raises(TransitionError, match="invalid task transition"):
+    with pytest.raises(TransitionError, match="cannot become completed"):
         store.set_task_status(task, "COMPLETED")
     with pytest.raises(TransitionError, match="tasks are not complete"):
         store.set_mission_status(mission["id"], "COMPLETED")
@@ -267,7 +269,7 @@ def test_version_one_database_migrates_original_prompts_and_new_tables(tmp_path:
     assert store.get_task(1)["proposal_status"] == "NONE"
     assert store.get_mission("old")["config"] == {}
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 
 
 def test_amendment_after_exit_invalidates_verification_and_requeues_task(tmp_path: Path) -> None:
@@ -547,7 +549,7 @@ def test_agent_proposals_require_operator_acceptance_before_scheduling(tmp_path:
 
 
 @pytest.mark.parametrize("terminal_status", ["COMPLETED", "CANCELLED"])
-def test_terminal_mission_rejects_new_operator_tasks_and_proposal_acceptance(tmp_path: Path, terminal_status: str) -> None:
+def test_finished_mission_rejects_proposal_acceptance_and_cancelled_rejects_tasks(tmp_path: Path, terminal_status: str) -> None:
     with BridgeStore(tmp_path / f"{terminal_status.lower()}.sqlite3") as store:
         mission = store.create_mission("mission", "objective", cwd=tmp_path)
         task = store.add_task(mission["id"], "source work")
@@ -558,12 +560,11 @@ def test_terminal_mission_rejects_new_operator_tasks_and_proposal_acceptance(tmp
             store.verify_task(task, evidence="verified source work")
             proposal = store.propose_task(mission["id"], "new proposal", source_operation_id=operation)
             store.set_mission_status(mission["id"], "COMPLETED")
-            with pytest.raises(TransitionError, match="terminal mission"):
+            with pytest.raises(TransitionError, match="takes no new proposals"):
                 store.decide_proposal(mission["id"], proposal, accept=True)
             assert store.get_task(proposal)["proposal_status"] == "PENDING"
         else:
             store.set_mission_status(mission["id"], "CANCELLED")
-
-        with pytest.raises(TransitionError, match="terminal mission"):
-            store.add_task(mission["id"], "must not be stranded")
+            with pytest.raises(TransitionError, match="was cancelled"):
+                store.add_task(mission["id"], "must not be stranded")
 

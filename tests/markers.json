@@ -1,0 +1,2977 @@
+{
+ "tests/test_additional_paths.py": {
+  "test_common_extra_branches": [
+   "subprocess"
+  ],
+  "test_common_process_helpers_and_estimators": [
+   "pty"
+  ],
+  "test_error_fallback_branches": [
+   "subprocess"
+  ],
+  "test_github_token_gh_failure_returns_none": [
+   "subprocess"
+  ],
+  "test_minimax_error_envelope_maps_to_clear_reason": [
+   "subprocess"
+  ],
+  "test_ralph_and_scheduler_highlight_helpers": [
+   "subprocess"
+  ],
+  "test_ralph_injects_selected_provider_context": [
+   "subprocess"
+  ],
+  "test_ralph_suspends_machine_until_earliest_renewal": [
+   "subprocess"
+  ],
+  "test_ralph_suspends_when_all_blocked_then_continues": [
+   "subprocess"
+  ],
+  "test_ralph_validation_dry_run_rotation_and_autonomy": [
+   "subprocess",
+   "slow"
+  ],
+  "test_scheduler_argument_branches": [
+   "subprocess"
+  ],
+  "test_scheduler_suspend_dry_run_and_failures": [
+   "subprocess"
+  ],
+  "test_scheduler_tmux_missing_and_template_error": [
+   "subprocess"
+  ],
+  "test_scheduler_unavailable_suspend_and_no_stream": [
+   "subprocess"
+  ],
+  "test_usage_option_branches_and_unavailable": [
+   "pty",
+   "subprocess"
+  ],
+  "test_usage_service_action_dispatch": [
+   "subprocess"
+  ],
+  "test_usage_service_ephemeral_client": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_chronology_contracts.py": {
+  "test_handoff_lists_newest_attempt_first_when_timestamps_match": [
+   "subprocess"
+  ],
+  "test_same_second_queued_instructions_keep_submission_order": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_cli.py": {
+  "test_cli_station_view_and_invalid_steering_report_rejection": [
+   "subprocess"
+  ],
+  "test_cli_typed_steering_branches_persist_boundary_requests": [
+   "subprocess"
+  ],
+  "test_console_can_review_and_accept_proposals_with_quoted_reason": [
+   "subprocess"
+  ],
+  "test_console_cancel_task_id_does_not_cancel_other_mission_work": [
+   "subprocess"
+  ],
+  "test_console_control_commands_preserve_public_mission_options": [
+   "subprocess"
+  ],
+  "test_console_legacy_aliases_share_public_task_and_event_handlers": [
+   "subprocess"
+  ],
+  "test_console_pause_resume_id_and_help_match_task_cli": [
+   "subprocess"
+  ],
+  "test_console_preserves_public_proposal_option_grammar": [
+   "subprocess"
+  ],
+  "test_console_reuses_cli_task_grammar_for_multiline_add_and_amend": [
+   "subprocess"
+  ],
+  "test_finished_mission_reports_proposal_rejection_and_takes_follow_up_tasks": [
+   "subprocess"
+  ],
+  "test_legacy_mode_starts_after_creating_durable_mission_and_missing_file_is_reported": [
+   "subprocess"
+  ],
+  "test_legacy_prompt_file_creates_task_one_and_console_command_is_safe": [
+   "subprocess"
+  ],
+  "test_main_routes_console_views_and_controller_through_injected_entrypoints": [
+   "subprocess"
+  ],
+  "test_main_start_resume_attach_and_detach_entrypoints": [
+   "subprocess"
+  ],
+  "test_mission_cli_create_status_tasks_events_and_evidence": [
+   "subprocess"
+  ],
+  "test_mission_create_accepts_stdin_and_persists_verifier_argv": [
+   "subprocess"
+  ],
+  "test_mission_freezes_provider_model_and_route_config": [
+   "subprocess"
+  ],
+  "test_proposal_cli_rejects_foreign_operation_provenance": [
+   "subprocess"
+  ],
+  "test_proposals_are_durable_and_require_explicit_operator_acceptance": [
+   "subprocess"
+  ],
+  "test_repl_explicit_mission_flag_spellings_choose_the_same_mission": [
+   "subprocess"
+  ],
+  "test_repl_task_commands_use_the_shared_handler_without_spawning_a_cli": [
+   "subprocess"
+  ],
+  "test_resume_wakes_active_controller_without_reconciling_live_operation": [
+   "subprocess"
+  ],
+  "test_stop_terminal_mission_refuses_station_cleanup_while_controller_lock_is_held": [
+   "subprocess"
+  ],
+  "test_stop_terminal_mission_without_station_is_idempotent_and_keeps_status": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_cli_acceptance.py": {
+  "test_cancellation_preserves_previously_verified_work": [
+   "subprocess"
+  ],
+  "test_console_file_path_and_cli_share_durable_commands": [
+   "subprocess"
+  ],
+  "test_cross_mission_writes_fail_without_partial_effect": [
+   "subprocess"
+  ],
+  "test_cycle_rejection_is_reported_as_failure": [
+   "subprocess"
+  ],
+  "test_event_paging_is_ordered_and_bounded": [
+   "subprocess"
+  ],
+  "test_stdin_multiline_and_dependency_submission": [
+   "subprocess"
+  ],
+  "test_task_priority_reorder_pause_resume_and_amend": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_colors.py": {
+  "test_real_curses_pty_obeys_color_mode": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_colour_pty.py": {
+  "test_colour_mode_uses_explicit_palette_colours": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_console_opened_from_the_home_screen_is_pure_ascii_in_the_c_locale": [
+   "tmux",
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_console_state_glyphs_and_chip_appear_in_a_utf8_locale": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ],
+  "test_no_color_emits_attributes_only_and_keeps_the_terminal_background": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_undetected_background_shows_the_theme_hint_once": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_colour_surfaces.py": {
+  "test_mission_colour_defaults_to_the_mission_of_the_folder": [
+   "subprocess"
+  ],
+  "test_mission_colour_pins_clears_and_records_an_event": [
+   "subprocess"
+  ],
+  "test_mission_colour_rejects_bad_values_and_unknown_missions": [
+   "subprocess"
+  ],
+  "test_real_station_draws_the_label_as_a_filled_chip_and_colours_the_state": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_completed_stop.py": {
+  "test_completed_mission_closes_its_station_and_stop_is_a_safe_no_op": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_composer_recovery.py": {
+  "test_external_editor_failure_keeps_original_and_private_editor_file": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_concurrency.py": {
+  "test_committed_dispatch_survives_process_death_without_automatic_replay": [
+   "subprocess"
+  ],
+  "test_concurrent_task_submission_has_no_lost_tasks_or_events": [
+   "subprocess"
+  ],
+  "test_kernel_ownership_is_released_on_controller_death": [
+   "subprocess"
+  ],
+  "test_process_death_rolls_back_uncommitted_state_and_event": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_cursor_cells.py": {
+  "test_attached_control_caret_and_exact_source_cells": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_demo_limits.py": {
+  "test_stand_in_claude_reports_the_limit_and_exits_with_status_1": [
+   "subprocess"
+  ],
+  "test_stand_in_codex_passes_its_tests_and_exits_cleanly": [
+   "subprocess"
+  ],
+  "test_stand_in_waits_for_its_go_file": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_demo_render.py": {
+  "test_wide_character_background_spans_both_cells": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_dispatch_atomicity.py": {
+  "test_command_interruption_cannot_leave_applied_task_without_acknowledgement": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_dogfood_fixes.py": {
+  "test_console_dispatch_approve_expands_to_task_verify": [
+   "subprocess"
+  ],
+  "test_console_start_keeps_text_reply_without_native_station": [
+   "subprocess"
+  ],
+  "test_console_start_of_native_mission_returns_attach_action": [
+   "subprocess"
+  ],
+  "test_controller_lock_acquisition_waits_out_a_short_probe": [
+   "subprocess"
+  ],
+  "test_status_and_list_show_missing_controller": [
+   "subprocess"
+  ],
+  "test_titles_and_names_drop_heading_markers_but_prompt_is_stored_verbatim": [
+   "subprocess"
+  ],
+  "test_unknown_commands_suggest_close_names_instead_of_dumping_choices": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_editor_cwd.py": {
+  "test_composer_editor_runs_in_the_private_drafts_directory": [
+   "subprocess"
+  ],
+  "test_task_editor_runs_in_the_private_drafts_directory": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_enabled_rotation.py": {
+  "test_default_rotation_drops_disabled_entries_instead_of_failing": [
+   "subprocess"
+  ],
+  "test_enabled_rotation_is_accepted_and_unrestricted_config_allows_everything": [
+   "subprocess"
+  ],
+  "test_environment_can_enable_what_the_frozen_config_disables": [
+   "subprocess"
+  ],
+  "test_legacy_prompt_form_accepts_acceptance": [
+   "subprocess"
+  ],
+  "test_mission_create_records_acceptance_on_the_first_task": [
+   "subprocess"
+  ],
+  "test_resume_refuses_a_rotation_that_can_never_launch": [
+   "subprocess"
+  ],
+  "test_rotation_set_refuses_disabled_entries_and_keeps_the_saved_rotation": [
+   "subprocess"
+  ],
+  "test_routes_are_checked_by_their_launch_cli": [
+   "subprocess"
+  ],
+  "test_start_uses_the_missions_frozen_config_and_refuses_before_launching": [
+   "subprocess"
+  ],
+  "test_start_with_an_explicit_disabled_provider_is_refused_but_a_saved_partial_rotation_runs": [
+   "subprocess"
+  ],
+  "test_task_list_shows_dependencies_in_an_after_column": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_end_to_end.py": {
+  "test_detached_submission_amendment_and_verification": [
+   "subprocess"
+  ],
+  "test_pause_graceful_shutdown_and_restart_do_not_replay_completed_provider_work": [
+   "subprocess"
+  ],
+  "test_provider_abort_hands_same_task_to_next_provider": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_final_dogfood.py": {
+  "test_controller_parser_does_not_inherit_configured_routes": [
+   "subprocess"
+  ],
+  "test_explicit_providers_clear_the_configured_routes": [
+   "subprocess"
+  ],
+  "test_explicit_routes_win_and_defaults_apply_when_nothing_is_given": [
+   "subprocess"
+  ],
+  "test_launch_controller_passes_an_explicit_empty_routes_to_the_controller": [
+   "subprocess"
+  ],
+  "test_legacy_prompt_create_follows_the_same_rule": [
+   "subprocess"
+  ],
+  "test_managed_prompt_is_readable_text_without_raw_json": [
+   "subprocess"
+  ],
+  "test_native_prompt_asks_the_operator_to_exit_but_headless_does_not": [
+   "subprocess"
+  ],
+  "test_numbered_acceptance_in_the_prompt": [
+   "subprocess"
+  ],
+  "test_start_with_explicit_providers_clears_saved_routes": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_finish_safety.py": {
+  "test_finish_refuses_when_provider_shows_a_dialog_and_types_nothing": [
+   "subprocess"
+  ],
+  "test_second_enter_only_while_the_exit_popup_is_open": [
+   "subprocess"
+  ],
+  "test_skip_check_override_types_without_reading_the_pane": [
+   "subprocess"
+  ],
+  "test_unreadable_pane_is_refused": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_finished_station.py": {
+  "test_a_live_native_provider_is_never_killed": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_attach_to_a_finished_mission_explains_instead_of_suggesting_start": [
+   "subprocess"
+  ],
+  "test_attached_client_keeps_the_station_until_the_last_one_detaches": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_autonomous_station_closes_although_its_pane_tails_a_log": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_detach_hook_does_not_close_a_station_whose_mission_is_still_running": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_detach_hook_output_never_puts_the_remaining_client_into_view_mode": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_excluded_client_is_ignored_even_if_tmux_still_lists_it": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_failed_mission_station_closes_the_same_way": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_finished_mission_station_closes_over_a_waiting_message_pane": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_idle_station_of_a_completed_mission_is_closed_and_recorded": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_message_does_not_overwrite_a_previous_providers_output": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_message_is_shown_in_an_empty_pane_and_refreshed_but_never_replaces_a_provider": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_missing_station_is_reported_not_created": [
+   "subprocess"
+  ],
+  "test_station_gc_command_prints_the_outcome": [
+   "subprocess"
+  ],
+  "test_unfinished_mission_and_active_controller_leave_the_station_alone": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_first_run_fixes.py": {
+  "test_amend_of_a_not_running_task_applies_immediately": [
+   "subprocess"
+  ],
+  "test_amend_of_a_running_task_stays_pending_and_task_show_says_so": [
+   "subprocess"
+  ],
+  "test_amend_of_a_verifying_task_keeps_its_requeue_behaviour": [
+   "subprocess"
+  ],
+  "test_attach_is_ambiguous_only_among_live_stations": [
+   "subprocess"
+  ],
+  "test_attach_prefers_the_single_mission_with_a_live_station": [
+   "subprocess"
+  ],
+  "test_console_aliases_take_mission_task_numbers": [
+   "subprocess"
+  ],
+  "test_console_help_with_an_unknown_topic_is_an_error": [
+   "subprocess"
+  ],
+  "test_console_read_only_commands_print_text_not_json": [
+   "subprocess"
+  ],
+  "test_console_reject_takes_the_reason_literally": [
+   "subprocess"
+  ],
+  "test_console_reject_without_a_number_uses_the_single_waiting_task": [
+   "subprocess"
+  ],
+  "test_console_status_matches_the_cli_and_json_is_opt_in": [
+   "subprocess"
+  ],
+  "test_console_steer_and_proposal_reject_take_free_text_literally": [
+   "subprocess"
+  ],
+  "test_console_task_show_is_human_text_and_json_on_request": [
+   "subprocess"
+  ],
+  "test_console_verify_alias_takes_evidence_literally": [
+   "subprocess"
+  ],
+  "test_dependencies_and_steering_use_mission_task_numbers": [
+   "subprocess"
+  ],
+  "test_detach_picks_the_named_client_and_reports_it": [
+   "subprocess"
+  ],
+  "test_detach_with_one_writable_client_needs_no_option": [
+   "subprocess"
+  ],
+  "test_doctor_for_a_mission_checks_the_missions_own_rotation": [
+   "subprocess"
+  ],
+  "test_managed_context_names_the_mission_task_number": [
+   "subprocess"
+  ],
+  "test_mission_json_leaves_out_the_saved_tool_config_unless_asked": [
+   "subprocess"
+  ],
+  "test_mission_list_and_ambiguity_errors_share_one_order": [
+   "subprocess"
+  ],
+  "test_missions_listing_shows_the_mission_task_number": [
+   "subprocess"
+  ],
+  "test_only_cancel_cancels_a_mission": [
+   "subprocess"
+  ],
+  "test_pause_of_an_unstarted_mission_is_not_a_raw_transition_error": [
+   "subprocess"
+  ],
+  "test_read_only_commands_use_the_folders_finished_mission": [
+   "subprocess"
+  ],
+  "test_refused_transitions_use_operator_wording": [
+   "subprocess"
+  ],
+  "test_schema_migration_numbers_existing_tasks_by_creation_within_each_mission": [
+   "subprocess"
+  ],
+  "test_several_finished_missions_in_a_folder_are_listed": [
+   "subprocess"
+  ],
+  "test_snapshot_tasks_carry_ordinal_and_keep_the_global_id": [
+   "subprocess"
+  ],
+  "test_status_lists_several_tasks_awaiting_approval": [
+   "subprocess"
+  ],
+  "test_status_says_what_needs_the_operator": [
+   "subprocess"
+  ],
+  "test_stop_force_and_console_stop_never_cancel_a_created_mission": [
+   "subprocess"
+  ],
+  "test_stop_on_a_saved_mission_changes_nothing": [
+   "subprocess"
+  ],
+  "test_stop_with_a_controller_still_asks_it_to_stop": [
+   "subprocess"
+  ],
+  "test_task_add_reopens_a_completed_mission": [
+   "subprocess"
+  ],
+  "test_task_add_to_a_cancelled_mission_says_so": [
+   "subprocess"
+  ],
+  "test_task_id_option_takes_the_global_id_and_rejects_foreign_tasks": [
+   "subprocess"
+  ],
+  "test_task_numbers_restart_at_one_in_every_mission": [
+   "subprocess"
+  ],
+  "test_unknown_task_number_names_the_valid_range_without_long_ids": [
+   "subprocess"
+  ],
+  "test_verify_needs_evidence_or_approval": [
+   "subprocess"
+  ],
+  "test_verify_with_evidence_and_approve_completes": [
+   "subprocess"
+  ],
+  "test_verify_without_approve_only_records_evidence": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_first_run_path.py": {
+  "test_new_user_reaches_a_completed_hello_world_mission": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_first_run_start.py": {
+  "test_follow_up_task_reopens_a_completed_mission_and_start_runs_it": [
+   "subprocess"
+  ],
+  "test_headless_start_points_at_status_instead_of_attach": [
+   "subprocess"
+  ],
+  "test_native_start_from_a_script_ends_with_the_attach_command": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_focus_marker.py": {
+  "test_focus_marker_remains_dynamic_after_prefix_pane_switch": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_force_stop.py": {
+  "test_force_stop_continues_when_the_recorded_provider_process_has_already_exited": [
+   "subprocess"
+  ],
+  "test_force_stop_refuses_stale_ready_pid_while_real_controller_owns_lock": [
+   "subprocess"
+  ],
+  "test_force_stop_terminates_matching_controller_before_marking_stopped": [
+   "subprocess"
+  ],
+  "test_force_stop_terminates_owned_verifier_before_controller": [
+   "subprocess"
+  ],
+  "test_terminating_a_provider_that_already_exited_is_a_no_op_not_an_identity_mismatch": [
+   "subprocess"
+  ],
+  "test_terminating_still_refuses_a_live_process_with_a_different_identity": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_fuzz.py": {
+  "test_fuzz_target": [
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_fuzz_pty.py": {
+  "test_control_view_survives_terminal_noise": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_ctrl_s_does_not_freeze_the_screen": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_home_screen_survives_terminal_noise": [
+   "pty",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_fuzz_regressions.py": {
+  "test_markdown_with_a_very_long_line_renders_in_the_background": [
+   "slow"
+  ],
+  "test_numbers_beyond_the_database_range_are_a_usage_error_not_a_traceback": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_golden_screens.py": {
+  "test_golden_screen": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_hangup.py": {
+  "test_a_curses_program_exits_when_its_terminal_is_hung_up_with_sighup_ignored": [
+   "pty",
+   "subprocess"
+  ],
+  "test_an_idle_terminal_is_not_mistaken_for_a_hangup": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_an_ignored_sighup_still_ends_the_program_that_owns_the_terminal": [
+   "pty",
+   "subprocess"
+  ],
+  "test_probe_does_not_consume_pending_input": [
+   "pty",
+   "slow"
+  ],
+  "test_terminal_probe_sees_a_live_pty_a_closed_master_and_a_pipe": [
+   "pty"
+  ],
+  "test_the_console_still_handles_input_and_then_exits_on_hangup": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_help.py": {
+  "test_console_start_feedback_reads_durable_state_and_keeps_log_path_secondary": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_idle_redraw.py": {
+  "test_a_commit_by_another_process_reloads_the_list": [
+   "subprocess"
+  ],
+  "test_an_idle_home_screen_draws_once_and_sleeps_between_wakeups": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launch_limits.py": {
+  "test_bridge_fails_the_task_with_a_visible_event_and_does_not_hand_it_to_another_provider": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launcher.py": {
+  "test_bare_command_runs_from_unrelated_folder_and_creates_without_provider": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_launcher_opens_explicit_existing_mission_or_quits": [
+   "subprocess"
+  ],
+  "test_launcher_uses_shared_create_and_control_handlers_without_start": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launcher_contracts.py": {
+  "test_failed_save_retains_source_then_confirmed_retry_cleans_it": [
+   "subprocess"
+  ],
+  "test_launcher_start_is_explicit_and_start_failure_retains_saved_mission": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launcher_exact_paste.py": {
+  "test_real_launcher_paste_saves_64kib_objective_verbatim_without_start": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launcher_home.py": {
+  "test_defaults_come_from_config_and_ordering_from_current_folder": [
+   "subprocess"
+  ],
+  "test_headless_start_failing_after_launch_also_opens_controls": [
+   "subprocess"
+  ],
+  "test_native_start_returning_nonzero_after_launch_opens_controls_not_the_form": [
+   "subprocess"
+  ],
+  "test_opening_an_existing_live_mission_only_opens_controls": [
+   "subprocess"
+  ],
+  "test_save_only_clears_objective_and_never_starts": [
+   "subprocess"
+  ],
+  "test_start_failing_before_launch_returns_to_list_with_real_error": [
+   "subprocess"
+  ],
+  "test_start_failure_without_message_gets_retry_guidance": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launcher_overview.py": {
+  "test_c_locale_terminal_session_emits_no_non_ascii_bytes": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_home_load_counts_operator_tasks_and_names_the_latest_provider": [
+   "subprocess"
+  ],
+  "test_periodic_refresh_reads_without_waiting_for_a_writer": [
+   "subprocess"
+  ],
+  "test_running_launcher_opens_the_mission_chosen_through_the_filter": [
+   "subprocess"
+  ],
+  "test_utf8_terminal_session_draws_the_unicode_glyphs": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launcher_paste_safety.py": {
+  "test_bracketed_multiline_paste_lands_whole_in_the_composer": [
+   "pty",
+   "subprocess"
+  ],
+  "test_human_speed_keys_navigate_and_save": [
+   "pty",
+   "subprocess"
+  ],
+  "test_launcher_enables_bracketed_paste_on_start_and_disables_it_on_exit": [
+   "pty",
+   "subprocess"
+  ],
+  "test_unbracketed_burst_cannot_activate_save_and_needs_a_fresh_enter": [
+   "pty",
+   "subprocess"
+  ],
+  "test_unbracketed_multiline_burst_opens_composer_and_creates_nothing": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_launcher_routes.py": {
+  "test_bare_provider_selection_clears_a_configured_default_rotation": [
+   "subprocess"
+  ],
+  "test_running_launcher_creates_a_route_mission": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_logs.py": {
+  "test_bridge_headless_pty_capture_keeps_only_bounded_tail": [
+   "pty"
+  ],
+  "test_run_retention_prunes_raw_logs_but_keeps_digest_event": [
+   "subprocess"
+  ],
+  "test_tmux_sink_cli_rotates_input_without_unbounded_append": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_long_prompt_editor.py": {
+  "test_real_curses_amendment_preserves_long_prompt_and_whitespace": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_real_curses_stdin_file_request_keeps_control_input_available": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_long_run.py": {
+  "test_thousand_iterations_keep_tasks_evidence_and_resources_bounded": [
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_mission_creation.py": {
+  "test_auto_continue_applies_to_mission_create_only": [
+   "subprocess"
+  ],
+  "test_legacy_form_and_mission_create_store_the_same_mission_and_task": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_mode_names.py": {
+  "test_create_accepts_each_single_mode": [
+   "subprocess"
+  ],
+  "test_status_and_snapshot_call_the_default_mode_background": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_monitor.py": {
+  "test_convergence_uses_bounded_persisted_evidence_and_verified_progress_resets_warning": [
+   "subprocess"
+  ],
+  "test_latest_capacity_wait_and_progress_survive_more_than_one_hundred_events": [
+   "subprocess"
+  ],
+  "test_latest_event_queries_use_mission_kind_id_index": [
+   "subprocess"
+  ],
+  "test_mission_log_pages_older_events_without_changing_current_capacity": [
+   "subprocess"
+  ],
+  "test_new_capacity_refresh_clears_interleaved_provider_wait": [
+   "subprocess"
+  ],
+  "test_new_usable_selection_clears_older_wait_and_uses_readiness_target": [
+   "subprocess"
+  ],
+  "test_operator_events_skip_controller_plumbing_and_stay_fast_with_many_heartbeats": [
+   "subprocess"
+  ],
+  "test_pending_proposals_are_counted_separately_from_runnable_tasks": [
+   "subprocess"
+  ],
+  "test_projection_includes_only_bounded_recent_amendment_history": [
+   "subprocess"
+  ],
+  "test_projection_paginates_tasks_and_search_without_loading_full_queue": [
+   "subprocess"
+  ],
+  "test_projection_uses_persisted_capacity_and_does_not_invent_opaque_values": [
+   "subprocess"
+  ],
+  "test_refresh_worker_events_project_as_last_observed_not_live": [
+   "subprocess"
+  ],
+  "test_reopen_projects_durable_progress_and_stall_is_only_repeated_failures": [
+   "subprocess"
+  ],
+  "test_viewed_station_and_native_history_are_independent_of_executing_station": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_monitor_chronology_review.py": {
+  "test_latest_operation_follows_insertion_order_with_same_second_timestamps": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_mouse_wheel.py": {
+  "test_pty_sgr_wheel_moves_the_home_selection": [
+   "pty",
+   "subprocess"
+  ],
+  "test_pty_sgr_wheel_scrolls_the_provider_checklist": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_pty_sgr_wheel_scrolls_the_standalone_viewer": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_pty_shift_wheel_pans_the_viewer_when_wrap_is_off": [
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_running_launcher_wheel_moves_selection_and_enter_opens_that_mission": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_native_e2e.py": {
+  "test_native_session_id_survives_full_controller_shutdown": [
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_native_input_probe.py": {
+  "test_direct_cli_comparison_harness_delivers_keystrokes_to_a_native_terminal": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_operator_cli.py": {
+  "test_attach_without_a_station_says_how_to_start_one": [
+   "subprocess"
+  ],
+  "test_completed_mission_stop_prints_station_receipt": [
+   "subprocess"
+  ],
+  "test_console_accepts_slash_commands_and_exit_hint": [
+   "subprocess"
+  ],
+  "test_console_commands_still_accept_a_mission_prefix": [
+   "subprocess"
+  ],
+  "test_doctor_does_not_infer_a_mission": [
+   "subprocess"
+  ],
+  "test_folder_inference_lists_candidates_and_prefers_live_missions": [
+   "subprocess"
+  ],
+  "test_legacy_prompt_mode_no_start_prints_a_receipt": [
+   "subprocess"
+  ],
+  "test_lifecycle_commands_print_one_line_receipts": [
+   "subprocess"
+  ],
+  "test_mission_create_and_list_are_readable_and_json_is_unchanged": [
+   "subprocess"
+  ],
+  "test_mission_is_inferred_from_the_current_folder": [
+   "subprocess"
+  ],
+  "test_mission_prefix_resolution_errors_and_success": [
+   "subprocess"
+  ],
+  "test_native_stop_with_active_provider_explains_how_to_finish": [
+   "subprocess"
+  ],
+  "test_new_missions_use_the_configured_rotation": [
+   "subprocess"
+  ],
+  "test_non_native_stop_has_no_provider_wait_hint": [
+   "subprocess"
+  ],
+  "test_proposal_station_and_steer_receipts": [
+   "subprocess"
+  ],
+  "test_rejected_lifecycle_command_exits_nonzero_in_text_mode": [
+   "subprocess"
+  ],
+  "test_status_events_doctor_and_proposals_are_readable": [
+   "subprocess"
+  ],
+  "test_task_commands_print_receipts_and_tables": [
+   "subprocess"
+  ],
+  "test_task_verify_receipt": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_output_idle.py": {
+  "test_real_scratch_tmux_reports_activity_epoch_of_single_print": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_pending_amendments.py": {
+  "test_every_recorded_state_is_compared": [
+   "subprocess"
+  ],
+  "test_pending_amendment_paths_match_the_recorded_rows_and_events": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_counters.py": {
+  "test_list_tasks_pages_in_list_order_and_batches_dependencies": [
+   "subprocess"
+  ],
+  "test_maintained_counters_match_a_recount_after_every_kind_of_task_write": [
+   "subprocess"
+  ],
+  "test_projection_reads_counters_not_the_task_table": [
+   "subprocess"
+  ],
+  "test_schema_eight_database_is_backfilled_once_and_then_maintained": [
+   "subprocess"
+  ],
+  "test_task_list_command_defaults_to_one_page_and_all_lists_everything": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_events.py": {
+  "test_cursor_memory_is_bounded": [
+   "subprocess"
+  ],
+  "test_moving_newest_page_is_not_cached": [
+   "subprocess"
+  ],
+  "test_pages_equal_plain_offset_pages_in_every_visiting_order": [
+   "subprocess"
+  ],
+  "test_sequential_paging_reads_from_a_remembered_bound": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_home.py": {
+  "test_home_and_mission_list_queries_scan_no_task_or_operation_table": [
+   "subprocess"
+  ],
+  "test_home_stats_and_switcher_entries_match_what_the_full_scans_reported": [
+   "subprocess"
+  ],
+  "test_home_stats_fall_back_to_task_counts_on_a_database_without_counters": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_prune.py": {
+  "test_a_pass_stops_at_its_budget_and_resumes": [
+   "subprocess"
+  ],
+  "test_a_restarted_worker_continues_the_previous_observation": [
+   "subprocess"
+  ],
+  "test_a_wait_or_selection_after_the_last_observation_forces_a_new_row": [
+   "subprocess"
+  ],
+  "test_audit_event_records_a_pass_and_is_kept_out_of_operator_activity": [
+   "subprocess"
+  ],
+  "test_pruning_bounds_heartbeats_and_thins_old_capacity_refreshes": [
+   "subprocess"
+  ],
+  "test_status_readers_still_find_the_latest_events_after_pruning": [
+   "subprocess"
+  ],
+  "test_the_newest_row_of_a_kind_survives_even_when_it_is_old": [
+   "subprocess"
+  ],
+  "test_unchanged_observation_updates_the_previous_row_and_a_change_appends": [
+   "subprocess"
+  ],
+  "test_worker_prune_pass_removes_expired_rows_and_audits_once": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_queries.py": {
+  "test_controller_prompt_history_uses_the_store_query": [
+   "subprocess"
+  ],
+  "test_schema_seven_database_gains_the_history_indexes_once": [
+   "subprocess"
+  ],
+  "test_task_history_matches_the_single_predicate_query_it_replaces": [
+   "subprocess"
+  ],
+  "test_task_history_reads_the_indexes_not_the_event_log": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_ready.py": {
+  "test_controller_asks_for_one_task_and_builds_one_dictionary": [
+   "subprocess"
+  ],
+  "test_limit_bounds_the_returned_tasks_but_not_the_promotion": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_startup.py": {
+  "test_importing_the_bridge_cli_does_not_load_the_network_stack": [
+   "subprocess"
+  ],
+  "test_network_helpers_load_on_first_use_and_stay_patchable": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_perf_store.py": {
+  "test_heartbeat_worker_keeps_one_connection": [
+   "subprocess"
+  ],
+  "test_heartbeat_worker_reopens_after_a_database_error": [
+   "subprocess"
+  ],
+  "test_older_database_migrates_once_and_a_current_open_writes_nothing": [
+   "subprocess"
+  ],
+  "test_readonly_open_creates_a_missing_database_and_migrates_an_old_one": [
+   "subprocess"
+  ],
+  "test_readonly_store_reads_but_cannot_write": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_performance.py": {
+  "test_console_projection_reads_only_the_head_of_each_task_prompt": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_process_group_kill.py": {
+  "test_a_process_that_honours_sigterm_is_stopped_by_sigterm": [
+   "subprocess"
+  ],
+  "test_a_process_that_ignores_sigterm_is_killed_after_the_grace_period": [
+   "subprocess"
+  ],
+  "test_an_exited_process_is_reaped_without_error": [
+   "subprocess"
+  ],
+  "test_verifier_timeout_stops_a_child_that_ignores_sigterm": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_process_scans.py": {
+  "test_child_pids_lists_direct_children_only": [
+   "subprocess"
+  ],
+  "test_codex_session_observer_backs_off_then_stops_when_the_session_is_found": [
+   "subprocess"
+  ],
+  "test_current_owned_tree_matches_the_full_scan_and_refuses_a_reused_root": [
+   "subprocess"
+  ],
+  "test_finishing_an_operation_forgets_its_observer_schedule": [
+   "subprocess"
+  ],
+  "test_owned_processes_follow_children_without_scanning_proc": [
+   "subprocess"
+  ],
+  "test_owned_processes_scan_proc_when_child_lists_are_unavailable": [
+   "subprocess"
+  ],
+  "test_process_group_absent_is_one_syscall_and_distinguishes_live_groups": [
+   "subprocess"
+  ],
+  "test_recording_the_process_searches_at_once_even_inside_a_backoff_interval": [
+   "subprocess"
+  ],
+  "test_terminating_a_provider_tree_with_children_stops_every_member": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_progress.py": {
+  "test_checkpoint_detects_same_size_edits_reversal_and_untracked_files": [
+   "subprocess"
+  ],
+  "test_checkpoint_does_not_follow_symlinks_or_claim_partial_scan_is_complete": [
+   "subprocess"
+  ],
+  "test_concurrent_file_edit_and_git_timeout_report_unknown": [
+   "subprocess"
+  ],
+  "test_deleted_tracked_file_and_large_file_budget_are_observable": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_r7b_console.py": {
+  "test_console_commands_use_the_mission_task_number_not_the_global_id": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_r7b_home.py": {
+  "test_attach_without_a_station_falls_back_to_the_controls": [
+   "subprocess"
+  ],
+  "test_enter_on_a_live_mission_runs_attach_then_returns_to_the_list": [
+   "subprocess"
+  ],
+  "test_o_after_save_opens_the_controls_without_starting": [
+   "subprocess"
+  ],
+  "test_s_after_save_starts_the_selected_mission_and_o_opens_its_controls": [
+   "subprocess"
+  ],
+  "test_save_only_stays_on_the_list_with_a_confirmation_and_s_starts_it": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_recovery_tmux.py": {
+  "test_graceful_stop_terminates_tmux_station_and_bridge_ui": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_resume_reconciles_native_mutator_and_stops_old_station": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_refresh.py": {
+  "test_refresh_failure_event_is_bounded_and_does_not_leak_exception_text": [
+   "subprocess"
+  ],
+  "test_refresh_worker_records_heartbeat_then_delays_quota_refresh": [
+   "subprocess"
+  ],
+  "test_refresh_worker_records_read_only_observation_after_first_interval": [
+   "subprocess"
+  ],
+  "test_refresh_worker_waits_for_inflight_selection_then_stops_without_writes": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_reject_rotation.py": {
+  "test_console_reject_alias_with_explicit_and_implicit_task": [
+   "subprocess"
+  ],
+  "test_console_start_reports_the_rotation_change": [
+   "subprocess"
+  ],
+  "test_context_has_no_rejection_text_for_a_fresh_task": [
+   "subprocess"
+  ],
+  "test_hooks_report_a_changed_rotation_once": [
+   "subprocess"
+  ],
+  "test_latest_rejection_reason_is_the_newest_one": [
+   "subprocess"
+  ],
+  "test_next_attempt_context_quotes_the_rejection_reason": [
+   "subprocess"
+  ],
+  "test_reject_is_atomic_when_the_second_transition_fails": [
+   "subprocess"
+  ],
+  "test_reject_moves_verifying_to_queued_with_ordered_events": [
+   "subprocess"
+  ],
+  "test_reject_refuses_tasks_that_are_not_awaiting_verification": [
+   "subprocess"
+  ],
+  "test_reject_reruns_the_task_with_the_reason_and_a_changed_rotation": [
+   "subprocess"
+  ],
+  "test_reject_validates_the_reason_and_leaves_the_task_untouched": [
+   "subprocess"
+  ],
+  "test_rotation_change_saves_and_announces": [
+   "subprocess"
+  ],
+  "test_rotation_change_when_stopped_and_when_unchanged": [
+   "subprocess"
+  ],
+  "test_rotation_console_command_and_help": [
+   "subprocess"
+  ],
+  "test_rotation_in_providers_mode_uses_provider_models": [
+   "subprocess"
+  ],
+  "test_rotation_rejects_unknown_names_with_suggestions": [
+   "subprocess"
+  ],
+  "test_rotation_shows_saved_order_cli_model_and_selection": [
+   "subprocess"
+  ],
+  "test_run_controller_persists_override_through_set_rotation": [
+   "subprocess"
+  ],
+  "test_set_rotation_records_changes_once": [
+   "subprocess"
+  ],
+  "test_start_override_is_refused_while_a_controller_owns_the_mission": [
+   "subprocess"
+  ],
+  "test_start_override_is_saved_announced_and_reused": [
+   "subprocess"
+  ],
+  "test_status_shows_the_saved_rotation": [
+   "subprocess"
+  ],
+  "test_task_reject_receipt_text_and_json": [
+   "subprocess"
+  ],
+  "test_task_reject_requires_a_reason_and_the_right_state": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_review_hold.py": {
+  "test_a_task_that_depends_on_the_reviewed_one_cannot_start_so_nothing_holds": [
+   "subprocess"
+  ],
+  "test_continue_command_cli_and_console": [
+   "subprocess"
+  ],
+  "test_continue_releases_once_and_the_reviewed_task_keeps_waiting": [
+   "subprocess"
+  ],
+  "test_explicit_auto_continue_off_holds_even_when_unattended_by_default": [
+   "subprocess"
+  ],
+  "test_failing_verifier_leaves_the_task_in_review_and_holds": [
+   "subprocess"
+  ],
+  "test_hold_message_failure_does_not_stop_the_hold": [
+   "subprocess"
+  ],
+  "test_hold_message_is_shown_in_the_provider_pane": [
+   "subprocess"
+  ],
+  "test_mission_create_auto_continue_flag_and_mission_set": [
+   "subprocess"
+  ],
+  "test_native_mission_holds_until_approved": [
+   "subprocess"
+  ],
+  "test_no_hold_with_auto_continue_or_unattended_modes": [
+   "subprocess"
+  ],
+  "test_nothing_to_hold_back_means_no_hold": [
+   "subprocess"
+  ],
+  "test_passing_verifier_completes_the_task_without_a_hold": [
+   "subprocess"
+  ],
+  "test_reject_releases_the_hold_and_requeues_the_task": [
+   "subprocess"
+  ],
+  "test_rejected_then_rereviewed_task_holds_again_after_an_earlier_continue": [
+   "subprocess"
+  ],
+  "test_released_hold_for_a_task_that_was_cancelled_is_recorded_plainly": [
+   "subprocess"
+  ],
+  "test_review_hint_is_prepared_before_launch_only_when_a_clean_exit_means_review": [
+   "subprocess"
+  ],
+  "test_stop_during_a_hold_ends_the_loop": [
+   "subprocess"
+  ],
+  "test_turning_auto_continue_on_while_holding_releases_the_hold": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_review_hold_tmux.py": {
+  "test_review_hint_replaces_the_footer_only_after_a_clean_exit": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_second_task_waits_for_approval_of_the_first": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_review_regressions.py": {
+  "test_cancel_failed_task_has_atomic_successful_acknowledgement": [
+   "subprocess"
+  ],
+  "test_complete_stop_terminates_owned_descendant_in_a_new_session": [
+   "subprocess"
+  ],
+  "test_controller_start_overrides_survive_complete_shutdown": [
+   "subprocess"
+  ],
+  "test_legacy_attached_scheduler_forwards_outer_terminal_resize": [
+   "pty"
+  ],
+  "test_log_older_page_stays_older_when_live_events_arrive": [
+   "subprocess"
+  ],
+  "test_owned_group_termination_kills_descendant_after_leader_exits": [
+   "subprocess"
+  ],
+  "test_proposal_acceptance_cannot_strand_work_in_terminal_mission": [
+   "subprocess"
+  ],
+  "test_rejected_command_rolls_back_prior_effects": [
+   "subprocess"
+  ],
+  "test_repl_preserves_public_proposal_decision_options": [
+   "subprocess"
+  ],
+  "test_repository_progress_observes_executable_mode_changes": [
+   "subprocess"
+  ],
+  "test_unaccepted_proposal_does_not_prevent_verified_mission_completion": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_runtime.py": {
+  "test_after_iteration_ignores_callback_for_already_finished_operation": [
+   "subprocess"
+  ],
+  "test_after_iteration_ignores_stale_or_malformed_scheduler_callback": [
+   "subprocess"
+  ],
+  "test_autonomous_station_tail_shows_real_headless_provider_output": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_before_iteration_marks_mission_complete_when_every_operator_task_is_verified": [
+   "subprocess"
+  ],
+  "test_before_iteration_stops_on_terminal_mission_status": [
+   "subprocess"
+  ],
+  "test_before_iteration_waits_out_mission_pause_and_then_selects_ready_work": [
+   "subprocess"
+  ],
+  "test_before_iteration_waits_when_no_tasks_are_available_then_observes_stop": [
+   "subprocess"
+  ],
+  "test_before_launch_declines_when_mission_is_paused": [
+   "subprocess"
+  ],
+  "test_before_launch_preserves_unresolvable_configured_cwd_without_claiming_checkpoint": [
+   "subprocess"
+  ],
+  "test_before_launch_rethrows_unrelated_operation_intent_transition_error": [
+   "subprocess"
+  ],
+  "test_before_launch_rethrows_unrelated_operation_running_transition_error": [
+   "subprocess"
+  ],
+  "test_before_launch_treats_concurrent_mission_stop_as_rejected_launch": [
+   "subprocess"
+  ],
+  "test_boundary_requests_clear_without_replacing_an_existing_pause": [
+   "subprocess"
+  ],
+  "test_bounded_verifier_process_callbacks_report_identity_and_exit": [
+   "subprocess"
+  ],
+  "test_cancel_command_is_durable_and_defers_process_boundary": [
+   "subprocess"
+  ],
+  "test_codex_same_worktree_session_is_never_auto_bound_to_bridge": [
+   "subprocess"
+  ],
+  "test_controller_cleans_owned_station_when_ralph_already_committed_stopped": [
+   "subprocess"
+  ],
+  "test_controller_native_mode_without_tmux_fails_truthfully": [
+   "subprocess"
+  ],
+  "test_controller_reconciles_terminal_startup_without_running_provider_loop": [
+   "subprocess"
+  ],
+  "test_controller_recovery_terminates_unresolved_verifier_without_completing_task": [
+   "subprocess"
+  ],
+  "test_controller_rejects_conflicting_modes_before_mutating_mission": [
+   "subprocess"
+  ],
+  "test_controller_restart_rejects_queued_command_without_replaying_its_effect": [
+   "subprocess"
+  ],
+  "test_controller_return_cannot_leave_mission_claiming_running": [
+   "subprocess"
+  ],
+  "test_controller_tears_down_station_before_marking_mission_stopped": [
+   "subprocess"
+  ],
+  "test_detached_launch_accepts_only_the_new_controller_startup_identity": [
+   "subprocess"
+  ],
+  "test_detached_launch_builds_child_environment_and_accepts_matching_readiness": [
+   "subprocess"
+  ],
+  "test_detached_launch_never_accepts_a_stale_ready_file": [
+   "subprocess"
+  ],
+  "test_detached_launch_reports_a_controller_that_exits_before_ready": [
+   "subprocess"
+  ],
+  "test_detached_launch_reports_an_already_owned_controller_without_spawning": [
+   "subprocess"
+  ],
+  "test_detached_native_launch_requires_tmux_before_spawning": [
+   "subprocess"
+  ],
+  "test_explicit_native_mode_uses_owned_provider_pane": [
+   "subprocess"
+  ],
+  "test_force_stop_checks_persisted_start_token_and_owned_process_group": [
+   "subprocess"
+  ],
+  "test_force_stop_marks_uncertain_then_terminates_only_recorded_headless_group": [
+   "subprocess"
+  ],
+  "test_force_stop_refuses_unidentified_headless_process_and_leaves_stopping": [
+   "subprocess"
+  ],
+  "test_handoff_preference_ignores_unusable_entries_and_consumes_first_usable_choice": [
+   "subprocess"
+  ],
+  "test_handoff_preference_is_preserved_when_no_usable_matching_decision_exists": [
+   "subprocess"
+  ],
+  "test_headless_pty_reports_spawned_child_pid_before_wait": [
+   "pty"
+  ],
+  "test_headless_restart_marks_provider_operation_uncertain_and_kills_verified_process": [
+   "subprocess"
+  ],
+  "test_headless_restart_refuses_reused_provider_pid_without_signalling": [
+   "subprocess"
+  ],
+  "test_headless_restart_refuses_running_operation_without_identity": [
+   "subprocess"
+  ],
+  "test_live_verifier_with_unreadable_identity_blocks_controller_cleanup": [
+   "subprocess"
+  ],
+  "test_managed_process_recovery_does_not_signal_reused_pid": [
+   "subprocess"
+  ],
+  "test_managed_process_recovery_skips_a_process_already_marked_exited": [
+   "subprocess"
+  ],
+  "test_mission_pause_leaves_completed_work_awaiting_verification": [
+   "subprocess"
+  ],
+  "test_native_capture_wait_exits_promptly_when_operator_boundary_interrupts": [
+   "subprocess"
+  ],
+  "test_native_capture_without_structured_metadata_records_unavailable": [
+   "subprocess"
+  ],
+  "test_operation_progress_records_real_workspace_change_and_bounded_log_digest": [
+   "subprocess"
+  ],
+  "test_owned_claude_and_copilot_sessions_survive_controller_restart_by_exact_id": [
+   "subprocess"
+  ],
+  "test_owned_codex_observation_persists_only_a_confirmed_exact_identity": [
+   "subprocess"
+  ],
+  "test_owned_codex_observation_rejects_a_mismatched_expected_identity": [
+   "subprocess"
+  ],
+  "test_owned_native_identity_cwd_mismatch_and_capability_drift_do_not_resume": [
+   "subprocess"
+  ],
+  "test_owned_process_group_escalates_when_provider_ignores_sigterm": [
+   "subprocess"
+  ],
+  "test_pause_command_reports_active_provider_work_is_deferred": [
+   "subprocess"
+  ],
+  "test_pending_verification_request_stays_queued_until_task_is_verifying": [
+   "subprocess"
+  ],
+  "test_process_recording_skips_pid_without_a_verified_start_token": [
+   "subprocess"
+  ],
+  "test_provider_receives_explicit_bridge_identity_and_operator_controls": [
+   "subprocess"
+  ],
+  "test_recovery_terminates_a_persisted_verifier_by_start_token": [
+   "subprocess"
+  ],
+  "test_run_controller_records_ready_and_finalizes_completion_or_failure": [
+   "subprocess"
+  ],
+  "test_run_log_pruning_keeps_recent_runs_and_digests_removed_operation_logs": [
+   "subprocess"
+  ],
+  "test_run_log_pruning_never_follows_an_operation_log_symlink_outside_run": [
+   "subprocess"
+  ],
+  "test_run_log_pruning_noops_for_disabled_retention_and_missing_directory": [
+   "subprocess"
+  ],
+  "test_run_log_pruning_preserves_digest_metadata_when_raw_file_is_already_gone": [
+   "subprocess"
+  ],
+  "test_run_log_pruning_skips_a_run_directory_that_resolves_outside_log_root": [
+   "subprocess"
+  ],
+  "test_runtime_hook_keeps_autonomous_provider_launch_headless_with_control_pane": [
+   "subprocess"
+  ],
+  "test_runtime_hook_persists_provider_handoffs_capacity_and_exhaustion": [
+   "subprocess"
+  ],
+  "test_second_controller_returns_without_reentering_owned_mission_lock": [
+   "subprocess"
+  ],
+  "test_selection_without_a_station_is_still_recorded": [
+   "subprocess"
+  ],
+  "test_start_mode_override_uses_prior_station_config_and_persists_after_cleanup": [
+   "subprocess"
+  ],
+  "test_station_selection_is_persisted_as_view_only_preference": [
+   "subprocess"
+  ],
+  "test_task_cancel_reports_the_active_provider_operation_as_deferred": [
+   "subprocess"
+  ],
+  "test_task_pause_winning_prelaunch_race_aborts_prepared_operation": [
+   "subprocess"
+  ],
+  "test_task_prompt_contains_objective_checkpoint_and_explicit_reconstruction": [
+   "subprocess"
+  ],
+  "test_unidentified_starting_verifier_blocks_cleanup_instead_of_claiming_stopped": [
+   "subprocess"
+  ],
+  "test_unknown_repository_progress_is_not_reported_as_unchanged": [
+   "subprocess"
+  ],
+  "test_verifier_launch_identity_failure_still_runs_finished_cleanup": [
+   "subprocess"
+  ],
+  "test_verifier_pid_reuse_is_never_signalled_and_is_recorded_uncertain": [
+   "subprocess"
+  ],
+  "test_wait_interrupted_reports_mission_flags_and_normal_state": [
+   "subprocess"
+  ],
+  "test_wait_interrupts_for_every_terminal_or_paused_mission_state": [
+   "subprocess"
+  ],
+  "test_wait_interrupts_for_task_pause_and_cancel": [
+   "subprocess"
+  ],
+  "test_wait_interrupts_on_boundary_flags_and_returns_false_during_normal_work": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_credentials.py": {
+  "test_native_tmux_provider_pane_does_not_inherit_other_providers_credentials": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_verifier_receives_no_provider_credentials": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_drafts.py": {
+  "test_console_and_control_startup_prune_old_drafts": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_environment.py": {
+  "test_panes_do_not_inherit_what_the_server_environment_lacks": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_managed.py": {
+  "test_console_never_inherits_the_managed_marker": [
+   "subprocess"
+  ],
+  "test_controller_launch_drops_the_managed_marker": [
+   "subprocess"
+  ],
+  "test_managed_provider_cannot_run_operator_commands": [
+   "subprocess"
+  ],
+  "test_managed_provider_is_scoped_to_its_own_mission": [
+   "subprocess"
+  ],
+  "test_managed_provider_keeps_read_only_commands_and_proposal_create": [
+   "subprocess"
+  ],
+  "test_proposal_count_per_operation_is_capped": [
+   "subprocess"
+  ],
+  "test_proposal_size_is_capped": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_output_heuristics.py": {
+  "test_assistant_text_prompt_at_the_end_still_aborts": [
+   "subprocess"
+  ],
+  "test_tool_result_as_the_last_event_does_not_abort_either": [
+   "subprocess"
+  ],
+  "test_tool_result_echoing_a_file_does_not_abort_a_stream_json_run": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_presentation.py": {
+  "test_cli_output_has_no_control_or_format_characters": [
+   "subprocess"
+  ],
+  "test_detach_notice_filters_the_mission_name": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_prompt_delivery.py": {
+  "test_headless_run_delivers_the_prompt_on_stdin": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_pythonpath.py": {
+  "test_console_command_dispatch_ignores_package_in_mission_folder": [
+   "subprocess"
+  ],
+  "test_controller_launch_is_isolated_from_mission_folder": [
+   "subprocess"
+  ],
+  "test_station_hook_runs_without_current_directory_on_path": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_special_files.py": {
+  "test_repository_checkpoint_does_not_block_on_a_tracked_file_swapped_for_a_fifo": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_station_keys.py": {
+  "test_application_cannot_set_the_clipboard_and_config_says_external": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_copy_mode_prompts_are_unbound": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_mouse_menus_are_unbound": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_pasted_prefix_burst_cannot_reach_the_tmux_command_prompt": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_single_unbracketed_burst_cannot_reach_the_tmux_command_prompt": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_tmux.py": {
+  "test_detach_hook_does_not_run_commands_embedded_in_its_arguments": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_ordinary_hash_in_a_folder_name_is_accepted_and_survives_tmux": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_scheduler_respawn_and_pipe_do_not_run_commands_embedded_in_paths": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_station_start_does_not_run_commands_embedded_in_the_folder_name": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_security_trust.py": {
+  "test_blocking_phrase_in_earlier_output_does_not_abort": [
+   "pty"
+  ],
+  "test_final_trust_prompt_receives_enter_when_confirmation_is_on": [
+   "pty"
+  ],
+  "test_final_trust_prompt_without_confirmation_aborts_with_a_clear_reason": [
+   "pty"
+  ],
+  "test_legacy_create_stores_trust_folder_in_the_mission_config": [
+   "subprocess"
+  ],
+  "test_trust_phrase_followed_by_more_output_writes_no_byte": [
+   "pty"
+  ],
+  "test_trust_phrase_in_earlier_output_is_not_a_prompt_even_when_output_goes_quiet": [
+   "pty"
+  ]
+ },
+ "tests/test_bridge_sessions.py": {
+  "test_capability_drift_and_uninstalled_cli_are_unavailable": [
+   "subprocess"
+  ],
+  "test_claude_and_copilot_start_with_owned_uuid_then_confirm_structured_startup": [
+   "subprocess"
+  ],
+  "test_codex_session_discovery_rejects_unrelated_readonly_and_multiple_fds": [
+   "subprocess"
+  ],
+  "test_new_session_id_is_not_injected_after_cli_capability_drift": [
+   "subprocess"
+  ],
+  "test_owned_codex_discovery_reads_only_bounded_metadata_header": [
+   "subprocess"
+  ],
+  "test_owned_codex_session_requires_exact_live_writable_process_tree_fd": [
+   "subprocess"
+  ],
+  "test_resume_argv_uses_exact_id_only_when_installed_help_advertises_support": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_shared_capacity_reads.py": {
+  "test_separate_processes_share_the_cache": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_source_recovery.py": {
+  "test_full_objective_is_authoritative_and_failure_does_not_create_source": [
+   "subprocess"
+  ],
+  "test_reopening_pending_amendment_edits_latest_desired_source": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_start_mode_review.py": {
+  "test_start_launches_controller_with_persisted_mode_or_explicit_override": [
+   "subprocess"
+  ],
+  "test_start_without_mode_override_uses_persisted_mission_mode": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_startup_imports.py": {
+  "test_help_builds_the_full_parser": [
+   "subprocess"
+  ],
+  "test_mission_list_does_not_load_the_provider_launcher": [
+   "subprocess"
+  ],
+  "test_store_reading_commands_skip_the_heavy_modules": [
+   "subprocess"
+  ],
+  "test_version_loads_neither_parser_nor_store_engine": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_states.py": {
+  "test_store_applies_the_mission_transition_table": [
+   "subprocess"
+  ],
+  "test_store_applies_the_task_transition_table": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_station_gc_tmux.py": {
+  "test_gc_closes_idle_stations_and_keeps_one_with_a_live_provider": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_picker_x_then_y_closes_the_station_in_a_real_terminal": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_station_restart.py": {
+  "test_restart_after_stop_provider_quit_and_late_attach": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_stations_rotation.py": {
+  "test_stations_fall_back_to_frozen_defaults_only_without_a_mission_rotation": [
+   "subprocess"
+  ],
+  "test_stations_follow_the_mission_rotation_not_every_config_table": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_status_context.py": {
+  "test_status_context_appears_in_real_station_window_label": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_steering.py": {
+  "test_handoff_preference_selects_requested_usable_station_once": [
+   "subprocess"
+  ],
+  "test_pause_after_iteration_applies_after_operation_exit": [
+   "subprocess"
+  ],
+  "test_replace_is_revisioned_and_preserves_original_objective": [
+   "subprocess"
+  ],
+  "test_review_creates_dependent_operator_review_task": [
+   "subprocess"
+  ],
+  "test_steer_cli_accepts_verbatim_prompt_file": [
+   "subprocess"
+  ],
+  "test_stop_after_task_stops_only_after_verified_completion": [
+   "subprocess"
+  ],
+  "test_verify_request_runs_configured_verifier_at_safe_boundary": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_store.py": {
+  "test_agent_proposals_require_operator_acceptance_before_scheduling": [
+   "subprocess"
+  ],
+  "test_amendment_after_exit_invalidates_verification_and_requeues_task": [
+   "subprocess"
+  ],
+  "test_amendment_during_operation_invalidates_that_operation_success": [
+   "subprocess"
+  ],
+  "test_commit_failure_rolls_back_and_leaves_connection_reusable": [
+   "subprocess"
+  ],
+  "test_completion_requires_evidence_and_all_tasks_verified": [
+   "subprocess"
+  ],
+  "test_current_schema_open_preserves_identity_for_removed_worktree": [
+   "subprocess"
+  ],
+  "test_dependency_invariant_covers_verifying_paused_ready_and_completion": [
+   "subprocess"
+  ],
+  "test_events_share_transaction_and_mission_lock_is_exclusive": [
+   "subprocess"
+  ],
+  "test_finished_mission_rejects_proposal_acceptance_and_cancelled_rejects_tasks": [
+   "subprocess"
+  ],
+  "test_managed_process_rejects_unowned_or_ambiguous_lifecycle_changes": [
+   "subprocess"
+  ],
+  "test_managed_verifier_process_identity_is_durable_until_exit": [
+   "subprocess"
+  ],
+  "test_nonzero_and_autonomy_abort_are_not_marked_complete": [
+   "subprocess"
+  ],
+  "test_operation_identity_commands_and_worktree_exclusion": [
+   "subprocess"
+  ],
+  "test_operation_intent_cannot_cross_a_nonrunning_mission_boundary": [
+   "subprocess"
+  ],
+  "test_operation_intent_precedes_launch_and_crash_becomes_uncertain": [
+   "subprocess"
+  ],
+  "test_operation_log_directory_lookup_uses_prefix_index_and_excludes_siblings": [
+   "subprocess"
+  ],
+  "test_operation_process_identity_is_persisted_only_while_running": [
+   "subprocess"
+  ],
+  "test_ready_transitions_are_evented_and_new_blocking_dependency_demotes_task": [
+   "subprocess"
+  ],
+  "test_running_task_cannot_gain_new_dependencies": [
+   "subprocess"
+  ],
+  "test_runtime_events_are_transactional_and_payloads_are_bounded": [
+   "subprocess"
+  ],
+  "test_sibling_directories_in_one_git_worktree_are_exclusive": [
+   "subprocess"
+  ],
+  "test_success_requires_explicit_verification_and_dependencies_unlock_afterwards": [
+   "subprocess"
+  ],
+  "test_successful_child_exit_observes_mission_pause": [
+   "subprocess"
+  ],
+  "test_successful_child_exit_preserves_operator_task_state": [
+   "subprocess"
+  ],
+  "test_task_order_dependencies_and_boundary_amendment_are_durable": [
+   "subprocess"
+  ],
+  "test_transaction_rolls_back_keyboard_interrupt_and_wal_files_are_private": [
+   "subprocess"
+  ],
+  "test_version_one_database_migrates_original_prompts_and_new_tables": [
+   "subprocess"
+  ],
+  "test_worktree_ownership_covers_nested_paths": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_store_boundaries.py": {
+  "test_command_reuse_is_idempotent_but_rejects_different_request": [
+   "subprocess"
+  ],
+  "test_event_pages_have_stable_cursors_and_zero_does_not_read_every_event": [
+   "subprocess"
+  ],
+  "test_failures_with_amendments_are_not_automatically_replayed": [
+   "subprocess"
+  ],
+  "test_managed_verifier_identity_cannot_be_rewritten_after_start_or_exit": [
+   "subprocess"
+  ],
+  "test_missing_objects_and_invalid_requests_do_not_write_events": [
+   "subprocess"
+  ],
+  "test_terminal_tasks_cannot_be_edited_reordered_or_receive_dependencies": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_stress.py": {
+  "test_console_commands_commit_while_provider_streams": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_bridge_switcher.py": {
+  "test_cli_finish_reports_json_and_errors": [
+   "subprocess"
+  ],
+  "test_cli_help_lists_new_commands": [
+   "subprocess"
+  ],
+  "test_collect_entries_reads_provider_task_and_liveness": [
+   "subprocess"
+  ],
+  "test_console_dispatch_missions_returns_pick_action_and_finish_errors": [
+   "subprocess"
+  ],
+  "test_finish_refuses_dead_pane_and_missing_station": [
+   "subprocess"
+  ],
+  "test_finish_refuses_headless_missing_provider_and_unknown_exit": [
+   "subprocess"
+  ],
+  "test_finish_resolves_route_provider_and_honours_override": [
+   "subprocess"
+  ],
+  "test_finish_sends_provider_exit_command_then_second_enter": [
+   "subprocess"
+  ],
+  "test_finish_skips_second_enter_when_pane_already_dead": [
+   "subprocess"
+  ],
+  "test_finish_success_when_session_vanishes": [
+   "subprocess",
+   "slow"
+  ],
+  "test_finish_times_out_without_killing": [
+   "subprocess"
+  ],
+  "test_missions_cli_lists_and_emits_json": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_switcher_tmux.py": {
+  "test_ctrl_bracket_m_binding_opens_picker_popup": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_finish_cli_exits_fake_provider_and_task_reaches_verifying": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_finish_console_command_confirms_and_exits_provider": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_finish_refuses_to_type_into_a_real_provider_dialog": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_finish_reports_when_provider_does_not_exit": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ],
+  "test_missions_command_switches_attached_client_to_other_station": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_picker_switch_then_one_detach_returns_to_where_the_user_launched_from": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_picker_wheel_and_click_in_real_pty": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_station_config_sets_titles_and_help_mentions_switcher": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_status_context_carries_mission_label_and_title": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_wheel_reaches_popup_picker_through_station_client": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_theme.py": {
+  "test_osc11_exchange_parses_replies_and_leaves_no_input": [
+   "pty"
+  ],
+  "test_osc11_reply_split_across_reads_and_with_noise_before_it": [
+   "pty"
+  ],
+  "test_osc11_timeout_flushes_late_bytes_and_stays_within_budget": [
+   "pty"
+  ],
+  "test_osc11_unsupported_terminal_answers_only_da1_and_returns_quickly": [
+   "pty"
+  ],
+  "test_theme_command_under_a_pty_answering_osc11_with_aubergine_chooses_dark": [
+   "pty",
+   "subprocess"
+  ],
+  "test_theme_command_under_a_pty_answering_osc11_with_white_chooses_light": [
+   "pty",
+   "subprocess"
+  ],
+  "test_theme_command_under_a_pty_without_osc11_support_falls_back_to_dark": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_trust_declined.py": {
+  "test_console_needs_you_row_uses_the_same_wording": [
+   "subprocess"
+  ],
+  "test_declined_runs_do_not_use_up_the_provider_failure_budget": [
+   "subprocess"
+  ],
+  "test_hook_holds_the_task_and_records_why": [
+   "subprocess"
+  ],
+  "test_other_failures_still_ask_to_retry": [
+   "subprocess"
+  ],
+  "test_scheduler_does_not_relaunch_a_declined_provider": [
+   "subprocess"
+  ],
+  "test_start_releases_only_the_declined_task": [
+   "subprocess"
+  ],
+  "test_start_with_a_running_controller_releases_the_held_task": [
+   "subprocess"
+  ],
+  "test_status_names_the_provider_and_what_to_do": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_tui.py": {
+  "test_real_monitor_projection_survives_tui_bounding_and_systems_render": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_tui_overhaul.py": {
+  "test_amend_and_add_task_actions_use_the_composer_hooks": [
+   "slow"
+  ],
+  "test_real_control_view_renders_new_tabs_status_strip_and_actions": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_tui_pty.py": {
+  "test_real_compact_console_pty_dispatches_and_exits": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_bracketed_multiline_paste_preserves_source_sha256": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_control_navigation_dispatch_and_exit": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_ctrl_e_preserves_typed_task_options": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_editor_roundtrip_dispatches_and_removes_private_file": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_multiline_command_response_scrolls_dismisses_and_accepts_next_command": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_short_bracketed_command_paste_waits_for_enter": [
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_tui_wheel.py": {
+  "test_real_control_view_wheel_moves_selection_with_sgr_sequences": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_ux_acceptance.py": {
+  "test_exact_interactive_ceiling_and_larger_file_import": [
+   "subprocess"
+  ],
+  "test_large_composition_survives_storage_amendment_and_export": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_ux_picker_home.py": {
+  "test_gc_closes_only_finished_stations_and_reports_json": [
+   "subprocess"
+  ],
+  "test_home_list_shows_review_instead_of_running_with_a_detail_line": [
+   "subprocess"
+  ],
+  "test_home_review_applies_to_running_missions_only": [
+   "subprocess"
+  ],
+  "test_picker_shows_review_state_and_detail_line": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_verifier.py": {
+  "test_bounded_verifier_optional_lifecycle_callbacks_can_be_omitted": [
+   "subprocess"
+  ],
+  "test_task_amendment_during_verifier_cannot_commit_old_revision_evidence": [
+   "subprocess"
+  ],
+  "test_verifier_context_is_removed_even_if_child_deletes_it": [
+   "subprocess"
+  ],
+  "test_verifier_failure_leaves_task_verifying_and_records_private_result": [
+   "subprocess"
+  ],
+  "test_verifier_invalid_launch_configuration_fails_before_managed_spawn": [
+   "subprocess"
+  ],
+  "test_verifier_logs_are_immutable_per_revision_and_attempt": [
+   "subprocess"
+  ],
+  "test_verifier_missing_executable_records_private_failed_attempt": [
+   "subprocess"
+  ],
+  "test_verifier_output_memory_and_private_log_are_bounded": [
+   "subprocess"
+  ],
+  "test_verifier_preconditions_do_not_spawn_or_change_nonverifying_task": [
+   "subprocess"
+  ],
+  "test_verifier_private_log_caps_disk_output_above_ten_mib": [
+   "subprocess"
+  ],
+  "test_verifier_refuses_unverified_child_identity_and_marks_managed_launch_failed": [
+   "subprocess"
+  ],
+  "test_verifier_success_records_revision_bound_artifact_digest": [
+   "subprocess"
+  ],
+  "test_verifier_successful_plain_text_becomes_revision_bound_evidence": [
+   "subprocess"
+  ],
+  "test_verifier_that_exits_before_its_identity_is_read_is_a_normal_fast_exit": [
+   "subprocess"
+  ],
+  "test_verifier_timeout_escalates_when_child_ignores_sigterm": [
+   "subprocess"
+  ],
+  "test_verifier_timeout_is_bounded_and_does_not_complete_task": [
+   "subprocess"
+  ],
+  "test_verifier_timeout_kills_descendant_process_group": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_verifier_guard.py": {
+  "test_deleted_or_extra_tracked_verifier_file_requires_approval": [
+   "subprocess"
+  ],
+  "test_mission_create_records_verifier_fingerprints": [
+   "subprocess"
+  ],
+  "test_unmodified_script_verifier_still_completes_the_task": [
+   "subprocess"
+  ],
+  "test_verifier_edited_by_the_agent_requires_operator_approval": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_wait_interrupt.py": {
+  "test_detached_pause_interrupts_long_provider_capacity_wait": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_wait_predicate.py": {
+  "test_should_interrupt_wait_matches_reference_over_mission_task_and_boundary_states": [
+   "subprocess"
+  ]
+ },
+ "tests/test_bridge_waiting_and_failure.py": {
+  "test_a_later_successful_run_clears_the_failure_reason": [
+   "subprocess"
+  ],
+  "test_controller_returning_while_running_records_why": [
+   "subprocess"
+  ],
+  "test_detached_launch_reports_the_recorded_reason_instead_of_a_bare_exit_status": [
+   "subprocess"
+  ],
+  "test_disabled_rotation_fails_the_controller_with_a_recorded_reason": [
+   "subprocess"
+  ],
+  "test_headless_and_pane_errors_never_break_the_wait": [
+   "subprocess"
+  ],
+  "test_json_status_carries_the_new_fields": [
+   "subprocess"
+  ],
+  "test_native_controller_writes_the_wait_into_the_empty_provider_pane_once": [
+   "subprocess"
+  ],
+  "test_snapshot_exposes_the_capacity_wait_the_station_never_showed": [
+   "subprocess"
+  ],
+  "test_status_text_says_what_the_mission_waits_for_and_how_to_change_it": [
+   "subprocess"
+  ],
+  "test_stopped_mission_through_the_cli_prints_the_start_hint": [
+   "subprocess"
+  ],
+  "test_system_exit_reason_comes_from_the_last_logged_error": [
+   "subprocess"
+  ],
+  "test_system_exit_without_a_logged_error_still_names_the_status": [
+   "subprocess"
+  ],
+  "test_unavailable_providers_are_reported_by_reason_not_as_capacity": [
+   "subprocess"
+  ],
+  "test_unexpected_exception_is_recorded_as_a_one_line_reason": [
+   "subprocess"
+  ],
+  "test_waiting_ends_when_a_provider_is_selected_or_an_operation_runs": [
+   "subprocess"
+  ],
+  "test_waiting_is_only_reported_for_a_running_mission_without_an_operation": [
+   "subprocess"
+  ]
+ },
+ "tests/test_contracts.py": {
+  "test_legacy_cache_migration": [
+   "subprocess"
+  ],
+  "test_ralph_robin_claude_stream_json_passthrough": [
+   "subprocess"
+  ],
+  "test_ralph_robin_exact_stdout_passthrough": [
+   "subprocess"
+  ],
+  "test_ralph_robin_invalid_prefix_field": [
+   "subprocess"
+  ],
+  "test_ralph_robin_partial_stdout_on_provider_failure": [
+   "subprocess",
+   "slow"
+  ],
+  "test_ralph_robin_prefix_can_be_disabled": [
+   "subprocess"
+  ],
+  "test_ralph_robin_prefix_usage_field": [
+   "subprocess"
+  ],
+  "test_ralph_robin_timestamps_each_relayed_line": [
+   "subprocess"
+  ],
+  "test_scheduler_aborts_on_credit_question": [
+   "subprocess"
+  ],
+  "test_scheduler_aborts_on_no_output_progress": [
+   "subprocess"
+  ],
+  "test_scheduler_autonomy_abort_no_retry": [
+   "subprocess"
+  ],
+  "test_scheduler_submission_prompt_files_retry_and_logs": [
+   "subprocess"
+  ],
+  "test_scheduler_validation_and_dry_run": [
+   "subprocess"
+  ],
+  "test_short_cli_aliases": [
+   "subprocess"
+  ],
+  "test_usage_help_and_validation": [
+   "subprocess"
+  ],
+  "test_usage_json_table_statusline_and_cache": [
+   "subprocess"
+  ],
+  "test_usage_log_only": [
+   "subprocess"
+  ]
+ },
+ "tests/test_coverage_boost.py": {
+  "test_decision_summary": [
+   "subprocess"
+  ],
+  "test_report_prior_suspend_failures": [
+   "subprocess"
+  ],
+  "test_suspend_machine_until_awake_wait": [
+   "subprocess"
+  ],
+  "test_suspend_machine_until_reliable_success": [
+   "subprocess"
+  ],
+  "test_suspend_machine_until_unreliable_wake_latches_awake": [
+   "subprocess"
+  ],
+  "test_suspend_until_available": [
+   "subprocess"
+  ]
+ },
+ "tests/test_kilo.py": {
+  "test_read_kilo_balance_above_minimum": [
+   "subprocess"
+  ],
+  "test_read_kilo_balance_and_budget_both_visible": [
+   "subprocess"
+  ],
+  "test_read_kilo_balance_below_minimum": [
+   "subprocess"
+  ],
+  "test_read_kilo_budget_scope": [
+   "subprocess"
+  ],
+  "test_read_kilo_byok_mode_ungated": [
+   "subprocess"
+  ],
+  "test_read_kilo_exact_mtd_cost_warns_and_falls_back_on_schema_mismatch": [
+   "subprocess"
+  ],
+  "test_read_kilo_local_mode_label": [
+   "subprocess"
+  ],
+  "test_read_kilo_parses_stats_json": [
+   "subprocess"
+  ],
+  "test_read_kilo_parses_stats_text": [
+   "subprocess"
+  ],
+  "test_read_kilo_parses_stats_tui": [
+   "subprocess"
+  ],
+  "test_read_kilo_source_omits_db_when_exact_cost_is_not_rendered": [
+   "subprocess"
+  ],
+  "test_read_kilo_spend_row_has_monthly_reset": [
+   "subprocess"
+  ],
+  "test_read_kilo_stats_query_is_bounded_to_mtd": [
+   "subprocess"
+  ],
+  "test_read_kilo_ungated_mode_label": [
+   "subprocess"
+  ],
+  "test_scheduler_accepts_kilo_provider": [
+   "subprocess"
+  ],
+  "test_scheduler_dry_run_kilo_balance_event": [
+   "subprocess"
+  ],
+  "test_scheduler_dry_run_kilo_budget_pacing": [
+   "subprocess"
+  ],
+  "test_scheduler_kilo_balance_below_minimum_blocks": [
+   "subprocess"
+  ],
+  "test_scheduler_kilo_byok_launches_with_attached_command": [
+   "subprocess"
+  ],
+  "test_scheduler_rejects_kilo_invalid_scope": [
+   "subprocess"
+  ],
+  "test_usage_table_renders_kilo_scope": [
+   "subprocess"
+  ]
+ },
+ "tests/test_minimax.py": {
+  "test_minimax_json_top_level_in_llm_usage_json": [
+   "subprocess"
+  ],
+  "test_ralph_robin_accepts_minimax_provider": [
+   "subprocess"
+  ],
+  "test_ralph_robin_rejects_unknown_provider": [
+   "subprocess"
+  ],
+  "test_read_minimax_classifies_stderr_error_envelope": [
+   "subprocess"
+  ],
+  "test_read_minimax_handles_cli_timeout": [
+   "subprocess"
+  ],
+  "test_read_minimax_handles_invalid_json": [
+   "subprocess"
+  ],
+  "test_read_minimax_handles_nonzero_exit": [
+   "subprocess"
+  ],
+  "test_read_minimax_ignores_non_matching_model": [
+   "subprocess"
+  ],
+  "test_read_minimax_parses_quota_show_json": [
+   "subprocess"
+  ],
+  "test_read_minimax_parses_stdout_json_with_stderr_warning": [
+   "subprocess"
+  ],
+  "test_scheduler_accepts_minimax_provider": [
+   "subprocess"
+  ],
+  "test_scheduler_minimax_5h_below_minimum_blocks": [
+   "subprocess"
+  ],
+  "test_scheduler_rejects_minimax_invalid_scope": [
+   "subprocess"
+  ]
+ },
+ "tests/test_opencode.py": {
+  "test_read_opencode_byok_mode_ungated": [
+   "subprocess"
+  ],
+  "test_read_opencode_local_mode_label": [
+   "subprocess"
+  ],
+  "test_read_opencode_parses_stats_json": [
+   "subprocess"
+  ],
+  "test_read_opencode_parses_stats_text": [
+   "subprocess"
+  ],
+  "test_read_opencode_spend_row_has_monthly_reset": [
+   "subprocess"
+  ],
+  "test_read_opencode_stats_query_is_bounded_to_mtd": [
+   "subprocess"
+  ],
+  "test_read_opencode_tui_surfaces_spent_balance": [
+   "subprocess"
+  ],
+  "test_read_opencode_ungated_mode_label": [
+   "subprocess"
+  ],
+  "test_scheduler_accepts_opencode_provider": [
+   "subprocess"
+  ],
+  "test_scheduler_dry_run_opencode_balance_event": [
+   "subprocess"
+  ],
+  "test_scheduler_dry_run_opencode_budget_pacing": [
+   "subprocess"
+  ],
+  "test_scheduler_opencode_balance_below_minimum_blocks": [
+   "subprocess"
+  ],
+  "test_scheduler_opencode_byok_launches_with_headless_command": [
+   "subprocess"
+  ],
+  "test_scheduler_rejects_opencode_invalid_scope": [
+   "subprocess"
+  ],
+  "test_usage_table_renders_opencode_scope": [
+   "subprocess"
+  ]
+ },
+ "tests/test_process_hygiene.py": {
+  "test_a_detached_process_is_attributed_by_the_test_directory_it_references": [
+   "subprocess",
+   "slow"
+  ],
+  "test_a_new_child_of_pytest_is_a_candidate_and_an_earlier_one_is_not": [
+   "subprocess"
+  ],
+  "test_exited_children_and_zombies_are_not_leaks": [
+   "subprocess"
+  ],
+  "test_stale_runtime_dirs_stop_processes_of_dead_sessions_only": [
+   "subprocess"
+  ],
+  "test_terminate_process_tree_is_harmless_for_an_exited_child": [
+   "subprocess"
+  ],
+  "test_terminate_process_tree_stops_the_group_escalates_and_reaps": [
+   "subprocess"
+  ],
+  "test_the_session_guard_fails_a_test_that_leaves_a_process_and_stops_it": [
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_providers.py": {
+  "test_codex_app_server_subprocess_auth_error": [
+   "subprocess"
+  ],
+  "test_codex_app_server_subprocess_success": [
+   "subprocess"
+  ],
+  "test_github_token_gh_fallback": [
+   "subprocess"
+  ],
+  "test_kilo_snapshot_uses_env": [
+   "subprocess"
+  ]
+ },
+ "tests/test_ralph_kilo.py": {
+  "test_select_provider_falls_back_to_kilo_when_codex_rate_limited": [
+   "subprocess"
+  ],
+  "test_select_tool_uses_kilo_in_byok_mode": [
+   "subprocess"
+  ]
+ },
+ "tests/test_routes.py": {
+  "test_ungated_route_handles_kilo_byok": [
+   "subprocess"
+  ]
+ },
+ "tests/test_scheduler_owned_pane.py": {
+  "test_scheduler_refuses_to_send_shell_command_into_a_live_native_pane": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_scheduler_submits_through_private_owned_pane_and_keeps_server_alive": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_security_module_launch.py": {
+  "test_copilot_refresh_child_ignores_a_hostile_working_directory": [
+   "subprocess"
+  ]
+ },
+ "tests/test_site_check.py": {
+  "test_frames_are_sampled_across_the_whole_video": [
+   "subprocess"
+  ],
+  "test_text_in_video_frames_is_found": [
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_attach_frames.py": {
+  "test_attach_does_not_leave_the_window_at_a_fixed_size": [
+   "tmux",
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_attach_lands_on_the_provider_pane_with_one_resize_and_one_clear": [
+   "tmux",
+   "pty",
+   "subprocess",
+   "slow"
+  ],
+  "test_focus_on_the_pane_that_is_already_shown_does_not_resize_the_provider": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_terminal_attached.py": {
+  "test_attached_client_input_paste_mouse_resize_detach_and_reattach": [
+   "tmux",
+   "pty",
+   "subprocess",
+   "slow"
+  ]
+ },
+ "tests/test_terminal_backend.py": {
+  "test_dead_provider_pane_is_not_reported_alive": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_focus_helper_expands_the_selected_owned_pane": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_open_existing_rejects_a_foreign_private_tmux_server": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_private_tmux_station_preserves_native_terminal_io_and_cleans_up": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_terminal_backend_uses_only_its_private_tmux_server": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_contract_edges.py": {
+  "test_capture_and_send_keys_reject_unknown_pane_but_literal_text_is_safe": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_dead_socket_artifact_is_removed_only_with_bridge_config_marker": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_open_existing_rejects_station_with_wrong_pane_shape": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_start_config_write_error_removes_partial_private_config": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_start_failure_after_server_creation_tears_down_only_the_owned_station": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_stop_preserves_artifacts_for_unconfirmed_post_kill_state": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_dead_station.py": {
+  "test_attach_removes_the_socket_a_failed_attach_leaves_behind": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_controller_open_existing_treats_dead_socket_as_no_station": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_guarded_attach_does_not_recreate_the_socket_of_a_stopped_station": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_open_existing_removes_dead_socket_and_reports_no_station": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_reclaim_leaves_unprovable_config_and_reports_nothing_when_clean": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_reclaim_never_removes_a_socket_that_accepts_connections": [
+   "tmux",
+   "subprocess",
+   "slow"
+  ],
+  "test_start_refuses_a_live_foreign_server": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_start_refuses_dead_socket_whose_config_has_no_bridge_marker": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_start_replaces_dead_socket_with_bridge_config": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_start_replaces_dead_socket_without_config": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_stop_still_refuses_a_config_that_is_present_but_unprovable": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_detach_notice.py": {
+  "test_detach_from_a_finished_mission_does_not_promise_it_keeps_running": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_detach_from_a_mission_station_says_it_keeps_running": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_other_sessions_keep_tmux_s_own_line": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_interactive_attach.py": {
+  "test_readonly_and_control_clients_are_not_writable_choices": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_real_curses_dispatches_terminal_action_after_restoring_terminal": [
+   "pty",
+   "subprocess"
+  ],
+  "test_real_outer_pty_switches_station_and_one_detach_returns_to_the_launch_point": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_process_cost.py": {
+  "test_cached_ownership_is_dropped_when_the_server_goes_away_or_is_replaced": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_open_existing_does_not_serve_a_cached_handle_after_the_server_dies": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_open_existing_reuses_a_verified_handle_without_starting_tmux": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_ownership_is_verified_once_not_on_every_operation": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_pane_activity_screen_captures_only_when_the_epoch_moved": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_pane_activity_screen_reports_a_dead_pane_as_unreadable": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_publish_status_forgets_what_it_wrote_when_the_station_is_replaced": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_publish_status_sanitises_text_so_it_cannot_split_the_tmux_command": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_publish_status_sends_only_changed_options_in_one_invocation": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_resize_hook_runs_inside_tmux_and_restores_the_command_pane_and_zoom": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ],
+  "test_station_start_uses_few_tmux_processes_and_keeps_every_binding": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_switcher_without_picker_command_is_bound_after_start_and_help_is_in_the_config": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_station_tuning.py": {
+  "test_idle_placeholder_pane_is_blank_and_real_exit_shows_friendly_message": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_modified_keys_reach_a_provider_that_requests_them": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_station_config_sets_provider_terminal_options": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_status_context_keeps_middle_dot_separator": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_status_row_never_shows_scroll_markers_or_cut_words": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_status_row_separates_context_and_truncates_long_context_at_80_columns": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_status_row_shortens_the_state_text_when_even_short_hints_leave_no_room": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_tuning_options_are_quiet_so_unknown_options_cannot_abort_creation": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_teardown_failure.py": {
+  "test_server_exists_does_not_treat_an_unqueryable_live_socket_as_dead": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_stop_failure_preserves_owned_socket_and_config": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_stop_preserves_metadata_when_live_server_cannot_be_queried": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_stop_rejects_a_live_foreign_server_without_unlinking_it": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_stop_removes_metadata_for_an_already_dead_owned_server": [
+   "tmux",
+   "subprocess"
+  ]
+ },
+ "tests/test_terminal_wheel_fallback.py": {
+  "test_alternate_screen_without_mouse_request_uses_copy_mode_then_returns_native_keys": [
+   "tmux",
+   "pty",
+   "subprocess"
+  ]
+ },
+ "tests/test_usage_first_run.py": {
+  "test_copilot_still_drives_the_cli_when_the_quota_endpoint_has_no_answer": [
+   "pty"
+  ],
+  "test_kilo_with_a_configured_balance_still_asks_the_cli": [
+   "subprocess"
+  ],
+  "test_kilo_without_a_database_still_asks_the_cli": [
+   "subprocess"
+  ]
+ },
+ "tests/test_zai.py": {
+  "test_ralph_robin_accepts_zai_provider": [
+   "subprocess"
+  ],
+  "test_ralph_robin_rejects_unknown_provider": [
+   "subprocess"
+  ],
+  "test_scheduler_accepts_zai_provider": [
+   "subprocess"
+  ],
+  "test_scheduler_zai_below_minimum_blocks": [
+   "subprocess"
+  ],
+  "test_validate_provider_scope_rejects_weekly_for_unknown_provider": [
+   "subprocess"
+  ],
+  "test_zai_json_top_level_in_llm_usage_json": [
+   "subprocess"
+  ]
+ }
+}

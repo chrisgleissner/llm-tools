@@ -41,15 +41,15 @@ to existing windows and polls screen capture. Add a narrow owned-pane transport
 hook while retaining scheduler exit classification and runtime blocks. Use argv
 interfaces or private scripts with shlex.quote, never output interpolation.
 
-At 80x24 prioritize the native viewport; compact status/command area. Orders,
-Stations, Systems, Log, Sessions and Palette can use a separate full control
+At 80x24 prioritize the native viewport; compact status/command area. Tasks,
+Providers, Health, Activity, Sessions and Actions can use a separate full control
 view. Private-server prefix default Ctrl-], configurable, with literal
 send-prefix. tmux handles native pane mouse/resize/paste; Bridge keyboard and
 curses mouse controls share command handlers. Native selection may require
 Shift or tmux copy mode. Do not write a second raw mouse relay.
 
-Autonomous mode displays real headless CLI output as an activity feed. Native
-supervised mode runs the actual interactive CLI, including menus and shortcuts;
+Background and Headless modes display real headless CLI output as an activity feed. Native
+mode runs the actual interactive CLI, including menus and shortcuts;
 it normally remains alive after a model turn and needs an explicit operator
 checkpoint. Neither mode impersonates the other. Viewed and executing stations
 are separate. Opening an interactive writer first pauses autonomous scheduling
@@ -190,7 +190,7 @@ llm-bridge status --mission ID [--json]
 llm-bridge start|pause|resume|stop|cancel|attach|detach --mission ID
 llm-bridge stop --mission ID --force
 llm-bridge task add --mission ID --file task.md [--priority N]
-llm-bridge task list|show --mission ID [--task ID] [--json]
+llm-bridge task list|show --mission ID [--task ID] [--all|--limit N --offset N] [--json]
 llm-bridge task amend --mission ID --task ID --file amendment.md
 llm-bridge task priority|reorder|dependencies --mission ID --task ID ...
 llm-bridge task pause|resume|cancel|retry|verify --mission ID --task ID
@@ -199,7 +199,7 @@ llm-bridge events --mission ID [--after ID] [--limit N] [--json]
 llm-bridge doctor [--mission ID] [--json]
 ```
 
-Palette/mouse/keyboard use same handlers. Multiline entry via private editor file
+Actions/mouse/keyboard use same handlers. Multiline entry via private editor file
 preserves content. Status includes desired/observed modes, controller ownership,
 executing/viewed station, pending commands, evidence counts and last progress.
 Slow capacity refresh stays outside input/render path. Refresh only changed

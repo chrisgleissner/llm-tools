@@ -98,20 +98,21 @@ def test_capacity_summary_classifies_active_alternate_and_opaque_routes() -> Non
                     {"name": "subscription", "kind": "opaque"},
                 ]},
                 {"provider": "other", "usable": False, "windows": [{"kind": "budget"}]},
+                {"provider": "mystery", "windows": [{"name": "5h", "remaining_percent": "x", "estimated_remaining": "no rate data"}]},
             ],
         }},
     })
-    assert summaries[0].startswith("ACTIVE codex")
-    assert "5h est 2h (61%; reset " in summaries[0]
-    assert "subscription: quota unmeasured" in summaries[0]
-    assert any(row.startswith("READY alt / model-a | capacity unavailable") for row in summaries)
-    assert any(row.startswith("ALT other") and "unknown" in row for row in summaries)
+    assert summaries[0].startswith("codex (active) · 5h 61% left, empty in ~2h at this pace, resets ")
+    assert "subscription quota unmeasured" in summaries[0]
+    assert "alt / model-a (next) · capacity unavailable" in summaries
+    assert any(row.startswith("other (not ready) · ") and "budget remaining unknown" in row for row in summaries)
+    assert any(row.startswith("mystery · ") and "at this pace" not in row for row in summaries)
     assert bridge_tui._capacity_summaries({}) == []
 
 
 def test_navigation_hit_testing_clamps_inputs_and_uses_current_view_markers() -> None:
     labels = bridge_tui._nav_labels(0)
-    assert labels[0].startswith("[1 Bridge]") and labels[-1] == "8 Usage"
+    assert labels[0].startswith("[1 Overview]") and labels[-1] == "8 Usage"
     assert bridge_tui._nav_index_at(0, 0, 80, " ") == 0
     assert bridge_tui._nav_index_at(79, 0, 80, " ") == 7
     assert bridge_tui._nav_index_at(100, 0, 80, " ") == 7
@@ -127,31 +128,37 @@ def test_view_rows_cover_empty_and_legacy_fallbacks() -> None:
     assert state.rows() == ["No tasks recorded."]
 
     state.choose_view(2)
-    assert state.rows() == ["No stations recorded."]
+    assert state.rows() == ["No providers recorded."]
     state.snapshot = {"operations": [{"station": "codex", "model": "gpt", "status": "EXITED"}]}
     assert state.rows() == ["codex  gpt  EXITED"]
 
-    state.choose_view(3)
+    state.choose_view(bridge_tui.VIEWS.index("Health"))
     assert state.rows() == ["System and capacity status is not available in this snapshot."]
     state.snapshot = {"routes": "codex,claude", "health": "warning", "capacity": {"source": "event"}}
     rows = state.rows()
-    assert "routes: codex,claude" in rows and "health: warning" in rows and "capacity: source=event" in rows
+    assert "Routes                codex,claude" in rows and "Health                warning" in rows
+    assert "Capacity              event" in rows
 
-    state.choose_view(4)
+    state.choose_view(bridge_tui.VIEWS.index("Activity"))
     assert state.rows() == ["No recent mission events."]
     state.snapshot = {"events": [{"id": 1, "created_at": "then"}]}
-    assert state.rows() == ["1  event  then"]
+    assert state.rows() == ["--:--:--  Event"]
 
-    state.choose_view(5)
+    state.choose_view(bridge_tui.VIEWS.index("Sessions"))
     assert state.rows() == ["No session activity recorded."]
+    assert state.column_header() is None
     state.snapshot = {"stations": [{"id": "codex", "model": "configured", "observed_model": "unknown"}]}
-    assert "configured model configured" in state.rows()[0]
+    assert state.rows()[0] == "codex  model configured  observed -"
 
     state.choose_view(6)
-    assert state.rows()[0].startswith("Help — Read")
-    assert len(state.rows()) == len(bridge_tui.PALETTE_COMMANDS)
+    assert state.rows()[0].startswith("Start ") and "/start" in state.rows()[0]  # a mission that was not started
+    assert state.rows()[-1].startswith("Help ") and "Read the offline quick-start" in state.rows()[-1]
+    assert len(state.rows()) == len(state.palette_actions()) < len(bridge_tui.PALETTE_COMMANDS)
+    assert all("· mission" not in row for row in state.rows())  # no repeated mission id suffix
+    state.palette_filter = "no such action"
+    assert state.rows() == ["No actions match; / edits the filter, Backspace clears it."]
     state.choose_view(99)
-    assert state.view == "Palette"
+    assert state.view == "Actions"
 
 
 def test_empty_and_command_key_navigation_paths_remain_predictable() -> None:
@@ -159,16 +166,16 @@ def test_empty_and_command_key_navigation_paths_remain_predictable() -> None:
     state = bridge_tui._ConsoleState("M", lambda _mission, line: calls.append(line) or "ok", lambda _id: {}, full=True)
     assert not state.handle_key("\x04")
     state.handle_key("\t")
-    assert state.view == "Orders"
+    assert state.view == "Tasks"
     state.handle_key("KEY_BTAB")
-    assert state.view == "Bridge"
+    assert state.view == "Overview"
     state.choose_view(2)
     state.handle_key("KEY_ENTER")
     assert not state.command_pending  # no station selection to dispatch
     state.handle_key("\x10")
     state.handle_key("\x0e")
     state.handle_key("KEY_Finvalid")
-    assert state.view == "Stations"
+    assert state.view == "Providers"
     for char in "x":
         state.handle_key(char)
     state.handle_key("KEY_UP")  # arrows do not navigate while a command is being entered
@@ -202,9 +209,9 @@ def test_optional_snapshot_sections_and_ui_helpers_cover_empty_and_present_value
     assert sparse["lifecycle"] == {}
 
     state = bridge_tui._ConsoleState("M", lambda *_: "", lambda _id: {}, full=True, snapshot={"task_total": 0, "tasks": []})
-    assert bridge_tui._orders_summary(state) == "Orders: 0 total; showing 0-0"
+    assert bridge_tui._orders_summary(state) == "Tasks: 0 total · showing 0-0"
     state.search_query = "foo"
-    assert bridge_tui._orders_summary(state) == "Orders: 0 total matching /foo/; showing 0-0"
+    assert bridge_tui._orders_summary(state) == "Tasks: 0 total · filter: foo · Esc clears · showing 0-0"
     assert bridge_tui._command_display("ignored", 0) == ""
     assert bridge_tui._mission({"mission": {"id": "nested"}}) == {"id": "nested"}
 
@@ -221,7 +228,7 @@ def test_key_state_transitions_cover_pending_search_and_navigation_modes() -> No
     state.handle_key("\x1b")
     assert not state.search_editing and state.command == ""
 
-    state.choose_view(3)
+    state.choose_view(bridge_tui.VIEWS.index("Health"))
     state.handle_key("KEY_NPAGE")
     assert state.selected == 0  # The unavailable placeholder is the only row.
     state.handle_key("KEY_PPAGE")
@@ -229,7 +236,7 @@ def test_key_state_transitions_cover_pending_search_and_navigation_modes() -> No
     state.command = "typed"
     state.input_focused = True
     state.handle_key("KEY_RIGHT")
-    assert state.view == "Systems"
+    assert state.view == "Health"
     state.handle_key("\x04")
     assert state.command == "typed"  # EOF cannot silently destroy a draft.
     state.handle_key("\x15")  # Explicitly clear before exit.

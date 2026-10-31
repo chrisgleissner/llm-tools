@@ -9,6 +9,14 @@ from threading import Event
 
 from llm_tools import bridge_tui
 
+import pytest
+from tests.conftest import wait_for as _shared_wait_for
+
+
+@pytest.fixture(autouse=True)
+def _private_state_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+
 
 class _Window:
     def clear(self) -> None: pass
@@ -35,13 +43,8 @@ class _DrawWindow(_Window):
     def noutrefresh(self): pass
 
 
-def _wait(predicate, timeout: float = 1.5) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.01)
-    assert predicate()
+def _wait(predicate, timeout: float = 1.5):
+    return _shared_wait_for(predicate, timeout, 0.01, message="condition not reached")
 
 
 def test_snapshot_reader_failure_preserves_last_good_projection_and_bounds_error() -> None:
@@ -72,7 +75,7 @@ def test_snapshot_projection_passes_only_supported_bounded_query_arguments() -> 
     state.search_query = "needle"
     state.choose_view(1)
     state.refresh(force=True)
-    _wait(lambda: received == [(200, bridge_tui._TASK_PAGE_SIZE, "needle", "Orders")])
+    _wait(lambda: received == [(200, bridge_tui._TASK_PAGE_SIZE, "needle", "Tasks")])
 
 
 def test_dispatch_errors_and_reentrant_command_are_reported_without_duplicate_work() -> None:
@@ -94,6 +97,10 @@ def test_dispatch_errors_and_reentrant_command_are_reported_without_duplicate_wo
     _wait(lambda: state.refresh() is None and not state.command_pending)
     assert any("still running" in line for line in state.output)
     assert any("Outcome unknown: durable write failed" in line for line in state.output)
+    # The line stays empty like Codex CLI / Claude Code; the failed command is the newest history entry.
+    assert state.command == "" and list(state.history)[-1] == "priority 1 5"
+    assert any("Outcome unknown: durable write failed · ↑ recalls the command" in line for line in state.output)
+    state.handle_key("\x10")
     assert state.command == "priority 1 5"
 
 
@@ -144,7 +151,7 @@ def test_usage_and_control_requests_are_local_view_actions() -> None:
     assert state._dispatch("usage")
     assert state.view == "Usage" and state.expand_requested
     assert state._dispatch("control")
-    assert state.view == "Bridge" and state.expand_requested
+    assert state.view == "Overview" and state.expand_requested
     assert calls == []
 
 
@@ -152,7 +159,7 @@ def test_editor_failure_and_empty_file_do_not_dispatch_and_remove_tempfile(monke
     created: list[Path] = []
     calls: list[str] = []
 
-    def failed_editor(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def failed_editor(argv: list[str], *, check: bool, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         created.append(Path(argv[-1]))
         return subprocess.CompletedProcess(argv, 3)
 
@@ -167,7 +174,7 @@ def test_editor_failure_and_empty_file_do_not_dispatch_and_remove_tempfile(monke
     assert "status 3" in state.output[-1]
     assert created and not created[-1].exists()
 
-    def empty_editor(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def empty_editor(argv: list[str], *, check: bool, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         created.append(Path(argv[-1]))
         Path(argv[-1]).write_text("", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0)
@@ -184,7 +191,7 @@ def test_invalid_editor_setting_cleans_private_file_without_leaking_exception(mo
     created: list[Path] = []
     real_mkstemp = bridge_tui.tempfile.mkstemp
 
-    def private_temp(*, prefix: str, suffix: str):
+    def private_temp(*, prefix: str, suffix: str, dir=None):
         fd, raw_path = real_mkstemp(prefix=prefix, suffix=suffix, dir=tmp_path)
         created.append(Path(raw_path))
         return fd, raw_path
@@ -214,10 +221,10 @@ def test_usage_and_lifecycle_empty_branches_render_without_claims() -> None:
         "lifecycle": {"status": "RUNNING", "heartbeat": {}},
     })
     state.choose_view(7)
-    assert state.rows() == ["Usage: ready | age 0s | background refresh", "one", "two"]
-    state.choose_view(3)
+    assert state.rows() == ["Usage · ready · updated 0s ago", "one", "two"]
+    state.choose_view(bridge_tui.VIEWS.index("Health"))
     rows = state.rows()
-    assert rows == ["lifecycle: status=RUNNING"]
+    assert rows == ["Lifecycle             RUNNING"]
 
 
 def test_arrow_navigation_during_command_entry_does_not_change_view() -> None:
@@ -225,7 +232,7 @@ def test_arrow_navigation_during_command_entry_does_not_change_view() -> None:
     state.command = "status"
     for key in ("KEY_LEFT", "KEY_RIGHT"):
         state.handle_key(key)
-    assert state.view == "Bridge" and state.command == "status"
+    assert state.view == "Overview" and state.command == "status"
 
 
 def test_compact_full_and_usage_drawing_handles_small_terminals_and_curses_errors(monkeypatch) -> None:

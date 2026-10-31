@@ -12,6 +12,7 @@ from llm_tools.bridge_log_sink import main as log_sink_main
 from llm_tools.bridge_runtime import _prune_old_run_logs
 from llm_tools.bridge_store import BridgeStore
 from llm_tools import common
+from tests.conftest import scaled
 
 
 def test_controller_log_sink_rotates_and_closes_fds(tmp_path: Path) -> None:
@@ -38,7 +39,7 @@ def test_tmux_sink_cli_rotates_input_without_unbounded_append(tmp_path: Path) ->
         [sys.executable, "-m", "llm_tools.bridge_log_sink", "--path", str(path), "--max-bytes", "1024", "--rotations", "1"],
         input=b"a" * 3000 + b"THE-END",
         capture_output=True,
-        timeout=5,
+        timeout=scaled(5),
     )
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     assert path.stat().st_size <= 1024

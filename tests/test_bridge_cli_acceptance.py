@@ -62,7 +62,8 @@ def test_task_priority_reorder_pause_resume_and_amend(tmp_path, monkeypatch, cap
     with BridgeStore(state / "bridge.sqlite3") as store:
         task = store.get_task(first)
         assert task["priority"] == 12 and task["ordering"] == 1
-        assert task["pending"]["prompt"] == "Revised instruction\n"
+        assert task["pending"] == {}
+        assert task["prompt"] == "Revised instruction\n"
         assert task["original_prompt"] == "Original objective\nsecond line\n"
 
 
@@ -90,7 +91,7 @@ def test_console_file_path_and_cli_share_durable_commands(tmp_path, monkeypatch,
         assert store.db.execute("SELECT status FROM commands ORDER BY rowid DESC LIMIT 1").fetchone()[0] == "APPLIED"
         tasks = store.list_tasks(mission)
         assert len(tasks) == 2 and tasks[1]["id"] == created_task_id and tasks[1]["prompt"] == path.read_text()
-    assert "invalid choice" in dispatch_console_command(mission, "echo not-a-shell")
+    assert "Unknown command 'echo'" in dispatch_console_command(mission, "echo not-a-shell")
     assert main(["doctor", "--mission", mission, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["sqlite_integrity"] == "ok"
 

@@ -1,0 +1,361 @@
+{
+ "amend_no_active_step": {
+  "amendments": [
+   [
+    2,
+    "APPLIED",
+    true,
+    {
+     "acceptance": [
+      "x",
+      "y"
+     ],
+     "priority": 5,
+     "prompt": "new prompt"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amendment-applied",
+    {
+     "reason": "no-active-step",
+     "revision": 2
+    }
+   ],
+   [
+    "task-amended",
+    {
+     "fields": [
+      "acceptance",
+      "priority",
+      "prompt"
+     ],
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "x",
+    "y"
+   ],
+   "evidence": [],
+   "pending": {},
+   "priority": 5,
+   "prompt": "new prompt",
+   "revision": 2,
+   "status": "QUEUED",
+   "title": "t0"
+  }
+ },
+ "amend_verifying": {
+  "amendments": [
+   [
+    2,
+    "APPLIED",
+    true,
+    {
+     "acceptance": [
+      "z"
+     ],
+     "prompt": "after verify"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amendment-applied",
+    {
+     "reason": "after-verification-result",
+     "revision": 2
+    }
+   ],
+   [
+    "task-amended",
+    {
+     "fields": [
+      "acceptance",
+      "prompt"
+     ],
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "z"
+   ],
+   "evidence": [],
+   "pending": {},
+   "priority": 1,
+   "prompt": "after verify",
+   "revision": 2,
+   "status": "READY",
+   "title": "t0"
+  }
+ },
+ "amend_while_running_pending": {
+  "amendments": [
+   [
+    2,
+    "PENDING",
+    false,
+    {
+     "prompt": "p2",
+     "title": "during run"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amended",
+    {
+     "fields": [
+      "prompt",
+      "title"
+     ],
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "a"
+   ],
+   "evidence": [],
+   "pending": {
+    "prompt": "p2",
+    "title": "during run"
+   },
+   "priority": 1,
+   "prompt": "original",
+   "revision": 2,
+   "status": "RUNNING",
+   "title": "t0"
+  }
+ },
+ "begin_iteration": {
+  "amendments": [
+   [
+    2,
+    "APPLIED",
+    true,
+    {
+     "priority": 9,
+     "title": "late"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amended",
+    {
+     "fields": [
+      "priority",
+      "title"
+     ],
+     "revision": 2
+    }
+   ],
+   [
+    "task-amendment-applied",
+    {
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "a"
+   ],
+   "evidence": [],
+   "pending": {},
+   "priority": 9,
+   "prompt": "original",
+   "revision": 2,
+   "status": "READY",
+   "title": "late"
+  }
+ },
+ "begin_operation_applies_pending": {
+  "amendments": [
+   [
+    2,
+    "APPLIED",
+    true,
+    {
+     "priority": 7,
+     "title": "late2"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amended",
+    {
+     "fields": [
+      "priority",
+      "title"
+     ],
+     "revision": 2
+    }
+   ],
+   [
+    "task-amendment-applied",
+    {
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "a"
+   ],
+   "evidence": [],
+   "pending": {},
+   "priority": 7,
+   "prompt": "original",
+   "revision": 2,
+   "status": "RUNNING",
+   "title": "late2"
+  }
+ },
+ "finish_blocked_with_pending": {
+  "amendments": [
+   [
+    2,
+    "PENDING",
+    false,
+    {
+     "priority": 9,
+     "title": "late"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amended",
+    {
+     "fields": [
+      "priority",
+      "title"
+     ],
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "a"
+   ],
+   "evidence": [],
+   "pending": {
+    "priority": 9,
+    "title": "late"
+   },
+   "priority": 1,
+   "prompt": "original",
+   "revision": 2,
+   "status": "BLOCKED",
+   "title": "t0"
+  }
+ },
+ "finish_exit0_with_pending": {
+  "amendments": [
+   [
+    2,
+    "APPLIED",
+    true,
+    {
+     "prompt": "p2",
+     "title": "during run"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amended",
+    {
+     "fields": [
+      "prompt",
+      "title"
+     ],
+     "revision": 2
+    }
+   ],
+   [
+    "task-amendment-applied",
+    {
+     "before_verification": true,
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "a"
+   ],
+   "evidence": [],
+   "pending": {},
+   "priority": 1,
+   "prompt": "p2",
+   "revision": 2,
+   "status": "READY",
+   "title": "during run"
+  }
+ },
+ "finish_failed_with_pending": {
+  "amendments": [
+   [
+    2,
+    "PENDING",
+    false,
+    {
+     "prompt": "carried"
+    }
+   ]
+  ],
+  "events": [
+   [
+    "task-amended",
+    {
+     "fields": [
+      "prompt"
+     ],
+     "revision": 2
+    }
+   ]
+  ],
+  "task": {
+   "acceptance": [
+    "a"
+   ],
+   "evidence": [],
+   "pending": {
+    "prompt": "carried"
+   },
+   "priority": 1,
+   "prompt": "original",
+   "revision": 2,
+   "status": "FAILED",
+   "title": "t0"
+  }
+ },
+ "verifying_before_amend": {
+  "amendments": [],
+  "events": [],
+  "task": {
+   "acceptance": [
+    "a"
+   ],
+   "evidence": [],
+   "pending": {},
+   "priority": 1,
+   "prompt": "original",
+   "revision": 1,
+   "status": "VERIFYING",
+   "title": "t0"
+  }
+ }
+}

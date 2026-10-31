@@ -686,6 +686,26 @@ def validate_args(cfg: RalphConfig) -> None:
         raise SystemExit(2)
 
 
+def reload_rotation(cfg: RalphConfig, providers_spec: str, routes_spec: str) -> str:
+    """Switch a running loop to a new rotation; return an error text or ``""``.
+
+    The new rotation goes through the same validation and policy resolution as
+    the one given at startup. When it is invalid, ``cfg`` keeps the rotation it
+    had before the call.
+    """
+    names = ("providers_spec", "routes_spec", "providers", "routes", "route_policies", "policies")
+    saved = {name: getattr(cfg, name) for name in names}
+    cfg.providers_spec, cfg.routes_spec = providers_spec, routes_spec
+    try:
+        validate_args(cfg)
+        resolve_policies(cfg, toolconfig.load_config())
+    except SystemExit:
+        for name, value in saved.items():
+            setattr(cfg, name, value)
+        return "rotation is not valid for this mission's configuration"
+    return ""
+
+
 def safe_args_json(cfg: RalphConfig) -> dict[str, Any]:
     return {
         "providers_spec": cfg.providers_spec,
@@ -1489,6 +1509,14 @@ def scheduler_config_for(
     )
 
 
+def _command_could_not_execute(status_file: Path) -> bool:
+    """True when the shell reported the provider command as not executable or not found."""
+    try:
+        return status_file.read_text(encoding="utf-8").strip() in {"126", "127"}
+    except OSError:
+        return False
+
+
 def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
     scheduler.resolve_attach_mode(scfg)
     child_logs = common.setup_run_logs(scfg.log_dir, scfg.provider or "wake", scfg.provider or "", scfg.run_dir)
@@ -1504,6 +1532,18 @@ def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
         return int(exc.code or 0)
     argv = scheduler.command_argv(scfg, child_logs, prompt)
     common.log_event(child_logs, "resolved_command", {"argv": argv})
+    violation = common.command_line_limit_violation(argv)
+    if violation and not scfg.dry_run:
+        # exec would fail with E2BIG (exit 126) on every attempt. Refuse before
+        # launching, leave the reason where the operation log is read, and skip
+        # the retry schedule: the same command cannot succeed later.
+        attempt_out = child_logs.run_dir / "attempt-1.out"
+        attempt_out.write_text(violation + "\n", encoding="utf-8")
+        (child_logs.run_dir / "attempt-1.status").write_text(str(common.LAUNCH_REFUSED_STATUS), encoding="utf-8")
+        common.log_text(child_logs, f"launch refused: {violation}")
+        common.log_event(child_logs, "launch_refused", {"reason": violation, "argv_bytes": sum(len(os.fsencode(a)) for a in argv)})
+        common.log_event(child_logs, "final", {"status": "launch-refused"})
+        return common.LAUNCH_REFUSED_STATUS
     if scfg.dry_run:
         common.log_text(child_logs, "dry-run complete")
         common.log_event(child_logs, "final", {"status": "dry-run"})
@@ -1518,7 +1558,12 @@ def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
     if result == common.AUTONOMY_ABORT_STATUS:
         common.log_event(child_logs, "final", {"status": "autonomy-abort"})
         return common.AUTONOMY_ABORT_STATUS
+    if result == common.OPERATOR_DECLINED_STATUS:
+        common.log_event(child_logs, "final", {"status": "operator-declined"})
+        return common.OPERATOR_DECLINED_STATUS
     for delay in delays:
+        if _command_could_not_execute(child_logs.run_dir / f"attempt-{attempt}.status"):
+            break  # exit 126/127: the command itself cannot run, so a retry fails identically
         common.log_event(child_logs, "retry", {"after_attempt": attempt, "delay": delay})
         if not scheduler._sleep_interruptibly(scfg, common.now_epoch() + delay):
             return 143
@@ -1530,6 +1575,9 @@ def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
         if result == common.AUTONOMY_ABORT_STATUS:
             common.log_event(child_logs, "final", {"status": "autonomy-abort"})
             return common.AUTONOMY_ABORT_STATUS
+        if result == common.OPERATOR_DECLINED_STATUS:
+            common.log_event(child_logs, "final", {"status": "operator-declined"})
+            return common.OPERATOR_DECLINED_STATUS
     common.log_event(child_logs, "final", {"status": "failed"})
     return 1
 
@@ -1814,6 +1862,16 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
             if action != "run" or not isinstance(bridge_context.get("prompt"), str):
                 raise ValueError("Bridge before_iteration must return run, wait, or stop with a prompt for run")
             iteration_prompt = str(bridge_context["prompt"])
+            pending_rotation = getattr(bridge_hooks, "rotation_update", lambda: None)()
+            if pending_rotation:
+                rotation_error = reload_rotation(cfg, *pending_rotation)
+                if not rotation_error:
+                    current_index = 0
+                    skipped = set()
+                    completed_counts.clear()
+                    completed_counts.update({key: 0 for key in rotation_keys(cfg)})
+                    common.log_event(logs, "rotation", {"providers_spec": cfg.providers_spec, "routes_spec": cfg.routes_spec})
+                getattr(bridge_hooks, "rotation_applied", lambda *_args: None)(pending_rotation, rotation_error)
         common.log_event(logs, "state", {"state_file": str(cfg.state_file), "current_index": current_index, "completed_counts": completed_counts})
         selection = select_provider(cfg, logs, current_index, skipped)
         if bridge_hooks is not None:
@@ -1923,6 +1981,28 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
             # using it until a limit is hit.
             current_index = selected_index
             skipped = set()
+            continue
+        if status == common.OPERATOR_DECLINED_STATUS:
+            common.log_event(logs, "provider_operator_declined", {"provider": selected_provider, "index": selected_index})
+            if bridge_hooks is None:
+                # Starting the provider again would only show the same prompt.
+                status_line(f"{selected_provider} was not allowed to trust this folder; stopping", level="error")
+                common.log_event(logs, "final", {"status": "operator-declined", "provider": selected_provider})
+                return status
+            # Bridge holds the task and shows what the operator has to do; nothing
+            # is launched until the task is released.
+            status_line(f"{selected_provider} was not allowed to trust this folder; waiting for the operator", level="warn")
+            sleep_seconds(0.5)
+            continue
+        if status == common.LAUNCH_REFUSED_STATUS:
+            # The command cannot be executed as built, whichever provider runs
+            # it. Without a controller to pick the next task, stop with the
+            # reason; a Bridge controller has already failed the task.
+            common.log_event(logs, "provider_launch_refused", {"provider": selected_provider, "index": selected_index})
+            status_line(f"{selected_provider} launch refused: the command line is too large", level="error")
+            if bridge_hooks is None:
+                common.log_event(logs, "final", {"status": "launch-refused"})
+                return status
             continue
         if status == common.AUTONOMY_ABORT_STATUS:
             common.log_text(logs, f"scheduler autonomy-abort for provider={selected_provider}; re-evaluating rotation")

@@ -13,6 +13,11 @@ def main(argv: list[str] | None = None) -> int:
     if len(args) != 1:
         return 2
     cache = Path(args[0])
+    # The launcher put the package root in PYTHONPATH because it runs us with
+    # `python -P`. The Copilot CLI that read_copilot_live starts does not need it.
+    cleaned = common.without_package_root(os.environ)
+    os.environ.clear()
+    os.environ.update(cleaned)
     lock = cache.with_name("copilot-refresh.lock")
     try:
         result = common.read_copilot_live(os.environ)

@@ -1,6 +1,4 @@
 """Lossless form fields and durable launcher recovery using guarded dispatch."""
-import json
-from pathlib import Path
 import curses
 
 from llm_tools import bridge, bridge_launcher as launcher, bridge_tui as tui
@@ -25,8 +23,8 @@ def test_form_field_cells_preserve_spaces_tabs_and_caret(monkeypatch,tmp_path):
     state.cursors[0]=3
     window=Window()
     launcher._draw(window,state)
-    assert window.rows[7].startswith('> Objective: a  中')
-    assert window.cursor==(7,16)
+    assert window.rows[5].startswith('> Objective: a  中')
+    assert window.cursor==(5,16)
     for key in (curses.KEY_HOME,'X',curses.KEY_RIGHT,curses.KEY_BACKSPACE,curses.KEY_END,'\x15'):
         state.key(key)
     assert state.objective==''
@@ -51,7 +49,7 @@ def test_failed_save_retains_source_then_confirmed_retry_cleans_it(monkeypatch,t
     monkeypatch.setattr(tui,'initialize_colors',lambda: False)
     source='FIRST\n\t  中 source\r\n'+'x'*65536+'TAIL\n'
     monkeypatch.setattr(tui,'compose_document',lambda *_args,**_kwargs: source)
-    window=Window(['n','\x05',*('\t'*5),'\n','\n'])
+    window=Window(['n','\x05',*('\t'*4),'\n','\n','o'])
     monkeypatch.setattr(curses,'wrapper',lambda callback: callback(window))
     failures=[]
     calls=[]
@@ -82,7 +80,7 @@ def test_launcher_start_is_explicit_and_start_failure_retains_saved_mission(monk
     monkeypatch.setattr(curses,'curs_set',lambda _:None)
     monkeypatch.setattr(curses,'mousemask',lambda _:None)
     monkeypatch.setattr(tui,'initialize_colors',lambda:False)
-    window=Window(['n',*'Objective',*('\t'*4),'\n','\x04'])
+    window=Window(['n',*'Objective',*('\t'*5),'\n','\x04'])
     monkeypatch.setattr(curses,'wrapper',lambda callback:callback(window))
     calls=[]
     def dispatch(args):

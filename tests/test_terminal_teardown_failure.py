@@ -10,6 +10,7 @@ import time
 import pytest
 
 from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend
+from tests.conftest import scaled
 
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for teardown tests")
@@ -58,7 +59,7 @@ def test_stop_failure_preserves_owned_socket_and_config(tmp_path, monkeypatch, f
 def test_stop_removes_metadata_for_an_already_dead_owned_server(tmp_path) -> None:
     backend = TmuxTerminalBackend()
     handle = _start(tmp_path, backend)
-    subprocess.run(["tmux", "-S", str(handle.socket_path), "kill-server"], check=True, timeout=5)
+    subprocess.run(["tmux", "-S", str(handle.socket_path), "kill-server"], check=True, timeout=scaled(5))
 
     # kill-server may return while tmux is still closing its listener. During
     # that interval the socket is reachable but no longer answers commands,
@@ -92,7 +93,7 @@ def test_stop_rejects_a_live_foreign_server_without_unlinking_it(tmp_path) -> No
     subprocess.run(
         ["tmux", "-S", str(socket_path), "-f", "/dev/null", "new-session", "-d", "-s", "foreign"],
         check=True,
-        timeout=5,
+        timeout=scaled(5),
     )
     handle = TerminalHandle(socket_path, socket_path.with_name("foreign.sock.conf"), "foreign", "%0", "%1", 6)
     backend = TmuxTerminalBackend()
@@ -102,7 +103,7 @@ def test_stop_rejects_a_live_foreign_server_without_unlinking_it(tmp_path) -> No
         assert backend.server_exists(handle)
         assert socket_path.exists()
     finally:
-        subprocess.run(["tmux", "-S", str(socket_path), "kill-server"], check=False, timeout=5)
+        subprocess.run(["tmux", "-S", str(socket_path), "kill-server"], check=False, timeout=scaled(5))
 
 
 def test_server_exists_does_not_treat_an_unqueryable_live_socket_as_dead(tmp_path, monkeypatch) -> None:

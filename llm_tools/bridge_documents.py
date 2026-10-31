@@ -8,6 +8,20 @@ import threading
 
 from .bridge_input import wrapped_row_for_column, cell_width
 
+_HEADING_START = re.compile(r"^\s{0,3}#{1,6}\s+")
+
+
+def heading_label(line: str) -> str | None:
+    """The text of an ATX heading line without its closing ``#`` marks or blanks, else ``None``.
+
+    The label is cut with ``rstrip`` rather than a lazy ``(.+?)\\s*#*\\s*$`` pattern, which
+    backtracks cubically on a heading followed by a long run of blanks.
+    """
+    start = _HEADING_START.match(line)
+    return None if start is None else line[start.end():].rstrip().rstrip("#").rstrip()
+# A source longer than this (characters) gets its first wrapped layout computed on a worker thread.
+LAYOUT_ASYNC_CHARS = 262_144
+
 
 @dataclass
 class DocumentViewer:
@@ -30,18 +44,36 @@ class DocumentViewer:
     _rich_cache: dict[tuple[int, bool], tuple[tuple[tuple[str, str], ...], ...]] = field(default_factory=dict, init=False, repr=False)
     _rich_pending: set[tuple[int, bool]] = field(default_factory=set, init=False, repr=False)
     _released: bool = field(default=False, init=False, repr=False)
+    _heading_cache: dict[tuple[int, bool], tuple[tuple[int, str, int], ...]] = field(default_factory=dict, init=False, repr=False)
+    _layout_pending: set[tuple[bool, bool, int]] = field(default_factory=set, init=False, repr=False)
+    _source_size: int = field(default=-1, init=False, repr=False)
+    _count_cache: tuple[str, int] = field(default=("", 0), init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.source_lines = tuple(self.source.split("\n"))
 
     @property
     def rendering(self) -> bool:
-        return bool(self._rich_pending)
+        """Whether a Markdown render or a first wrapped layout is still running."""
+        return bool(self._rich_pending or self._layout_pending)
+
+    @property
+    def source_size(self) -> int:
+        """UTF-8 size of the source, measured once."""
+        if self._source_size < 0:
+            self._source_size = len(self.source.encode("utf-8"))
+        return self._source_size
+
+    @property
+    def layout_rows(self) -> int:
+        return len(self._layout())
 
     def rich_lines(self, width: int | None = None) -> tuple[tuple[tuple[str, str], ...], ...]:
         key = (max(20, width or self.width), self.wrap)
         if key not in self._rich_cache:
-            if len(self.source.encode("utf-8")) > 32768:
+            # Rich takes seconds for one very long line (4 600 tabs) or for many lines of a highlighted block (about 4 ms a line),
+            # so those render in the background like a source over 32 KB.
+            if len(self.source.encode("utf-8")) > 32768 or len(self.source_lines) > 300 or any(len(line) > 2000 for line in self.source_lines):
                 if not self._rich_pending and not self._released:
                     self._rich_pending.add(key)
                     source = self.source
@@ -66,20 +98,34 @@ class DocumentViewer:
         """Drop parsed/layout caches and source references when the viewer closes."""
         self._line_cache.clear()
         self._rich_cache.clear()
+        self._heading_cache.clear()
         self.source_lines = ()
         self.source = ""
         self._released = True
 
     def headings(self) -> list[tuple[int, str, int]]:
-        """Return source heading line, plain label, and approximate visual row."""
-        result = []
-        visual = 0
-        for number, line in enumerate(self.source_lines, 1):
-            match = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
-            if match:
-                result.append((number, match.group(2), visual))
-            visual += len(_wrap_cells(line, max(1, self.width))) if self.wrap else 1
-        return result
+        """Return source heading line, plain label, and approximate visual row.
+
+        The scan covers every line, so it is cached per (width, wrap) and only
+        runs when a caller (the heading list) asks.
+        """
+        width = max(1, self.width)
+        key = (width, self.wrap)
+        cached = self._heading_cache.get(key)
+        if cached is None:
+            result = []
+            visual = 0
+            for number, line in enumerate(self.source_lines, 1):
+                if "#" in line:
+                    label = heading_label(line)
+                    if label:
+                        result.append((number, label, visual))
+                visual += _wrap_count(line, width) if self.wrap else 1
+            cached = tuple(result)
+            if len(self._heading_cache) >= 4:
+                self._heading_cache.pop(next(iter(self._heading_cache)))
+            self._heading_cache[key] = cached
+        return list(cached)
 
     def _capture_anchor(self) -> int:
         if self.match_offset >= 0 and not self.rendered:
@@ -94,11 +140,11 @@ class DocumentViewer:
             return sum(len(line) + 1 for line in self.source_lines[:logical]) + _column_for_cells(self.source_lines[logical], self.horizontal)
         consumed = 0
         for logical, line in enumerate(self.source_lines):
-            rows = _wrap_cells(line, max(1, self.width))
-            if visual < consumed + len(rows):
+            count = _wrap_count(line, max(1, self.width))
+            if visual < consumed + count:
                 row = visual - consumed
                 return sum(len(item) + 1 for item in self.source_lines[:logical]) + _column_for_wrapped_row(line, row, self.width)
-            consumed += len(rows)
+            consumed += count
         return len(self.source)
 
     def _seek_source_anchor(self, anchor: int) -> None:
@@ -116,7 +162,7 @@ class DocumentViewer:
                 if matches:
                     self.top = min(matches, key=lambda index: abs(index-self.top))
         elif self.wrap:
-            preceding = sum(len(_wrap_cells(line, max(1, self.width))) for line in self.source_lines[:logical])
+            preceding = sum(_wrap_count(line, max(1, self.width)) for line in self.source_lines[:logical])
             row, _ = wrapped_row_for_column(self.source_lines[logical], column, self.width)
             self.top = preceding + row
         else:
@@ -152,11 +198,32 @@ class DocumentViewer:
             else:
                 rows = self.source_lines
             if self.wrap and not self.rendered:
-                rows = tuple(part for line in rows for part in _wrap_cells(line, actual_width))
+                if len(self.source) > LAYOUT_ASYNC_CHARS:
+                    return self._layout_async(key, actual_width)
+                rows = _wrap_all(rows, actual_width)
             if self.rendered and self._rich_cache.get((max(20, actual_width), self.wrap)) is not source_rows:
                 return rows or ("",)
             self._line_cache[key] = rows or ("",)
         return self._line_cache[key]
+
+    def _layout_async(self, key: tuple[bool, bool, int], width: int) -> tuple[str, ...]:
+        """Wrap a very large source on a worker; until it finishes the unwrapped lines stand in."""
+        if not self._layout_pending and not self._released:
+            self._layout_pending.add(key)
+            source_lines = self.source_lines
+
+            def work() -> None:
+                try:
+                    rows = _wrap_all(source_lines, width) or ("",)
+                    if not self._released:
+                        if len(self._line_cache) >= 4:
+                            self._line_cache.pop(next(iter(self._line_cache)))
+                        self._line_cache[key] = rows
+                finally:
+                    self._layout_pending.discard(key)
+
+            threading.Thread(target=work, name="llm-bridge-layout", daemon=True).start()
+        return self.source_lines or ("",)
 
     @property
     def lines(self) -> list[str]:
@@ -169,11 +236,11 @@ class DocumentViewer:
 
     def page(self, delta: int, height: int) -> None:
         self.anchor_active = False
-        self.top = max(0, min(max(0, len(self.lines) - height), self.top + delta * max(1, height)))
+        self.top = max(0, min(max(0, self.layout_rows - height), self.top + delta * max(1, height)))
 
     def scroll(self, delta: int, height: int) -> None:
         self.anchor_active = False
-        self.top = max(0, min(max(0, len(self.lines) - height), self.top + delta))
+        self.top = max(0, min(max(0, self.layout_rows - height), self.top + delta))
 
     def home(self) -> None:
         self.anchor_active = False
@@ -181,7 +248,7 @@ class DocumentViewer:
 
     def end(self, height: int) -> None:
         self.anchor_active = False
-        self.top = max(0, len(self.lines) - max(1, height))
+        self.top = max(0, self.layout_rows - max(1, height))
 
     def search(self, query: str, *, reverse: bool = False) -> int | None:
         self.query = query
@@ -202,7 +269,7 @@ class DocumentViewer:
                 self.anchor_column = column
                 self.anchor_active = True
                 if self.wrap:
-                    visual_before = sum(len(_wrap_cells(item, self.width)) for item in self.source_lines[:logical])
+                    visual_before = sum(_wrap_count(item, self.width) for item in self.source_lines[:logical])
                     row, cell = wrapped_row_for_column(line, column, self.width)
                     if cell and cell + cell_width(query) > self.width:
                         row += 1
@@ -229,15 +296,23 @@ class DocumentViewer:
         self.width = max(1, width)
         self.viewport_height = max(1, height)
         if self.anchor_active and not self.rendered and self.wrap:
-            source = [self.source_lines[self.anchor_line][self.anchor_column:], *self.source_lines[self.anchor_line + 1:]]
-            rows = [part for line in source for part in _wrap_cells(line, self.width)]
+            rows: list[str] = []
+            for index in range(self.anchor_line, len(self.source_lines)):
+                line = self.source_lines[index]
+                rows.extend(_wrap_cells(line[self.anchor_column:] if index == self.anchor_line else line, self.width))
+                if len(rows) >= self.viewport_height:
+                    break  # the rest of the document is off screen
             return rows[:self.viewport_height]
-        rows = self._layout(self.width)
-        return [_slice_cells(row, self.horizontal) if not self.wrap else row for row in rows[self.top:self.top + self.viewport_height]]
+        laid_out = self._layout(self.width)
+        return [_slice_cells(row, self.horizontal) if not self.wrap else row for row in laid_out[self.top:self.top + self.viewport_height]]
 
     @property
     def search_count(self) -> int:
-        return self.source.casefold().count(self.query.casefold()) if self.query else 0
+        if not self.query:
+            return 0
+        if self._count_cache[0] != self.query:
+            self._count_cache = (self.query, self.source.casefold().count(self.query.casefold()))
+        return self._count_cache[1]
 
 
 def _slice_cells(value: str, offset: int) -> str:
@@ -284,23 +359,34 @@ def _column_for_wrapped_row(text: str, row: int, width: int) -> int:
     return len(text)
 
 
+def _wrap_all(lines: tuple[str, ...], width: int) -> tuple[str, ...]:
+    return tuple(part for line in lines for part in _wrap_cells(line, width))
+
+
+def _wrap_count(line: str, width: int) -> int:
+    """Number of rows `_wrap_cells` returns, without building them when that is cheap."""
+    if line.isascii() and line.isprintable():
+        return max(1, -(-len(line) // max(1, width)))  # one cell per character
+    return len(_wrap_cells(line, width))
+
+
 def _wrap_cells(line: str, width: int) -> list[str]:
     width = max(1, width)
+    if line.isascii() and line.isprintable():
+        # One cell per character: rows are plain slices.
+        return [line[start:start + width] for start in range(0, len(line), width)] or [""]
     rows: list[str] = []
     row = ""
     cells = 0
     for char in line:
-        if char == "\t":
-            amount = 8 - cells % 8
-            chars = " " * amount
-        else:
-            amount = cell_width(char)
-            chars = char
+        # A tab is padding to the next multiple of eight, never wider than the row itself.
+        amount = min(8 - cells % 8, width) if char == "\t" else cell_width(char)
         if cells and cells + amount > width:
             rows.append(row)
             row, cells = "", 0
             if char == "\t":
-                amount = 8
+                amount = min(8, width)
+        chars = " " * amount if char == "\t" else char
         row += chars
         cells += amount
         if cells >= width:
@@ -316,6 +402,13 @@ def _find_casefold(source: str, query: str, last: int, reverse: bool) -> int:
     needle = query.casefold()
     if not needle:
         return -1
+    folded = source.casefold()
+    if len(folded) == len(source):
+        # Casefolding never shortens a character, so equal totals mean every
+        # character folded to exactly one: offsets in `folded` are offsets in `source`.
+        if reverse:
+            return folded.rfind(needle, 0, len(folded) if last < 0 else min(len(folded), last))
+        return folded.find(needle, 0 if last < 0 else last + 1)
     pieces: list[str] = []
     offsets: list[int] = []
     for index, char in enumerate(source):

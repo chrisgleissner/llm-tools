@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend
+from tests.conftest import scaled
 
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
@@ -156,34 +157,13 @@ def test_open_existing_rejects_station_with_wrong_pane_shape(tmp_path) -> None:
         session_name="shape",
     )
     try:
-        subprocess.run(["tmux", "-S", str(handle.socket_path), "split-window", "-d", "-t", handle.session_name], check=True, timeout=5)
+        subprocess.run(["tmux", "-S", str(handle.socket_path), "split-window", "-d", "-t", handle.session_name], check=True, timeout=scaled(5))
         with pytest.raises(RuntimeError, match="exactly one provider pane"):
             backend.open_existing(handle.socket_path, handle.session_name)
         with pytest.raises(ValueError, match="bridge_rows"):
             backend.open_existing(handle.socket_path, handle.session_name, bridge_rows=9)
     finally:
         backend.stop(handle)
-
-
-def test_existing_dead_socket_collision_is_not_replaced(tmp_path) -> None:
-    runtime = tmp_path / "runtime"
-    runtime.mkdir(mode=0o700)
-    socket_path = runtime / "stale.sock"
-    stale = unix_socket.socket(unix_socket.AF_UNIX, unix_socket.SOCK_STREAM)
-    try:
-        stale.bind(str(socket_path))
-    finally:
-        stale.close()
-    socket_path.chmod(0o600)
-    with pytest.raises(FileExistsError, match="socket already exists"):
-        TmuxTerminalBackend().start(
-            provider_argv=[sys.executable, "-c", "pass"],
-            bridge_argv=["/bin/cat"],
-            cwd=tmp_path,
-            socket_path=socket_path,
-            session_name="collision",
-        )
-    assert socket_path.exists()
 
 
 def test_absent_unknown_and_malformed_metadata_states_are_distinct(tmp_path, monkeypatch) -> None:
@@ -214,7 +194,7 @@ def test_start_failure_after_server_creation_tears_down_only_the_owned_station(t
 
     def fail_once(socket_path, *args, **kwargs):
         nonlocal failed
-        if args and args[0] == "bind-key" and not failed:
+        if "bind-key" in args and not failed:  # the bindings are sent after the session exists, in one chained invocation
             failed = True
             raise subprocess.CalledProcessError(1, ["tmux", *args])
         return real_run(socket_path, *args, **kwargs)

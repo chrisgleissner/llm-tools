@@ -1,6 +1,5 @@
 """Malformed metadata must never become a restored native conversation."""
 import json
-from pathlib import Path
 import pytest
 from llm_tools import bridge_sessions as sessions
 

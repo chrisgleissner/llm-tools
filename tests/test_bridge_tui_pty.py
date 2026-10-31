@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
+from tests.conftest import scaled
 
 
 def _read_until(
@@ -26,7 +27,7 @@ def _read_until(
     timeout: float = 5.0,
     output_sink: bytearray | None = None,
 ) -> bytes:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     output = output_sink if output_sink is not None else bytearray()
     if marker in output:
         return bytes(output)
@@ -52,7 +53,7 @@ def _wait_for_record(
     timeout: float = 5.0,
     output_sink: bytearray | None = None,
 ) -> str:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         if record.exists():
             content = record.read_text(encoding="utf-8")
@@ -72,7 +73,7 @@ def _wait_for_record(
 
 
 def _wait_for_record_count(process: subprocess.Popen[bytes], record: Path, count: int, timeout: float = 5.0) -> list[str]:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         if record.exists():
             rows = record.read_text(encoding="utf-8").splitlines()
@@ -85,7 +86,7 @@ def _wait_for_record_count(process: subprocess.Popen[bytes], record: Path, count
 
 
 def _wait_for_missing(path: Path, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while path.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not path.exists(), f"private draft was not cleaned after durable acknowledgement: {path}"
@@ -144,9 +145,9 @@ def test_real_curses_control_navigation_dispatch_and_exit(tmp_path: Path) -> Non
         output.extend(_read_until(master, process, b"RUNNING"))
         # Wait for the view title rather than the always-visible tab legend.
         os.write(master, b"\x1bOR")
-        output.extend(_read_until(master, process, b"No stations recorded.", output_sink=output))
+        output.extend(_read_until(master, process, b"No providers recorded.", output_sink=output))
         os.write(master, b"\t")
-        _read_until(master, process, b"[4 Systems]", output_sink=output)
+        _read_until(master, process, b"[Activity]", output_sink=output)
         os.write(master, b"status\r")
         assert _wait_for_record(master, process, record, output_sink=output) == "('pty-mission', 'status', '')\n"
         if b"status result: RUNNING" not in output:
@@ -156,10 +157,10 @@ def test_real_curses_control_navigation_dispatch_and_exit(tmp_path: Path) -> Non
         assert _wait_for_record(master, process, record, output_sink=output).splitlines()[-1] == "('pty-mission', 'priority 42 7', '')"
         os.write(master, b"\x04")
         try:
-            process.wait(timeout=5)
+            process.wait(timeout=scaled(5))
         except subprocess.TimeoutExpired:
             os.write(master, b"\x04")
-            process.wait(timeout=5)
+            process.wait(timeout=scaled(5))
         assert process.returncode == 0
         while True:
             ready, _, _ = select.select([master], [], [], 0)
@@ -175,7 +176,7 @@ def test_real_curses_control_navigation_dispatch_and_exit(tmp_path: Path) -> Non
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -200,12 +201,12 @@ def test_real_curses_multiline_command_response_scrolls_dismisses_and_accepts_ne
             "('pty-mission', 'status', '')",
         ]
         os.write(master, b"\x04")
-        process.wait(timeout=5)
+        process.wait(timeout=scaled(5))
         assert process.returncode == 0
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -231,8 +232,8 @@ def test_real_curses_editor_roundtrip_dispatches_and_removes_private_file(tmp_pa
         rendered = _wait_for_record(master, process, record, output_sink=output)
         assert rendered
         mission, command, payload = ast.literal_eval(rendered)
-        if b"Applied: task add" not in output:
-            _read_until(master, process, b"Applied: task add", output_sink=output)
+        if b"Task added" not in output:
+            _read_until(master, process, b"Task added", output_sink=output)
         argv = shlex.split(command)
         assert mission == "pty-mission" and argv[:2] == ["task", "add"]
         assert Path(argv[-1]).parent.name == "drafts"
@@ -254,7 +255,7 @@ def test_real_curses_editor_roundtrip_dispatches_and_removes_private_file(tmp_pa
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -281,8 +282,8 @@ def test_real_curses_ctrl_e_preserves_typed_task_options(tmp_path: Path) -> None
         os.write(master, b"\x13")
         rendered = _wait_for_record(master, process, record, output_sink=output)
         mission, command, prompt = ast.literal_eval(rendered)
-        if b"Applied: task add" not in output:
-            _read_until(master, process, b"Applied: task add", output_sink=output)
+        if b"Task added" not in output:
+            _read_until(master, process, b"Task added", output_sink=output)
         argv = shlex.split(command)
         assert mission == "pty-mission"
         assert argv[:7] == ["task", "add", "--priority", "5", "--acceptance", "tests pass", "--file"]
@@ -292,7 +293,7 @@ def test_real_curses_ctrl_e_preserves_typed_task_options(tmp_path: Path) -> None
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -310,7 +311,7 @@ def test_real_curses_short_bracketed_command_paste_waits_for_enter(tmp_path: Pat
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -336,11 +337,11 @@ def test_real_curses_bracketed_multiline_paste_preserves_source_sha256(tmp_path:
         assert shlex.split(command)[:2] == ["task", "add"]
         assert received == source
         assert hashlib.sha256(received.encode("utf-8")).hexdigest() == expected
-        _read_until(master, process, b"Applied: task add", timeout=5, output_sink=output)
+        _read_until(master, process, b"Task added", timeout=scaled(5), output_sink=output)
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -363,7 +364,7 @@ def test_real_compact_console_pty_dispatches_and_exits(tmp_path: Path) -> None:
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -412,7 +413,7 @@ def test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment(tmp_path: 
     try:
         _read_until(master, process, b"RUNNING")
         os.write(master, b"\t")  # Orders view.
-        _read_until(master, process, b"73 READY PTY order")  # Wait until the async snapshot is visible.
+        _read_until(master, process, b"READY  P8  after 11  PTY order")  # Wait until the async snapshot is visible.
         os.write(master, b"\r")  # Inspect the selected order.
         rendered = _read_until(master, process, b"Acceptance criteria")
         assert b"Dependencies: 11" in rendered
@@ -428,8 +429,8 @@ def test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment(tmp_path: 
         assert shlex.split(command)[:2] == ["task", "amend"]
         assert shlex.split(command)[3] == "73"
         assert prompt == "keep this prompt\nwith its second line\nchanged by editor"
-        if b"Applied: task amend" not in output:
-            _read_until(master, process, b"Applied: task amend", output_sink=output)
+        if b"Task 73 amended" not in output:
+            _read_until(master, process, b"Task 73 amended", output_sink=output)
         _wait_for_missing(Path(shlex.split(command)[-1]))
         os.write(master, b"\x1b\x15\x1b")  # Dismiss result, clear any draft, return to body shortcuts.
         deadline = time.monotonic() + 5
@@ -440,5 +441,5 @@ def test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment(tmp_path: 
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)

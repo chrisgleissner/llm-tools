@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from llm_tools.bridge_store import BridgeStore, MissionLock
+from tests.conftest import scaled
 
 
 def test_concurrent_task_submission_has_no_lost_tasks_or_events(tmp_path: Path) -> None:
@@ -24,7 +25,7 @@ with BridgeStore(sys.argv[1]) as store:
     writers = [subprocess.Popen([sys.executable, "-c", code, str(path), mid, str(i)],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(4)]
     for process in writers:
-        _, stderr = process.communicate(timeout=30)
+        _, stderr = process.communicate(timeout=scaled(30))
         assert process.returncode == 0, stderr.decode()
     with BridgeStore(path) as store:
         tasks = store.list_tasks(mid)
@@ -48,7 +49,7 @@ with store._transaction():
     store._event(sys.argv[2], 'uncommitted-event', {})
     os._exit(19)
 '''
-    process = subprocess.run([sys.executable, "-c", code, str(path), mid], timeout=10)
+    process = subprocess.run([sys.executable, "-c", code, str(path), mid], timeout=scaled(10))
     assert process.returncode == 19
     with BridgeStore(path) as store:
         assert store.get_mission(mid)["name"] == "crash"
@@ -74,13 +75,13 @@ time.sleep(60)
             with MissionLock(directory, "mission"):
                 pytest.fail("a second controller acquired the mission")
         process.kill()
-        process.wait(timeout=10)
+        process.wait(timeout=scaled(10))
         with MissionLock(directory, "mission"):
             pass
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=10)
+            process.wait(timeout=scaled(10))
         process.stdout.close()
 
 
@@ -101,7 +102,7 @@ print(op, flush=True)
 os._exit(23)
 '''
     child = subprocess.run([sys.executable, "-c", code, str(path), str(task_id), phase],
-                           text=True, capture_output=True, timeout=10)
+                           text=True, capture_output=True, timeout=scaled(10))
     assert child.returncode == 23, child.stderr
     operation_id = child.stdout.strip()
     with BridgeStore(path) as store:

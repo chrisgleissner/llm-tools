@@ -1,4 +1,4 @@
-"""A completed controller's retained terminal still needs an ordinary stop."""
+"""A completed mission closes its own idle station; an ordinary stop is still safe afterwards."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ import time
 from llm_tools.bridge_runtime import mission_socket_path
 from llm_tools.bridge_store import BridgeStore, MissionLock
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import scaled
 
 
-def test_normal_stop_closes_completed_mission_station_without_force(tmp_path: Path, env: dict[str, str]) -> None:
+def test_completed_mission_closes_its_station_and_stop_is_a_safe_no_op(tmp_path: Path, env: dict[str, str]) -> None:
     state = tmp_path / "state"
     env["LLM_BRIDGE_STATE_DIR"] = str(state)
     env["LLM_SCHEDULER_USAGE_JSON"] = json.dumps({
@@ -29,7 +30,7 @@ def test_normal_stop_closes_completed_mission_station_without_force(tmp_path: Pa
     def cli(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "llm_tools.bridge", *args],
-            env=env, text=True, capture_output=True, timeout=15,
+            env=env, text=True, capture_output=True, timeout=scaled(15),
         )
 
     def released() -> bool:
@@ -54,11 +55,10 @@ def test_normal_stop_closes_completed_mission_station_without_force(tmp_path: Pa
                 break
             time.sleep(0.03)
         assert status == "COMPLETED" and released()
-        handle = backend.open_existing(mission_socket_path(mission_id, env=env), f"mission-{mission_id}")
+        assert not mission_socket_path(mission_id, env=env).exists(), "a completed mission with no client attached must not keep its station"
         stopped = cli("stop", "--mission", mission_id)
         assert stopped.returncode == 0, stopped.stderr
-        assert not backend.session_exists(handle), "ordinary stop acknowledged success but retained the completed mission's station"
-        assert not backend.pane_is_alive(handle, pane="bridge")
+        assert "No station to close" in stopped.stdout
     finally:
         cli("stop", "--mission", mission_id, "--force")
         if handle is not None:

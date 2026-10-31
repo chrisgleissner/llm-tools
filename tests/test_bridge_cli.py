@@ -61,7 +61,7 @@ def test_legacy_prompt_file_creates_task_one_and_console_command_is_safe(tmp_pat
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
     objective = tmp_path / "objective.md"
     objective.write_text("Build a native terminal bridge", encoding="utf-8")
-    assert main(["--prompt-file", str(objective), "--cwd", str(tmp_path), "--no-start"]) == 0
+    assert main(["--prompt-file", str(objective), "--cwd", str(tmp_path), "--no-start", "--json"]) == 0
     result = json.loads(capsys.readouterr().out)
     mission_id = result["mission"]["id"]
     snapshot = status_snapshot(mission_id)
@@ -289,7 +289,7 @@ def test_console_can_review_and_accept_proposals_with_quoted_reason(tmp_path: Pa
         store.finish_operation(operation, exit_code=0)
         proposal_id = store.propose_task(mission["id"], "follow-up", source_operation_id=operation)
 
-    listed = json.loads(dispatch_console_command(mission["id"], "proposals"))
+    listed = json.loads(dispatch_console_command(mission["id"], "proposals --json"))
     assert [item["id"] for item in listed["proposals"]] == [proposal_id]
     result = json.loads(dispatch_console_command(mission["id"], f"proposal reject {proposal_id} outside current scope"))
     assert result["status"] == "APPLIED"
@@ -350,8 +350,10 @@ def test_console_reuses_cli_task_grammar_for_multiline_add_and_amend(tmp_path: P
     assert amend["result"]["revision"] == 2
     with BridgeStore(state / "bridge.sqlite3") as store:
         task = store.get_task(task_id)
-        assert task["prompt"] == objective_file.read_text(encoding="utf-8")
-        assert task["pending"] == {"prompt": amendment_file.read_text(encoding="utf-8")}
+        # The task is not being worked on, so the amendment applies at once.
+        assert task["prompt"] == amendment_file.read_text(encoding="utf-8")
+        assert task["pending"] == {}
+        assert task["original_prompt"] == objective_file.read_text(encoding="utf-8")
 
 
 def test_console_pause_resume_id_and_help_match_task_cli(tmp_path: Path, monkeypatch) -> None:
@@ -374,7 +376,7 @@ def test_console_pause_resume_id_and_help_match_task_cli(tmp_path: Path, monkeyp
         assert store.get_task(task_id)["status"] in {"QUEUED", "READY"}
 
 
-def test_terminal_mission_task_add_and_proposal_accept_are_reported_rejected(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_finished_mission_reports_proposal_rejection_and_takes_follow_up_tasks(tmp_path: Path, monkeypatch, capsys) -> None:
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
     with BridgeStore(state / "bridge.sqlite3") as store:
@@ -387,13 +389,17 @@ def test_terminal_mission_task_add_and_proposal_accept_are_reported_rejected(tmp
         proposal = store.propose_task(mission["id"], "future work", source_operation_id=operation)
         store.set_mission_status(mission["id"], "COMPLETED")
 
-    assert main(["task", "add", "--mission", mission["id"], "--prompt", "stranded", "--json"]) == 2
-    assert "terminal mission" in capsys.readouterr().err
     assert main(["proposal", "accept", "--mission", mission["id"], "--task", str(proposal), "--json"]) == 2
-    assert "terminal mission" in capsys.readouterr().err
+    assert "takes no new proposals" in capsys.readouterr().err
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(proposal)["proposal_status"] == "PENDING"
         assert len(store.list_tasks(mission["id"])) == 2
+
+    assert main(["task", "add", "--mission", mission["id"], "--prompt", "follow-up"]) == 0
+    assert "Mission reopened · start it with: llm-bridge start" in capsys.readouterr().out
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        assert store.get_mission(mission["id"])["status"] == "STOPPED"
+        assert len(store.list_tasks(mission["id"])) == 3
 
 
 def test_cli_typed_steering_branches_persist_boundary_requests(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -413,7 +419,7 @@ def test_cli_typed_steering_branches_persist_boundary_requests(tmp_path: Path, m
         return json.loads(capsys.readouterr().out)
 
     replacement = invoke("steer", "--kind", "replace", "--task", str(task_id), "--prompt", "Implement the new API")
-    assert replacement["result"]["status"] == "QUEUED_FOR_BOUNDARY"
+    assert replacement["result"]["status"] == "APPLIED"  # nothing is running the task yet
     review = invoke("steer", "--kind", "review", "--task", str(task_id))
     assert review["result"]["depends_on"] == task_id
     pause = invoke("steer", "--kind", "pause-after-iteration")
@@ -500,8 +506,8 @@ def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: P
         second = store.add_task(mission_id, "second task")
         store.set_mission_status(mission_id, "RUNNING")
 
-    assert [task["id"] for task in json.loads(dispatch_console_command(mission_id, "tasks"))] == [first, second]
-    assert [task["id"] for task in json.loads(dispatch_console_command(mission_id, "orders"))] == [first, second]
+    assert [task["id"] for task in json.loads(dispatch_console_command(mission_id, "tasks --json"))] == [first, second]
+    assert [task["id"] for task in json.loads(dispatch_console_command(mission_id, "orders --json"))] == [first, second]
     assert json.loads(dispatch_console_command(mission_id, f"priority {second} 7"))["result"]["priority"] == 7
     assert json.loads(dispatch_console_command(mission_id, f"reorder {second} -4"))["result"]["ordering"] == -4
     assert json.loads(dispatch_console_command(mission_id, f"dependencies {second} {first}"))["result"]["depends_on"] == [first]
@@ -519,8 +525,8 @@ def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: P
     assert json.loads(dispatch_console_command(mission_id, f"pause {added_id}"))["result"]["status"] == "PAUSED"
     assert json.loads(dispatch_console_command(mission_id, f"resume {added_id}"))["result"]["status"] in {"QUEUED", "READY"}
     assert json.loads(dispatch_console_command(mission_id, f"cancel {added_id}"))["result"]["status"] == "CANCELLED"
-    assert json.loads(dispatch_console_command(mission_id, "events 0"))["events"]
-    assert json.loads(dispatch_console_command(mission_id, "proposals PENDING"))["proposals"] == []
+    assert json.loads(dispatch_console_command(mission_id, "events 0 --json"))["events"]
+    assert json.loads(dispatch_console_command(mission_id, "proposals PENDING --json"))["proposals"] == []
     assert dispatch_console_command(mission_id, "attach") == TerminalAction(mission_id)
     assert dispatch_console_command(mission_id, "attach --mission other --client /dev/pts/7") == TerminalAction("other", "/dev/pts/7")
     assert dispatch_console_command(mission_id, "detach --client /dev/pts/7") == TerminalAction(mission_id, "/dev/pts/7", "detach")
@@ -532,7 +538,7 @@ def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: P
     assert "cannot recursively start" in dispatch_console_command(mission_id, "console")
     assert "cannot recursively start" in dispatch_console_command(mission_id, "_controller")
     assert "required" in dispatch_console_command(mission_id, "task add")
-    assert "unknown mission" in dispatch_console_command(mission_id, "task list --mission another")
+    assert "no mission matches" in dispatch_console_command(mission_id, "task list --mission another")
     assert "error:" in dispatch_console_command(mission_id, "task list --mission")
     assert "error:" in dispatch_console_command(mission_id, "unknown-command")
 
@@ -568,7 +574,7 @@ def test_main_routes_console_views_and_controller_through_injected_entrypoints(t
     monkeypatch.setattr(bridge_logs, "capture_process_output", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr("llm_tools.bridge_runtime.run_controller", lambda mid, **kwargs: runtime_calls.append((mid, kwargs)) or 23)
     assert main(["_controller", "--mission", mission_id, "--headless", "--providers", "codex", "--startup-token", "token"]) == 23
-    assert runtime_calls == [(mission_id, {"headless": True, "native_tui": False, "providers": "codex", "routes": "", "startup_token": "token"})]
+    assert runtime_calls == [(mission_id, {"headless": True, "native_tui": False, "providers": "codex", "routes": None, "startup_token": "token"})]
 
 
 def test_main_start_resume_attach_and_detach_entrypoints(tmp_path, monkeypatch) -> None:

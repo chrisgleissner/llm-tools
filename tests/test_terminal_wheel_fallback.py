@@ -13,6 +13,7 @@ import time
 
 import pytest
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import scaled
 
 
 @pytest.mark.skipif(shutil.which('tmux') is None,reason='tmux required')
@@ -52,5 +53,5 @@ def test_alternate_screen_without_mouse_request_uses_copy_mode_then_returns_nati
     finally:
         backend.stop(handle)
         if client.poll() is None: client.terminate()
-        client.wait(timeout=5)
+        client.wait(timeout=scaled(5))
         os.close(master)

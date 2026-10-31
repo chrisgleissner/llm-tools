@@ -1,5 +1,4 @@
 """Opaque UUIDs must never determine chronological operator or handoff history."""
-import json
 from types import SimpleNamespace
 from llm_tools import bridge_store
 from llm_tools.bridge_store import BridgeStore
@@ -33,4 +32,4 @@ def test_handoff_lists_newest_attempt_first_when_timestamps_match(tmp_path,monke
         hooks.bind(store)
         context = hooks.before_iteration()
         payload = context['prompt'].split('Durable checkpoint (latest bounded history):\n',1)[1].split('\n\nContinue',1)[0]
-        assert [row['id'] for row in json.loads(payload)['operations']] == list(reversed(attempts))
+        assert [line.split()[2].rstrip(':') for line in payload.splitlines() if line.startswith('- operation ')] == list(reversed(attempts))

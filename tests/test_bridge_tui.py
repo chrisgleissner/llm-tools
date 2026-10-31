@@ -8,7 +8,15 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from llm_tools import bridge_tui
+from tests.conftest import scaled
+
+
+@pytest.fixture(autouse=True)
+def _private_state_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
 
 
 class FakeWindow:
@@ -44,7 +52,7 @@ class FakeWindow:
 
 
 def _wait_for(predicate, state: bridge_tui._ConsoleState, timeout: float = 1.0) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         state.refresh()
         if predicate():
@@ -72,7 +80,7 @@ def test_console_state_dispatches_through_injected_facade_and_refreshes() -> Non
     state = bridge_tui._ConsoleState("M1", dispatch, snapshot, full=False)
     state.refresh(force=True)
     _wait_for(lambda: bool(state.snapshot), state)
-    assert state.rows()[0].startswith("Controller:")
+    assert state.rows()[0].startswith("Controller  ")
     assert "M1" in bridge_tui._header(state, 80)
     assert snapshots == ["M1"]
     last_refresh = state.last_refresh
@@ -135,15 +143,16 @@ def test_command_feedback_keeps_help_and_json_results_multiline_and_bounded() ->
 def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     calls: list[str] = []
     state = bridge_tui._ConsoleState("M2", lambda _mission, cmd: calls.append(cmd) or "ok", lambda _id: {}, full=True)
+    state.snapshot = {"mission": {"status": "RUNNING"}}
 
     state.handle_key("KEY_F3")
-    assert state.view == "Stations"
+    assert state.view == "Providers"
     state.handle_key("\t")
-    assert state.view == "Systems"
+    assert state.view == "Activity"
     nav = bridge_tui._nav_line(state.view_index, "  ")
-    stations_x = nav.index("Stations") + 2
+    stations_x = nav.index("Providers") + 2
     state.handle_mouse(2, stations_x, 24, 80)
-    assert state.view == "Stations"
+    assert state.view == "Providers"
     state.handle_mouse(2, 78, 24, 80)
     assert state.view == "Usage"
     state.handle_key("KEY_F7")
@@ -151,12 +160,12 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     assert state.command == "" and state.selected == 0  # Selection never dispatches.
     state.handle_key("\x15")
     state.handle_key("\x1b")  # Return from the command widget to the palette.
-    state.selected = 4
+    state.selected = [action.label for action in state.palette_actions()].index("Pause")
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["pause"]
-    assert bridge_tui.PALETTE_COMMANDS[8:11] == ("steer --help", "attach", "detach")
-    assert bridge_tui.PALETTE_COMMANDS[11:16] == ("usage", "control", "task add --help", "proposal list", "start")
+    assert {"steer --help", "attach", "detach", "task add --help", "proposal list", "start"} <= set(bridge_tui.PALETTE_COMMANDS)
+    assert not {"usage", "control", "orders", "events"} & set(bridge_tui.PALETTE_COMMANDS)  # view tabs are not actions
 
 
 def test_destructive_actions_require_scoped_confirmation_even_from_palette() -> None:
@@ -171,8 +180,9 @@ def test_destructive_actions_require_scoped_confirmation_even_from_palette() -> 
     assert not state.response_overlay and state.confirm_command is None
     assert calls == []
 
-    state.view_index = bridge_tui.VIEWS.index("Palette")
-    state.selected = bridge_tui.PALETTE_COMMANDS.index("cancel")
+    state.snapshot = {"mission": {"status": "RUNNING"}}
+    state.view_index = bridge_tui.VIEWS.index("Actions")
+    state.selected = [action.command for action in state.palette_actions()].index("cancel")
     state.handle_key("KEY_ENTER")
     assert state.confirm_command == "cancel"
     state.handle_key("y")
@@ -181,7 +191,6 @@ def test_destructive_actions_require_scoped_confirmation_even_from_palette() -> 
 
 
 def test_draft_cleanup_requires_positive_durable_ack(tmp_path) -> None:
-    from pathlib import Path
 
     def run(response: str) -> tuple[bridge_tui._ConsoleState, Path]:
         draft = tmp_path / f"draft-{len(list(tmp_path.iterdir()))}.md"
@@ -202,9 +211,81 @@ def test_capacity_active_means_current_executing_operation_only() -> None:
     snapshot = {"capacity": {"selection": {"route": "kilo", "decisions": [
         {"route": "kilo", "usable": True, "windows": []},
     ]}}}
-    assert bridge_tui._capacity_summaries(snapshot)[0].startswith("Last selected kilo")
+    assert bridge_tui._capacity_summaries(snapshot)[0].startswith("kilo (next)")
     snapshot["station_context"] = {"executing_operation": "op-2", "operation_status": "RUNNING", "last_launched_station": "kilo"}
-    assert bridge_tui._capacity_summaries(snapshot)[0].startswith("ACTIVE kilo")
+    assert bridge_tui._capacity_summaries(snapshot)[0].startswith("kilo (active)")
+
+
+def test_capacity_last_selected_requires_a_recorded_operation() -> None:
+    decisions = [
+        {"route": "claude", "windows": []},
+        {"route": "codex", "windows": []},
+        {"route": "kilo", "windows": []},
+    ]
+    never_ran = {"capacity": {"selection": {"route": "codex", "decisions": decisions}}}
+    labels = [row.split(" · ")[0] for row in bridge_tui._capacity_summaries(never_ran)]
+    # codex is the selected entry but has no operation, so it is not "last selected".
+    # claude is the first non-active entry in rotation order, so it is "next".
+    assert labels == ["claude (next)", "codex", "kilo"]
+
+    ran = dict(never_ran, operations=[{"route_id": "codex", "status": "EXITED"}])
+    labels = [row.split(" · ")[0] for row in bridge_tui._capacity_summaries(ran)]
+    assert labels == ["claude (next)", "codex (last selected)", "kilo"]
+
+
+def test_capacity_next_skips_the_active_entry() -> None:
+    snapshot = {
+        "station_context": {"executing_operation": "op", "operation_status": "RUNNING", "last_launched_station": "claude"},
+        "capacity": {"selection": {"route": "claude", "decisions": [
+            {"route": "claude", "windows": []},
+            {"route": "codex", "windows": []},
+            {"route": "kilo", "windows": []},
+        ]}},
+    }
+    labels = [row.split(" · ")[0] for row in bridge_tui._capacity_summaries(snapshot)]
+    assert labels == ["claude (active)", "codex (next)", "kilo"]
+
+
+def test_capacity_not_ready_is_labelled_and_never_next() -> None:
+    snapshot = {
+        "station_context": {"executing_operation": "op", "operation_status": "RUNNING", "last_launched_station": "codex"},
+        "capacity": {"selection": {"route": "codex", "decisions": [
+            {"route": "codex", "usable": True, "windows": []},
+            {"route": "claude", "usable": False, "windows": []},
+            {"route": "kilo", "usable": True, "windows": []},
+        ]}},
+    }
+    labels = [row.split(" · ")[0] for row in bridge_tui._capacity_summaries(snapshot)]
+    assert labels == ["codex (active)", "claude (not ready)", "kilo (next)"]
+
+
+def test_event_summary_maps_only_reason_fields_to_plain_words() -> None:
+    from llm_tools.bridge_format import _event_summary
+
+    text = _event_summary({"title": "even-burn", "rotation_reason": "even-burn"})
+    assert "title=even-burn" in text and "rotation_reason=spreading use" in text
+
+
+def test_capacity_line_reads_as_plain_language(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000000")
+    snapshot = {
+        "station_context": {"executing_operation": "op", "operation_status": "RUNNING", "last_launched_station": "codex"},
+        "capacity": {"selection": {"route": "codex", "decisions": [
+            {"route": "other", "usable": True, "windows": [{"name": "5h", "kind": "reset_window", "remaining_percent": "62.6", "reset_epoch": 1000000 + 7200}]},
+            {"route": "codex", "selected_model": "gpt-5", "windows": [
+                {"name": "5h", "kind": "reset_window", "remaining_percent": "100.0", "estimated_remaining": "None", "reset_epoch": 1000000 + 4 * 3600 + 59 * 60 + 30},
+                {"name": "weekly", "kind": "reset_window", "remaining_percent": "21.0", "estimated_remaining": "1h 52m", "reset_epoch": 1000000 + 5 * 86400 + 19 * 3600 + 28 * 60},
+                {"name": "pool", "kind": "opaque"},
+            ]},
+        ]}},
+    }
+    first, second = bridge_tui._capacity_summaries(snapshot)
+    assert first == (
+        "codex / gpt-5 (active) · 5h 100% left, resets 4h 59m"
+        " · weekly 21% left, empty in ~1h 52m at this pace, resets 5d 19h · pool quota unmeasured"
+    )
+    assert second == "other (next) · 5h 63% left, resets 2h"
+    assert "est unknown" not in first and "None" not in first
 
 
 def test_task_completion_and_click_to_focus_command_entry() -> None:
@@ -242,7 +323,7 @@ def test_multiline_response_overlay_scrolls_and_view_keys_dismiss_without_dispat
     state.handle_key("x")
     assert state.command == ""
     state.handle_key("KEY_F3")
-    assert not state.response_overlay and state.view == "Stations"
+    assert not state.response_overlay and state.view == "Providers"
     state.handle_key("\n")
     assert calls == ["task add --help"]
 
@@ -278,7 +359,7 @@ def test_full_view_mouse_selects_the_task_row_under_the_pointer() -> None:
     state.choose_view(1)
     state.handle_mouse(4, 10, 24, 80)
     assert state.selected == 1
-    assert state.rows()[state.selected].startswith("B  QUEUED")
+    assert state.rows()[state.selected].startswith("B  ○ QUEUED")
 
 
 def test_station_view_distinguishes_viewed_from_executing_and_enter_selects_view() -> None:
@@ -314,25 +395,27 @@ def test_station_view_distinguishes_viewed_from_executing_and_enter_selects_view
     state.choose_view(2)
 
     rows = state.rows()
-    assert "Viewed: claude | last launched: kilo-zai" in rows[0]
-    assert "operation-7" in rows[0]
-    assert "Provider liveness: unknown" in rows[1]
-    assert "VIEWED" in rows[3]
-    assert "LAST LAUNCHED" in rows[4]
+    assert rows[0] == "Viewing claude · last launched kilo-zai · operation operatio RUNNING"
+    assert rows[1] == "mode native"  # unknown effort/liveness are hidden
+    starts = state.selection_rows()
+    assert [rows[index].split("  ")[0] for index in starts] == ["■ codex", "■ claude", "■ kilo-zai"]
+    assert "[viewed]" in rows[starts[1]] and "model sonnet" in rows[starts[1]]
+    assert "unknown" not in "\n".join(rows)
+    assert rows[starts[0]].startswith("■ codex ") and "model gpt-5" in rows[starts[0]]
+    assert rows[starts[2]].startswith("■ kilo-zai  model zai/glm-5.2  ● running")
 
     state.selected = 1
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["station claude"]
 
-    state.choose_view(3)
+    state.choose_view(bridge_tui.VIEWS.index("Health"))
     system_rows = "\n".join(state.rows())
-    assert "capacity:" in system_rows and "selected_model=zai/glm-5.2" in system_rows
-    assert "configured_mode=native" in system_rows and "actual_mode=unknown" in system_rows
-    assert "Controller heartbeat (last observed):" in system_rows
-    assert "age_seconds=8" in system_rows and "current_liveness=unknown" in system_rows
-    assert "source=controller-heartbeat" in system_rows
-    assert "unbounded_payload" not in system_rows
+    assert "Capacity" in system_rows and "selected kilo-zai / zai/glm-5.2" in system_rows
+    assert "configured native · actual unverified" in system_rows
+    assert "Controller heartbeat  active · 8s ago · owner lock held · mission wants RUNNING" in system_rows
+    assert "liveness" not in system_rows and "controller-heartbeat" not in system_rows
+    assert "unbounded_payload" not in system_rows and "{" not in system_rows
 
 
 def test_sessions_view_labels_operation_model_and_native_identity_separately() -> None:
@@ -349,12 +432,14 @@ def test_sessions_view_labels_operation_model_and_native_identity_separately() -
             "restoration_state": "RESTORED_NATIVE",
         }],
     })
-    state.choose_view(5)
+    state.choose_view(bridge_tui.VIEWS.index("Sessions"))
 
+    header = state.column_header()
+    assert header is not None and header.split() == ["op", "task", "provider", "model", "status", "native", "session", "restoration"]
     row = state.rows()[0]
-    assert "op op-123" in row
-    assert "pinned model sonnet" in row
-    assert "native session session-uuid-1234 restoration RESTORED_NATIVE" in row
+    assert row.split() == ["op-123", "9", "claude-sonnet", "sonnet", "EXITED", "session-", "RESTORED_NATIVE"]  # first 8 characters, like operation ids
+    assert header.index("native") == row.index("session-")  # aligned under the header
+    assert "None" not in row and "unknown" not in row
 
 
 def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt(monkeypatch) -> None:
@@ -362,7 +447,7 @@ def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt
     sent_prompt: list[str] = []
     editor_initial: list[str] = []
 
-    def run_editor(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def run_editor(argv: list[str], *, check: bool, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         path = Path(argv[-1])
         editor_initial.append(path.read_text(encoding="utf-8"))
         path.write_text(path.read_text(encoding="utf-8") + "\nrevised", encoding="utf-8")
@@ -376,7 +461,7 @@ def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt
     monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
     snapshot = bridge_tui._bounded_snapshot({
         "tasks": [{
-            "id": 41, "title": "inspect order", "prompt": "original prompt\nsecond line",
+            "id": 41, "ordinal": 3, "title": "inspect order", "prompt": "original prompt\nsecond line",
             "status": "READY", "priority": 9, "revision": 3, "depends_on": [12],
             "acceptance": ["tests pass"], "evidence": ["pytest output"],
             "pending": {"title": "pending title", "priority": 10},
@@ -385,9 +470,9 @@ def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt
         }],
     })
     def dispatch(_mission: str, line: str) -> str:
-        if shlex.split(line) == ["task", "show", "--task", "41"]:
+        if shlex.split(line) == ["task", "show", "--task", "3", "--json"]:
             import json
-            return json.dumps({"id":41,"prompt":"original prompt\nsecond line"})
+            return json.dumps({"id":41,"ordinal":3,"prompt":"original prompt\nsecond line"})
         calls.append(line)
         sent_prompt.append(Path(shlex.split(line)[-1]).read_text(encoding="utf-8"))
         return "amended"
@@ -406,10 +491,10 @@ def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt
 
     task = state.selected_task()
     assert task is not None
-    bridge_tui._edit_task_prompt(FakeWindow(24, 80), state, "41", initial_text=str(task["prompt"]))  # type: ignore[arg-type]
+    bridge_tui._edit_task_prompt(FakeWindow(24, 80), state, "3", initial_text=str(task["prompt"]))  # type: ignore[arg-type]
     _wait_for(lambda: not state.command_pending, state)
     assert editor_initial == ["original prompt\nsecond line"]
-    assert calls and calls[0].startswith("amend 41 ")
+    assert calls and calls[0].startswith("task amend --task 3 --file ")
     assert sent_prompt == ["original prompt\nsecond line\nrevised"]
 
 
@@ -440,7 +525,9 @@ def test_orders_detail_scroll_does_not_change_selected_order_or_amend_target() -
 
 
 def test_systems_preserves_and_renders_quota_budget_and_reset_windows() -> None:
+    now = int(time.time())
     snapshot = bridge_tui._bounded_snapshot({
+        "operations": [{"route_id": "codex", "status": "EXITED"}],
         "capacity": {
             "source": "persisted runtime event",
             "selection": {
@@ -448,7 +535,7 @@ def test_systems_preserves_and_renders_quota_budget_and_reset_windows() -> None:
                 "decision": {"usable": False, "reason": "rate-limited"},
                 "decisions": [
                     {"provider": "codex", "windows": [
-                        {"name": "weekly", "kind": "reset_window", "remaining_percent": 34.0, "reset_epoch": 1999999999, "reason": "cooldown"},
+                        {"name": "weekly", "kind": "reset_window", "remaining_percent": 34.0, "reset_epoch": now + 3 * 3600 + 30, "reason": "cooldown"},
                         {"name": "balance", "kind": "budget", "remaining_amount": 12.5, "currency": "USD", "reset_epoch": None},
                     ]},
                 ],
@@ -457,10 +544,10 @@ def test_systems_preserves_and_renders_quota_budget_and_reset_windows() -> None:
         },
     })
     state = bridge_tui._ConsoleState("M12", lambda _mission, _line: "", lambda _id: {}, full=True, snapshot=snapshot)
-    state.choose_view(3)
+    state.choose_view(bridge_tui.VIEWS.index("Health"))
     rendered = "\n".join(state.rows())
-    assert "Quota/budget codex weekly [reset_window]: remaining 34.0%; est. runout unknown; reset epoch 1999999999" in rendered
-    assert "Quota/budget codex balance [budget]: remaining 12.5 USD; no reset" in rendered
+    assert "codex (last selected) · weekly 34% left, resets 3h (cooldown) · balance 12.5 USD left" in rendered
+    assert "epoch" not in rendered and "None" not in rendered
     assert "private_payload" not in str(state.snapshot)
 
 
@@ -473,8 +560,7 @@ def test_stations_enter_selects_view_and_shows_recent_operation_history() -> Non
     }))
     state.choose_view(2)
     rendered = "\n".join(state.rows())
-    assert "Recent history for codex" in rendered
-    assert "op op-5 task 6 EXITED model gpt-6.1-sol exit 0" in rendered
+    assert "  recent: task 6 · exited · exit 0" in rendered
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["station codex"]
@@ -507,13 +593,13 @@ def test_real_monitor_projection_survives_tui_bounding_and_systems_render(tmp_pa
     )
     state.choose_view(2)
     station_rows = "\n".join(state.rows())
-    assert "codex  configured gpt-6.1-sol  observed unknown" in station_rows
-    assert "Provider liveness: unknown" in station_rows
-    state.choose_view(3)
+    assert "■ codex  model gpt-6.1-sol  ● running task 1" in station_rows
+    assert "liveness" not in station_rows
+    state.choose_view(bridge_tui.VIEWS.index("Health"))
     system_rows = "\n".join(state.rows())
-    assert "configured_mode=headless" in system_rows and "actual_mode=headless" in system_rows
-    assert "Controller heartbeat (last observed):" in system_rows
-    assert "current_liveness=unknown" in system_rows
+    assert "configured headless · actual headless" in system_rows
+    assert "Controller heartbeat  running" in system_rows
+    assert "{" not in system_rows and "None" not in system_rows
 
 
 def test_mouse_double_click_uses_enter_activation_for_orders_and_stations() -> None:
@@ -560,15 +646,15 @@ def test_tui_compact_and_full_render_at_supported_sizes(monkeypatch) -> None:
     compact = FakeWindow(6, 80)
     bridge_tui._draw_compact(compact, state)  # type: ignore[arg-type]
     assert "LLM BRIDGE" in compact.lines[0]
-    assert "[1 Bridge]" in compact.lines[2]
-    assert compact.lines[4].startswith("> ")
-    assert "Ctrl-D exit" in compact.lines[5]
+    assert "[Overview]" in compact.lines[2]
+    assert compact.lines[4].startswith("› ")
+    assert "Ctrl-D exit" in compact.lines[5] and compact.lines[5].rstrip().endswith("? help")
 
     state.full = True
     full = FakeWindow(24, 80)
     bridge_tui._draw_full(full, state)  # type: ignore[arg-type]
-    assert "Bridge" in full.lines[2]
-    assert full.lines[22].startswith("> ")
+    assert "Overview" in full.lines[2]
+    assert full.lines[22].startswith("› type a command · /help")
     assert len(full.lines) == 24
 
 
@@ -627,20 +713,20 @@ def test_orders_page_through_large_missions_with_bounded_snapshot_reads() -> Non
     state.choose_view(1)
     state.refresh(force=True)
     _wait_for(lambda: len(state.snapshot.get("tasks", [])) == 200, state)
-    assert state.rows()[0].startswith("1  QUEUED")
+    assert state.rows()[0] == "1    ○ QUEUED  task 1"
 
     state.handle_key("KEY_NPAGE")
-    _wait_for(lambda: offsets[-1:] == [200] and state.rows()[0].startswith("201  QUEUED"), state)
+    _wait_for(lambda: offsets[-1:] == [200] and state.rows()[0].startswith("201  ○ QUEUED"), state)
     assert len(state.snapshot["tasks"]) == 200  # type: ignore[arg-type]
 
     state.handle_key("KEY_NPAGE")
-    _wait_for(lambda: offsets[-1:] == [400] and state.rows()[0].startswith("401  QUEUED"), state)
+    _wait_for(lambda: offsets[-1:] == [400] and state.rows()[0].startswith("401  ○ QUEUED"), state)
     assert len(state.snapshot["tasks"]) == 50  # type: ignore[arg-type]
     state.handle_key("KEY_NPAGE")
     assert state.task_offset == 400  # A partial final page cannot advance past the queue.
 
     state.handle_key("KEY_PPAGE")
-    _wait_for(lambda: offsets[-1:] == [200] and state.rows()[0].startswith("201  QUEUED"), state)
+    _wait_for(lambda: offsets[-1:] == [200] and state.rows()[0].startswith("201  ○ QUEUED"), state)
 
 
 def test_orders_search_filters_all_tasks_without_dispatching_a_command() -> None:
@@ -676,7 +762,7 @@ def test_orders_search_filters_all_tasks_without_dispatching_a_command() -> None
         state.handle_key(char)
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: searches[-1:] == ["task-500"] and state.snapshot.get("task_total") == 1, state)
-    assert state.rows()[0].startswith("500  QUEUED")
+    assert state.rows()[0].startswith("500  ○ QUEUED")
     assert dispatches == []
 
     state.handle_key("\x15")
@@ -709,8 +795,8 @@ def test_console_printable_commands_are_never_navigation_shortcuts() -> None:
     state.handle_key("\x0e")
     assert state.command == ""
 
-    state.handle_key("KEY_F4")
-    assert state.view == "Systems"
+    state.handle_key("KEY_F6")
+    assert state.view == "Health"
 
 
 def test_slow_snapshot_and_dispatch_never_block_keyboard_input() -> None:
@@ -741,7 +827,7 @@ def test_private_editor_file_dispatches_multiline_task_and_cleans_up(monkeypatch
     calls: list[tuple[list[str], str]] = []
     editor_argv: list[str] = []
 
-    def run_editor(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def run_editor(argv: list[str], *, check: bool, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         editor_argv.extend(argv)
         path = argv[-1]
         mode = stat.S_IMODE(os.stat(path).st_mode)
@@ -772,7 +858,7 @@ def test_private_editor_file_dispatches_multiline_task_and_cleans_up(monkeypatch
 def test_editor_appends_file_to_typed_task_options(monkeypatch) -> None:
     calls: list[list[str]] = []
 
-    def run_editor(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def run_editor(argv: list[str], *, check: bool, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         Path(argv[-1]).write_text("multiline prompt\nsecond line", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0)
 
@@ -794,7 +880,7 @@ def test_editor_appends_file_to_typed_task_options(monkeypatch) -> None:
 def test_editor_amends_selected_order_through_same_dispatch(monkeypatch) -> None:
     sent: list[list[str]] = []
 
-    def run_editor(argv: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+    def run_editor(argv: list[str], *, check: bool, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         Path(argv[-1]).write_text("replacement text", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0)
 
@@ -806,20 +892,20 @@ def test_editor_amends_selected_order_through_same_dispatch(monkeypatch) -> None
     monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
     state = bridge_tui._ConsoleState(
         "M8",
-        lambda _mission, command: ('{"id":42,"prompt":"old"}' if shlex.split(command)[:2] == ["task", "show"] else sent.append(shlex.split(command)) or json.dumps({"status": "APPLIED", "result": {}})),
+        lambda _mission, command: ('{"id":42,"ordinal":2,"prompt":"old"}' if shlex.split(command)[:2] == ["task", "show"] else sent.append(shlex.split(command)) or json.dumps({"status": "APPLIED", "result": {}})),
         lambda _id: {},
         full=True,
-        snapshot={"tasks": [{"id": 42, "title": "old", "status": "READY"}]},
+        snapshot={"tasks": [{"id": 42, "ordinal": 2, "title": "old", "status": "READY"}]},
     )
     bridge_tui._edit_task_prompt(FakeWindow(24, 80), state, bridge_tui._selected_task_id(state))  # type: ignore[arg-type]
     _wait_for(lambda: not state.command_pending, state)
-    assert sent and sent[0][0:2] == ["amend", "42"]
+    assert sent and sent[0][0:4] == ["task", "amend", "--task", "2"]
     assert not Path(sent[0][-1]).exists()
 
 
 def test_log_page_keys_request_older_and_newer_snapshots_without_changing_orders():
     state = bridge_tui._ConsoleState('mission',lambda *_:'',lambda _id:{},full=True)
-    state.choose_view(4)
+    state.choose_view(bridge_tui.VIEWS.index("Activity"))
     state.handle_key('KEY_PPAGE')
     assert state.event_offset == 20
     assert state.task_offset == 0

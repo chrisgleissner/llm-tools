@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
+from .bridge_format import countdown, needs_attention
 from .bridge_store import BridgeStore
+from .bridge_events import recent_hidden_kinds
+from .bridge_projection import ProjectionParams, Snapshot
+from .bridge_states import ACTIVE_OPERATION_STATUSES
 
 
 def _decode_event(row: Any) -> dict[str, Any]:
@@ -54,6 +60,88 @@ def _latest_suspend_event(store: BridgeStore, mission_id: str) -> dict[str, Any]
     return _decode_event(max(candidates, key=lambda row: int(row["id"]))) if candidates else None
 
 
+# Events written by the controller's own bookkeeping. They drown the operator's
+# view on a long mission (a heartbeat every few seconds), so the "recent
+# activity" projection leaves them out. Every other kind, including kinds added
+# later, counts as operator-meaningful.
+PLUMBING_EVENT_KINDS = recent_hidden_kinds()  # classified in bridge_events.EVENTS
+OPERATOR_EVENT_LIMIT = 20
+
+
+def latest_operator_events(store: BridgeStore, mission_id: str, *, anchor: int | None = None, limit: int = OPERATOR_EVENT_LIMIT) -> list[dict[str, Any]]:
+    """The newest ``limit`` events that are not controller plumbing, oldest first.
+
+    ``kind NOT IN (...) ORDER BY id DESC`` scans every heartbeat when the last
+    meaningful event is old (about 0.1 s for 100k heartbeats). Instead the
+    mission's distinct kinds are enumerated with an index skip-scan, and the
+    newest rows of each operator kind are read through
+    ``events_mission_kind_id``; the cost depends on the number of kinds, not
+    events (about 0.2 ms for the same 100k heartbeats).
+    """
+    kinds = [
+        str(row[0]) for row in store.db.execute(
+            "WITH RECURSIVE k(kind) AS (SELECT MIN(kind) FROM events WHERE mission_id=? UNION ALL "
+            "SELECT (SELECT MIN(kind) FROM events WHERE mission_id=? AND kind>k.kind) FROM k WHERE kind IS NOT NULL) "
+            "SELECT kind FROM k WHERE kind IS NOT NULL",
+            (mission_id, mission_id),
+        )
+        if row[0] not in PLUMBING_EVENT_KINDS
+    ]
+    bound = "" if anchor is None else " AND id<=?"
+    rows: list[Any] = []
+    for kind in kinds:
+        params: tuple[Any, ...] = (mission_id, kind) if anchor is None else (mission_id, kind, int(anchor))
+        rows.extend(store.db.execute(
+            f"SELECT * FROM events INDEXED BY events_mission_kind_id WHERE mission_id=? AND kind=?{bound} ORDER BY id DESC LIMIT {int(limit)}",
+            params,
+        ))
+    newest = sorted(rows, key=lambda row: int(row["id"]), reverse=True)[:limit]
+    return [_decode_event(row) for row in reversed(newest)]
+
+
+EVENT_PAGE_SIZE = 20
+_PAGE_CURSOR_KEYS = 64
+_page_cursors: OrderedDict[tuple[str, str, int], dict[int, int]] = OrderedDict()
+_page_cursor_lock = threading.Lock()
+
+
+def _event_page_rows(store: BridgeStore, mission_id: str, anchor: int | None, offset: int) -> list[Any]:
+    """One page of ``EVENT_PAGE_SIZE`` events, newest first, at ``offset`` rows below the anchor.
+
+    ``LIMIT n OFFSET k`` reads and discards k rows, so a page deep in a long log
+    cost time proportional to its depth (about 0.12 s at offset 900k). With an
+    anchor, the rows below it never change, so each page read remembers the id
+    bound where the next page starts, and the next read (the console re-reads its
+    page several times a second, and pages one step at a time) starts there with a
+    small offset instead of at the newest event. Without a remembered bound, for
+    example a first jump to a deep offset, the read falls back to plain offsets.
+    """
+    if anchor is None:
+        return store.db.execute(
+            "SELECT * FROM events WHERE mission_id=? ORDER BY id DESC LIMIT ? OFFSET ?", (mission_id, EVENT_PAGE_SIZE, offset),
+        ).fetchall()
+    key = (str(store.path), mission_id, int(anchor))
+    with _page_cursor_lock:
+        known = dict(_page_cursors.get(key, {}))
+    start = max((at for at in known if at <= offset), default=None)
+    start = 0 if start is None else start
+    upper = known.get(start, int(anchor))
+    rows = store.db.execute(
+        "SELECT * FROM events WHERE mission_id=? AND id<=? ORDER BY id DESC LIMIT ? OFFSET ?",
+        (mission_id, upper, EVENT_PAGE_SIZE, offset - start),
+    ).fetchall()
+    with _page_cursor_lock:
+        cursors = _page_cursors.setdefault(key, {0: int(anchor)})
+        _page_cursors.move_to_end(key)
+        if rows:
+            cursors[offset] = int(rows[0]["id"])
+        if len(rows) == EVENT_PAGE_SIZE:
+            cursors[offset + EVENT_PAGE_SIZE] = int(rows[-1]["id"]) - 1
+        while len(_page_cursors) > _PAGE_CURSOR_KEYS:
+            _page_cursors.popitem(last=False)
+    return rows
+
+
 def _event_time(value: str | None) -> float | None:
     if not value:
         return None
@@ -63,39 +151,144 @@ def _event_time(value: str | None) -> float | None:
         return None
 
 
+def name_list(value: Any) -> list[str]:
+    """Normalize a comma-separated string or a TOML list into unique names."""
+    if isinstance(value, str):
+        items: list[Any] = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        return []
+    return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
+
+
 def _configured_stations(config: dict[str, Any]) -> dict[str, Any]:
+    """Describe the mission's own rotation, not every table in the tool config.
+
+    The rotation is the mission's ``routes`` (route mode) or ``providers``. Only
+    when the mission recorded neither does the frozen ``[ralph].routes`` /
+    ``[defaults].providers`` apply. Models and efforts come from the matching
+    ``[providers.<name>]`` / ``[routes.<name>]`` tables.
+    """
     frozen = config.get("frozen_tool_config", "")
-    providers: list[str] = []
-    routes: list[str] = []
+    parsed: dict[str, Any] = {}
     models: dict[str, str] = {}
     efforts: dict[str, str] = {}
     try:
         import tomllib
 
-        parsed = tomllib.loads(frozen) if isinstance(frozen, str) and frozen else {}
-        providers = sorted(str(key) for key in parsed.get("providers", {}))
-        routes = sorted(str(key) for key in parsed.get("routes", {}))
-        for provider, details in parsed.get("providers", {}).items():
-            if isinstance(details, dict):
-                if isinstance(details.get("model"), str):
-                    models[str(provider)] = details["model"]
-                if isinstance(details.get("effort"), str):
-                    efforts[str(provider)] = details["effort"]
-        for route, details in parsed.get("routes", {}).items():
-            if isinstance(details, dict):
-                if isinstance(details.get("model"), str):
-                    models[str(route)] = details["model"]
-                if isinstance(details.get("effort"), str):
-                    efforts[str(route)] = details["effort"]
+        loaded = tomllib.loads(frozen) if isinstance(frozen, str) and frozen else {}
+        parsed = loaded if isinstance(loaded, dict) else {}
     except (ValueError, TypeError):
-        pass
+        parsed = {}
+    for table in ("providers", "routes"):
+        section = parsed.get(table, {})
+        for name, details in (section.items() if isinstance(section, dict) else ()):
+            if isinstance(details, dict):
+                if isinstance(details.get("model"), str):
+                    models[str(name)] = details["model"]
+                if isinstance(details.get("effort"), str):
+                    efforts[str(name)] = details["effort"]
+    routes = name_list(config.get("routes"))
+    providers = name_list(config.get("providers"))
+    if not routes and not providers:
+        ralph = parsed.get("ralph", {})
+        defaults = parsed.get("defaults", {})
+        routes = name_list(ralph.get("routes") if isinstance(ralph, dict) else None)
+        if not routes:
+            providers = name_list(defaults.get("providers") if isinstance(defaults, dict) else None)
+    if routes:
+        providers = []
     return {
         "providers": providers,
         "routes": routes,
         "models": models,
         "efforts": efforts,
-        "configured_mode": "native" if config.get("native_tui") else ("headless" if config.get("headless") else "autonomous"),
+        "configured_mode": "native" if config.get("native_tui") else ("headless" if config.get("headless") else "background"),
     }
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def waiting_entry(decision: dict[str, Any]) -> dict[str, Any]:
+    """The blocking window, or reason, of one provider that is not usable."""
+    windows = [w for w in decision.get("windows", []) if isinstance(w, dict)] if isinstance(decision.get("windows"), list) else []
+    measured = [w for w in windows if _number(w.get("remaining_percent")) is not None]
+    blocking = min(measured, key=lambda w: float(w["remaining_percent"]), default=None)
+    reset = _number(decision.get("wait_until"))
+    if reset is None and blocking is not None:
+        reset = _number(blocking.get("reset_epoch"))
+    return {
+        "name": str(decision.get("route") or decision.get("provider") or "?"),
+        "provider": str(decision.get("provider") or ""),
+        "window": str(blocking["name"]) if blocking is not None and blocking.get("name") else None,
+        "remaining_percent": float(blocking["remaining_percent"]) if blocking is not None else None,
+        "reset_epoch": int(reset) if reset is not None else None,
+        "reason": str(decision.get("reason") or "") or None,
+    }
+
+
+def waiting_entry_text(entry: dict[str, Any], now: float) -> str:
+    """``copilot monthly 0% · resets in 2d 9h`` for one waiting provider."""
+    text = str(entry["name"])
+    if entry.get("window"):
+        text += f" {entry['window']}"
+        if entry.get("remaining_percent") is not None:
+            text += f" {entry['remaining_percent']:g}%"
+    elif entry.get("reason"):
+        text += f" {entry['reason']}"
+    if entry.get("reset_epoch") is not None:
+        text += f" · resets in {countdown(entry['reset_epoch'] - now)}"
+    return text
+
+
+def waiting_from_wait(data: dict[str, Any], now: float, since: str | None = None) -> dict[str, Any]:
+    """Describe a ``provider-wait`` event: which providers block the mission and until when."""
+    decisions = [d for d in data.get("decisions", []) if isinstance(d, dict) and d.get("usable") is not True] if isinstance(data.get("decisions"), list) else []
+    entries = [waiting_entry(decision) for decision in decisions]
+    resets = [entry["reset_epoch"] for entry in entries if entry["reset_epoch"] is not None]
+    target = _number(data.get("target_epoch"))
+    until = int(target) if target is not None else (min(resets) if resets else None)
+    return {
+        "reason": "capacity" if data.get("all_rate_limited") else "unavailable",
+        "providers": [entry["name"] for entry in entries],
+        "entries": entries,
+        "until_epoch": until,
+        "detail": "; ".join(waiting_entry_text(entry, now) for entry in entries),
+        "since": since,
+    }
+
+
+def waiting_message(waiting: dict[str, Any], now: float) -> str:
+    """The sentence shown in an empty provider pane while the mission waits."""
+    parts = []
+    for entry in waiting.get("entries", []):
+        name = entry.get("name") or entry.get("provider") or "?"
+        reset = _number(entry.get("reset_epoch"))
+        if reset is not None:
+            quota = f"{entry['window']} quota " if entry.get("window") else ""
+            parts.append(f"{name} {quota}resets in {countdown(reset - now)}")
+        else:
+            parts.append(f"{name} {entry.get('reason') or 'is unavailable'}")
+    until = _number(waiting.get("until_epoch"))
+    if not parts and until is not None:
+        parts.append(f"next provider ready in {countdown(until - now)}")
+    subject = "capacity" if waiting.get("reason") == "capacity" else "a usable provider"
+    return f"Waiting for {subject}: {'; '.join(parts) or 'no provider is ready yet'}. Ctrl-] then B for options."
+
+
+def _attach_task_ordinals(store: BridgeStore, records: list[dict[str, Any]]) -> None:
+    """Add ``task_ordinal`` (the per-mission task number) next to each record's global ``task_id``."""
+    ids = sorted({int(record["task_id"]) for record in records if record.get("task_id") is not None})
+    if not ids:
+        return
+    marks = ",".join("?" for _ in ids)
+    ordinals = {int(row[0]): int(row[1]) for row in store.db.execute(f"SELECT id,ordinal FROM tasks WHERE id IN ({marks})", ids)}
+    for record in records:
+        if record.get("task_id") is not None:
+            record["task_ordinal"] = ordinals.get(int(record["task_id"]))
 
 
 def project_snapshot(
@@ -106,7 +299,39 @@ def project_snapshot(
     search: str = "",
     event_offset: int = 0,
     event_anchor: int | None = None,
-) -> dict[str, Any]:
+    prompt_chars: int | None = None,
+    *,
+    params: ProjectionParams | None = None,
+) -> Snapshot:
+    """The bounded status projection plus ``needs_you``: what the operator has to do next, or ``None``.
+
+    ``prompt_chars`` limits the task prompt text read from SQLite to that many
+    characters (the console only previews prompts; `task show` has the full text).
+    ``params`` carries the same six values as one object and, when given, replaces them.
+    """
+    if params is not None:
+        task_limit, task_offset, search = params.task_limit, params.task_offset, params.search
+        event_offset, event_anchor, prompt_chars = params.event_offset, params.event_anchor, params.prompt_chars
+    snapshot = _project_snapshot(store, mission_id, task_limit, task_offset, search, event_offset, event_anchor, prompt_chars)
+    hold = store.review_hold(mission_id)
+    # ``hold`` is set while the controller waits for the operator's decision on a
+    # reviewed task before it starts the next one: {"reason": "review",
+    # "task_ordinal", "tasks", "since"}; ``None`` otherwise.
+    snapshot["hold"] = {key: value for key, value in hold.items() if key not in {"marker", "task_id"}} if hold else None
+    snapshot["needs_you"] = needs_attention(cast("dict[str, Any]", snapshot))  # a TypedDict is a plain dict at run time
+    return snapshot
+
+
+def _project_snapshot(
+    store: BridgeStore,
+    mission_id: str,
+    task_limit: int | None = None,
+    task_offset: int = 0,
+    search: str = "",
+    event_offset: int = 0,
+    event_anchor: int | None = None,
+    prompt_chars: int | None = None,
+) -> Snapshot:
     """Project monitor state using bounded queries and persisted runtime evidence only.
 
     `task_limit=None` still uses a bounded default page. Aggregate counts are SQL
@@ -123,12 +348,21 @@ def project_snapshot(
         needle = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         params.extend((needle, needle))
 
-    task_total = int(store.db.execute(f"SELECT COUNT(*) FROM tasks WHERE {where}", params).fetchone()[0])
+    counters = store.task_counters(mission_id)
+    # Only a search needs to look at task text; the unfiltered total is maintained.
+    task_total = int(store.db.execute(f"SELECT COUNT(*) FROM tasks WHERE {where}", params).fetchone()[0]) if search else counters["total"]
+    columns, column_params = "*", []
+    if prompt_chars is not None:
+        # Read only the head of each prompt: a task may hold up to 1 MiB of text.
+        names = [str(row[1]) for row in store.db.execute("PRAGMA table_info(tasks)")]
+        trimmed = {"prompt", "original_prompt"}
+        columns = ",".join(f"substr({name},1,?) AS {name}" if name in trimmed else name for name in names)
+        column_params = [max(1, int(prompt_chars))] * sum(name in trimmed for name in names)
     rows = store.db.execute(
-        f"SELECT * FROM tasks WHERE {where} ORDER BY priority DESC,ordering,id LIMIT ? OFFSET ?",
-        (*params, limit, offset),
+        f"SELECT {columns} FROM tasks WHERE {where} ORDER BY priority DESC,ordering,id LIMIT ? OFFSET ?",
+        (*column_params, *params, limit, offset),
     ).fetchall()
-    tasks = [store._task_dict(row) for row in rows]
+    tasks = store._task_dicts(rows)
     if tasks:
         placeholders = ",".join("?" for _ in tasks)
         amendment_rows = store.db.execute(
@@ -146,33 +380,17 @@ def project_snapshot(
             amendments[int(item["task_id"])].append(item)
         for task in tasks:
             task["amendments"] = amendments[int(task["id"])]
-    counts = {str(row[0]): int(row[1]) for row in store.db.execute(
-        "SELECT status,COUNT(*) FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED') GROUP BY status", (mission_id,)
-    )}
-    proposal_counts = {str(row[0]): int(row[1]) for row in store.db.execute(
-        "SELECT proposal_status,COUNT(*) FROM tasks WHERE mission_id=? AND origin='agent-proposal' GROUP BY proposal_status", (mission_id,)
-    )}
-    criterion_row = store.db.execute(
-        "SELECT COALESCE(SUM(json_array_length(acceptance_json)),0), "
-        "COALESCE(SUM(CASE WHEN status='COMPLETED' THEN json_array_length(acceptance_json) ELSE 0 END),0) "
-        "FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')", (mission_id,),
-    ).fetchone()
-    criterion_total, criterion_verified = int(criterion_row[0]), int(criterion_row[1])
+    counts = counters["status"]
+    proposal_counts = counters["proposal"]
+    criterion_total, criterion_verified = counters["criteria_total"], counters["criteria_verified"]
 
     # Keep histories bounded regardless of mission lifetime. State projections
     # below use indexed latest-kind queries so high event churn cannot hide them.
-    event_where = "mission_id=?"
-    event_params: tuple[Any, ...] = (mission_id,)
-    if event_anchor is not None:
-        event_where += " AND id<=?"
-        event_params += (int(event_anchor),)
-    event_rows = store.db.execute(
-        f"SELECT * FROM events WHERE {event_where} ORDER BY id DESC LIMIT 20 OFFSET ?",
-        (*event_params, max(0, int(event_offset))),
-    ).fetchall()
+    event_rows = _event_page_rows(store, mission_id, event_anchor, max(0, int(event_offset)))
     events = [_decode_event(row) for row in reversed(event_rows)]
     latest_selection = _latest_of_kinds(store, mission_id, ("capacity-refresh", "provider-selection"))
     latest_wait = _latest_event(store, mission_id, "provider-wait")
+    latest_provider_selection = _latest_event(store, mission_id, "provider-selection")
     latest_progress = _latest_event(store, mission_id, "task-verified")
     latest_handoff = _latest_event(store, mission_id, "provider-handoff")
     latest_station_observation = _latest_event(store, mission_id, "station-observation")
@@ -187,10 +405,11 @@ def project_snapshot(
     for operation in operations:
         operation["configured_model"] = operation["model"] or "unknown"
         operation["model_source"] = "scheduler-configured pin"
-    active = next((op for op in operations if op["status"] in {"INTENT", "PREPARED", "RUNNING"}), None)
+    _attach_task_ordinals(store, [*events, *operations])
+    active = next((op for op in operations if op["status"] in ACTIVE_OPERATION_STATUSES), None)
     latest_op = operations[0] if operations else None
     if active is not None:
-        active_task = store.get_task(int(active["task_id"]))
+        active_task: dict[str, Any] | None = store.get_task(int(active["task_id"]))
     else:
         current_row = store.db.execute(
             "SELECT * FROM tasks WHERE mission_id=? AND status IN ('RUNNING','VERIFYING','READY') "
@@ -294,6 +513,8 @@ def project_snapshot(
     latest_mode = _latest_event(store, mission_id, "controller-mode")
     mode_data = (latest_mode or {}).get("data", {})
     actual_mode = mode_data.get("actual_mode", "unknown") if isinstance(mode_data, dict) and mode_data.get("verified") is True else "unknown"
+    if actual_mode == "autonomous":  # the name earlier controllers recorded for Background mode
+        actual_mode = "background"
     configured_mode = configured["configured_mode"]
     suspend_data = (latest_suspend or {}).get("data", {})
     db = store.db
@@ -301,6 +522,17 @@ def project_snapshot(
         "SELECT id FROM commands INDEXED BY commands_mission_fifo WHERE mission_id=? AND status='QUEUED' ORDER BY rowid LIMIT 100", (mission_id,)
     ).fetchall()
     pending_commands = [store.get_command(str(row[0])) for row in pending_rows]
+    waiting = None
+    if (
+        mission["status"] == "RUNNING"
+        and latest_wait is not None
+        and active is None
+        and (latest_provider_selection is None or int(latest_wait["id"]) > int(latest_provider_selection["id"]))
+        and isinstance(latest_wait["data"], dict)
+    ):
+        waiting = waiting_from_wait(latest_wait["data"], now, latest_wait.get("created_at"))
+    latest_failure = _latest_event(store, mission_id, "controller-failed") if mission["status"] == "FAILED" else None
+    failure_data = (latest_failure or {}).get("data", {})
     timed_operation = active or latest_op or {}
     began = _event_time(timed_operation.get("created_at"))
     ended = now if active else _event_time(timed_operation.get("updated_at"))
@@ -319,6 +551,7 @@ def project_snapshot(
         "pending_commands": pending_commands,
         "operations": list(reversed(operations[:20])),
         "events": events[-20:],
+        "operator_events": latest_operator_events(store, mission_id, anchor=event_anchor),
         "event_page": {"offset": max(0, int(event_offset)), "limit": 20, "returned": len(events)},
         "stations": stations,
         "station_config": configured,
@@ -352,8 +585,11 @@ def project_snapshot(
             "source_age_seconds": max(0, int(now - source_time)) if source_time is not None else None,
             "live": False,
         },
+        "waiting": waiting,
         "lifecycle": {
             "status": mission["status"],
+            "failure_reason": failure_data.get("reason") if isinstance(failure_data, dict) else None,
+            "failed_at": (latest_failure or {}).get("created_at"),
             "controller": controller_data.get("status", "unknown") if controller_verified else "unknown",
             "controller_event_at": (latest_controller or {}).get("created_at") if controller_verified else None,
             "controller_source": "verified persisted ownership event" if controller_verified else "unavailable",

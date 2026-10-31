@@ -13,22 +13,18 @@ from pathlib import Path
 
 from llm_tools.bridge_runtime import _process_start_token
 from llm_tools.bridge_store import BridgeStore, MissionLock
+from tests.conftest import scaled, wait_for as _shared_wait_for
 
 
 def _call(env: dict[str, str], *args: object) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "llm_tools.bridge", *map(str, args)],
-        env=env, text=True, capture_output=True, timeout=8,
+        env=env, text=True, capture_output=True, timeout=scaled(8),
     )
 
 
-def _wait(predicate, timeout: float = 8) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.05)
-    assert predicate(), "controller force-stop state was not reached"
+def _wait(predicate, timeout: float = 8):
+    return _shared_wait_for(predicate, timeout, 0.05, message="controller force-stop state was not reached")
 
 
 def _controller_locked(state: Path, mission_id: str) -> bool:
@@ -89,10 +85,10 @@ def test_force_stop_refuses_stale_ready_pid_while_real_controller_owns_lock(tmp_
     finally:
         if owner.poll() is None:
             os.killpg(owner.pid, signal.SIGTERM)
-            owner.wait(timeout=3)
+            owner.wait(timeout=scaled(3))
         if foreign.poll() is None:
             os.killpg(foreign.pid, signal.SIGTERM)
-            foreign.wait(timeout=3)
+            foreign.wait(timeout=scaled(3))
 
 
 def test_force_stop_terminates_matching_controller_before_marking_stopped(tmp_path: Path, env: dict[str, str]) -> None:
@@ -132,7 +128,7 @@ def test_force_stop_terminates_matching_controller_before_marking_stopped(tmp_pa
     finally:
         if owner.poll() is None:
             os.killpg(owner.pid, signal.SIGTERM)
-            owner.wait(timeout=3)
+            owner.wait(timeout=scaled(3))
 
 
 def test_force_stop_terminates_owned_verifier_before_controller(tmp_path: Path, env: dict[str, str]) -> None:
@@ -207,3 +203,65 @@ def _process_alive(pid: int) -> bool:
         return status[status.rfind(")") + 2:].split()[0] != "Z"
     except OSError:
         return True
+
+
+def _live_provider(tmp_path: Path) -> tuple[int, str, subprocess.Popen]:
+    """A provider process whose start token was recorded while it was alive."""
+    provider = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path, start_new_session=True)
+    deadline = time.monotonic() + 3
+    token = ""
+    while not token and time.monotonic() < deadline:
+        token = _process_start_token(provider.pid)
+        time.sleep(0.01)
+    assert token
+    return provider.pid, token, provider
+
+
+def test_terminating_a_provider_that_already_exited_is_a_no_op_not_an_identity_mismatch(tmp_path: Path) -> None:
+    from llm_tools.bridge_runtime import _terminate_owned_process_group
+
+    pid, token, provider = _live_provider(tmp_path)
+    os.killpg(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 3
+    while _process_start_token(pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _terminate_owned_process_group(pid, token) is None  # zombie: nothing to signal
+    provider.wait(timeout=3)
+    assert _terminate_owned_process_group(pid, token) is None  # reaped: no /proc entry
+
+
+def test_terminating_still_refuses_a_live_process_with_a_different_identity(tmp_path: Path) -> None:
+    import pytest
+
+    from llm_tools.bridge_runtime import _terminate_owned_process_group
+
+    pid, token, provider = _live_provider(tmp_path)
+    try:
+        with pytest.raises(PermissionError, match="persisted identity does not match"):
+            _terminate_owned_process_group(pid, token + "-reused")
+        assert provider.poll() is None
+    finally:
+        os.killpg(pid, signal.SIGKILL)
+        provider.wait(timeout=3)
+
+
+def test_force_stop_continues_when_the_recorded_provider_process_has_already_exited(tmp_path: Path, env: dict[str, str]) -> None:
+    state = tmp_path / "state"
+    env["LLM_BRIDGE_STATE_DIR"] = str(state)
+    pid, token, provider = _live_provider(tmp_path)
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("mission", "objective", cwd=tmp_path)
+        mission_id = str(mission["id"])
+        store.set_mission_status(mission_id, "RUNNING")
+        task_id = store.add_task(mission_id, "work")
+        operation = store.begin_operation(task_id, iteration=1, station="codex")
+        store.mark_operation_running(operation, pane_id="", route_id="", model="")
+        store.record_operation_process(operation, process_pid=pid, process_start=token)
+    os.killpg(pid, signal.SIGKILL)  # the provider exits before the operator forces the stop
+    provider.wait(timeout=3)
+
+    stopped = _call(env, "stop", "--mission", mission_id, "--force")
+
+    assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+    assert "refusing to signal" not in stopped.stdout + stopped.stderr
+    assert _mission_status(state / "bridge.sqlite3", mission_id) == "STOPPED"

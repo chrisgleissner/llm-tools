@@ -6,23 +6,18 @@ import sys
 import time
 
 from llm_tools.bridge_store import BridgeStore, MissionLock
+from tests.conftest import scaled, wait_for as _shared_wait_for
 
 
 def call(env, *args):
     result = subprocess.run([sys.executable, "-m", "llm_tools.bridge", *map(str, args)],
-                            env=env, text=True, capture_output=True, timeout=15)
+                            env=env, text=True, capture_output=True, timeout=scaled(15))
     assert result.returncode == 0, result.stderr + result.stdout
     return result.stdout
 
 
 def wait_for(predicate, timeout=15):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        value = predicate()
-        if value:
-            return value
-        time.sleep(.05)
-    assert predicate(), "detached mission did not reach expected state"
+    return _shared_wait_for(predicate, timeout, .05, message="detached mission did not reach expected state")
 
 
 def controller_released(state, mission):

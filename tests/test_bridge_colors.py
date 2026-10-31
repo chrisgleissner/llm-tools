@@ -17,8 +17,9 @@ import time
 
 import pytest
 
-from llm_tools import bridge_theme, bridge_tui
+from llm_tools import bridge_draw, bridge_theme, bridge_tui
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import scaled
 
 
 def _luminance(rgb: tuple[int, int, int]) -> float:
@@ -87,11 +88,11 @@ def test_eight_color_fallback_keeps_semantic_roles_legible(theme) -> None:
         )
         fitted = bridge_theme.fit_role_color(color, 8, theme)
         assert 0 <= fitted < 8
-        assert _contrast(bridge_theme._xterm_rgb(fitted), background) >= 4.5, (theme, role, fitted)
+        assert _contrast(bridge_theme._xterm_rgb(fitted), background) >= bridge_theme.LOW_COLOR_CONTRAST, (theme, role, fitted)
 
 
 def test_selected_role_is_high_contrast_and_monochrome_keeps_emphasis(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "_ROLE_ATTRS", {"brand": 16})
+    monkeypatch.setattr(bridge_draw, "_ROLE_ATTRS", {"brand": 16})
     assert bridge_tui.role_attr("selected") & bridge_tui.curses.A_REVERSE
     assert bridge_tui.role_attr("selected") & bridge_tui.curses.A_BOLD
     assert bridge_tui.role_attr("selected") == (
@@ -122,7 +123,7 @@ def test_curses_color_init_respects_no_color_and_maps_palette(monkeypatch) -> No
     assert calls == []
     assert bridge_tui.initialize_colors({"TERM": "xterm", "LLM_BRIDGE_THEME": "light"}, is_tty=True)
     assert calls
-    assert all(0 <= fg < 8 and bg == -1 for _pair, fg, bg in calls)
+    assert all(-1 <= fg < 8 and bg == -1 for _pair, fg, bg in calls)  # info keeps the terminal foreground
     assert bridge_tui._CURRENT_THEME == "light"
     assert not bridge_tui.role_attr("error") & curses.A_BOLD
     assert not bridge_tui.role_attr("heading") & curses.A_BOLD
@@ -140,7 +141,7 @@ class _RecordingWindow:
 
 
 def test_put_applies_semantic_role_attributes(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: {"error": 123}.get(role, 0))
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: {"error": 123}.get(role, 0))
     window = _RecordingWindow()
     bridge_tui._put(window, 2, 3, "Rejected: no capacity", 80, role="error")
     assert window.calls == [(2, 3, "Rejected: no capacity", 80, 123)]
@@ -188,12 +189,12 @@ def test_real_curses_pty_obeys_color_mode(tmp_path: Path, env: dict[str, str], n
         has_256_color = re.search(rb"\x1b\[[0-9;]*38;5;[0-9]+m", output) is not None
         assert has_256_color is not no_color
         os.write(master, b"\x04")
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))
         assert process.returncode == 0
     finally:
         if process.poll() is None:
             process.terminate()
-            process.wait(timeout=2)
+            process.wait(timeout=scaled(2))
         os.close(master)
 
 
@@ -218,22 +219,22 @@ def test_styled_usage_and_response_keep_column_spacing_and_indentation(monkeypat
     state.snapshot = {"usage": {"text": "Provider       Scope       Remaining\ncodex          5h          72%"}}
     window = Window()
     bridge_tui._draw_full(window, state)
-    lines = [call[2] for call in window.calls]
-    assert "  Provider       Scope       Remaining" in lines
-    assert "  codex          5h          72%" in lines
+    lines = [(call[1], call[2]) for call in window.calls]
+    assert (2, "Provider       Scope       Remaining") in lines  # two-cell gutter, spacing untouched
+    assert (2, "codex          5h          72%") in lines
     state.output.extend(['{', '    "status": "FAILED"', '}'])
     bridge_tui._draw_response_overlay(window, state)
     assert '    "status": "FAILED"' in [call[2] for call in window.calls]
 
 
 def test_active_navigation_and_negative_readiness_have_unambiguous_emphasis(monkeypatch) -> None:
-    monkeypatch.setattr(bridge_tui, "role_attr", lambda role: 100 if role == "selected" else 10)
+    monkeypatch.setattr(bridge_draw, "role_attr", lambda role: 100 if role == "accent" else 10)
     window = _RecordingWindow()
     bridge_tui._draw_navigation(window, 1, "  ", 100)
-    assert window.calls[-1][2] == "[2 Orders]"
+    assert window.calls[-1][2] == "[2 Tasks]"
     assert window.calls[-1][-1] == 100
     assert window.calls[0][-1] == 10
-    assert window.calls[0][2].index("[2 Orders]") == window.calls[-1][1]
+    assert window.calls[0][2].index("[2 Tasks]") == window.calls[-1][1]
     assert bridge_tui._status_role("Next: none ready") == "dim"
     assert bridge_tui._status_role("ready=False") == "warn"
 

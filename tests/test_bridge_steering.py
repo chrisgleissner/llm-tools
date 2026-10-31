@@ -28,10 +28,11 @@ def test_replace_is_revisioned_and_preserves_original_objective(tmp_path: Path) 
         })
         task = store.get_task(task_id)
 
-        assert result["result"]["status"] == "QUEUED_FOR_BOUNDARY"
+        assert result["result"]["status"] == "APPLIED"  # nothing runs the task, so there is no boundary to wait for
         assert task["original_prompt"] == "original task"
         assert task["revision"] == 2
-        assert task["pending"]["prompt"] == "Revised remaining work"
+        assert task["prompt"] == "Revised remaining work"
+        assert task["pending"] == {}
 
 
 def test_steer_cli_accepts_verbatim_prompt_file(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -48,7 +49,7 @@ def test_steer_cli_accepts_verbatim_prompt_file(tmp_path: Path, monkeypatch, cap
     output = json.loads(capsys.readouterr().out)
     assert output["result"]["kind"] == "replace"
     with bridge.open_store() as store:
-        assert store.get_task(task_id)["pending"]["prompt"] == "Keep line one\n\nKeep trailing newline\n"
+        assert store.get_task(task_id)["prompt"] == "Keep line one\n\nKeep trailing newline\n"
 
 
 def test_review_creates_dependent_operator_review_task(tmp_path: Path) -> None:

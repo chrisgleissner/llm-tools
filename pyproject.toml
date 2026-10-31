@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-tools"
-version = "1.2.1"
+version = "1.3.0"
 description = "Local LLM CLI usage and scheduling tools"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,6 +24,21 @@ include = ["llm_tools*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "fuzz: seeded chaotic-input tests for LLM Bridge (tests/fuzz); deselect with -m 'not fuzz' for the fast inner loop",
+  "tmux: starts a real tmux server (applied automatically by tests/conftest.py)",
+  "pty: allocates a real pseudo-terminal (applied automatically by tests/conftest.py)",
+  "subprocess: spawns real child processes such as CLIs, controllers or fake providers (applied automatically by tests/conftest.py)",
+  "slow: takes more than a few seconds even on an idle host (applied automatically by tests/conftest.py)",
+]
+
+[tool.mypy]
+# Dev-only type check of the Bridge modules (CI runs `python -m mypy`; mypy is not a runtime dependency).
+# Other modules are followed silently so their own findings are not reported here.
+python_version = "3.11"
+files = ["llm_tools/bridge*.py", "llm_tools/terminal.py"]
+follow_imports = "silent"
+ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["llm_tools"]

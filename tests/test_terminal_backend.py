@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import re
 import subprocess
 import sys
 import time
@@ -11,18 +12,14 @@ from pathlib import Path
 import pytest
 
 from llm_tools.terminal import TmuxTerminalBackend, TerminalHandle
+from tests.conftest import scaled, wait_for as _shared_wait_for
 
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
 
 
 def _wait_for(predicate, timeout: float = 3.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return bool(predicate())
+    return bool(_shared_wait_for(predicate, timeout, 0.05))
 
 
 def _fake_native_cli(path: Path) -> list[str]:
@@ -31,7 +28,7 @@ def _fake_native_cli(path: Path) -> list[str]:
         "sys.stdout.write('READY\\x1b[31m RED \\x1b[0m\\x1b[?1049hALT-SCREEN\\n'); sys.stdout.flush()\n"
         "line = sys.stdin.readline().rstrip('\\n')\n"
         "size = struct.unpack('HHHH', fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b'\\0'*8))[:2]\n"
-        "print('INPUT=' + line + ' SIZE=' + str(size[0]) + 'x' + str(size[1]), flush=True); time.sleep(0.3)\n"
+        "print('INPUT=' + line + ' SIZE=' + str(size[0]) + 'x' + str(size[1]), flush=True); time.sleep(" + repr(scaled(0.3)) + ")\n"
         "sys.stdout.write('\\x1b[?1049l'); sys.stdout.flush()\n",
         encoding="utf-8",
     )
@@ -96,8 +93,9 @@ def test_private_tmux_station_preserves_native_terminal_io_and_cleans_up(tmp_pat
             text=True,
             capture_output=True,
         ).stdout
-        assert "Bridge: Ctrl-] then B" in status_left and "pane_index" in status_left
-        assert "Provider: Ctrl-] then P" in status_right and "pane_index" in status_right
+        # Key names carry their own colour markup; the words read as before once it is removed.
+        assert "Bridge: Ctrl-] then B" in re.sub(r"#\[[^\]]*\]", "", status_left) and "pane_index" in status_left
+        assert "Provider: Ctrl-] then P" in re.sub(r"#\[[^\]]*\]", "", status_right) and "pane_index" in status_right
         root_bindings = subprocess.run(
             ["tmux", "-S", str(handle.socket_path), "list-keys", "-T", "root"],
             check=True,

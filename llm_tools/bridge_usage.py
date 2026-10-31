@@ -10,11 +10,13 @@ def collect_usage() -> dict[str, Any]:
     from . import usage
     cfg = usage.Config()
     cfg.show_remaining_time = True
-    cfg.show_source = True
+    # The source column is a long cache path that pushes rows past 170 cells.
+    cfg.show_source = False
     cfg.show_copilot_credits = True
     cfg.color_enabled = False
     cfg.progress_enabled = False
-    # Keep all columns; the Bridge view wraps them to the available width.
+    # Keep every remaining column on one line; the Bridge view clips and pans
+    # wide rows instead of wrapping them, so a table row is never split.
     cfg.terminal_width = 10000
     return usage.dashboard_snapshot(cfg)
 
@@ -30,7 +32,7 @@ class EmbeddedUsage:
         self._lock = threading.Lock()
         self._running = False
         self._next_refresh = 0.0
-        self._observed = None
+        self._observed: float | None = None
         self._data: dict[str, Any] = {}
         self._error = ''
 

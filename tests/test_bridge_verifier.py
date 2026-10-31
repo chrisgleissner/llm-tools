@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import sys
 import threading
@@ -12,6 +11,7 @@ import pytest
 
 from llm_tools.bridge_runtime import run_configured_verifier
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import scaled
 
 
 def _verifying_mission(tmp_path, verifier):
@@ -151,7 +151,7 @@ def test_task_amendment_during_verifier_cannot_commit_old_revision_evidence(tmp_
     assert started.exists()
     store.amend_task(task_id, prompt="new revision")
     release.write_text("continue", encoding="ascii")
-    thread.join(timeout=5)
+    thread.join(timeout=scaled(5))
 
     assert not thread.is_alive()
     task = store.get_task(task_id)
@@ -285,6 +285,29 @@ def test_verifier_refuses_unverified_child_identity_and_marks_managed_launch_fai
     assert managed["status"] == "FAILED"
     assert managed["process_pid"] is None and managed["process_start"] is None
     assert store.get_task(task_id)["status"] == "VERIFYING"
+
+
+def test_verifier_that_exits_before_its_identity_is_read_is_a_normal_fast_exit(tmp_path, monkeypatch) -> None:
+    from llm_tools import bridge_runtime
+
+    store, mission, task_id = _verifying_mission(tmp_path, {"argv": [sys.executable, "-c", "print('quick pass')"], "timeout_seconds": 5})
+    real_token = bridge_runtime._process_start_token
+
+    def token_after_exit(pid: int) -> str:
+        # Reproduces the race: the verifier has already exited when /proc is read.
+        deadline = time.monotonic() + 5
+        while real_token(pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return real_token(pid)
+
+    monkeypatch.setattr(bridge_runtime, "_process_start_token", token_after_exit)
+
+    outcome = run_configured_verifier(store, mission["id"], task_id, runtime=tmp_path / "runtime")
+
+    assert outcome["passed"] is True
+    assert store.get_mission(mission["id"])["status"] == "RUNNING"
+    managed = store.db.execute("SELECT status,exit_code FROM managed_processes").fetchone()
+    assert (managed["status"], managed["exit_code"]) == ("EXITED", 0)
 
 
 def test_verifier_timeout_escalates_when_child_ignores_sigterm(tmp_path) -> None:

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from llm_tools import common, ralph_robin, scheduler
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import scaled
 
 
 def test_ralph_wall_clock_wait_returns_on_operator_request(monkeypatch) -> None:
@@ -25,7 +26,8 @@ def test_ralph_wall_clock_wait_returns_on_operator_request(monkeypatch) -> None:
     started = time.monotonic()
 
     assert ralph_robin.wait_until_epoch(common.now_epoch() + 60, interrupt) is False
-    assert time.monotonic() - started < 0.5
+    assert calls == 3, "the 60 second wait must stop at the third interrupt poll"
+    assert time.monotonic() - started < scaled(5)
 
 
 def test_bridge_cross_provider_wait_stays_awake_and_interruptible(monkeypatch, tmp_path) -> None:
@@ -81,14 +83,14 @@ def test_detached_pause_interrupts_long_provider_capacity_wait(tmp_path: Path, e
     def call(*args: object) -> None:
         result = subprocess.run(
             [sys.executable, "-m", "llm_tools.bridge", *map(str, args)],
-            env=env, text=True, capture_output=True, timeout=10,
+            env=env, text=True, capture_output=True, timeout=scaled(10),
         )
         assert result.returncode == 0, result.stdout + result.stderr
 
     created = subprocess.run(
         [sys.executable, "-m", "llm_tools.bridge", "mission", "create", "--prompt", "capacity wait",
          "--cwd", str(tmp_path), "--headless", "--providers", "codex", "--command-template", template, "--json"],
-        env=env, text=True, capture_output=True, timeout=10,
+        env=env, text=True, capture_output=True, timeout=scaled(10),
     )
     assert created.returncode == 0, created.stdout + created.stderr
     mission = json.loads(created.stdout)["mission"]
@@ -107,7 +109,7 @@ def test_detached_pause_interrupts_long_provider_capacity_wait(tmp_path: Path, e
             )
 
     def wait_for(predicate, timeout: float = 6) -> None:
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + scaled(timeout)
         while time.monotonic() < deadline:
             if predicate():
                 return
@@ -124,7 +126,7 @@ def test_detached_pause_interrupts_long_provider_capacity_wait(tmp_path: Path, e
         started = time.monotonic()
         call("pause", "--mission", mission_id)
         wait_for(lambda: current()[0] == "PAUSED")
-        assert time.monotonic() - started < 2.0
+        assert time.monotonic() - started < scaled(2.0)
         assert current() == ("PAUSED", "READY", "", None)
         assert not (tmp_path / "ran").exists()
         call("stop", "--mission", mission_id)

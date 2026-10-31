@@ -15,6 +15,7 @@ import pytest
 
 from llm_tools.bridge_input import cell_width
 from llm_tools.terminal import TmuxTerminalBackend
+from tests.conftest import scaled
 
 
 @pytest.mark.skipif(shutil.which('tmux') is None, reason='tmux required')
@@ -69,5 +70,5 @@ def test_attached_control_caret_and_exact_source_cells(tmp_path: Path, env):
     finally:
         backend.stop(handle)
         if client.poll() is None: client.terminate()
-        client.wait(timeout=5)
+        client.wait(timeout=scaled(5))
         os.close(master)

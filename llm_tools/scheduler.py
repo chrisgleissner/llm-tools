@@ -29,8 +29,9 @@ in its normal interactive form attached directly to that terminal: output,
 key input, window resizes, and Ctrl-C behave exactly as if the CLI had been
 started directly in the shell. Without a terminal (pipes, cron, systemd
 resume) or with --headless, the non-interactive form (claude --print,
-codex exec, copilot --prompt, kilo run --dir, opencode run, mmx run --auto)
-runs on a captured PTY instead.
+codex exec, copilot --prompt, kilo run --dir, opencode run, mmx text chat)
+runs on a captured PTY instead. MiniMax has no interactive form; it always
+runs headless.
 
 Examples:
   llm-scheduler --provider codex --prompt-file task.md
@@ -144,6 +145,9 @@ class SchedulerConfig:
     wake_armed_target: int = 0
     exact_stdout: bool = False
     claude_stream_json: bool = False
+    # Internal: file the headless provider reads its prompt from (set by
+    # command_argv), so the prompt is not in the process arguments.
+    prompt_stdin: str = field(default="", repr=False, compare=False)
     ralph_robin_active: bool = False
     ralph_robin_providers: str = ""
     # Ordered fields stamped on each relayed provider line (see
@@ -394,9 +398,15 @@ def _record_popen_process(cfg: SchedulerConfig, proc: subprocess.Popen[Any]) -> 
 
 
 def provider_env(cfg: SchedulerConfig) -> dict[str, str] | None:
-    if not cfg.ralph_robin_active and not cfg.env_overrides:
+    """Environment for the provider process: other providers' credentials removed.
+
+    Returns None (inherit unchanged) only when nothing needs to change.
+    """
+    foreign = common.credential_variables_to_remove(os.environ, cfg.provider)
+    exposes_root = common.package_root() in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+    if not cfg.ralph_robin_active and not cfg.env_overrides and not foreign and not exposes_root:
         return None
-    env = os.environ.copy()
+    env = common.scrubbed_environment(os.environ, cfg.provider)
     if cfg.ralph_robin_active:
         env["LLM_TOOLS_RALPH_ROBIN_ACTIVE"] = "1"
         env["LLM_TOOLS_RALPH_ROBIN_SELECTED_PROVIDER"] = cfg.provider
@@ -474,6 +484,12 @@ MODEL_FLAG_PROVIDERS = frozenset({"claude", "codex", "copilot", "kilo", "opencod
 # real provider-rotation attempts.
 SLASH_MODEL_PROVIDERS = frozenset({"kilo", "opencode"})
 
+ZAI_LAUNCH_HINT = (
+    "--provider zai has no launch CLI. Launch Kilo or OpenCode instead: use a route "
+    '(e.g. [routes.kilo-zai-glm-47] with capacity.policy = "delegate" and provider = "zai") '
+    'or set [providers.kilo] capacity_provider = "zai"'
+)
+
 
 def provider_model_flags(provider: str, model: str) -> list[str]:
     """The `--model` tokens to inject for ``provider``, or empty when unsupported."""
@@ -506,7 +522,7 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
             # route (``provider=kilo``/``opencode``), not directly. A bare
             # ``--provider zai`` invocation has no launch CLI, so we surface
             # the contract here.
-            common.err("--provider zai must be launched through a route (e.g. [routes.kilo-zai-glm-4.7])")
+            common.err(ZAI_LAUNCH_HINT)
             raise SystemExit(2)
         return ["copilot", *m, "-C", cfg.cwd, "-i", prompt]
     if cfg.provider == "codex":
@@ -533,7 +549,7 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
     if cfg.provider == "minimax":
         return ["mmx", "text", "chat", "--message", prompt]
     if cfg.provider == "zai":
-        common.err("--provider zai must be launched through a route (e.g. [routes.kilo-zai-glm-4.7])")
+        common.err(ZAI_LAUNCH_HINT)
         raise SystemExit(2)
     return ["copilot", *m, "-C", cfg.cwd, "--prompt", prompt]
 
@@ -545,7 +561,36 @@ def command_argv(cfg: SchedulerConfig, logs: common.RunLogs, prompt: str) -> lis
         argv = provider_default_argv(cfg, prompt)
     if cfg.command_argv_transform is not None:
         argv = cfg.command_argv_transform(argv)
-    return argv
+    argv = prompt_to_stdin(cfg, logs, argv, prompt)
+    # The provider is started in the mission folder. Resolve it now, through
+    # absolute PATH entries only, so a file of that name in the folder cannot
+    # take its place.
+    return [common.resolve_trusted_executable(argv[0]), *argv[1:]] if argv else argv
+
+
+def prompt_to_stdin(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], prompt: str) -> list[str]:
+    """Move the prompt of a headless Codex or Claude run from argv to stdin.
+
+    Arguments of a running process are readable by every process of the same
+    user through ``/proc/<pid>/cmdline`` (and by ``ps``). ``codex exec -`` and
+    ``claude --print`` read the prompt from stdin, so the run reads the 0600
+    ``prompt.txt`` of its run directory instead. Native (tmux) launches and
+    attached terminals need the prompt as an argument and keep it there; custom
+    command templates and other providers are left unchanged.
+    """
+    cfg.prompt_stdin = ""
+    if cfg.command_template or cfg.command_argv_transform is not None or cfg.attached or cfg.exec_mode == "tmux":
+        return argv
+    if not prompt or not argv or argv[-1] != prompt or not (logs.run_dir / "prompt.txt").is_file():
+        return argv
+    if cfg.provider == "codex" and argv[:2] == ["codex", "exec"]:
+        rewritten = [*argv[:-1], "-"]
+    elif cfg.provider == "claude" and argv[:1] == ["claude"] and "--print" in argv:
+        rewritten = argv[:-1]
+    else:
+        return argv
+    cfg.prompt_stdin = str(logs.run_dir / "prompt.txt")
+    return rewritten
 
 
 def scheduler_model_description(cfg: SchedulerConfig) -> str:
@@ -657,7 +702,7 @@ def schedule_resume_and_suspend(cfg: SchedulerConfig, logs: common.RunLogs, targ
         print(f"dry-run: would schedule {unit}.timer at epoch {target_epoch} ({common.format_local_epoch(target_epoch)}); logs: {logs.run_dir}")
         return True
     env_path = os.environ.get("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
-    py_path = os.environ.get("PYTHONPATH") or str(Path(__file__).resolve().parent.parent)
+    py_path = os.pathsep.join(filter(None, (str(Path(__file__).resolve().parent.parent), os.environ.get("PYTHONPATH", ""))))
     proc = subprocess.run(
         [
             "systemd-run",
@@ -668,10 +713,7 @@ def schedule_resume_and_suspend(cfg: SchedulerConfig, logs: common.RunLogs, targ
             f"--setenv=PATH={env_path}",
             f"--setenv=PYTHONPATH={py_path}",
             f"--working-directory={cfg.cwd}",
-            sys.executable,
-            "-m",
-            "llm_tools.scheduler",
-            *argv[1:],
+            *common.python_module_argv("llm_tools.scheduler", *argv[1:]),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -863,6 +905,7 @@ def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path,
         env=provider_env(cfg),
         on_process_started=lambda pid: _record_spawned_process(cfg, pid) if cfg.process_started else None,
         max_output_bytes=cfg.max_output_bytes,
+        stdin_path=Path(cfg.prompt_stdin) if cfg.prompt_stdin else None,
     )
     return status
 
@@ -900,9 +943,44 @@ def render_claude_content_block(block: Any) -> str:
     return ""
 
 
+# Stands in for tool calls and tool results in the text scanned for blocking
+# prompts. Their content comes from the repository or from the model's tool
+# input, never from the provider CLI, but they still end any pending question.
+TOOL_ACTIVITY_SCAN_MARKER = "\n[tool activity]\n"
+
+
 class ClaudeStreamRenderer:
     def __init__(self) -> None:
         self.rendered_assistant_text = False
+        # Bytes of the last rendered line that may be scanned for blocking
+        # prompts: model text and the final result, never tool input or output.
+        self.scannable = b""
+
+    @staticmethod
+    def scan_event(event: dict[str, Any]) -> str:
+        event_type = str(event.get("type", ""))
+        if event_type in {"assistant", "user"}:
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            blocks = content if isinstance(content, list) else [content]
+            texts: list[str] = []
+            tool_activity = event_type == "user"
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") in {"tool_use", "tool_result"}:
+                    tool_activity = True
+                elif event_type == "assistant":
+                    if isinstance(block, str):
+                        texts.append(block)
+                    elif isinstance(block, dict) and block.get("type") == "text":
+                        texts.append(str(block.get("text", "")))
+            return "".join(texts) + (TOOL_ACTIVITY_SCAN_MARKER if tool_activity else "")
+        if event_type in {"assistant_delta", "content_block_delta"}:
+            delta = event.get("delta")
+            text = delta.get("text") if isinstance(delta, dict) else None
+            return text if isinstance(text, str) else ""
+        if event_type == "result" and isinstance(event.get("result"), str):
+            return str(event["result"])
+        return ""
 
     def render_event(self, event: dict[str, Any]) -> str:
         event_type = str(event.get("type", ""))
@@ -943,14 +1021,17 @@ class ClaudeStreamRenderer:
 
     def render_line(self, line: bytes) -> bytes:
         stripped = line.strip()
+        self.scannable = b""
         if not stripped:
             return b""
         try:
             event = json.loads(stripped.decode("utf-8", "replace"))
         except json.JSONDecodeError:
+            self.scannable = line
             return line
         if not isinstance(event, dict):
             return b""
+        self.scannable = self.scan_event(event).encode("utf-8", "replace")
         rendered = self.render_event(event)
         if rendered and not rendered.endswith("\n"):
             rendered += "\n"
@@ -977,6 +1058,7 @@ class ProgressGuard:
     def note_output(self, combined_tail: str) -> bool:
         """Record fresh output. Returns True if an interactive prompt was seen."""
         self.last_progress = time.time()
+        combined_tail = common.blocking_tail(combined_tail)
         if any(pattern.search(combined_tail) for pattern in common.BLOCKING_PROMPT_PATTERNS):
             return True
         # Only treat the run as "waiting on a question" when the most recent
@@ -1003,12 +1085,24 @@ class ProgressGuard:
         return None
 
 
+def _popen_with_prompt(cfg: SchedulerConfig, argv: list[str]) -> "subprocess.Popen[bytes]":
+    """Start a headless provider with piped output, reading its prompt from the run's prompt file when set."""
+    stdin: Any = None
+    if cfg.prompt_stdin:
+        stdin = open(cfg.prompt_stdin, "rb")
+    try:
+        return subprocess.Popen(argv, cwd=cfg.cwd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg), start_new_session=True)
+    finally:
+        if stdin is not None:
+            stdin.close()
+
+
 def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_file: Path, status_file: Path) -> int:
     import os
     import select
     import signal
 
-    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg), start_new_session=True)
+    proc = _popen_with_prompt(cfg, argv)
     _record_popen_process(cfg, proc)
     assert proc.stdout is not None and proc.stderr is not None
     stdout_fd = proc.stdout.fileno()
@@ -1046,9 +1140,12 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     abort_reason = ""
     guard = ProgressGuard()
 
-    def scan_tail() -> bool:
-        tail = common.strip_ansi(b"".join(combined_parts)[-8000:].decode("utf-8", "replace"))
-        return guard.note_output(tail)
+    scan_buffer = b""
+
+    def scan_tail(scannable: bytes) -> bool:
+        nonlocal scan_buffer
+        scan_buffer = (scan_buffer + scannable)[-8000:]
+        return guard.note_output(common.strip_ansi(scan_buffer.decode("utf-8", "replace")))
 
     while open_fds:
         if time.time() - start > timeout:
@@ -1074,7 +1171,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                             sys.stdout.buffer.flush()
                         except OSError:
                             pass
-                        if scan_tail():
+                        if scan_tail(renderer.scannable):
                             blocking = True
                     stdout_buffer = b""
                 open_fds.pop(fd, None)
@@ -1099,7 +1196,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                         sys.stdout.buffer.flush()
                     except OSError:
                         pass
-                    if scan_tail():
+                    if scan_tail(renderer.scannable):
                         blocking = True
                         break
             else:
@@ -1109,7 +1206,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-                if scan_tail():
+                if scan_tail(chunk):
                     blocking = True
             if blocking:
                 break
@@ -1153,7 +1250,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     import select
     import signal
 
-    proc = subprocess.Popen(argv, cwd=cfg.cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=provider_env(cfg), start_new_session=True)
+    proc = _popen_with_prompt(cfg, argv)
     _record_popen_process(cfg, proc)
     assert proc.stdout is not None and proc.stderr is not None
     stdout_fd = proc.stdout.fileno()
@@ -1251,6 +1348,12 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     return exit_code
 
 
+# Seconds between checks that a Bridge-owned provider pane is still alive. The
+# status file normally reports a finished provider within a second; the pane
+# check only recovers a provider killed before it could write one.
+TMUX_PANE_CHECK_SECONDS = 10
+
+
 def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output_file: Path, status_file: Path) -> int:
     if not common.have_cmd("tmux"):
         output_file.write_text("tmux not installed\n", encoding="utf-8")
@@ -1272,13 +1375,19 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     target = cfg.tmux_pane or f"{session}:{window}"
     command_line = common.argv_to_command_line(argv)
     cmd_file = logs.run_dir / "tmux-command.sh"
-    guard_exports = "export LLM_TOOLS_RALPH_ROBIN_ACTIVE=1\nexport LLM_TOOLS_RALPH_ROBIN_SCHEDULER=guarded\n" if cfg.ralph_robin_active else ""
+    # The script changes into the mission folder first: keep relative PATH entries out of every lookup.
+    guard_exports = f"export PATH={shlex.quote(common.trusted_path())}\n"
+    if cfg.ralph_robin_active:
+        guard_exports += "export LLM_TOOLS_RALPH_ROBIN_ACTIVE=1\nexport LLM_TOOLS_RALPH_ROBIN_SCHEDULER=guarded\n"
     if cfg.ralph_robin_active and cfg.route_id:
         guard_exports += f"export LLM_TOOLS_RALPH_ROBIN_SELECTED_ROUTE={shlex.quote(cfg.route_id)}\n"
     for key, value in cfg.env_overrides.items():
         if not re.fullmatch(r"LLM_BRIDGE_[A-Z0-9_]+", key):
             raise ValueError(f"invalid managed provider environment name: {key}")
         guard_exports += f"export {key}={shlex.quote(str(value))}\n"
+    # A tmux pane inherits the server's environment, not ours; remove other providers' credentials there.
+    for key in sorted(common.credential_variables_to_remove(os.environ, cfg.provider)):
+        guard_exports += f"unset {shlex.quote(key)}\n"
     cmd_file.write_text(
         "#!/usr/bin/env bash\n"
         f"# tmux target: {target}\n"
@@ -1302,23 +1411,38 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             return 143
         tmux(["new-session", "-d", "-s", session, "-n", window, invocation], check=False)
     elif owned_pane:
-        pane_dead = tmux(["display-message", "-p", "-t", target, "#{pane_dead}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
+        pane_state = tmux(["display-message", "-p", "-t", target, "#{pane_dead}\t#{pane_start_command}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout
+        pane_dead, _, start_command = pane_state.rstrip("\n").partition("\t")
+        for _ in range(20):
+            if pane_dead == "1" or "exit 0" not in start_command:
+                break
+            # The idle placeholder (a shell running `exit 0`) may not have exited yet right after the
+            # station was created; give it up to two seconds rather than reporting a live native process.
+            time.sleep(0.1)
+            pane_state = tmux(["display-message", "-p", "-t", target, "#{pane_dead}\t#{pane_start_command}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout
+            pane_dead, _, start_command = pane_state.rstrip("\n").partition("\t")
+        if pane_dead != "1":
+            # A Bridge "waiting for capacity" message pane holds no provider; replace it.
+            if "llm-bridge-wait" in start_command:
+                pane_dead = "1"
         if pane_dead != "1":
             output_file.write_text("Bridge provider pane is busy; refusing to replace a live native process\n", encoding="utf-8")
             status_file.write_text(str(common.AUTONOMY_ABORT_STATUS), encoding="utf-8")
             return common.AUTONOMY_ABORT_STATUS
         if cfg.max_output_bytes > 0:
             pipe_command = common.argv_to_command_line([
-                sys.executable, "-m", "llm_tools.bridge_log_sink",
-                "--path", str(output_file),
-                "--max-bytes", str(cfg.max_output_bytes),
-                "--rotations", str(cfg.max_output_rotations),
+                *common.rooted_module_argv(
+                    "llm_tools.bridge_log_sink",
+                    "--path", str(output_file),
+                    "--max-bytes", str(cfg.max_output_bytes),
+                    "--rotations", str(cfg.max_output_rotations),
+                ),
             ])
         else:
             pipe_command = f"cat >> {shlex.quote(str(output_file))}"
         output_file.parent.mkdir(parents=True, exist_ok=True)
         output_file.touch()
-        respawn = tmux(["respawn-pane", "-k", "-t", target, "-c", cfg.cwd, f"sleep 0.1; {invocation}"], check=False)
+        respawn = tmux(["respawn-pane", "-k", "-t", target, "-c", common.tmux_literal(cfg.cwd), f"sleep 0.1; {invocation}"], check=False)
         if respawn.returncode != 0:
             output_file.write_text("could not respawn provider pane\n", encoding="utf-8")
             status_file.write_text("127", encoding="utf-8")
@@ -1327,7 +1451,7 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             pane_pid = tmux(["display-message", "-p", "-t", target, "#{pane_pid}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
             if pane_pid.isdigit():
                 _record_spawned_process(cfg, int(pane_pid))
-        tmux(["pipe-pane", "-t", target, pipe_command], check=False)
+        tmux(["pipe-pane", "-t", target, common.tmux_literal(pipe_command)], check=False)
     else:
         windows = tmux(["list-windows", "-t", session, "-F", "#W"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.splitlines()
         if window not in windows:
@@ -1344,16 +1468,24 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     while (not status_file.is_file() or status_file.stat().st_size == 0) and (timeout is None or waited < timeout):
         if owned_pane and cfg.process_observer is not None:
             cfg.process_observer()
-        if cfg.tmux_socket and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
+        if owned_pane:
+            # A provider that finishes writes its status file, which the loop
+            # condition sees. The checks below only cover a station or provider
+            # that vanished without one, so they need not start tmux every second.
+            station_gone = not common.unix_socket_accepts(cfg.tmux_socket) and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0
+            if station_gone:
+                status_file.write_text("143", encoding="utf-8")
+                break
+            if waited % TMUX_PANE_CHECK_SECONDS == TMUX_PANE_CHECK_SECONDS - 1:
+                pane_dead = tmux(["display-message", "-p", "-t", target, "#{pane_dead}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
+                if pane_dead == "1":
+                    time.sleep(0.05)
+                    if not status_file.is_file() or status_file.stat().st_size == 0:
+                        status_file.write_text("124", encoding="utf-8")
+                        break
+        elif cfg.tmux_socket and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
             status_file.write_text("143", encoding="utf-8")
             break
-        if owned_pane:
-            pane_dead = tmux(["display-message", "-p", "-t", target, "#{pane_dead}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
-            if pane_dead == "1":
-                time.sleep(0.05)
-                if not status_file.is_file() or status_file.stat().st_size == 0:
-                    status_file.write_text("124", encoding="utf-8")
-                    break
         else:
             pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
             output_file.write_text(pane.stdout, encoding="utf-8")
@@ -1375,6 +1507,7 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
 
 
 def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: list[str]) -> int:
+    attempt_started = time.monotonic()
     output_file = logs.run_dir / f"attempt-{attempt}.out"
     status_file = logs.run_dir / f"attempt-{attempt}.status"
     common.log_text(logs, f"attempt {attempt} command: {json.dumps(argv, separators=(',', ':'))}")
@@ -1399,6 +1532,17 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     with logs.text_log.open("a", encoding="utf-8") as fh:
         fh.write(output)
     common.log_event(logs, "attempt_result", {"attempt": attempt, "status": status, "output": output})
+    if (
+        cfg.provider == "claude"
+        and status not in (0, 124, 130, 143, common.AUTONOMY_ABORT_STATUS)
+        and time.monotonic() - attempt_started <= common.TRUST_DECLINE_MAX_SECONDS
+        and common.output_shows_declined_trust_prompt(output)
+    ):
+        # The operator chose "No, exit" at Claude Code's folder-trust prompt.
+        # Starting it again only shows the same prompt, so report a distinct
+        # status that callers do not retry and do not count as a provider fault.
+        common.log_event(logs, "operator_declined", {"attempt": attempt, "provider": cfg.provider, "reason": "folder-trust-declined", "exit_code": status})
+        return common.OPERATOR_DECLINED_STATUS
     if status == common.AUTONOMY_ABORT_STATUS:
         common.log_event(logs, "autonomy_abort", {"attempt": attempt, "output": output})
         # An autonomy abort on a route means the provider ran but produced no
@@ -1691,6 +1835,11 @@ def main(argv: list[str] | None = None) -> int:
         common.log_event(logs, "final", {"status": "autonomy-abort"})
         print(f"autonomy-abort: logs written to {logs.run_dir}", file=sys.stderr)
         return common.AUTONOMY_ABORT_STATUS
+    if result == common.OPERATOR_DECLINED_STATUS:
+        common.log_text(logs, "final status: operator-declined")
+        common.log_event(logs, "final", {"status": "operator-declined"})
+        print(f"operator-declined: logs written to {logs.run_dir}", file=sys.stderr)
+        return common.OPERATOR_DECLINED_STATUS
     for delay in retry_delays:
         common.log_text(logs, f"retry after {delay}s")
         common.log_event(logs, "retry", {"after_attempt": attempt, "delay": delay})
@@ -1707,6 +1856,11 @@ def main(argv: list[str] | None = None) -> int:
             common.log_event(logs, "final", {"status": "autonomy-abort"})
             print(f"autonomy-abort: logs written to {logs.run_dir}", file=sys.stderr)
             return common.AUTONOMY_ABORT_STATUS
+        if result == common.OPERATOR_DECLINED_STATUS:
+            common.log_text(logs, "final status: operator-declined")
+            common.log_event(logs, "final", {"status": "operator-declined"})
+            print(f"operator-declined: logs written to {logs.run_dir}", file=sys.stderr)
+            return common.OPERATOR_DECLINED_STATUS
     common.log_text(logs, "final status: failed")
     common.log_event(logs, "final", {"status": "failed"})
     print(f"failed: logs written to {logs.run_dir}", file=sys.stderr)

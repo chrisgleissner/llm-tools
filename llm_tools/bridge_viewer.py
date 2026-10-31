@@ -2,18 +2,63 @@
 from __future__ import annotations
 
 import curses
+import errno
 from pathlib import Path
 import time
 
+from . import bridge_hangup
+from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
+from .fileio import open_regular_file
+
+# Lines scrolled per vertical wheel notch; horizontal notches use the 8-column
+# step of the Left/Right keys.
+WHEEL_LINES = 3
+
+
+MAX_SOURCE_BYTES = 64 * 1024 * 1024
+
 
 def read_source(path: Path) -> str:
-    with path.open(encoding='utf-8', newline='') as stream:
-        return stream.read()
+    """The complete text of a regular file of at most ``MAX_SOURCE_BYTES``.
+
+    A FIFO, device or directory is refused instead of being read, so ``view``
+    on one cannot hang or exhaust memory.
+    """
+    try:
+        stream = open_regular_file(path)
+    except OSError as exc:
+        if exc.errno == errno.EINVAL:
+            raise ValueError(f"not a regular file: {path}") from exc
+        raise
+    with stream:
+        data = stream.read(MAX_SOURCE_BYTES + 1)
+    if len(data) > MAX_SOURCE_BYTES:
+        raise ValueError(f"file is larger than {MAX_SOURCE_BYTES // (1024 * 1024)} MiB: {path}")
+    return data.decode('utf-8')
 
 
 def signature(path: Path) -> tuple[int, int, int, int]:
     info=path.stat()
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def wheel_keys(buttons: int, *, wrap: bool, editing: bool) -> list[str]:
+    """Key names equivalent to a wheel event, so scrolling shares the key handlers.
+
+    Vertical notches scroll ``WHEEL_LINES`` lines (one entry in the heading
+    list, which selects rather than scrolls). Horizontal notches (Shift+wheel)
+    pan only when wrapping is off, and nothing happens while a search or
+    export path is being typed.
+    """
+    wheel=wheel_delta(buttons)
+    if wheel is None or editing:
+        return []
+    vertical,horizontal=wheel
+    if vertical:
+        return ['KEY_UP' if vertical<0 else 'KEY_DOWN']*WHEEL_LINES
+    if horizontal and not wrap:
+        return ['KEY_LEFT' if horizontal<0 else 'KEY_RIGHT']
+    return []
 
 
 def run_document(source: str, *, title: str, path: Path | None = None, follow: bool = False) -> int:
@@ -31,10 +76,11 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
         nonlocal following, seen
         initialize_colors()
         window.keypad(True)
-        window.timeout(100)
+        bridge_hangup.set_timeout(window, 100)
+        enable_mouse()
         checked=0.0
         if following:
-            state.document_viewer.end(max(1,window.getmaxyx()[0]-2))
+            state.document_viewer.end(max(1,window.getmaxyx()[0]-2))  # type: ignore[union-attr]  # set before this loop
         while state.document_viewer is not None:
             viewer=state.document_viewer
             now=time.monotonic()
@@ -64,16 +110,34 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
                     state.document_notice=f'File unavailable; retained source · {exc}'
             _draw_document(window,state)
             try:
-                key=window.get_wch()
+                key=bridge_hangup.read_wch(window)
             except curses.error:
                 continue
+            if key == curses.KEY_MOUSE:
+                event=read_mouse()
+                viewer=state.document_viewer
+                if event is None or viewer is None:
+                    continue
+                editing=state.document_search_editing or state.document_export_editing
+                keys=wheel_keys(event[2],wrap=viewer.wrap,editing=editing)
+                if state.document_heading_list:
+                    keys=keys[:1]
+            else:
+                keys=None
+            if keys is not None:
+                for name in keys:
+                    if follow and name=='KEY_UP':
+                        following=False
+                        state.document_notice='Paused · End resumes'
+                    state.handle_key(name)
+                continue
             if key == '\x1b':
-                window.timeout(25)
+                bridge_hangup.set_timeout(window, 25)
                 try:
-                    extra=window.get_wch()
+                    extra=bridge_hangup.read_wch(window)
                     if extra in {'[','O'}:
                         for _ in range(32):
-                            part=window.get_wch()
+                            part=bridge_hangup.read_wch(window)
                             if isinstance(part,str) and len(part)==1 and '@'<=part<='~':
                                 break
                         continue
@@ -81,7 +145,7 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
                 except curses.error:
                     pass
                 finally:
-                    window.timeout(100)
+                    bridge_hangup.set_timeout(window, 100)
             if isinstance(key,int):
                 try: key=curses.keyname(key).decode('ascii')
                 except (ValueError,UnicodeError): continue
@@ -95,6 +159,8 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
             state.handle_key(key)
         return 0
     try:
-        return curses.wrapper(loop)
+        return bridge_hangup.run_curses(loop)
+    except bridge_hangup.TerminalGone:
+        return bridge_hangup.abandon_terminal()
     finally:
         state.close_document()

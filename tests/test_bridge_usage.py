@@ -59,6 +59,6 @@ def test_usage_collector_reuses_public_api_without_subprocess(monkeypatch):
         return {'text':'full output','rows':[]}
     monkeypatch.setattr(usage,'dashboard_snapshot',snapshot)
     assert collect_usage() == {'text':'full output','rows':[]}
-    assert observed[0].show_remaining_time and observed[0].show_source
+    assert observed[0].show_remaining_time and not observed[0].show_source  # the cache-path column made rows ~170 cells wide
     assert observed[0].show_copilot_credits
     assert not observed[0].progress_enabled and not observed[0].color_enabled

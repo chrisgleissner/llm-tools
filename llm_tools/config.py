@@ -45,7 +45,6 @@ Schema::
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,7 +55,7 @@ from .capacity import ALL_PROVIDERS
 
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
-_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot", "usage"})
+_TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot", "usage", "bridge"})
 _USAGE_KEYS = frozenset({"providers"})
 _BUDGET_KEYS = frozenset({"monthly", "currency"})
 _COPILOT_KEYS = frozenset({"monthly_spend_limit", "currency"})
@@ -239,6 +238,8 @@ def load_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     cached = _cache.get(key)
     if cached is not None:
         return cached
+    import tomllib  # parsed only when a config file exists; keeps start-up lean
+
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -319,6 +320,18 @@ def _validate_usage(usage: Any) -> None:
     for name in providers:
         if name not in ALL_PROVIDERS:
             _fail(f"usage.providers: unknown provider '{name}' (known: {', '.join(ALL_PROVIDERS)})")
+
+
+def bridge_theme_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return the raw ``[bridge.theme]`` table, or ``{}`` when absent or malformed.
+
+    The table is deliberately not validated here: ``bridge_theme`` reports
+    invalid names, roles and colours as warnings and ignores them, so a typo in
+    the style never prevents Bridge from starting.
+    """
+    bridge = cfg.get("bridge") if isinstance(cfg, dict) else None
+    theme = bridge.get("theme") if isinstance(bridge, dict) else None
+    return theme if isinstance(theme, dict) else {}
 
 
 def usage_providers(cfg: dict[str, Any]) -> tuple[str, ...] | None:

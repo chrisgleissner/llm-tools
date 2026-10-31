@@ -1,16 +1,18 @@
 """Bounded activity evidence; repository changes are never completion evidence."""
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 import stat
 import subprocess
-import tempfile
 from typing import Any
+
+from .fileio import open_regular_file
 
 
 def _git(cwd: Path, *args: str) -> bytes | None:
+    import tempfile  # loaded only when a repository is actually read
+
     try:
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['git','-c','core.fsmonitor=false','-C',str(cwd),*args],
@@ -55,6 +57,8 @@ def repository_checkpoint(cwd: str | Path, *, max_files: int = 512, max_bytes: i
         paths = sorted(set(item for item in raw.split(b'\0') if item))
         if len(paths) > max_files:
             return unknown
+        import hashlib
+
         digest = hashlib.sha256(_git(root,'rev-parse','--verify','HEAD') or b'unborn')
         size = 0
         count = 0
@@ -77,7 +81,7 @@ def repository_checkpoint(cwd: str | Path, *, max_files: int = 512, max_bytes: i
                 size += len(data)
                 digest.update(b'link\0'+data)
             elif stat.S_ISREG(before.st_mode):
-                with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW),'rb') as stream:
+                with open_regular_file(path, follow_symlinks=False) as stream:
                     while data := stream.read(min(65536,max(1,max_bytes-size+1))):
                         size += len(data)
                         if size > max_bytes:

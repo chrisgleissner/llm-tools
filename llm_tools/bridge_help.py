@@ -4,57 +4,100 @@ from __future__ import annotations
 TOPICS: dict[str, str] = {
     "quickstart": """LLM Bridge — supervise AI work in your terminal
 
-Opening Bridge or a saved mission starts no provider. Save first; start explicitly.
+Needs: Python 3.11+, tmux, and one provider CLI that is installed and signed in.
+Check with llm-bridge doctor; its Next line says what to do.
 
-1. Save: llm-bridge mission create --name demo --native --file prompt.md --cwd .
-   This saves the objective and first task. Note the returned mission ID.
-2. Start: llm-bridge start --mission ID
-   This starts provider work and may consume paid capacity. Saved mode is reused.
-3. Open: llm-bridge attach --mission ID
-   Ctrl-] B opens Bridge; Ctrl-] P returns to the same provider process.
-4. Inspect: llm-bridge status --mission ID
-   A zero provider exit means awaiting verification, not completed work.
-5. Verify: llm-bridge task verify --mission ID --task 1 --evidence 'tests passed'
-   Use the actual task ID. Review evidence before approving work as complete.
-   Add more work: llm-bridge task add --mission ID --file next-task.md
+First mission, from your project folder. Opening Bridge starts no provider.
 
-Native interactive keeps the complete provider interface as your workspace.
-Autonomous runs headless provider work with activity output. Headless has no
-station. The home form recommends Native; CLI defaults and saved modes remain
-compatible. CLI creation defaults to claude,codex,opencode unless specified.
+1. Run llm-bridge, then press N.
+2. Type the task. The form selects the first provider that is installed and signed in.
+3. Press Tab five times to reach "Start and open provider", then Enter. This uses
+   paid capacity. Claude Code may first ask whether to trust the folder: choose
+   "Yes, I trust this folder" (the first option is No, exit; if you pick it, Bridge holds
+   the task until you run /start again).
+4. When the provider says it is done, exit it with /exit. The station then says the
+   task is waiting for your review.
+5. Press Ctrl-] then B, type /approve, press Enter, then y. The mission shows COMPLETED.
+6. Press Ctrl-] then d to leave the station, and Ctrl-D to leave the controls.
 
-Detach with Ctrl-] d; reattach with the command above. Detaching or exiting Bridge
-does not stop the mission. Pause waits at the current invocation boundary and
-never suspends the host. Stop and cancel are separate explicit operations.
+The same from a script, with no terminal attached (run inside the mission's folder,
+or add --mission ID):
 
-More: help keys, prompts, markdown, providers, states, verification, recovery.
-Every public command also has --help. ID and task numbers are placeholders.""",
+  llm-bridge mission create --file task.md --name demo --native
+  llm-bridge start                        starts provider work; may consume paid capacity
+  llm-bridge status                       after the provider exits, "Needs you" shows the approve command
+  llm-bridge task verify --task 1 --approve --evidence 'tests passed'
+
+A zero provider exit means awaiting verification, not completed work. Review the
+evidence before approving. Reopen a station with llm-bridge attach. Add more work
+with llm-bridge task add --file next-task.md. Ctrl-] B opens Bridge and Ctrl-] P
+returns to the same provider process.
+
+Three modes. Native (--native) keeps the provider's own interactive terminal in a
+tmux station. Headless (--headless) runs the provider without a terminal, with
+no station and no tmux. Background, the default when neither flag is given, runs
+the provider without a terminal under a background controller and shows its
+activity log in a tmux station. Use --native or --headless, not both. The home
+form offers Native (recommended) and Headless.
+CLI defaults and saved modes remain compatible. CLI creation rotates over the providers (or routes) set in your
+llm-tools config ([ralph] wins over [defaults]); without such a config it uses
+the built-in claude,codex,opencode. --providers or --routes override either.
+
+Typing in the Bridge command line: bare commands and Codex/Claude-style slash
+commands are the same: /start, /attach, /pause, /status and /approve [N] work
+like their bare forms (N is the task to approve; it may be omitted when exactly
+one task awaits approval). /help and ? show help.
+
+Detach your own terminal with Ctrl-] then d, which works the same locally and
+over SSH. Reattach with llm-bridge attach. The command llm-bridge detach is
+different: it removes a station client from outside, normally another terminal's
+(for example one still open at the machine while you are on SSH). Do not use it
+to leave your own session. Detaching or exiting Bridge does not stop the mission.
+Pause waits at the current invocation boundary and never suspends the host.
+Stop and cancel are separate explicit operations.
+
+More: help keys, remote, prompts, markdown, providers, states, verification, recovery.
+Every public command also has --help. ID and task numbers are placeholders.
+--mission accepts a unique ID prefix (4+ characters) and may be omitted when you
+run the command inside the mission's folder.""",
     "keys": """Keys and terminal ownership
 
 Provider focus: ordinary keys, slash commands, arrows, Tab, Escape, Ctrl-C,
 Ctrl-D, paste and requested mouse/focus events belong to the provider.
 Ctrl-] is Bridge's prefix: b/B opens controls, p/P returns to Provider, ? shows
-station keys, z toggles zoom, d detaches. Ctrl-] Ctrl-] sends a literal prefix.
-Switching panes returns to the same process; it does not launch another provider.
+station keys, z toggles zoom, d detaches only your own terminal (the safe choice
+over SSH). Ctrl-] Ctrl-] sends a literal prefix. Switching panes returns to the
+same process; it does not launch another provider.
 
-Bridge body: F1-F8 select Bridge, Orders, Stations, Systems, Log, Sessions,
-Palette, Usage. Orders means Tasks; Stations means Providers/routes. Tab and
-Shift-Tab cycle views. Up/Down select; PgUp/PgDn page; Home/End select endpoints.
+llm-bridge detach --mission ID is for another shell: it detaches the station's
+single connected writable client, which is usually a different terminal from the
+one running the command. With no client attached it reports that; with several
+attached (for example local and SSH) it refuses and asks for --client /dev/pts/N.
+Observers (read-only clients) are never detached.
+
+Command line: slash commands such as /start, /attach, /approve [N] and /help are
+accepted exactly like the bare commands; Escape returns focus without side effects.
+
+Bridge body: F1-F8 select Overview, Tasks, Providers, Activity, Sessions, Health,
+Actions, Usage. Line 1 is a live status strip (provider, task, inactivity,
+capacity). Typing a view name (overview, providers, activity, sessions, health, actions,
+usage) switches to it; the older names orders, stations, log, systems and palette still
+work. Tab and Shift-Tab cycle views. Up/Down select; PgUp/PgDn page; Home/End select endpoints.
 Enter opens the labelled selection. ? opens context help.
-Bridge body o opens the complete objective; Orders v opens the complete prompt. Printable text starts
+Overview o opens the complete objective; Tasks v opens the complete prompt. Printable text starts
 a command; Ctrl-G focuses the retained draft; click the input to focus it.
 
 Command input: Left/Right move; Home/End or Ctrl-A/Ctrl-E move to endpoints.
-Backspace/Delete remove adjacent text. Ctrl-U clears; Ctrl-K deletes to end.
+Backspace/Delete remove adjacent text. Ctrl-U clears. After a failed command the line stays empty; Up recalls it.
 Ctrl-P/Ctrl-N recall history and restore the pre-history draft. Tab completes.
 Enter submits an explicit command. ? is ordinary input. Escape returns to the
 body with the draft retained. Ctrl-C cancels local editing first. Ctrl-D exits
 only with empty input and no unresolved mutation; exit does not stop work.
 
-Body Ctrl-E composes/adds a task; Orders body Ctrl-R amends the selected task.
-Ctrl-E in command input means End. Body Ctrl-F opens Orders search; Enter applies,
+Body Ctrl-E composes/adds a task; Tasks body Ctrl-R amends the selected task.
+Ctrl-E in command input means End. Ctrl-K opens Actions from any view with the filter ready. Activity: Ctrl-T hides or shows controller bookkeeping rows. Body Ctrl-F opens Tasks search; Enter applies,
 Escape cancels and restores the command draft. Clear the query to show all tasks.
-Palette / filters labelled actions. Single-click selects; Enter/double-click
+Actions lists what applies to the current state, with the command for each; / filters them. Single-click selects; Enter/double-click
 activates the selected action. Disabled actions explain their unavailable target.
 
 Composer: Enter newline; Tab indent; PgUp/PgDn page; F2/Ctrl-S saves. Ctrl-O opens VISUAL/EDITOR.
@@ -67,8 +110,43 @@ c copies source when a supported local helper is available.
 
 Native application scrolling and tmux scrollback differ. With mouse capture,
 Shift-drag selection depends on the terminal. Ctrl-] [ enters tmux copy mode;
-q leaves copy mode. Use terminal paste shortcuts. No cross-platform clipboard
-support or automatic OSC52 clipboard transmission is promised.""",
+q leaves copy mode. Use terminal paste shortcuts.
+
+Clipboard: the station sets tmux set-clipboard external. Text you copy in tmux
+copy mode is sent to your local clipboard with the OSC 52 escape sequence,
+including over SSH, in terminals that support OSC 52 (many do; some need it
+enabled). An application in the provider pane cannot set your clipboard this
+way: its own OSC 52 sequences are ignored, so a provider cannot overwrite what
+you paste next. Without OSC 52 support nothing reaches the clipboard; use
+Shift-drag selection or export. The Bridge viewer's c copy uses a local helper
+(wl-copy, xclip, xsel or pbcopy) and is separate from this.""",
+    "console": """Bridge console: commands at the bottom line
+
+Type at the bottom line. Slash commands work like Codex and Claude Code, and the
+mission is implied. Bare words do the same (start, pause, ...).
+  /start /resume /pause /stop    start, continue or hold provider work
+  /attach  /detach               open the provider terminal; Ctrl-] P returns
+  /approve [N]  /reject N WHY    decide on a task that awaits approval
+  /status  /tasks  /proposals    print the current state
+  /missions  /home               switch to another mission (the mission picker)
+  /overview /tasks /providers /activity /health /actions /usage   open a view
+  /help [topic]                  this page; topics: keys, prompts, providers, states
+Keys: Ctrl-E add a task, Ctrl-R amend the selected task, Ctrl-K find an action,
+Tab completes, ? explains the current view, Ctrl-D leaves (the mission keeps running).
+Commands that run in a shell, such as llm-bridge task add --file F, are the same
+commands without the slash. llm-bridge --help lists them all.""",
+    "remote": """Remote use and shared windows
+
+Missions and provider stations belong to your user account, so you can log in
+over SSH, run llm-bridge, and attach to a mission that is running at the machine.
+Several terminals can attach at once. tmux sizes the shared window to the most
+recently active client (window-size latest), so a second client of a different
+size resizes the first one's view while it is in use. To avoid that, detach the
+other client (Ctrl-] then d in that terminal, or llm-bridge detach --mission ID
+from a shell), or use terminals of the same size.
+Ctrl-] then d detaches only your own terminal and is safe over SSH. Text you
+copy in tmux copy mode (Ctrl-] [) reaches your local clipboard through OSC 52
+when your terminal supports it. See also: help keys.""",
     "prompts": """Compose, import, amend and recover complete prompts
 
 A 30 KiB or larger document belongs in the multiline composer or a file, not a
@@ -103,7 +181,7 @@ retrying or creating a new mission. Terminal missions cannot accept new tasks.
 Final authoritative validation still occurs when a durable mutation is applied.""",
     "markdown": """Read full source and Markdown
 
-In Orders, open the selected full prompt with v. Bounded status previews are not
+In Tasks, open the selected full prompt with v. Bounded status previews are not
 the complete source. The viewer identifies document kind and source/render mode.
 Use / to search the whole document, n/N for matches, Home/End and PgUp/PgDn to
 navigate, m for source/render, w for wrap, Left/Right for long unwrapped code.
@@ -119,15 +197,16 @@ color; text and focus cues remain. Provider output is never parsed as Markdown.
 
 Use viewer export to choose an explicit destination. When a supported local
 clipboard helper is available, Copy source copies the complete source. Export
-is the reliable fallback; Bridge never silently sends clipboard escape sequences.
+is the reliable fallback; the viewer itself never sends clipboard escape sequences.
 Retained provider logs are bounded; pruned content cannot be recovered by paging.
 Open an artifact with llm-bridge view --file notes.md. Add --follow only to
 follow changes: scrolling up pauses, End resumes, and rotation/truncation is
 labelled. Without a TTY, view prints complete source; --follow requires a TTY.""",
     "providers": """Providers, routes and native stations
 
-Native interactive supervises a real CLI in a private owned tmux station.
-Autonomous runs headless work with activity; --headless has no station.
+Native supervises a real CLI in a private owned tmux station. Background (no
+flag) runs the provider without a terminal and shows its activity log in the
+station; Headless (--headless) runs it with no station and no tmux.
 Opening, inspecting and attaching start no paid work. start/resume can run work.
 Selecting a station changes the viewed terminal, not routing of an invocation.
 Use configured providers/routes and safe-boundary steering for future launches.
@@ -151,7 +230,10 @@ currently executing owned operation; Last selected is history, not execution.
 Completed missions have no active execution and cannot accept another task.
 
 Provider zero exit enters verification. Passing required verification and operator
-approval where configured establish completion. Blocked means a dependency,
+approval where configured establish completion. A native mission then holds
+before its next task until you /approve or /reject the reviewed one, or run
+/continue to start the next task while it keeps waiting (mission create
+--auto-continue, or mission set --auto-continue on, turns the hold off). Blocked means a dependency,
 verification request or uncertain operation needs attention: inspect status/events.
 Stop ends the owned controller; --force is for deliberately terminating owned
 work when graceful stop is insufficient. Cancel is a mission/task state mutation.
@@ -204,10 +286,65 @@ Stop/cancel have explicit scopes; detach and exit keep the mission separate.""",
 }
 
 
-def topic_text(topic: str = "quickstart") -> str:
-    key = " ".join(topic.strip().lower().split())
-    if key in TOPICS:
-        return TOPICS[key]
+_VIEW_HELP_FOOTER = "Every key: /help keys · every slash command: /help · Esc closes this page"
+
+_VIEW_HELP: dict[str, str] = {
+    "Overview": """Overview: what the mission is doing and what needs you
+
+Reading it: Controller (is the mission being driven), Now and Next (tasks),
+Needs you (approvals, proposals, blocked tasks), Capacity, then Recent events.
+Keys: o read the full objective · Ctrl-E add a task · Ctrl-K find an action
+Slash: /start /pause /resume /attach /status""",
+    "Tasks": """Tasks: the ordered work of this mission
+
+Keys: Up/Down choose · Enter inspect · v read the full prompt · Ctrl-R amend
+      Ctrl-E add a task · Ctrl-F find in task text (Esc clears the filter)
+Slash: /approve N · /reject N WHY · /task cancel --task N
+A task awaiting approval shows VERIFYING; approve it only after reading its evidence.""",
+    "Providers": """Providers: who works and how much capacity is left
+
+Each block is one provider or route: its live state, the 5h / week / month
+windows and its latest operations. Before the first run the numbers come from
+the Usage data.
+Keys: Up/Down choose · Enter mark as viewed (changes the shown terminal only)
+Slash: /attach opens the provider terminal""",
+    "Activity": """Activity: what happened, newest last
+
+Operator-level events are plain; controller bookkeeping is dim.
+Keys: PgUp older · PgDn newer · Ctrl-T hide or show bookkeeping rows
+Slash: /status prints the current state""",
+    "Sessions": """Sessions: provider operations and their native session ids
+
+One row per operation: task, provider, model, status, native session and whether
+it could be restored. Keys: Up/Down scroll.""",
+    "Health": """Health: controller, persistence and capacity diagnostics
+
+Mode, lifecycle, controller heartbeat, execution, health and capacity sources.
+Keys: Up/Down scroll · Shift-Left/Right pan. Use /status for a printable summary.""",
+    "Actions": """Actions: what you can do now
+
+The list follows the mission state; the command to type is shown for each.
+Keys: Up/Down choose · Enter run (risky ones ask first) · Ctrl-K find an action
+Slash: typing / followed by a letter goes to the command line, so
+/reject 3 WHY works here too.""",
+    "Usage": """Usage: the llm-usage dashboard for all providers
+
+The table comes first. Keys: l show or hide the legend · Up/Down scroll
+Shift-Left/Right pan wide tables. At narrow widths the Remaining Time column is
+hidden before anything else. Slash: /providers shows the capacity per provider.""",
+}
+
+
+def view_help(view: str) -> str:
+    """Short help (under one screen) for one console view, ending with a link to the full topics."""
+    body = _VIEW_HELP.get(view)
+    if body is None:
+        body = f"{view}\n\nKeys: Up/Down scroll."
+    return f"{body}\n\n{_VIEW_HELP_FOOTER}"
+
+
+def _command_path_parser(key: str):
+    """The argparse parser for a command path such as ``task verify``, or ``None``."""
     # Import the grammar only when command-path help is requested. No database,
     # renderer or terminal service is needed to format argparse help.
     from .bridge import _build_parser
@@ -216,8 +353,24 @@ def topic_text(topic: str = "quickstart") -> str:
     for word in key.split():
         groups = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
         if not groups or word not in groups[0].choices or word in {"console", "_controller"}:
-            return f"Unknown help topic: {topic or '(empty)'}\nTopics: {', '.join(TOPICS)}\nTry llm-bridge help quickstart."
+            return None
         parser = groups[0].choices[word]
+    return parser
+
+
+def is_known_topic(topic: str) -> bool:
+    """Whether ``topic`` is a help topic or a command path."""
+    key = " ".join(topic.strip().lower().split())
+    return key in TOPICS or _command_path_parser(key) is not None
+
+
+def topic_text(topic: str = "quickstart") -> str:
+    key = " ".join(topic.strip().lower().split())
+    if key in TOPICS:
+        return TOPICS[key]
+    parser = _command_path_parser(key)
+    if parser is None:
+        return f"Unknown help topic '{topic.strip() or '(empty)'}' · topics: {', '.join(TOPICS)} · or a command such as: task verify"
     return parser.format_help()
 
 
@@ -229,8 +382,8 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "task": ("Add, inspect, amend and verify mission tasks", "task list --mission ID"),
     "task add": ("Save a new task for the specified mission", "task add --mission ID --file prompt.md"),
     "task list": ("List tasks in the specified mission", "task list --mission ID --json"),
-    "task show": ("Read the complete task source and evidence", "task show --mission ID --task 1 --json"),
-    "task amend": ("Queue complete replacement source at a safe boundary", "task amend --mission ID --task 1 --file revised.md"),
+    "task show": ("Read the complete task text, recorded evidence and any pending amendment", "task show --mission ID --task 1 --json"),
+    "task amend": ("Replace the task text: applies at once, or after the current step when a provider is working on the task", "task amend --mission ID --task 1 --file revised.md"),
     "task priority": ("Change task scheduling priority; default priority is zero", "task priority --mission ID --task 1 --value 5"),
     "task reorder": ("Change a task's ordering value", "task reorder --mission ID --task 1 --value 10"),
     "task dependencies": ("Require another task before this task can run", "task dependencies --mission ID --task 2 --add 1"),
@@ -238,7 +391,9 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "task resume": ("Make a held task eligible for the running controller", "task resume --mission ID --task 1"),
     "task cancel": ("Cancel the targeted task, preserving its durable record", "task cancel --mission ID --task 1"),
     "task retry": ("Queue another attempt after inspecting the failure", "task retry --mission ID --task 1"),
-    "task verify": ("Record evidence; --approve explicitly approves completion", "task verify --mission ID --task 1 --evidence 'tests passed'"),
+    "task verify": ("Record evidence with --evidence; add --approve to approve the task as complete", "task verify --mission ID --task 1 --approve --evidence 'tests passed'"),
+    "task reject": ("Send a task awaiting verification back with a reason; it is queued for another attempt and the next prompt quotes the reason", "task reject --mission ID --task 1 --reason 'tests were not run'"),
+    "rotation": ("Show or change the mission's saved provider rotation; a change applies from the next provider selection", "rotation --mission ID --set claude-sonnet,codex"),
     "proposal": ("Review task proposals before adding them to work", "proposal list --mission ID"),
     "proposal create": ("Record a proposal linked to an owned operation", "proposal create --mission ID --operation OP --file proposal.md"),
     "proposal list": ("List pending proposals by default", "proposal list --mission ID --status ALL"),
@@ -248,10 +403,14 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "start": ("Start the owned controller using saved mode unless overridden", "start --mission ID"),
     "pause": ("Hold after the current invocation; never suspend the host", "pause --mission ID"),
     "resume": ("Allow the controller to continue eligible work", "resume --mission ID"),
+    "continue": ("Start the next task now while a reviewed task keeps awaiting approval (native missions hold for review by default)", "continue --mission ID"),
     "stop": ("Stop the owned controller; --force targets owned running work", "stop --mission ID"),
     "cancel": ("Cancel this mission's work; unrelated sessions are unaffected", "cancel --mission ID"),
     "attach": ("Open the existing owned station; starts no provider", "attach --mission ID"),
-    "detach": ("Detach a terminal client while mission work continues", "detach --mission ID"),
+    "missions": ("List every mission, live ones first; --pick switches to one (in a station: Ctrl-] then M)", "missions --json"),
+    "gc": ("Close the idle tmux stations of finished missions; a station with a live provider process or an attached terminal is kept", "gc --json"),
+    "finish": ("Ask the native provider to exit (its own /exit or /quit) so the task moves to verification", "finish --mission ID"),
+    "detach": ("Detach a station client from outside; your own terminal uses Ctrl-] d", "detach --mission ID"),
     "doctor": ("Inspect local prerequisites and persistence; mission is optional", "doctor --json"),
     "control": ("Inspect and steer the mission in Bridge controls; no autostart", "control --mission ID"),
     "usage": ("Inspect background capacity observations for this mission", "usage --mission ID"),
@@ -262,28 +421,63 @@ COMMANDS: dict[str, tuple[str, str]] = {
 }
 
 
+def _mission_create_defaults() -> str:
+    """The ``mission create`` default-rotation line; read from the llm-tools config only when help is formatted."""
+    from .bridge import default_rotation
+
+    providers, routes = default_rotation()
+    rotation = f"routes {routes}" if routes else f"providers {providers}"
+    return f"\nDefaults: cwd is the current directory; {rotation} (from your llm-tools config when set);\nscripted mode is Background unless --native/--headless is explicit."
+
+
 def decorate_parser(parser: object) -> None:
     """Add shared public descriptions without changing the argument grammar."""
     import argparse
     assert isinstance(parser, argparse.ArgumentParser)
     internal = {"console", "_controller"}
     class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
-        pass
+        def _get_help_string(self, action: argparse.Action) -> str | None:
+            # Show a default only when it carries information: never "None",
+            # "False", an empty value, or text that already states its default.
+            text = action.help or ""
+            if "default" in text or action.dest == "mission" or action.default in (None, False, "", [], (), argparse.SUPPRESS):
+                return text
+            return super()._get_help_string(action)
 
     def visit(current: argparse.ArgumentParser, path: str) -> None:
         info = COMMANDS.get(path)
         current.formatter_class = HelpFormatter
         if info:
             description, example = info
-            starts = path in {"start", "resume", "task resume", "task retry", "proposal accept"}
+            starts = path in {"start", "resume", "task resume", "task retry", "task reject", "proposal accept"}
             effect = "Can enable provider work and consume paid capacity." if starts else "Does not directly start paid provider work."
             defaults = ""
-            if path == "mission create":
-                defaults = "\nDefaults: cwd is the current directory; providers claude,codex,opencode;\nscripted mode is autonomous unless --native/--headless is explicit."
+            lazy_defaults = _mission_create_defaults if path == "mission create" else None
+            if path == "detach":
+                defaults = (
+                    "\nRemoves the station's one connected writable client, normally another terminal's."
+                    "\nWith several attached (for example local and SSH), pass --client /dev/pts/N."
+                    "\nTo leave your own terminal, press Ctrl-] then d (safe over SSH)."
+                )
             if path.startswith("task"):
                 defaults += "\nUse the actual mission ID and task number; input files retain source text."
             current.description = description + ".\n" + effect + defaults
-            current.epilog = "Example:\n  llm-bridge " + example + "\n\nMore: llm-bridge help keys · llm-bridge help recovery"
+            if lazy_defaults is not None:
+                base_description = current.description
+                original_format_help = current.format_help
+
+                def format_help() -> str:
+                    current.description = base_description + lazy_defaults()
+                    return original_format_help()
+
+                current.format_help = format_help  # type: ignore[method-assign]
+            shorthand = ""
+            if "--mission ID" in example:
+                shorthand = (
+                    "\n  llm-bridge " + example.replace("--mission ID", "--mission 3f9a1c2b")
+                    + "\n\n--mission takes a unique ID prefix (4+ characters) and may be omitted inside the mission's folder."
+                )
+            current.epilog = "Example:\n  llm-bridge " + example + shorthand + "\n\nMore: llm-bridge help keys · llm-bridge help recovery"
         for action in current._actions:
             if isinstance(action, argparse._SubParsersAction):
                 public = [name for name in action.choices if name not in internal]
@@ -334,6 +528,6 @@ Common commands
   status / task    Inspect work; add, amend and verify tasks
   pause / stop     Hold at an invocation boundary / stop controller
 
-Also: mission list, resume, cancel, detach, proposal, events, doctor,
-control, usage, station, steer, view, help.
+Also: missions, finish, mission list, mission colour, rotation, theme, resume, cancel,
+detach, proposal, events, doctor, control, usage, station, steer, view, help.
 More: llm-bridge COMMAND --help · llm-bridge help keys"""

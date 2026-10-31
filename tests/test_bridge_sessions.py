@@ -8,7 +8,6 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-import time
 
 import pytest
 
@@ -23,6 +22,7 @@ from llm_tools.bridge_sessions import (
     resume_argv,
 )
 from llm_tools.bridge_runtime import _process_start_token
+from tests.conftest import scaled
 
 
 CODEX_ID = "12345678-1234-4234-8234-123456789abc"
@@ -253,7 +253,7 @@ def test_owned_codex_session_requires_exact_live_writable_process_tree_fd(tmp_pa
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))
 
 
 def test_codex_session_discovery_rejects_unrelated_readonly_and_multiple_fds(tmp_path: Path, monkeypatch) -> None:
@@ -278,7 +278,7 @@ def test_codex_session_discovery_rejects_unrelated_readonly_and_multiple_fds(tmp
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.wait(timeout=3)
+            process.wait(timeout=scaled(3))
 
 
 @pytest.mark.parametrize("shape", ["second-record", "large-transcript", "oversized-header", "malformed-header"])
@@ -308,4 +308,4 @@ def test_owned_codex_discovery_reads_only_bounded_metadata_header(tmp_path: Path
             assert identity is None
     finally:
         process.kill()
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))

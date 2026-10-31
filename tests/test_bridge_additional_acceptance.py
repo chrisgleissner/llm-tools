@@ -53,7 +53,7 @@ def test_composer_editor_success_preserves_exact_newlines_and_removes_editor_cop
     edited = "  \tfirst\r\nlast\n"
     paths = []
 
-    def run(argv, *, check, timeout):
+    def run(argv, *, check, timeout, **_kwargs):
         path = Path(argv[-1]); paths.append(path)
         assert path.read_bytes() == b"original"
         path.write_bytes(edited.encode())
@@ -72,7 +72,7 @@ def test_composer_editor_timeout_keeps_both_private_recovery_sources(tmp_path, m
         monkeypatch.setattr(curses, name, lambda: None)
     paths = []
 
-    def run(argv, *, check, timeout):
+    def run(argv, *, check, timeout, **_kwargs):
         paths.append(Path(argv[-1]))
         raise subprocess.TimeoutExpired(argv, timeout)
 
@@ -87,7 +87,7 @@ def test_composer_editor_timeout_keeps_both_private_recovery_sources(tmp_path, m
 
 def test_launcher_form_rejects_invalid_start_and_preserves_fields(tmp_path):
     state = bridge_launcher.Launcher(str(tmp_path), creating=True, directory=str(tmp_path))
-    state.focus = 4
+    state.focus = 5  # Start is the last row; Save is row 4
     assert state.key("\n") is None
     assert "objective" in state.error.lower()
     state.objective = "Build this"
@@ -104,13 +104,13 @@ def test_launcher_click_selects_without_activation_then_explicitly_opens(tmp_pat
     state = bridge_launcher.Launcher(str(tmp_path), missions=[
         {"id": "one", "name": "One"}, {"id": "two", "name": "Two"}
     ])
-    assert state.click(9, activate=False) is None
+    assert state.click(7, activate=False) is None
     assert state.selected == 2
-    assert state.click(9, activate=True) == "open"
+    assert state.click(7, activate=True) == "open"
     assert state.click(2, activate=True) is None
     state.creating = True
     state.focus = 0
-    assert state.click(17) is None
+    assert state.click(15) is None
     assert state.focus == 5
 
 
@@ -145,7 +145,7 @@ def test_response_overlay_blocks_accidental_command_and_allows_view_navigation()
     state.handle_key("KEY_PPAGE")
     assert state.response_scroll == 0
     state.handle_key("KEY_F2")
-    assert state.view == "Orders" and not state.response_overlay
+    assert state.view == "Tasks" and not state.response_overlay
 
 
 def test_orders_paging_and_search_draft_restore_do_not_change_task_source():
@@ -224,7 +224,7 @@ def test_launcher_oversize_paste_is_atomic_and_next_edit_works(tmp_path, monkeyp
 def test_launcher_native_start_is_explicit_and_reopens_controls(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
-    window = Window(["n", *"Objective", *(["\t"] * 4), "\n"])
+    window = Window(["n", *"Objective", *(["\t"] * 5), "\n"])
     monkeypatch.setattr(curses, "wrapper", lambda callback: callback(window))
     monkeypatch.setattr(bridge_launcher, "_draw", lambda *_: None)
     calls = []
@@ -246,7 +246,7 @@ def test_launcher_native_start_is_explicit_and_reopens_controls(tmp_path, monkey
 def test_launcher_failed_start_keeps_saved_mission_and_shows_retry_path(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
-    first = Window(["n", *"Objective", *(["\t"] * 4), "\n"])
+    first = Window(["n", *"Objective", *(["\t"] * 5), "\n"])
     second = Window(["\x04"])
     windows = iter([first, second])
     monkeypatch.setattr(curses, "wrapper", lambda callback: callback(next(windows)))
@@ -271,7 +271,7 @@ def test_delayed_task_read_does_not_replace_help_opened_while_waiting():
     import time
     entered, release = Event(), Event()
     def dispatch(_mission, command):
-        assert command == "task show --task 9"
+        assert command == "task show --task 9 --json"
         entered.set()
         assert release.wait(1)
         return '{"id":"9","revision":2,"prompt":"full task source"}'

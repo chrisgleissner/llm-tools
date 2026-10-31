@@ -17,12 +17,14 @@
 # ---------------------------------------------------------------------------
 # LLM Bridge
 # ---------------------------------------------------------------------------
-# Bridge settings are supplied on `llm-bridge` commands. This config parser
-# does not support a [bridge] table. Mission creation flags include
+# Bridge settings are supplied on `llm-bridge` commands. The only [bridge]
+# table the config parser accepts is [bridge.theme] (name, background, roles);
+# see below and docs/llm-bridge/colour-guide.md. Mission creation flags include
 # --providers, --routes, --headless, and --native; see `llm-bridge mission create
-# --help`. Without --headless, tmux is required for the local control
-# station. --native asks the selected provider CLI to use its interactive UI;
-# otherwise the provider station shows the autonomous activity log. The
+# --help`. Three modes exist. --native runs the selected provider CLI's
+# interactive UI in a tmux station. With neither flag (autonomous), the provider
+# runs headless and the tmux station tails the controller log. --headless runs
+# without a station and without tmux; use it instead of --native. The
 # `--json` option changes output only; mission creation and controller start
 # are separate commands. A configured verifier is supplied as repeated
 # `--verifier-arg` argv elements, with `--verifier-timeout` defaulting to
@@ -39,9 +41,18 @@
 # model pin and a controller mode are labelled as configured unless a verified
 # observation supports an actual value. See docs/llm-bridge/operations.md.
 #
-# durable mission database defaults to
+# The durable mission database defaults to
 # ${XDG_STATE_HOME:-~/.local/state}/llm-tools/llm-bridge and can be relocated
 # with LLM_BRIDGE_STATE_DIR.
+#
+# Theme (the only Bridge settings stored in this file). `llm-bridge theme`
+# previews the result. Env overrides: LLM_BRIDGE_THEME, LLM_BRIDGE_BACKGROUND,
+# LLM_BRIDGE_COLOR_<ROLE>.
+#[bridge.theme]
+#name       = "dark"     # dark | light | high-contrast | neutral | mono
+#background = "dark"     # dark | light; used when `name` does not fix it
+#[bridge.theme.roles]
+#mission_1  = "#5f87ff"  # recolour one of the eight mission hues
 
 
 # ---------------------------------------------------------------------------
