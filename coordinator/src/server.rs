@@ -38,8 +38,15 @@ impl RunningServer {
 }
 
 pub async fn start(data_dir: &Path) -> Result<RunningServer, String> {
+    start_with(data_dir, None).await
+}
+
+/// Like [`start`], with an explicit web directory that overrides `web_dir` in `config.toml`.
+pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<RunningServer, String> {
     let cfg = Config::load(data_dir)?;
     let bind = cfg.checked_bind()?;
+    let configured = cfg.web_dir.as_ref().map(std::path::PathBuf::from);
+    let web_dir = crate::web::resolve_web_dir(web_dir.map(Path::to_path_buf).or(configured).as_deref())?;
     let tls = TlsAcceptor::from(crate::certs::load_server_config(data_dir)?);
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
     let listener = TcpListener::bind(bind).await.map_err(|e| format!("cannot bind {bind}: {e}"))?;
@@ -58,6 +65,7 @@ pub async fn start(data_dir: &Path) -> Result<RunningServer, String> {
         dummy_hash,
         argon_slots: Semaphore::new(2),
         shutdown: shutdown_rx.clone(),
+        web_dir,
     });
     let app = http::router(state.clone());
     let task = tokio::spawn(accept_loop(listener, tls, app, db, shutdown_rx));

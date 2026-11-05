@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   init [--hostname NAME]... [--ip ADDR]...
-  serve
+  serve [--web-dir DIR]
   worker add NAME | worker revoke NAME
   admin reset-password          (new password on stdin)
   cert renew [--hostname NAME]... [--ip ADDR]... | cert install --cert FILE --key FILE
@@ -22,6 +22,7 @@ struct Args {
     ips: Vec<IpAddr>,
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
+    web_dir: Option<PathBuf>,
     words: Vec<String>,
 }
 
@@ -32,6 +33,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         ips: vec![],
         cert: None,
         key: None,
+        web_dir: None,
         words: vec![],
     };
     let mut it = args.into_iter();
@@ -45,6 +47,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                 a.ips.push(v.parse().map_err(|_| format!("invalid IP address {v:?}"))?);
             }
             "--cert" => a.cert = Some(value("--cert")?.into()),
+            "--web-dir" => a.web_dir = Some(value("--web-dir")?.into()),
             "--key" => a.key = Some(value("--key")?.into()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => a.words.push(arg),
@@ -78,7 +81,7 @@ async fn run(args: Args) -> Result<(), String> {
     match words.as_slice() {
         ["init"] => bridge_coordinator::init::init(&dir, &sans),
         ["serve"] => {
-            let srv = server::start(&dir).await?;
+            let srv = server::start_with(&dir, args.web_dir.as_deref()).await?;
             eprintln!("bridge-coordinator listening on https://{}", srv.addr);
             let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
             tokio::select! { _ = term.recv() => {}, _ = tokio::signal::ctrl_c() => {} }

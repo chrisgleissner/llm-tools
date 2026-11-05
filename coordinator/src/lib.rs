@@ -10,6 +10,7 @@ pub mod hub;
 pub mod init;
 pub mod protocol;
 pub mod server;
+pub mod web;
 pub mod ws_worker;
 
 use std::path::{Path, PathBuf};

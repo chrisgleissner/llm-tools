@@ -10,7 +10,7 @@ use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUp
 use axum::extract::{Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, Method, StatusCode};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
 use serde_json::{json, Map, Value};
@@ -38,6 +38,7 @@ pub struct AppState {
     pub dummy_hash: String,
     pub argon_slots: Semaphore,
     pub shutdown: watch::Receiver<bool>,
+    pub web_dir: Option<PathBuf>,
 }
 
 pub type St = Arc<AppState>;
@@ -238,10 +239,6 @@ fn clean(s: &str) -> String {
 
 async fn healthz() -> Response {
     json_ok(StatusCode::OK, json!({"status": "ok"}))
-}
-
-async fn index() -> Html<&'static str> {
-    Html("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Bridge coordinator</title></head><body><h1>Bridge coordinator</h1><p>The web interface is not installed yet. The API is under <code>/api/v1</code>.</p></body></html>")
 }
 
 async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
@@ -588,19 +585,26 @@ async fn stream_session(mut socket: WebSocket, mut rx: broadcast::Receiver<Arc<s
 
 // ---------------------------------------------------------------- router
 
-async fn not_found() -> ApiError {
-    err(StatusCode::NOT_FOUND, "not-found", "no such route")
+async fn static_files(State(st): State<St>, method: Method, uri: axum::http::Uri, headers: HeaderMap) -> Response {
+    crate::web::serve(st.web_dir.clone(), method, uri, headers).await
 }
 
 async fn security_headers(mut r: Response) -> Response {
     let h = r.headers_mut();
+    // The static handler sets its own Content-Security-Policy and cache policy.
     for (k, v) in [
         ("cache-control", "no-store"),
+        ("content-security-policy", "default-src 'self'; frame-ancestors 'none'"),
+    ] {
+        if !h.contains_key(k) {
+            h.insert(k, v.parse().expect("static header"));
+        }
+    }
+    for (k, v) in [
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
         ("referrer-policy", "no-referrer"),
         ("strict-transport-security", "max-age=31536000"),
-        ("content-security-policy", "default-src 'self'; frame-ancestors 'none'"),
     ] {
         h.insert(k, v.parse().expect("static header"));
     }
@@ -609,7 +613,6 @@ async fn security_headers(mut r: Response) -> Response {
 
 pub fn router(st: St) -> Router {
     Router::new()
-        .route("/", get(index))
         .route("/healthz", get(healthz))
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup))
@@ -625,7 +628,7 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/diagnostics", get(diagnostics))
         .route("/api/v1/worker/connect", get(crate::ws_worker::connect))
-        .fallback(not_found)
+        .fallback(static_files)
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(st)

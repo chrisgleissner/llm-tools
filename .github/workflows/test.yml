@@ -88,6 +88,36 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
 
+  web:
+    name: web UI (TypeScript, Playwright)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install the Python worker for the end-to-end worker test
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e .
+      - name: Build the coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Type-check, build and run browser tests
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npx playwright install --with-deps chromium firefox
+          npm run test:e2e
+
   # Static type check of the Bridge modules (llm_tools/bridge*.py and terminal.py; see [tool.mypy] in
   # pyproject.toml). mypy is a development tool and is not a runtime dependency.
   typecheck:

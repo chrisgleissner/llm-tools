@@ -1,0 +1,20 @@
+{
+  "name": "bridge-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LLM Bridge browser interface (served by bridge-coordinator)",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
+    "test:e2e": "playwright test",
+    "pretest:e2e": "npm run build"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.6",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

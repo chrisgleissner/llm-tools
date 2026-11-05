@@ -14,6 +14,9 @@ pub struct Config {
     /// Extra exact Origin values accepted for cookie-authenticated writes
     /// (the default is `https://<Host header>`).
     pub allowed_origins: Vec<String>,
+    /// Directory with the built web interface (`index.html`, `app.js`, ...). Unset: `web` next to
+    /// the executable, else `/usr/share/bridge-coordinator/web`.
+    pub web_dir: Option<String>,
 }
 
 impl Default for Config {
@@ -23,6 +26,7 @@ impl Default for Config {
             lan_enabled: false,
             max_events_per_worker: 50_000,
             allowed_origins: vec![],
+            web_dir: None,
         }
     }
 }
@@ -34,7 +38,10 @@ lan_enabled = false\n\
 # Stored events per worker; oldest are deleted first.\n\
 max_events_per_worker = 50000\n\
 # Extra exact Origin values accepted for cookie-authenticated writes.\n\
-allowed_origins = []\n";
+allowed_origins = []\n\
+# Directory with the built web interface; default: web next to the executable, then\n\
+# /usr/share/bridge-coordinator/web.\n\
+# web_dir = \"/path/to/web\"\n";
 
 impl Config {
     pub fn load(dir: &Path) -> Result<Config, String> {
