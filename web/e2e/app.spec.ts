@@ -1,4 +1,4 @@
-import { expect, expectAccessible, expectNoHorizontalScroll, loginViaUi, PASSWORD, setupViaUi, test } from "./fixtures";
+import { expect, expectAccessible, expectNoHorizontalScroll, loginViaUi, navTo, PASSWORD, setupViaUi, signOutViaUi, test } from "./fixtures";
 
 test("first-run setup signs in and shows the overview; unauthenticated visits go to login", async ({ page, coord }) => {
   await setupViaUi(page, coord);
@@ -7,9 +7,9 @@ test("first-run setup signs in and shows the overview; unauthenticated visits go
   await expect(page.getByText("Workers online")).toBeVisible();
   await expect(page.getByText("healthy")).toBeVisible();
   // The setup token is consumed.
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOutViaUi(page);
   await expect(page).toHaveURL(/\/login$/);
-  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await expect(page.locator("#login-notice")).toContainText("You signed out");
   // A deep link while signed out lands on login, not on data.
   await page.goto("/missions");
   await expect(page).toHaveURL(/\/login$/);
@@ -18,13 +18,13 @@ test("first-run setup signs in and shows the overview; unauthenticated visits go
 
 test("wrong password shows an error; correct password signs in; logout ends the session", async ({ page, coord }) => {
   await setupViaUi(page, coord);
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await page.getByLabel("Username").fill("admin");
+  await signOutViaUi(page);
+  await page.getByLabel("Username", { exact: true }).fill("admin");
   await page.getByLabel("Password", { exact: true }).fill("wrong password!!");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("alert")).toContainText("invalid username or password");
+  await expect(page.locator("#form-error")).toContainText("The username or password is not correct");
   await loginViaUi(page);
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOutViaUi(page);
   await expect(page).toHaveURL(/\/login$/);
   await page.goto("/workers");
   await expect(page).toHaveURL(/\/login$/);
@@ -33,14 +33,14 @@ test("wrong password shows an error; correct password signs in; logout ends the 
 test("setup rejects a wrong token and mismatched passwords", async ({ page, coord }) => {
   await page.goto("/");
   await page.getByLabel("Setup token").fill("not-the-token");
-  await page.getByLabel("Username").fill("admin");
+  await page.getByLabel("Administrator username").fill("admin");
   await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
   await page.getByLabel("Repeat password").fill("different password");
   await page.getByRole("button", { name: "Create administrator" }).click();
-  await expect(page.getByRole("alert")).toContainText("do not match");
+  await expect(page.locator("#password-confirm-error")).toContainText("do not match");
   await page.getByLabel("Repeat password").fill(PASSWORD);
   await page.getByRole("button", { name: "Create administrator" }).click();
-  await expect(page.getByRole("alert")).toContainText("invalid setup token");
+  await expect(page.locator("#setup-token-error")).toContainText("not the setup token");
   expect(coord.setupToken()).not.toBe("");
 });
 
@@ -48,7 +48,7 @@ test("workers added with the CLI are listed as offline", async ({ page, coord })
   coord.cli("worker", "add", "alpha");
   coord.cli("worker", "add", "beta");
   await setupViaUi(page, coord);
-  await page.getByRole("link", { name: "Workers" }).click();
+  await navTo(page, "Workers");
   await expect(page.getByRole("heading", { name: "Workers" })).toBeVisible();
   const rows = page.locator("#workers-table tbody tr");
   await expect(rows).toHaveCount(2);
@@ -64,7 +64,7 @@ test("missions index is empty without workers and the SPA serves deep links", as
   await setupViaUi(page, coord);
   await page.goto("/missions");
   await expect(page.getByRole("heading", { name: "Missions", exact: true })).toBeVisible();
-  await expect(page.getByText("No missions.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No missions yet" })).toBeVisible();
   await page.goto("/missions/nobody/none");
   await expect(page.getByRole("heading", { name: "none" })).toBeVisible();
   await expect(page.locator("#terminal-region")).toBeVisible();
@@ -75,41 +75,50 @@ test("missions index is empty without workers and the SPA serves deep links", as
 test("keyboard: skip link, navigation and sign-in work without a mouse", async ({ page, coord, browserName }) => {
   test.skip(browserName === "webkit");
   await setupViaUi(page, coord);
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await signOutViaUi(page);
   await page.goto("/login");
-  await page.getByLabel("Username").focus();
+  await page.getByLabel("Username", { exact: true }).focus();
   await page.keyboard.type("admin");
   await page.keyboard.press("Tab");
   await page.keyboard.type(PASSWORD);
-  await page.keyboard.press("Tab");
-  await expect(page.getByRole("button", { name: "Sign in" })).toBeFocused();
+  await page.getByRole("button", { name: "Sign in" }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  // main has focus after navigation; shift-tab backwards then tab forward reaches the skip link first.
-  await page.locator("body").press("Home");
-  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  // main has focus after navigation; the first Tab stop is the skip link.
+  // Move the sequential focus starting point to the top of the document, as a fresh page load does.
+  await page.evaluate(() => {
+    const marker = document.createElement("span");
+    marker.tabIndex = -1;
+    document.body.prepend(marker);
+    marker.focus();
+    marker.remove();
+  });
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
+  const name = () => page.evaluate(() => (document.activeElement?.getAttribute("aria-label") || document.activeElement?.textContent || "").trim().slice(0, 40));
   const reached: string[] = [];
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 14; i++) {
     await page.keyboard.press("Tab");
-    reached.push((await page.evaluate(() => document.activeElement?.textContent?.trim() ?? "")).slice(0, 30));
+    reached.push(await name());
   }
-  for (const label of ["Overview", "Workers", "Missions", "Diagnostics", "Account", "Theme: auto", "Sign out"]) expect(reached).toContain(label);
+  const wide = (page.viewportSize()?.width ?? 0) >= 960;
+  for (const label of ["LLM Bridge", "Overview", "Workers", "Missions", wide ? "Diagnostics" : "More"]) expect(reached.some((r) => r.includes(label)), `${label} in ${reached.join(" | ")}`).toBe(true);
+  expect(reached.some((r) => r.startsWith("Theme:"))).toBe(true);
+  expect(reached.some((r) => r.includes("account menu"))).toBe(true);
   // Focus is visible: the focused element has a non-zero outline.
   const outline = await page.evaluate(() => getComputedStyle(document.activeElement as Element).outlineStyle);
   expect(outline).not.toBe("none");
-  await page.getByRole("link", { name: "Workers" }).focus();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" }).focus();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/workers$/);
-  await expect(page.getByRole("link", { name: "Workers" })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" })).toHaveAttribute("aria-current", "page");
 });
 
 test("theme toggle cycles and persists", async ({ page, coord }) => {
   await setupViaUi(page, coord);
   const toggle = page.locator("#theme-toggle");
   await toggle.click();
-  await expect(toggle).toHaveText("Theme: light");
+  await expect(toggle).toHaveAttribute("aria-label", /Theme: light/);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
   await toggle.click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
@@ -119,19 +128,19 @@ test("theme toggle cycles and persists", async ({ page, coord }) => {
 
 test("password change signs out and the new password works", async ({ page, coord }) => {
   await setupViaUi(page, coord);
-  await page.getByRole("link", { name: "Account" }).click();
+  await navTo(page, "Account");
   await page.getByLabel("Current password").fill(PASSWORD);
   await page.getByLabel("New password", { exact: true }).fill("another long passphrase");
   await page.getByLabel("Repeat new password").fill("another long passphrase");
   await page.getByRole("button", { name: "Change password" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
-  await expect(page.getByText("Password changed")).toBeVisible();
+  await expect(page.locator("#login-notice")).toContainText("Password changed");
   await loginViaUi(page, "admin", "another long passphrase");
 });
 
 test("diagnostics shows coordinator data", async ({ page, coord }) => {
   await setupViaUi(page, coord);
-  await page.getByRole("link", { name: "Diagnostics" }).click();
+  await navTo(page, "Diagnostics");
   await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
   await expect(page.getByRole("row", { name: /Protocol/ })).toBeVisible();
   await expect(page.getByRole("row", { name: /Live stream live/ })).toBeVisible();
@@ -154,7 +163,7 @@ test("static responses carry the security headers and the app logs no console er
   page.on("console", (m) => m.type() === "error" && problems.push(m.text()));
   page.on("pageerror", (e) => problems.push(String(e)));
   await setupViaUi(page, coord);
-  await page.getByRole("link", { name: "Diagnostics" }).click();
+  await navTo(page, "Diagnostics");
   await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
   expect(problems).toEqual([]);
 });
@@ -165,21 +174,13 @@ test("pages have no horizontal scroll and no accessibility violations", async ({
   await expectNoHorizontalScroll(page);
   await expectAccessible(page, "setup");
   await setupViaUi(page, coord);
-  for (const [path, heading] of [
-    ["/", "Overview"],
-    ["/workers", "Workers"],
-    ["/missions", "Missions"],
-    ["/diagnostics", "Diagnostics"],
-    ["/account", "Account"],
-  ] as const) {
-    await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: heading }).click();
-    await expect(page).toHaveURL(new RegExp(`${path === "/" ? "/$" : path + "$"}`));
-    await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
-    if (path === "/diagnostics") await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
+  for (const name of ["Overview", "Workers", "Missions", "Sessions", "Usage", "Diagnostics", "Account"] as const) {
+    await navTo(page, name);
+    await expect(page.getByRole("heading", { name: name === "Usage" ? "Provider usage" : name, exact: true })).toBeVisible();
+    if (name === "Diagnostics") await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
     await expectNoHorizontalScroll(page);
-    await expectAccessible(page, path);
+    await expectAccessible(page, name);
   }
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await signOutViaUi(page);
   await expectAccessible(page, "login");
 });

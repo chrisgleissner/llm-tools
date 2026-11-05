@@ -13,11 +13,10 @@ export function workerReadView(
   const select = h("select", { id: "worker-select", name: "worker" });
   const status = h("p", { class: "muted", role: "status", id: "view-status" });
   const body = h("div", { id: "view-body" });
-  const refreshBtn = button("Refresh", () => void load());
+  const refreshBtn = button("Refresh", () => void load(), { icon: "refresh" });
   root.append(
     h("h1", {}, opts.title),
-    h("div", { class: "field" }, h("label", { for: "worker-select" }, "Worker"), select),
-    h("div", { class: "row-actions" }, refreshBtn),
+    h("div", { class: "toolbar" }, h("div", { class: "field", style: "margin:0;flex:1 1 220px" }, h("label", { for: "worker-select" }, "Worker"), select), refreshBtn),
     status,
     body,
   );
@@ -60,7 +59,7 @@ export function workerReadView(
       if (disposed || mine !== seq) return;
       body.replaceChildren();
       status.textContent = "";
-      body.append(h("p", { class: "form-error", role: "alert" }, e instanceof api.ApiError ? `Worker ${target} refused or could not answer: ${e.message}` : "Unexpected error."));
+      body.append(h("p", { class: "form-error box", role: "alert" }, e instanceof api.ApiError ? `Worker ${target} refused or could not answer: ${e.message}` : "Unexpected error."));
     }
   }
 
@@ -90,13 +89,13 @@ export function workerReadView(
 export function table(id: string, label: string, headers: string[], rows: Node[][]): HTMLElement {
   return h(
     "div",
-    { class: "table-wrap", role: "region", "aria-label": `${label} table`, tabindex: "0" },
+    { class: "table-wrap rt", role: "region", "aria-label": `${label} table`, tabindex: "0" },
     h(
       "table",
-      { id },
+      { id, class: "rt" },
       h("caption", { class: "sr-only" }, label),
       h("thead", {}, h("tr", {}, ...headers.map((t) => h("th", { scope: "col" }, t)))),
-      h("tbody", {}, ...rows.map((cells) => h("tr", {}, ...cells.map((c, i) => (i === 0 ? h("th", { scope: "row" }, c) : h("td", {}, c)))))),
+      h("tbody", {}, ...rows.map((cells) => h("tr", {}, ...cells.map((c, i) => (i === 0 ? h("th", { scope: "row", "data-label": headers[i] ?? "" }, c) : h("td", { "data-label": headers[i] ?? "" }, c)))))),
     ),
   );
 }

@@ -325,6 +325,10 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
         "setup_required": setup_required,
         "authenticated": false,
         "password_policy": {"min_length": auth::MIN_PASSWORD_LEN, "max_length": auth::MAX_PASSWORD_LEN},
+        "session_policy": {
+            "remembered": {"idle_secs": crate::db::session_policy(true).0, "absolute_secs": crate::db::session_policy(true).1},
+            "default": {"idle_secs": crate::db::session_policy(false).0, "absolute_secs": crate::db::session_policy(false).1},
+        },
     });
     if let Ok(Principal::Session {
         csrf,

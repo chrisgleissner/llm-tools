@@ -3,7 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { expect, expectAccessible, expectNoHorizontalScroll, setupViaUi, test, type Coordinator } from "./fixtures";
+import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, test, type Coordinator } from "./fixtures";
 
 const repo = resolve(import.meta.dirname, "../..");
 const python = join(repo, ".venv", "bin", "python");
@@ -54,10 +54,10 @@ test.describe("with a connected worker", () => {
     try {
       await setupViaUi(page, coord);
       // Workers: online.
-      await page.getByRole("link", { name: "Workers" }).click();
+      await navTo(page, "Workers");
       await expect(page.locator('tr[data-worker="e2e-worker"]').getByText("online", { exact: true })).toBeVisible({ timeout: 20_000 });
       // Missions index: shows the mission, not stale.
-      await page.getByRole("link", { name: "Missions" }).click();
+      await navTo(page, "Missions");
       const link = page.getByRole("link", { name: "Browser E2E mission" });
       await expect(link).toBeVisible({ timeout: 20_000 });
       const row = page.locator("#missions-table tbody tr").first();
@@ -105,9 +105,9 @@ test.describe("with a connected worker", () => {
       await expect(page.locator("#mission-tasks").getByRole("button", { name: "Pause" }).first()).toBeDisabled({ timeout: 20_000 });
       await expect(page.locator(".page-head .badge.stale")).toBeVisible({ timeout: 20_000 });
       await expect(page.locator(".page-head .notice")).toContainText("not connected");
-      await page.getByRole("link", { name: "Workers" }).click();
+      await navTo(page, "Workers");
       await expect(page.locator('tr[data-worker="e2e-worker"]').getByText("offline", { exact: true })).toBeVisible();
-      await page.getByRole("link", { name: "Missions" }).click();
+      await navTo(page, "Missions");
       await expect(page.locator("#missions-table .badge.stale")).toBeVisible();
     } finally {
       fake.cleanup();

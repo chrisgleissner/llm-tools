@@ -46,6 +46,8 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /** Seconds from a `Retry-After` header, when the server sent one. */
+    readonly retryAfter: number | null = null,
   ) {
     super(message);
   }
@@ -83,18 +85,29 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
   if (res.status === 401 && !quiet401) unauthorizedHandler();
   if (!res.ok) {
     const e = (json as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(res.status, e?.code ?? "http", e?.message ?? `Request failed (${res.status}).`);
+    const ra = Number(res.headers.get("retry-after"));
+    throw new ApiError(res.status, e?.code ?? "http", e?.message ?? `Request failed (${res.status}).`, Number.isFinite(ra) && ra > 0 ? ra : null);
   }
   return json as T;
 }
 
 export const get = <T>(path: string): Promise<T> => request<T>("GET", path);
+export const del = <T>(path: string): Promise<T> => request<T>("DELETE", path);
 export const post = <T>(path: string, body: unknown = {}): Promise<T> => request<T>("POST", path, body);
+
+export interface PasswordPolicy {
+  min_length: number;
+  max_length: number;
+}
 
 export interface AuthState {
   setup_required: boolean;
   authenticated: boolean;
   csrf_token?: string;
+  password_policy?: PasswordPolicy;
+  session_policy?: { remembered: { idle_secs: number; absolute_secs: number }; default: { idle_secs: number; absolute_secs: number } };
+  username?: string | null;
+  session?: { remember: boolean; expires_at: number; idle_timeout_secs: number };
 }
 
 export async function authState(): Promise<AuthState> {
@@ -103,8 +116,8 @@ export async function authState(): Promise<AuthState> {
   return s;
 }
 
-export async function login(username: string, password: string): Promise<void> {
-  const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/login", { username, password }, true);
+export async function login(username: string, password: string, remember = false): Promise<void> {
+  const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/login", { username, password, remember }, true);
   setCsrf(r.csrf_token);
 }
 
@@ -120,16 +133,44 @@ function requestId(): string {
   return "web-" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
 
+export type CommandOutcomeKind = "ok" | "accepted" | "applied" | "rejected" | "failed" | "uncertain";
+
+function commandRequest(operation: string, missionId: string | null, params: Record<string, unknown>) {
+  return { schema_version: 1, operation, params, mission_id: missionId, target: "local", request_id: requestId() };
+}
+
 /** Submit a typed command to a worker and wait for its result. Throws ApiError on a failed outcome. */
 export async function command(target: string, operation: string, missionId: string | null, params: Record<string, unknown> = {}, waitMs = 10000): Promise<CommandRow> {
-  const row = await request<CommandRow>("POST", "/api/v1/commands", {
-    target,
-    wait_ms: waitMs,
-    request: { schema_version: 1, operation, params, mission_id: missionId, target: "local", request_id: requestId() },
-  });
+  const row = await request<CommandRow>("POST", "/api/v1/commands", { target, wait_ms: waitMs, request: commandRequest(operation, missionId, params) });
   if (row.state !== "done") throw new ApiError(202, "pending", "The worker has not answered yet; the command stays queued.");
   const r = row.result;
   if (r?.error) throw new ApiError(422, r.error.code, r.error.message);
   if (r?.outcome && ["rejected", "failed", "uncertain"].includes(r.outcome)) throw new ApiError(422, r.outcome, `The worker reported: ${r.outcome}.`);
   return row;
+}
+
+export interface MutationResult {
+  outcome: Exclude<CommandOutcomeKind, "ok">;
+  message: string;
+}
+
+/**
+ * Submit a state-changing command and classify what happened: `applied` (the worker did it),
+ * `accepted` (queued, not yet confirmed), `rejected` (the worker refused), `failed` (never carried
+ * out) or `uncertain` (the connection broke after the request may have been delivered).
+ */
+export async function mutate(target: string, operation: string, missionId: string | null, params: Record<string, unknown> = {}, waitMs = 10000): Promise<MutationResult> {
+  let row: CommandRow;
+  try {
+    row = await request<CommandRow>("POST", "/api/v1/commands", { target, wait_ms: waitMs, request: commandRequest(operation, missionId, params) });
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 0) return { outcome: "uncertain", message: "The connection broke while sending the request; it may have reached the coordinator." };
+    if (e instanceof ApiError && e.status >= 500) return { outcome: "uncertain", message: e.message };
+    return { outcome: e instanceof ApiError && e.status === 422 ? "rejected" : "failed", message: e instanceof ApiError ? e.message : "Unexpected error." };
+  }
+  if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
+  const r = row.result;
+  const known = r?.outcome === "applied" || r?.outcome === "accepted" || r?.outcome === "rejected" || r?.outcome === "failed" || r?.outcome === "uncertain";
+  const outcome = known ? (r?.outcome as MutationResult["outcome"]) : r?.error ? "failed" : "applied";
+  return { outcome, message: r?.error?.message ?? "" };
 }

@@ -42,6 +42,38 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
   openView.id = "terminal-open";
   openWrite.id = "terminal-control";
   closeBtn.id = "terminal-close";
+  // On-screen keys for devices without a hardware keyboard. They never take focus from the terminal, so the
+  // soft keyboard stays open, and they send bytes only while this browser holds the writer role.
+  const keybar = h("div", { class: "keybar", id: "terminal-keys", role: "toolbar", "aria-label": "Terminal keys" });
+  let ctrlArmed = false;
+  const keyButtons = new Map<string, HTMLButtonElement>();
+  const addKey = (id: string, text: string, label: string, bytes: (() => string) | null): void => {
+    const b = h("button", { type: "button", class: "btn", id: `key-${id}`, "data-key": id, "aria-label": label }, text);
+    // Keep the terminal focused: a button must not take focus on press.
+    b.addEventListener("pointerdown", (e) => e.preventDefault());
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", () => {
+      if (mode !== "write") return;
+      if (bytes) sendInput(new TextEncoder().encode(bytes()));
+      else {
+        ctrlArmed = !ctrlArmed;
+        b.setAttribute("aria-pressed", String(ctrlArmed));
+      }
+      term?.focus();
+    });
+    if (!bytes) b.setAttribute("aria-pressed", "false");
+    keyButtons.set(id, b);
+    keybar.append(b);
+  };
+  const arrow = (c: string) => () => (term?.modes.applicationCursorKeysMode ? `\x1bO${c}` : `\x1b[${c}`);
+  addKey("esc", "Esc", "Esc, the Escape key", () => "\x1b");
+  addKey("tab", "Tab", "Tab key", () => "\t");
+  addKey("ctrl", "Ctrl", "Ctrl, applies to the next key you type", null);
+  addKey("up", "\u2191", "Arrow up", arrow("A"));
+  addKey("down", "\u2193", "Arrow down", arrow("B"));
+  addKey("left", "\u2190", "Arrow left", arrow("D"));
+  addKey("right", "\u2192", "Arrow right", arrow("C"));
+  const touchLike = window.matchMedia("(pointer: coarse), (max-width: 720px)");
   const element = h(
     "section",
     { id: "terminal-region", "aria-labelledby": "ms-term", class: "term-region" },
@@ -49,6 +81,7 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
     h("div", { class: "actions" }, openView, openWrite, closeBtn),
     status,
     host,
+    keybar,
     hint,
   );
 
@@ -79,12 +112,33 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
     status.dataset["mode"] = mode;
     closeBtn.hidden = next === "idle" || next === "ended";
     updateButtons();
+    paintKeys();
   }
 
   function updateButtons(): void {
     const busy = state === "connecting" || state === "live" || state === "reconnecting";
     openView.disabled = busy || !available;
     openWrite.disabled = busy || !available;
+  }
+
+  function paintKeys(): void {
+    const on = state === "live" && mode === "write" && touchLike.matches;
+    keybar.classList.toggle("on", on);
+    if (!on) {
+      ctrlArmed = false;
+      keyButtons.get("ctrl")?.setAttribute("aria-pressed", "false");
+    }
+  }
+  touchLike.addEventListener("change", paintKeys);
+
+  /** Typed text: an armed on-screen Ctrl turns the next letter into its control code (Ctrl+C is 0x03). */
+  function typed(d: string): void {
+    if (ctrlArmed && d.length === 1 && /[A-Za-z@[\\\]^_]/.test(d)) {
+      ctrlArmed = false;
+      keyButtons.get("ctrl")?.setAttribute("aria-pressed", "false");
+      d = String.fromCharCode(d.toUpperCase().charCodeAt(0) & 0x1f);
+    }
+    sendInput(new TextEncoder().encode(d));
   }
 
   function send(frame: Record<string, unknown>): void {
@@ -105,12 +159,12 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
   function ensureTerminal(): Terminal {
     if (term) return term;
     host.hidden = false;
-    const t = new Terminal({ cols: 80, rows: 24, scrollback: 2000, convertEol: false, cursorBlink: true, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 14, allowProposedApi: false });
+    const t = new Terminal({ cols: 80, rows: 24, scrollback: 2000, convertEol: false, cursorBlink: true, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: window.matchMedia("(max-width: 720px)").matches ? 13 : 14, allowProposedApi: false });
     fit = new FitAddon();
     t.loadAddon(fit);
     t.open(host);
     t.textarea?.setAttribute("aria-label", "Terminal input");
-    t.onData((d) => sendInput(new TextEncoder().encode(d)));
+    t.onData(typed);
     t.onBinary((d) => sendInput(Uint8Array.from(d, (c) => c.charCodeAt(0) & 0xff)));
     t.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;

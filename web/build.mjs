@@ -10,6 +10,9 @@ const result = await build({
   bundle: true,
   minify: true,
   sourcemap: false,
+  format: "esm",
+  splitting: true, // the terminal (xterm.js) is a separate chunk, loaded only on a mission page
+  chunkNames: "chunk-[hash]",
   target: ["es2022", "chrome110", "firefox110", "safari16"],
   outdir: "dist",
   entryNames: "[name]-[hash]",
@@ -27,7 +30,7 @@ const css = await build({
   logLevel: "warning",
 });
 const outputs = [...Object.keys(result.metafile.outputs), ...Object.keys(css.metafile.outputs)].map((p) => basename(p));
-const js = outputs.find((f) => f.endsWith(".js"));
+const js = outputs.find((f) => f.startsWith("app-") && f.endsWith(".js"));
 const style = outputs.find((f) => f.endsWith(".css"));
 if (!js || !style) throw new Error("esbuild produced no js/css output");
 const html = readFileSync("src/index.html", "utf8").replace("{{JS}}", js).replace("{{CSS}}", style);

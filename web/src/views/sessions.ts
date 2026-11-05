@@ -1,4 +1,4 @@
-import { h, isoTime, statusBadge } from "../dom";
+import { emptyState, h, idChip, statusBadge, timeEl } from "../dom";
 import { table, workerReadView } from "./remote";
 
 interface Session {
@@ -25,7 +25,7 @@ export function sessions(root: HTMLElement, query: URLSearchParams): () => void 
     query,
     render: (result, workerName) => {
       const list = (result["sessions"] as Session[] | undefined) ?? [];
-      if (list.length === 0) return h("p", { class: "muted" }, `No provider sessions recorded on ${workerName}.`);
+      if (list.length === 0) return emptyState({ icon: "sessions", title: "No provider sessions yet", text: `${workerName} has not started a provider session. They are listed here once a mission runs a task.` });
       return table(
         "sessions-table",
         `Provider sessions on ${workerName}`,
@@ -35,10 +35,10 @@ export function sessions(root: HTMLElement, query: URLSearchParams): () => void 
           h("a", { href: `/missions/${encodeURIComponent(workerName)}/${encodeURIComponent(s.mission_id)}` }, s.mission_name || s.mission_id),
           h("span", {}, dash(s.task_ordinal)),
           statusBadge(s.state),
-          h("code", {}, dash(s.native_session_id)),
+          s.native_session_id ? idChip(s.native_session_id, "session ID") : h("span", {}, "-"),
           h("span", {}, s.restoration_state.toLowerCase()),
-          h("span", {}, isoTime(s.started_at)),
-          h("span", {}, isoTime(s.last_activity_at)),
+          timeEl(s.started_at),
+          timeEl(s.last_activity_at),
         ]),
       );
     },

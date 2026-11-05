@@ -73,16 +73,36 @@ export async function setupViaUi(page: Page, coord: Coordinator, username = "adm
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "First-run setup" })).toBeVisible();
   await page.getByLabel("Setup token").fill(coord.setupToken());
-  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Administrator username").fill(username);
   await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
   await page.getByLabel("Repeat password").fill(PASSWORD);
   await page.getByRole("button", { name: "Create administrator" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 }
 
+/** Open the account menu and sign out. */
+export async function signOutViaUi(page: Page): Promise<void> {
+  await page.locator("#account-button").click();
+  await page.locator("#account-panel").getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+}
+
+/** Go to a page through the navigation that the current viewport shows (side bar, tab bar or the More sheet). */
+export async function navTo(page: Page, name: "Overview" | "Workers" | "Missions" | "Sessions" | "Usage" | "Diagnostics" | "Account"): Promise<void> {
+  if (name === "Account") {
+    await page.locator("#account-button").click();
+    await page.locator("#account-panel").getByRole("button", { name: "Change password" }).click();
+    return;
+  }
+  const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true });
+  if (await link.isVisible()) return link.click();
+  await page.locator("#more-button").click();
+  await page.locator("#more-sheet").getByRole("link", { name, exact: true }).click();
+}
+
 export async function loginViaUi(page: Page, username = "admin", password = PASSWORD): Promise<void> {
   await page.goto("/login");
-  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Username", { exact: true }).fill(username);
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
@@ -99,6 +119,6 @@ export async function expectAccessible(page: Page, label: string): Promise<void>
 }
 
 export async function expectNoHorizontalScroll(page: Page): Promise<void> {
-  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  const overflow = await page.evaluate(() => Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) - window.innerWidth);
   expect(overflow, "page must not scroll horizontally").toBeLessThanOrEqual(0);
 }

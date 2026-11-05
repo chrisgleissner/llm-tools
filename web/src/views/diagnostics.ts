@@ -8,7 +8,7 @@ export function diagnostics(root: HTMLElement): () => void {
   let data: Record<string, unknown> | null = null;
   let error = "";
   const render = () => {
-    if (error) return body.replaceChildren(h("p", { class: "form-error", role: "alert" }, error));
+    if (error) return body.replaceChildren(h("p", { class: "form-error box", role: "alert" }, error));
     if (!data) return;
     const d = data;
     const row = (k: string, v: unknown) => h("tr", {}, h("th", { scope: "row" }, k), h("td", {}, v === null || v === undefined ? "-" : String(v)));

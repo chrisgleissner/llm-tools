@@ -1,11 +1,13 @@
 import * as api from "../api";
 import type { BridgeEvent } from "../api";
-import { button, fill, h, isoTime, statusBadge } from "../dom";
+import { button, debounce, emptyState, fill, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
 import { isStale, onStream, store, subscribe, worker } from "../store";
-import { terminalPanel } from "../terminal";
+import type { TerminalPanel } from "../terminal";
 import { announce, confirmDialog } from "../ui";
+import { humanKind } from "./overview";
 
 const TASK_PAGE = 25;
+const TASK_FETCH = 500;
 const EVENT_PAGE = 25;
 const EVENT_WINDOW = 300;
 
@@ -19,44 +21,55 @@ interface Task {
   prompt?: string;
 }
 
+type TaskSort = "ordinal" | "title" | "status" | "priority";
 const TERMINAL = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
+const STATUS_ORDER = ["RUNNING", "VERIFYING", "BLOCKED", "READY", "QUEUED", "PAUSED", "FAILED", "COMPLETED", "CANCELLED"];
 
 export function missionDetail(root: HTMLElement, workerName: string, missionId: string): () => void {
   const header = h("div", { class: "page-head" });
   const statusBox = h("section", { "aria-labelledby": "ms-status", id: "mission-status" });
   const taskBox = h("section", { "aria-labelledby": "ms-tasks", id: "mission-tasks" });
   const eventBox = h("section", { "aria-labelledby": "ms-events", id: "mission-events" });
-  const termPanel = terminalPanel(workerName, missionId);
-  const termBox = termPanel.element;
+  const termBox = h("div", { id: "terminal-slot" });
   root.append(header, statusBox, taskBox, eventBox, termBox);
 
   let snapshot: Record<string, unknown> | null = null;
   let snapshotError = "";
   let tasks: Task[] = [];
   let taskTotal = 0;
-  let taskOffset = 0;
   let taskError = "";
+  let taskLoaded = false;
+  let tq = "";
+  let tStatus: string[] = [];
+  let tSort: TaskSort = "ordinal";
+  let tOrder: "asc" | "desc" = "asc";
+  let taskOffset = 0;
   let events: BridgeEvent[] = [];
   let eventShown = EVENT_PAGE;
   let eventStart = 0; // lowest cursor already requested
   let eventError = "";
   let disposed = false;
+  let termPanel: TerminalPanel | null = null;
 
   const entry = () => store.missions.find((m) => m.worker === workerName && m.mission.id === missionId);
   const online = () => store.conn === "live" && worker(workerName)?.state === "online";
 
+  // The terminal code (xterm.js) is the bulk of the bundle: load it only on this page.
+  void import("../terminal").then(({ terminalPanel }) => {
+    if (disposed) return;
+    termPanel = terminalPanel(workerName, missionId);
+    termBox.append(termPanel.element);
+    termPanel.setAvailable(online());
+  });
+
   // ---- actions
   async function run(label: string, operation: string, params: Record<string, unknown>, task?: Task): Promise<void> {
     if (!online()) {
-      announce(`${label}: the worker is offline.`, "error");
+      announce(`${label}: the worker is offline.`, "failed");
       return;
     }
-    try {
-      await api.command(workerName, operation, missionId, task ? { task_id: task.id, expected_revision: task.revision, ...params } : params);
-      announce(`${label}: done.`);
-    } catch (e) {
-      announce(`${label} failed: ${e instanceof api.ApiError ? e.message : "unexpected error"}`, "error");
-    }
+    const r = await api.mutate(workerName, operation, missionId, task ? { task_id: task.id, expected_revision: task.revision, ...params } : params);
+    announce(`${label}.`, r.outcome, r.message);
     await Promise.all([loadTasks(), loadSnapshot()]);
   }
 
@@ -75,7 +88,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   function taskActions(t: Task): HTMLElement {
     const off = !online();
     const tip = off ? "Worker is offline" : undefined;
-    const b = (label: string, fn: () => void, kind = "") => button(label, fn, { kind, disabled: off, title: tip });
+    const b = (label: string, fn: () => void, kind = "") => button(label, fn, { kind: `${kind} small`.trim(), disabled: off, title: tip, label: `${label} task ${t.ordinal}` });
     const items: HTMLElement[] = [];
     const s = t.status;
     if (s === "VERIFYING" || s === "BLOCKED") {
@@ -107,7 +120,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
           })(),
         { kind: danger ? "danger" : "", disabled: !online(), title: online() ? undefined : "Worker is offline" },
       );
-    fill(header, 
+    fill(
+      header,
       h("nav", { "aria-label": "Breadcrumb", class: "crumbs" }, h("a", { href: "/missions" }, "Missions"), " / ", h("span", {}, m?.name || missionId)),
       h("h1", {}, m?.name || missionId),
       h(
@@ -119,24 +133,27 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         h("a", { href: "/workers" }, workerName),
         m?.folder ? h("span", { class: "muted" }, ` - ${m.folder}`) : null,
       ),
+      h("p", { class: "meta muted small" }, "Mission ID ", idChip(missionId, "mission ID")),
       h("div", { class: "row-actions" }, mb("Pause mission", "mission.pause"), mb("Continue", "mission.continue"), mb("Cancel mission", "mission.cancel", true)),
       !online() ? h("p", { class: "notice", role: "status" }, "The worker is not connected. Actions are disabled and the data below may be out of date.") : null,
     );
   }
 
   function renderStatus(): void {
-    const rows: Array<[string, string]> = [];
+    const rows: Array<[string, Node | string]> = [];
     if (snapshot) {
       const mission = (snapshot["mission"] ?? {}) as Record<string, unknown>;
-      for (const k of ["status", "name", "cwd", "created_at", "updated_at"]) if (mission[k] != null) rows.push([k.replace("_", " "), k.endsWith("_at") ? isoTime(String(mission[k])) : String(mission[k])]);
+      for (const k of ["status", "name", "cwd"]) if (mission[k] != null) rows.push([k.replace("_", " "), String(mission[k])]);
+      for (const k of ["created_at", "updated_at"]) if (mission[k] != null) rows.push([k.replace("_", " "), timeEl(String(mission[k]))]);
       const counts = snapshot["task_counts"] as Record<string, unknown> | undefined;
-      if (counts) rows.push(["task counts", Object.entries(counts).filter(([, v]) => typeof v === "number").map(([k, v]) => `${k} ${v}`).join(", ")]);
+      if (counts) rows.push(["task counts", Object.entries(counts).filter(([, v]) => typeof v === "number").map(([k, v]) => `${k.toLowerCase()} ${v}`).join(", ")]);
       const needs = snapshot["needs_you"];
-      if (needs) rows.push(["needs you", typeof needs === "string" ? needs : JSON.stringify(needs)]);
+      if (needs) rows.push(["needs you", typeof needs === "string" ? needs : String((needs as { message?: string }).message ?? JSON.stringify(needs))]);
       const health = snapshot["health"] as Record<string, unknown> | undefined;
       if (health && typeof health["state"] === "string") rows.push(["health", health["state"]]);
     }
-    fill(statusBox, 
+    fill(
+      statusBox,
       h("h2", { id: "ms-status" }, "Status"),
       snapshotError
         ? h("p", { class: "notice", role: "status" }, snapshotError)
@@ -146,50 +163,105 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     );
   }
 
-  function pager(label: string, shown: string, prev: (() => void) | null, next: (() => void) | null): HTMLElement {
-    return h("nav", { class: "pager", "aria-label": label }, button("Previous", prev ?? (() => {}), { disabled: !prev }), h("span", { class: "muted", "aria-live": "polite" }, shown), button("Next", next ?? (() => {}), { disabled: !next }));
+  /** Tasks after the search, status filter and sort, which run in the browser over the loaded list. */
+  function visibleTasks(): Task[] {
+    const needle = tq.toLowerCase();
+    const list = tasks.filter((t) => (!tStatus.length || tStatus.includes(t.status)) && (!needle || `${t.ordinal} ${t.title}`.toLowerCase().includes(needle)));
+    const key = (t: Task): string | number => (tSort === "ordinal" ? t.ordinal : tSort === "priority" ? t.priority : tSort === "title" ? (t.title || "").toLowerCase() : STATUS_ORDER.indexOf(t.status));
+    list.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.ordinal - b.ordinal));
+    return tOrder === "desc" ? list.reverse() : list;
+  }
+
+  function setTaskSort(k: string): void {
+    if (tSort === k) tOrder = tOrder === "asc" ? "desc" : "asc";
+    else {
+      tSort = k as TaskSort;
+      tOrder = "asc";
+    }
+    taskOffset = 0;
+    renderTasks();
   }
 
   function renderTasks(): void {
-    const last = Math.min(taskTotal, taskOffset + tasks.length);
-    fill(taskBox, 
+    const focusId = document.activeElement?.id;
+    const shown = visibleTasks();
+    if (taskOffset >= shown.length) taskOffset = Math.max(0, Math.floor((shown.length - 1) / TASK_PAGE) * TASK_PAGE);
+    const page = shown.slice(taskOffset, taskOffset + TASK_PAGE);
+    const counts = new Map<string, number>();
+    for (const t of tasks) counts.set(t.status, (counts.get(t.status) ?? 0) + 1);
+    const chips = [...counts].sort((a, b) => STATUS_ORDER.indexOf(a[0]) - STATUS_ORDER.indexOf(b[0]));
+    const sh = (label: string, key: TaskSort) => sortHeader(label, key, tSort, tOrder, setTaskSort);
+    const filtered = Boolean(tq || tStatus.length);
+    fill(
+      taskBox,
       h("h2", { id: "ms-tasks" }, "Tasks"),
-      taskError
-        ? h("p", { class: "notice", role: "status" }, taskError)
-        : tasks.length === 0
-          ? h("p", { class: "muted" }, "No tasks to show.")
+      taskError ? h("p", { class: "notice", role: "status" }, taskError) : null,
+      tasks.length > 0
+        ? h(
+            "div",
+            { class: "toolbar" },
+            searchBox("task-search", "Search tasks", tq, (v) => {
+              tq = v.trim();
+              taskOffset = 0;
+              renderTasksDebounced();
+            }),
+            h(
+              "ul",
+              { class: "chips", "aria-label": "Filter tasks by status", style: "flex-basis:100%" },
+              ...chips.map(([s, n]) => {
+                const c = h("button", { type: "button", class: "chip", "aria-pressed": String(tStatus.includes(s)), "data-status": s }, s.toLowerCase(), h("span", { class: "n" }, String(n)));
+                c.addEventListener("click", () => {
+                  tStatus = tStatus.includes(s) ? tStatus.filter((x) => x !== s) : [...tStatus, s];
+                  taskOffset = 0;
+                  renderTasks();
+                });
+                return h("li", {}, c);
+              }),
+            ),
+          )
+        : null,
+      !taskError && tasks.length === 0
+        ? taskLoaded
+          ? emptyState({ icon: "inbox", title: "No tasks yet", text: h("span", {}, "Add tasks on the worker with ", h("code", {}, "llm-bridge task add"), ". They appear here as soon as the worker reports them.") })
+          : h("p", { class: "muted" }, "Loading...")
+        : shown.length === 0
+          ? emptyState({ icon: "search", title: "No tasks match", text: "Nothing matches the current search and filters.", action: h("div", { class: "actions" }, button("Clear search and filters", () => { tq = ""; tStatus = []; renderTasks(); }, { label: "" })) })
           : h(
               "div",
-              { class: "table-wrap", role: "region", "aria-label": "Tasks table", tabindex: "0" },
+              { class: "table-wrap rt", role: "region", "aria-label": "Tasks table", tabindex: "0" },
               h(
                 "table",
-                { id: "tasks-table" },
+                { id: "tasks-table", class: "rt" },
                 h("caption", { class: "sr-only" }, "Tasks"),
-                h("thead", {}, h("tr", {}, ...["#", "Title", "Status", "Priority", "Actions"].map((t) => h("th", { scope: "col" }, t)))),
+                h("thead", {}, h("tr", {}, sh("#", "ordinal"), sh("Title", "title"), sh("Status", "status"), sh("Priority", "priority"), h("th", { scope: "col" }, "Actions"))),
                 h(
                   "tbody",
                   {},
-                  ...tasks.map((t) =>
-                    h("tr", { "data-task": t.id }, h("td", {}, t.ordinal), h("th", { scope: "row" }, t.title || `Task ${t.ordinal}`), h("td", {}, statusBadge(t.status)), h("td", {}, t.priority), h("td", {}, taskActions(t))),
+                  ...page.map((t) =>
+                    h("tr", { "data-task": t.id }, h("td", { "data-label": "#" }, t.ordinal), h("th", { scope: "row", "data-label": "Title" }, t.title || `Task ${t.ordinal}`), h("td", { "data-label": "Status" }, statusBadge(t.status)), h("td", { "data-label": "Priority" }, t.priority), h("td", { "data-label": "Actions" }, taskActions(t))),
                   ),
                 ),
               ),
             ),
-      taskTotal > TASK_PAGE
-        ? pager(
-            "Task pages",
-            `${taskOffset + 1}-${last} of ${taskTotal}`,
-            taskOffset > 0 ? () => void loadTasks(Math.max(0, taskOffset - TASK_PAGE)) : null,
-            taskOffset + TASK_PAGE < taskTotal ? () => void loadTasks(taskOffset + TASK_PAGE) : null,
-          )
-        : null,
+      shown.length > TASK_PAGE ? pager("Task pages", taskOffset, TASK_PAGE, shown.length, (o) => { taskOffset = o; renderTasks(); }) : null,
+      taskTotal > tasks.length ? h("p", { class: "notice info" }, `Showing the first ${tasks.length} of ${taskTotal} tasks.`) : null,
+      filtered && shown.length ? h("p", { class: "muted small", "aria-live": "polite" }, `${shown.length} of ${tasks.length} tasks match.`) : null,
     );
+    if (focusId) document.getElementById(focusId)?.focus();
   }
+  const renderTasksDebounced = debounce(() => {
+    const el = document.getElementById("task-search") as HTMLInputElement | null;
+    const pos = el?.selectionStart ?? null;
+    renderTasks();
+    const again = document.getElementById("task-search") as HTMLInputElement | null;
+    if (again && pos !== null) again.setSelectionRange(pos, pos);
+  }, 200);
 
   function renderEvents(): void {
     const newest = [...events].reverse();
     const visible = newest.slice(0, eventShown);
-    fill(eventBox, 
+    fill(
+      eventBox,
       h("h2", { id: "ms-events" }, "Events"),
       eventError ? h("p", { class: "notice", role: "status" }, eventError) : null,
       events.length === 0
@@ -201,10 +273,9 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
               h(
                 "li",
                 {},
-                h("span", { class: "ev-kind" }, e.kind),
-                " ",
-                h("span", { class: "muted small" }, isoTime(e.created_at)),
+                h("span", { class: "ev-kind" }, humanKind(e.kind)),
                 e.task_id != null ? h("span", { class: "muted small" }, ` task ${e.task_id}`) : null,
+                h("div", {}, timeEl(e.created_at)),
                 Object.keys(e.data ?? {}).length ? h("code", { class: "ev-data" }, JSON.stringify(e.data).slice(0, 200)) : null,
               ),
             ),
@@ -235,19 +306,19 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     if (!disposed) renderStatus();
   }
 
-  async function loadTasks(offset = taskOffset): Promise<void> {
+  async function loadTasks(): Promise<void> {
     if (!online()) {
       taskError = tasks.length ? "" : "The worker is offline, so tasks cannot be loaded.";
       renderTasks();
       return;
     }
     try {
-      const row = await api.command(workerName, "task.list", missionId, { limit: TASK_PAGE, offset });
+      const row = await api.command(workerName, "task.list", missionId, { limit: TASK_FETCH, offset: 0 });
       const r = (row.result?.result ?? {}) as { tasks?: Task[]; total?: number };
       tasks = r.tasks ?? [];
       taskTotal = r.total ?? tasks.length;
-      taskOffset = offset;
       taskError = "";
+      taskLoaded = true;
     } catch (e) {
       taskError = e instanceof api.ApiError ? e.message : "Cannot load tasks.";
     }
@@ -293,7 +364,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         renderEvents();
         void loadTasks();
         void loadSnapshot();
-        announce(`New event: ${mine[mine.length - 1]?.kind ?? "update"}`);
+        announce(`New event: ${humanKind(mine[mine.length - 1]?.kind ?? "update")}`);
       }
     }
   });
@@ -307,7 +378,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     renderHeader();
     renderTasks();
     const now = online();
-    termPanel.setAvailable(now);
+    termPanel?.setAvailable(now);
     if (now && !wasOnline) {
       void loadTasks();
       void loadSnapshot();
@@ -320,14 +391,13 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   renderStatus();
   renderTasks();
   renderEvents();
-  termPanel.setAvailable(online());
   void loadSnapshot();
-  void loadTasks(0);
+  void loadTasks();
   void loadEvents();
   return () => {
     disposed = true;
     offStream();
     offStore();
-    termPanel.dispose();
+    termPanel?.dispose();
   };
 }

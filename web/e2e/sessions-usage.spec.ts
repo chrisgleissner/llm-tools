@@ -3,7 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { expect, expectAccessible, expectNoHorizontalScroll, setupViaUi, test, type Coordinator } from "./fixtures";
+import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, test, type Coordinator } from "./fixtures";
 
 const repo = resolve(import.meta.dirname, "../..");
 const python = join(repo, ".venv", "bin", "python");
@@ -64,21 +64,21 @@ test.describe("sessions and usage views", () => {
     const fake = await startWorker(coord);
     try {
       await setupViaUi(page, coord);
-      await page.getByRole("link", { name: "Workers" }).click();
+      await navTo(page, "Workers");
       await expect(page.locator('tr[data-worker="su-worker"]').getByText("online", { exact: true })).toBeVisible({ timeout: 20_000 });
 
-      await page.getByRole("link", { name: "Sessions" }).click();
+      await navTo(page, "Sessions");
       await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
       await expect(page.getByLabel("Worker", { exact: true })).toHaveValue("su-worker");
       const row = page.locator("#sessions-table tbody tr").first();
       await expect(row).toBeVisible({ timeout: 20_000 });
       await expect(row).toContainText("codex");
-      await expect(row).toContainText(SESSION_ID);
+      await expect(row.locator(`code[title="${SESSION_ID}"]`)).toBeVisible();
       await expect(row.getByRole("link", { name: "Session mission" })).toBeVisible();
       await expectNoHorizontalScroll(page);
       await expectAccessible(page, "sessions");
 
-      await page.getByRole("link", { name: "Usage" }).click();
+      await navTo(page, "Usage");
       await expect(page.getByRole("heading", { name: "Provider usage" })).toBeVisible();
       const usage = page.locator("#usage-table tbody tr");
       await expect(usage).toHaveCount(2, { timeout: 20_000 });

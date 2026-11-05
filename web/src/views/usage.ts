@@ -1,4 +1,4 @@
-import { h, isoTime } from "../dom";
+import { h, isoTime, timeEl } from "../dom";
 import { table, workerReadView } from "./remote";
 
 interface Scope {
@@ -36,7 +36,7 @@ export function usage(root: HTMLElement, query: URLSearchParams): () => void {
           h("span", {}, s.model ? `${s.scope} / ${s.model}` : s.scope),
           h("span", {}, pct(s.remaining_percent)),
           h("span", {}, pct(s.used_percent)),
-          h("span", {}, s.reset_epoch === null ? "-" : isoTime(s.reset_epoch)),
+          s.reset_epoch === null ? h("span", {}, "-") : timeEl(s.reset_epoch),
           h("span", {}, s.guidance ?? (i === 0 && p.reason ? p.reason : "-")),
         ]);
       });

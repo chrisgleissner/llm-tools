@@ -31,6 +31,11 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
         body.get("username").is_none() && body.get("session").is_none(),
         "nothing about the session before sign-in: {body}"
     );
+    assert_eq!(body["session_policy"]["remembered"]["idle_secs"], bridge_coordinator::db::SESSION_IDLE_SECS);
+    assert_eq!(
+        body["session_policy"]["default"]["absolute_secs"],
+        bridge_coordinator::db::SESSION_ABSOLUTE_SECS_SHORT
+    );
     // The advertised minimum is the one the server enforces.
     let min = bridge_coordinator::auth::MIN_PASSWORD_LEN;
     assert!(bridge_coordinator::auth::valid_password(&"x".repeat(min)).is_ok());
