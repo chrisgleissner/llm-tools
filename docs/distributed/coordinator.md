@@ -27,6 +27,18 @@ worker protocol is `protocol.md`.
     link-local addresses are skipped). With any explicit `--hostname` or `--ip`,
     discovery is not used and the certificate covers exactly the given names plus
     `localhost`, `127.0.0.1` and `::1`. `cert renew` follows the same rule.
+  - The CA is constrained (`certs.rs`): `basicConstraints` CA with `pathLenConstraint=0`
+    and a critical `nameConstraints` extension that permits only the names of the server
+    certificate at `init` time (DNS names, and each address as a single-host range),
+    `localhost`, `home.arpa` and its subdomains, `127.0.0.0/8` and `::1`. Validity is 5
+    years. A leaf for any other name does not validate, so a leaked `ca.key` or a CA
+    imported into a browser cannot be used for other sites. `cert renew` verifies the new
+    certificate against `ca.pem` with webpki before replacing any file and refuses names
+    outside the constraints, listing them. `cert new-ca [--hostname ...] [--ip ...]`
+    creates a new constrained CA and server certificate for the given names; the previous
+    files are kept as `ca.pem.old-<UTC>` and `ca.key.old-<UTC>`. Browsers must import the
+    new `ca.pem` and workers must be re-enrolled with it. A CA from before name
+    constraints existed keeps working; `info` reports it as unconstrained.
   - `--bind` (or `BRIDGE_COORDINATOR_BIND` when the flag is absent) is written to
     `config.toml`; a non-loopback bind also writes `lan_enabled = true`
     (or the value of `BRIDGE_COORDINATOR_LAN_ENABLED` when set). The default bind is
@@ -62,13 +74,18 @@ worker protocol is `protocol.md`.
   (`Config::default`); `init` generates `config.toml` from them.
 - `bridge-coordinator worker add NAME` prints a new worker token once and
   stores its SHA-256 hash; `worker revoke NAME` deletes it.
-- `bridge-coordinator admin reset-password` (local shell only) sets a new
-  password from stdin and deletes all sessions.
+- `bridge-coordinator admin reset-password [--keep-api-tokens]` (local shell only)
+  sets a new password from stdin, deletes all sessions and revokes every API token
+  (the number is printed) unless `--keep-api-tokens` is given.
 - `bridge-coordinator cert renew [--hostname ...] [--ip ...]` replaces the
-  server certificate from the existing CA; `cert install --cert F --key F`
+  server certificate from the existing CA (names must be within the CA's name
+  constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
   installs administrator-provided files.
-- `bridge-coordinator token create NAME` prints an API token for the remote
-  CLI; stored hashed, revocable with `token revoke NAME`.
+- `bridge-coordinator token create NAME [--expires-days N]` prints an API token for the
+  remote CLI; stored hashed, revocable with `token revoke NAME`. The token expires
+  after 90 days by default; `--expires-days 0` creates one that never expires. The
+  expiry is checked on every use. An API token has full administrator power (see
+  `threat-model.md`).
 
 ## HTTP API (all under `/api/v1`, JSON)
 
@@ -79,7 +96,7 @@ Public:
 | GET | `/healthz` | `{"status":"ok"}` only. |
 | GET | `/api/v1/auth/state` | `{"setup_required": bool, "authenticated": bool}` |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
-| POST | `/api/v1/auth/login` | `{username, password}`; sets cookie `bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
+| POST | `/api/v1/auth/login` | `{username, password}`; sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
 
 Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 
@@ -110,17 +127,37 @@ them automatically.
 | Limit | Default | Setting |
 |---|---|---|
 | Concurrent TCP connections, all kinds | 256; a connection over the cap is closed immediately after `accept` | `max_connections` |
+| Concurrent connections per client address (IPv6 counted by /64) | 32; over the cap is closed immediately. Behind a proxy or a published container port every client has the proxy's address: raise it | `max_connections_per_ip` |
+| Worker reserve | 16 of the 256 slots (at most a quarter of `max_connections`) are used only after the other slots are full. A connection in the reserve has a 5 s handshake and header limit and may only carry `/api/v1/worker/*` with a valid worker token; any other request gets 503 and the connection is closed. Unauthenticated clients that fill the general slots therefore cannot stop workers from reconnecting | `worker_reserve_connections` |
 | TLS handshake | 10 s | fixed |
 | Wait for the next HTTP request header (keep-alive idle and slow-header limit) | 30 s | `http_idle_timeout_secs` |
+| Receive a complete request body once the handler reads it (slow-body limit); the connection is closed with 408 | 30 s | `request_body_timeout_secs` |
 | Browser `/stream` and `/terminal` WebSockets | server ping every 30 s; closed with 1001 `idle timeout` when nothing (pong or message) arrived for 90 s, checked at each ping | `ws_ping_interval_secs`, `ws_idle_timeout_secs` |
 | Worker connections | 64; ping every 20 s; closed after 60 s of silence | fixed |
 | Terminal sessions | 16 per worker, 64 total | fixed |
-| Request body | 1 MiB | fixed |
+| Request body | 1 MiB; 4 KiB on `/api/v1/auth/*` (413 above) | fixed |
+| Request bodies above 64 KiB buffered at once | 8 (over that: 503 `busy`, so at most 8 MiB of large bodies in memory); a body above 64 KiB takes a slot only after authentication | fixed |
+| Pre-hello worker connections | 1 per worker token, 10 s to send hello (second connection: 429) | fixed |
 | Graceful shutdown | 10 s | fixed |
 | Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers) | fixed |
 | Stored events per worker | 50 000, oldest deleted first (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | 7 days | fixed |
-| Login failures | 5 per minute per client address and per username | fixed |
+| Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
+
+Login rate limiting. Before the body is read and before Argon2 runs, a login reserves
+one attempt for the client address under the limiter lock. Attempts still in progress
+count against the limit, so 60 simultaneous wrong passwords from one address let 5
+reach Argon2 and answer the other 55 with 429. A failure is recorded when the attempt
+ends (also when the client disconnects mid-check); a successful login releases the
+reservation. When the table of tracked keys (4096) is full of live entries, a new key
+is refused with 429 instead of being left untracked. The per-username limit stops
+guessing from many addresses but is not applied to an address with a successful login
+in the last 7 days (stored as a salted hash of the address, `known_addrs`), so bad
+passwords sent for `admin` by others cannot lock the administrator out of the
+addresses they normally use. The per-address limit applies to every address, and
+known addresses may use a small reserve in the key table. The administrator logging in
+from a new address while someone is guessing `admin` waits for the window (at most a
+minute) or restarts the coordinator, which clears the in-memory counters.
 
 `ws_idle_timeout_secs` must be larger than `ws_ping_interval_secs`. The worker-side
 terminal WebSocket is not subject to the browser ping rule: the worker control
@@ -132,7 +169,10 @@ firewall (see `install.md`).
 
 SQLite (WAL, `synchronous=FULL`) with `PRAGMA user_version` migrations:
 `workers`, `missions`, `events`, `commands`, `admin`, `sessions`,
-`api_tokens`, `audit`. Passwords use Argon2id (19 MiB, t=2, p=1, unique salt);
+`api_tokens` (with `expires_at`), `audit`, `worker_generations` (per-name
+high-water mark of issued generations; survives `worker revoke`, so a worker that is
+revoked and added again receives a generation above every earlier one),
+`known_addrs` and `meta` (schema version 2). Passwords use Argon2id (19 MiB, t=2, p=1, unique salt);
 session and API tokens are 32 random bytes stored as SHA-256 hashes.
 
 ## Content Security Policy

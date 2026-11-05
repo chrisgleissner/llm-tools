@@ -127,6 +127,10 @@ pub fn report(dir: &Path, with_trust_steps: bool) -> Result<String, String> {
     );
     out += &format!("CA certificate:    {}\n", dir.join("ca.pem").display());
     out += &format!("CA SHA-256:        {}\n", ca_fingerprint(dir)?);
+    if !crate::certs::ca_is_constrained(dir) {
+        out += "CA name limits:    none (this CA predates name constraints and is trusted for any name;\n\
+                \x20                  run `cert new-ca` to replace it, then re-import ca.pem everywhere)\n";
+    }
     if admin_exists {
         out += "Administrator:     created\n";
     } else {
@@ -310,7 +314,7 @@ pub fn restore(dir: &Path, input: &Path) -> Result<PathBuf, String> {
         return Err(format!("{} does not exist", input.display()));
     }
     let version = integrity_ok(input).map_err(|e| format!("{}: {e}", input.display()))?;
-    if version < 1 || version > db::SCHEMA_VERSION {
+    if !(1..=db::SCHEMA_VERSION).contains(&version) {
         return Err(format!(
             "{} has schema version {version}; this binary supports 1..={}",
             input.display(),
@@ -332,5 +336,34 @@ pub fn restore(dir: &Path, input: &Path) -> Result<PathBuf, String> {
         let _ = std::fs::remove_file(format!("{}{suffix}", live.display()));
     }
     std::fs::rename(&staged, &live).map_err(|e| format!("cannot install the restored database: {e}"))?;
+    // A backup can predate a logout, a password change or a revocation. Browser sessions are not
+    // carried over; workers and API tokens are (see `restored_credentials`).
+    let db = Db::open(&live).map_err(|e| format!("cannot open the restored database: {e}"))?;
+    db.sessions_clear().map_err(|e| e.to_string())?;
+    db.audit("cli", "restore", "database restored; browser sessions deleted", "local");
     Ok(kept)
+}
+
+/// What is active after a restore, with the commands to revoke it. Revocations made after the
+/// backup was taken are undone by a restore, so the operator must check this list.
+pub fn restored_credentials(dir: &Path) -> Result<String, String> {
+    let db = Db::open(&db_path(dir)).map_err(|e| e.to_string())?;
+    let workers = db.workers_list().map_err(|e| e.to_string())?;
+    let tokens = db.tokens_list().map_err(|e| e.to_string())?;
+    let mut out = String::from("Credentials active after the restore (revocations made after the backup are undone):\n");
+    if workers.is_empty() {
+        out += "  workers: none\n";
+    }
+    for w in &workers {
+        out += &format!("  worker {}: bridge-coordinator worker revoke {}\n", w.name, w.name);
+    }
+    if tokens.is_empty() {
+        out += "  API tokens: none\n";
+    }
+    for (name, expires) in &tokens {
+        let until = expires.map_or("never expires".to_string(), |e| format!("expires at Unix time {e}"));
+        out += &format!("  API token {name} ({until}): bridge-coordinator token revoke {name}\n");
+    }
+    out += "Browser sessions were deleted; every administrator has to log in again.\n";
+    Ok(out)
 }

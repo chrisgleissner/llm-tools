@@ -155,7 +155,20 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
+/// salted hashes of addresses with a recent successful login, and a small key/value table.
+const MIGRATE_V2: &str = "
+ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER;
+CREATE TABLE worker_generations(name TEXT PRIMARY KEY, high INTEGER NOT NULL);
+INSERT INTO worker_generations(name, high) SELECT name, generation FROM workers;
+CREATE TABLE known_addrs(hash TEXT PRIMARY KEY, last_success INTEGER NOT NULL);
+CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+";
+
+/// An address with a successful login within this many seconds is a known address.
+pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 
 type R<T> = rusqlite::Result<T>;
 
@@ -178,7 +191,10 @@ impl Db {
             ));
         }
         if version < 1 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"))?;
+            conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
+        }
+        if version < 2 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V2} PRAGMA user_version = 2; COMMIT;"))?;
         }
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
@@ -204,13 +220,16 @@ impl Db {
             params![username, hash, crate::now()],
         )? == 1)
     }
-    /// Set the password and delete every session in one transaction.
-    pub fn admin_set_password(&self, hash: &str) -> R<()> {
+    /// Set the password and delete every session in one transaction. Unless `keep_api_tokens`,
+    /// every API token is revoked in the same transaction; returns how many were revoked.
+    pub fn admin_set_password(&self, hash: &str, keep_api_tokens: bool) -> R<usize> {
         let mut c = self.c();
         let tx = c.transaction()?;
         tx.execute("UPDATE admin SET password_hash=? WHERE id=1", params![hash])?;
         tx.execute("DELETE FROM sessions", [])?;
-        tx.commit()
+        let revoked = if keep_api_tokens { 0 } else { tx.execute("DELETE FROM api_tokens", [])? };
+        tx.commit()?;
+        Ok(revoked)
     }
 
     // ---- sessions ----
@@ -257,34 +276,90 @@ impl Db {
         )?;
         Ok(())
     }
+    pub fn sessions_clear(&self) -> R<()> {
+        self.c().execute("DELETE FROM sessions", [])?;
+        Ok(())
+    }
     pub fn session_count(&self) -> R<i64> {
         self.c().query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
     }
 
     // ---- api tokens ----
-    pub fn token_create(&self, name: &str, hash: &str) -> R<bool> {
+    /// `expires_at` is a Unix time; `None` never expires.
+    pub fn token_create(&self, name: &str, hash: &str, expires_at: Option<i64>) -> R<bool> {
         Ok(self.c().execute(
-            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at) VALUES(?,?,?)",
-            params![name, hash, crate::now()],
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at) VALUES(?,?,?,?)",
+            params![name, hash, crate::now(), expires_at],
         )? == 1)
+    }
+    /// (name, expires_at) of every API token, by name.
+    pub fn tokens_list(&self) -> R<Vec<(String, Option<i64>)>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT name, expires_at FROM api_tokens ORDER BY name")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
+        rows
     }
     pub fn token_revoke(&self, name: &str) -> R<bool> {
         Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)
     }
-    /// Name of the API token with this hash, touching `last_used` at most once a minute.
+    /// Name of the unexpired API token with this hash, touching `last_used` at most once a minute.
     pub fn token_lookup(&self, hash: &str) -> R<Option<String>> {
         let c = self.c();
-        let row: Option<(String, Option<i64>)> = c
-            .query_row("SELECT name, last_used FROM api_tokens WHERE token_hash=?", params![hash], |r| {
-                Ok((r.get(0)?, r.get(1)?))
+        let row: Option<(String, Option<i64>, Option<i64>)> = c
+            .query_row("SELECT name, last_used, expires_at FROM api_tokens WHERE token_hash=?", params![hash], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .optional()?;
-        let Some((name, last)) = row else { return Ok(None) };
+        let Some((name, last, expires_at)) = row else { return Ok(None) };
         let now = crate::now();
+        if expires_at.is_some_and(|e| now >= e) {
+            return Ok(None);
+        }
         if last.is_none_or(|l| now - l >= 60) {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
         Ok(Some(name))
+    }
+
+    // ---- known addresses ----
+    /// Salted hash of a client address key; the salt is created on first use and stored in `meta`.
+    fn addr_hash(c: &Connection, key: &str) -> R<String> {
+        let salt: Option<String> = c.query_row("SELECT value FROM meta WHERE key='addr_salt'", [], |r| r.get(0)).optional()?;
+        let salt = match salt {
+            Some(s) => s,
+            None => {
+                let fresh = crate::auth::random_token();
+                c.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('addr_salt', ?)", params![fresh])?;
+                c.query_row("SELECT value FROM meta WHERE key='addr_salt'", [], |r| r.get(0))?
+            }
+        };
+        Ok(crate::auth::sha256_hex(&format!("{salt}|{key}")))
+    }
+    /// Remember that `addr_key` had a successful login now.
+    pub fn known_addr_remember(&self, addr_key: &str) -> R<()> {
+        let c = self.c();
+        let h = Self::addr_hash(&c, addr_key)?;
+        c.execute(
+            "INSERT INTO known_addrs(hash, last_success) VALUES(?,?) ON CONFLICT(hash) DO UPDATE SET last_success=excluded.last_success",
+            params![h, crate::now()],
+        )?;
+        Ok(())
+    }
+    /// True when `addr_key` had a successful login within [`KNOWN_ADDR_SECS`].
+    pub fn known_addr(&self, addr_key: &str) -> R<bool> {
+        let c = self.c();
+        let h = Self::addr_hash(&c, addr_key)?;
+        let last: Option<i64> = c
+            .query_row("SELECT last_success FROM known_addrs WHERE hash=?", params![h], |r| r.get(0))
+            .optional()?;
+        Ok(last.is_some_and(|t| crate::now() - t < KNOWN_ADDR_SECS))
+    }
+    /// Test hook: age a known address.
+    pub fn known_addr_age(&self, addr_key: &str, last_success: i64) -> R<()> {
+        let c = self.c();
+        let h = Self::addr_hash(&c, addr_key)?;
+        c.execute("UPDATE known_addrs SET last_success=? WHERE hash=?", params![last_success, h])?;
+        Ok(())
     }
 
     // ---- workers ----
@@ -334,7 +409,16 @@ impl Db {
             return Ok(HelloOutcome::WorkerIdMismatch);
         }
         let now = crate::now();
-        let generation = generation + 1;
+        // Above everything ever issued for this name, including before a revoke and re-add.
+        let high: i64 = tx
+            .query_row("SELECT high FROM worker_generations WHERE name=?", params![name], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0);
+        let generation = generation.max(high) + 1;
+        tx.execute(
+            "INSERT INTO worker_generations(name, high) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET high=excluded.high",
+            params![name, generation],
+        )?;
         let text = |k: &str| hello.get(k).map(|v| v.to_string());
         tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, software_version=?, protocol_versions=?, platform=?, capabilities=? WHERE name=?",
             params![worker_id, generation, now, now, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), name])?;
@@ -510,6 +594,8 @@ impl Db {
             "DELETE FROM commands WHERE state='done' AND updated_at < ?",
             params![now - COMPLETED_COMMAND_KEEP_SECS],
         )?;
+        c.execute("DELETE FROM known_addrs WHERE last_success < ?", params![now - KNOWN_ADDR_SECS])?;
+        c.execute("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?", params![now])?;
         c.execute("DELETE FROM audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM audit) - ?", params![AUDIT_KEEP])?;
         Ok(())
     }

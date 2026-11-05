@@ -7,7 +7,7 @@ use crate::hub::{Hub, SendResult};
 use crate::protocol::{self, valid_id, valid_name};
 use axum::body::Bytes;
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -19,10 +19,19 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, watch, Semaphore};
+use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_BODY: usize = 1024 * 1024;
-pub const COOKIE: &str = "bridge_session";
+/// Request bodies of the unauthenticated `/api/v1/auth/*` routes (login, setup) are tiny.
+pub const AUTH_BODY_MAX: usize = 4096;
+/// Bodies declared (or streamed with unknown length) above this size need one of
+/// [`BIG_BODY_SLOTS`] while they are buffered.
+pub const BIG_BODY_BYTES: u64 = 64 * 1024;
+/// At most this many bodies above [`BIG_BODY_BYTES`] are buffered at once: 8 x 1 MiB.
+pub const BIG_BODY_SLOTS: usize = 8;
+/// `__Host-` makes the browser accept the cookie only with `Secure`, `Path=/` and no `Domain`,
+/// so a cookie set from a sibling host name cannot replace it.
+pub const COOKIE: &str = "__Host-bridge_session";
 const MAX_WAIT_MS: u64 = 30_000;
 
 #[derive(Clone, Copy)]
@@ -37,6 +46,8 @@ pub struct AppState {
     pub started: Instant,
     pub dummy_hash: String,
     pub argon_slots: Semaphore,
+    /// Permits for request bodies larger than [`BIG_BODY_BYTES`] (see [`read_body`]).
+    pub big_bodies: Arc<Semaphore>,
     pub shutdown: watch::Receiver<bool>,
     pub web_dir: Option<PathBuf>,
 }
@@ -74,6 +85,10 @@ impl IntoResponse for ApiError {
         if let Some(s) = self.retry_after {
             r.headers_mut().insert(header::RETRY_AFTER, s.to_string().parse().expect("number"));
         }
+        if matches!(self.status, StatusCode::REQUEST_TIMEOUT | StatusCode::SERVICE_UNAVAILABLE) {
+            // The request body may be only partly read: do not reuse the connection.
+            r.headers_mut().insert(header::CONNECTION, "close".parse().expect("static header"));
+        }
         r
     }
 }
@@ -86,6 +101,55 @@ fn json_ok(status: StatusCode, v: Value) -> Response {
 
 fn unauthorized() -> ApiError {
     err(StatusCode::UNAUTHORIZED, "unauthorized", "authentication required")
+}
+
+/// A buffered request body. Holds its [`BIG_BODY_SLOTS`] permit, if it needed one, until dropped.
+pub struct Buffered {
+    pub bytes: Bytes,
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
+/// Buffer the request body within the route's size limit and `request_body_timeout_secs`.
+/// A body above [`BIG_BODY_BYTES`] (declared, or chunked with unknown length) first takes one of
+/// the [`BIG_BODY_SLOTS`] permits, so total buffered body memory stays bounded.
+pub async fn read_body(st: &St, req: Request) -> Result<Buffered, ApiError> {
+    let declared = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let big = declared.map_or(req.headers().contains_key(header::TRANSFER_ENCODING), |n| n > BIG_BODY_BYTES);
+    let permit = if big {
+        let p = st
+            .big_bodies
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "busy", "too many large requests in progress; retry shortly"))?;
+        Some(p)
+    } else {
+        None
+    };
+    let read = Bytes::from_request(req, st);
+    match tokio::time::timeout(Duration::from_secs(st.cfg.request_body_timeout_secs), read).await {
+        Err(_) => Err(err(StatusCode::REQUEST_TIMEOUT, "request-timeout", "request body not received in time")),
+        Ok(Err(rej)) => Err(err(
+            rej.status(),
+            if rej.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                "payload-too-large"
+            } else {
+                "invalid-request"
+            },
+            "request body too large or unreadable",
+        )),
+        Ok(Ok(bytes)) => Ok(Buffered { bytes, _permit: permit }),
+    }
+}
+
+impl FromRequest<St> for Buffered {
+    type Rejection = ApiError;
+    async fn from_request(req: Request, st: &St) -> Result<Self, ApiError> {
+        read_body(st, req).await
+    }
 }
 
 fn parse_body(bytes: &Bytes) -> Result<Map<String, Value>, ApiError> {
@@ -116,9 +180,10 @@ pub enum Principal {
 }
 
 fn cookie_value(headers: &HeaderMap) -> Option<String> {
+    let prefix = format!("{COOKIE}=");
     for h in headers.get_all(header::COOKIE) {
         for part in h.to_str().ok()?.split(';') {
-            if let Some(v) = part.trim().strip_prefix("bridge_session=") {
+            if let Some(v) = part.trim().strip_prefix(prefix.as_str()) {
                 return Some(v.to_string());
             }
         }
@@ -253,26 +318,52 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
     Ok(json_ok(StatusCode::OK, body))
 }
 
-async fn setup(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Bytes) -> ApiResult {
+/// Rate-limit key part for the client address (IPv6 by /64).
+fn client_key(ip: &str) -> String {
+    ip.parse::<std::net::IpAddr>().map_or_else(|_| ip.to_string(), |a| auth::addr_key(&a))
+}
+
+async fn setup(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req: Request) -> ApiResult {
     check_public_origin(&st, &headers)?;
-    let key = format!("setup:{ip}");
-    if let Some(r) = st.limiter.blocked(&key) {
-        return Err(limited(r));
-    }
-    let m = parse_body(&body)?;
-    no_extra(&m, &["setup_token", "username", "password"])?;
-    let (token, username, password) = (str_field(&m, "setup_token")?, str_field(&m, "username")?, str_field(&m, "password")?);
+    let addr = client_key(&ip);
+    // The attempt is reserved before the body is read; only a wrong setup token counts as a failure.
+    let attempt = st.limiter.acquire(&[format!("setup:{addr}")], false).map_err(limited)?;
+    let body = match read_body(&st, req).await {
+        Ok(b) => b,
+        Err(e) => {
+            attempt.release();
+            return Err(e);
+        }
+    };
+    let parsed = parse_body(&body.bytes).and_then(|m| {
+        no_extra(&m, &["setup_token", "username", "password"])?;
+        Ok((
+            str_field(&m, "setup_token")?.to_string(),
+            str_field(&m, "username")?.to_string(),
+            str_field(&m, "password")?.to_string(),
+        ))
+    });
+    let (token, username, password) = match parsed {
+        Ok(t) => t,
+        Err(e) => {
+            attempt.release();
+            return Err(e);
+        }
+    };
+    let (token, username, password) = (token.as_str(), username.as_str(), password.as_str());
     if st.db.admin_get()?.is_some() {
+        attempt.release();
         return Err(err(StatusCode::CONFLICT, "setup-complete", "an administrator already exists"));
     }
     let path = st.data_dir.join(crate::SETUP_TOKEN_FILE);
     let expected = std::fs::read_to_string(&path).map(|s| s.trim().to_string()).unwrap_or_default();
     // Compare even when the file is missing so timing does not reveal its presence.
     if !auth::ct_eq(token, &expected) || expected.is_empty() {
-        st.limiter.fail(&key);
+        attempt.fail();
         st.db.audit("anonymous", "setup.failure", "invalid setup token", &ip);
         return Err(err(StatusCode::FORBIDDEN, "invalid-setup-token", "invalid setup token"));
     }
+    attempt.release();
     if !auth::valid_username(username) {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -290,37 +381,64 @@ async fn setup(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, bod
     Ok(json_ok(StatusCode::CREATED, json!({"username": username})))
 }
 
-async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Bytes) -> ApiResult {
+/// Login rate limiting (see docs/distributed/threat-model.md):
+/// * one attempt is reserved under the limiter lock for the client address (IPv6 by /64) before
+///   the body is read or Argon2 starts, and attempts still in progress count against the limit, so
+///   concurrent requests cannot all pass the check;
+/// * a second key per user name stops guessing from many addresses, but is not applied to an
+///   address with a successful login in the last 7 days, so anyone sending bad passwords for
+///   `admin` cannot lock the administrator out of the addresses they normally use.
+async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req: Request) -> ApiResult {
     check_public_origin(&st, &headers)?;
-    let m = parse_body(&body)?;
-    no_extra(&m, &["username", "password"])?;
-    let (username, password) = (str_field(&m, "username")?, str_field(&m, "password")?);
-    let ip_key = format!("ip:{ip}");
-    let user_key = format!("user:{}", clean(&username.to_lowercase()));
-    for k in [&ip_key, &user_key] {
-        if let Some(r) = st.limiter.blocked(k) {
+    let addr = client_key(&ip);
+    let known_addr = st.db.known_addr(&addr)?;
+    let mut attempt = st.limiter.acquire(&[format!("ip:{addr}")], known_addr).map_err(limited)?;
+    let body = match read_body(&st, req).await {
+        Ok(b) => b,
+        Err(e) => {
+            attempt.release();
+            return Err(e);
+        }
+    };
+    let parsed = parse_body(&body.bytes).and_then(|m| {
+        no_extra(&m, &["username", "password"])?;
+        Ok((str_field(&m, "username")?.to_string(), str_field(&m, "password")?.to_string()))
+    });
+    drop(body);
+    let (username, password) = match parsed {
+        Ok(c) => c,
+        Err(e) => {
+            attempt.release();
+            return Err(e);
+        }
+    };
+    if !known_addr {
+        if let Err(r) = attempt.add_keys(&[format!("user:{}", clean(&username.to_lowercase()))], false) {
+            attempt.release();
             return Err(limited(r));
         }
     }
     if password.len() > auth::MAX_PASSWORD_LEN {
+        attempt.fail();
         return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
     }
     let admin = st.db.admin_get()?;
     // Always run one Argon2 verification so unknown users cost the same as wrong passwords.
     let (known, phc) = match &admin {
-        Some((u, h)) if auth::ct_eq(u, username) => (true, h.clone()),
+        Some((u, h)) if auth::ct_eq(u, &username) => (true, h.clone()),
         _ => (false, st.dummy_hash.clone()),
     };
-    let verified = verify_blocking(&st, password.to_string(), phc).await;
+    let verified = verify_blocking(&st, password, phc).await;
     if !(known && verified) {
-        st.limiter.fail(&ip_key);
-        st.limiter.fail(&user_key);
-        st.db.audit(&clean(username), "login.failure", "invalid credentials", &ip);
+        attempt.fail();
+        st.db.audit(&clean(&username), "login.failure", "invalid credentials", &ip);
         return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "invalid username or password"));
     }
+    attempt.succeed();
+    st.db.known_addr_remember(&addr)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
     st.db.session_create(&auth::sha256_hex(&token), &csrf)?;
-    st.db.audit(username, "login.success", "", &ip);
+    st.db.audit(&username, "login.success", "", &ip);
     let mut r = json_ok(StatusCode::OK, json!({"csrf_token": csrf}));
     r.headers_mut().insert(
         header::SET_COOKIE,
@@ -339,25 +457,36 @@ async fn logout(State(st): State<St>, Authed(p, ip): Authed) -> ApiResult {
     Ok(r)
 }
 
-async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Bytes) -> ApiResult {
-    let m = parse_body(&body)?;
-    no_extra(&m, &["current", "new"])?;
+async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["current", "new", "keep_api_tokens"])?;
     let (current, new) = (str_field(&m, "current")?, str_field(&m, "new")?);
-    let key = "password-change".to_string();
-    if let Some(r) = st.limiter.blocked(&key) {
-        return Err(limited(r));
-    }
-    let (_, phc) = st.db.admin_get()?.ok_or_else(unauthorized)?;
+    let keep_tokens = match m.get("keep_api_tokens") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "keep_api_tokens must be true or false")),
+    };
+    let attempt = st.limiter.acquire(&["password-change".to_string()], true).map_err(limited)?;
+    let Some((_, phc)) = st.db.admin_get()? else {
+        attempt.release();
+        return Err(unauthorized());
+    };
     if current.len() > auth::MAX_PASSWORD_LEN || !verify_blocking(&st, current.to_string(), phc).await {
-        st.limiter.fail(&key);
+        attempt.fail();
         st.db.audit(&p.actor(), "password.failure", "wrong current password", &ip);
         return Err(err(StatusCode::FORBIDDEN, "invalid-credentials", "current password is wrong"));
     }
+    attempt.succeed();
     auth::valid_password(new).map_err(|e| err(StatusCode::BAD_REQUEST, "invalid-password", e))?;
     let hash = hash_blocking(&st, new.to_string()).await;
-    st.db.admin_set_password(&hash)?;
-    st.db.audit(&p.actor(), "password.change", "all sessions deleted", &ip);
-    let mut r = json_ok(StatusCode::OK, json!({"ok": true}));
+    let revoked = st.db.admin_set_password(&hash, keep_tokens)?;
+    st.db.audit(
+        &p.actor(),
+        "password.change",
+        &format!("all sessions deleted; {revoked} API token(s) revoked"),
+        &ip,
+    );
+    let mut r = json_ok(StatusCode::OK, json!({"ok": true, "revoked_api_tokens": revoked}));
     r.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0).parse().expect("cookie"));
     Ok(r)
 }
@@ -376,8 +505,8 @@ async fn list_workers(State(st): State<St>, _a: Authed) -> ApiResult {
     Ok(json_ok(StatusCode::OK, json!({"workers": workers})))
 }
 
-async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Bytes) -> ApiResult {
-    let m = parse_body(&body)?;
+async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    let m = parse_body(&body.bytes)?;
     no_extra(&m, &["name"])?;
     let name = str_field(&m, "name")?;
     if !valid_name(name) {
@@ -435,8 +564,8 @@ async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<S
 
 // ---------------------------------------------------------------- handlers: commands
 
-async fn post_command(State(st): State<St>, Authed(p, ip): Authed, body: Bytes) -> ApiResult {
-    let m = parse_body(&body)?;
+async fn post_command(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    let m = parse_body(&body.bytes)?;
     no_extra(&m, &["target", "request", "wait_ms"])?;
     let target = str_field(&m, "target")?;
     let Some(Value::Object(request)) = m.get("request") else {
@@ -628,10 +757,10 @@ pub fn router(st: St) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/auth/state", get(auth_state))
-        .route("/api/v1/auth/setup", post(setup))
-        .route("/api/v1/auth/login", post(login))
-        .route("/api/v1/auth/logout", post(logout))
-        .route("/api/v1/auth/password", post(change_password))
+        .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/logout", post(logout).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/password", post(change_password).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/workers", get(list_workers).post(add_worker))
         .route("/api/v1/workers/{name}", delete(revoke_worker))
         .route("/api/v1/missions", get(list_missions))
@@ -645,10 +774,47 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/worker/terminal/{session_id}", get(crate::terminal::worker))
         .fallback(static_files)
         .layer(DefaultBodyLimit::max(MAX_BODY))
+        .layer(axum::middleware::from_fn_with_state(st.clone(), reserve_gate))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(st)
 }
 
 pub fn with_peer(app: Router, peer: SocketAddr) -> Router {
     app.layer(Extension(Peer(peer)))
+}
+
+/// Which connection slots a TCP connection holds (see `server.rs`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    General,
+    /// Accepted from the slots kept for workers while the general slots were full.
+    Reserve,
+}
+
+pub fn with_tier(app: Router, tier: Tier) -> Router {
+    app.layer(Extension(tier))
+}
+
+/// A connection in the worker reserve may only carry a worker WebSocket request with a valid
+/// worker token; anything else is refused and the connection closed, so unauthenticated clients
+/// cannot occupy the reserve for longer than the (short) header timeout.
+async fn reserve_gate(State(st): State<St>, req: Request, next: axum::middleware::Next) -> Response {
+    if req.extensions().get::<Tier>() == Some(&Tier::Reserve) {
+        let valid_worker = req.uri().path().starts_with("/api/v1/worker/")
+            && req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .is_some_and(|t| matches!(st.db.worker_by_token(&auth::sha256_hex(t)), Ok(Some(_))));
+        if !valid_worker {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "busy",
+                "the coordinator is at its connection limit; only workers are accepted",
+            )
+            .into_response();
+        }
+    }
+    next.run(req).await
 }

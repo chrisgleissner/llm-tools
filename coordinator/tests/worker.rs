@@ -327,7 +327,7 @@ async fn stream_broadcast() {
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
     let origin = env.origin();
-    let cookie = format!("bridge_session={}", api.cookie.as_ref().unwrap());
+    let cookie = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());
     let mut stream = env.ws("/api/v1/stream", &[("cookie", &cookie), ("origin", &origin)]).await.unwrap();
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let m = next(&mut stream).await;

@@ -155,7 +155,7 @@ impl Api {
             rb = rb.bearer_auth(t);
         }
         if let Some(c) = &self.cookie {
-            rb = rb.header("cookie", format!("bridge_session={c}")).header("origin", self.base.clone());
+            rb = rb.header("cookie", format!("__Host-bridge_session={c}")).header("origin", self.base.clone());
         }
         if let Some(c) = &self.csrf {
             rb = rb.header("x-csrf-token", c.clone());
@@ -184,7 +184,7 @@ impl Api {
         let st = r.status().as_u16();
         if st == 200 {
             let sc = r.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
-            let value = sc.split(';').next().unwrap().strip_prefix("bridge_session=").unwrap().to_string();
+            let value = sc.split(';').next().unwrap().strip_prefix("__Host-bridge_session=").unwrap().to_string();
             self.cookie = Some(value);
             let body: Value = r.json().await.unwrap();
             self.csrf = Some(body["csrf_token"].as_str().unwrap().to_string());

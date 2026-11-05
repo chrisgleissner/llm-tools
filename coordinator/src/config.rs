@@ -19,6 +19,13 @@ pub struct Config {
     pub web_dir: Option<String>,
     /// Total concurrent TCP connections; further connections are closed immediately (NET-010).
     pub max_connections: usize,
+    /// Concurrent TCP connections from one client address (IPv6 clients counted by /64).
+    pub max_connections_per_ip: usize,
+    /// Slots out of `max_connections` that only worker connections with a valid worker token can
+    /// use once the other slots are taken (capped at a quarter of `max_connections`).
+    pub worker_reserve_connections: usize,
+    /// Seconds to receive a complete request body once the handler starts reading it (slow-body limit).
+    pub request_body_timeout_secs: u64,
     /// Seconds an HTTP connection may wait for the next request header (keep-alive idle and
     /// slow-header limit).
     pub http_idle_timeout_secs: u64,
@@ -37,6 +44,9 @@ impl Default for Config {
             allowed_origins: vec![],
             web_dir: None,
             max_connections: 256,
+            max_connections_per_ip: 32,
+            worker_reserve_connections: 16,
+            request_body_timeout_secs: 30,
             http_idle_timeout_secs: 30,
             ws_ping_interval_secs: 30,
             ws_idle_timeout_secs: 90,
@@ -80,12 +90,25 @@ allowed_origins = []\n\
 # web_dir = \"/path/to/web\"\n\
 # Total concurrent TCP connections; excess connections are closed immediately.\n\
 max_connections = {}\n\
+# Concurrent connections from one client address (IPv6 clients by /64).\n\
+max_connections_per_ip = {}\n\
+# Connection slots kept for workers with a valid token when the others are full.\n\
+worker_reserve_connections = {}\n\
+# Seconds to receive a complete request body (slow-body limit).\n\
+request_body_timeout_secs = {}\n\
 # Seconds to wait for the next request header on an idle HTTP connection.\n\
 http_idle_timeout_secs = {}\n\
 # Browser WebSockets (/stream, /terminal): server ping interval and inactivity close.\n\
 ws_ping_interval_secs = {}\n\
 ws_idle_timeout_secs = {}\n",
-        d.max_events_per_worker, d.max_connections, d.http_idle_timeout_secs, d.ws_ping_interval_secs, d.ws_idle_timeout_secs
+        d.max_events_per_worker,
+        d.max_connections,
+        d.max_connections_per_ip,
+        d.worker_reserve_connections,
+        d.request_body_timeout_secs,
+        d.http_idle_timeout_secs,
+        d.ws_ping_interval_secs,
+        d.ws_idle_timeout_secs
     )
 }
 
@@ -113,8 +136,16 @@ impl Config {
         if cfg.max_events_per_worker == 0 {
             return Err("max_events_per_worker must be at least 1".into());
         }
-        if cfg.max_connections == 0 || cfg.http_idle_timeout_secs == 0 || cfg.ws_ping_interval_secs == 0 {
-            return Err("max_connections, http_idle_timeout_secs and ws_ping_interval_secs must be at least 1".into());
+        if cfg.max_connections == 0
+            || cfg.max_connections_per_ip == 0
+            || cfg.request_body_timeout_secs == 0
+            || cfg.http_idle_timeout_secs == 0
+            || cfg.ws_ping_interval_secs == 0
+        {
+            return Err(
+                "max_connections, max_connections_per_ip, request_body_timeout_secs, http_idle_timeout_secs and ws_ping_interval_secs must be at least 1"
+                    .into(),
+            );
         }
         if cfg.ws_idle_timeout_secs <= cfg.ws_ping_interval_secs {
             return Err("ws_idle_timeout_secs must be larger than ws_ping_interval_secs".into());

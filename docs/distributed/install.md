@@ -52,9 +52,9 @@ docker compose cp coordinator:/data/ca.pem .                   # import into bro
 docker compose cp coordinator:/data/setup-token .              # create the administrator in the browser
 docker compose exec coordinator bridge-coordinator info
 docker compose exec coordinator bridge-coordinator worker add build-1     # prints the worker token once
-docker compose exec coordinator bridge-coordinator token create laptop    # API token for llm-bridge remote login
+docker compose exec coordinator bridge-coordinator token create laptop    # API token for llm-bridge remote login (expires in 90 days; --expires-days N)
 docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
-docker compose exec coordinator bridge-coordinator cert renew             # after changing BRIDGE_PUBLIC_NAMES
+docker compose exec coordinator bridge-coordinator cert renew             # new server certificate; names must be within the CA's name constraints (see "Trusting the certificate")
 docker compose exec coordinator bridge-coordinator backup --output /data/backup-2026-11-05.sqlite3
 docker compose stop && docker compose run --rm coordinator restore --input /data/backup-2026-11-05.sqlite3 && docker compose start
 ```
@@ -201,12 +201,25 @@ Certificates > View Certificates > Authorities > Import, choose `ca.pem`, tick
 Android: copy `ca.pem` (or `ca.crt`) to the phone, then Settings > Security >
 Encryption & credentials > Install a certificate > CA certificate, and confirm the
 warning. The exact menu names vary by vendor (search settings for "CA certificate").
+The CA is name-constrained: it carries a critical Name Constraints extension and
+`pathLenConstraint=0`. Browsers and workers that trust it accept it only for the names
+the server certificate had when `init` ran (host names, and each address as a
+single-host range), `localhost`, `home.arpa` and its subdomains, `127.0.0.0/8` and
+`::1`. A certificate for any other site, signed with a stolen `ca.key`, is rejected. It
+is valid for 5 years. Check with
+`openssl x509 -in ca.pem -noout -text | grep -A8 'Name Constraints'`.
+A coordinator created before this change has an unconstrained CA; `info` says so, and
+`cert new-ca` replaces it.
+
 Chrome on Android uses the user store. Some apps ignore user CAs; the web interface
 in Chrome works.
 
 The address in the browser must be one of the certificate's names. If it is not, the
 browser reports a name mismatch; fix it with `cert renew` (Recovery), not by
-bypassing the warning. Workers trust the same `ca.pem` through their enrolment.
+bypassing the warning. If the new name is outside the CA's name constraints, `cert
+renew` refuses and names it; run `cert new-ca` with the full list of names, then import
+the new `ca.pem` in every browser and re-enrol every worker. Workers trust the same
+`ca.pem` through their enrolment.
 
 ## Backup and restore
 
@@ -241,8 +254,14 @@ Restore: stop the service, then run
 the service. `restore` refuses to run while a server holds `DIR/coordinator.lock`,
 checks integrity and schema version of the input (a file from a newer coordinator is
 refused), and keeps the replaced database as
-`coordinator.sqlite3.before-restore-<UTC time>`. Sessions in the restored database
-become valid again; run `admin reset-password` if you want all of them removed.
+`coordinator.sqlite3.before-restore-<UTC time>`. Browser sessions are deleted by the
+restore. Workers and API tokens that were revoked after the backup was taken are
+active again: `restore` prints every worker and API token now active, each with the
+command that revokes it (`bridge-coordinator worker revoke NAME`,
+`bridge-coordinator token revoke NAME`). Go through that list. If the administrator
+password changed after the backup, the old one is back: run `admin reset-password`.
+Schema version 2 added the expiry of API tokens; tokens created before it never expire,
+so revoke and recreate them with `token create` to get the 90-day default.
 
 ## Recovery
 
@@ -250,21 +269,27 @@ All recovery commands run on the machine, as the service user, with the same dat
 directory (`--data-dir` or `BRIDGE_COORDINATOR_DATA_DIR`).
 
 - Lost administrator password: `bridge-coordinator admin reset-password` reads the new
-  password from standard input (at least the minimum length) and deletes every
-  session. Example: `printf '%s\n' "$NEW" | bridge-coordinator admin reset-password`.
+  password from standard input (at least the minimum length), deletes every
+  session and revokes every API token (it prints how many; `--keep-api-tokens` keeps
+  them). Example: `printf '%s\n' "$NEW" | bridge-coordinator admin reset-password`.
 - Expired certificate, or the machine's address or name changed: run
   `bridge-coordinator cert renew --hostname NAME --ip ADDR` (or without options to
   rediscover this machine's names) and restart the service. The CA is unchanged, so
-  browsers keep their trust. `bridge-coordinator info` flags a URL that the current
+  browsers keep their trust, but only while every name is within the CA's name
+  constraints. A new name outside them (for example a new public address) needs
+  `bridge-coordinator cert new-ca --hostname NAME --ip ADDR` instead: it creates a new
+  constrained CA and server certificate, keeps the old CA as `ca.pem.old-<UTC>` (and the
+  old key as `ca.key.old-<UTC>`; delete it once nothing needs the old CA), and prints the
+  new fingerprint. Import the new `ca.pem` in every browser and re-enrol every worker. `bridge-coordinator info` flags a URL that the current
   certificate does not cover. To use a certificate from your own CA instead, run
   `bridge-coordinator cert install --cert FILE --key FILE`; the pair is checked
   before it replaces the current one.
 - Lost setup token before the administrator exists: `bridge-coordinator setup-token`
   writes a new token file (0600) and prints its path. It refuses once an administrator
   exists; use `admin reset-password` then.
-- Lost `ca.key`: issue a new CA by removing `ca.pem`, `ca.key`, `server.pem` and
-  `server.key` and running `init` again, then import the new CA in every browser and
-  worker. The database is unaffected.
+- Lost `ca.key`: run `bridge-coordinator cert new-ca` (with `--hostname`/`--ip` for the
+  names to serve), then import the new CA in every browser and re-enrol every worker.
+  The database is unaffected.
 - Database damaged: restore the latest backup (previous section).
 
 ## Upgrades and compatibility

@@ -258,7 +258,12 @@ pub fn new_id() -> String {
 
 /// Serialise an outbound envelope.
 pub fn encode(kind: &str, worker_id: &str, generation: u64, payload: Value) -> String {
-    json!({"v": PROTOCOL_VERSION, "type": kind, "id": new_id(), "worker_id": worker_id, "generation": generation, "payload": payload}).to_string()
+    encode_with_id(&new_id(), kind, worker_id, generation, payload)
+}
+
+/// Like [`encode`] with a caller-chosen message id (to recognise replies to it).
+pub fn encode_with_id(id: &str, kind: &str, worker_id: &str, generation: u64, payload: Value) -> String {
+    json!({"v": PROTOCOL_VERSION, "type": kind, "id": id, "worker_id": worker_id, "generation": generation, "payload": payload}).to_string()
 }
 
 pub fn error_message(worker_id: &str, generation: u64, code: &str, message: &str, in_reply_to: Option<&str>) -> String {

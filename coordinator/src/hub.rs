@@ -1,7 +1,7 @@
 //! In-memory registry of live worker connections and the `/stream` broadcast channel.
 
 use axum::extract::ws::WebSocket;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -67,6 +67,20 @@ pub struct Hub {
     pub stream: broadcast::Sender<Arc<str>>,
     next_id: AtomicU64,
     active: AtomicUsize,
+    /// Worker names with a connection that has not sent its hello yet.
+    pending: Mutex<HashSet<String>>,
+}
+
+/// Marks one worker token as having a connection waiting for its hello (at most one at a time).
+pub struct PendingGuard {
+    hub: Arc<Hub>,
+    name: String,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        self.hub.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.name);
+    }
 }
 
 /// Counts a worker WebSocket (also before hello) against `MAX_WORKER_CONNECTIONS`.
@@ -86,6 +100,18 @@ impl Hub {
             stream: broadcast::channel(STREAM_BUFFER).0,
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
+            pending: Mutex::new(HashSet::new()),
+        })
+    }
+
+    /// Claim the single pre-hello slot of worker `name`; `None` when one is already waiting.
+    pub fn try_pending(self: &Arc<Self>, name: &str) -> Option<PendingGuard> {
+        if !self.pending.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_string()) {
+            return None;
+        }
+        Some(PendingGuard {
+            hub: self.clone(),
+            name: name.to_string(),
         })
     }
 

@@ -3,7 +3,7 @@
 use crate::auth::sha256_hex;
 use crate::db::{CommandRow, EventsOutcome, HelloOutcome};
 use crate::http::{Peer, St};
-use crate::hub::{ConnHandle, Outbound, OUTBOUND_QUEUE};
+use crate::hub::{ConnHandle, Outbound, PendingGuard, OUTBOUND_QUEUE};
 use crate::protocol::{self, Message, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
 use axum::extract::ws::{close_code, CloseFrame, Message as Ws, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -27,7 +27,7 @@ fn plain(status: StatusCode, text: &'static str) -> Response {
         .into_response()
 }
 
-pub async fn connect(State(st): State<St>, Extension(_peer): Extension<Peer>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+pub async fn connect(State(st): State<St>, Extension(peer): Extension<Peer>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -44,12 +44,18 @@ pub async fn connect(State(st): State<St>, Extension(_peer): Extension<Peer>, he
         return plain(StatusCode::SERVICE_UNAVAILABLE, "too many worker connections");
     };
     let name = worker.name;
+    // One connection per worker token may wait for its hello: a leaked token cannot be used to fill
+    // the connection table with silent sockets. The slot is freed when the hello arrives.
+    let Some(pending) = st.hub.try_pending(&name) else {
+        return plain(StatusCode::TOO_MANY_REQUESTS, "a connection of this worker is already waiting for its hello");
+    };
+    let remote = peer.0.ip().to_string();
     // Transport limit is twice the protocol limit so an oversized frame can be answered with our own close 1009.
     ws.max_message_size(2 * MAX_MESSAGE_BYTES)
         .max_frame_size(2 * MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _guard = guard;
-            run(st, name, socket).await;
+            run(st, name, remote, pending, socket).await;
         })
 }
 
@@ -88,6 +94,10 @@ fn classify(frame: Option<Result<Ws, axum::Error>>, name: &str, generation: u64)
                 Ok(m) => Step::Message(m),
                 Err(e) => {
                     let fatal = e.code == "unsupported-version";
+                    // A malformed `error` message is dropped: answering errors with errors can loop.
+                    if !fatal && serde_json::from_slice::<Value>(t.as_bytes()).is_ok_and(|v| v["type"] == "error") {
+                        return Step::Skip;
+                    }
                     let text = protocol::error_message(name, generation, e.code, &e.message, None);
                     if fatal {
                         Step::Reject(format!("\u{0}fatal{text}"))
@@ -100,7 +110,7 @@ fn classify(frame: Option<Result<Ws, axum::Error>>, name: &str, generation: u64)
     }
 }
 
-async fn run(st: St, name: String, mut socket: WebSocket) {
+async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut socket: WebSocket) {
     let mut shutdown = st.shutdown.clone();
     // ---- handshake: wait for a valid hello
     let deadline = Instant::now() + HELLO_TIMEOUT;
@@ -135,6 +145,7 @@ async fn run(st: St, name: String, mut socket: WebSocket) {
                     }
                 }
             },
+            Step::Message(m) if m.kind == "error" => {}
             Step::Message(m) => {
                 if !send(
                     &mut socket,
@@ -147,6 +158,7 @@ async fn run(st: St, name: String, mut socket: WebSocket) {
             }
         }
     };
+    drop(pending);
     let worker_id = hello.worker_id.clone();
     let (generation, cursor) = match st.db.worker_hello(&name, &worker_id, &hello.payload, &caps) {
         Ok(HelloOutcome::Ok { generation, cursor }) => (generation, cursor),
@@ -192,7 +204,9 @@ async fn run(st: St, name: String, mut socket: WebSocket) {
     );
     st.hub
         .publish(json!({"type": "worker", "worker": name, "state": "online", "generation": generation}));
-    let welcome = protocol::encode(
+    let welcome_id = protocol::new_id();
+    let welcome = protocol::encode_with_id(
+        &welcome_id,
         "welcome",
         &worker_id,
         generation,
@@ -233,6 +247,16 @@ async fn run(st: St, name: String, mut socket: WebSocket) {
                     Step::Reject(text) => {
                         let text = text.strip_prefix("\u{0}fatal").map(str::to_string).unwrap_or(text);
                         if !send(&mut socket, text).await { break }
+                    }
+                    Step::Message(m) if is_stale_welcome_reply(&m, &welcome_id) => {
+                        st.db.audit(
+                            &format!("worker:{name}"),
+                            "worker.stale-generation",
+                            &format!("worker rejected generation {generation} in welcome {welcome_id} as stale; connection closed"),
+                            &remote,
+                        );
+                        final_close = Some((1008, "worker rejected the welcome generation"));
+                        break
                     }
                     Step::Message(m) => match handle(&st, &name, &worker_id, generation, m) {
                         Ok(replies) => for r in replies { if !send(&mut socket, r).await { alive = false; break } },
@@ -289,9 +313,20 @@ async fn deliver_row(st: &St, socket: &mut WebSocket, worker_id: &str, generatio
     true
 }
 
+/// The worker's `stale-generation` error in reply to our `welcome`.
+fn is_stale_welcome_reply(m: &Message, welcome_id: &str) -> bool {
+    m.kind == "error"
+        && m.payload.get("code").and_then(Value::as_str) == Some("stale-generation")
+        && m.payload.get("in_reply_to").and_then(Value::as_str) == Some(welcome_id)
+}
+
 /// Handle one validated message after welcome. `Err(())` means a storage failure.
 fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> Result<Vec<String>, ()> {
     let reply = |code: &str, text: &str| Ok(vec![protocol::error_message(worker_id, generation, code, text, Some(&m.id))]);
+    // An `error` is never answered with an error, whatever its worker id or generation (no ping-pong).
+    if m.kind == "error" {
+        return Ok(vec![]);
+    }
     if m.worker_id != worker_id {
         return reply("invalid-message", "worker_id differs from the connection's worker id");
     }
@@ -301,7 +336,7 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
     let db = |e: rusqlite::Error| eprintln!("database error: {e}");
     match m.kind.as_str() {
         "ping" => Ok(vec![protocol::encode("pong", worker_id, generation, json!({}))]),
-        "pong" | "error" => Ok(vec![]),
+        "pong" => Ok(vec![]),
         "events" => {
             let p = &m.payload;
             let (after, through) = (p["after"].as_u64().unwrap_or(0), p["through"].as_u64().unwrap_or(0));

@@ -37,7 +37,7 @@ async fn control(fw: &mut Fw, kind: &str) -> Value {
 
 fn browser_headers(api: &Api) -> Vec<(String, String)> {
     vec![
-        ("cookie".into(), format!("bridge_session={}", api.cookie.as_ref().unwrap())),
+        ("cookie".into(), format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap())),
         ("origin".into(), api.base.clone()),
     ]
 }
@@ -202,12 +202,12 @@ async fn browser_upgrade_is_authenticated_and_origin_checked() {
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
-    let cookie = format!("bridge_session={}", api.cookie.as_ref().unwrap());
+    let cookie = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());
     let q = "/api/v1/terminal?worker=w1&mission=m1";
     let refused = |e: tokio_tungstenite::tungstenite::Error, code: &str| assert!(format!("{e:?}").contains(code), "{e:?}");
     refused(env.ws(q, &[]).await.expect_err("no credentials"), "401");
     refused(
-        env.ws(q, &[("cookie", "bridge_session=nope"), ("origin", &api.base)])
+        env.ws(q, &[("cookie", "__Host-bridge_session=nope"), ("origin", &api.base)])
             .await
             .expect_err("bad cookie"),
         "401",
@@ -243,7 +243,11 @@ async fn browser_upgrade_is_authenticated_and_origin_checked() {
 
     // an API token works without an Origin header
     let bearer = "api-token-for-terminal-test";
-    env.srv.state.db.token_create("ci", &bridge_coordinator::auth::sha256_hex(bearer)).unwrap();
+    env.srv
+        .state
+        .db
+        .token_create("ci", &bridge_coordinator::auth::sha256_hex(bearer), None)
+        .unwrap();
     let mut b = env.ws(q, &[("authorization", &format!("Bearer {bearer}"))]).await.expect("token upgrade");
     let open = control(&mut fw, "terminal.open").await;
     assert_eq!(open["payload"]["mode"], "view");

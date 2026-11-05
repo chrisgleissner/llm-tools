@@ -87,7 +87,7 @@ async fn login_session_lifecycle() {
         assert_eq!(st, 401, "{m} {p}: {body}");
     }
     let (st, _) = anon
-        .send(anon.rb(Method::GET, "/api/v1/workers").header("cookie", "bridge_session=garbage"))
+        .send(anon.rb(Method::GET, "/api/v1/workers").header("cookie", "__Host-bridge_session=garbage"))
         .await;
     assert_eq!(st, 401);
     assert_eq!(anon.send(anon.bare(Method::GET, "/healthz")).await.1, json!({"status": "ok"}));
@@ -198,7 +198,7 @@ async fn csrf_origin_and_bearer_tokens() {
     let create = |rb: reqwest::RequestBuilder| api.send(rb.json(&json!({"name": "w-csrf"})));
     let path = "/api/v1/workers";
     // cookie only: no CSRF header, no Origin, wrong values
-    let cookie = format!("bridge_session={}", api.cookie.as_ref().unwrap());
+    let cookie = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());
     let base = || api.bare(Method::POST, path).header("cookie", cookie.clone());
     assert_eq!(create(base().header("origin", env.origin())).await.0, 403, "missing CSRF token");
     assert_eq!(
@@ -226,7 +226,7 @@ async fn csrf_origin_and_bearer_tokens() {
 
     // bearer API token: no CSRF or Origin needed, and revocable
     let tok = bridge_coordinator::auth::random_token();
-    env.srv.state.db.token_create("cli", &bridge_coordinator::auth::sha256_hex(&tok)).unwrap();
+    env.srv.state.db.token_create("cli", &bridge_coordinator::auth::sha256_hex(&tok), None).unwrap();
     let mut bearer = env.api();
     bearer.bearer = Some(tok.clone());
     assert_eq!(bearer.post("/api/v1/workers", json!({"name": "w-bearer"})).await.0, 201);
@@ -237,7 +237,7 @@ async fn csrf_origin_and_bearer_tokens() {
     assert!(audit.iter().any(|r| r["action"] == "worker.add" && r["actor"] == "token:cli"));
 
     // the stream upgrade checks Origin for cookie sessions
-    let c = format!("bridge_session={}", api.cookie.as_ref().unwrap());
+    let c = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());
     assert!(env.ws("/api/v1/stream", &[("cookie", &c)]).await.is_err(), "no Origin");
     assert!(
         env.ws("/api/v1/stream", &[("cookie", &c), ("origin", "https://evil.example")]).await.is_err(),

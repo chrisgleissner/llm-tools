@@ -44,6 +44,10 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Other users' processes and the kernel's non-process /proc entries are not visible.
+ProtectProc=invisible
+ProcSubset=pid
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # No capabilities. To listen on a port below 1024 instead of 8443, add a drop-in
 # (systemctl edit bridge-coordinator) with

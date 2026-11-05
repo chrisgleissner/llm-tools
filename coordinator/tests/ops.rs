@@ -197,11 +197,30 @@ fn recovery_commands_reset_password_and_certificates() {
     assert_eq!(db.session_count().unwrap(), 0, "all sessions deleted");
     assert!(!run(&["admin", "reset-password", "--data-dir", d], Some("short\n")).status.success());
 
-    // cert renew with a new address, then cert install of the same pair.
+    // cert renew within the CA's name constraints works.
     let old = std::fs::read(dir.join("server.pem")).unwrap();
-    let o = run(&["cert", "renew", "--data-dir", d, "--hostname", "a.test", "--ip", "192.0.2.9"], None);
+    let o = run(&["cert", "renew", "--data-dir", d, "--hostname", "a.test"], None);
     assert!(o.status.success(), "{}", text(&o));
     assert_ne!(old, std::fs::read(dir.join("server.pem")).unwrap());
+    // A new address is outside them: renew refuses and changes nothing; new-ca makes a new CA.
+    let renewed = std::fs::read(dir.join("server.pem")).unwrap();
+    let o = run(&["cert", "renew", "--data-dir", d, "--hostname", "a.test", "--ip", "192.0.2.9"], None);
+    let msg = text(&o);
+    assert!(!o.status.success() && msg.contains("192.0.2.9") && msg.contains("cert new-ca"), "{msg}");
+    assert!(!msg.contains("a.test,"), "only the offending name is listed: {msg}");
+    assert_eq!(renewed, std::fs::read(dir.join("server.pem")).unwrap());
+    let old_ca = std::fs::read(dir.join("ca.pem")).unwrap();
+    let o = run(&["cert", "new-ca", "--data-dir", d, "--hostname", "a.test", "--ip", "192.0.2.9"], None);
+    assert!(o.status.success(), "{}", text(&o));
+    assert!(text(&o).contains("import"), "{}", text(&o));
+    let kept: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("ca.pem.old-"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(old_ca, std::fs::read(dir.join(&kept[0])).unwrap());
+    assert_ne!(old_ca, std::fs::read(dir.join("ca.pem")).unwrap());
     assert!(contains(&dir.join("server.pem"), &[192, 0, 2, 9]));
     let (c, k) = (dir.join("copy.pem"), dir.join("copy.key"));
     std::fs::copy(dir.join("server.pem"), &c).unwrap();
@@ -311,5 +330,75 @@ fn init_accepts_an_existing_empty_directory() {
     let o = run(&["init", "--data-dir", dir.to_str().unwrap(), "--hostname", "a.test"], None);
     assert!(o.status.success(), "{}", text(&o));
     assert!(dir.join("server.pem").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn token_create_sets_expiry_and_password_reset_revokes_tokens() {
+    let dir = tmp_dir();
+    let d = dir.to_str().unwrap();
+    assert!(run(&["init", "--data-dir", d, "--hostname", "a.test"], None).status.success());
+    Db::open(&db_path(&dir)).unwrap().admin_create("admin", "old-hash").unwrap();
+    let now = bridge_coordinator::now();
+    for (name, args, days) in [
+        ("default", vec![], Some(90)),
+        ("short", vec!["--expires-days", "3"], Some(3)),
+        ("forever", vec!["--expires-days", "0"], None),
+    ] {
+        let mut a = vec!["token", "create", name, "--data-dir", d];
+        a.extend(args);
+        let o = run(&a, None);
+        assert!(o.status.success(), "{}", text(&o));
+        assert!(text(&o).contains("full administrator power"), "{}", text(&o));
+        let db = Db::open(&db_path(&dir)).unwrap();
+        let tokens = db.tokens_list().unwrap();
+        let expires = tokens.iter().find(|(n, _)| n == name).unwrap().1;
+        match days {
+            Some(days) => {
+                let e = expires.expect("has an expiry");
+                assert!((e - (now + days * 86_400)).abs() < 60, "{name}: {e}");
+            }
+            None => assert_eq!(expires, None, "{name} never expires"),
+        }
+    }
+    assert!(!run(&["token", "create", "bad", "--expires-days", "soon", "--data-dir", d], None)
+        .status
+        .success());
+    // Resetting the password revokes every API token unless asked not to.
+    let o = run(
+        &["admin", "reset-password", "--keep-api-tokens", "--data-dir", d],
+        Some("a long enough password\n"),
+    );
+    assert!(o.status.success(), "{}", text(&o));
+    assert_eq!(Db::open(&db_path(&dir)).unwrap().tokens_list().unwrap().len(), 3, "kept on request");
+    let o = run(&["admin", "reset-password", "--data-dir", d], Some("a long enough password\n"));
+    assert!(o.status.success() && text(&o).contains("3 API token(s) revoked"), "{}", text(&o));
+    assert!(Db::open(&db_path(&dir)).unwrap().tokens_list().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn restore_lists_the_credentials_it_reinstated() {
+    let dir = tmp_dir();
+    let d = dir.to_str().unwrap();
+    assert!(run(&["init", "--data-dir", d, "--hostname", "a.test"], None).status.success());
+    assert!(run(&["worker", "add", "w1", "--data-dir", d], None).status.success());
+    assert!(run(&["token", "create", "ci", "--data-dir", d], None).status.success());
+    let db = Db::open(&db_path(&dir)).unwrap();
+    db.session_create("old-session", "csrf").unwrap();
+    drop(db);
+    let bk = dir.join("b.sqlite3");
+    assert!(run(&["backup", "--data-dir", d, "--output", bk.to_str().unwrap()], None).status.success());
+    // After the backup the operator revokes both; the restore brings them back.
+    assert!(run(&["worker", "revoke", "w1", "--data-dir", d], None).status.success());
+    assert!(run(&["token", "revoke", "ci", "--data-dir", d], None).status.success());
+    let o = run(&["restore", "--data-dir", d, "--input", bk.to_str().unwrap()], None);
+    let out = text(&o);
+    assert!(o.status.success(), "{out}");
+    assert!(out.contains("worker w1: bridge-coordinator worker revoke w1"), "{out}");
+    assert!(out.contains("API token ci") && out.contains("bridge-coordinator token revoke ci"), "{out}");
+    let db = Db::open(&db_path(&dir)).unwrap();
+    assert!(db.worker_get("w1").unwrap().is_some());
+    assert_eq!(db.session_count().unwrap(), 0, "browser sessions are not carried over");
     let _ = std::fs::remove_dir_all(dir);
 }

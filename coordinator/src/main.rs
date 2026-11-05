@@ -18,12 +18,22 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   setup-token                   (new setup token; only while no administrator exists)
   serve [--web-dir DIR]
   worker add NAME | worker revoke NAME
-  admin reset-password          (new password on stdin)
-  cert renew [--hostname NAME]... [--ip ADDR]... | cert install --cert FILE --key FILE
-  token create NAME | token revoke NAME
+  admin reset-password [--keep-api-tokens]
+                                (new password on stdin; revokes all API tokens unless kept)
+  cert renew [--hostname NAME]... [--ip ADDR]...   (new server certificate, same CA; names must be
+                                                    within the CA's name constraints)
+  cert new-ca [--hostname NAME]... [--ip ADDR]...  (new name-constrained CA and server certificate;
+                                                    the old CA is kept as ca.pem.old-<UTC>)
+  cert install --cert FILE --key FILE
+  token create NAME [--expires-days N] | token revoke NAME
+                                (default 90 days, 0 = never expires; a token has full
+                                 administrator power)
 --data-dir defaults to $BRIDGE_COORDINATOR_DATA_DIR, then /var/lib/bridge-coordinator.
 Environment: BRIDGE_COORDINATOR_BIND (host:port) and BRIDGE_COORDINATOR_LAN_ENABLED (true/false)
 override config.toml.";
+
+/// API tokens expire after this many days unless `--expires-days` says otherwise.
+const DEFAULT_TOKEN_DAYS: u32 = 90;
 
 struct Args {
     data_dir: Option<PathBuf>,
@@ -35,6 +45,8 @@ struct Args {
     output: Option<PathBuf>,
     input: Option<PathBuf>,
     bind: Option<String>,
+    expires_days: Option<u32>,
+    keep_api_tokens: bool,
     words: Vec<String>,
 }
 
@@ -49,6 +61,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         output: None,
         input: None,
         bind: None,
+        expires_days: None,
+        keep_api_tokens: false,
         words: vec![],
     };
     let mut it = args.into_iter();
@@ -66,6 +80,11 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             "--output" => a.output = Some(value("--output")?.into()),
             "--input" => a.input = Some(value("--input")?.into()),
             "--bind" => a.bind = Some(value("--bind")?),
+            "--expires-days" => {
+                let v = value("--expires-days")?;
+                a.expires_days = Some(v.parse().map_err(|_| format!("--expires-days must be a whole number of days, not {v:?}"))?);
+            }
+            "--keep-api-tokens" => a.keep_api_tokens = true,
             "--key" => a.key = Some(value("--key")?.into()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => a.words.push(arg),
@@ -125,6 +144,7 @@ async fn run(args: Args) -> Result<(), String> {
             let input = args.input.as_ref().ok_or("--input is required")?;
             let kept = ops::restore(&dir, input)?;
             println!("restored; the previous database is kept as {}", kept.display());
+            print!("{}", ops::restored_credentials(&dir)?);
             Ok(())
         }
         ["setup-token"] => {
@@ -166,12 +186,24 @@ async fn run(args: Args) -> Result<(), String> {
             if !protocol::valid_name(name) {
                 return Err("token name must be lowercase letters, digits and '-' (at most 63)".into());
             }
+            let days = args.expires_days.unwrap_or(DEFAULT_TOKEN_DAYS);
+            let expires_at = (days > 0).then(|| bridge_coordinator::now() + i64::from(days) * 86_400);
             let db = open_db(&dir)?;
             let token = auth::random_token();
-            if !db.token_create(name, &auth::sha256_hex(&token)).map_err(|e| e.to_string())? {
+            if !db.token_create(name, &auth::sha256_hex(&token), expires_at).map_err(|e| e.to_string())? {
                 return Err(format!("token {name} already exists"));
             }
-            db.audit("cli", "token.create", name, "local");
+            let detail = if days == 0 {
+                format!("{name} (never expires)")
+            } else {
+                format!("{name} (expires in {days} days)")
+            };
+            db.audit("cli", "token.create", &detail, "local");
+            if days == 0 {
+                eprintln!("note: this token never expires and has full administrator power; revoke it with `token revoke {name}`");
+            } else {
+                eprintln!("note: this token has full administrator power and expires in {days} days");
+            }
             println!("{token}");
             Ok(())
         }
@@ -192,11 +224,34 @@ async fn run(args: Args) -> Result<(), String> {
             std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
             let password = line.trim_end_matches(['\n', '\r']);
             auth::valid_password(password)?;
-            db.admin_set_password(&auth::hash_password(password)).map_err(|e| e.to_string())?;
-            db.audit("cli", "password.reset", "all sessions deleted", "local");
+            let revoked = db
+                .admin_set_password(&auth::hash_password(password), args.keep_api_tokens)
+                .map_err(|e| e.to_string())?;
+            db.audit(
+                "cli",
+                "password.reset",
+                &format!("all sessions deleted; {revoked} API token(s) revoked"),
+                "local",
+            );
+            if args.keep_api_tokens {
+                println!("password changed; all sessions deleted; API tokens kept (--keep-api-tokens)");
+            } else {
+                println!("password changed; all sessions deleted; {revoked} API token(s) revoked");
+            }
             Ok(())
         }
         ["cert", "renew"] => certs::renew(&dir, &sans),
+        ["cert", "new-ca"] => {
+            let stamp = certs::new_ca(&dir, &sans)?;
+            println!("new name-constrained CA and server certificate written to {}", dir.display());
+            println!("previous CA kept as ca.pem.old-{stamp} and ca.key.old-{stamp}; delete ca.key.old-{stamp} once nothing needs the old CA");
+            println!("new CA SHA-256: {}", ops::ca_fingerprint(&dir)?);
+            println!(
+                "Every browser must import the new ca.pem and every worker must be re-enrolled with it \
+                 (workers pin the CA they were enrolled with); restart the coordinator to serve the new certificate."
+            );
+            Ok(())
+        }
         ["cert", "install"] => {
             let (c, k) = (args.cert.as_ref().ok_or("--cert is required")?, args.key.as_ref().ok_or("--key is required")?);
             certs::install(&dir, c, k)

@@ -1,7 +1,10 @@
 //! Local CA and server certificate handling, and the rustls server configuration.
 
 use crate::{write_new, write_replace};
-use rcgen::{BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose};
+use rcgen::{
+    BasicConstraints, Certificate, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose,
+    NameConstraints,
+};
 use rustls::crypto::CryptoProvider;
 use rustls::ServerConfig;
 use std::net::IpAddr;
@@ -38,18 +41,15 @@ fn set_validity(params: &mut CertificateParams, valid_days: i64) {
     params.not_after = rcgen::date_time_ymd(y, m, d);
 }
 
-/// The CA subject and key usages are fixed, so the CA certificate can be rebuilt from its
-/// stored key when signing a renewed server certificate (same issuer name and key).
-fn ca_certificate(ca_key: &KeyPair) -> Result<Certificate, String> {
-    let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
-    params.distinguished_name.push(DnType::CommonName, "Bridge Coordinator CA");
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    set_validity(&mut params, 3650);
-    params.self_signed(ca_key).map_err(|e| e.to_string())
-}
+/// CA validity. Browsers and workers import the CA as a trust anchor, so it is kept short.
+pub const CA_VALID_DAYS: i64 = 5 * 365;
 
-fn server_pem(ca_key: &KeyPair, sans: &Sans) -> Result<(String, String), String> {
+/// DNS suffix that is always permitted besides `localhost` and the names given at init time
+/// (RFC 8375: reserved for home networks, never delegated in the public DNS).
+pub const HOME_ARPA: &str = "home.arpa";
+
+/// The names the server certificate carries: `localhost`, loopback, the given host names and addresses.
+fn san_list(sans: &Sans) -> Result<Vec<String>, String> {
     let mut names: Vec<String> = vec!["localhost".into(), "127.0.0.1".into(), "::1".into()];
     for h in &sans.hostnames {
         if h.is_empty() || !h.is_ascii() || h.contains(char::is_whitespace) {
@@ -60,15 +60,115 @@ fn server_pem(ca_key: &KeyPair, sans: &Sans) -> Result<(String, String), String>
     names.extend(sans.ips.iter().map(|i| i.to_string()));
     names.sort();
     names.dedup();
+    Ok(names)
+}
+
+/// Name constraints for the CA: exactly the server certificate's names, `localhost`, the
+/// `home.arpa` subtree, the IPv4 loopback range and `::1`. Each address is a single-host range.
+fn constraints_for(names: &[String]) -> NameConstraints {
+    let mut permitted = vec![GeneralSubtree::DnsName("localhost".into()), GeneralSubtree::DnsName(HOME_ARPA.into())];
+    permitted.push(GeneralSubtree::IpAddress(CidrSubnet::from_v4_prefix([127, 0, 0, 0], 8)));
+    permitted.push(GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(
+        IpAddr::from([0u16, 0, 0, 0, 0, 0, 0, 1]),
+        128,
+    )));
+    for n in names {
+        let subtree = match n.parse::<IpAddr>() {
+            Ok(ip) if ip.is_loopback() => continue, // covered by the loopback entries above
+            Ok(ip) => GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(ip, if ip.is_ipv4() { 32 } else { 128 })),
+            Err(_) => GeneralSubtree::DnsName(n.clone()),
+        };
+        if !permitted.contains(&subtree) {
+            permitted.push(subtree);
+        }
+    }
+    NameConstraints {
+        permitted_subtrees: permitted,
+        excluded_subtrees: vec![],
+    }
+}
+
+/// The CA certificate. `constrain` carries the server names for a new CA; the CA certificate is
+/// also rebuilt from its stored key (with `None`) as the issuer when signing a renewed server
+/// certificate: signing needs only the subject name and key, so the stored `ca.pem` stays the
+/// certificate clients trust and its constraints are checked afterwards by [`verify_names`].
+fn ca_certificate(ca_key: &KeyPair, constrain: Option<&[String]>) -> Result<Certificate, String> {
+    let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
+    params.distinguished_name.push(DnType::CommonName, "Bridge Coordinator CA");
+    // pathLenConstraint = 0: the CA signs server certificates only, never another CA.
+    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.name_constraints = constrain.map(constraints_for);
+    set_validity(&mut params, CA_VALID_DAYS);
+    params.self_signed(ca_key).map_err(|e| e.to_string())
+}
+
+fn server_pem(ca_key: &KeyPair, names: Vec<String>) -> Result<(String, String), String> {
     let mut params = CertificateParams::new(names).map_err(|e| e.to_string())?;
     params.distinguished_name.push(DnType::CommonName, "Bridge Coordinator");
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     set_validity(&mut params, 825);
     let key = KeyPair::generate().map_err(|e| e.to_string())?;
-    let ca = ca_certificate(ca_key)?;
+    let ca = ca_certificate(ca_key, None)?;
     let cert = params.signed_by(&key, &ca, ca_key).map_err(|e| e.to_string())?;
     Ok((cert.pem(), key.serialize_pem()))
+}
+
+/// Sign a server certificate for exactly `names` with the CA key, without checking the CA's name
+/// constraints. Tests use this to build a certificate the CA must not be trusted for.
+pub fn issue_unchecked(ca_key_pem: &str, names: Vec<String>) -> Result<(String, String), String> {
+    server_pem(&KeyPair::from_pem(ca_key_pem).map_err(|e| e.to_string())?, names)
+}
+
+/// Why [`verify_names`] refused a certificate.
+#[derive(Debug)]
+pub enum VerifyFailure {
+    /// A name in the certificate is outside the CA's name constraints.
+    NameConstraint,
+    Other(String),
+}
+
+/// Verify `cert_pem` for every name in `names` against the CA in `ca_pem` with the same path
+/// validation (webpki, including name constraints) that rustls clients use. Name constraints
+/// apply to every name in the certificate, so one name outside them fails all of the checks.
+pub fn verify_names(ca_pem: &[u8], cert_pem: &[u8], names: &[String]) -> Result<(), VerifyFailure> {
+    use rustls::client::danger::ServerCertVerifier;
+    let other = |e: &dyn std::fmt::Display| VerifyFailure::Other(e.to_string());
+    let mut roots = rustls::RootCertStore::empty();
+    for c in rustls_pemfile::certs(&mut &*ca_pem) {
+        roots.add(c.map_err(|e| other(&e))?).map_err(|e| other(&e))?;
+    }
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::new(rustls::crypto::ring::default_provider()))
+        .build()
+        .map_err(|e| other(&e))?;
+    let leaf = rustls_pemfile::certs(&mut &*cert_pem)
+        .next()
+        .ok_or_else(|| VerifyFailure::Other("no certificate found in PEM".into()))?
+        .map_err(|e| other(&e))?;
+    for n in names {
+        let server_name = rustls::pki_types::ServerName::try_from(n.clone()).map_err(|e| other(&format!("{n}: {e}")))?;
+        verifier
+            .verify_server_cert(&leaf, &[], &server_name, &[], rustls::pki_types::UnixTime::now())
+            .map_err(|e| {
+                if format!("{e:?}").contains("NameConstraint") {
+                    VerifyFailure::NameConstraint
+                } else {
+                    VerifyFailure::Other(format!("the new server certificate does not validate against ca.pem for {n}: {e}"))
+                }
+            })?;
+    }
+    Ok(())
+}
+
+/// True when `ca.pem` carries a NameConstraints extension (OID 2.5.29.30). A CA from before name
+/// constraints were introduced vouches for any name; `cert new-ca` replaces it.
+pub fn ca_is_constrained(dir: &Path) -> bool {
+    let Ok(pem) = std::fs::read(dir.join("ca.pem")) else { return true };
+    let Some(Ok(der)) = rustls_pemfile::certs(&mut &*pem).next() else {
+        return true;
+    };
+    der.as_ref().windows(5).any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x1e])
 }
 
 /// Create the CA and server certificate when missing. Existing files are never overwritten.
@@ -83,25 +183,71 @@ pub fn init_certs(dir: &Path, sans: &Sans) -> Result<(), String> {
         write_new(&ca_key_path, key.serialize_pem().as_bytes(), 0o600).map_err(|e| e.to_string())?;
         key
     };
+    let names = san_list(sans)?;
     if !ca_pem_path.exists() {
-        let ca = ca_certificate(&ca_key)?;
+        let ca = ca_certificate(&ca_key, Some(&names))?;
         write_new(&ca_pem_path, ca.pem().as_bytes(), 0o644).map_err(|e| e.to_string())?;
     }
     if !dir.join("server.pem").exists() && !dir.join("server.key").exists() {
-        let (cert, key) = server_pem(&ca_key, sans)?;
+        let (cert, key) = server_pem(&ca_key, names)?;
         write_new(&dir.join("server.key"), key.as_bytes(), 0o600).map_err(|e| e.to_string())?;
         write_new(&dir.join("server.pem"), cert.as_bytes(), 0o644).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
-/// Replace the server certificate with a new one signed by the existing CA.
+/// Replace the server certificate with a new one signed by the existing CA. The new certificate
+/// is checked against the CA certificate in `ca.pem` first; a name outside the CA's name
+/// constraints is refused without changing any file.
 pub fn renew(dir: &Path, sans: &Sans) -> Result<(), String> {
     let text = std::fs::read_to_string(dir.join("ca.key")).map_err(|e| format!("cannot read ca.key: {e}"))?;
     let ca_key = KeyPair::from_pem(&text).map_err(|e| e.to_string())?;
-    let (cert, key) = server_pem(&ca_key, sans)?;
+    let names = san_list(sans)?;
+    let (cert, key) = server_pem(&ca_key, names.clone())?;
+    let ca_pem = std::fs::read(dir.join("ca.pem")).map_err(|e| format!("cannot read ca.pem: {e}"))?;
+    match verify_names(&ca_pem, cert.as_bytes(), &names) {
+        Ok(()) => {}
+        Err(VerifyFailure::Other(e)) => return Err(e),
+        Err(VerifyFailure::NameConstraint) => {
+            // Name constraints apply to the whole certificate: probe each name alone to name the offenders.
+            let outside: Vec<&String> = names
+                .iter()
+                .filter(|n| {
+                    server_pem(&ca_key, vec![(*n).clone()]).map_or(true, |(c, _)| verify_names(&ca_pem, c.as_bytes(), std::slice::from_ref(n)).is_err())
+                })
+                .collect();
+            return Err(format!(
+                "not renewed: {} outside the name constraints of the CA in ca.pem. That CA only vouches for the names it was created \
+                 with, localhost, {HOME_ARPA} and its subdomains, and loopback addresses. Run `cert new-ca` with the full list of names \
+                 to create a new constrained CA and server certificate; browsers must then import the new ca.pem and workers must be re-enrolled",
+                outside.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
     write_replace(&dir.join("server.key"), key.as_bytes(), 0o600).map_err(|e| e.to_string())?;
     write_replace(&dir.join("server.pem"), cert.as_bytes(), 0o644).map_err(|e| e.to_string())
+}
+
+/// Create a new name-constrained CA and a server certificate for `sans`. The previous CA files
+/// are kept as `ca.pem.old-<UTC>` and `ca.key.old-<UTC>`. Returns the stamp used.
+pub fn new_ca(dir: &Path, sans: &Sans) -> Result<String, String> {
+    let names = san_list(sans)?;
+    let ca_key = KeyPair::generate().map_err(|e| e.to_string())?;
+    let ca = ca_certificate(&ca_key, Some(&names))?;
+    let (cert, key) = server_pem(&ca_key, names.clone())?;
+    verify_names(ca.pem().as_bytes(), cert.as_bytes(), &names).map_err(|e| format!("new certificate does not validate against the new CA: {e:?}"))?;
+    let stamp = crate::utc_stamp();
+    for f in ["ca.pem", "ca.key"] {
+        let from = dir.join(f);
+        if from.exists() {
+            std::fs::rename(&from, dir.join(format!("{f}.old-{stamp}"))).map_err(|e| format!("cannot keep the old {f}: {e}"))?;
+        }
+    }
+    write_replace(&dir.join("ca.key"), ca_key.serialize_pem().as_bytes(), 0o600).map_err(|e| e.to_string())?;
+    write_replace(&dir.join("ca.pem"), ca.pem().as_bytes(), 0o644).map_err(|e| e.to_string())?;
+    write_replace(&dir.join("server.key"), key.as_bytes(), 0o600).map_err(|e| e.to_string())?;
+    write_replace(&dir.join("server.pem"), cert.as_bytes(), 0o644).map_err(|e| e.to_string())?;
+    Ok(stamp)
 }
 
 /// Install administrator-provided files after checking that they form a usable pair.

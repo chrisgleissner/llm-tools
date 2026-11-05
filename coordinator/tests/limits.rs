@@ -76,7 +76,7 @@ fn fast_ws(t: String) -> String {
 
 fn session_headers(api: &Api) -> Vec<(String, String)> {
     vec![
-        ("cookie".into(), format!("bridge_session={}", api.cookie.as_ref().unwrap())),
+        ("cookie".into(), format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap())),
         ("origin".into(), api.base.clone()),
     ]
 }
