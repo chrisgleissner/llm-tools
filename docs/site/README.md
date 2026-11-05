@@ -27,11 +27,12 @@ The page works without storage or JavaScript.
 | See every limit (`#limits`) | The `llm-usage` table as text (wide and narrow variants), three points |
 | When one runs dry (`#handoff`) | An example night as a timeline (HTML and CSS, no image), four short points |
 | LLM Bridge (`#bridge`) | The limit hand-off clip, Plan, Run and Review as tabs with a screenshot each, the full-demo link, and six smaller features (mission picker, `/finish`, rotation, themes, wheel, JSON and `doctor`) |
+| Web console (`#console`) | Optional distributed mode in one screen: a headline, a two-sentence lede, an architecture diagram in HTML and CSS (browser and CLI over HTTPS to the coordinator, workers connect out, provider sign-ins stay on the workers), three web console screenshots in the existing tab pattern (Overview, Approve, Terminal) with one Pixel 4 screenshot, and four one-line points |
 | Control (`#control`) | Four cards for reliability, approval and review hold, cost awareness, and fit (no server, SSH, Apache-2.0) |
 | Install (`#first-run`) | Requirements, then four steps that match `docs/llm-bridge/first-run.md`: install, `llm-bridge doctor`, start a mission, finish and approve. Measured timings and an optional `llm-usage` step |
 | Built with itself | Counts taken from the author's Bridge database, and three dated facts |
 | Know the limits (`#edges`) | Four limits of the tools and a privacy block: what is read, called and written |
-| FAQ | Nine questions |
+| FAQ | Eleven questions, including whether the coordinator is needed and whether the console is safe on a LAN |
 | Footer | Badges (external images with alt text), links |
 
 Also published: `404.html` (absolute `/llm-tools/` URLs, because GitHub Pages serves it from any missing path under the project) and `sitemap.xml`. There is no `robots.txt`: crawlers read it only from the host root, which a project site does not control. The page carries `SoftwareApplication` JSON-LD with fields that can be checked against the repository; do not add a version, rating or review field.
@@ -82,6 +83,7 @@ build when a file or the OCR text of an image contains a home path other than
 | --- | --- |
 | `demo-{dark,light}.mp4` | The full recording, opened by "Watch the full 60-second run". |
 | `step-{plan,run,review}-{dark,light}.png`, `-1x` variants | Step screenshots. Rendered by `scripts/site_stills.py` from an 84-column recording (`bridge_demo.py --size 84x30 --frames-out`). The 1x file is 700 px wide, the other is 1372 px for high-density screens; both are in `srcset`. |
+| `web-{overview,approval,terminal,phone}-{dark,light}-{1x,2x}.{webp,png}` | Web console screenshots from the deterministic mock of `web/e2e/mock.ts` (sample data, fixed clock). Capture with `SITE_SHOTS_DIR=/tmp/shots npx playwright test e2e/site-shots.spec.ts --project=chromium-desktop --project=chromium-mobile` in `web/`, then `python3 scripts/site_webshots.py /tmp/shots docs/site/assets` (Pillow; the system `python3`). The demo-recorder rule above does not apply: these images never show a real installation. |
 | `social-card.png` | 1200x630 Open Graph and Twitter image, rendered by headless Chrome from `assets/src/social-card.html` (it embeds the real `llm-usage` text). |
 | `favicon.svg` | The brand chip. |
 | `src/` | Sources that are not referenced by the page (exempt from the unreferenced-asset check). |
