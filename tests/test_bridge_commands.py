@@ -156,8 +156,8 @@ def test_target_option(mission, capsys):
     assert main(["--target=local", "mission", "list", "--json"]) == 0
     capsys.readouterr()
     for argv, message in [
-        (["--target", "workstation", "status"], "unknown target 'workstation'"),
-        (["--target", "all", "mission", "list"], "target 'all' needs a configured coordinator"),
+        (["--target", "workstation", "status", "--mission", mission_id], "no coordinator is configured"),
+        (["--target", "all", "mission", "list"], "no coordinator is configured"),
         (["--target", "Bad!", "status"], "invalid target name"),
         (["--target"], "--target needs a name"),
         (["--target", "--json"], "--target needs a name"),
@@ -244,3 +244,19 @@ def test_cli_task_mutations_route_through_the_command_layer(mission, capsys, mon
         assert main(["task", argv[0], "--mission", mission_id, *argv[1:], "--json"]) == 0, argv
     capsys.readouterr()
     assert seen == ["task.priority", "task.reorder", "task.pause", "task.resume", "task.amend", "task.cancel"]
+
+
+def test_remote_style_references_resolve_on_the_worker(mission):
+    """Requests may name a mission by unique prefix and a task by its number, never by folder."""
+    state, mission_id = mission
+    task = _first_task(state, mission_id)
+    shown = commands.execute(CommandRequest("task.show", {"task_number": 1}, mission_id=mission_id[:8]))
+    assert shown.outcome == "ok" and shown.result["id"] == task["id"]
+    for params, code in [({}, "invalid-argument"), ({"task_number": 1, "task_id": task["id"]}, "invalid-argument"), ({"task_number": 9}, "not-found")]:
+        assert commands.execute(CommandRequest("task.show", params, mission_id=mission_id)).error.code == code
+    paused = commands.execute(CommandRequest("task.pause", {"task_number": 1}, mission_id=mission_id[:8], request_id="pause-by-number"))
+    assert paused.outcome == "applied"
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        payload = json.loads(store.db.execute("SELECT payload_json FROM commands WHERE id='pause-by-number'").fetchone()[0])
+    assert payload == {"action": "task.pause", "task_id": task["id"]}
+    assert commands.execute(CommandRequest("mission.status", mission_id="zz")).error.code == "invalid-argument"

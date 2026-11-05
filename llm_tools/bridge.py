@@ -1298,6 +1298,18 @@ def _build_parser(
     _add_json_arg(worker_status)
     worker_sub.add_parser("run", help="run the worker in the foreground until interrupted")
     worker_sub.add_parser("unenroll", help="delete this host's enrolment, token and coordinator CA")
+    worker_list = worker_sub.add_parser("list", help="list the workers registered with the configured coordinator")
+    _add_json_arg(worker_list)
+
+    remote = sub.add_parser("remote", help="configure this CLI to reach other workers through a coordinator (used by --target)")
+    remote_sub = remote.add_subparsers(dest="remote_action", required=True)
+    remote_login = remote_sub.add_parser("login", help="store the coordinator URL, CA and API token")
+    remote_login.add_argument("--coordinator", required=True, metavar="URL", help="coordinator URL, for example https://bridge.home.arpa:8443")
+    remote_login.add_argument("--token-file", required=True, metavar="PATH", help="file holding an API token from bridge-coordinator token create ('-' reads stdin)")
+    remote_login.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
+    remote_status = remote_sub.add_parser("status", help="show the configured coordinator without the token")
+    _add_json_arg(remote_status)
+    remote_sub.add_parser("logout", help="delete the stored coordinator URL, CA and API token")
 
     finish = sub.add_parser("finish", help="ask the native provider to exit so its task moves to verification")
     _add_mission_arg(finish, default_mission)
@@ -1959,6 +1971,28 @@ def _worker_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _remote_command(args: argparse.Namespace) -> int:
+    """``llm-bridge remote``: where ``--target`` requests are sent."""
+    from . import bridge_remote as remote
+
+    if args.remote_action == "login":
+        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
+        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        config = remote.login(args.coordinator, token, ca_pem=ca_pem)
+        print(f"Remote targets now go through {config.coordinator_url}. List them with: llm-bridge worker list")
+        return 0
+    if args.remote_action == "status":
+        try:
+            config = remote.load()
+        except remote.RemoteError as exc:
+            print(f"llm-bridge: {exc}", file=sys.stderr)
+            return 2
+        _print_result(config.public(), args.json, lambda value: f"coordinator_url: {value['coordinator_url']}")
+        return 0
+    print("Remote configuration removed." if remote.logout() else "No coordinator is configured.")
+    return 0
+
+
 def _split_target(arguments: list[str]) -> tuple[str | None, list[str]]:
     """Remove a leading ``--target NAME`` and validate the name."""
     if arguments[0] == "--target":
@@ -2002,14 +2036,12 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
         print(topic_text(topic))
         return 0
+    target: str = commands.LOCAL_TARGET
     if arguments and (arguments[0] == "--target" or arguments[0].startswith("--target=")):
-        target, arguments = _split_target(arguments)
-        if target is None:
+        parsed_target, arguments = _split_target(arguments)
+        if parsed_target is None:
             return 2
-        if target != commands.LOCAL_TARGET:
-            # Never fall back to local execution for a named target (CLI-005).
-            print(f"llm-bridge: {commands.unknown_target_message(target)}", file=sys.stderr)
-            return 2
+        target = parsed_target
         if not arguments:
             print("llm-bridge: --target needs a command, for example: llm-bridge --target local status", file=sys.stderr)
             return 2
@@ -2029,6 +2061,15 @@ def _main(argv: list[str] | None = None) -> int:
     if _managed_session() and not _managed_allows(args):
         print(f"llm-bridge: {MANAGED_REFUSAL}", file=sys.stderr)
         return 2
+    if target != commands.LOCAL_TARGET:
+        # Never fall back to local execution for a named target (CLI-005).
+        from .bridge_remote import run_cli
+
+        return run_cli(target, args)
+    if args.command == "worker" and args.worker_action == "list":
+        from .bridge_remote import run_cli as run_remote
+
+        return run_remote(commands.ALL_TARGET, args)
     if _managed_session() and hasattr(args, "mission") and args.mission is None and os.environ.get(MANAGED_MISSION_ENV):
         args.mission = os.environ[MANAGED_MISSION_ENV].strip()  # never infer another mission from the folder
     if args.command in {"control", "usage", "console", "start", "resume", "attach", "view"}:
@@ -2431,6 +2472,8 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "worker":
             return _worker_command(args)
+        if args.command == "remote":
+            return _remote_command(args)
         if args.command == "theme":
             _print_theme(args)
             return 0

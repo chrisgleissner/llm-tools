@@ -22,12 +22,13 @@ stored outcome instead of repeating the effect (WORK-006, PROTO-004).
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
-from .bridge_missions import MissionNotFound
+from .bridge_missions import MissionNotFound, resolve_mission_ref
 from .bridge_store import BridgeStore, TransitionError
 
 COMMAND_SCHEMA_VERSION = 1
@@ -150,13 +151,6 @@ def validate_target(name: str) -> str:
     raise CommandFailure("invalid-target", f"invalid target name {name!r}: use lowercase letters, digits and '-'")
 
 
-def unknown_target_message(name: str) -> str:
-    """Explain why a non-local target cannot be reached from this host."""
-    if name == ALL_TARGET:
-        return "target 'all' needs a configured coordinator; distributed mode is not configured on this host (known targets: local)"
-    return f"unknown target {name!r}: distributed mode is not configured on this host (known targets: local)"
-
-
 def _is_kind(value: Any, kind: type) -> bool:
     # bool is an int subclass; never accept True where a number is expected.
     return isinstance(value, kind) and not (kind is int and isinstance(value, bool))
@@ -265,8 +259,11 @@ def _operator(action: str) -> Handler:
     return handler
 
 
+_TASK_SELECTOR: Mapping[str, Param] = {"task_id": Param(int), "task_number": Param(int)}
+
+
 def _task_op(operation: str, summary: str, extra: Mapping[str, Param] | None = None) -> OperationSpec:
-    params = {"task_id": Param(int, required=True), **(extra or {}), "expected_revision": Param(int)}
+    params = {**_TASK_SELECTOR, **(extra or {}), "expected_revision": Param(int)}
     return OperationSpec(operation, summary, True, True, params, _operator(operation))
 
 
@@ -297,7 +294,7 @@ OPERATIONS: dict[str, OperationSpec] = {
             {"limit": Param(int, default=50), "offset": Param(int, default=0)},
             _task_list,
         ),
-        OperationSpec("task.show", "Show one task by global ID", False, True, {"task_id": Param(int, required=True)}, _task_show),
+        OperationSpec("task.show", "Show one task", False, True, _TASK_SELECTOR, _task_show),
         OperationSpec(
             "task.add",
             "Add a task",
@@ -359,12 +356,29 @@ def dispatch(request: CommandRequest) -> dict[str, Any]:
     if spec.needs_mission and not request.mission_id:
         raise CommandFailure("invalid-argument", f"{spec.operation}: mission_id is required")
     cli = _cli()
-    if spec.mutating:
-        return spec.handler(None, request, params)
     with cli.open_store(readonly=True) as store:
-        if spec.needs_mission and request.mission_id is not None and store.mission_id_if_exists(request.mission_id) is None:
-            raise MissionNotFound(f"no mission matches {request.mission_id!r}")
-        return spec.handler(store, request, params)
+        if spec.needs_mission:
+            # A full ID or a unique prefix; never the caller's folder, which is meaningless remotely.
+            request = dataclasses.replace(request, mission_id=resolve_mission_ref(store, request.mission_id, read_only=True))
+        if "task_number" in spec.params:
+            params = _resolve_task_number(store, spec, request, params)
+        if not spec.mutating:
+            return spec.handler(store, request, params)
+    return spec.handler(None, request, params)
+
+
+def _resolve_task_number(store: BridgeStore, spec: OperationSpec, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Accept exactly one of ``task_id`` (global) or ``task_number`` (the mission's own number)."""
+    number = params.pop("task_number")
+    if (number is None) == (params["task_id"] is None):
+        raise CommandFailure("invalid-argument", f"{spec.operation}: give exactly one of task_id or task_number")
+    if number is not None:
+        assert request.mission_id is not None
+        try:
+            params["task_id"] = int(store.task_by_ordinal(request.mission_id, number)["id"])
+        except (KeyError, ValueError, TransitionError) as exc:
+            raise CommandFailure("not-found", str(exc).strip("'\"")) from None
+    return params
 
 
 def outcome_of(spec: OperationSpec, result: Mapping[str, Any]) -> str:

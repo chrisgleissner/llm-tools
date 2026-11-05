@@ -49,7 +49,12 @@ jobs:
           llm-bridge mission create --help >/dev/null
           llm-bridge </dev/null >/dev/null
 
+      - name: Build the Rust coordinator for cross-component tests
+        run: cargo build --locked --manifest-path coordinator/Cargo.toml
+
       - name: Run tests with coverage
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
         run: |
           python -m coverage run -m pytest
           python -m coverage combine
@@ -64,6 +69,24 @@ jobs:
           path: coverage.xml
           if-no-files-found: error
           retention-days: 1
+
+  coordinator:
+    name: coordinator (Rust)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: coordinator
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Format, lint and test
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
 
   # Static type check of the Bridge modules (llm_tools/bridge*.py and terminal.py; see [tool.mypy] in
   # pyproject.toml). mypy is a development tool and is not a runtime dependency.
