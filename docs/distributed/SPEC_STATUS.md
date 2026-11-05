@@ -20,7 +20,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | TRACK-005 | [x] | WORKLOG.md has one entry per work-unit batch and the register is updated per batch, not per edit. |
 | TRACK-006 | [x] | WORKLOG.md header holds the resume procedure; it was used after a session restart (22:40Z entry: gate rerun after restart). |
 | TRACK-007 | [x] | WORKLOG.md is 31 lines in total, one dense line per work unit with verification evidence. |
-| TRACK-008 | [ ] | The final report is step 12 and has not been written yet; it must be derived from this register. |
+| TRACK-008 | [x] | docs/distributed/FINAL_REPORT.md, derived from this register. |
 | REPO-001 | [x] | Baseline recorded in WORKLOG.md (entry points, schema v10, event schema v7, CI workflows). |
 | REPO-002 | [x] | Authoritative owners recorded in DECISIONS.md D1. |
 | REPO-003 | [x] | Fast suite baseline in WORKLOG.md; 1 env-dependent failure explained. |
@@ -134,7 +134,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | OPS-003 | [x] | `init` generates CA, server certificate and setup token without source edits or manual cryptography; idempotent on an initialised directory; env overrides BRIDGE_COORDINATOR_DATA_DIR/BIND/LAN_ENABLED. |
 | OPS-004 | [x] | `admin reset-password`, `cert renew`, `cert install`, `setup-token` (only before an administrator exists), `backup`/`restore`; CLI tests in coordinator/tests/ops.rs; Recovery section in install.md. |
 | OPS-005 | [x] | install.md "Upgrades and compatibility": protocol negotiation, forward-only migrations, rollback by restoring the pre-upgrade backup, mixed worker versions, upgrade order. |
-| TEST-001 | [~] | No existing test has deleted lines (git diff --numstat main..HEAD -- tests) and gates at 0952c13 were green (92% total, 94% Bridge); the step 11 gate on the final tree is still running. |
+| TEST-001 | [x] | No existing test lost lines (`git diff --numstat main..HEAD -- tests` shows no deletions). Final gate on 51a1824: 4181 passed, 18 skipped, 0 failed; coverage 92% total, 94% Bridge; mypy clean. |
 | TEST-002 | [x] | tests/test_bridge_commands.py (validation, transitions), tests/test_bridge_worker.py, coordinator/tests/worker.rs and api.rs (routing, authorisation, persistence). |
 | TEST-003 | [x] | Equivalent scenarios through local and remote paths (tests/test_bridge_commands.py test_read_operations_match_cli_json_output; tests/test_distributed_integration.py test_remote_commands_match_local_semantics_and_are_idempotent, test_remote_cli_has_local_semantics). |
 | TEST-004 | [x] | Existing fake-provider suites are unchanged and distributed tests need no live provider (seeded missions and real tmux stations in tests/test_bridge_terminal_stream.py). |
@@ -150,7 +150,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | TEST-014 | [!] | x86-64 host and container: startup, idle and peak RSS, API latency, event throughput, reconnect latency, database growth and memory pressure (benchmarks.md). Blocked: ARM64 figures need pi-sim or the hardware (due 2026-11-06). |
 | TEST-015 | [x] | benchmarks.md labels every figure by platform (x86-64 host, container on x86-64) and states the Pi Zero 2 W was not measured; no emulated result has been recorded yet. |
 | TEST-016 | [x] | .github/workflows/test.yml: Python job (also builds the coordinator for cross-component tests), coordinator job (fmt, clippy, test), web job (typecheck, build, Playwright), mypy job. |
-| TEST-017 | [~] | Depends on the final step 11 gate (full suite, coverage, cargo test, Playwright) on the final tree, which is not complete. |
+| TEST-017 | [x] | Final verification on 51a1824: full Python suite (4181 passed, 18 skipped) with both coverage gates, mypy, cargo fmt/clippy/test (84 passed), cargo audit and npm audit clean, Playwright 68/68 on all four projects, container smoke test on x86-64. |
 | QUAL-001 | [x] | DECISIONS.md D1 names one owner per business rule; the coordinator and web call the worker's command layer instead of reimplementing it (ARCH-004). |
 | QUAL-002 | [x] | Typed dataclasses and a command catalog in Python (mypy job covers bridge*.py), strict TypeScript (npm run typecheck), Rust with clippy in CI. |
 | QUAL-003 | [x] | No plugin framework or generic abstraction layer: one stdlib WebSocket client, one command layer, one coordinator crate with a small module set. |
@@ -161,7 +161,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | QUAL-008 | [x] | Each normative topic has one home (wire format: protocol.md; coordinator configuration, limits, CA constraints, cookie/CSRF: coordinator.md; installation and backup: install.md; operation: operations.md; measurements: benchmarks.md); the other documents link to it. |
 | QUAL-009 | [x] | One focused Opus security review (DECISIONS.md D7) and orchestrator review of each delegated slice before commit (WORKLOG.md: 'reviewed, committed'). |
 | QUAL-010 | [x] | llm_tools diff against main is limited to Bridge distributed modules and additive terminal and store helpers (git diff --stat main..HEAD -- llm_tools); no unrelated refactoring. |
-| CONV-001 | [~] | Steps 1-10 complete and pushed; step 11 (hardening: SEC-009 review done, DECISIONS.md D7) nearly complete; step 12 (documentation and final verification) not done. |
+| CONV-001 | [x] | Steps 1-12 completed in order and pushed to origin/feat/distributed-bridge; each step's gate is recorded in WORKLOG.md. |
 | CONV-002 | [x] | Each step was committed with focused tests and a full-suite gate before the push (WORKLOG.md verification column). |
 | CONV-003 | [x] | The command layer and protocol (steps 2 and 4) were fixed before the worker, coordinator, CLI and web were built on them (commit order 8a662e2, b3c3771, 59c2d4b, b8a09a1). |
 | CONV-004 | [x] | Sequential by default; parallel agents only for disjoint directories (coordinator versus web and Python) with at most three active. |
@@ -172,7 +172,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | CONV-009 | [x] | Steps were pushed only after the full suite and coverage gates passed (step 10 push at 0952c13 after a green gate: 92% total, 94% Bridge). |
 | CONV-010 | [x] | Blocked pi-sim and hardware work was recorded in WORKLOG.md (18:46Z) and independent work continued. |
 | CONV-011 | [x] | No mandatory requirement was relaxed; unmet items stay open in this register. |
-| CONV-012 | [~] | Work continues: step 11 nearly done and step 12 outstanding; externally blocked ARM64 verification remains. |
+| CONV-012 | [!] | All mandatory work that can run on this host is implemented and verified. Remaining: ARM64 execution and Pi Zero 2 W measurements (COORD-001, COORD-003, OPS-001, TEST-013, TEST-014, A2, A4, A5), blocked on pi-sim (unreachable) and the hardware due 2026-11-06. |
 
 ## Operator addendum (2026-11-05, task revision 4)
 
