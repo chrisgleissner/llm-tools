@@ -6,6 +6,8 @@ use rcgen::{
     NameConstraints,
 };
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::PrivateKeyDer;
 use rustls::ServerConfig;
 use std::net::IpAddr;
 use std::path::Path;
@@ -136,13 +138,13 @@ pub fn verify_names(ca_pem: &[u8], cert_pem: &[u8], names: &[String]) -> Result<
     use rustls::client::danger::ServerCertVerifier;
     let other = |e: &dyn std::fmt::Display| VerifyFailure::Other(e.to_string());
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut &*ca_pem) {
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(ca_pem) {
         roots.add(c.map_err(|e| other(&e))?).map_err(|e| other(&e))?;
     }
     let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::new(rustls::crypto::ring::default_provider()))
         .build()
         .map_err(|e| other(&e))?;
-    let leaf = rustls_pemfile::certs(&mut &*cert_pem)
+    let leaf = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
         .next()
         .ok_or_else(|| VerifyFailure::Other("no certificate found in PEM".into()))?
         .map_err(|e| other(&e))?;
@@ -165,7 +167,7 @@ pub fn verify_names(ca_pem: &[u8], cert_pem: &[u8], names: &[String]) -> Result<
 /// constraints were introduced vouches for any name; `cert new-ca` replaces it.
 pub fn ca_is_constrained(dir: &Path) -> bool {
     let Ok(pem) = std::fs::read(dir.join("ca.pem")) else { return true };
-    let Some(Ok(der)) = rustls_pemfile::certs(&mut &*pem).next() else {
+    let Some(Ok(der)) = rustls::pki_types::CertificateDer::pem_slice_iter(&pem).next() else {
         return true;
     };
     der.as_ref().windows(5).any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x1e])
@@ -270,15 +272,13 @@ pub fn provider() -> Arc<CryptoProvider> {
 }
 
 pub fn build_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig, String> {
-    let certs = rustls_pemfile::certs(&mut &*cert_pem)
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     if certs.is_empty() {
         return Err("no certificate found in PEM".into());
     }
-    let key = rustls_pemfile::private_key(&mut &*key_pem)
-        .map_err(|e| e.to_string())?
-        .ok_or("no private key found in PEM")?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| format!("no private key found in PEM: {e}"))?;
     let mut cfg = ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
         .map_err(|e| e.to_string())?

@@ -3,6 +3,7 @@ mod common;
 use bridge_coordinator::db::Db;
 use bridge_coordinator::{db_path, ops};
 use common::*;
+use rustls::pki_types::pem::PemObject;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -34,7 +35,7 @@ fn text(o: &Output) -> String {
 
 fn contains(file: &Path, needle: &[u8]) -> bool {
     let pem = std::fs::read(file).unwrap();
-    let der = rustls_pemfile::certs(&mut &*pem).next().unwrap().unwrap();
+    let der = rustls::pki_types::CertificateDer::pem_slice_iter(&pem).next().unwrap().unwrap();
     der.as_ref().windows(needle.len()).any(|w| w == needle)
 }
 

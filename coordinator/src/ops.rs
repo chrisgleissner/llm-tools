@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::db::{self, Db};
 use crate::{auth, db_path, netinfo, write_replace, SETUP_TOKEN_FILE};
 use rusqlite::{backup::Backup, Connection, OpenFlags};
+use rustls::pki_types::pem::PemObject;
 use sha2::{Digest, Sha256};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -30,7 +31,7 @@ pub fn lock_data_dir(dir: &Path) -> Result<std::fs::File, String> {
 /// SHA-256 of the first certificate in `ca.pem`, as colon-separated upper-case hex.
 pub fn ca_fingerprint(dir: &Path) -> Result<String, String> {
     let pem = std::fs::read(dir.join("ca.pem")).map_err(|e| format!("cannot read ca.pem: {e}"))?;
-    let der = rustls_pemfile::certs(&mut &*pem)
+    let der = rustls::pki_types::CertificateDer::pem_slice_iter(&pem)
         .next()
         .ok_or("ca.pem contains no certificate")?
         .map_err(|e| e.to_string())?;
@@ -43,7 +44,7 @@ pub fn ca_fingerprint(dir: &Path) -> Result<String, String> {
 /// address change; it is not a validation (clients do that).
 fn cert_covers(dir: &Path, host: &str) -> bool {
     let Ok(pem) = std::fs::read(dir.join("server.pem")) else { return false };
-    let Some(Ok(der)) = rustls_pemfile::certs(&mut &*pem).next() else {
+    let Some(Ok(der)) = rustls::pki_types::CertificateDer::pem_slice_iter(&pem).next() else {
         return false;
     };
     let needle: Vec<u8> = match host.parse::<IpAddr>() {
@@ -169,7 +170,7 @@ pub async fn health(dir: &Path) -> Result<(), String> {
     let target = SocketAddr::new(ip, addr.port());
     let ca = std::fs::read(dir.join("ca.pem")).map_err(|e| format!("cannot read ca.pem: {e}"))?;
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut &*ca) {
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(&ca) {
         roots.add(c.map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     }
     let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))

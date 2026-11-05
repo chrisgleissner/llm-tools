@@ -3,6 +3,7 @@ use bridge_coordinator::certs::Sans;
 use bridge_coordinator::server::{self, RunningServer};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, Method, RequestBuilder};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::ServerName;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -37,7 +38,7 @@ pub fn sans() -> Sans {
 
 pub fn client_tls(ca: &[u8]) -> Arc<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut &*ca) {
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(ca) {
         roots.add(c.unwrap()).unwrap();
     }
     Arc::new(
