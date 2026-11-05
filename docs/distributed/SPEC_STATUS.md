@@ -173,3 +173,13 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | CONV-010 | [ ] |  |
 | CONV-011 | [ ] |  |
 | CONV-012 | [ ] |  |
+
+## Operator addendum (2026-11-05, task revision 4)
+
+Extends OPS-001, COORD-009, NET-003 and TEST-013/014/015; tracked here as A1-A5 (not register rows).
+
+- A1 [~] No Raspberry-Pi-specific code or configuration; Pi Zero 2 W is a documented target profile.
+- A2 [ ] Coordinator as a multi-arch (amd64/arm64) non-root OCI image, read-only root, volumes, HEALTHCHECK, loopback-default compose file, measured memory limit for a 512 MB shared host; admin tasks via `docker compose run`/`docker exec`; one set of runtime defaults shared with systemd.
+- A3 [ ] Decision on an optional worker image recorded in DECISIONS.md; workers native by default.
+- A4 [ ] ARM64 deployment, container and resource checks on the emulated Pi `pi-sim` (QEMU raspi3b, DietPi Trixie), labelled "emulated (QEMU TCG)"; physical Pi `[!]` until the hardware arrives (expected 2026-11-06).
+- A5 [ ] Generic deployment docs plus one marked Pi Zero 2 W target-profile section.
