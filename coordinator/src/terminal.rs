@@ -119,9 +119,11 @@ enum End {
     Worker(String),
     Lagged,
     Shutdown,
+    Idle,
 }
 
 enum ViewerItem {
+    Ping,
     Frame(String, usize),
     Close(u16, String),
 }
@@ -187,8 +189,12 @@ async fn browser_session(st: St, mut socket: WebSocket, p: Params, actor: String
             _ = shutdown.changed() => { let _ = socket.send(close_frame(close_code::AWAY, "shutting down")).await; return }
         }
     };
-    let end = relay(&mut reg, socket, worker_ws, &mut shutdown).await;
-    if matches!(end, End::Browser | End::Lagged | End::Shutdown) {
+    let keepalive = (
+        Duration::from_secs(st.cfg.ws_ping_interval_secs),
+        Duration::from_secs(st.cfg.ws_idle_timeout_secs),
+    );
+    let end = relay(&mut reg, socket, worker_ws, &mut shutdown, keepalive).await;
+    if matches!(end, End::Browser | End::Lagged | End::Shutdown | End::Idle) {
         st.hub.send_to_worker(&p.worker, "terminal.close", json!({"session_id": reg.id}));
     }
 }
@@ -237,7 +243,13 @@ pub fn checked_worker_frame(text: &str) -> Result<Option<String>, String> {
     })
 }
 
-async fn relay(reg: &mut TermReg, browser: WebSocket, worker: WebSocket, shutdown: &mut tokio::sync::watch::Receiver<bool>) -> End {
+async fn relay(
+    reg: &mut TermReg,
+    browser: WebSocket,
+    worker: WebSocket,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    (ping, idle): (Duration, Duration),
+) -> End {
     let (mut b_sink, mut b_stream) = browser.split();
     let (mut w_sink, mut w_stream) = worker.split();
     let queued = Arc::new(AtomicUsize::new(0));
@@ -254,6 +266,11 @@ async fn relay(reg: &mut TermReg, browser: WebSocket, worker: WebSocket, shutdow
                         let ok = b_sink.send(Ws::Text(text.into())).await.is_ok();
                         queued.fetch_sub(n, Ordering::SeqCst);
                         if !ok {
+                            return;
+                        }
+                    }
+                    ViewerItem::Ping => {
+                        if b_sink.send(Ws::Ping(Vec::new().into())).await.is_err() {
                             return;
                         }
                     }
@@ -286,9 +303,14 @@ async fn relay(reg: &mut TermReg, browser: WebSocket, worker: WebSocket, shutdow
     };
 
     let mut writer_done = false;
+    let mut tick = tokio::time::interval(ping);
+    tick.tick().await;
+    let mut last_heard = std::time::Instant::now();
     let end = loop {
         tokio::select! {
-            incoming = b_stream.next() => match incoming {
+            incoming = b_stream.next() => {
+                if matches!(incoming, Some(Ok(_))) { last_heard = std::time::Instant::now(); }
+                match incoming {
                 Some(Ok(Ws::Text(t))) => {
                     if let Some(frame) = checked_browser_frame(t.as_str()) {
                         let _ = w_tx.try_send(frame);
@@ -296,6 +318,11 @@ async fn relay(reg: &mut TermReg, browser: WebSocket, worker: WebSocket, shutdow
                 }
                 Some(Ok(Ws::Close(_))) | None | Some(Err(_)) => break End::Browser,
                 Some(Ok(_)) => {}
+                }
+            },
+            _ = tick.tick() => {
+                if last_heard.elapsed() >= idle { break End::Idle }
+                let _ = v_tx.send(ViewerItem::Ping);
             },
             frame = w_stream.next() => match frame {
                 Some(Ok(Ws::Text(t))) => match checked_worker_frame(t.as_str()) {
@@ -331,6 +358,9 @@ async fn relay(reg: &mut TermReg, browser: WebSocket, worker: WebSocket, shutdow
         }
         End::Browser => {
             let _ = v_tx.send(ViewerItem::Close(close_code::NORMAL, "closed".into()));
+        }
+        End::Idle => {
+            let _ = v_tx.send(ViewerItem::Close(close_code::AWAY, "idle timeout".into()));
         }
     }
     drop(v_tx);

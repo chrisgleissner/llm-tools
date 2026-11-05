@@ -8,6 +8,8 @@ pub mod db;
 pub mod http;
 pub mod hub;
 pub mod init;
+pub mod netinfo;
+pub mod ops;
 pub mod protocol;
 pub mod server;
 pub mod terminal;
@@ -21,6 +23,14 @@ pub const SETUP_TOKEN_FILE: &str = "setup-token";
 
 pub fn db_path(dir: &Path) -> PathBuf {
     dir.join(DB_FILE)
+}
+
+/// Current UTC time as `YYYYMMDDTHHMMSSZ` (file name suffixes).
+pub fn utc_stamp() -> String {
+    let t = now();
+    let (y, m, d) = certs::civil_from_days(t.div_euclid(86_400));
+    let s = t.rem_euclid(86_400);
+    format!("{y:04}{m:02}{d:02}T{:02}{:02}{:02}Z", s / 3600, s % 3600 / 60, s % 60)
 }
 
 pub fn now() -> i64 {

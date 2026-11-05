@@ -7,16 +7,59 @@ worker protocol is `protocol.md`.
 
 ## Process and files
 
-- `bridge-coordinator init --data-dir DIR [--hostname NAME]... [--ip ADDR]...`
-  creates `DIR` (0700), `coordinator.sqlite3`, a local CA (`ca.pem`,
-  `ca.key`) and a server certificate signed by it with the given DNS/IP SANs,
-  `config.toml` (bind `127.0.0.1:8443` by default) and a one-time
-  `setup-token` file used to create the administrator. Existing files are never
-  overwritten. Private keys and tokens are 0600.
+- `bridge-coordinator init [--hostname NAME]... [--ip ADDR]... [--bind HOST:PORT]`
+  creates the data directory (0700, best effort; it never chowns, and an existing
+  empty directory such as a volume mount point is accepted), `coordinator.sqlite3`,
+  a local CA (`ca.pem`, `ca.key`) and a server certificate signed by it,
+  `config.toml` and a one-time `setup-token` file used to create the
+  administrator. Private keys and tokens are 0600. On a directory that already
+  holds a configuration, CA, server certificate and database, `init` prints
+  `already initialised` and changes nothing (exit 0), so it can run on every
+  container start. After a successful init it prints the HTTPS URL(s), the path of
+  `ca.pem` and its SHA-256 fingerprint, the setup-token path and the browser trust
+  steps (`install.md`).
+  - Certificate names. Without `--hostname`/`--ip`, the certificate covers
+    `localhost`, `127.0.0.1`, `::1`, the machine host name, `<host>.home.arpa`, and
+    the machine's non-loopback global IPv4/IPv6 addresses (`netinfo.rs`: host name
+    from `/proc/sys/kernel/hostname`; IPv4 from `/proc/net/fib_trie` plus the source
+    address the kernel selects for a private destination via a connected UDP socket,
+    which sends nothing; IPv6 from `/proc/net/if_inet6`, global scope only;
+    link-local addresses are skipped). With any explicit `--hostname` or `--ip`,
+    discovery is not used and the certificate covers exactly the given names plus
+    `localhost`, `127.0.0.1` and `::1`. `cert renew` follows the same rule.
+  - `--bind` (or `BRIDGE_COORDINATOR_BIND` when the flag is absent) is written to
+    `config.toml`; a non-loopback bind also writes `lan_enabled = true`
+    (or the value of `BRIDGE_COORDINATOR_LAN_ENABLED` when set). The default bind is
+    `127.0.0.1:8443`.
 - `bridge-coordinator serve --data-dir DIR` serves HTTPS (rustls; TLS 1.3 and
   1.2 with AEAD suites only). It refuses to start when the bind address is not
-  loopback and `lan_enabled = true` is not set in `config.toml` (NET-003).
-  SIGTERM drains connections and exits within 10 s.
+  loopback and `lan_enabled = true` is not set (NET-003). It holds an exclusive
+  lock on `DIR/coordinator.lock` while running (released by the kernel on any
+  exit). Logs go to stderr only; nothing is written outside the data directory
+  (SQLite temporary storage is in memory). SIGTERM or SIGINT drains connections and
+  exits within 10 s.
+- `bridge-coordinator info` prints the URLs (flagging any that the server
+  certificate does not cover), bind address, LAN state, CA path and SHA-256
+  fingerprint and whether an administrator exists.
+- `bridge-coordinator health` does an HTTPS `GET /healthz` against the configured
+  bind (loopback for a wildcard bind: 127.0.0.1 for `0.0.0.0`, `::1` for `::`),
+  verifies the certificate against `ca.pem` as `localhost`, and exits 0 when the
+  answer is `200` with `{"status":"ok"}`, otherwise 1. The whole check is limited to
+  3 s. It needs no shell, DNS or other tools, so it works as a container
+  `HEALTHCHECK` and in monitoring.
+- `bridge-coordinator backup --output FILE` writes a consistent copy of the
+  database with the SQLite online backup API while the server runs (0600, never
+  overwrites, `integrity_check` before the file appears). `restore --input FILE`
+  checks the file (integrity and schema version) and replaces the database; it
+  refuses while a server holds the data directory lock and keeps the replaced
+  database as `coordinator.sqlite3.before-restore-<UTC>`.
+- `bridge-coordinator setup-token` replaces the setup token file; it fails once an
+  administrator exists.
+- Environment variables: `BRIDGE_COORDINATOR_DATA_DIR` (when `--data-dir` is not
+  given; default `/var/lib/bridge-coordinator`), `BRIDGE_COORDINATOR_BIND`
+  (`host:port`) and `BRIDGE_COORDINATOR_LAN_ENABLED` (`true`/`false`). The last two
+  take precedence over `config.toml`. All defaults are defined in `config.rs`
+  (`Config::default`); `init` generates `config.toml` from them.
 - `bridge-coordinator worker add NAME` prints a new worker token once and
   stores its SHA-256 hash; `worker revoke NAME` deletes it.
 - `bridge-coordinator admin reset-password` (local shell only) sets a new
@@ -62,14 +105,28 @@ coordinator's own origin; WebSocket upgrades check `Origin` too (AUTH-007).
 Bearer API tokens are not subject to CSRF checks because browsers never send
 them automatically.
 
-## Limits (COORD-004)
+## Limits and timeouts (COORD-004, NET-010)
 
-Request bodies 1 MiB; 64 concurrent worker connections; per-connection
-outbound queue 256 messages (a full queue closes the connection; the worker
-reconnects and the journal redelivers); stored events per worker capped at
-`max_events_per_worker` (default 50 000, oldest deleted first; worker
-databases keep the authoritative copy); completed commands kept 7 days;
-login failures limited to 5 per minute per client address and per username.
+| Limit | Default | Setting |
+|---|---|---|
+| Concurrent TCP connections, all kinds | 256; a connection over the cap is closed immediately after `accept` | `max_connections` |
+| TLS handshake | 10 s | fixed |
+| Wait for the next HTTP request header (keep-alive idle and slow-header limit) | 30 s | `http_idle_timeout_secs` |
+| Browser `/stream` and `/terminal` WebSockets | server ping every 30 s; closed with 1001 `idle timeout` when nothing (pong or message) arrived for 90 s, checked at each ping | `ws_ping_interval_secs`, `ws_idle_timeout_secs` |
+| Worker connections | 64; ping every 20 s; closed after 60 s of silence | fixed |
+| Terminal sessions | 16 per worker, 64 total | fixed |
+| Request body | 1 MiB | fixed |
+| Graceful shutdown | 10 s | fixed |
+| Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers) | fixed |
+| Stored events per worker | 50 000, oldest deleted first (worker databases keep the authoritative copy) | `max_events_per_worker` |
+| Completed commands kept | 7 days | fixed |
+| Login failures | 5 per minute per client address and per username | fixed |
+
+`ws_idle_timeout_secs` must be larger than `ws_ping_interval_secs`. The worker-side
+terminal WebSocket is not subject to the browser ping rule: the worker control
+connection already has its own liveness check and ends the session when it drops.
+The limits are per process; they bound resource use but are not a substitute for a
+firewall (see `install.md`).
 
 ## Storage
 

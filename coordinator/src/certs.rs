@@ -13,7 +13,7 @@ pub struct Sans {
     pub ips: Vec<IpAddr>,
 }
 
-fn civil_from_days(z: i64) -> (i32, u8, u8) {
+pub(crate) fn civil_from_days(z: i64) -> (i32, u8, u8) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);

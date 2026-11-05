@@ -69,7 +69,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | COORD-006 | [ ] |  |
 | COORD-007 | [ ] |  |
 | COORD-008 | [ ] |  |
-| COORD-009 | [ ] |  |
+| COORD-009 | [~] | deploy/bridge-coordinator.service (hardened system unit, verified with systemd-analyze), deploy/install.sh (Debian/DietPi amd64/arm64, idempotent, --dry-run), `health` command, SIGTERM drain, `serve` holds coordinator.lock; ARM64 build verified (cargo-zigbuild, gnu and musl). Container deployment in progress (A2). |
 | COORD-010 | [ ] |  |
 | PROTO-001 | [~] | docs/distributed/protocol.md (v1, JSON over WebSocket); llm_tools/bridge_protocol.py parser. Coordinator side pending. |
 | PROTO-002 | [x] | Envelope v/type/id/worker_id/generation/payload validated strictly by bridge_protocol.decode (tests/test_bridge_protocol.py). |
@@ -86,11 +86,11 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | NET-003 | [ ] |  |
 | NET-004 | [ ] |  |
 | NET-005 | [ ] |  |
-| NET-006 | [ ] |  |
+| NET-006 | [x] | docs/distributed/install.md: CA import for Chrome (Linux/Windows/macOS), Firefox and Android with SHA-256 fingerprint check (`bridge-coordinator info`); no warning bypass. |
 | NET-007 | [ ] |  |
 | NET-008 | [ ] |  |
-| NET-009 | [ ] |  |
-| NET-010 | [ ] |  |
+| NET-009 | [x] | `init` default SANs: localhost, 127.0.0.1, ::1, host name, `<host>.home.arpa`, discovered non-loopback addresses (coordinator/src/netinfo.rs, tests). |
+| NET-010 | [x] | max_connections 256, HTTP idle/header timeout 30 s, WebSocket ping 30 s and close after 90 s silence for /stream and /terminal (coordinator/tests/limits.rs); firewall and interface guidance in install.md stating LAN placement is not authentication. |
 | AUTH-001 | [ ] |  |
 | AUTH-002 | [ ] |  |
 | AUTH-003 | [ ] |  |
@@ -127,13 +127,13 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | DATA-003 | [ ] |  |
 | DATA-004 | [ ] |  |
 | DATA-005 | [ ] |  |
-| DATA-006 | [~] | Worker/standalone: `llm-bridge backup`/`restore` (online backup API, integrity check, refuses while controllers run, keeps the replaced database, raises the event id sequence), docs/distributed/operations.md, tests/test_bridge_backup.py. Coordinator database procedure pending. |
+| DATA-006 | [x] | Worker/standalone: `llm-bridge backup`/`restore` (tests/test_bridge_backup.py). Coordinator: `bridge-coordinator backup`/`restore` (online backup API, integrity check, refuses while serving, keeps the replaced database; coordinator/tests/ops.rs). Procedures in operations.md and install.md. |
 | DATA-007 | [ ] |  |
-| OPS-001 | [ ] |  |
-| OPS-002 | [ ] |  |
-| OPS-003 | [ ] |  |
-| OPS-004 | [ ] |  |
-| OPS-005 | [ ] |  |
+| OPS-001 | [~] | install.sh and unit for Debian/DietPi ARM64; staged install tested with --prefix twice. Not yet run on DietPi (emulated or physical). |
+| OPS-002 | [x] | `init` and `info` print the HTTPS URLs, CA path and SHA-256 fingerprint and browser trust steps (coordinator/tests/ops.rs). |
+| OPS-003 | [x] | `init` generates CA, server certificate and setup token without source edits or manual cryptography; idempotent on an initialised directory; env overrides BRIDGE_COORDINATOR_DATA_DIR/BIND/LAN_ENABLED. |
+| OPS-004 | [x] | `admin reset-password`, `cert renew`, `cert install`, `setup-token` (only before an administrator exists), `backup`/`restore`; CLI tests in coordinator/tests/ops.rs; Recovery section in install.md. |
+| OPS-005 | [x] | install.md "Upgrades and compatibility": protocol negotiation, forward-only migrations, rollback by restoring the pre-upgrade backup, mixed worker versions, upgrade order. |
 | TEST-001 | [ ] |  |
 | TEST-002 | [ ] |  |
 | TEST-003 | [~] | Local vs remote JSON parity for mission list, task list/show, status (test_remote_cli_has_local_semantics, test_remote_commands_match_local_semantics_and_are_idempotent). |
@@ -147,8 +147,8 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | TEST-011 | [ ] |  |
 | TEST-012 | [ ] |  |
 | TEST-013 | [~] | Coordinator cross-built for aarch64-unknown-linux-gnu with cargo-zigbuild (ELF aarch64, 3.15 MB). No qemu-user or ARM host available to run it; x86-64 tested. |
-| TEST-014 | [ ] |  |
-| TEST-015 | [ ] |  |
+| TEST-014 | [~] | coordinator/tests/bench.rs (ignored test) and deploy/bench.sh; x86-64 results in docs/distributed/benchmarks.md (startup 47 ms, idle RSS 6.2 MiB, 26.4 MiB after 1000 events, API p95 < 1 ms). ARM64 pending. |
+| TEST-015 | [~] | benchmarks.md labels every figure by platform; Pi Zero 2 W marked not measured (no hardware). |
 | TEST-016 | [~] | CI: coordinator job (fmt, clippy, test); Python job builds the coordinator and requires the cross-component tests. TypeScript pending. |
 | TEST-017 | [ ] |  |
 | QUAL-001 | [ ] |  |

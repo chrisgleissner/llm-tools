@@ -1,20 +1,29 @@
 //! `bridge-coordinator` command line (see docs/distributed/coordinator.md).
 
 use bridge_coordinator::certs::{self, Sans};
+use bridge_coordinator::config;
 use bridge_coordinator::db::Db;
-use bridge_coordinator::{auth, db_path, protocol, server};
+use bridge_coordinator::{auth, db_path, ops, protocol, server};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
-  init [--hostname NAME]... [--ip ADDR]...
+  init [--hostname NAME]... [--ip ADDR]... [--bind ADDR:PORT]
+                                (no --hostname/--ip: localhost, this machine's host name,
+                                 <host>.home.arpa and its non-loopback addresses)
+  info                          (URL, CA path and SHA-256, bind address, LAN state)
+  health                        (HTTPS GET /healthz with the local CA; exit 0 healthy, 1 not)
+  backup --output FILE | restore --input FILE   (restore needs the server stopped)
+  setup-token                   (new setup token; only while no administrator exists)
   serve [--web-dir DIR]
   worker add NAME | worker revoke NAME
   admin reset-password          (new password on stdin)
   cert renew [--hostname NAME]... [--ip ADDR]... | cert install --cert FILE --key FILE
   token create NAME | token revoke NAME
---data-dir defaults to $BRIDGE_COORDINATOR_DATA_DIR.";
+--data-dir defaults to $BRIDGE_COORDINATOR_DATA_DIR, then /var/lib/bridge-coordinator.
+Environment: BRIDGE_COORDINATOR_BIND (host:port) and BRIDGE_COORDINATOR_LAN_ENABLED (true/false)
+override config.toml.";
 
 struct Args {
     data_dir: Option<PathBuf>,
@@ -23,6 +32,9 @@ struct Args {
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
     web_dir: Option<PathBuf>,
+    output: Option<PathBuf>,
+    input: Option<PathBuf>,
+    bind: Option<String>,
     words: Vec<String>,
 }
 
@@ -34,6 +46,9 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         cert: None,
         key: None,
         web_dir: None,
+        output: None,
+        input: None,
+        bind: None,
         words: vec![],
     };
     let mut it = args.into_iter();
@@ -48,6 +63,9 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             }
             "--cert" => a.cert = Some(value("--cert")?.into()),
             "--web-dir" => a.web_dir = Some(value("--web-dir")?.into()),
+            "--output" => a.output = Some(value("--output")?.into()),
+            "--input" => a.input = Some(value("--input")?.into()),
+            "--bind" => a.bind = Some(value("--bind")?),
             "--key" => a.key = Some(value("--key")?.into()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => a.words.push(arg),
@@ -72,14 +90,48 @@ async fn run(args: Args) -> Result<(), String> {
     let dir = args
         .data_dir
         .clone()
-        .or_else(|| std::env::var_os("BRIDGE_COORDINATOR_DATA_DIR").map(PathBuf::from))
-        .ok_or("--data-dir is required")?;
-    let sans = Sans {
-        hostnames: args.hostnames.clone(),
-        ips: args.ips.clone(),
+        .or_else(|| std::env::var_os(config::ENV_DATA_DIR).filter(|v| !v.is_empty()).map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(config::DEFAULT_DATA_DIR));
+    // Explicit --hostname/--ip replace discovery; with neither, discover this machine's names.
+    let sans = if args.hostnames.is_empty() && args.ips.is_empty() {
+        bridge_coordinator::netinfo::discovered_sans()
+    } else {
+        Sans {
+            hostnames: args.hostnames.clone(),
+            ips: args.ips.clone(),
+        }
     };
     match words.as_slice() {
-        ["init"] => bridge_coordinator::init::init(&dir, &sans),
+        ["init"] => bridge_coordinator::init::init_with(&dir, &sans, args.bind.as_deref()),
+        ["info"] => {
+            print!("{}", ops::report(&dir, false)?);
+            Ok(())
+        }
+        ["health"] => {
+            ops::health(&dir).await?;
+            println!("ok");
+            Ok(())
+        }
+        ["backup"] => {
+            let out = args.output.as_ref().ok_or("--output is required")?;
+            ops::backup(&dir, out)?;
+            println!(
+                "backup written to {} (the files listed in docs/distributed/install.md are not part of it)",
+                out.display()
+            );
+            Ok(())
+        }
+        ["restore"] => {
+            let input = args.input.as_ref().ok_or("--input is required")?;
+            let kept = ops::restore(&dir, input)?;
+            println!("restored; the previous database is kept as {}", kept.display());
+            Ok(())
+        }
+        ["setup-token"] => {
+            let path = ops::setup_token(&dir)?;
+            println!("new setup token written to {}", path.display());
+            Ok(())
+        }
         ["serve"] => {
             let srv = server::start_with(&dir, args.web_dir.as_deref()).await?;
             eprintln!("bridge-coordinator listening on https://{}", srv.addr);

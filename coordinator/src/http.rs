@@ -558,14 +558,23 @@ async fn stream(State(st): State<St>, Authed(p, _): Authed, headers: HeaderMap, 
     }
     let rx = st.hub.stream.subscribe();
     let shutdown = st.shutdown.clone();
+    let keepalive = (
+        Duration::from_secs(st.cfg.ws_ping_interval_secs),
+        Duration::from_secs(st.cfg.ws_idle_timeout_secs),
+    );
     Ok(ws
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
-        .on_upgrade(move |s| stream_session(s, rx, shutdown))
+        .on_upgrade(move |s| stream_session(s, rx, shutdown, keepalive))
         .into_response())
 }
 
-async fn stream_session(mut socket: WebSocket, mut rx: broadcast::Receiver<Arc<str>>, mut shutdown: watch::Receiver<bool>) {
+/// Pushes updates to a browser. The server pings every `ping` and closes the socket once nothing
+/// (no pong, no message) was received for `idle` (NET-010).
+async fn stream_session(mut socket: WebSocket, mut rx: broadcast::Receiver<Arc<str>>, mut shutdown: watch::Receiver<bool>, (ping, idle): (Duration, Duration)) {
+    let mut tick = tokio::time::interval(ping);
+    tick.tick().await;
+    let mut last_heard = Instant::now();
     let close = |code: u16, reason: &'static str| WsMessage::Close(Some(CloseFrame { code, reason: reason.into() }));
     loop {
         tokio::select! {
@@ -576,8 +585,12 @@ async fn stream_session(mut socket: WebSocket, mut rx: broadcast::Receiver<Arc<s
             },
             incoming = socket.recv() => match incoming {
                 Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(_)) => {}
+                Some(Ok(_)) => last_heard = Instant::now(),
             },
+            _ = tick.tick() => {
+                if last_heard.elapsed() >= idle { let _ = socket.send(close(1001, "idle timeout")).await; return }
+                if socket.send(WsMessage::Ping(Vec::new().into())).await.is_err() { return }
+            }
             _ = shutdown.changed() => { let _ = socket.send(close(1001, "shutting down")).await; return }
         }
     }

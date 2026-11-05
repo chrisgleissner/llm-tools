@@ -17,9 +17,7 @@ use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
-const MAX_CONNECTIONS: usize = 256;
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RunningServer {
@@ -68,7 +66,9 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         web_dir,
     });
     let app = http::router(state.clone());
-    let task = tokio::spawn(accept_loop(listener, tls, app, db, shutdown_rx));
+    let lock = crate::ops::lock_data_dir(data_dir)?;
+    let (max_conn, idle) = (state.cfg.max_connections, Duration::from_secs(state.cfg.http_idle_timeout_secs));
+    let task = tokio::spawn(accept_loop(listener, tls, app, db, shutdown_rx, max_conn, idle, lock));
     Ok(RunningServer {
         addr,
         state,
@@ -77,8 +77,18 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     })
 }
 
-async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, app: axum::Router, db: Arc<Db>, mut shutdown: watch::Receiver<bool>) {
-    let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+#[allow(clippy::too_many_arguments)]
+async fn accept_loop(
+    listener: TcpListener,
+    tls: TlsAcceptor,
+    app: axum::Router,
+    db: Arc<Db>,
+    mut shutdown: watch::Receiver<bool>,
+    max_connections: usize,
+    http_idle: Duration,
+    _lock: std::fs::File,
+) {
+    let slots = Arc::new(Semaphore::new(max_connections));
     let mut conns: JoinSet<()> = JoinSet::new();
     let mut maintenance = tokio::time::interval(Duration::from_secs(3600));
     loop {
@@ -88,13 +98,14 @@ async fn accept_loop(listener: TcpListener, tls: TlsAcceptor, app: axum::Router,
             Some(_) = conns.join_next(), if !conns.is_empty() => {}
             accepted = listener.accept() => {
                 let Ok((tcp, peer)) = accepted else { continue };
+                // Over the cap: drop the socket at once (the peer sees a close, not a hang).
                 let Ok(permit) = slots.clone().try_acquire_owned() else { continue };
                 let (tls, app, mut sd) = (tls.clone(), http::with_peer(app.clone(), peer), shutdown.clone());
                 conns.spawn(async move {
                     let _permit = permit;
                     let Ok(Ok(stream)) = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, tls.accept(tcp)).await else { return };
                     let mut builder = http1::Builder::new();
-                    builder.timer(TokioTimer::new()).header_read_timeout(HEADER_TIMEOUT);
+                    builder.timer(TokioTimer::new()).header_read_timeout(http_idle);
                     let conn = builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app)).with_upgrades();
                     tokio::pin!(conn);
                     tokio::select! {

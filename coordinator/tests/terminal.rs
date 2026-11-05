@@ -380,3 +380,22 @@ async fn session_caps() {
     wait_sessions(&env, 0).await;
     env.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn silent_browser_terminal_is_closed_after_idle_timeout() {
+    // NET-010: the server pings; a browser that never answers is closed with 1001.
+    let env = boot_with(|t| {
+        t.replace("ws_ping_interval_secs = 30", "ws_ping_interval_secs = 1")
+            .replace("ws_idle_timeout_secs = 90", "ws_idle_timeout_secs = 2")
+    })
+    .await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let mut s = open_session(&env, &api, &mut fw, &token, "view").await;
+    tokio::time::sleep(Duration::from_millis(4500)).await;
+    // A client that never read its queued pings may see a reset instead of the close frame.
+    let code = expect_close(&mut s.browser).await;
+    assert!(matches!(code, None | Some(1001)), "{code:?}");
+    env.stop().await;
+}

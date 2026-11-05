@@ -154,6 +154,9 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
     })
 }
 
+/// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
+pub const SCHEMA_VERSION: i64 = 1;
+
 type R<T> = rusqlite::Result<T>;
 
 impl Db {
@@ -163,9 +166,19 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // No temporary files outside the data directory (read-only root file systems).
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_SCHEMA),
+                Some(format!(
+                    "database schema version {version} is newer than this binary supports ({SCHEMA_VERSION}); install a newer coordinator or restore a backup"
+                )),
+            ));
+        }
         if version < 1 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
+            conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"))?;
         }
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));

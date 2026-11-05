@@ -17,6 +17,15 @@ pub struct Config {
     /// Directory with the built web interface (`index.html`, `app.js`, ...). Unset: `web` next to
     /// the executable, else `/usr/share/bridge-coordinator/web`.
     pub web_dir: Option<String>,
+    /// Total concurrent TCP connections; further connections are closed immediately (NET-010).
+    pub max_connections: usize,
+    /// Seconds an HTTP connection may wait for the next request header (keep-alive idle and
+    /// slow-header limit).
+    pub http_idle_timeout_secs: u64,
+    /// Seconds between server pings on browser `/stream` and terminal WebSockets.
+    pub ws_ping_interval_secs: u64,
+    /// Close a browser WebSocket that has sent nothing (not even a pong) for this many seconds.
+    pub ws_idle_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -27,29 +36,80 @@ impl Default for Config {
             max_events_per_worker: 50_000,
             allowed_origins: vec![],
             web_dir: None,
+            max_connections: 256,
+            http_idle_timeout_secs: 30,
+            ws_ping_interval_secs: 30,
+            ws_idle_timeout_secs: 90,
         }
     }
 }
 
-pub const DEFAULT_CONFIG_TEXT: &str = "# bridge-coordinator configuration\n\
+/// Data directory used when neither `--data-dir` nor `BRIDGE_COORDINATOR_DATA_DIR` is given
+/// (the systemd unit's `StateDirectory`).
+pub const DEFAULT_DATA_DIR: &str = "/var/lib/bridge-coordinator";
+pub const ENV_DATA_DIR: &str = "BRIDGE_COORDINATOR_DATA_DIR";
+pub const ENV_BIND: &str = "BRIDGE_COORDINATOR_BIND";
+pub const ENV_LAN_ENABLED: &str = "BRIDGE_COORDINATOR_LAN_ENABLED";
+
+/// `config.toml` text written by `init`, generated from [`Config::default`] so the file and the
+/// built-in defaults cannot differ. A non-loopback `bind` also sets `lan_enabled = true` at the
+/// call site (the operator asked for it explicitly).
+pub fn config_text(bind: &str, lan_enabled: bool) -> String {
+    let d = Config::default();
+    format!(
+        "# bridge-coordinator configuration. Every key has a built-in default; the environment\n\
+# variables BRIDGE_COORDINATOR_BIND and BRIDGE_COORDINATOR_LAN_ENABLED override bind and\n\
+# lan_enabled at start-up.\n\
 # Listen address. A non-loopback address is refused unless lan_enabled = true.\n\
-bind = \"127.0.0.1:8443\"\n\
-lan_enabled = false\n\
+bind = \"{bind}\"\n\
+lan_enabled = {lan_enabled}\n\
 # Stored events per worker; oldest are deleted first.\n\
-max_events_per_worker = 50000\n\
+max_events_per_worker = {}\n\
 # Extra exact Origin values accepted for cookie-authenticated writes.\n\
 allowed_origins = []\n\
 # Directory with the built web interface; default: web next to the executable, then\n\
 # /usr/share/bridge-coordinator/web.\n\
-# web_dir = \"/path/to/web\"\n";
+# web_dir = \"/path/to/web\"\n\
+# Total concurrent TCP connections; excess connections are closed immediately.\n\
+max_connections = {}\n\
+# Seconds to wait for the next request header on an idle HTTP connection.\n\
+http_idle_timeout_secs = {}\n\
+# Browser WebSockets (/stream, /terminal): server ping interval and inactivity close.\n\
+ws_ping_interval_secs = {}\n\
+ws_idle_timeout_secs = {}\n",
+        d.max_events_per_worker, d.max_connections, d.http_idle_timeout_secs, d.ws_ping_interval_secs, d.ws_idle_timeout_secs
+    )
+}
+
+/// Parse a boolean environment value (`1/0`, `true/false`, `yes/no`, `on/off`).
+pub fn parse_bool(name: &str, v: &str) -> Result<bool, String> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(format!("{name} must be true or false, not {v:?}")),
+    }
+}
 
 impl Config {
     pub fn load(dir: &Path) -> Result<Config, String> {
         let path = dir.join("config.toml");
         let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e} (run `init` first)", path.display()))?;
-        let cfg: Config = toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
+        let mut cfg: Config = toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
+        // Environment variables win over config.toml (container deployments).
+        if let Some(v) = std::env::var_os(ENV_BIND) {
+            cfg.bind = v.to_string_lossy().into_owned();
+        }
+        if let Some(v) = std::env::var_os(ENV_LAN_ENABLED) {
+            cfg.lan_enabled = parse_bool(ENV_LAN_ENABLED, &v.to_string_lossy())?;
+        }
         if cfg.max_events_per_worker == 0 {
             return Err("max_events_per_worker must be at least 1".into());
+        }
+        if cfg.max_connections == 0 || cfg.http_idle_timeout_secs == 0 || cfg.ws_ping_interval_secs == 0 {
+            return Err("max_connections, http_idle_timeout_secs and ws_ping_interval_secs must be at least 1".into());
+        }
+        if cfg.ws_idle_timeout_secs <= cfg.ws_ping_interval_secs {
+            return Err("ws_idle_timeout_secs must be larger than ws_ping_interval_secs".into());
         }
         cfg.bind_addr()?;
         Ok(cfg)
