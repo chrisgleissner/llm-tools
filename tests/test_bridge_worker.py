@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import stat
 import threading
@@ -329,3 +330,78 @@ def test_service_unit_install_and_uninstall(state, tmp_path, capsys, monkeypatch
     assert main(["worker", "install-service"]) == 0 and "Do this." in capsys.readouterr().out
     monkeypatch.setattr(worker, "uninstall_service", lambda: False)
     assert main(["worker", "uninstall-service"]) == 0 and "No worker service" in capsys.readouterr().out
+
+
+def test_errors_are_never_answered_and_stale_welcome_closes_the_connection(state):
+    """Review M3: a stale welcome must not leave a connected but unusable worker exchanging errors."""
+    directory, _ = state
+    session, _ = _session(directory)
+    error = Message("error", "c", 0, {"code": "stale-generation", "message": "x"})
+    assert session.handle(error) == []  # before welcome
+    _welcome(session, generation=4)
+    assert session.handle(error) == []  # after welcome
+    stale, _ = _session(directory)
+    assert _welcome(stale, generation=2)[0].payload["code"] == "stale-generation" and stale.close_reason
+    stop = threading.Event()
+    connections = []
+
+    class Link:
+        def __init__(self, generation):
+            self.sent, self.closed = [], False
+            self.inbox = [Message("welcome", "c", generation, {"generation": generation, "protocol_version": 1, "event_cursor": 0}).encode()]
+
+        def send_text(self, text):
+            self.sent.append(decode(text))
+
+        def receive_text(self, timeout=None):
+            if self.inbox:
+                return self.inbox.pop(0)
+            stop.set()
+            return None
+
+        def close(self):
+            self.closed = True
+
+    def connect(config):
+        connections.append(Link(3 if not connections else 9))
+        return connections[-1]
+
+    reconnecting, _ = _session(directory)
+    worker.run(reconnecting, connect, stop=stop, idle=0.01, max_backoff=0.01)
+    first, second = connections
+    assert first.closed and [m.type for m in first.sent] == ["hello", "error"]
+    assert reconnecting.config.max_generation == 9 and second.sent[0].type == "hello"
+    assert "connection.refused" in [entry["action"] for entry in worker.read_audit(50)]
+
+
+def test_a_new_token_resets_the_generation_high_water_mark(state):
+    first = worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False)
+    worker._save(dataclasses.replace(first, max_generation=7))
+    assert worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False).max_generation == 7
+    renewed = worker.enroll("ws-1", "wss://c:1", "u" * 40, ca_pem=None, allow_control=False)
+    assert (renewed.max_generation, renewed.worker_id) == (0, first.worker_id)
+
+
+def test_read_only_worker_shares_terminals_only_with_the_view_opt_in(state, tmp_path, capsys):
+    directory, mission_id = state
+    opened = []
+
+    class Launcher:
+        def open(self, session, session_id, mission, mode, *, allow_write):
+            opened.append((session_id, mode, allow_write))
+
+    def open_terminal(config, session_id):
+        session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="t",
+                                       save=lambda value: None, terminal_launcher=Launcher())
+        _welcome(session)
+        return session.handle(Message("terminal.open", "c", 1, {"session_id": session_id, "mission_id": mission_id, "mode": "view", "cols": 80, "rows": 24}))
+
+    plain = worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False)
+    assert "--allow-terminal-view" in open_terminal(plain, "t1")[0].payload["reason"] and opened == []
+    viewer = worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False, allow_terminal_view=True)
+    assert open_terminal(viewer, "t2") == [] and opened == [("t2", "view", False)]
+    assert worker.load_config().public()["allow_terminal_view"] is True
+    token = tmp_path / "token"
+    token.write_text(TOKEN)
+    assert main(["worker", "enroll", "--name", "ws", "--coordinator", "wss://c:1", "--token-file", str(token), "--allow-terminal-view", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["allow_terminal_view"] is True

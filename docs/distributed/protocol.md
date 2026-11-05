@@ -49,7 +49,7 @@ around them.
 | `events` | worker → coordinator | `after`, `through`, `events` (ascending by id). |
 | `events.nack` | coordinator → worker | `expected_after`: the coordinator's stored cursor; the worker resends from there. |
 | `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
-| `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. |
+| `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
 
 ## Command delivery (PROTO-003, PROTO-004, WORK-006, WORK-007)
 
@@ -85,7 +85,11 @@ otherwise the coordinator answers `events.nack` and the worker resends from
 The coordinator increments and persists a per-worker generation for every
 accepted connection and closes any older connection of that worker. The
 worker persists the highest generation it has seen and rejects a `command`
-whose `generation` is lower, with `error` code `stale-generation`.
+whose `generation` is lower, with `error` code `stale-generation`. A `welcome`
+whose generation is not higher than that value is answered with
+`stale-generation` and the worker closes the connection and reconnects. Enrolling
+with a new worker token resets the stored value, because the coordinator starts a
+new registration's generations again.
 
 ## Concurrency (PROTO-006)
 
@@ -110,7 +114,9 @@ only opens and closes sessions:
 | `terminal.close` | coordinator → worker | `session_id`. |
 | `terminal.status` | worker → coordinator | `session_id`, `state` (`opened`, `refused`, `closed`), `mode` (the highest mode the worker allows this session; the live role is reported in `s` frames), `reason` (text, may be empty). |
 
-On `terminal.open` the worker validates the mission, decides the granted mode
+A worker shares terminals only when enrolled with `--allow-control` (view and
+write) or `--allow-terminal-view` (view only); otherwise it refuses
+`terminal.open`. On `terminal.open` the worker validates the mission, decides the granted mode
 and opens a second WebSocket to
 `wss://<coordinator>/api/v1/worker/terminal/<session_id>` with the same worker
 token. The coordinator accepts that connection only for a session it opened for
@@ -127,7 +133,8 @@ that worker and that has not been attached yet. Frames on it are JSON text:
 Single writer: the worker grants `write` to at most one session per mission,
 and only while no local tmux client is attached to that station. Any other
 request is granted `view` with a reason. Losing the writer role (a local
-client attached) is reported with an `s` frame. Viewers are unlimited.
+client attached) is reported with an `s` frame; the worker also checks for a
+local client before typing each input frame. Viewers are unlimited.
 
 Bounds: the worker reads at most 64 KiB per frame and its sends block, so a
 slow coordinator slows reading. The tmux control client runs with

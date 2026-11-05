@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import stat
 import urllib.error
 
@@ -186,3 +187,30 @@ def test_worker_list_shows_age_not_epoch():
     text = remote._format_workers(workers, now=1000 + 30)
     assert "last seen just now" in text and "last seen never" in text and "1000" not in text
     assert "last seen 1h 2m ago" in remote._format_workers(workers[:1], now=1000 + 3720)
+
+
+def test_redirects_are_refused_so_the_token_is_never_resent(tmp_path):
+    import http.server
+
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append((self.path, self.headers.get("Authorization")))
+            self.send_response(302)
+            self.send_header("Location", "/elsewhere")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = remote.RemoteConfig(f"http://127.0.0.1:{server.server_address[1]}", TOKEN)
+        status, _ = remote.Client(config, opener=remote._open_without_redirects).call("GET", "/api/v1/workers")
+        assert status == 302 and [path for path, _ in hits] == ["/api/v1/workers"]
+    finally:
+        server.shutdown()
+        server.server_close()

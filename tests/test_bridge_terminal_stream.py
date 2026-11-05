@@ -309,3 +309,19 @@ def test_terminal_input_is_counted_and_audited_without_content(enrolled):
     assert typed and (typed[0]["bytes"], typed[0]["writes"]) == (12, 1)
     assert "secret-keys" not in (tmp_path / "state" / "worker" / worker.AUDIT_FILE).read_text()
     assert [entry["action"] for entry in entries if entry["action"].startswith("terminal.")][-1] == "terminal.closed"
+
+
+def test_input_is_dropped_when_a_local_client_attached_since_the_last_role_check():
+    registry = stream.WriterRegistry()
+    source = FakeSource([b""] * 2)
+
+    class Attach(FakeConnection):
+        def receive_text(self, timeout=None):
+            if self.incoming:
+                source.local = 1  # attaches between the periodic role checks
+            return super().receive_text(timeout)
+
+    connection = Attach([_input(b"x")])
+    stream.TerminalSession("s9", "m", "write", source, connection, writers=registry, clock=lambda: 0.0).run()
+    assert source.inputs == []
+    assert [frame["mode"] for frame in connection.sent if frame["t"] == "s"] == ["write", "view"]

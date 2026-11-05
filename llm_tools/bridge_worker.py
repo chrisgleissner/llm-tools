@@ -54,11 +54,17 @@ class WorkerConfig:
     token: str
     allow_control: bool
     max_generation: int = 0
+    allow_terminal_view: bool = False  # read-only workers stream terminals only with this opt-in
+
+    @property
+    def terminal_view(self) -> bool:
+        """Whether remote terminal viewing is allowed; control implies it."""
+        return self.allow_control or self.allow_terminal_view
 
     def public(self) -> dict[str, Any]:
         """Configuration without the token, for status output and logs (AUTH-010)."""
         return {"worker_id": self.worker_id, "name": self.name, "coordinator_url": self.coordinator_url,
-                "allow_control": self.allow_control, "max_generation": self.max_generation}
+                "allow_control": self.allow_control, "allow_terminal_view": self.terminal_view, "max_generation": self.max_generation}
 
 
 def worker_dir(env: dict[str, str] | None = None) -> Path:
@@ -138,7 +144,8 @@ def read_audit(limit: int = 50, env: dict[str, str] | None = None) -> list[dict[
     return entries[-limit:] if limit > 0 else []
 
 
-def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None) -> WorkerConfig:
+def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None,
+           allow_terminal_view: bool = False) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""
     if not _NAME.fullmatch(name):
         raise WorkerConfigError("worker name must be lowercase letters, digits and '-' (at most 63)")
@@ -149,16 +156,18 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
     directory = worker_dir(env)
     try:
         previous = load_config(env)
-        worker_id, generation = previous.worker_id, previous.max_generation
+        # A new token is a new registration on the coordinator, whose generations start again.
+        worker_id, generation = previous.worker_id, previous.max_generation if previous.token == token else 0
     except WorkerConfigError:
         worker_id, generation = uuid.uuid4().hex, 0
     if ca_pem is not None:
         if "-----BEGIN CERTIFICATE-----" not in ca_pem:
             raise WorkerConfigError("CA file is not a PEM certificate")
         _atomic_private_write(directory / CA_FILE, ca_pem)
-    config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation)
+    config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation, allow_terminal_view)
     _save(config, env)
-    audit("enroll", env, worker_id=worker_id, name=name, coordinator_url=coordinator_url, allow_control=allow_control, ca_file=ca_pem is not None)
+    audit("enroll", env, worker_id=worker_id, name=name, coordinator_url=coordinator_url, allow_control=allow_control,
+          allow_terminal_view=allow_terminal_view, ca_file=ca_pem is not None)
     return config
 
 
@@ -173,6 +182,7 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
         return WorkerConfig(
             worker_id=str(value["worker_id"]), name=str(value["name"]), coordinator_url=str(value["coordinator_url"]),
             token=str(value["token"]), allow_control=bool(value["allow_control"]), max_generation=int(value.get("max_generation", 0)),
+            allow_terminal_view=bool(value.get("allow_terminal_view", False)),
         )
     except FileNotFoundError:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
@@ -300,6 +310,7 @@ class WorkerSession:
         self.cursor: int | None = None  # coordinator's event cursor; None until welcome
         self.terminal_launcher = terminal_launcher
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
+        self.close_reason: str | None = None  # set when the connection must be dropped after the replies
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
         return Message(kind, self.config.worker_id, self.generation, payload)
@@ -336,6 +347,7 @@ class WorkerSession:
             generation = int(message.payload["generation"])
             if generation <= self.config.max_generation:
                 self.audit("connection.refused", reason="stale-generation", generation=generation)
+                self.close_reason = "stale generation in welcome"
                 return [self.error("stale-generation", f"generation {generation} is not newer than {self.config.max_generation}", message.id)]
             self.config = dataclasses.replace(self.config, max_generation=generation)
             self.save(self.config)  # durable before any command of this generation is accepted
@@ -343,6 +355,8 @@ class WorkerSession:
             self.cursor = int(message.payload["event_cursor"])
             self.audit("connection.accepted", generation=generation)
             return []
+        if message.type == "error":
+            return []  # never answer an error with an error; that can loop forever
         if self.generation == 0:
             return [self.error("not-welcomed", f"{message.type} before welcome", message.id)]
         if message.type == "ping":
@@ -351,8 +365,6 @@ class WorkerSession:
             return []
         if message.type == "events.nack":
             self.cursor = int(message.payload["expected_after"])
-            return []
-        if message.type == "error":
             return []
         if message.type == "terminal.open":
             return self._terminal_open(dict(message.payload))
@@ -381,6 +393,8 @@ class WorkerSession:
         self.audit("terminal.requested", session_id=session_id, mission_id=mission_id, mode=mode)
         if self.terminal_launcher is None:
             return [self._terminal_refused(session_id, "terminal access is not available on this worker")]
+        if not self.config.terminal_view:
+            return [self._terminal_refused(session_id, "this worker does not share terminals; enrol it with --allow-terminal-view or --allow-control")]
         with self.open_store() as store:
             known = store.mission_id_if_exists(mission_id)
         if known is None:
@@ -489,7 +503,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
         connection = None
         try:
             connection = connect(session.config)
-            session.generation, session.cursor = 0, None
+            session.generation, session.cursor, session.close_reason = 0, None, None
             connection.send_text(session.hello().encode())
             last_heard = last_ping = time.monotonic()
             while not stop.is_set():
@@ -504,6 +518,9 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                         replies = [session.error(exc.code, str(exc))]
                     for reply in replies:
                         connection.send_text(reply.encode())
+                    if session.close_reason:
+                        reason, session.close_reason = session.close_reason, None
+                        raise ConnectionAbortedError(reason)
                 while True:
                     try:
                         connection.send_text(session.outbox.get_nowait().encode())

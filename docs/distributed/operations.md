@@ -10,7 +10,12 @@ Enrol the host once, then install the systemd user unit:
 
 ```bash
 llm-bridge worker enroll --name build-1 --coordinator wss://bridge.home.arpa:8443 \
-  --token-file token.txt --ca-file coordinator-ca.pem      # add --allow-control for remote mutations
+  --token-file token.txt --ca-file coordinator-ca.pem
+# Remote access levels: none of the flags = read-only operations, no terminals;
+# --allow-terminal-view = also stream mission terminals for viewing;
+# --allow-control = also mutations and terminal input. Control lets a remote
+# administrator (or a stolen API token) make the provider agent run commands
+# through prompts or keystrokes; enable it only where that is acceptable.
 llm-bridge worker install-service          # writes ~/.config/systemd/user/llm-bridge-worker.service and starts it
 loginctl enable-linger                     # optional: keep it running while you are logged out
 ```

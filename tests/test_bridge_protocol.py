@@ -107,3 +107,9 @@ def test_seeded_mutations_never_escape_protocol_error(seed):
 def test_deep_nesting_is_a_protocol_error():
     with pytest.raises(ProtocolError):
         decode("[" * 200_000 + "]" * 200_000)
+
+
+def test_an_over_long_integer_is_a_protocol_error():
+    text = '{"v":1,"type":"ping","id":"a","worker_id":"w","generation":' + "9" * 5000 + ',"payload":{}}'
+    with pytest.raises(ProtocolError):
+        decode(text)

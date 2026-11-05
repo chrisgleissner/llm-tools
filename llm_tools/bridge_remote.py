@@ -101,7 +101,7 @@ class Client:
         ca = remote_dir(env) / CA_FILE
         self.context = ssl.create_default_context(cafile=str(ca) if ca.exists() else None)
         self.context.minimum_version = ssl.TLSVersion.TLSv1_2
-        self.opener = opener or urllib.request.urlopen
+        self.opener = opener or _open_without_redirects
 
     def call(self, method: str, path: str, body: dict[str, Any] | None = None, *, timeout: float = 30.0) -> tuple[int, Any]:
         request = urllib.request.Request(
@@ -143,6 +143,18 @@ class Client:
                 exit_code=EXIT_UNAVAILABLE,
             )
         return dict(body["result"])
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: it would resend the bearer token to another URL."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+def _open_without_redirects(request: urllib.request.Request, *, context: ssl.SSLContext, timeout: float) -> Any:
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _RefuseRedirect())
+    return opener.open(request, timeout=timeout)
 
 
 def _api_error(status: int, body: Any) -> str:

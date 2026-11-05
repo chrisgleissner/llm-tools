@@ -245,6 +245,9 @@ class TerminalSession:
             except ValueError:
                 return
             if 0 < len(data) <= MAX_INPUT:
+                if self.source.local_clients():  # a local client attached since the last role check
+                    self._refresh_role()
+                    return
                 self.source.send_input(data)
                 self.input_bytes += len(data)
                 self.input_frames += 1

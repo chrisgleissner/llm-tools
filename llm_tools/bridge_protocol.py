@@ -137,7 +137,7 @@ def decode(text: str | bytes) -> Message:
         raise ProtocolError("message-too-large", f"message exceeds {MAX_MESSAGE_BYTES} bytes")
     try:
         value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+    except (ValueError, RecursionError) as exc:  # JSONDecodeError and UnicodeDecodeError are ValueErrors; so is an over-long integer
         raise ProtocolError("invalid-message", "message is not valid UTF-8 JSON") from exc
     if not isinstance(value, dict) or set(value) != _ENVELOPE_FIELDS:
         raise ProtocolError("invalid-message", f"envelope must have exactly the fields {sorted(_ENVELOPE_FIELDS)}")
