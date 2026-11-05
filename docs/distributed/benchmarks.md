@@ -186,6 +186,7 @@ temporary directory, then `~/.cache`) and skips with that reason when none works
 | Database file growth for those events (main file + WAL) | 527 bytes/event | 1024 bytes/event |
 | `db_bytes` from `GET /api/v1/diagnostics` for the same events | 896 bytes/event | 2048 bytes/event |
 | 1000 `mission.list` commands round-tripped through a worker (16 in flight) | 66.6 MiB written, 68 KiB/command | 150 MiB |
+| Idle for 50 s: one connected worker (pinged every 20 s) and an API client reading the worker list every 5 s | 0 bytes | 8 KiB |
 
 Reading the figures:
 
@@ -203,7 +204,20 @@ Reading the figures:
   `sent`, `acked`, `done`), each with `synchronous=FULL` and therefore an fsync
   of the WAL, and each rewrites the `commands` table page and its two indexes.
   This is a property of `coordinator/src/db.rs`; it was not changed.
-- Is a change justified? At the rate an operator issues commands, no. Ten commands
+- Idle writes. Until 2026-11-05 every 20-second worker ping committed an update of
+  the worker's `last_seen`: 24-32 KiB in 50 seconds, about 2.2 MiB per connected
+  worker per hour, with nothing else happening. The value is now stored at most every
+  ten minutes while the worker is connected (`LAST_SEEN_EVERY_SECS` in
+  `coordinator/src/ws_worker.rs`) and at once when it disconnects. Its age after a
+  coordinator crash is therefore at most ten minutes. A session's `last_seen` and an
+  API token's `last_used` are touched at most every five minutes (`TOUCH_EVERY_SECS`
+  in `coordinator/src/db.rs`; previously every minute). The shortest idle timeout is
+  two hours, so expiry moves by at most 4 %. With one commit costing about 12 KiB
+  (the measured 24 KiB for two pings), an idle worker now costs about 72 KiB per hour
+  (derived). The hourly maintenance pass deletes nothing on an idle system and
+  writes nothing. Reverting the throttle (setting `LAST_SEEN_EVERY_SECS` to 0) makes
+  the idle test fail with 24576 bytes.
+- Is a change to commands justified? At the rate an operator issues commands, no. Ten commands
   per minute, around the clock, would write about 0.9 GB per day. A card rated for
   tens of terabytes written (the usual figure for a 32 GB card, which
   assumes ideal wear levelling) would take decades to wear out at that rate. Merging the

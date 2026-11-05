@@ -8,6 +8,8 @@
 # Then:       docker compose up -d
 # Admin:      docker compose exec coordinator bridge-coordinator info
 #             docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
+# Flash storage (SD cards, eMMC): add compose.low-write.yaml, see
+#   docs/distributed/install.md (Low-write host).
 # See docs/distributed/install.md (Container deployment).
 services:
   coordinator:
@@ -30,6 +32,17 @@ services:
     pids_limit: 64
     cpus: ${BRIDGE_CPUS:-1.0}
     stop_grace_period: 15s
+    # Same check as the image's HEALTHCHECK. Docker writes every result to its state directory,
+    # so a flash-storage host can check less often with BRIDGE_HEALTHCHECK_INTERVAL (for example 5m).
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bridge-coordinator", "health"]
+      interval: ${BRIDGE_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 20s
+      start_interval: 5s
+      retries: 3
+    # json-file with rotation is the default. compose.low-write.yaml replaces this block with
+    # BRIDGE_LOG_DRIVER (default journald); the json-file size options are not valid for other drivers.
     logging:
       driver: json-file
       options:

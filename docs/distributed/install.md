@@ -339,6 +339,70 @@ directory (`--data-dir` or `BRIDGE_COORDINATOR_DATA_DIR`).
 - Replacing the binary: `deploy/install.sh --binary NEW` again, or copy the file to
   `/usr/local/bin/bridge-coordinator` and `systemctl restart bridge-coordinator`.
 
+## Low-write host
+
+This section applies to any host whose storage wears with writes: SD and microSD
+cards, eMMC and USB sticks. Nothing in it is specific to one board.
+
+What writes to storage while the coordinator runs:
+
+- **The coordinator database.** Every commit is flushed (`synchronous=FULL`), which is
+  what keeps acknowledged commands and replicated events across a power loss. Leave it
+  that way and keep the data directory on persistent storage, not on a RAM disk. The
+  measured volumes are in `benchmarks.md` (Storage writes): about 545 bytes per
+  replicated event and about 68 KiB per command. An idle coordinator writes nothing
+  per worker heartbeat. A connected worker's `last_seen` is stored at most every ten
+  minutes, and an open browser session or API token is touched at most every five
+  minutes.
+- **Docker's container log.** `compose.yaml` uses the `json-file` driver with up to
+  three 1 MB files.
+- **Docker's health checks.** Docker records every health-check result in its state
+  directory. The default interval of 30 seconds is 2880 writes a day.
+- **The system journal**, if it is stored on disk.
+
+For a container deployment, add the override file `container/compose.low-write.yaml`.
+It sends the container log to journald instead of `json-file` and checks health every
+five minutes. Docker still checks every 5 seconds during the 20-second start period, so
+a fresh start is reported healthy as quickly as before.
+
+```sh
+cd container
+docker compose -f compose.yaml -f compose.low-write.yaml up -d
+```
+
+Two variables in `.env` adjust it:
+
+| Variable | Default with the override | Default without it | Meaning |
+|---|---|---|---|
+| `BRIDGE_LOG_DRIVER` | `journald` | `json-file` (fixed) | Docker log driver. Use a driver without size options: `journald`, `syslog` or `none`. |
+| `BRIDGE_HEALTHCHECK_INTERVAL` | `5m` | `30s` | Interval between health checks. `compose.yaml` reads it too, so it can be set without the override. |
+
+Keep the journal in memory so that the journald driver, and the native service's log,
+do not reach storage. In `/etc/systemd/journald.conf` set:
+
+```ini
+[Journal]
+Storage=volatile
+RuntimeMaxUse=16M
+```
+
+Then run `sudo systemctl restart systemd-journald`. Some distributions already keep
+logs in RAM; check `journalctl --header | grep 'File path'`, which shows a path under
+`/run` for a volatile journal. A volatile journal loses the coordinator's log at
+reboot. The audit trail is not affected: it is stored in the coordinator database.
+
+A native install has no Docker log or health check, and its log goes to the journal,
+so the journal setting above is the only change it needs.
+
+To see what the coordinator itself writes, read its `write_bytes` counter twice, an
+hour apart, while the system is in normal use:
+
+```sh
+pid=$(systemctl show -p MainPID --value bridge-coordinator)   # native install
+pid=$(docker inspect -f '{{.State.Pid}}' $(docker compose ps -q coordinator))  # container, run in container/
+sudo grep write_bytes /proc/$pid/io
+```
+
 ## Raspberry Pi Zero 2 W target profile
 
 This is the only device-specific section in the distributed documentation. The rest
@@ -372,6 +436,8 @@ Recommended settings:
   coordinator then never swaps. If it needs more memory than the limit, the kernel stops
   the container and `restart: unless-stopped` starts it again. This avoids heavy swap
   writes on a microSD card. No swap or zram configuration is needed for the coordinator.
+- The card wears with writes. Follow Low-write host above: the low-write compose
+  override and a volatile journal.
 - The database uses `synchronous=FULL`, so each commit is flushed to the card. The
   x86-64 measurement is 557 bytes per event including the write-ahead log; with the
   default `max_events_per_worker` of 50 000 that is about 27 MB per worker (derived,

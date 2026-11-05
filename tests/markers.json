@@ -3222,6 +3222,10 @@
   ],
   "test_one_thousand_command_round_trips_stay_within_the_write_bound": [
    "subprocess"
+  ],
+  "test_an_idle_coordinator_with_a_connected_worker_writes_nothing_per_heartbeat": [
+   "slow",
+   "subprocess"
   ]
  }
 }
