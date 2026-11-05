@@ -50,3 +50,27 @@ An enrolled worker accepts only read operations unless it was enrolled with
 `--allow-control`. The worker enforces this itself and advertises only the
 allowed operations in `hello.capabilities`, so a compromised coordinator
 cannot mutate a read-only worker.
+
+## D6 Coordinator in a container, workers native (operator addendum A2, A3)
+
+The coordinator is distributed as a `FROM scratch` OCI image holding one static
+musl binary and the web files, for linux/amd64 and linux/arm64. Binaries are
+cross-compiled on the build host with cargo-zigbuild, so building an arm64 image
+needs no emulation (ARM64 user-mode emulation does not work under the rootless
+Docker used here). The image runs as UID 65532 with a read-only root filesystem; all
+state is in the `/data` volume. Inside the container the server binds 0.0.0.0 with
+`lan_enabled = true`; host exposure is decided by the published port, which
+`compose.yaml` binds to 127.0.0.1 unless the operator sets
+`BRIDGE_PUBLISH_ADDRESS`. `BRIDGE_COORDINATOR_PUBLIC_NAMES` replaces discovery of
+names because names discovered inside a container (random host name, bridge-network
+address) are useless to browsers. The systemd unit stays a supported alternative and
+shares `Config::default`.
+
+No worker image is provided. A worker executes Bridge commands against the local
+mission database, starts controllers that launch provider CLIs with the operator's
+credentials and environment, and attaches to the operator's tmux stations. A
+container would need the home directory, provider credentials, the tmux socket and
+the mission folders mounted in, which removes the isolation that motivates a
+container and puts provider credentials into a container configuration (SEC-005).
+The native `llm-bridge worker install-service` unit is the supported deployment.
+

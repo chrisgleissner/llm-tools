@@ -32,10 +32,31 @@ Notes:
 - The step from 6.2 MiB to 25.4 MiB is the Argon2id password hash (19 MiB per hash,
   at most two at once). A container or unit memory limit should cover idle RSS plus
   that working memory twice, plus event and connection growth. Under this load the
-  measured peak was 26.4 MiB; the shipped unit uses `MemoryHigh=192M` and
-  `MemoryMax=256M`, which leave a wide margin.
+  measured peak was 26.4 MiB. The container measurement below drives both Argon2id
+  slots at once and is the basis of the shipped limits.
 - Each run uses a fresh database, so these figures do not show long-term growth
   beyond `max_events_per_worker` (default 50 000 events per worker).
+
+## x86-64 host measurement, container image
+
+Same host, image `llm-bridge-coordinator` built by `container/build.sh` (static musl
+binary, `FROM scratch`), rootless Docker 29.9, `container/compose.yaml` limits
+(96 MiB, one CPU). RSS read from `/proc/<pid>/status` and the container cgroup on
+the host. One run on 2026-11-05.
+
+| Measurement | Result |
+|---|---|
+| Image size | 6.44 MB |
+| RSS before the first login | 1.5 MiB |
+| Load: 30 concurrent logins (Argon2id, 2 slots), 200 concurrent `POST /api/v1/commands` with `wait_ms` through a native worker, 1500 replicated events | 200 commands answered in 1.4 s |
+| Peak RSS (`VmHWM`) | 48.1 MiB |
+| Peak cgroup memory (`memory.peak`, includes page cache) | 48.3 MiB |
+| RSS after the load | 32.8 MiB |
+| `docker compose stop` (SIGTERM to exit) | 0.3 s |
+
+Recommended limit: 96 MiB (`mem_limit`/`memswap_limit` in `compose.yaml`,
+`MemoryMax=96M` in the systemd unit), about twice the measured peak. On a 512 MB host
+shared with other containers this reserves less than a fifth of RAM.
 
 ## Raspberry Pi Zero 2 W
 

@@ -20,10 +20,10 @@ RestartSec=3
 KillSignal=SIGTERM
 TimeoutStopSec=20
 
-# Memory: release-build RSS measured on x86-64 is about 6 MiB idle and about 30 MiB with 10000 stored events
-# (docs/distributed/benchmarks.md). MemoryMax leaves room for Argon2id (19 MiB per login).
-MemoryHigh=192M
-MemoryMax=256M
+# Memory: peak RSS measured on x86-64 is about 48 MiB (two concurrent Argon2id logins at 19 MiB each,
+# 200 commands, 1500 events; docs/distributed/benchmarks.md). Same limit as container/compose.yaml.
+MemoryHigh=80M
+MemoryMax=96M
 TasksMax=128
 
 # Hardening. The service only needs its state directory and TCP sockets.

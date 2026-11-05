@@ -1,10 +1,87 @@
 # Installing and operating the coordinator
 
-This page covers a native install on Debian-family Linux (amd64 or arm64, including
-DietPi) with systemd. Limits and timeouts are listed in `coordinator.md`; the trust
+The recommended deployment is the container image (next section). It runs on any
+Linux host with Docker or another OCI runtime, on amd64 or arm64, and keeps the
+host OS untouched. A native install with systemd on Debian-family Linux (including
+DietPi) is a supported alternative. Both use the same runtime defaults
+(`Config::default` in `coordinator/src/config.rs`, overridable by `config.toml` in
+the data directory and by `BRIDGE_COORDINATOR_*` environment variables). Workers
+always run natively on the workstations that hold the provider CLIs (see
+`DECISIONS.md` D6). Limits and timeouts are listed in `coordinator.md`; the trust
 boundaries are in `threat-model.md`.
 
-## Install
+## Container deployment (recommended)
+
+The image contains only the static `bridge-coordinator` binary and the web files
+(`FROM scratch`, about 6.5 MB). It runs as UID 65532 with a read-only root
+filesystem, no capabilities and no privileged mode; all state lives in the `/data`
+volume (SQLite database, CA and server keys, `config.toml`, setup token). Logs go to
+stdout/stderr. `SIGTERM` drains connections and exits within 10 s. The image health
+check runs `bridge-coordinator health`.
+
+Build it from this repository (cross-compiles static musl binaries for amd64 and
+arm64 on the build host with cargo-zigbuild; nothing is compiled inside an emulated
+container):
+
+```sh
+container/build.sh --load                                   # this host's architecture, into Docker
+container/build.sh --oci bridge-coordinator.oci.tar         # amd64 + arm64 archive
+docker load < ...  /  skopeo copy oci-archive:... docker-daemon:...   # on the target host
+```
+
+Run it with `container/compose.yaml`. By default it publishes port 8443 on
+`127.0.0.1` only. To reach it from the LAN, create `.env` next to `compose.yaml`:
+
+```sh
+BRIDGE_PUBLISH_ADDRESS=192.168.1.20        # host LAN address (or 0.0.0.0 for every interface)
+BRIDGE_PUBLIC_NAMES=bridge.home.arpa,192.168.1.20
+BRIDGE_PORT=8443                           # host port
+```
+
+`BRIDGE_PUBLIC_NAMES` are the names browsers and workers use. They replace the
+container-internal names in the certificate (`localhost`, `127.0.0.1` and `::1` are
+always added) and in the URLs `info` prints. Publishing on the LAN is not
+authentication; the login, the CA and the firewall guidance below still apply.
+
+First run and day-to-day administration (no shell is needed or present in the image):
+
+```sh
+docker compose run --rm coordinator init                       # CA, certificate, config, setup token
+docker compose up -d
+docker compose cp coordinator:/data/ca.pem .                   # import into browsers (Trusting the certificate)
+docker compose cp coordinator:/data/setup-token .              # create the administrator in the browser
+docker compose exec coordinator bridge-coordinator info
+docker compose exec coordinator bridge-coordinator worker add build-1     # prints the worker token once
+docker compose exec coordinator bridge-coordinator token create laptop    # API token for llm-bridge remote login
+docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
+docker compose exec coordinator bridge-coordinator cert renew             # after changing BRIDGE_PUBLIC_NAMES
+docker compose exec coordinator bridge-coordinator backup --output /data/backup-2026-11-05.sqlite3
+docker compose stop && docker compose run --rm coordinator restore --input /data/backup-2026-11-05.sqlite3 && docker compose start
+```
+
+`init` on an initialised volume prints "already initialised" and changes nothing.
+`restore` refuses while the server holds the data-directory lock, so stop it first.
+Copy backups off the volume with `docker compose cp`; back up the whole volume (for
+example `docker run --rm -v <project>_bridge-data:/data -v "$PWD":/out busybox tar
+-C /data -czf /out/bridge-data.tgz .` with the server stopped) to include the CA and
+server keys.
+
+Resources: `compose.yaml` sets `mem_limit` and `memswap_limit` to 96 MiB
+(`BRIDGE_MEMORY_LIMIT`), 64 processes and one CPU. The limit is about twice the
+measured peak: 48 MiB peak RSS under 30 concurrent logins, 200 commands and 1500
+replicated events in the container on x86-64 (`benchmarks.md`). Idle RSS is about
+2 MiB before the first login and about 15-35 MiB afterwards, because the two
+Argon2id verification slots (19 MiB each) and the allocator keep memory. Log files
+are capped at 3 x 1 MB by the `json-file` options.
+
+Verified on x86-64 (rootless Docker 29.9): init, idempotent init, health check,
+loopback-only publishing, administrator setup, worker add and token create through
+`exec`, a native worker connecting with `--allow-control` and answering
+`llm-bridge --target` commands, backup, restore refused while running and done while
+stopped, password reset, certificate renewal, restart with data kept, and stop in
+0.3 s.
+
+## Native install with systemd (alternative)
 
 You need a prebuilt `bridge-coordinator` binary for the target architecture, and
 optionally the built web interface directory.
@@ -38,7 +115,7 @@ step.
 
 The unit runs as `bridge` with `NoNewPrivileges`, `ProtectSystem=strict`,
 `ProtectHome`, `PrivateTmp`, an empty capability set, address families limited to
-IPv4, IPv6 and Unix sockets, `MemoryMax=256M`, `Restart=on-failure` and
+IPv4, IPv6 and Unix sockets, `MemoryMax=96M`, `Restart=on-failure` and
 `TimeoutStopSec=20` (the coordinator drains for up to 10 s on SIGTERM). Binding a port
 below 1024 needs a drop-in granting `CAP_NET_BIND_SERVICE`; the unit file shows the
 two lines.

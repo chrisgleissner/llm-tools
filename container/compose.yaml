@@ -6,8 +6,8 @@
 # certificate (with localhost) and into the URLs `info` prints.
 # First run:  docker compose run --rm coordinator init
 # Then:       docker compose up -d
-# Admin:      docker compose exec coordinator info | health | backup --output /data/backup.sqlite3
-#             docker compose exec -T coordinator admin reset-password < new-password.txt
+# Admin:      docker compose exec coordinator bridge-coordinator info
+#             docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
 # See docs/distributed/install.md (Container deployment).
 services:
   coordinator:
@@ -24,6 +24,7 @@ services:
       BRIDGE_COORDINATOR_PUBLIC_PORT: ${BRIDGE_PORT:-8443}
     volumes:
       - bridge-data:/data
+    # About twice the measured peak RSS (48 MiB; docs/distributed/benchmarks.md).
     mem_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
     memswap_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
     pids_limit: 64
