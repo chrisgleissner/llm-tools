@@ -288,3 +288,18 @@ def test_real_station_streams_output_and_types_exact_bytes(enrolled):
         if source is not None:
             source.close()
         backend.stop(handle)
+
+
+def test_terminal_input_is_counted_and_audited_without_content(enrolled):
+    tmp_path, mission_id, config = enrolled
+    source = FakeSource([b""] * 3)
+    connection = FakeConnection([_input(b"secret-keys\r")])
+    launcher = worker.TerminalLauncher(lambda cfg, sid: connection, lambda mission: source)
+    session = _worker_session(tmp_path, config, launcher)
+    _open(session, mission_id, "audit-1")
+    _statuses(session, 2)
+    entries = worker.read_audit(20)
+    typed = [entry for entry in entries if entry["action"] == "terminal.input"]
+    assert typed and (typed[0]["bytes"], typed[0]["writes"]) == (12, 1)
+    assert "secret-keys" not in (tmp_path / "state" / "worker" / worker.AUDIT_FILE).read_text()
+    assert [entry["action"] for entry in entries if entry["action"].startswith("terminal.")][-1] == "terminal.closed"

@@ -34,6 +34,8 @@ from .bridge_store import BridgeStore, default_state_dir, store_path
 
 WORKER_FILE = "worker.json"
 CA_FILE = "coordinator-ca.pem"
+AUDIT_FILE = "audit.jsonl"
+AUDIT_MAX_BYTES = 1024 * 1024  # one rotation is kept: audit.jsonl.1
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 PING_INTERVAL = 20.0
 SILENCE_LIMIT = 60.0
@@ -84,6 +86,58 @@ def _atomic_private_write(path: Path, text: str) -> None:
         raise
 
 
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_VALUE = re.compile(r"[^\x20-\x7e]")
+
+
+def _audit_value(value: Any) -> Any:
+    """Bounded printable scalar; secrets never reach the audit call sites."""
+    if isinstance(value, bool) or value is None or isinstance(value, int):
+        return value
+    return _AUDIT_VALUE.sub("?", str(value))[:200]
+
+
+def audit(action: str, env: dict[str, str] | None = None, **detail: Any) -> None:
+    """Append one security-relevant worker action to ``<state>/worker/audit.jsonl`` (SEC-007).
+
+    Records identifiers, operations, outcomes and byte counts only: never the
+    worker token, request parameters, prompts or terminal content. The file is
+    0600, bounded to ``AUDIT_MAX_BYTES`` with one rotation, and a write failure
+    never stops the worker.
+    """
+    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "action": action,
+             **{key: _audit_value(value) for key, value in detail.items()}}
+    path = worker_dir(env) / AUDIT_FILE
+    try:
+        with _AUDIT_LOCK:
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if path.exists() and path.stat().st_size > AUDIT_MAX_BYTES:
+                os.replace(path, path.with_name(AUDIT_FILE + ".1"))
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
+
+def read_audit(limit: int = 50, env: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """The newest ``limit`` audit entries, oldest first; unreadable lines are skipped."""
+    entries: list[dict[str, Any]] = []
+    for name in (AUDIT_FILE + ".1", AUDIT_FILE):
+        try:
+            lines = (worker_dir(env) / name).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                entries.append(value)
+    return entries[-limit:] if limit > 0 else []
+
+
 def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""
     if not _NAME.fullmatch(name):
@@ -104,6 +158,7 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         _atomic_private_write(directory / CA_FILE, ca_pem)
     config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation)
     _save(config, env)
+    audit("enroll", env, worker_id=worker_id, name=name, coordinator_url=coordinator_url, allow_control=allow_control, ca_file=ca_pem is not None)
     return config
 
 
@@ -133,6 +188,8 @@ def unenroll(env: dict[str, str] | None = None) -> bool:
         if path.exists():
             path.unlink()
             removed = True
+    if removed:
+        audit("unenroll", env)
     return removed
 
 
@@ -148,8 +205,10 @@ class WorkerSession:
     """Protocol state for one worker; pure apart from the store and the config file."""
 
     def __init__(self, config: WorkerConfig, *, open_store: Callable[[], BridgeStore], software_version: str,
-                 save: Callable[[WorkerConfig], None] = _save, terminal_launcher: "TerminalLauncher | None" = None) -> None:
+                 save: Callable[[WorkerConfig], None] = _save, terminal_launcher: "TerminalLauncher | None" = None,
+                 audit: Callable[..., None] = audit) -> None:
         self.config = config
+        self.audit = audit
         self.open_store = open_store
         self.software_version = software_version
         self.save = save
@@ -192,11 +251,13 @@ class WorkerSession:
         if message.type == "welcome":
             generation = int(message.payload["generation"])
             if generation <= self.config.max_generation:
+                self.audit("connection.refused", reason="stale-generation", generation=generation)
                 return [self.error("stale-generation", f"generation {generation} is not newer than {self.config.max_generation}", message.id)]
             self.config = dataclasses.replace(self.config, max_generation=generation)
             self.save(self.config)  # durable before any command of this generation is accepted
             self.generation = generation
             self.cursor = int(message.payload["event_cursor"])
+            self.audit("connection.accepted", generation=generation)
             return []
         if self.generation == 0:
             return [self.error("not-welcomed", f"{message.type} before welcome", message.id)]
@@ -218,12 +279,14 @@ class WorkerSession:
         if message.type != "command":
             return [self.error("unsupported-message", f"workers do not accept {message.type}", message.id)]
         if message.generation != self.generation or message.generation < self.config.max_generation:
+            self.audit("command.refused", reason="stale-generation", generation=message.generation)
             return [self.error("stale-generation", "command from an older coordinator connection", message.id)]
         request = commands.CommandRequest.from_json(dict(message.payload))
         return self._command(request)
 
     def terminal_status(self, session_id: str, state: str, mode: str, reason: str) -> None:
         """Queue a ``terminal.status`` for the run loop (called from terminal threads)."""
+        self.audit(f"terminal.{state}", session_id=session_id, mode=mode, reason=reason)
         try:
             self.outbox.put_nowait(self.message("terminal.status", {"session_id": session_id, "state": state, "mode": mode, "reason": reason[:500]}))
         except queue.Full:
@@ -231,14 +294,19 @@ class WorkerSession:
 
     def _terminal_open(self, payload: dict[str, Any]) -> list[Message]:
         session_id, mission_id, mode = str(payload["session_id"]), str(payload["mission_id"]), str(payload["mode"])
+        self.audit("terminal.requested", session_id=session_id, mission_id=mission_id, mode=mode)
         if self.terminal_launcher is None:
-            return [self.message("terminal.status", {"session_id": session_id, "state": "refused", "mode": "view", "reason": "terminal access is not available on this worker"})]
+            return [self._terminal_refused(session_id, "terminal access is not available on this worker")]
         with self.open_store() as store:
             known = store.mission_id_if_exists(mission_id)
         if known is None:
-            return [self.message("terminal.status", {"session_id": session_id, "state": "refused", "mode": "view", "reason": "unknown mission"})]
+            return [self._terminal_refused(session_id, "unknown mission")]
         self.terminal_launcher.open(self, session_id, known, mode, allow_write=self.config.allow_control)
         return []
+
+    def _terminal_refused(self, session_id: str, reason: str) -> Message:
+        self.audit("terminal.refused", session_id=session_id, mode="view", reason=reason)
+        return self.message("terminal.status", {"session_id": session_id, "state": "refused", "mode": "view", "reason": reason})
 
     def _command(self, request: commands.CommandRequest) -> list[Message]:
         spec = commands.OPERATIONS.get(request.operation)
@@ -252,6 +320,9 @@ class WorkerSession:
                                             error=commands.CommandError("forbidden", "this worker accepts read-only remote operations"))
         else:
             result = commands.execute(dataclasses.replace(request, target=commands.LOCAL_TARGET))
+        if spec is None or spec.mutating or result.error is not None:
+            self.audit("command", operation=request.operation, request_id=request.request_id, mission_id=request.mission_id,
+                       outcome=result.outcome, error=result.error.code if result.error else None, duplicate=duplicate)
         return [ack, self.message("command.result", result.to_json())]
 
     def next_events(self) -> Message | None:
@@ -313,6 +384,7 @@ class TerminalLauncher:
             terminal = TerminalSession(session_id, mission_id, mode, source, connection, allow_write=allow_write, stop=stop)
             session.terminal_status(session_id, "opened", "write" if mode == "write" and allow_write else "view", terminal.reason)
             reason = terminal.run()
+            session.audit("terminal.input", session_id=session_id, mission_id=mission_id, bytes=terminal.input_bytes, writes=terminal.input_frames)
             session.terminal_status(session_id, "closed", "view", reason)
         finally:
             with self._lock:
@@ -328,6 +400,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
     exponential backoff (ARCH-007).
     """
     backoff = 1.0
+    session.audit("worker.start", allow_control=session.config.allow_control)
     while not stop.is_set():
         connection = None
         try:
@@ -362,6 +435,8 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                     last_ping = now
         except Exception as exc:  # noqa: BLE001 - every failure leads to a bounded reconnect
             log(f"worker connection ended: {type(exc).__name__}: {str(exc)[:200]}")
+            if session.generation:  # only welcomed connections; failed attempts would flood the audit
+                session.audit("connection.ended", generation=session.generation, reason=type(exc).__name__)
         finally:
             if connection is not None:
                 try:
@@ -371,6 +446,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
         if stop.wait(backoff * random.uniform(0.5, 1.0)):
             break
         backoff = min(max_backoff, backoff * 2)
+    session.audit("worker.stop")
 
 
 def default_session(software_version: str, env: dict[str, str] | None = None) -> WorkerSession:
@@ -399,4 +475,4 @@ def websocket_connector(env: dict[str, str] | None = None) -> Connector:
     return connect
 
 
-__all__ = ["PROTOCOL_VERSION", "WorkerConfig", "WorkerConfigError", "WorkerSession", "enroll", "load_config", "run"]
+__all__ = ["AUDIT_FILE", "PROTOCOL_VERSION", "audit", "read_audit", "WorkerConfig", "WorkerConfigError", "WorkerSession", "enroll", "load_config", "run"]

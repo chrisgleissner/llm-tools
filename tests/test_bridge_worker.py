@@ -229,3 +229,74 @@ def test_worker_cli(state, tmp_path, capsys, monkeypatch):
     capsys.readouterr()
     assert main(["worker", "unenroll"]) == 0 and "removed" in capsys.readouterr().out
     assert main(["worker", "unenroll"]) == 0 and "not enrolled" in capsys.readouterr().out
+
+
+def test_audit_records_security_actions_without_secrets(state, capsys, monkeypatch):
+    """SEC-007: enrolment, connections, mutations, refusals and terminal sessions are audited; tokens and parameters are not."""
+    directory, mission_id = state
+    session, _ = _session(directory, allow_control=False)
+    _welcome(session, generation=3)
+    _welcome(session, generation=2)  # stale
+    _command(session, CommandRequest("mission.status", mission_id=mission_id))  # successful reads are not audited
+    _command(session, CommandRequest("task.add", {"prompt": "SECRET-PROMPT"}, mission_id=mission_id, request_id="r-1"))
+    _command(session, CommandRequest("mission.status", mission_id=mission_id), generation=1)
+    session.handle(Message("terminal.open", "c", 3, {"session_id": "t1", "mission_id": mission_id, "mode": "write", "cols": 80, "rows": 24}))
+    entries = worker.read_audit(100)
+    actions = [entry["action"] for entry in entries]
+    assert actions == ["enroll", "connection.accepted", "connection.refused", "command", "command.refused", "terminal.requested", "terminal.refused"]
+    command = entries[3]
+    assert (command["operation"], command["outcome"], command["error"], command["request_id"]) == ("task.add", "rejected", "forbidden", "r-1")
+    text = (directory / "worker" / worker.AUDIT_FILE).read_text()
+    assert TOKEN not in text and "SECRET-PROMPT" not in text
+    assert stat.S_IMODE((directory / "worker" / worker.AUDIT_FILE).stat().st_mode) == 0o600
+    assert main(["worker", "audit", "--limit", "2"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2 and "terminal.refused" in out[1] and "reason=terminal access is not available" in out[1]
+    assert main(["worker", "audit", "--json", "--limit", "0"]) == 0 and json.loads(capsys.readouterr().out) == {"entries": []}
+    worker.unenroll()
+    assert worker.read_audit(1)[0]["action"] == "unenroll"
+
+
+def test_audit_rotates_and_survives_bad_lines_and_write_failures(state, monkeypatch, capsys):
+    directory, _ = state
+    monkeypatch.setattr(worker, "AUDIT_MAX_BYTES", 200)
+    for index in range(10):
+        worker.audit("probe", index=index, text="x \x1b" * 100)
+    path = directory / "worker" / worker.AUDIT_FILE
+    assert path.with_name(worker.AUDIT_FILE + ".1").exists()
+    assert len(json.loads(path.read_text().splitlines()[-1])["text"]) == 200
+    with path.open("a") as handle:
+        handle.write("not json\n[1]\n")
+    assert worker.read_audit(100)[-1]["index"] == 9
+    path.unlink()
+    path.with_name(worker.AUDIT_FILE + ".1").unlink()
+    assert main(["worker", "audit"]) == 0 and "No worker audit entries" in capsys.readouterr().out
+    monkeypatch.setattr(worker.os, "open", lambda *a, **k: (_ for _ in ()).throw(PermissionError("ro")))
+    worker.audit("ignored")  # must not raise
+
+
+def test_run_audits_start_end_and_stop(state, monkeypatch):
+    directory, _ = state
+    session, _ = _session(directory)
+    stop = threading.Event()
+
+    class Once:
+        def __init__(self):
+            self.sent = []
+            self.replies = [Message("welcome", "c", 1, {"generation": 5, "protocol_version": 1, "event_cursor": 0}).encode()]
+
+        def send_text(self, text):
+            self.sent.append(text)
+
+        def receive_text(self, timeout=None):
+            if self.replies:
+                return self.replies.pop(0)
+            stop.set()
+            raise ConnectionResetError("gone")
+
+        def close(self):
+            pass
+
+    worker.run(session, lambda config: Once(), stop=stop, idle=0.01)
+    actions = [entry["action"] for entry in worker.read_audit(10)]
+    assert actions[-4:] == ["worker.start", "connection.accepted", "connection.ended", "worker.stop"]

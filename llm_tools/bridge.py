@@ -1297,6 +1297,9 @@ def _build_parser(
     worker_status = worker_sub.add_parser("status", help="show this host's enrolment without the token")
     _add_json_arg(worker_status)
     worker_sub.add_parser("run", help="run the worker in the foreground until interrupted")
+    worker_audit = worker_sub.add_parser("audit", help="show this worker's security audit log (no tokens or terminal content)")
+    worker_audit.add_argument("--limit", metavar="N", type=_db_int, default=50, help="newest entries shown (default: 50)")
+    _add_json_arg(worker_audit)
     worker_sub.add_parser("unenroll", help="delete this host's enrolment, token and coordinator CA")
     worker_list = worker_sub.add_parser("list", help="list the workers registered with the configured coordinator")
     _add_json_arg(worker_list)
@@ -1951,6 +1954,12 @@ def _worker_command(args: argparse.Namespace) -> int:
         return 0
     if args.worker_action == "status":
         _print_result(worker.load_config().public(), args.json, lambda value: "\n".join(f"{key}: {value[key]}" for key in sorted(value)))
+        return 0
+    if args.worker_action == "audit":
+        entries = worker.read_audit(args.limit)
+        _print_result({"entries": entries}, args.json, lambda value: "\n".join(
+            " ".join([str(entry.get("ts", "?")), str(entry.get("action", "?"))] + [f"{key}={entry[key]}" for key in sorted(entry) if key not in {"ts", "action"} and entry[key] is not None])
+            for entry in value["entries"]) or "No worker audit entries.")
         return 0
     if args.worker_action == "unenroll":
         removed = worker.unenroll()

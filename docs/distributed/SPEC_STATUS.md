@@ -107,7 +107,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | SEC-004 | [ ] |  |
 | SEC-005 | [ ] |  |
 | SEC-006 | [ ] |  |
-| SEC-007 | [ ] |  |
+| SEC-007 | [~] | Worker: `<state>/worker/audit.jsonl` (0600, 1 MiB + one rotation) records enrolment, connections, mutating/refused commands and terminal sessions with input byte counts only; `llm-bridge worker audit` (test_audit_*). Coordinator: `audit` table for login, setup, password, worker and token actions. Review of coverage pending SEC-009. |
 | SEC-008 | [ ] |  |
 | SEC-009 | [ ] |  |
 | WEB-001 | [ ] |  |

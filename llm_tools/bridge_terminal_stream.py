@@ -196,6 +196,8 @@ class TerminalSession:
         self.mode = "view"
         self.reason = "" if requested_mode == "view" else ("" if allow_write else "this worker accepts read-only remote control")
         self.size: tuple[int, int] = (0, 0)
+        self.input_bytes = 0  # audited as counts only, never content (SEC-007)
+        self.input_frames = 0
 
     def _send(self, frame: dict[str, Any]) -> None:
         self.connection.send_text(json.dumps(frame, separators=(",", ":")))
@@ -235,6 +237,8 @@ class TerminalSession:
                 return
             if 0 < len(data) <= MAX_INPUT:
                 self.source.send_input(data)
+                self.input_bytes += len(data)
+                self.input_frames += 1
         elif frame.get("t") == "r" and self.mode == "write":
             columns, rows = frame.get("cols"), frame.get("rows")
             if isinstance(columns, int) and isinstance(rows, int) and not isinstance(columns, bool) and 1 <= columns <= 1000 and 1 <= rows <= 1000:
