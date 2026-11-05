@@ -986,7 +986,7 @@ class BridgeStore:
             if prior is not None:
                 if prior["mission_id"] != mission_id or prior["payload_json"] != self._json(payload):
                     raise TransitionError("command id was already used for a different request")
-                return dict(prior)
+                return self.get_command(cid)
             self.db.execute("INSERT INTO commands(id,mission_id,payload_json,status,created_at,updated_at) VALUES(?,?,?,'QUEUED',?,?)", (cid, mission_id, self._json(payload), now, now))
             self._event(mission_id, "command-queued", {"command_id": cid, "command": payload.get("action", "unknown")})
         return self.get_command(cid)

@@ -13,6 +13,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, Callable, NoReturn, TYPE_CHECKING, cast
 
+from . import bridge_commands as commands
 from . import bridge_format as fmt
 from .bridge_format import NATIVE_STOP_HINT
 from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_title, prune_old_drafts, rotation_label, store_path
@@ -258,13 +259,22 @@ def _add_task_selector(parser: argparse.ArgumentParser, *, required: bool = True
     group.add_argument("--task-id", metavar="ID", dest="task_by_id", type=_db_int, help=f"advanced: the {noun}'s global ID, unique across all missions (task JSON field id)")
 
 
-def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Apply one validated command and persist its idempotent result."""
-    command = store.enqueue_command(mission_id, payload)
+def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[str, Any], *, command_id: str | None = None) -> dict[str, Any]:
+    """Apply one validated command and persist its idempotent result.
+
+    ``command_id`` is the caller's durable request ID; a repeated delivery of
+    the same ID returns the stored outcome without repeating the effect.
+    """
+    command = store.enqueue_command(mission_id, payload, command_id=command_id)
     if command["status"] != "QUEUED":
-        return command.get("result") or command
+        return command  # duplicate delivery: the stored outcome, same shape as the first reply
     try:
         with store._transaction():
+            # Another delivery of the same ID may have applied it since enqueue;
+            # the write lock is held now, so this check cannot race.
+            current = store.get_command(command["id"])
+            if current["status"] != "QUEUED":
+                return current
             result = _apply_operator_effect(store, mission_id, payload)
             return store.finish_command(command["id"], status="APPLIED", result=result)
     except _RejectedOperatorCommand as exc:
@@ -1876,6 +1886,22 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
 
+def _split_target(arguments: list[str]) -> tuple[str | None, list[str]]:
+    """Remove a leading ``--target NAME`` and validate the name."""
+    if arguments[0] == "--target":
+        if len(arguments) < 2 or arguments[1].startswith("-"):
+            print("llm-bridge: --target needs a name: local, all, or a worker name", file=sys.stderr)
+            return None, arguments
+        raw, rest = arguments[1], arguments[2:]
+    else:
+        raw, rest = arguments[0].split("=", 1)[1], arguments[1:]
+    try:
+        return commands.validate_target(raw), rest
+    except commands.CommandFailure as exc:
+        print(f"llm-bridge: {exc}", file=sys.stderr)
+        return None, arguments
+
+
 def _main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
@@ -1903,6 +1929,17 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
         print(topic_text(topic))
         return 0
+    if arguments and (arguments[0] == "--target" or arguments[0].startswith("--target=")):
+        target, arguments = _split_target(arguments)
+        if target is None:
+            return 2
+        if target != commands.LOCAL_TARGET:
+            # Never fall back to local execution for a named target (CLI-005).
+            print(f"llm-bridge: {commands.unknown_target_message(target)}", file=sys.stderr)
+            return 2
+        if not arguments:
+            print("llm-bridge: --target needs a command, for example: llm-bridge --target local status", file=sys.stderr)
+            return 2
     if arguments == ["--version"]:
         print(f"llm-bridge {package_version()}")
         return 0
@@ -2133,17 +2170,14 @@ def _main(argv: list[str] | None = None) -> int:
                     _print_result(result, bool(getattr(args, "json", False)), fmt.format_mission_colour)
                     return 0
                 else:
-                    missions = order_missions(store.list_missions())
-                    for item in missions:
-                        item["controller_running"] = controller_running(str(item["id"]))
-                    result = {"missions": missions}
+                    result = commands.dispatch(commands.CommandRequest("mission.list", {"include_config": bool(args.include_config)}))
             human = fmt.format_mission_created if args.mission_action == "create" else (lambda value: fmt.format_mission_list(value["missions"]))
             if not args.include_config:
                 result = strip_frozen_config(result)
             _print_result(result, bool(getattr(args, "json", False)), human)
             return 0
         if args.command == "status":
-            result = status_snapshot(args.mission)
+            result = commands.dispatch(commands.CommandRequest("mission.status", mission_id=args.mission))
             _print_result(result, args.json, fmt.format_status)
             return 0
         if args.command == "agents":
@@ -2173,8 +2207,7 @@ def _main(argv: list[str] | None = None) -> int:
                 print(result.get("message") or result.get("reason") or result.get("status"))
             return 0 if result.get("ok") is True else 2
         if args.command == "events":
-            with open_store(readonly=True) as store:
-                result = {"schema_version": 1, "events": store.events(args.mission, after=args.after, limit=args.limit)}
+            result = commands.dispatch(commands.CommandRequest("mission.events", {"after": args.after, "limit": args.limit}, mission_id=args.mission))
             _print_result(result, args.json, lambda value: fmt.format_events(value["events"]))
             return 0
         if args.command == "proposal":
@@ -2224,8 +2257,7 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, bool(getattr(args, "json", False)), _task_text(args))
             return 0
         if args.command == "continue":
-            with open_store() as store:
-                result = _apply_operator_command(store, args.mission, {"action": "continue"})
+            result = commands.dispatch(commands.CommandRequest("mission.continue", mission_id=args.mission))
             if result.get("status") == "REJECTED" and not args.json:
                 print(f"llm-bridge: {(result.get('result') or {}).get('error', 'continue rejected')}", file=sys.stderr)
                 return 2
@@ -2318,16 +2350,10 @@ def _main(argv: list[str] | None = None) -> int:
                         store.set_mission_status(args.mission, "STOPPED")
                     result = {"mission": store.get_mission(args.mission)}
             else:
-                with open_store() as store:
-                    current_status = store.get_mission(args.mission)["status"]
-                if args.command == "stop" and current_status in {"COMPLETED", "FAILED", "CANCELLED", "STOPPED"}:
-                    result = _stop_terminal_mission_station(args.mission)
-                else:
-                    with open_store() as store:
-                        result = _apply_operator_command(store, args.mission, {"action": args.command})
-                        if result.get("status") == "REJECTED" and not args.json:
-                            print(f"llm-bridge: {(result.get('result') or {}).get('error', args.command + ' rejected')}", file=sys.stderr)
-                            return 2
+                result = commands.dispatch(commands.CommandRequest(f"mission.{args.command}", mission_id=args.mission))
+                if result.get("status") == "REJECTED" and not args.json:
+                    print(f"llm-bridge: {(result.get('result') or {}).get('error', args.command + ' rejected')}", file=sys.stderr)
+                    return 2
             _print_result(result, args.json, lambda value: fmt.format_command_receipt(args.command, value, args.mission))
             return 0
         if args.command == "theme":
@@ -2388,7 +2414,7 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("steer", value, args.mission))
             return 0
         _build_parser().error(f"unsupported command {args.command}")
-    except (ValueError, KeyError, OSError, RuntimeError, TransitionError) as exc:
+    except (ValueError, KeyError, OSError, RuntimeError, TransitionError, commands.CommandFailure) as exc:
         print(f"llm-bridge: {exc}", file=sys.stderr)
         return 2
     return 0
