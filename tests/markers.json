@@ -3192,5 +3192,36 @@
   "test_zai_json_top_level_in_llm_usage_json": [
    "subprocess"
   ]
+ },
+ "tests/test_distributed_unreliable_network.py": {
+  "test_worker_reconnects_within_bound_after_repeated_resets": [
+   "subprocess"
+  ],
+  "test_half_open_stall_is_detected_by_silence_and_recovered": [
+   "subprocess"
+  ],
+  "test_cut_off_worker_is_offline_and_stale_and_its_events_replicate_after_recovery": [
+   "subprocess"
+  ],
+  "test_command_executed_but_unacknowledged_is_redelivered_and_applied_once": [
+   "subprocess"
+  ],
+  "test_commands_submitted_while_the_link_flaps_are_applied_exactly_once": [
+   "subprocess"
+  ],
+  "test_queues_stay_bounded_while_the_worker_is_cut_off": [
+   "subprocess"
+  ],
+  "test_slow_jittery_throttled_link_loses_nothing": [
+   "subprocess"
+  ]
+ },
+ "tests/test_distributed_storage_writes.py": {
+  "test_one_thousand_replicated_events_stay_within_the_write_and_growth_bounds": [
+   "subprocess"
+  ],
+  "test_one_thousand_command_round_trips_stay_within_the_write_bound": [
+   "subprocess"
+  ]
  }
 }

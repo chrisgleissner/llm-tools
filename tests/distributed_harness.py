@@ -68,14 +68,17 @@ def restart(coordinator: Coordinator) -> None:
 
 
 @contextmanager
-def running_system(tmp_path: Path, monkeypatch, capsys, *, allow_control: bool, worker_name: str = "ws", prepare=None) -> Iterator[System]:
-    """Mission + coordinator + enrolled worker thread, torn down on exit. ``prepare(state, mission_id)`` runs before the worker starts."""
+def running_system(tmp_path: Path, monkeypatch, capsys, *, allow_control: bool, worker_name: str = "ws", prepare=None,
+                   data_dir: Path | None = None) -> Iterator[System]:
+    """Mission + coordinator + enrolled worker thread, torn down on exit. ``prepare(state, mission_id)`` runs before the worker starts.
+
+    ``data_dir`` places the coordinator's data directory elsewhere than ``tmp_path`` (storage-write tests need a block device)."""
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
     mission_id = create_mission(tmp_path, capsys)
     if prepare is not None:
         prepare(state, mission_id)
-    coordinator = Coordinator(tmp_path / "coordinator")
+    coordinator = Coordinator(data_dir or tmp_path / "coordinator")
     token = coordinator.run("worker", "add", worker_name)
     worker.enroll(worker_name, f"wss://localhost:{coordinator.port}", token, ca_pem=(coordinator.data / "ca.pem").read_text(), allow_control=allow_control)
     stop = threading.Event()

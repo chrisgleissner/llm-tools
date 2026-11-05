@@ -164,6 +164,55 @@ therefore not a prediction for the Pi. Memory figures use the same architecture 
 same static binary and are the meaningful result; they cover the process and cgroup,
 not a full Raspberry Pi OS. The runner is shared, so timings vary between runs.
 
+## Storage writes (microSD wear)
+
+Platform: x86-64 host (ext4 on NVMe), release coordinator, one run per figure on
+2026-11-05, repeated three times with the same results to within 1 %. The figures
+are not from a microSD card. They are bytes, not time, so they do not depend on
+the medium, but the Pi's file system (ext4 on the card) adds its own journal
+writes that are not counted here.
+
+Test: `tests/test_distributed_storage_writes.py` (Linux only; it reads
+`write_bytes` from `/proc/<pid>/io` of the coordinator process and is skipped
+where that file does not exist). `write_bytes` counts bytes sent to a block
+device, so the test puts the coordinator's data directory on a directory where a
+probe write moves the counter. `/tmp` is a RAM disk on some hosts and reports
+zero, so the test looks next to it (`BRIDGE_STORAGE_TEST_DIR`, the system
+temporary directory, then `~/.cache`) and skips with that reason when none works.
+
+| Workload | Measured | Bound asserted |
+|---|---|---|
+| 1000 replicated events (about 100-byte payload, batches of up to 200) | 0.52 MiB written, 545 bytes/event | 1.5 MiB |
+| Database file growth for those events (main file + WAL) | 527 bytes/event | 1024 bytes/event |
+| `db_bytes` from `GET /api/v1/diagnostics` for the same events | 896 bytes/event | 2048 bytes/event |
+| 1000 `mission.list` commands round-tripped through a worker (16 in flight) | 66.6 MiB written, 68 KiB/command | 150 MiB |
+
+Reading the figures:
+
+- Events are written one transaction per batch, so the bytes written are about
+  the bytes stored (545 written against 527 stored per event). The bound is about
+  2.9 times the measurement. A change that adds a write per event fails it.
+- The 557-558 bytes/event above is for 10 000 events. The 527 bytes/event here is for
+  1000 events: the write-ahead log (WAL) file is counted at its current size, and
+  SQLite checkpoints it into the main file after 1000 pages (about 4 MiB) and then
+  reuses it, so the file size stops growing by the WAL's share beyond that.
+  `db_bytes` is larger because it adds the WAL file size to `page_count * page_size`,
+  which already includes pages that are still only in the WAL.
+- A command costs much more than an event: about 17 database pages (68 KiB). The
+  coordinator commits five separate transactions per command (insert, audit row,
+  `sent`, `acked`, `done`), each with `synchronous=FULL` and therefore an fsync
+  of the WAL, and each rewrites the `commands` table page and its two indexes.
+  This is a property of `coordinator/src/db.rs`; it was not changed.
+- Is a change justified? At the rate an operator issues commands, no. Ten commands
+  per minute, around the clock, would write about 0.9 GB per day. A card rated for
+  tens of terabytes written (the usual figure for a 32 GB card, which
+  assumes ideal wear levelling) would take decades to wear out at that rate. Merging the
+  audit row into the insert transaction and `sent` with `acked` would cut the
+  writes by about 40 % if the command rate were ever to become much higher. That
+  would not change durability, but it is not needed at the measured rates and is
+  left alone. Do not lower `synchronous` to save writes: it is what keeps
+  acknowledged commands and replicated events across a power loss.
+
 ## Raspberry Pi Zero 2 W
 
 Not measured on the device (hardware arrives 2026-11-06). The emulated ARM64
