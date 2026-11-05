@@ -133,6 +133,37 @@ guest; the guest port is forwarded only to the host's loopback):
 | `systemctl stop` | 0.21 s |
 | Guest memory used with the service running | 80 MB of 478 MB |
 
+## GitHub-hosted ARM64 runner (not a Pi)
+
+Figures to be filled from the `arm64-container` job of the `test` workflow (artifact
+`bench-arm64`, file `bench-arm64.md`, and the job summary). Not yet recorded.
+
+Method: the job runs natively on a GitHub-hosted `ubuntu-24.04-arm` runner (a
+cloud arm64 virtual machine, not a Raspberry Pi). It builds the linux/arm64 image with
+`container/build.sh --load` (static `aarch64-unknown-linux-musl` binary, the same
+artifact as the Pi image), then:
+
+- `deploy/ci/container-check.sh smoke`: `init`, `/healthz` 200, an unauthenticated
+  API call answered 401, `info` through `docker compose exec`, `docker compose stop`
+  time, and persistence across a restart (same CA, administrator login works).
+- `deploy/ci/container-check.sh pressure` at 96 MiB, 64 MiB and 48 MiB: 30 concurrent
+  logins and 200 concurrent `GET /api/v1/missions`, with the container's `memory.peak`,
+  restart count and OOM flag (the same procedure as the x86-64 memory-pressure run).
+- `deploy/ci/bench-limited.sh`: the release `coordinator/tests/bench.rs` harness inside one
+  container limited to 512 MB (swap equal) and one CPU, so the harness client and the
+  coordinator share the limit.
+
+| Measurement | Result |
+|---|---|
+| (to be filled from the CI run) | - |
+
+Limits of this measurement: the runner's CPU cores are faster than the Cortex-A53 of
+a Pi Zero 2 W, and `--cpus 1` limits CPU time but not cache, memory bandwidth or
+storage. The data directory is on the runner's disk, not a microSD card. Time figures are
+therefore not a prediction for the Pi. Memory figures use the same architecture and the
+same static binary and are the meaningful result; they cover the process and cgroup,
+not a full Raspberry Pi OS. The runner is shared, so timings vary between runs.
+
 ## Raspberry Pi Zero 2 W
 
 Not measured on the device (hardware arrives 2026-11-06). The emulated ARM64

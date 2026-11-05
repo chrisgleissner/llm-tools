@@ -169,3 +169,158 @@ jobs:
           use_oidc: true
           files: ./coverage-reports/coverage-3.11/coverage.xml,./coverage-reports/coverage-3.15/coverage.xml
           fail_ci_if_error: true
+
+  # Native ARM64 (GitHub-hosted ubuntu-24.04-arm, Cobalt 100). This is not a Raspberry Pi: the
+  # figures show behaviour on the arm64 architecture and under Pi-like limits, not Pi speed.
+  arm64-coordinator:
+    name: ARM64 coordinator (lint, tests, Python integration)
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Show the platform
+        run: |
+          uname -m
+          rustc --version --verbose
+      - name: Format, lint and test the coordinator
+        working-directory: coordinator
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Build the release coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Install tmux and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tmux
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+      - name: Python distributed integration tests against the ARM64 binary
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
+          BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator
+        run: |
+          file "$BRIDGE_COORDINATOR_BIN"
+          python -m pytest -q tests/test_distributed_*.py tests/test_bridge_worker.py \
+            tests/test_bridge_remote.py tests/test_bridge_ws.py tests/test_bridge_commands*.py
+
+  arm64-container:
+    name: ARM64 container (build, smoke, limits)
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    env:
+      BRIDGE_PORT: "18443"
+      COMPOSE_PROJECT_NAME: bridgeci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cargo-zigbuild and zig
+        run: python -m pip install cargo-zigbuild ziglang
+      - name: Build the linux/arm64 image (host architecture only)
+        # container/build.sh builds both architectures' binaries from a git archive of HEAD and loads
+        # the image for this host's architecture (--load, the default); the amd64 binary is only
+        # cross-compiled here, not run. rust-toolchain.toml installs both musl targets.
+        run: container/build.sh --load --tag llm-bridge-coordinator:latest
+      - name: Image architecture and size
+        run: |
+          docker image inspect llm-bridge-coordinator:latest -f '{{.Architecture}} {{.Size}} bytes'
+          test "$(docker image inspect llm-bridge-coordinator:latest -f '{{.Architecture}}')" = arm64
+      - name: Container smoke test
+        run: |
+          {
+            echo "## ARM64 container smoke test (GitHub-hosted runner)"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+          } >>"$GITHUB_STEP_SUMMARY"
+          SUMMARY_FILE="$GITHUB_STEP_SUMMARY" deploy/ci/container-check.sh smoke
+      - name: Container under a 96 MiB limit (login burst)
+        run: |
+          mkdir -p out
+          {
+            echo "## ARM64 container under memory limits (login burst, 200 concurrent GETs)"
+            echo
+            echo "| Limit | Result |"
+            echo "|---|---|"
+          } | tee -a "$GITHUB_STEP_SUMMARY" out/container-limits.md
+          for limit in 96m 64m 48m; do
+            BRIDGE_MEMORY_LIMIT=$limit SUMMARY_FILE="$PWD/out/limit-$limit.md" deploy/ci/container-check.sh pressure
+            tee -a "$GITHUB_STEP_SUMMARY" out/container-limits.md <"out/limit-$limit.md"
+          done
+      - name: Measurement harness within 512 MB and one CPU
+        run: |
+          sudo apt-get install --no-install-recommends -y jq
+          deploy/ci/bench-limited.sh out/bench-limited.md
+      - name: Assemble bench-arm64.md
+        if: always()
+        run: |
+          {
+            echo "# GitHub-hosted ARM64 runner (not a Pi)"
+            echo
+            echo "Runner: $(uname -m), $(nproc) CPUs, $(awk '/MemTotal/ { printf "%.1f GiB", $2 / 1048576 }' /proc/meminfo) RAM, $(. /etc/os-release; echo "$PRETTY_NAME"), kernel $(uname -r)."
+            echo "Commit: $GITHUB_SHA"
+            echo
+            echo "## Measurement harness, 512 MB and 1 CPU"
+            echo
+            cat out/bench-limited.md 2>/dev/null || echo "not produced"
+            echo
+            echo "## Container limits"
+            echo
+            cat out/container-limits.md 2>/dev/null || echo "not produced"
+          } >bench-arm64.md
+          cat bench-arm64.md
+          { echo; cat bench-arm64.md; } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-arm64
+          path: bench-arm64.md
+          if-no-files-found: warn
+          retention-days: 30
+
+  # macOS runs the standalone Python suite; the coordinator is not built, so the integration tests
+  # that need it skip themselves (tests/test_distributed_integration.py skips when no binary is
+  # found and BRIDGE_REQUIRE_COORDINATOR is unset).
+  macos:
+    name: macOS (Python 3.12)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tmux
+        run: |
+          brew install tmux
+          tmux -V
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+      - name: Run the suite
+        # Exclusions (keep this list narrow and explain each entry):
+        #   -m "not fuzz": the seeded fuzz suites run for about a minute on Linux and test curses
+        #   input handling, not platform behaviour.
+        # Linux-only code paths (procfs process identity in bridge_runtime, systemd suspend/inhibit,
+        # RTC wake) are not supported on macOS. If the first runs show failures that are caused
+        # by a missing /proc or systemd, list those tests here with --deselect and the reason.
+        run: python -m pytest -q -m "not fuzz"

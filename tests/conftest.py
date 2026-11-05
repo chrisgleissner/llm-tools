@@ -378,7 +378,11 @@ def _controller_pids() -> dict[int, str]:
     Identified from /proc cmdline only; never by pattern-killing.
     """
     found: dict[int, str] = {}
-    for entry in os.listdir("/proc"):
+    try:
+        entries = os.listdir("/proc")
+    except OSError:  # no procfs (macOS): nothing can be identified, so nothing is reported
+        return found
+    for entry in entries:
         if not entry.isdigit():
             continue
         try:
