@@ -231,6 +231,8 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
     if (term) term.reset();
     setState("connecting");
     connect();
+    // xterm.js does not paint while the terminal is outside the viewport, so bring it into view.
+    host.scrollIntoView({ block: "nearest" });
     term?.focus();
   }
 

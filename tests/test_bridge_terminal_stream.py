@@ -325,3 +325,26 @@ def test_input_is_dropped_when_a_local_client_attached_since_the_last_role_check
     stream.TerminalSession("s9", "m", "write", source, connection, writers=registry, clock=lambda: 0.0).run()
     assert source.inputs == []
     assert [frame["mode"] for frame in connection.sent if frame["t"] == "s"] == ["write", "view"]
+
+
+def test_a_resize_redraws_the_screen_from_tmux():
+    """The browser terminal and tmux reflow a resized screen differently, so a size change resends the snapshot."""
+
+    class Resizable(FakeSource):
+        def __init__(self):
+            super().__init__([b""] * 3)
+            self.current = (80, 24)
+
+        def size(self):
+            return self.current
+
+        def resize(self, columns, rows):
+            super().resize(columns, rows)
+            self.current = (columns, rows)
+
+    source = Resizable()
+    connection = FakeConnection([_frame("r", cols=100, rows=30)])
+    stream.TerminalSession("s10", "m", "write", source, connection, writers=stream.WriterRegistry()).run()
+    sizes = [(frame["cols"], frame["rows"]) for frame in connection.sent if frame["t"] == "s"]
+    snapshots = [frame for frame in connection.sent if frame["t"] == "o" and base64.b64decode(frame["d"]).startswith(stream.CLEAR_SCREEN)]
+    assert sizes == [(80, 24), (100, 30)] and len(snapshots) == 2

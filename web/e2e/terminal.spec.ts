@@ -31,7 +31,10 @@ interface Station {
   cleanup: () => void;
 }
 
-async function startStation(coord: Coordinator, allowControl: boolean): Promise<Station> {
+/** Remote access the worker is enrolled with: "control" (view and write), "view" (view only) or "none". */
+type Access = "control" | "view" | "none";
+
+async function startStation(coord: Coordinator, access: Access): Promise<Station> {
   const state = mkdtempSync(join(tmpdir(), "bridge-e2e-term-"));
   const runtime = mkdtempSync("/tmp/lbe-");
   chmodSync(runtime, 0o700);
@@ -44,7 +47,7 @@ async function startStation(coord: Coordinator, allowControl: boolean): Promise<
   const missionId = created.mission.id;
   const socket = execFileSync(python, ["-c", START_STATION, missionId, tmpdir(), ECHO_LOOP], { env, encoding: "utf8", cwd: repo }).trim();
   const token = coord.cli("worker", "add", "e2e-worker");
-  bridge(["worker", "enroll", "--name", "e2e-worker", "--coordinator", coord.url.replace("https://", "wss://"), "--token-file", "-", "--ca-file", join(coord.dir, "ca.pem"), ...(allowControl ? ["--allow-control"] : [])], token);
+  bridge(["worker", "enroll", "--name", "e2e-worker", "--coordinator", coord.url.replace("https://", "wss://"), "--token-file", "-", "--ca-file", join(coord.dir, "ca.pem"), ...(access === "control" ? ["--allow-control"] : access === "view" ? ["--allow-terminal-view"] : [])], token);
   const child: ChildProcess = spawn(python, [join(repo, "llm-bridge"), "worker", "run"], { env, cwd: repo, stdio: process.env["E2E_WORKER_LOG"] ? "inherit" : "ignore" });
   const killStation = () => {
     try {
@@ -81,6 +84,17 @@ async function openTerminal(page: Page, button: string): Promise<void> {
   }).toPass({ timeout: 30_000 });
 }
 
+/** The rendered terminal rows. xterm.js pauses painting while the terminal is outside the
+ * viewport (content above it can grow while the test runs), so scroll it into view first. */
+async function expectScreen(page: Page, text: string, present = true): Promise<void> {
+  const rows = page.locator("#terminal-host .xterm-rows");
+  await expect(async () => {
+    await page.locator("#terminal-host").scrollIntoViewIfNeeded({ timeout: 2000 });
+    if (present) await expect(rows).toContainText(text, { timeout: 2000 });
+    else await expect(rows).not.toContainText(text, { timeout: 2000 });
+  }).toPass({ timeout: 20_000 });
+}
+
 test.describe("remote terminal with a real worker and tmux station", () => {
   test.skip(!existsSync(python), "repo .venv python is missing");
   test.skip(() => {
@@ -93,7 +107,7 @@ test.describe("remote terminal with a real worker and tmux station", () => {
   }, "tmux is not installed");
 
   test("view, take control, single writer, copy and input paths", async ({ page, context, coord }) => {
-    const st = await startStation(coord, true);
+    const st = await startStation(coord, "control");
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
@@ -107,12 +121,11 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await openTerminal(page, "#terminal-control");
       await expect(status).toHaveAttribute("data-mode", "write");
       await expect(status).toContainText("you have control");
-      const rows = page.locator("#terminal-host .xterm-rows");
-      await expect(rows).toContainText("ok", { timeout: 20_000 });
+      await expectScreen(page, "ok");
       await page.locator("#terminal-host .xterm-helper-textarea").focus();
       await page.keyboard.type("hello");
       await page.keyboard.press("Enter");
-      await expect(rows).toContainText("echo:hello", { timeout: 20_000 });
+      await expectScreen(page, "echo:hello");
       await expectNoHorizontalScroll(page);
       await expectAccessible(page, "mission detail with terminal");
 
@@ -125,8 +138,7 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await expect(status2).toHaveAttribute("data-mode", "view");
       await expect(status2).toContainText("view only");
       await expect(status2).toContainText("writer role");
-      const rows2 = second.locator("#terminal-host .xterm-rows");
-      await expect(rows2).toContainText("echo:hello", { timeout: 20_000 }); // fresh snapshot of the shared pane
+      await expectScreen(second, "echo:hello"); // fresh snapshot of the shared pane
       await second.locator("#terminal-host .xterm-helper-textarea").focus();
       await second.keyboard.type("blocked");
       await second.keyboard.press("Enter");
@@ -135,11 +147,11 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await page.locator("#terminal-host .xterm-helper-textarea").focus();
       await page.keyboard.type("again");
       await page.keyboard.press("Enter");
-      await expect(rows).toContainText("echo:again", { timeout: 20_000 });
+      await expectScreen(page, "echo:again");
       await second.bringToFront();
-      await expect(rows2).toContainText("echo:again", { timeout: 20_000 }); // live output reaches the viewer
-      await expect(rows).not.toContainText("echo:blocked");
-      await expect(rows2).not.toContainText("echo:blocked");
+      await expectScreen(second, "echo:again"); // live output reaches the viewer
+      await expectScreen(page, "echo:blocked", false);
+      await expectScreen(second, "echo:blocked", false);
 
       // 3. Closing the writer frees the role: a new "Take control" in the second tab is granted write.
       await page.bringToFront();
@@ -152,21 +164,21 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await second.locator("#terminal-host .xterm-helper-textarea").focus();
       await second.keyboard.type("second");
       await second.keyboard.press("Enter");
-      await expect(rows2).toContainText("echo:second", { timeout: 20_000 });
+      await expectScreen(second, "echo:second");
       await second.close();
       await page.bringToFront();
 
       // 4. Plain view mode: no control requested, input is not sent.
       await openTerminal(page, "#terminal-open");
       await expect(status).toHaveAttribute("data-mode", "view", { timeout: 20_000 });
-      await expect(rows).toContainText("echo:second", { timeout: 20_000 });
+      await expectScreen(page, "echo:second");
     } finally {
       st.cleanup();
     }
   });
 
   test("a read-only worker grants view only, and the session ends when the station stops", async ({ page, coord }) => {
-    const st = await startStation(coord, false);
+    const st = await startStation(coord, "view");
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
@@ -178,7 +190,7 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await openTerminal(page, "#terminal-control");
       await expect(status).toHaveAttribute("data-mode", "view");
       await expect(status).toContainText("read-only");
-      await expect(page.locator("#terminal-host .xterm-rows")).toContainText("ok", { timeout: 20_000 });
+      await expectScreen(page, "ok");
       st.killStation();
       await expect(status).toHaveAttribute("data-state", "ended", { timeout: 20_000 });
       await expect(status).toContainText("station ended");
@@ -188,8 +200,28 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     }
   });
 
+  test("a read-only worker without the terminal opt-in refuses terminals", async ({ page, coord }) => {
+    const st = await startStation(coord, "none");
+    try {
+      await setupViaUi(page, coord);
+      const url = `/missions/e2e-worker/${st.missionId}`;
+      await expect(async () => {
+        await page.goto(url);
+        await expect(page.locator("#terminal-open")).toBeEnabled({ timeout: 2000 });
+      }).toPass({ timeout: 30_000 });
+      await page.locator("#terminal-open").click();
+      const status = page.locator("#terminal-status");
+      await expect(status).toContainText("--allow-terminal-view", { timeout: 20_000 });
+      await expect(status).not.toHaveAttribute("data-state", "live");
+      // The worker refused before sending any output, so nothing was ever written to the terminal.
+      await expect(page.locator("#terminal-host .xterm-rows")).not.toContainText("ok");
+    } finally {
+      st.cleanup();
+    }
+  });
+
   test("an unknown mission is refused with the worker's reason", async ({ page, coord }) => {
-    const st = await startStation(coord, true);
+    const st = await startStation(coord, "control");
     try {
       await setupViaUi(page, coord);
       await expect(async () => {

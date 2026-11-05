@@ -229,8 +229,13 @@ class TerminalSession:
                 reason = "another session holds the writer role; viewing only"
         size = self.source.size()
         if (mode, reason, size) != (self.mode, self.reason, self.size):
+            resized = self.size != (0, 0) and size != self.size
             self.mode, self.reason, self.size = mode, reason, size
             self._send({"t": "s", "cols": size[0], "rows": size[1], "mode": mode, "reason": reason})
+            if resized:
+                # The browser terminal and tmux reflow a resized screen differently; redraw from tmux
+                # so the cursor and rows match again.
+                self._output(CLEAR_SCREEN + self.source.snapshot())
 
     def _handle_frame(self, text: str) -> None:
         try:
@@ -256,6 +261,7 @@ class TerminalSession:
             if isinstance(columns, int) and isinstance(rows, int) and not isinstance(columns, bool) and 1 <= columns <= 1000 and 1 <= rows <= 1000:
                 if not self.source.local_clients():
                     self.source.resize(columns, rows)
+                    self._refresh_role()  # report the new size and redraw at once
 
     def run(self) -> str:
         """Stream until the station, the peer or ``stop`` ends the session; return the reason."""
