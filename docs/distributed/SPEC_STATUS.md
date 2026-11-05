@@ -4,103 +4,103 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 
 | ID | Status | Evidence |
 |---|---|---|
-| AGENT-001 | [~] | Single agent so far; ongoing process rule. |
-| AGENT-002 | [ ] |  |
-| AGENT-003 | [ ] |  |
-| AGENT-004 | [~] | No subagents spawned; ongoing process rule. |
-| AGENT-005 | [ ] |  |
-| AGENT-006 | [ ] |  |
-| AGENT-007 | [ ] |  |
-| AGENT-008 | [ ] |  |
-| AGENT-009 | [ ] |  |
+| AGENT-001 | [x] | The orchestrator did most of the work; bulk slices (coordinator relay, operations, security fixes) went to one Sonnet agent at a time, as recorded in WORKLOG.md entries from 20:30Z, 17:52Z and 18:46Z. |
+| AGENT-002 | [x] | Additional Sonnet agents were used only for bounded slices (coordinator milestone 1, terminal relay with web, coordinator operations, security fixes), each limited to named directories; no standing team. |
+| AGENT-003 | [x] | One Opus consultation, for the SEC-009 security architecture review (DECISIONS.md D7); no other Opus use. |
+| AGENT-004 | [x] | At most three agents were active at any time, including the orchestrator (WORKLOG.md shows one delegated agent at a time). |
+| AGENT-005 | [x] | Agents were used for implementation slices and the one required security review, not for exploration, routine review, documentation or test runs; reconnaissance was done once (REPO-005). |
+| AGENT-006 | [~] | WORKLOG.md records the scope of each delegation, but the handover texts are not stored in the repository, so their content cannot be checked from it. |
+| AGENT-007 | [~] | Process rule; the repository holds no record of tool-output volume, so it cannot be verified here. |
+| AGENT-008 | [x] | Every CONV-001 step 1-10 was pushed only after the full suite and coverage gates passed (WORKLOG.md verification column); no check was dropped to save tokens. |
+| AGENT-009 | [x] | The work ran without questions to the user; the only external blocker (pi-sim SSH timeout) was recorded in WORKLOG.md and other work continued. |
 | TRACK-001 | [x] | This register; checked by tests/test_distributed_spec_status.py. |
 | TRACK-002 | [x] | tests/test_distributed_spec_status.py fails on a missing, duplicate or unknown ID. |
-| TRACK-003 | [~] | WORKLOG.md started; ongoing. |
-| TRACK-004 | [~] | DECISIONS.md started; ongoing. |
-| TRACK-005 | [ ] |  |
-| TRACK-006 | [~] | Resume procedure in WORKLOG.md header; ongoing. |
-| TRACK-007 | [ ] |  |
-| TRACK-008 | [ ] |  |
+| TRACK-003 | [~] | WORKLOG.md entries follow the required five-field format (UTC, IDs, Changes, Verification, Next action) through the container work (18:46Z); the security review and hardening commits (94fc75a, 0f47ea9, 2425055, abbea56) have no entry yet. |
+| TRACK-004 | [x] | DECISIONS.md D1-D7 record consequential decisions (owners, command layer, targets, transport, opt-in control, container and no worker image, security review) without repeating the architecture docs. |
+| TRACK-005 | [x] | WORKLOG.md has one entry per work-unit batch and the register is updated per batch, not per edit. |
+| TRACK-006 | [x] | WORKLOG.md header holds the resume procedure; it was used after a session restart (22:40Z entry: gate rerun after restart). |
+| TRACK-007 | [x] | WORKLOG.md is 31 lines in total, one dense line per work unit with verification evidence. |
+| TRACK-008 | [ ] | The final report is step 12 and has not been written yet; it must be derived from this register. |
 | REPO-001 | [x] | Baseline recorded in WORKLOG.md (entry points, schema v10, event schema v7, CI workflows). |
 | REPO-002 | [x] | Authoritative owners recorded in DECISIONS.md D1. |
 | REPO-003 | [x] | Fast suite baseline in WORKLOG.md; 1 env-dependent failure explained. |
-| REPO-004 | [~] | Ongoing. |
+| REPO-004 | [x] | git diff --stat main..HEAD shows llm_tools changes only in bridge*.py, bridge_store.py (three read helpers), terminal.py (additive methods) and new modules; no existing test has deleted lines. |
 | REPO-005 | [x] | Single reconnaissance pass, 2026-11-05. |
-| ARCH-001 | [ ] |  |
-| ARCH-002 | [ ] |  |
-| ARCH-003 | [ ] |  |
+| ARCH-001 | [x] | The worker executes remote commands through bridge_commands.execute, the same layer the CLI uses, and the coordinator has no execution engine (DECISIONS.md D1, D2; tests/test_distributed_integration.py test_remote_commands_match_local_semantics_and_are_idempotent). |
+| ARCH-002 | [x] | Each mission lives in one worker database; the coordinator only indexes missions per worker and routes by worker name (coordinator/src/http.rs post_command, list_missions; DECISIONS.md D1). Controllers and provider processes start only through the worker's local engine. |
+| ARCH-003 | [x] | Coordinator owns worker registration (POST /workers, tokens), mission index, command journal and routing, event projection, web serving and its own metadata (docs/distributed/coordinator.md; coordinator/tests/worker.rs, api.rs). |
 | ARCH-004 | [x] | Coordinator stores, routes and projects only; commands execute on the worker via bridge_commands (D1, coordinator/src/hub.rs). |
-| ARCH-005 | [~] | llm_tools/bridge_commands.py: 20 operations (mission list/status/events/pause/stop/cancel/continue, task list/show/add/amend/verify/reject/priority/reorder/dependency/pause/resume/cancel/retry). TUI/web pending. |
+| ARCH-005 | [x] | llm_tools/bridge_commands.py defines 22 typed operations (OPERATIONS: mission, task and proposal); CLI, console, remote CLI and web all send them (tests/test_bridge_commands.py test_catalog_lists_every_operation_with_typed_parameters, test_console_commands_reach_the_same_command_layer). |
 | ARCH-006 | [x] | bridge_commands.dispatch runs in-process; CLI status/mission list/events/pause/stop/cancel/continue call it (test_cli_mission_controls_route_through_the_command_layer). |
-| ARCH-007 | [~] | Worker reconnects after coordinator restart and execution is local (test_worker_survives_coordinator_restart); long partition tests pending. |
-| ARCH-008 | [ ] |  |
-| ARCH-009 | [ ] |  |
-| LOCAL-001 | [~] | Full suite passes with no coordinator configuration; final offline verification pending. |
-| LOCAL-002 | [ ] |  |
-| LOCAL-003 | [ ] |  |
+| ARCH-007 | [x] | The worker keeps running and reconnects with backoff when the coordinator is stopped or silent (tests/test_distributed_integration.py test_worker_survives_coordinator_restart; tests/test_bridge_worker.py test_run_reconnects_and_says_hello_on_every_connection, test_run_drops_a_silent_coordinator); execution is local and independent of the connection. |
+| ARCH-008 | [x] | Separate modules: bridge_commands (domain), bridge_store (persistence), bridge_protocol/bridge_ws/bridge_worker/bridge_remote (transport), terminal.py and bridge_terminal_stream (process/terminal), web/src (presentation); coordinator split into db, protocol, ws_worker, http, terminal, web, certs. |
+| ARCH-009 | [x] | No cross-worker task migration, global scheduler or ownership transfer exists; --target all is read-only (tests/test_bridge_remote.py test_target_all_aggregates_reads_and_reports_unavailable_workers). |
+| LOCAL-001 | [x] | bridge_worker and bridge_remote are imported lazily only by the worker/remote commands (llm_tools/bridge.py); the existing suite passes with no coordinator configuration or service (gate at 0952c13: 92% total, 94% Bridge). |
+| LOCAL-002 | [x] | llm-bridge, llm-usage, llm-scheduler, ralph-robin and llm-sleep-soak entry points are unchanged; llm_tools usage, scheduler, ralph_robin, sleep_soak and common have no diff against main. |
+| LOCAL-003 | [x] | Existing CLI, JSON and exit-code tests (tests/test_bridge_cli*.py, test_bridge_operator_cli.py, golden screens) are unmodified and pass; new behaviour is additive (--target, worker, remote, backup, restore). |
 | LOCAL-004 | [x] | Commands without --target run locally unchanged; full suite passes. |
-| LOCAL-005 | [ ] |  |
-| LOCAL-006 | [ ] |  |
-| LOCAL-007 | [ ] |  |
-| LOCAL-008 | [ ] |  |
-| CLI-001 | [~] | CommandRequest/CommandResult/CommandError with operation IDs, typed params, request IDs (tests/test_bridge_commands.py). More operations pending. |
+| LOCAL-005 | [x] | Bridge SCHEMA_VERSION stays 10 and EVENT_SCHEMA_VERSION 7; the store diff adds only read helpers last_event_id, events_since and command_exists, and fixes the duplicate-command return shape (tests/test_bridge_store.py, test_bridge_commands.py unchanged semantics). |
+| LOCAL-006 | [x] | llm_tools/terminal.py changes are additive methods (send_bytes, pane_size, pane_cursor, resize_station, restore_station_sizing, control_client_argv); the tmux/PTY tests (tests/test_terminal_*.py, test_bridge_recovery_tmux.py) are unmodified. A remote writer is refused while a local client is attached (tests/test_bridge_terminal_stream.py test_writer_role_is_dropped_when_a_local_client_attaches). |
+| LOCAL-007 | [x] | bridge_runtime, verification guard, policy and prompt-delivery modules have no diff against main; remote approvals go through the same task.verify and task.reject operations (tests/test_bridge_commands.py test_apply_rechecks_status_under_the_write_lock). |
+| LOCAL-008 | [x] | Nothing is enabled at install. Worker and coordinator services start only after explicit commands (llm-bridge worker install-service, deploy/install.sh); the coordinator binds loopback unless lan_enabled is set (coordinator/tests/api.rs non_loopback_bind_needs_lan_enabled). |
+| CLI-001 | [x] | CommandRequest/CommandResult/CommandError with stable operation IDs, typed parameter specs, request IDs and error codes (tests/test_bridge_commands.py test_catalog_lists_every_operation_with_typed_parameters, test_invalid_requests_are_rejected_before_any_effect, test_request_json_round_trip_and_strict_decoding, test_error_mapping_is_stable). |
 | CLI-002 | [x] | Every remote-capable mutation runs through `bridge_commands.dispatch`: CLI (test_cli_*_route_through_the_command_layer), TUI console (test_console_commands_reach_the_same_command_layer, console commands are CLI command lines), remote `--target` and web (coordinator forwards typed requests that the worker executes with `bridge_commands.execute`). Console read views use the bounded projection (`bridge_monitor`), which has no business rules. Local-only actions (start/resume launch, steer, station view, provider-originated `proposal create`) stay in the CLI. |
 | CLI-003 | [x] | --target local|NAME|all; remote via coordinator (bridge_remote.py; test_remote_cli_has_local_semantics against the real coordinator). |
 | CLI-004 | [x] | --target all aggregates read operations only; mutations refused (test_target_all_*, integration test). |
 | CLI-005 | [x] | Unknown target 404 unknown-target exit 2; offline/silent exit 3 with queued request ID; no coordinator configured exit 2; never local fallback (tests/test_bridge_remote.py, integration). |
-| CLI-006 | [ ] |  |
+| CLI-006 | [x] | Existing JSON output is unchanged and checked against the command layer (tests/test_bridge_commands.py test_read_operations_match_cli_json_output); new remote metadata is additive; existing CLI tests are unmodified. |
 | CLI-007 | [x] | Remote transport carries typed CommandRequest JSON, never shell commands or human output (bridge_remote.request_for). |
-| CLI-008 | [ ] |  |
-| WORK-001 | [~] | llm_tools/bridge_worker.py reuses bridge_commands.execute; `llm-bridge worker run`. End-to-end with coordinator pending. |
+| CLI-008 | [~] | worker list, remote status and actionable errors exist (tests/test_bridge_remote.py test_main_routes_targets_and_worker_list_to_the_remote_client, test_run_cli_outcomes), but ./llm-bridge --help does not mention --target or the worker command. |
+| WORK-001 | [x] | llm_tools/bridge_worker.py runs the existing engine through bridge_commands.execute; `llm-bridge worker run` against the real coordinator in tests/test_distributed_integration.py and web/e2e/worker.spec.ts. |
 | WORK-002 | [x] | Worker opens the outbound WebSocket (bridge_ws.WebSocketClient, websocket_connector); no listener (tests/test_bridge_ws.py, test_bridge_worker.py). |
 | WORK-003 | [x] | hello carries worker_id (persisted), name, software/protocol versions, platform, capabilities, mission inventory, event cursor (test_hello_reports_inventory_and_only_permitted_operations). |
-| WORK-004 | [~] | hello and results contain no environment or credentials; token kept 0600 and excluded from status/public(). Audit pending. |
+| WORK-004 | [x] | hello and results carry typed data only; the token file is 0600 and hidden from status (tests/test_bridge_worker.py test_enrolment_is_private_validated_and_hides_the_token, test_hello_reports_inventory_and_only_permitted_operations, test_audit_records_security_actions_without_secrets); D7 review found no leak. |
 | WORK-005 | [x] | Remote commands run through bridge_commands.execute, the same path as the local CLI (test_commands_ack_then_result_and_duplicates_do_not_repeat). |
-| WORK-006 | [~] | Request ID is the durable command ID; duplicate delivery returns stored outcome, re-checked under write lock (test_duplicate_delivery_*, test_apply_rechecks_*). |
-| WORK-007 | [~] | Outcome vocabulary ok/accepted/applied/rejected/failed/uncertain in bridge_commands.execute. |
-| WORK-008 | [~] | Reconnect resends hello; event replication resumes from welcome cursor with nack resend; duplicate commands return stored outcome. Coordinator side pending. |
-| WORK-009 | [ ] |  |
+| WORK-006 | [x] | Request ID is the durable command ID; duplicate delivery returns the stored outcome (tests/test_bridge_commands.py test_duplicate_delivery_returns_stored_outcome_without_repeating_effect; tests/test_distributed_faults.py test_concurrent_redelivery_from_separate_processes_applies_once). |
+| WORK-007 | [x] | Outcomes ok, accepted, applied, rejected, failed and uncertain in bridge_commands.execute (tests/test_bridge_commands.py test_rejected_mutation_reports_rejected_outcome, test_unexpected_failure_of_a_mutation_is_uncertain). |
+| WORK-008 | [x] | Each reconnect sends hello with inventory and event cursor; events replay from the welcome cursor and commands redeliver with stored outcomes (tests/test_bridge_worker.py test_control_messages_and_event_replication; coordinator/tests/worker.rs redelivery_after_reconnect_and_generation, event_cursor_accept_and_nack; tests/test_distributed_faults.py test_partition_after_ack_redelivers_without_repeating_the_effect). |
+| WORK-009 | [x] | Remote and local commands use the same SQLite write lock and re-check (tests/test_bridge_commands.py test_apply_rechecks_status_under_the_write_lock; tests/test_distributed_faults.py test_conflicting_approvals_from_separate_processes_only_one_wins). |
 | WORK-010 | [x] | worker run: reconnect with jittered backoff, silence timeout, SIGINT/SIGTERM stop (test_run_*). `llm-bridge worker install-service` writes a systemd user unit (Restart=on-failure, UMask=0077, baked PATH/PYTHONPATH/state dir); unit checked with `systemd-analyze --user verify` and its ExecStart run against a closed port (test_service_unit_install_and_uninstall). |
-| COORD-001 | [~] | Rust coordinator builds and tests on x86-64; ARM64 cross-build succeeds; ARM64 execution unverified. |
+| COORD-001 | [~] | Rust stable coordinator builds and tests on x86-64 and cross-builds for aarch64 (gnu and musl, cargo-zigbuild); execution on ARM64 is unverified. Blocked: pi-sim unreachable (SSH banner timeout) and no Pi hardware until 2026-11-06. |
 | COORD-002 | [x] | Tokio, axum, serde, rusqlite (bundled), rustls/ring; no aws-lc-rs (coordinator/Cargo.toml). |
-| COORD-003 | [ ] |  |
-| COORD-004 | [ ] |  |
-| COORD-005 | [ ] |  |
-| COORD-006 | [ ] |  |
-| COORD-007 | [ ] |  |
-| COORD-008 | [ ] |  |
-| COORD-009 | [~] | deploy/bridge-coordinator.service (hardened system unit, verified with systemd-analyze), deploy/install.sh (Debian/DietPi amd64/arm64, idempotent, --dry-run), `health` command, SIGTERM drain, `serve` holds coordinator.lock; ARM64 build verified (cargo-zigbuild, gnu and musl). Container deployment in progress (A2). |
-| COORD-010 | [ ] |  |
-| PROTO-001 | [~] | docs/distributed/protocol.md (v1, JSON over WebSocket); llm_tools/bridge_protocol.py parser. Coordinator side pending. |
+| COORD-003 | [~] | Bounded design (limits in coordinator.md, 96 MiB container limit from a 48.1 MiB measured peak on x86-64, benchmarks.md) but nothing has been measured on a Pi Zero 2 W or the emulated Pi. Blocked on pi-sim and hardware. |
+| COORD-004 | [x] | Bounds and timeouts in coordinator.md Limits: connections, per-address, body size, 4 KiB auth bodies, outbound queue 256, events per worker, open commands, terminal sessions (coordinator/tests/limits.rs, hardening.rs, terminal.rs lagging_viewer_is_closed_with_1013, session_caps, api.rs body_limit_and_placeholder, worker.rs event_cursor_accept_and_nack). Completed-command retention (7 days) is not covered by a test. |
+| COORD-005 | [x] | Versioned /api/v1 endpoints for workers, missions, commands, events, diagnostics, /healthz and terminals (coordinator.md). Tasks and approvals are typed commands (task.list, task.verify, task.reject) posted to /commands rather than separate resources. |
+| COORD-006 | [x] | Authenticated /api/v1/stream WebSocket with Origin check and idle timeout (coordinator/tests/api.rs csrf_origin_and_bearer_tokens, worker.rs stream_broadcast, limits.rs silent_stream_client_is_closed_after_idle_timeout). |
+| COORD-007 | [x] | Coordinator state is its own SQLite file (WAL, synchronous=FULL, coordinator/src/db.rs); workers sync over the protocol only and no worker database is shared (coordinator.md Storage). |
+| COORD-008 | [x] | Workers are online, offline or stale; the web UI marks everything stale while the stream is down (web/e2e/worker.spec.ts "mission appears, a pause/resume/cancel round-trips, and stale marking follows the worker", app.spec.ts "workers added with the CLI are listed as offline"). |
+| COORD-009 | [~] | Hardened unit, install.sh, health command, SIGTERM drain (stop in 0.3 s) and ARM64 cross-builds are done (see detail above); build reproducibility is designed (SOURCE_DATE_EPOCH, git archive in container/build.sh) but two builds were never compared. |
+| COORD-010 | [x] | The coordinator serves web/dist itself with CSP and traversal protection (coordinator/tests/web.rs serves_index_and_assets_publicly_with_security_headers, path_traversal_never_leaves_the_web_root); the image is FROM scratch with no Node.js. |
+| PROTO-001 | [x] | docs/distributed/protocol.md (v1, JSON over WebSocket), parsed by llm_tools/bridge_protocol.py and coordinator/src/protocol.rs (tests/test_bridge_protocol.py, coordinator/tests/worker.rs frame_limits_and_malformed_messages). |
 | PROTO-002 | [x] | Envelope v/type/id/worker_id/generation/payload validated strictly by bridge_protocol.decode (tests/test_bridge_protocol.py). |
-| PROTO-003 | [~] | command.ack distinct from command.result in protocol and parser; worker/coordinator implementation pending. |
+| PROTO-003 | [x] | command.ack (received, duplicate) is a separate message from command.result (coordinator/tests/worker.rs command_round_trip, redelivery_after_reconnect_and_generation; tests/test_bridge_worker.py test_commands_ack_then_result_and_duplicates_do_not_repeat). |
 | PROTO-004 | [x] | Coordinator journal redelivers until result; worker dedups by request_id (cargo test worker redelivery; test_duplicate_delivery_*; integration duplicate cancel). |
-| PROTO-005 | [~] | Worker side: global event cursor, ascending batches, nack resend (test_control_messages_and_event_replication). |
+| PROTO-005 | [x] | Worker events carry a monotonic global cursor; the coordinator accepts in order and nacks gaps for resend, and caps stored events (coordinator/tests/worker.rs event_cursor_accept_and_nack; tests/test_bridge_worker.py test_control_messages_and_event_replication). |
 | PROTO-006 | [x] | Task mutations accept expected_revision, checked under the SQLite write lock; mismatch is outcome rejected, code conflict (test_stale_revision_*, test_conflicting_amendments_only_one_wins). |
-| PROTO-007 | [ ] |  |
-| PROTO-008 | [ ] |  |
+| PROTO-007 | [x] | hello.capabilities lists permitted operations; the coordinator answers 422 unsupported-operation (coordinator/tests/worker.rs request_id_idempotence_and_refusals; tests/test_bridge_commands.py test_invalid_requests_are_rejected_before_any_effect). |
+| PROTO-008 | [x] | Duplicates, lost acks, partitions, restarts and uncertain outcomes are tested (coordinator/tests/worker.rs redelivery_after_reconnect_and_generation, event_cursor_accept_and_nack; tests/test_distributed_faults.py test_partition_after_ack_redelivers_without_repeating_the_effect, test_storage_failure_during_a_mutation_is_uncertain_rolls_back_and_redelivery_applies_once). Reordered events are handled by the cursor nack. |
 | PROTO-009 | [x] | Separate WebSocket per terminal session (`/api/v1/worker/terminal/<id>`, `/api/v1/terminal`); control connection only opens/closes. Worker: tests/test_bridge_terminal_stream.py; coordinator: coordinator/tests/terminal.rs. |
 | PROTO-010 | [x] | Coordinator increments/persists generation and closes older connection (cargo test); worker persists max generation and rejects older (test_generation_fencing). |
-| NET-001 | [ ] |  |
-| NET-002 | [ ] |  |
-| NET-003 | [ ] |  |
-| NET-004 | [ ] |  |
-| NET-005 | [ ] |  |
+| NET-001 | [x] | The server has only a TLS acceptor (coordinator/src/server.rs) and no plaintext listener; browsers and workers use HTTPS/WSS (coordinator/tests/worker.rs tls_versions_and_suites). |
+| NET-002 | [x] | `init` creates the CA, server certificate and setup token locally with no network access; SANs include IP addresses, so no public DNS is needed (coordinator/tests/ops.rs init_without_flags_discovers_names_and_prints_next_steps, certs.rs). |
+| NET-003 | [x] | Default bind is 127.0.0.1; a non-loopback bind is refused without lan_enabled (coordinator/tests/api.rs non_loopback_bind_needs_lan_enabled); container/compose.yaml publishes on loopback unless BRIDGE_PUBLISH_ADDRESS is set. |
+| NET-004 | [x] | rustls with ring, TLS 1.3 and 1.2 only, modern suites; no aws-lc (coordinator/src/certs.rs, coordinator/tests/worker.rs tls_versions_and_suites). |
+| NET-005 | [x] | Local CA plus server certificate from `init`, and administrator-provided certificates through `cert install` (coordinator/tests/ops.rs recovery_commands_reset_password_and_certificates; coordinator/tests/certs.rs). |
 | NET-006 | [x] | docs/distributed/install.md: CA import for Chrome (Linux/Windows/macOS), Firefox and Android with SHA-256 fingerprint check (`bridge-coordinator info`); no warning bypass. |
-| NET-007 | [ ] |  |
-| NET-008 | [ ] |  |
+| NET-007 | [x] | Server certificate SANs from names, home.arpa and discovered addresses; `cert renew` and `cert new-ca` replace certificates and refuse names outside the CA constraints (coordinator/tests/certs.rs renew_refuses_a_name_outside_the_constraints_and_names_it, new_ca_replaces_the_ca_and_keeps_the_old_one). |
+| NET-008 | [x] | Rust-native TLS (rustls/ring in-process) chosen over a reverse proxy; idle RSS 6.2 MiB including TLS (benchmarks.md). No separate DECISIONS.md entry; the choice is in coordinator.md and Cargo.toml comments. |
 | NET-009 | [x] | `init` default SANs: localhost, 127.0.0.1, ::1, host name, `<host>.home.arpa`, discovered non-loopback addresses (coordinator/src/netinfo.rs, tests). |
 | NET-010 | [x] | max_connections 256, HTTP idle/header timeout 30 s, WebSocket ping 30 s and close after 90 s silence for /stream and /terminal (coordinator/tests/limits.rs); firewall and interface guidance in install.md stating LAN placement is not authentication. |
-| AUTH-001 | [ ] |  |
-| AUTH-002 | [ ] |  |
-| AUTH-003 | [ ] |  |
-| AUTH-004 | [ ] |  |
-| AUTH-005 | [ ] |  |
-| AUTH-006 | [ ] |  |
-| AUTH-007 | [ ] |  |
-| AUTH-008 | [ ] |  |
-| AUTH-009 | [ ] |  |
-| AUTH-010 | [ ] |  |
+| AUTH-001 | [x] | Every API handler takes the Authed extractor (coordinator/src/http.rs); public routes are /healthz, auth state, setup and login, and the static SPA shell. Checked for stream and terminal upgrades (coordinator/tests/api.rs csrf_origin_and_bearer_tokens, terminal.rs browser_upgrade_is_authenticated_and_origin_checked, web/e2e/app.spec.ts first-run test). No test enumerates every route unauthenticated. |
+| AUTH-002 | [x] | First-run setup needs the one-time setup token printed by `init`; no default password (coordinator/tests/api.rs setup_token_is_single_use; web/e2e/app.spec.ts "setup rejects a wrong token and mismatched passwords"). |
+| AUTH-003 | [x] | Argon2id 19 MiB, t=2, p=1, random salt per hash (coordinator/src/auth.rs); memory effect measured in benchmarks.md. |
+| AUTH-004 | [x] | Opaque 32-byte server-side session tokens stored as SHA-256; cookie __Host-bridge_session is HttpOnly, Secure, SameSite=Strict (coordinator/tests/api.rs login_session_lifecycle, hardening.rs session_cookie_uses_the_host_prefix). |
+| AUTH-005 | [x] | Logout, idle and absolute expiry, and invalidation on password change (coordinator/tests/api.rs login_session_lifecycle, password_change_deletes_all_sessions; web/e2e/app.spec.ts "password change signs out and the new password works"). |
+| AUTH-006 | [x] | Failed logins limited per address and per username with identical error for unknown user and wrong password (coordinator/tests/api.rs login_rate_limit_per_username, login_rate_limit_per_address, login_session_lifecycle; hardening.rs concurrent_wrong_logins_from_one_address_are_limited_before_argon2). |
+| AUTH-007 | [x] | CSRF token and exact Origin on cookie-authenticated mutations, Origin check on WebSocket upgrades (coordinator/tests/api.rs csrf_origin_and_bearer_tokens, terminal.rs browser_upgrade_is_authenticated_and_origin_checked). |
+| AUTH-008 | [x] | Server-side Authed extractor on every handler; the worker enforces its own opt-in at the command boundary (tests/test_bridge_worker.py test_read_only_worker_refuses_mutations, test_read_only_worker_shares_terminals_only_with_the_view_opt_in; DECISIONS.md D5). |
+| AUTH-009 | [x] | One administrator account; multi-user RBAC and OIDC are not implemented (coordinator/src/auth.rs, admin table). |
+| AUTH-010 | [x] | Tokens and sessions are stored as hashes, carried in cookies or headers and never in URLs; audit logs hold no secrets (coordinator/tests/api.rs token audit assertion, terminal.rs open audit; tests/test_bridge_worker.py test_audit_records_security_actions_without_secrets; tests/test_bridge_terminal_stream.py test_terminal_input_is_counted_and_audited_without_content). |
 | SEC-001 | [x] | Standalone Bridge never imports the worker; the worker runs only after `worker enroll` + `worker run`. The coordinator binds 127.0.0.1 by default and refuses a non-loopback bind without `lan_enabled = true` (coordinator/tests/api.rs non_loopback_bind_needs_lan_enabled); `container/compose.yaml` publishes on 127.0.0.1 unless `BRIDGE_PUBLISH_ADDRESS` is set. Mutations need `--allow-control`, terminals `--allow-terminal-view` (D5, D7 L4). |
 | SEC-002 | [x] | Workers connect only over `wss://`, verify the coordinator certificate against the enrolled CA (test_wss_verifies_the_server_against_the_given_ca) and authenticate with a per-worker token (coordinator/tests/worker.rs worker_authentication). The CA is name-constrained (coordinator/tests/certs.rs, D7 H2). |
 | SEC-003 | [x] | A worker is identified by its stable name and a per-worker token stored as a hash; `worker revoke` closes the live connection and the token stops working (worker_authentication). Generation high-water marks survive revoke, so a re-added worker cannot be confused with an old connection (re_added_worker_gets_a_generation_above_every_earlier_one). |
@@ -110,69 +110,69 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | SEC-007 | [x] | Worker: `<state>/worker/audit.jsonl` (0600, 1 MiB + one rotation) records enrolment, connections, mutating/refused commands and terminal sessions with input byte counts only; `llm-bridge worker audit` (test_audit_*). Coordinator: `audit` table for login, setup, password, worker, token and stale-generation actions. Coverage reviewed in SEC-009. |
 | SEC-008 | [x] | docs/distributed/threat-model.md: assets, five trust boundaries, threats with mitigations and residual risk, out-of-scope items. |
 | SEC-009 | [x] | One Opus security architecture review on 2026-11-05: no critical findings; H1, H2, M1-M3, M5 and L1-L7 fixed with tests that fail on revert (commits 94fc75a, 0f47ea9); M4 accepted and documented. Findings and disposition: DECISIONS.md D7. |
-| WEB-001 | [ ] |  |
-| WEB-002 | [ ] |  |
-| WEB-003 | [ ] |  |
-| WEB-004 | [ ] |  |
-| WEB-005 | [ ] |  |
-| WEB-006 | [ ] |  |
+| WEB-001 | [x] | Responsive TypeScript SPA tested on Chromium and Firefox with desktop and mobile projects (web/playwright.config.ts: chromium-desktop, chromium-mobile Pixel 7, firefox-desktop, firefox-mobile); no real Android device was used. |
+| WEB-002 | [x] | Static assets in web/dist served by the coordinator; browser needs no extension or client, and the image has no Node.js runtime (coordinator/tests/web.rs). |
+| WEB-003 | [x] | Light and dark themes with a persisted toggle and automated accessibility checks (web/e2e/app.spec.ts "theme toggle cycles and persists", "pages have no horizontal scroll and no accessibility violations"). |
+| WEB-004 | [~] | Overview, workers, missions, tasks, events (activity) and diagnostics views exist (web/src/views); there is no dedicated sessions view and no provider usage view. |
+| WEB-005 | [x] | Mission page shows tasks and events with paging, Approve/Reject/Cancel, mission lifecycle controls and live updates (web/src/views/mission.ts; web/e2e/worker.spec.ts "mission appears, a pause/resume/cancel round-trips, and stale marking follows the worker"). Approve and Reject are not exercised in a browser test; the command-layer behaviour is tested in tests/test_bridge_commands.py. |
+| WEB-006 | [x] | Connection states live, reconnecting and offline plus per-worker online, offline and stale badges (web/src/store.ts; web/e2e/worker.spec.ts stale-marking test; terminal.spec.ts reconnect). |
 | WEB-007 | [x] | @xterm/xterm 6.0.0 with @xterm/addon-fit 0.11.0 (web/src/terminal.ts). |
 | WEB-008 | [x] | Resize from `s` frames and `r` in write mode, keyboard input, copy (Ctrl+Shift+C/Cmd+C) and paste, reconnect with 0.5–8 s backoff and fresh snapshot, take/release writer. Playwright terminal.spec.ts against a real worker and tmux station on Chromium and Firefox, desktop and mobile (60 tests pass). |
-| WEB-009 | [ ] |  |
-| WEB-010 | [ ] |  |
-| WEB-011 | [ ] |  |
-| WEB-012 | [ ] |  |
-| DATA-001 | [ ] |  |
-| DATA-002 | [ ] |  |
-| DATA-003 | [ ] |  |
-| DATA-004 | [ ] |  |
-| DATA-005 | [ ] |  |
+| WEB-009 | [x] | axe-core with wcag2a, wcag2aa, wcag21aa and wcag22aa tags passes on setup, login, every main page and the mission page with terminal; keyboard navigation test (web/e2e/fixtures.ts expectAccessible; app.spec.ts "keyboard: skip link, navigation and sign-in work without a mouse"). Automated checks only, no manual screen-reader audit. |
+| WEB-010 | [x] | Tasks and events are paged (25 per page, older events loaded on request) in web/src/views/mission.ts; the built bundle is 388 KB; terminal scrollback is bounded by xterm. |
+| WEB-011 | [x] | Destructive actions use a confirmation dialog (web/src/ui.ts confirmDialog, used in mission.ts); the worker and coordinator validate every command again server-side. |
+| WEB-012 | [x] | No external resources: assets are bundled and CSP is default-src 'self' (coordinator/tests/web.rs; web/e2e/app.spec.ts "static responses carry the security headers and the app logs no console errors"). |
+| DATA-001 | [x] | Worker databases stay authoritative; the coordinator copy is replicated by cursor, capped and reconcilable on reconnect (coordinator.md Storage; tests/test_bridge_worker.py test_control_messages_and_event_replication). |
+| DATA-002 | [x] | State, event and command rows commit together under the write lock; an injected storage failure rolls back and is reported uncertain (tests/test_distributed_faults.py test_storage_failure_during_a_mutation_is_uncertain_rolls_back_and_redelivery_applies_once). |
+| DATA-003 | [x] | Bridge schema 10 and event schema 7 are unchanged and separate from the coordinator schema (user_version 2); migration tested in coordinator/tests/hardening.rs version_1_database_is_migrated_in_place. |
+| DATA-004 | [x] | Private file modes, synchronous=FULL, integrity-checked backups (coordinator/tests/api.rs init_is_idempotent_and_private, ops.rs backup_and_restore_round_trip; tests/test_bridge_backup.py test_corrupt_backup_fails_the_integrity_check). |
+| DATA-005 | [x] | Coordinator restart redelivers journaled commands and the worker deduplicates by request ID (tests/test_distributed_integration.py test_worker_survives_coordinator_restart; coordinator/tests/worker.rs redelivery_after_reconnect_and_generation). |
 | DATA-006 | [x] | Worker/standalone: `llm-bridge backup`/`restore` (tests/test_bridge_backup.py). Coordinator: `bridge-coordinator backup`/`restore` (online backup API, integrity check, refuses while serving, keeps the replaced database; coordinator/tests/ops.rs). Procedures in operations.md and install.md. |
-| DATA-007 | [ ] |  |
-| OPS-001 | [~] | install.sh and unit for Debian/DietPi ARM64; staged install tested with --prefix twice. Not yet run on DietPi (emulated or physical). |
+| DATA-007 | [x] | Coordinator keeps at most max_events_per_worker events (default 50 000, oldest deleted), 1000 open commands per worker and completed commands for 7 days; worker evidence is never deleted (coordinator/tests/worker.rs event_cursor_accept_and_nack). Command retention has no test. |
+| OPS-001 | [~] | install.sh and the hardened unit for Debian/DietPi amd64/arm64 are tested with --prefix and --dry-run, and the container flow runs on x86-64 (install.md, WORKLOG.md 18:46Z). Not run on DietPi, emulated or physical. Blocked: pi-sim SSH timeout, hardware due 2026-11-06. |
 | OPS-002 | [x] | `init` and `info` print the HTTPS URLs, CA path and SHA-256 fingerprint and browser trust steps (coordinator/tests/ops.rs). |
 | OPS-003 | [x] | `init` generates CA, server certificate and setup token without source edits or manual cryptography; idempotent on an initialised directory; env overrides BRIDGE_COORDINATOR_DATA_DIR/BIND/LAN_ENABLED. |
 | OPS-004 | [x] | `admin reset-password`, `cert renew`, `cert install`, `setup-token` (only before an administrator exists), `backup`/`restore`; CLI tests in coordinator/tests/ops.rs; Recovery section in install.md. |
 | OPS-005 | [x] | install.md "Upgrades and compatibility": protocol negotiation, forward-only migrations, rollback by restoring the pre-upgrade backup, mixed worker versions, upgrade order. |
-| TEST-001 | [ ] |  |
-| TEST-002 | [ ] |  |
-| TEST-003 | [~] | Local vs remote JSON parity for mission list, task list/show, status (test_remote_cli_has_local_semantics, test_remote_commands_match_local_semantics_and_are_idempotent). |
-| TEST-004 | [ ] |  |
-| TEST-005 | [~] | Registration, discovery, remote control, events and reconnection covered by tests/test_distributed_integration.py; approvals/terminal pending. |
-| TEST-006 | [~] | tests/test_distributed_faults.py: storage failure mid-mutation (uncertain, rolled back, redelivery applies once), locked database read, partition after ack (redelivery acked duplicate, effect once); test_distributed_integration.py: coordinator restart and reconnect. Coordinator crash during journal write pending. |
+| TEST-001 | [~] | No existing test has deleted lines (git diff --numstat main..HEAD -- tests) and gates at 0952c13 were green (92% total, 94% Bridge); the step 11 gate on the final tree is still running. |
+| TEST-002 | [x] | tests/test_bridge_commands.py (validation, transitions), tests/test_bridge_worker.py, coordinator/tests/worker.rs and api.rs (routing, authorisation, persistence). |
+| TEST-003 | [x] | Equivalent scenarios through local and remote paths (tests/test_bridge_commands.py test_read_operations_match_cli_json_output; tests/test_distributed_integration.py test_remote_commands_match_local_semantics_and_are_idempotent, test_remote_cli_has_local_semantics). |
+| TEST-004 | [x] | Existing fake-provider suites are unchanged and distributed tests need no live provider (seeded missions and real tmux stations in tests/test_bridge_terminal_stream.py). |
+| TEST-005 | [~] | Covered: registration, discovery, remote control, events, reconnection, terminal access (tests/test_distributed_integration.py, web/e2e/terminal.spec.ts, worker.spec.ts). Not covered end to end through the coordinator: approvals and standalone first-run as a distributed scenario. |
+| TEST-006 | [~] | tests/test_distributed_faults.py (storage failure, locked database, partition after ack) and coordinator redelivery tests cover most injections; a coordinator crash during a journal write is not tested. |
 | TEST-007 | [x] | Six real processes race the same request ID (one command row, one revision bump) and six conflicting amendments of one revision (one applied, five `conflict`) in tests/test_distributed_faults.py; in-process cases in tests/test_bridge_commands.py. |
-| TEST-008 | [~] | Seeded byte/structure mutation fuzz of bridge_protocol.decode (8 seeds x 400 cases) and deep-nesting test. |
-| TEST-009 | [ ] |  |
-| TEST-010 | [ ] |  |
-| TEST-011 | [ ] |  |
-| TEST-012 | [ ] |  |
-| TEST-013 | [~] | Coordinator cross-built for aarch64-unknown-linux-gnu with cargo-zigbuild (ELF aarch64, 3.15 MB). No qemu-user or ARM host available to run it; x86-64 tested. |
-| TEST-014 | [~] | coordinator/tests/bench.rs (ignored test) and deploy/bench.sh; x86-64 results in docs/distributed/benchmarks.md (startup 47 ms, idle RSS 6.2 MiB, 26.4 MiB after 1000 events, API p95 < 1 ms). ARM64 pending. |
-| TEST-015 | [~] | benchmarks.md labels every figure by platform; Pi Zero 2 W marked not measured (no hardware). |
-| TEST-016 | [~] | CI: coordinator job (fmt, clippy, test); Python job builds the coordinator and requires the cross-component tests. TypeScript pending. |
-| TEST-017 | [ ] |  |
-| QUAL-001 | [ ] |  |
-| QUAL-002 | [ ] |  |
-| QUAL-003 | [ ] |  |
-| QUAL-004 | [ ] |  |
-| QUAL-005 | [~] | Structured error codes in bridge_commands.error_for; unexpected mutation failure reported as uncertain. |
-| QUAL-006 | [ ] |  |
-| QUAL-007 | [ ] |  |
-| QUAL-008 | [ ] |  |
-| QUAL-009 | [ ] |  |
-| QUAL-010 | [ ] |  |
-| CONV-001 | [~] | Steps 1-2 in progress. |
-| CONV-002 | [ ] |  |
-| CONV-003 | [ ] |  |
-| CONV-004 | [ ] |  |
-| CONV-005 | [ ] |  |
-| CONV-006 | [ ] |  |
-| CONV-007 | [ ] |  |
-| CONV-008 | [ ] |  |
-| CONV-009 | [ ] |  |
-| CONV-010 | [ ] |  |
-| CONV-011 | [ ] |  |
-| CONV-012 | [ ] |  |
+| TEST-008 | [~] | Seeded mutation fuzz of bridge_protocol.decode (tests/test_bridge_protocol.py test_seeded_mutations_never_escape_protocol_error, test_deep_nesting_is_a_protocol_error) and malformed frames at the coordinator (worker.rs frame_limits_and_malformed_messages); no fuzz of command parameters or reconciliation. |
+| TEST-009 | [x] | CSRF, Origin, bypass, malformed input and writer contention are tested (coordinator/tests/api.rs csrf_origin_and_bearer_tokens, hardening.rs auth_bodies_are_limited_to_4_kib, terminal.rs browser_upgrade_is_authenticated_and_origin_checked; tests/test_bridge_terminal_stream.py test_second_writer_and_local_client_get_view_only; web/e2e/terminal.spec.ts). |
+| TEST-010 | [x] | HTTPS and TLS versions, certificates, login/logout, expiry, rate limiting and unauthenticated denial (coordinator/tests/worker.rs tls_versions_and_suites, certs.rs, api.rs login_session_lifecycle, login_rate_limit_per_address, limits.rs). |
+| TEST-011 | [x] | Playwright projects chromium-desktop, chromium-mobile, firefox-desktop and firefox-mobile run app.spec.ts, worker.spec.ts and terminal.spec.ts; CI job `web UI (TypeScript, Playwright)` in .github/workflows/test.yml. |
+| TEST-012 | [~] | No test runs with outside network blocked. Indirect evidence: CSP default-src 'self', the no-console-errors e2e test, and `init` and the container flow needing no network. |
+| TEST-013 | [~] | x86-64 standalone, worker and coordinator tested; coordinator cross-built for aarch64 (gnu and musl) but not run (no qemu-user or ARM host; pi-sim unreachable); macOS not tested. |
+| TEST-014 | [~] | x86-64 and container measurements in benchmarks.md (startup, idle and peak RSS, API latency, event throughput, reconnect latency, database growth). Missing: ARM64 numbers (blocked on pi-sim or hardware) and a memory-pressure test. |
+| TEST-015 | [x] | benchmarks.md labels every figure by platform (x86-64 host, container on x86-64) and states the Pi Zero 2 W was not measured; no emulated result has been recorded yet. |
+| TEST-016 | [x] | .github/workflows/test.yml: Python job (also builds the coordinator for cross-component tests), coordinator job (fmt, clippy, test), web job (typecheck, build, Playwright), mypy job. |
+| TEST-017 | [~] | Depends on the final step 11 gate (full suite, coverage, cargo test, Playwright) on the final tree, which is not complete. |
+| QUAL-001 | [x] | DECISIONS.md D1 names one owner per business rule; the coordinator and web call the worker's command layer instead of reimplementing it (ARCH-004). |
+| QUAL-002 | [x] | Typed dataclasses and a command catalog in Python (mypy job covers bridge*.py), strict TypeScript (npm run typecheck), Rust with clippy in CI. |
+| QUAL-003 | [x] | No plugin framework or generic abstraction layer: one stdlib WebSocket client, one command layer, one coordinator crate with a small module set. |
+| QUAL-004 | [~] | Dependencies are small: Python stdlib only; Rust avoids aws-lc and a second TLS stack (coordinator/Cargo.toml); npm has two runtime packages. No dependency audit (cargo audit, npm audit) has been run or recorded. |
+| QUAL-005 | [x] | Stable error codes and uncertain outcomes are reported, not hidden (tests/test_bridge_commands.py test_error_mapping_is_stable, test_unexpected_failure_of_a_mutation_is_uncertain; coordinator errors carry error.code). |
+| QUAL-006 | [x] | Bounded worker audit log with rotation (tests/test_bridge_worker.py test_audit_rotates_and_survives_bad_lines_and_write_failures), coordinator /diagnostics and bounded tables; container logs go to stdout; no secrets logged. |
+| QUAL-007 | [~] | protocol.md, coordinator.md, install.md, operations.md, threat-model.md and a README paragraph exist; step 12 (README and CLI help for --target and worker, final troubleshooting pass) is not done. |
+| QUAL-008 | [~] | protocol.md is normative for the wire format and other docs refer to it, but the step 12 pass to remove duplication has not been done. |
+| QUAL-009 | [x] | One focused Opus security review (DECISIONS.md D7) and orchestrator review of each delegated slice before commit (WORKLOG.md: 'reviewed, committed'). |
+| QUAL-010 | [x] | llm_tools diff against main is limited to Bridge distributed modules and additive terminal and store helpers (git diff --stat main..HEAD -- llm_tools); no unrelated refactoring. |
+| CONV-001 | [~] | Steps 1-10 complete and pushed; step 11 (hardening: SEC-009 review done, DECISIONS.md D7) nearly complete; step 12 (documentation and final verification) not done. |
+| CONV-002 | [x] | Each step was committed with focused tests and a full-suite gate before the push (WORKLOG.md verification column). |
+| CONV-003 | [x] | The command layer and protocol (steps 2 and 4) were fixed before the worker, coordinator, CLI and web were built on them (commit order 8a662e2, b3c3771, 59c2d4b, b8a09a1). |
+| CONV-004 | [x] | Sequential by default; parallel agents only for disjoint directories (coordinator versus web and Python) with at most three active. |
+| CONV-005 | [x] | Focused tests per commit and full gates at each step boundary (WORKLOG.md). |
+| CONV-006 | [x] | Defects were fixed at the cause, for example the terminal snapshot (WORKLOG.md 18:26Z) and security findings H1-L7 with tests that fail on revert (D7). |
+| CONV-007 | [x] | Architecture decisions D1-D7 were kept; no accepted decision was reversed. |
+| CONV-008 | [x] | WORKLOG.md and the register are updated in batches after work units, with the next action recorded. |
+| CONV-009 | [x] | Steps were pushed only after the full suite and coverage gates passed (step 10 push at 0952c13 after a green gate: 92% total, 94% Bridge). |
+| CONV-010 | [x] | Blocked pi-sim and hardware work was recorded in WORKLOG.md (18:46Z) and independent work continued. |
+| CONV-011 | [x] | No mandatory requirement was relaxed; unmet items stay open in this register. |
+| CONV-012 | [~] | Work continues: step 11 nearly done and step 12 outstanding; externally blocked ARM64 verification remains. |
 
 ## Operator addendum (2026-11-05, task revision 4)
 
@@ -181,5 +181,5 @@ Extends OPS-001, COORD-009, NET-003 and TEST-013/014/015; tracked here as A1-A5 
 - A1 [x] No Raspberry-Pi-specific code or configuration (checked: no Pi device checks or paths in coordinator/, deploy/, container/, llm_tools/); Pi Zero 2 W is a documented target profile in install.md.
 - A2 [~] Done on x86-64: container/Dockerfile, container/build.sh (amd64+arm64 static musl, git archive of one commit, SOURCE_DATE_EPOCH), container/compose.yaml (loopback default, 96 MiB from measured 48 MiB peak); full admin flow verified through `docker compose run/exec` (install.md, benchmarks.md). Pending: arm64 image run on the emulated Pi. Original item: Coordinator as a multi-arch (amd64/arm64) non-root OCI image, read-only root, volumes, HEALTHCHECK, loopback-default compose file, measured memory limit for a 512 MB shared host; admin tasks via `docker compose run`/`docker exec`; one set of runtime defaults shared with systemd.
 - A3 [x] DECISIONS.md D6: no worker image. Original item: Decision on an optional worker image recorded in DECISIONS.md; workers native by default.
-- A4 [ ] ARM64 deployment, container and resource checks on the emulated Pi `pi-sim` (QEMU raspi3b, DietPi Trixie), labelled "emulated (QEMU TCG)"; physical Pi `[!]` until the hardware arrives (expected 2026-11-06).
-- A5 [ ] Generic deployment docs plus one marked Pi Zero 2 W target-profile section.
+- A4 [!] Blocked: pi-sim SSH on port 2222 still times out (`timeout 30 ssh -o BatchMode=yes -p 2222 root@127.0.0.1 true` exit 124 on 2026-11-05; not modified), and the physical Pi arrives 2026-11-06. Not started: ARM64 deployment, container and resource checks on the emulated Pi `pi-sim` (QEMU raspi3b, DietPi Trixie), labelled "emulated (QEMU TCG)"; physical Pi `[!]` until the hardware arrives (expected 2026-11-06).
+- A5 [~] Generic deployment docs exist (install.md container and native sections) and install.md has a marked `Target profile: Raspberry Pi Zero 2 W` section, but it holds only a sizing note: no measured memory headroom, microSD, swap/zram or Wi-Fi findings yet. Original item: Generic deployment docs plus one marked Pi Zero 2 W target-profile section.
