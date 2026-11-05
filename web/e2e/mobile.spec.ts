@@ -190,15 +190,15 @@ test.describe("terminal on a phone", () => {
         await tap(k);
         await expect.poll(last).toEqual([0x1b, 0x5b, code]);
       }
-      // Ctrl is sticky for one key: Ctrl then "c" is 0x03, and the next "c" is plain.
+      // Ctrl is sticky for one key: Ctrl then "a" is 0x01, and the next "a" is plain.
       await tap("ctrl");
       await expect(page.locator("#key-ctrl")).toHaveAttribute("aria-pressed", "true");
       await page.locator("#terminal-host .xterm-helper-textarea").focus();
-      await page.keyboard.type("c");
-      await expect.poll(last).toEqual([0x03]);
+      await page.keyboard.type("a");
+      await expect.poll(last).toEqual([0x01]);
       await expect(page.locator("#key-ctrl")).toHaveAttribute("aria-pressed", "false");
-      await page.keyboard.type("c");
-      await expect.poll(last).toEqual([0x63]);
+      await page.keyboard.type("a");
+      await expect.poll(last).toEqual([0x61]);
 
       // Portrait and landscape: the terminal and the key bar stay inside the viewport.
       const vp = page.viewportSize()!;

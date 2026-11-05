@@ -49,19 +49,28 @@ export function overview(root: HTMLElement): () => void {
 
   async function loadSnapshots(): Promise<void> {
     const targets = store.missions.filter((m) => ACTIVE.has(m.mission.status.toUpperCase()) && worker(m.worker)?.state === "online" && store.conn === "live");
+    // Missions doing something come first; the rest by most recent update. Only the first few are asked.
+    const rank = (m: MissionEntry) => ["RUNNING", "PAUSED", "STOPPING", "CREATED"].indexOf(m.mission.status.toUpperCase());
+    targets.sort((a, b) => rank(a) - rank(b) || (b.mission.updated_at ?? "").localeCompare(a.mission.updated_at ?? ""));
     eligible = targets.length;
     const picked = targets.slice(0, MAX_SNAPSHOTS);
-    const results = await Promise.all(
-      picked.map(async (m: MissionEntry): Promise<Snapshot | null> => {
+    // A few at a time: each answer is a full status snapshot, and a worker should not be asked for a dozen at once.
+    const results: Array<Snapshot | null> = new Array(picked.length).fill(null);
+    let next = 0;
+    const lane = async (): Promise<void> => {
+      while (next < picked.length && !disposed) {
+        const i = next++;
+        const m = picked[i] as MissionEntry;
         try {
           const row = await api.command(m.worker, "mission.status", m.mission.id, {}, 8000);
           const r = (row.result?.result ?? {}) as { task_counts?: Record<string, number>; needs_you?: Snapshot["needs"] };
-          return { worker: m.worker, id: m.mission.id, name: m.mission.name, counts: r.task_counts ?? {}, needs: r.needs_you ?? null };
+          results[i] = { worker: m.worker, id: m.mission.id, name: m.mission.name, counts: r.task_counts ?? {}, needs: r.needs_you ?? null };
         } catch {
-          return null;
+          results[i] = null;
         }
-      }),
-    );
+      }
+    };
+    await Promise.all([lane(), lane(), lane()]);
     if (disposed) return;
     snapshots = results.filter((s): s is Snapshot => s !== null);
     checked = picked.length;

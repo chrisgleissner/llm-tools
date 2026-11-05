@@ -53,7 +53,7 @@ export async function startSeededWorker(coord: Coordinator, opts: { name?: strin
   if (n > 0) execFileSync(python, ["-c", SEED, String(n), tmpdir()], { env, cwd: repo });
   const token = coord.cli("worker", "add", name);
   bridge(["worker", "enroll", "--name", name, "--coordinator", coord.url.replace("https://", "wss://"), "--token-file", "-", "--ca-file", join(coord.dir, "ca.pem"), ...(opts.control === false ? [] : ["--allow-control"])], token);
-  const child: ChildProcess = spawn(python, [join(repo, "llm-bridge"), "worker", "run"], { env, cwd: repo, stdio: "ignore" });
+  const child: ChildProcess = spawn(python, [join(repo, "llm-bridge"), "worker", "run"], { env, cwd: repo, stdio: process.env["E2E_WORKER_LOG"] ? "inherit" : "ignore" });
   return {
     state,
     env,

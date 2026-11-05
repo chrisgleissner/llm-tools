@@ -145,7 +145,7 @@ p { margin: var(--space-2) 0; }
   display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-4);
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
-.brand { display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 700; color: var(--text); text-decoration: none; font-size: var(--text-lg); min-height: var(--target); }
+.brand { white-space: nowrap; display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 700; color: var(--text); text-decoration: none; font-size: var(--text-lg); min-height: var(--target); }
 .brand .icon { color: var(--accent); }
 .top .spacer { flex: 1 1 auto; }
 .tools { display: flex; align-items: center; gap: var(--space-2); }
@@ -183,7 +183,7 @@ main.auth { max-width: none; min-height: 100vh; min-height: 100dvh; padding: var
   main { padding-bottom: var(--space-7); width: 100%; }
 }
 
-.conn { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm); padding: 2px 10px; min-height: 28px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+.conn { white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm); padding: 2px 10px; min-height: 28px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
 .conn .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
 .conn.live .dot { background: var(--ok); }
 .conn.reconnecting .dot { background: var(--warn); }
@@ -425,4 +425,11 @@ pre.cmd { background: var(--surface-2); border-radius: var(--radius-md); padding
 }
 @media (prefers-reduced-motion: reduce) {
   .conn.reconnecting .dot, .btn.busy::after { animation: none; }
+}
+
+@media (max-width: 420px) {
+  /* Keep the header on one line on the narrowest phones: the logo stays, its name stays available to screen readers. */
+  .brand-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .account-btn .icon { display: none; }
+  .account-btn { padding: 0 var(--space-1) !important; }
 }

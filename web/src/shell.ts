@@ -179,7 +179,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
     h(
       "header",
       { class: "top" },
-      h("a", { class: "brand", href: "/" }, icon("shield", 24), "LLM Bridge"),
+      h("a", { class: "brand", href: "/" }, icon("shield", 24), h("span", { class: "brand-text" }, "LLM Bridge")),
       h("span", { class: "spacer" }),
       h("div", { class: "tools" }, h("span", { role: "status", "aria-label": "Connection state" }, conn), themeBtn, accountMenu(hooks)),
     ),

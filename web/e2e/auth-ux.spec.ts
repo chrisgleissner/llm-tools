@@ -222,16 +222,16 @@ test.describe("account menu and password change", () => {
   test("password change checks the current password and the new password rules inline, then signs out", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await navTo(page, "Account");
-    await page.getByLabel("Current password").fill("not my password!");
+    await page.getByLabel("Current password", { exact: true }).fill("not my password!");
     await page.getByLabel("New password", { exact: true }).fill("another long passphrase");
-    await page.getByLabel("Repeat new password").fill("another long passphrase");
+    await page.getByLabel("Repeat new password", { exact: true }).fill("another long passphrase");
     await page.getByRole("button", { name: "Change password" }).click();
     await expect(page.locator("#current-password-error")).toContainText("not correct");
-    await page.getByLabel("Current password").fill(PASSWORD);
-    await page.getByLabel("Repeat new password").fill("different");
+    await page.getByLabel("Current password", { exact: true }).fill(PASSWORD);
+    await page.getByLabel("Repeat new password", { exact: true }).fill("different");
     await page.getByRole("button", { name: "Change password" }).click();
     await expect(page.locator("#new-password-confirm-error")).toContainText("do not match");
-    await page.getByLabel("Repeat new password").fill("another long passphrase");
+    await page.getByLabel("Repeat new password", { exact: true }).fill("another long passphrase");
     await page.getByRole("button", { name: "Change password" }).click();
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await expect(page.locator("#login-notice")).toContainText("Every session was signed out");

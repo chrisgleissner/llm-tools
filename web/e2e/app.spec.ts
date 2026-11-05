@@ -95,6 +95,8 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
   });
   await page.keyboard.press("Tab");
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
+  // Keyboard focus is visible: the focused element has an outline.
+  expect(await page.evaluate(() => getComputedStyle(document.activeElement as Element).outlineStyle)).not.toBe("none");
   const name = () => page.evaluate(() => (document.activeElement?.getAttribute("aria-label") || document.activeElement?.textContent || "").trim().slice(0, 40));
   const reached: string[] = [];
   for (let i = 0; i < 14; i++) {
@@ -105,9 +107,6 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
   for (const label of ["LLM Bridge", "Overview", "Workers", "Missions", wide ? "Diagnostics" : "More"]) expect(reached.some((r) => r.includes(label)), `${label} in ${reached.join(" | ")}`).toBe(true);
   expect(reached.some((r) => r.startsWith("Theme:"))).toBe(true);
   expect(reached.some((r) => r.includes("account menu"))).toBe(true);
-  // Focus is visible: the focused element has a non-zero outline.
-  const outline = await page.evaluate(() => getComputedStyle(document.activeElement as Element).outlineStyle);
-  expect(outline).not.toBe("none");
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" }).focus();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/workers$/);
@@ -129,9 +128,9 @@ test("theme toggle cycles and persists", async ({ page, coord }) => {
 test("password change signs out and the new password works", async ({ page, coord }) => {
   await setupViaUi(page, coord);
   await navTo(page, "Account");
-  await page.getByLabel("Current password").fill(PASSWORD);
+  await page.getByLabel("Current password", { exact: true }).fill(PASSWORD);
   await page.getByLabel("New password", { exact: true }).fill("another long passphrase");
-  await page.getByLabel("Repeat new password").fill("another long passphrase");
+  await page.getByLabel("Repeat new password", { exact: true }).fill("another long passphrase");
   await page.getByRole("button", { name: "Change password" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   await expect(page.locator("#login-notice")).toContainText("Password changed");
