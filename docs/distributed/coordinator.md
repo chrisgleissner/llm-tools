@@ -109,9 +109,9 @@ Public:
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/healthz` | `{"status":"ok"}` only. |
-| GET | `/api/v1/auth/state` | `{"setup_required": bool, "authenticated": bool}` |
+| GET | `/api/v1/auth/state` | `{setup_required, authenticated, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
-| POST | `/api/v1/auth/login` | `{username, password}`; sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
+| POST | `/api/v1/auth/login` | `{username, password, remember?}`; `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
 
 Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 
@@ -122,7 +122,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/workers` | name, id, state (`online`/`offline`), last_seen, versions, platform, capabilities. |
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
-| GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). |
+| GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (1-500; without it every match is returned) and `offset`. The reply adds `total` (matches before paging), `offset` and `statuses` (match counts per status, ignoring the status filter). |
 | POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. A command for an offline worker is queued with `state: pending` and delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. Same `request_id` returns the existing journal entry. |
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
 | GET | `/events?worker=&after=&limit=` | Stored events, ascending. |

@@ -104,7 +104,7 @@ jobs:
   web:
     name: web UI (TypeScript, Playwright)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -141,7 +141,28 @@ jobs:
           npm run typecheck
           npm run build
           npx playwright install --with-deps chromium firefox
-          npm run test:e2e
+          # Behaviour, layout, accessibility and mobile tests on all four projects. The screenshot comparison is
+          # skipped here because font rendering differs between machines; it runs in the pinned image below.
+          BRIDGE_SKIP_VISUAL=1 npm run test:e2e
+      - name: Visual regression (official Playwright image, Chromium desktop and Pixel 4)
+        working-directory: web
+        run: |
+          version=$(node -p "require('@playwright/test/package.json').version")
+          docker run --rm --ipc=host -e CI=1 -e CARGO_TARGET_DIR=/work/coordinator/target \
+            -v "$GITHUB_WORKSPACE":/work -w /work/web "mcr.microsoft.com/playwright:v${version}-noble" \
+            node node_modules/@playwright/test/cli.js test e2e/screenshots.spec.ts --project=chromium-desktop --project=chromium-mobile
+      - name: Keep the Playwright report and the load measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-playwright
+          path: |
+            web/playwright-report
+            web/test-results/load-metrics.json
+            web/test-results/**/*-actual.png
+            web/test-results/**/*-diff.png
+          if-no-files-found: ignore
+          retention-days: 14
 
   # Static type check of the Bridge modules (llm_tools/bridge*.py and terminal.py; see [tool.mypy] in
   # pyproject.toml). mypy is a development tool and is not a runtime dependency.

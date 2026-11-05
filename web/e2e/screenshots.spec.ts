@@ -92,7 +92,7 @@ for (const theme of ["light", "dark"] as const) {
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.matches("input, textarea") || (document.activeElement as HTMLElement | null)?.blur?.());
       const axe = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"]).disableRules(["region"]).analyze();
       expect(axe.violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`), `axe (${s.name}, ${theme})`).toEqual([]);
-      if (info.project.name.startsWith("chromium") && browserName === "chromium") await expect(page).toHaveScreenshot(`${s.name}-${theme}.png`);
+      if (process.env["BRIDGE_SKIP_VISUAL"] !== "1" && info.project.name.startsWith("chromium") && browserName === "chromium") await expect(page).toHaveScreenshot(`${s.name}-${theme}.png`);
     });
   }
 }
