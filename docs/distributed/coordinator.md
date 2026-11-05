@@ -52,6 +52,8 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
 | GET | `/events?worker=&after=&limit=` | Stored events, ascending. |
 | GET | `/stream` | WebSocket; pushes `worker`, `event` and `command` updates. |
+| GET | `/terminal?worker=&mission=&mode=view\|write&cols=&rows=` | WebSocket for one remote terminal session. Session cookie (with exact Origin) or API token. The coordinator opens the session on the worker with `terminal.open` and relays the frames of `protocol.md` (Terminal sessions) unchanged after validation: browser input at most 64 KiB decoded, `r` only with 1–1000 columns and rows. At most 16 sessions per worker and 64 in total (`x` frame, close 1013). A viewer more than 256 KiB behind is closed with 1013. Each open is audited as `terminal.open`. The worker, not the coordinator, decides the writer role. |
+| GET | `/worker/terminal/{session_id}` | Worker side of a session; worker bearer token; accepted once, only for a session opened for that worker. |
 | GET | `/diagnostics` | versions, uptime, RSS, DB size, connected workers, queue depths. |
 
 Every state-changing request authenticated by cookie needs header
@@ -75,3 +77,10 @@ SQLite (WAL, `synchronous=FULL`) with `PRAGMA user_version` migrations:
 `workers`, `missions`, `events`, `commands`, `admin`, `sessions`,
 `api_tokens`, `audit`. Passwords use Argon2id (19 MiB, t=2, p=1, unique salt);
 session and API tokens are 32 random bytes stored as SHA-256 hashes.
+
+## Content Security Policy
+
+Static files are served with `default-src 'self'`, `script-src 'self'` and
+`style-src 'self' 'unsafe-inline'`. Inline styles are allowed because xterm.js
+6 creates `<style>` elements at runtime and has no nonce option; scripts stay
+restricted to the coordinator's own files.

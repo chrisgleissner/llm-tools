@@ -30,6 +30,11 @@ def test_control_mode_decoding():
     assert stream.parse_control_line(b"%extended-output %3 12 : a : b\\015\n", "%3") == b"a : b\r"
 
 
+def test_snapshot_keeps_the_top_row_and_restores_the_cursor():
+    assert stream.snapshot_bytes("a\nb\n", 3, 1) == b"a\r\nb\x1b[2;4H"
+    assert stream.snapshot_bytes("", 0, 0) == b"\x1b[1;1H"
+
+
 def test_writer_registry_allows_one_writer_per_mission():
     registry = stream.WriterRegistry()
     assert registry.acquire("m", "a") and registry.acquire("m", "a")
@@ -270,7 +275,8 @@ def test_real_station_streams_output_and_types_exact_bytes(enrolled):
     try:
         wait_for(lambda: "ready" in backend.capture(handle, pane="provider"), timeout=scaled(10), interval=0.05, message="provider did not start")
         source = stream.TmuxPaneSource(mission_id)
-        assert b"ready" in source.snapshot()
+        screen = source.snapshot()
+        assert b"ready" in screen and screen.endswith(b"H") and not screen.endswith(b"\r\nH")
         assert source.size()[0] > 0 and source.local_clients() == 0
         source.send_input(b"hello \\ world\r")
         seen = bytearray()

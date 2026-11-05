@@ -1,3 +1,4 @@
+@import "@xterm/xterm/css/xterm.css";
 :root {
   color-scheme: light;
   --bg: #ffffff;
@@ -97,6 +98,7 @@ main.login { display: flex; justify-content: center; padding-top: 48px; }
 .btn:disabled { opacity: 1; color: var(--muted); border-style: dashed; cursor: not-allowed; }
 .btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 .btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+.btn.primary:disabled { background: var(--bg); color: var(--muted); border-color: var(--border); }
 .btn.danger { background: var(--bg); color: var(--danger); border-color: var(--danger); }
 .dialog .btn.danger { background: var(--danger); color: var(--on-danger); }
 
@@ -137,6 +139,10 @@ table.kv th { width: 40%; font-weight: 600; }
 .events li { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .ev-kind { font-weight: 600; }
 .ev-data { display: block; color: var(--muted); white-space: pre-wrap; word-break: break-all; }
+.term-region { margin-top: 24px; }
+.term-status { margin: 8px 0; font-weight: 600; }
+.term-host { background: #000; border: 1px solid var(--border); border-radius: 8px; padding: 8px; height: min(60vh, 36rem); min-height: 12rem; overflow: auto; }
+.term-host .xterm:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
 .placeholder { border: 1px dashed var(--border); border-radius: 8px; padding: 4px 16px 12px; margin-top: 24px; }
 
 .toasts { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 8px; max-width: min(92vw, 380px); z-index: 30; }

@@ -118,7 +118,7 @@ that worker and that has not been attached yet. Frames on it are JSON text:
 
 | Frame | Direction | Meaning |
 |---|---|---|
-| `{"t":"o","d":"<base64>"}` | worker → coordinator | Output bytes of the provider pane. The first `o` frame is a full screen snapshot preceded by a clear-screen sequence. |
+| `{"t":"o","d":"<base64>"}` | worker → coordinator | Output bytes of the provider pane. The first `o` frame is a full screen snapshot: a clear-screen sequence, the pane rows joined by CRLF without a trailing newline, then `CSI row;col H` placing the cursor where the pane's cursor is. |
 | `{"t":"s","cols":N,"rows":N,"mode":"view"\|"write","reason":"..."}` | worker → coordinator | Pane size and granted mode; sent first and whenever they change. |
 | `{"t":"x","reason":"..."}` | worker → coordinator | Session ended; the worker closes the socket. |
 | `{"t":"i","d":"<base64>"}` | coordinator → worker | Keyboard or paste input, at most 64 KiB decoded. Dropped by the worker unless the session holds the writer role. |

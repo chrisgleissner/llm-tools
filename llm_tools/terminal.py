@@ -804,6 +804,13 @@ class TmuxTerminalBackend:
         columns, rows = result.stdout.split()
         return int(columns), int(rows)
 
+    def pane_cursor(self, handle: TerminalHandle, *, pane: str) -> tuple[int, int]:
+        """The pane's cursor as zero-based (column, row)."""
+        self._require_owned(handle)
+        result = self._run(handle.socket_path, "display-message", "-p", "-t", self._target(handle, pane), "#{cursor_x} #{cursor_y}", capture=True)
+        column, row = result.stdout.split()
+        return int(column), int(row)
+
     def resize_station(self, handle: TerminalHandle, *, columns: int, rows: int) -> None:
         """Resize the station window; callers apply this only when no local client is attached."""
         self._require_owned(handle)

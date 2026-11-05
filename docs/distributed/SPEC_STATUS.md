@@ -79,7 +79,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | PROTO-006 | [x] | Task mutations accept expected_revision, checked under the SQLite write lock; mismatch is outcome rejected, code conflict (test_stale_revision_*, test_conflicting_amendments_only_one_wins). |
 | PROTO-007 | [ ] |  |
 | PROTO-008 | [ ] |  |
-| PROTO-009 | [ ] |  |
+| PROTO-009 | [x] | Separate WebSocket per terminal session (`/api/v1/worker/terminal/<id>`, `/api/v1/terminal`); control connection only opens/closes. Worker: tests/test_bridge_terminal_stream.py; coordinator: coordinator/tests/terminal.rs. |
 | PROTO-010 | [x] | Coordinator increments/persists generation and closes older connection (cargo test); worker persists max generation and rejects older (test_generation_fencing). |
 | NET-001 | [ ] |  |
 | NET-002 | [ ] |  |
@@ -106,7 +106,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | SEC-003 | [ ] |  |
 | SEC-004 | [ ] |  |
 | SEC-005 | [ ] |  |
-| SEC-006 | [ ] |  |
+| SEC-006 | [x] | Worker `WriterRegistry`: one writer per mission, none while a local tmux client is attached, view only on read-only workers; coordinator never grants roles. Tests: test_second_writer_and_local_client_get_view_only, test_writer_role_is_dropped_when_a_local_client_attaches, Playwright terminal.spec.ts (second tab view only, input never reaches the pane). |
 | SEC-007 | [~] | Worker: `<state>/worker/audit.jsonl` (0600, 1 MiB + one rotation) records enrolment, connections, mutating/refused commands and terminal sessions with input byte counts only; `llm-bridge worker audit` (test_audit_*). Coordinator: `audit` table for login, setup, password, worker and token actions. Review of coverage pending SEC-009. |
 | SEC-008 | [x] | docs/distributed/threat-model.md: assets, five trust boundaries, threats with mitigations and residual risk, out-of-scope items. |
 | SEC-009 | [ ] |  |
@@ -116,8 +116,8 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | WEB-004 | [ ] |  |
 | WEB-005 | [ ] |  |
 | WEB-006 | [ ] |  |
-| WEB-007 | [ ] |  |
-| WEB-008 | [ ] |  |
+| WEB-007 | [x] | @xterm/xterm 6.0.0 with @xterm/addon-fit 0.11.0 (web/src/terminal.ts). |
+| WEB-008 | [x] | Resize from `s` frames and `r` in write mode, keyboard input, copy (Ctrl+Shift+C/Cmd+C) and paste, reconnect with 0.5–8 s backoff and fresh snapshot, take/release writer. Playwright terminal.spec.ts against a real worker and tmux station on Chromium and Firefox, desktop and mobile (60 tests pass). |
 | WEB-009 | [ ] |  |
 | WEB-010 | [ ] |  |
 | WEB-011 | [ ] |  |

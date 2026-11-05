@@ -52,6 +52,9 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
         "events" => (&["after", "through", "events"], &[]),
         "events.nack" => (&["expected_after"], &[]),
         "ping" | "pong" => (&[], &[]),
+        "terminal.open" => (&["session_id", "mission_id", "mode", "cols", "rows"], &[]),
+        "terminal.close" => (&["session_id"], &[]),
+        "terminal.status" => (&["session_id", "state", "mode", "reason"], &[]),
         "error" => (&["code", "message"], &["details", "in_reply_to"]),
         _ => return None,
     })
@@ -166,6 +169,32 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
             uint(p.get("event_cursor"), "event_cursor", 0)?;
             if !p["capabilities"].is_array() || !p["missions"].is_array() {
                 return perr("invalid-message", "hello: capabilities and missions must be lists");
+            }
+        }
+        "terminal.open" | "terminal.close" | "terminal.status" => {
+            if !p["session_id"].as_str().is_some_and(valid_id) {
+                return perr("invalid-message", "session_id must be 1-128 characters of [A-Za-z0-9_.-]");
+            }
+            match kind {
+                "terminal.open" => {
+                    if !p["mission_id"].is_string() || !matches!(p["mode"].as_str(), Some("view" | "write")) {
+                        return perr("invalid-message", "terminal.open: bad mission_id or mode");
+                    }
+                    for name in ["cols", "rows"] {
+                        if uint(p.get(name), name, 1)? > 1000 {
+                            return perr("invalid-message", format!("{name} must be at most 1000"));
+                        }
+                    }
+                }
+                "terminal.status" => {
+                    if !matches!(p["state"].as_str(), Some("opened" | "refused" | "closed"))
+                        || !matches!(p["mode"].as_str(), Some("view" | "write"))
+                        || !p["reason"].is_string()
+                    {
+                        return perr("invalid-message", "terminal.status: bad state, mode or reason");
+                    }
+                }
+                _ => {}
             }
         }
         "error" => {

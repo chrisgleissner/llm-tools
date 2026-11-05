@@ -1,13 +1,43 @@
 //! In-memory registry of live worker connections and the `/stream` broadcast channel.
 
+use axum::extract::ws::WebSocket;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 pub const MAX_WORKER_CONNECTIONS: usize = 64;
 pub const OUTBOUND_QUEUE: usize = 256;
 pub const STREAM_BUFFER: usize = 256;
+pub const MAX_TERMINALS_PER_WORKER: usize = 16;
+pub const MAX_TERMINALS: usize = 64;
+
+/// A `terminal.status` payload relayed from the worker's control connection.
+pub struct TermStatus {
+    pub state: String,
+    pub mode: String,
+    pub reason: String,
+}
+
+struct TermEntry {
+    worker: String,
+    attach: Option<oneshot::Sender<WebSocket>>,
+    status: mpsc::UnboundedSender<TermStatus>,
+}
+
+/// A terminal session this coordinator opened. Dropping it frees the session slot.
+pub struct TermReg {
+    hub: Arc<Hub>,
+    pub id: String,
+    pub attach: oneshot::Receiver<WebSocket>,
+    pub status: mpsc::UnboundedReceiver<TermStatus>,
+}
+
+impl Drop for TermReg {
+    fn drop(&mut self) {
+        self.hub.terms().remove(&self.id);
+    }
+}
 
 pub type CloseSignal = Option<(u16, &'static str)>;
 
@@ -33,6 +63,7 @@ pub enum SendResult {
 
 pub struct Hub {
     conns: Mutex<HashMap<String, ConnHandle>>,
+    terms: Mutex<HashMap<String, TermEntry>>,
     pub stream: broadcast::Sender<Arc<str>>,
     next_id: AtomicU64,
     active: AtomicUsize,
@@ -51,6 +82,7 @@ impl Hub {
     pub fn new() -> Arc<Hub> {
         Arc::new(Hub {
             conns: Mutex::new(HashMap::new()),
+            terms: Mutex::new(HashMap::new()),
             stream: broadcast::channel(STREAM_BUFFER).0,
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
@@ -122,6 +154,80 @@ impl Hub {
             text,
             command_id: Some(command_id.to_string()),
         }) {
+            Ok(()) => SendResult::Queued,
+            Err(_) => {
+                let _ = h.close.send(Some((1013, "outbound queue full")));
+                SendResult::Full
+            }
+        }
+    }
+
+    fn terms(&self) -> std::sync::MutexGuard<'_, HashMap<String, TermEntry>> {
+        self.terms.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Reserve a terminal session slot for `worker`; `Err` carries the refusal reason.
+    pub fn terminal_register(self: &Arc<Self>, worker: &str) -> Result<TermReg, &'static str> {
+        let mut terms = self.terms();
+        if terms.len() >= MAX_TERMINALS {
+            return Err("too many terminal sessions on this coordinator");
+        }
+        if terms.values().filter(|t| t.worker == worker).count() >= MAX_TERMINALS_PER_WORKER {
+            return Err("too many terminal sessions for this worker");
+        }
+        let id = loop {
+            let id = crate::protocol::new_id();
+            if !terms.contains_key(&id) {
+                break id;
+            }
+        };
+        let (attach_tx, attach) = oneshot::channel();
+        let (status_tx, status) = mpsc::unbounded_channel();
+        terms.insert(
+            id.clone(),
+            TermEntry {
+                worker: worker.to_string(),
+                attach: Some(attach_tx),
+                status: status_tx,
+            },
+        );
+        Ok(TermReg {
+            hub: self.clone(),
+            id,
+            attach,
+            status,
+        })
+    }
+
+    /// Claim the attach slot of a session opened for `worker`; only the first claim succeeds.
+    pub fn terminal_claim(&self, session_id: &str, worker: &str) -> Option<oneshot::Sender<WebSocket>> {
+        let mut terms = self.terms();
+        let entry = terms.get_mut(session_id)?;
+        if entry.worker != worker {
+            return None;
+        }
+        entry.attach.take()
+    }
+
+    /// Relay a worker's `terminal.status` to the session's viewer; ignored for a session of another worker.
+    pub fn terminal_status(&self, worker: &str, session_id: &str, status: TermStatus) {
+        if let Some(entry) = self.terms().get(session_id) {
+            if entry.worker == worker {
+                let _ = entry.status.send(status);
+            }
+        }
+    }
+
+    pub fn terminal_count(&self) -> usize {
+        self.terms().len()
+    }
+
+    /// Queue a non-command envelope (for example `terminal.open`) on the worker's control connection.
+    pub fn send_to_worker(&self, name: &str, kind: &str, payload: serde_json::Value) -> SendResult {
+        let m = self.map();
+        let Some(h) = m.get(name) else { return SendResult::Offline };
+        let text = crate::protocol::encode(kind, &h.worker_id, h.generation, payload);
+        match h.tx.try_send(Outbound { text, command_id: None }) {
             Ok(()) => SendResult::Queued,
             Err(_) => {
                 let _ = h.close.send(Some((1013, "outbound queue full")));

@@ -335,6 +335,20 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             }
             Ok(vec![])
         }
+        "terminal.status" => {
+            let p = &m.payload;
+            let text = |k: &str| p[k].as_str().unwrap_or_default().to_string();
+            st.hub.terminal_status(
+                name,
+                p["session_id"].as_str().unwrap_or_default(),
+                crate::hub::TermStatus {
+                    state: text("state"),
+                    mode: text("mode"),
+                    reason: text("reason"),
+                },
+            );
+            Ok(vec![])
+        }
         other => reply("unsupported-message", &format!("the coordinator does not accept {other} here")),
     }
 }

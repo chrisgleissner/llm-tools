@@ -55,6 +55,12 @@ def parse_control_line(line: bytes, pane_id: str) -> bytes | None:
     return None
 
 
+def snapshot_bytes(text: str, column: int, row: int) -> bytes:
+    """Screen text as terminal bytes ending with the cursor at zero-based ``column``, ``row``."""
+    body = text[:-1] if text.endswith("\n") else text
+    return body.replace("\n", "\r\n").encode("utf-8", "replace") + f"\x1b[{row + 1};{column + 1}H".encode("ascii")
+
+
 class WriterRegistry:
     """At most one writer session per mission, process-wide (SEC-006)."""
 
@@ -112,8 +118,11 @@ class TmuxPaneSource:
         self._paused = False
 
     def snapshot(self) -> bytes:
+        """The visible screen, rows joined by CRLF with no trailing newline (which would scroll
+        the top row away), followed by a move to the pane's cursor position."""
         text = self.backend.capture(self.handle, pane="provider", ansi=True)
-        return text.replace("\n", "\r\n").encode("utf-8", "replace")
+        column, row = self.backend.pane_cursor(self.handle, pane="provider")
+        return snapshot_bytes(text, column, row)
 
     def size(self) -> tuple[int, int]:
         return self.backend.pane_size(self.handle, pane="provider")

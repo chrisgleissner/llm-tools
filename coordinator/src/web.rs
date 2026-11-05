@@ -97,7 +97,7 @@ fn csp(headers: &HeaderMap) -> String {
         .filter(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c)));
     let ws = host.map(|h| format!(" wss://{h}")).unwrap_or_default();
     format!(
-        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; \
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; \
          connect-src 'self'{ws}; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
     )
 }

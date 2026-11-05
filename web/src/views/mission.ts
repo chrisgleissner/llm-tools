@@ -2,6 +2,7 @@ import * as api from "../api";
 import type { BridgeEvent } from "../api";
 import { button, fill, h, isoTime, statusBadge } from "../dom";
 import { isStale, onStream, store, subscribe, worker } from "../store";
+import { terminalPanel } from "../terminal";
 import { announce, confirmDialog } from "../ui";
 
 const TASK_PAGE = 25;
@@ -25,12 +26,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   const statusBox = h("section", { "aria-labelledby": "ms-status", id: "mission-status" });
   const taskBox = h("section", { "aria-labelledby": "ms-tasks", id: "mission-tasks" });
   const eventBox = h("section", { "aria-labelledby": "ms-events", id: "mission-events" });
-  const termBox = h(
-    "section",
-    { id: "terminal-region", "aria-labelledby": "ms-term", class: "placeholder" },
-    h("h2", { id: "ms-term" }, "Terminal"),
-    h("p", { class: "muted" }, "The live terminal view is not available yet."),
-  );
+  const termPanel = terminalPanel(workerName, missionId);
+  const termBox = termPanel.element;
   root.append(header, statusBox, taskBox, eventBox, termBox);
 
   let snapshot: Record<string, unknown> | null = null;
@@ -310,6 +307,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     renderHeader();
     renderTasks();
     const now = online();
+    termPanel.setAvailable(now);
     if (now && !wasOnline) {
       void loadTasks();
       void loadSnapshot();
@@ -322,6 +320,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   renderStatus();
   renderTasks();
   renderEvents();
+  termPanel.setAvailable(online());
   void loadSnapshot();
   void loadTasks(0);
   void loadEvents();
@@ -329,5 +328,6 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     disposed = true;
     offStream();
     offStore();
+    termPanel.dispose();
   };
 }

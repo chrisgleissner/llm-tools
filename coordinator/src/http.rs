@@ -628,6 +628,8 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/diagnostics", get(diagnostics))
         .route("/api/v1/worker/connect", get(crate::ws_worker::connect))
+        .route("/api/v1/terminal", get(crate::terminal::browser))
+        .route("/api/v1/worker/terminal/{session_id}", get(crate::terminal::worker))
         .fallback(static_files)
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::map_response(security_headers))

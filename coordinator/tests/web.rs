@@ -35,7 +35,9 @@ async fn serves_index_and_assets_publicly_with_security_headers() {
     assert!(body.contains("<title>spa</title>"));
     assert_eq!(h["content-type"], "text/html; charset=utf-8");
     let csp = h["content-security-policy"].to_str().unwrap();
-    assert!(csp.contains("default-src 'self'") && csp.contains("script-src 'self'") && !csp.contains("unsafe-inline"));
+    assert!(csp.contains("default-src 'self'") && csp.contains("script-src 'self'") && csp.contains("style-src 'self' 'unsafe-inline';"));
+    // xterm.js injects <style> elements, so only style-src may allow inline styles; scripts never.
+    assert!(!csp.replace("style-src 'self' 'unsafe-inline';", "").contains("unsafe-inline"));
     assert!(csp.contains(&format!("wss://127.0.0.1:{}", env.addr.port())));
     assert_eq!(h["x-content-type-options"], "nosniff");
     assert_eq!(h["referrer-policy"], "no-referrer");

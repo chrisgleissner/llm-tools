@@ -141,7 +141,10 @@ test("static responses carry the security headers and the app logs no console er
   const r = await request.get(coord.url + "/");
   const h = r.headers();
   expect(h["content-security-policy"]).toContain("default-src 'self'");
-  expect(h["content-security-policy"]).not.toContain("unsafe-inline");
+  // xterm.js injects <style> elements, so only style-src allows 'unsafe-inline'; scripts stay 'self' only.
+  const csp = h["content-security-policy"] ?? "";
+  expect(csp).toContain("script-src 'self';");
+  expect(csp.replace("style-src 'self' 'unsafe-inline'", "")).not.toContain("unsafe-inline");
   expect(h["x-content-type-options"]).toBe("nosniff");
   expect(h["referrer-policy"]).toBe("no-referrer");
   expect(h["x-frame-options"]).toBe("DENY");
