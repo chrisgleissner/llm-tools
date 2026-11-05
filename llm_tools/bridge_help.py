@@ -64,7 +64,7 @@ on` opts in to RTC-backed sleep at an idle boundary with no active operation.
 Pause, stop and cancel changes made during sleep take effect after the armed
 wake. Stop and cancel are separate explicit operations.
 
-More: help keys, remote, prompts, markdown, providers, states, verification, recovery.
+More: help keys, remote, distributed, prompts, markdown, providers, states, verification, recovery.
 Every public command also has --help. ID and task numbers are placeholders.
 --mission accepts a unique ID prefix (4+ characters) and may be omitted when you
 run the command inside the mission's folder.""",
@@ -155,6 +155,30 @@ from a shell), or use terminals of the same size.
 Ctrl-] then d detaches only your own terminal and is safe over SSH. Text you
 copy in tmux copy mode (Ctrl-] [) reaches your local clipboard through OSC 52
 when your terminal supports it. See also: help keys.""",
+    "distributed": """Work on other machines through a coordinator
+
+Distributed use is optional; without it Bridge opens no network connection.
+A coordinator (a separate service, see docs/distributed/install.md) relays
+commands between this CLI, a browser and workers. A worker is a machine that
+runs missions and connects out to the coordinator.
+
+On a worker (once):
+  llm-bridge worker enroll --coordinator wss://HOST:8443 --name build-1 --token-file T --ca-file ca.pem
+  llm-bridge worker install-service      (or: llm-bridge worker run)
+A worker is read-only unless enrolled with --allow-control. Terminals are shared
+only with --allow-terminal-view or --allow-control. llm-bridge worker audit
+shows what remote clients did on this worker.
+
+On the machine you type on (once):
+  llm-bridge remote login --coordinator https://HOST:8443 --token-file T --ca-file ca.pem
+  llm-bridge worker list                 workers, connection state and last seen
+
+Then put --target WORKER before a command, for example:
+  llm-bridge --target build-1 mission list
+  llm-bridge --target build-1 task add --mission ID --file prompt.md
+The worker applies the same checks as a local command. A refused or offline
+worker is reported with the reason; an outcome that cannot be confirmed is
+reported as uncertain, never as success.""",
     "prompts": """Compose, import, amend and recover complete prompts
 
 A 30 KiB or larger document belongs in the multiline composer or a file, not a
@@ -539,5 +563,6 @@ Common commands
   pause / stop     Hold at an invocation boundary / stop controller
 
 Also: missions, finish, mission list, mission colour, rotation, theme, resume, cancel,
-detach, proposal, events, doctor, control, usage, station, steer, view, help.
-More: llm-bridge COMMAND --help · llm-bridge help keys"""
+detach, proposal, events, doctor, control, usage, station, steer, view, backup, restore,
+remote, worker, help.
+More: llm-bridge COMMAND --help · help keys · help distributed (--target WORKER COMMAND)"""
