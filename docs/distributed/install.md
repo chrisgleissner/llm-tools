@@ -7,8 +7,14 @@ DietPi) is a supported alternative. Both use the same runtime defaults
 (`Config::default` in `coordinator/src/config.rs`, overridable by `config.toml` in
 the data directory and by `BRIDGE_COORDINATOR_*` environment variables). Workers
 always run natively on the workstations that hold the provider CLIs (see
-`DECISIONS.md` D6). Limits and timeouts are listed in `coordinator.md`; the trust
-boundaries are in `threat-model.md`.
+`DECISIONS.md` D6).
+
+Where to find each topic: configuration keys, environment variables, limits and
+timeouts are in `coordinator.md`; the wire format is in `protocol.md`; running a
+worker, the audit log, day-to-day checks and troubleshooting are in
+`operations.md`; trust boundaries and security reasoning are in `threat-model.md`;
+measurements are in `benchmarks.md`. This file covers installation, certificate
+trust, backup of the coordinator, recovery and upgrades.
 
 ## Container deployment (recommended)
 
@@ -38,10 +44,10 @@ BRIDGE_PUBLIC_NAMES=bridge.home.arpa,192.168.1.20
 BRIDGE_PORT=8443                           # host port
 ```
 
-`BRIDGE_PUBLIC_NAMES` are the names browsers and workers use. They replace the
-container-internal names in the certificate (`localhost`, `127.0.0.1` and `::1` are
-always added) and in the URLs `info` prints. Publishing on the LAN is not
-authentication; the login, the CA and the firewall guidance below still apply.
+`BRIDGE_PUBLIC_NAMES` are the names browsers and workers use. The compose file passes
+them to the container as `BRIDGE_COORDINATOR_PUBLIC_NAMES` (see `coordinator.md`,
+Environment variables). Publishing on the LAN is not authentication; the login, the
+CA and the firewall guidance below still apply.
 
 First run and day-to-day administration (no shell is needed or present in the image):
 
@@ -67,16 +73,13 @@ example `docker run --rm -v <project>_bridge-data:/data -v "$PWD":/out busybox t
 server keys.
 
 Resources: `compose.yaml` sets `mem_limit` and `memswap_limit` to 96 MiB
-(`BRIDGE_MEMORY_LIMIT`), 64 processes and one CPU. The limit is about twice the
-measured peak: 48 MiB peak RSS under 30 concurrent logins, 200 commands and 1500
-replicated events in the container on x86-64 (`benchmarks.md`). Idle RSS is about
-2 MiB before the first login and about 15-35 MiB afterwards, because the two
-Argon2id verification slots (19 MiB each) and the allocator keep memory. Log files
-are capped at 3 x 1 MB by the `json-file` options.
+(`BRIDGE_MEMORY_LIMIT`), 64 processes (`pids_limit`) and one CPU (`BRIDGE_CPUS`). The
+measurements behind the 96 MiB limit are in `benchmarks.md`. Log files are capped at
+3 x 1 MB by the `json-file` options.
 
 Client addresses: the login rate limits and the per-address connection cap
-(`max_connections_per_ip`, default 32) key on the client address the coordinator
-sees. Docker's userland proxy, used for connections to a port published on
+(`max_connections_per_ip`; defaults in `coordinator.md`, Limits and timeouts) key on
+the client address the coordinator sees. Docker's userland proxy, used for connections to a port published on
 loopback, and the port forwarder of rootless Docker replace the client address
 with a gateway address, so all clients that arrive that way share one address and
 one set of limits. Rootful Docker keeps the real address for LAN clients that are
@@ -114,9 +117,9 @@ Options: `--bind HOST:PORT`, `--lan` (same as `--bind 0.0.0.0:8443`), repeatable
 discovery), `--prefix DIR` (stage files below DIR, no user, no systemd), and
 `--dry-run` (print every action, change nothing).
 
-`init` with no names puts into the certificate: `localhost`, `127.0.0.1`, `::1`, the
-machine host name, `<host>.home.arpa` and the machine's global IPv4/IPv6 addresses.
-If the address of the machine changes later, issue a new certificate (Recovery below).
+`init` with no names discovers the certificate names (`coordinator.md`, Process and
+files). If the address of the machine changes later, issue a new certificate
+(Recovery below).
 
 After install, open the printed URL, import the CA (next section), and create the
 administrator with the content of the setup-token file. The token is consumed by that
@@ -124,8 +127,9 @@ step.
 
 The unit runs as `bridge` with `NoNewPrivileges`, `ProtectSystem=strict`,
 `ProtectHome`, `PrivateTmp`, an empty capability set, address families limited to
-IPv4, IPv6 and Unix sockets, `MemoryMax=96M`, `Restart=on-failure` and
-`TimeoutStopSec=20` (the coordinator drains for up to 10 s on SIGTERM). Binding a port
+IPv4, IPv6 and Unix sockets, `MemoryMax=96M` (the same limit as the container, see `benchmarks.md`),
+`Restart=on-failure` and `TimeoutStopSec=20` (the coordinator drains for up to 10 s on
+SIGTERM). Binding a port
 below 1024 needs a drop-in granting `CAP_NET_BIND_SERVICE`; the unit file shows the
 two lines.
 
@@ -144,9 +148,10 @@ the local CA, at most 3 s) and 1 otherwise. Use it from monitoring or a timer;
 - `0.0.0.0:8443` or `[::]:8443`: all interfaces.
 
 A non-loopback bind is refused unless `lan_enabled = true`
-(`BRIDGE_COORDINATOR_LAN_ENABLED`). **LAN placement is not authentication.** Anyone
+(`BRIDGE_COORDINATOR_LAN_ENABLED`; in the container image the published port decides
+exposure, see `coordinator.md`). **LAN placement is not authentication.** Anyone
 who can reach the port can attempt a login and can open connections up to the
-`max_connections` cap. Every request still needs the administrator session, an API
+connection limits in `coordinator.md`. Every request still needs the administrator session, an API
 token or a worker token, but you should also restrict who can reach the port.
 Never expose the port to the internet.
 
@@ -210,15 +215,12 @@ Certificates > View Certificates > Authorities > Import, choose `ca.pem`, tick
 Android: copy `ca.pem` (or `ca.crt`) to the phone, then Settings > Security >
 Encryption & credentials > Install a certificate > CA certificate, and confirm the
 warning. The exact menu names vary by vendor (search settings for "CA certificate").
-The CA is name-constrained: it carries a critical Name Constraints extension and
-`pathLenConstraint=0`. Browsers and workers that trust it accept it only for the names
-the server certificate had when `init` ran (host names, and each address as a
-single-host range), `localhost`, `home.arpa` and its subdomains, `127.0.0.0/8` and
-`::1`. A certificate for any other site, signed with a stolen `ca.key`, is rejected. It
-is valid for 5 years. Check with
+The CA is name-constrained and valid for 5 years. Browsers and workers accept it only
+for the names listed in `coordinator.md` (Process and files, CA constraints). Check
+the extension with
 `openssl x509 -in ca.pem -noout -text | grep -A8 'Name Constraints'`.
-A coordinator created before this change has an unconstrained CA; `info` says so, and
-`cert new-ca` replaces it.
+A coordinator created before name constraints existed has an unconstrained CA; `info`
+says so, and `cert new-ca` replaces it.
 
 Chrome on Android uses the user store. Some apps ignore user CAs; the web interface
 in Chrome works.
@@ -303,14 +305,9 @@ directory (`--data-dir` or `BRIDGE_COORDINATOR_DATA_DIR`).
 
 ## Upgrades and compatibility
 
-- Protocol: the worker sends the protocol versions it speaks in `hello`
-  (`protocol_versions`); the coordinator answers with the version it selected in
-  `welcome`, or closes the connection with 1002 `unsupported version` when there is no common version. Today only
-  version 1 exists (`protocol.md`).
-- Capabilities: each worker advertises its operations in `hello`. The coordinator
-  rejects a command for an operation the worker did not advertise
-  (`unsupported-operation`), so workers on different software versions can be connected
-  at the same time; features a worker lacks are unavailable for that worker only.
+- Protocol and capabilities: version negotiation and capability advertisement are
+  specified in `protocol.md`. Workers on different software versions can be connected
+  at the same time; an operation a worker lacks is unavailable for that worker only.
 - Database: the coordinator database carries `PRAGMA user_version`. Starting a newer
   coordinator migrates the database forward when it opens it. Migrations are
   forward-only: an older binary refuses a database with a newer version and does not
@@ -323,9 +320,65 @@ directory (`--data-dir` or `BRIDGE_COORDINATOR_DATA_DIR`).
 - Replacing the binary: `deploy/install.sh --binary NEW` again, or copy the file to
   `/usr/local/bin/bridge-coordinator` and `systemctl restart bridge-coordinator`.
 
-## Target profile: Raspberry Pi Zero 2 W
+## Raspberry Pi Zero 2 W target profile
 
-Target hardware for the native install: Raspberry Pi Zero 2 W (512 MB RAM, ARM64),
-DietPi (Debian 13). Nothing in the coordinator or the installer is specific to this
-device; it is a sizing reference only. Measurements on this device are pending (no
-hardware has been used yet); see `benchmarks.md` for the only measured platform.
+This is the only device-specific section in the distributed documentation. The rest
+of the documentation, the coordinator and the installer are hardware-neutral.
+
+Target: Raspberry Pi Zero 2 W (512 MB RAM, ARM64) running DietPi (Debian 13).
+
+**Status: not yet measured on this device.** No figure in this section comes from a
+Raspberry Pi, from ARM64 hardware or from an emulated Pi. All figures are derived from
+the x86-64 measurements in `benchmarks.md` and are labelled as such. Memory use, start
+time and login latency on a Cortex-A53 may differ. The physical device is expected on
+2026-11-06; until it has been measured, treat this section as a starting point and
+verify it with the commands below.
+
+Memory budget (derived from x86-64 container measurements):
+
+- The container peak was 48.1 MiB RSS (`benchmarks.md`), measured with 30 concurrent
+  logins, 200 commands and 1500 replicated events. The shipped limit is 96 MiB, which
+  is under a fifth of 512 MB.
+- The limit covers the coordinator container only. The kernel, DietPi, the Docker
+  daemon (container deployment) and any other containers use the remaining memory. Their
+  size on this device is not known; check it with `free -m` before adding services.
+- The native install avoids the Docker daemon. It uses the same 96 MiB limit
+  (`MemoryMax=96M`).
+
+Recommended settings:
+
+- Start with the shipped defaults: `BRIDGE_MEMORY_LIMIT=96m`, one CPU, loopback
+  publishing unless LAN access is needed (Container deployment).
+- Keep `memswap_limit` equal to `mem_limit` (the default in `compose.yaml`). The
+  coordinator then never swaps. If it needs more memory than the limit, the kernel stops
+  the container and `restart: unless-stopped` starts it again. This avoids heavy swap
+  writes on a microSD card. No swap or zram configuration is needed for the coordinator.
+- The database uses `synchronous=FULL`, so each commit is flushed to the card. The
+  x86-64 measurement is 557 bytes per event including the write-ahead log; with the
+  default `max_events_per_worker` of 50 000 that is about 27 MB per worker (derived,
+  not measured on the card). Keep the data volume on a card or disk with free space of
+  at least several times that, and lower `max_events_per_worker` in `config.toml` if
+  space is short.
+- The Pi Zero 2 W has no battery-backed clock. TLS certificates and login sessions
+  depend on the system time, so keep a time-synchronisation service enabled on the
+  device and check `date` after each boot.
+- Build the arm64 image on another machine (`container/build.sh --oci`) and load it on
+  the Pi; building on the device is not intended.
+
+Verification after deployment (run these on the device and record the results; they
+replace the derived figures above):
+
+```sh
+docker compose exec coordinator bridge-coordinator health && echo healthy
+docker compose exec coordinator bridge-coordinator info
+docker stats --no-stream            # MEM USAGE / LIMIT of the coordinator container
+free -m                             # host memory with the coordinator running
+```
+
+For a native install run `bridge-coordinator health --data-dir
+/var/lib/bridge-coordinator` and `systemctl status bridge-coordinator` (it shows the
+memory in use). The diagnostics page (`GET /api/v1/diagnostics`) reports the process
+RSS. Take the reading after a few logins, because the Argon2id verification memory is
+allocated on first use. If the container uses more than about 80 percent of its limit,
+raise `BRIDGE_MEMORY_LIMIT` (for example to `128m`) and record the measured value in
+`benchmarks.md`.

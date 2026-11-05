@@ -186,16 +186,49 @@ mission; older missions without saved policy keep their original prompts until
 explicitly configured. The [Bridge operations guide](./docs/llm-bridge/operations.md#provider-native-teams-and-token-spend-preference)
 covers the three preferences, provider fallback, and repeated-invocation prompt overhead.
 
-Distributed mode is optional and off by default. `llm-bridge worker enroll`
-stores a coordinator URL and worker token for this host, and `llm-bridge worker
-run` connects outbound to that coordinator so missions can be listed and
-controlled from another machine. A worker accepts only read operations unless
-it was enrolled with `--allow-control`. `--target local` (the default) runs a
-command on this host; other targets fail rather than fall back to local
-execution. See [docs/distributed](./docs/distributed/protocol.md); this mode is
-still being built.
-
 [Go deeper →](./docs/llm-bridge/operations.md)
+
+### Distributed use (optional)
+
+Standalone Bridge needs none of this and opens no network connection. Distributed
+use lets you list and control missions on other machines from a terminal or a
+browser. It has three roles:
+
+- **Coordinator**: a separate service (`bridge-coordinator`, container or systemd
+  unit) that holds the worker index, relays commands and serves the web interface.
+  It runs no providers.
+- **Worker**: a machine with the provider CLIs. `llm-bridge worker run` connects
+  outbound to the coordinator, so the worker opens no listening port.
+- **Client**: the web interface, or `llm-bridge --target WORKER COMMAND` on any
+  machine after `llm-bridge remote login`.
+
+Quick start (details in [install](./docs/distributed/install.md)):
+
+```bash
+docker compose -f container/compose.yaml run --rm coordinator init   # build or load the image first
+docker compose -f container/compose.yaml up -d                       # listens on 127.0.0.1:8443 only
+docker compose -f container/compose.yaml exec coordinator bridge-coordinator worker add build-1   # prints the worker token once; save it as token.txt
+llm-bridge worker enroll --name build-1 --coordinator wss://localhost:8443 --token-file token.txt --ca-file ca.pem
+llm-bridge worker install-service
+docker compose -f container/compose.yaml exec coordinator bridge-coordinator token create laptop   # prints an API token; save it as api-token.txt
+llm-bridge remote login --coordinator https://localhost:8443 --token-file api-token.txt --ca-file ca.pem
+llm-bridge --target build-1 mission list
+```
+
+A worker is read-only for remote clients by default. `--allow-terminal-view` at
+enrolment also shares mission terminals for viewing, and `--allow-control` allows
+changes and terminal input. `--target local` (the default) runs on this host; an
+unknown or offline target fails and never falls back to local execution. Copy
+`ca.pem` and `setup-token` out of the coordinator as described in the install guide.
+The same command line is shown by `llm-bridge help distributed`.
+
+Documentation: [install](./docs/distributed/install.md) (container and native
+install, certificate trust, backup, recovery, Raspberry Pi Zero 2 W target profile),
+[operations](./docs/distributed/operations.md) (worker service, audit log, backup,
+troubleshooting), [coordinator](./docs/distributed/coordinator.md) (configuration,
+HTTP API, limits), [protocol](./docs/distributed/protocol.md),
+[threat model](./docs/distributed/threat-model.md) and
+[benchmarks](./docs/distributed/benchmarks.md).
 
 ## llm-usage
 

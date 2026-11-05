@@ -59,19 +59,34 @@ worker protocol is `protocol.md`.
   answer is `200` with `{"status":"ok"}`, otherwise 1. The whole check is limited to
   3 s. It needs no shell, DNS or other tools, so it works as a container
   `HEALTHCHECK` and in monitoring.
-- `bridge-coordinator backup --output FILE` writes a consistent copy of the
-  database with the SQLite online backup API while the server runs (0600, never
-  overwrites, `integrity_check` before the file appears). `restore --input FILE`
-  checks the file (integrity and schema version) and replaces the database; it
-  refuses while a server holds the data directory lock and keeps the replaced
-  database as `coordinator.sqlite3.before-restore-<UTC>`.
+- `bridge-coordinator backup --output FILE` and `restore --input FILE` copy and
+  replace the database; the procedure, the files a backup does not contain and the
+  restore checks are in `install.md` (Backup and restore).
 - `bridge-coordinator setup-token` replaces the setup token file; it fails once an
   administrator exists.
-- Environment variables: `BRIDGE_COORDINATOR_DATA_DIR` (when `--data-dir` is not
-  given; default `/var/lib/bridge-coordinator`), `BRIDGE_COORDINATOR_BIND`
-  (`host:port`) and `BRIDGE_COORDINATOR_LAN_ENABLED` (`true`/`false`). The last two
-  take precedence over `config.toml`. All defaults are defined in `config.rs`
-  (`Config::default`); `init` generates `config.toml` from them.
+- Environment variables (names in `config.rs`):
+  - `BRIDGE_COORDINATOR_DATA_DIR`: data directory when `--data-dir` is not given;
+    default `/var/lib/bridge-coordinator`.
+  - `BRIDGE_COORDINATOR_BIND` (`host:port`) and `BRIDGE_COORDINATOR_LAN_ENABLED`
+    (`true`/`false`; `1/0`, `yes/no`, `on/off` are also accepted): take precedence
+    over `config.toml`.
+  - `BRIDGE_COORDINATOR_PUBLIC_NAMES`: comma-separated host names and addresses that
+    browsers and workers use. When set, they replace discovery for the certificate
+    (`init`, `cert renew`) and for the URLs `info` prints. It is needed in a
+    container, where the discovered names are container-internal. `compose.yaml` sets
+    it from `BRIDGE_PUBLIC_NAMES`.
+  - `BRIDGE_COORDINATOR_PUBLIC_PORT`: port in the printed URLs when it differs from
+    the bind port (a published container port). `compose.yaml` sets it from
+    `BRIDGE_PORT`.
+  - `BRIDGE_COORDINATOR_CONTAINER`: set by the container image. Network exposure is
+    then decided by the published port, not by `lan_enabled`.
+
+  All other settings are keys of `config.toml`: `bind`, `lan_enabled`,
+  `max_events_per_worker`, `allowed_origins` (extra exact `Origin` values accepted for
+  cookie-authenticated writes), `web_dir` (default: `web` next to the executable, then
+  `/usr/share/bridge-coordinator/web`) and the limit keys in the table below. All
+  defaults are defined in `config.rs` (`Config::default`); `init` generates
+  `config.toml` from them.
 - `bridge-coordinator worker add NAME` prints a new worker token once and
   stores its SHA-256 hash; `worker revoke NAME` deletes it.
 - `bridge-coordinator admin reset-password [--keep-api-tokens]` (local shell only)
@@ -112,7 +127,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
 | GET | `/events?worker=&after=&limit=` | Stored events, ascending. |
 | GET | `/stream` | WebSocket; pushes `worker`, `event` and `command` updates. |
-| GET | `/terminal?worker=&mission=&mode=view\|write&cols=&rows=` | WebSocket for one remote terminal session. Session cookie (with exact Origin) or API token. The coordinator opens the session on the worker with `terminal.open` and relays the frames of `protocol.md` (Terminal sessions) unchanged after validation: browser input at most 64 KiB decoded, `r` only with 1–1000 columns and rows. At most 16 sessions per worker and 64 in total (`x` frame, close 1013). A viewer more than 256 KiB behind is closed with 1013. Each open is audited as `terminal.open`. The worker, not the coordinator, decides the writer role. |
+| GET | `/terminal?worker=&mission=&mode=view\|write&cols=&rows=` | WebSocket for one remote terminal session. Session cookie (with exact Origin) or API token. The coordinator opens the session on the worker with `terminal.open` and relays the frames of `protocol.md` (Terminal sessions) unchanged after validation; the frame and backlog bounds are specified there and the session counts are in the limits table below (over the cap: `x` frame, close 1013). Each open is audited as `terminal.open`. The worker, not the coordinator, decides the writer role. |
 | GET | `/worker/terminal/{session_id}` | Worker side of a session; worker bearer token; accepted once, only for a session opened for that worker. |
 | GET | `/diagnostics` | versions, uptime, RSS, DB size, connected workers, queue depths. |
 

@@ -37,6 +37,11 @@ around them.
 | `generation` | Connection generation issued by the coordinator in `welcome` (PROTO-010). `0` in `hello`. |
 | `payload` | Typed body for `type`; unknown payload fields are rejected. |
 
+Version negotiation: the worker lists the versions it speaks in `hello`
+(`protocol_versions`) and the coordinator answers with the selected version in
+`welcome`. When there is no common version, the coordinator closes the connection
+with WebSocket code 1002 and reason `unsupported version`. Only version 1 exists.
+
 ## Message types
 
 | Type | Direction | Payload |
@@ -101,7 +106,8 @@ the effect and rejects a mismatch with error code `conflict`.
 
 `hello.capabilities` lists the operations the worker supports. The coordinator
 refuses a request for an operation the target worker did not advertise with
-`unsupported-operation`, without sending it.
+`unsupported-operation`, without sending it. Workers on different software versions
+can therefore be connected at the same time.
 
 ## Terminal sessions (PROTO-009, SEC-006, WEB-007, WEB-008)
 
@@ -128,7 +134,7 @@ that worker and that has not been attached yet. Frames on it are JSON text:
 | `{"t":"s","cols":N,"rows":N,"mode":"view"\|"write","reason":"..."}` | worker → coordinator | Pane size and granted mode; sent first and whenever they change. |
 | `{"t":"x","reason":"..."}` | worker → coordinator | Session ended; the worker closes the socket. |
 | `{"t":"i","d":"<base64>"}` | coordinator → worker | Keyboard or paste input, at most 64 KiB decoded. Dropped by the worker unless the session holds the writer role. |
-| `{"t":"r","cols":N,"rows":N}` | coordinator → worker | Resize request from the writer; applied only when no local tmux client is attached to the station. |
+| `{"t":"r","cols":N,"rows":N}` | coordinator → worker | Resize request from the writer (1–1000 columns and rows; the coordinator rejects other values); applied only when no local tmux client is attached to the station. |
 
 Single writer: the worker grants `write` to at most one session per mission,
 and only while no local tmux client is attached to that station. Any other

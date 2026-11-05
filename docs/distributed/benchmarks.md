@@ -54,11 +54,14 @@ the host. One run on 2026-11-05.
 | RSS after the load | 32.8 MiB |
 | `docker compose stop` (SIGTERM to exit) | 0.3 s |
 
-Recommended limit: 96 MiB (`mem_limit`/`memswap_limit` in `compose.yaml`,
-`MemoryMax=96M` in the systemd unit), about twice the measured peak. On a 512 MB host
-shared with other containers this reserves less than a fifth of RAM.
+Basis of the shipped limit: 96 MiB (`mem_limit`/`memswap_limit` in `compose.yaml`,
+`MemoryMax=96M` in the systemd unit), about twice the measured peak. Idle RSS is
+about 2 MiB before the first login and 15-35 MiB afterwards, because the two Argon2id
+slots and the allocator keep memory. How to apply the limit is described in
+`install.md`.
 
 ## Raspberry Pi Zero 2 W
 
-Not measured (no hardware available). Do not read any figure above as an estimate for
-that device.
+Not measured (no hardware available). Do not read any figure above as a measurement
+for that device. The sizing that `install.md` gives for it (Raspberry Pi Zero 2 W
+target profile) is derived from the x86-64 figures and is labelled as such there.
