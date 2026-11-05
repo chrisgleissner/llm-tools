@@ -8,6 +8,8 @@ import { loginView } from "./views/login";
 import { missionDetail } from "./views/mission";
 import { missions } from "./views/missions";
 import { overview } from "./views/overview";
+import { sessions } from "./views/sessions";
+import { usage } from "./views/usage";
 import { workers } from "./views/workers";
 
 const app = document.getElementById("app") as HTMLElement;
@@ -78,6 +80,8 @@ const NAV: Array<[string, string]> = [
   ["/", "Overview"],
   ["/workers", "Workers"],
   ["/missions", "Missions"],
+  ["/sessions", "Sessions"],
+  ["/usage", "Usage"],
   ["/diagnostics", "Diagnostics"],
   ["/account", "Account"],
 ];
@@ -163,6 +167,8 @@ async function route(): Promise<void> {
   if (path === "/") cleanup = overview(main);
   else if (path === "/workers") cleanup = workers(main);
   else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
+  else if (path === "/sessions") cleanup = sessions(main, new URLSearchParams(location.search));
+  else if (path === "/usage") cleanup = usage(main, new URLSearchParams(location.search));
   else if (m && m[1] && m[2]) cleanup = missionDetail(main, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
   else if (path === "/diagnostics") cleanup = diagnostics(main);
   else if (path === "/account") cleanup = account(main, () => toLogin("Password changed. Sign in with the new password."));

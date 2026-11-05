@@ -256,6 +256,130 @@ def _proposal_list(store: BridgeStore | None, request: CommandRequest, params: d
     return {"proposals": store.list_proposals(request.mission_id, status=status, limit=params["limit"], after_task_id=after_id)}
 
 
+_SESSION_LIMIT_MAX = 1000
+_USAGE_TIMEOUT_SECONDS = 20.0
+_NATIVE_SESSION_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+
+
+def _session_list(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Provider operations (sessions) of this worker's missions; metadata only, never prompts, logs or paths."""
+    assert store is not None
+    limit = params["limit"]
+    if not 1 <= limit <= _SESSION_LIMIT_MAX:
+        raise CommandFailure("invalid-argument", f"session.list: limit must be between 1 and {_SESSION_LIMIT_MAX}")
+    where, args = "", []
+    if params["mission"]:
+        where = "WHERE o.mission_id=?"
+        args.append(resolve_mission_ref(store, params["mission"], read_only=True))
+    rows = store.db.execute(
+        "SELECT o.id,o.mission_id,m.name,o.task_id,t.ordinal,o.station,o.route_id,o.model,o.status,o.restoration_state,"
+        "o.native_session_id,o.created_at,o.updated_at FROM operations o "
+        "JOIN missions m ON m.id=o.mission_id LEFT JOIN tasks t ON t.id=o.task_id "
+        f"{where} ORDER BY o.created_at DESC,o.rowid DESC LIMIT ?",
+        (*args, limit),
+    ).fetchall()
+    sessions = []
+    for row in rows:
+        native = row[10]
+        sessions.append({
+            "operation_id": row[0],
+            "mission_id": row[1],
+            "mission_name": row[2],
+            "task_id": row[3],
+            "task_ordinal": row[4],
+            "provider": row[5],
+            "route_id": row[6],
+            "model": row[7],
+            "state": row[8],
+            "restoration_state": row[9],
+            "native_session_id": native if isinstance(native, str) and _NATIVE_SESSION_SHAPE.fullmatch(native) else None,
+            "started_at": row[11],
+            "last_activity_at": row[12],
+        })
+    return {"schema_version": 1, "sessions": sessions}
+
+
+def _usage_scopes(rows: list[Any], provider: str, cfg: Any, usage: Any) -> list[dict[str, Any]]:
+    scopes: list[dict[str, Any]] = []
+    for row in rows:
+        if str(row.provider).lower() != provider:
+            continue
+        percent = row.remaining if isinstance(row.remaining, (int, float)) and not isinstance(row.remaining, bool) else None
+        spent = bool(getattr(row, "spent", False))
+        measured = percent is not None and not spent and row.kind not in {"opaque", "balance", "budget", "ungated"}
+        guidance = ""
+        if not spent and row.kind != "opaque":
+            try:
+                guidance = usage.render_guidance(row.provider, row.scope, row.remaining, row.reset, cfg)
+            except Exception:  # noqa: BLE001 - guidance is advisory
+                guidance = ""
+        epoch = usage.common.parse_epoch(row.reset)
+        scopes.append({
+            "scope": str(row.scope),
+            "model": str(row.model or ""),
+            "kind": row.kind,
+            "remaining_percent": round(float(percent), 1) if measured and percent is not None else None,
+            "used_percent": round(100.0 - float(percent), 1) if measured and percent is not None else None,
+            "reset_epoch": int(epoch) if isinstance(epoch, (int, float)) else None,
+            "guidance": guidance.strip() or None,
+        })
+    return scopes
+
+
+def _usage_collect() -> dict[str, Any]:
+    from . import usage
+
+    cfg = usage.Config()
+    cfg.color_enabled = False
+    cfg.progress_enabled = False
+    cfg.symbols_enabled = False
+    provider_data, generated_at = usage._render_data_for_frame(cfg, start_ephemeral=False)
+    source = "service" if generated_at is not None else "direct"
+    rows, _ = usage._build_usage_rows(cfg, provider_data)
+    providers: list[dict[str, Any]] = []
+    for name in usage.ALL_PROVIDERS:
+        if not usage.provider_visible(cfg, name):
+            continue
+        snapshot = provider_data.get(name)
+        provider_rows = [row for row in rows if str(row.provider).lower() == name]
+        available = bool(getattr(snapshot, "available", bool(provider_rows)))
+        reason = getattr(snapshot, "reason", None)
+        scopes = _usage_scopes(rows, name, cfg, usage)
+        providers.append({
+            "provider": name,
+            "available": available,
+            "reason": None if available else str(reason or "unavailable"),
+            "ready": bool(provider_rows) and usage.provider_ready(rows, provider_rows[0].provider),
+            "scopes": scopes,
+        })
+    return {"source": source, "generated_at": generated_at, "providers": providers}
+
+
+def _usage_snapshot(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Normalized provider capacity figures; a failure or timeout degrades to ``available: false``."""
+    import datetime as _dt
+    import threading
+
+    outcome: dict[str, Any] = {}
+
+    def work() -> None:
+        try:
+            outcome["value"] = _usage_collect()
+        except BaseException as exc:  # noqa: BLE001 - never fail the command
+            outcome["error"] = type(exc).__name__
+
+    thread = threading.Thread(target=work, name="usage-snapshot", daemon=True)
+    thread.start()
+    thread.join(_USAGE_TIMEOUT_SECONDS)
+    observed = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+    value = outcome.get("value")
+    if value is None:
+        reason = "timeout" if thread.is_alive() else f"read-failed:{outcome.get('error', 'unknown')}"
+        return {"schema_version": 1, "available": False, "reason": reason, "observed_at": observed, "source": None, "providers": []}
+    return {"schema_version": 1, "available": True, "reason": None, "observed_at": observed,
+            "source": value["source"], "providers": value["providers"]}
+
+
 def _operator(action: str) -> Handler:
     """Apply an operator payload ``{"action": action, **params}`` through the durable command path."""
 
@@ -336,6 +460,15 @@ OPERATIONS: dict[str, OperationSpec] = {
             {"status": Param(str, default="PENDING"), "limit": Param(int, default=100), "after": Param(int, default=0)},
             _proposal_list,
         ),
+        OperationSpec(
+            "session.list",
+            "List provider sessions (operations) of this worker's missions",
+            False,
+            False,
+            {"mission": Param(str), "limit": Param(int, default=100)},
+            _session_list,
+        ),
+        OperationSpec("usage.snapshot", "Provider capacity snapshot as llm-usage reports it", False, False, _NO_PARAMS, _usage_snapshot),
         OperationSpec(
             "proposal.decide",
             "Accept or reject an agent proposal",
