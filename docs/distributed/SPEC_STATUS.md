@@ -139,8 +139,8 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | TEST-003 | [~] | Local vs remote JSON parity for mission list, task list/show, status (test_remote_cli_has_local_semantics, test_remote_commands_match_local_semantics_and_are_idempotent). |
 | TEST-004 | [ ] |  |
 | TEST-005 | [~] | Registration, discovery, remote control, events and reconnection covered by tests/test_distributed_integration.py; approvals/terminal pending. |
-| TEST-006 | [ ] |  |
-| TEST-007 | [~] | Conflicting amendments and duplicate delivery tests in tests/test_bridge_commands.py; multi-process concurrency pending. |
+| TEST-006 | [~] | tests/test_distributed_faults.py: storage failure mid-mutation (uncertain, rolled back, redelivery applies once), locked database read, partition after ack (redelivery acked duplicate, effect once); test_distributed_integration.py: coordinator restart and reconnect. Coordinator crash during journal write pending. |
+| TEST-007 | [x] | Six real processes race the same request ID (one command row, one revision bump) and six conflicting amendments of one revision (one applied, five `conflict`) in tests/test_distributed_faults.py; in-process cases in tests/test_bridge_commands.py. |
 | TEST-008 | [~] | Seeded byte/structure mutation fuzz of bridge_protocol.decode (8 seeds x 400 cases) and deep-nesting test. |
 | TEST-009 | [ ] |  |
 | TEST-010 | [ ] |  |
