@@ -40,6 +40,131 @@ def test_pause_command_reports_active_provider_work_is_deferred(tmp_path, monkey
     assert command["result"]["detail"] == "pause takes effect when the active provider returns"
 
 
+@pytest.mark.parametrize(
+    ("exit_code", "expected_task_status", "amendment_status"),
+    [
+        (42, "READY", "APPLIED"),
+        (common.AUTONOMY_ABORT_STATUS, "BLOCKED", "PENDING"),
+        (common.AUTONOMY_ABORT_STATUS, "BLOCKED", None),
+    ],
+)
+def test_native_provider_failure_applies_pending_amendment_before_retry(
+    tmp_path, capsys, exit_code, expected_task_status, amendment_status,
+) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("quota retry", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "original task")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    context = hook.before_iteration()
+    run_dir = tmp_path / "provider-run"
+    run_dir.mkdir()
+    (run_dir / "attempt-1.out").write_text("ERROR: quota reached; wait for limit to reset\n", encoding="utf-8")
+    config = SimpleNamespace(
+        provider="codex", cwd=str(tmp_path), run_dir=run_dir, model="", exec_mode="fresh", headless=True,
+        native_tui=False, tmux_target="", tmux_socket="", tmux_pane="", env_overrides={},
+        prompt_text="x", max_output_bytes=0, max_output_rotations=0, log_dir=None,
+    )
+    selection = {"provider": "codex"}
+    assert hook.before_launch(context, selection, config, 1)
+    if amendment_status is not None:
+        store.amend_task(task_id, prompt="revised after quota reset")
+
+    hook.after_iteration(context, selection, config, 1, exit_code, 1.0)
+
+    assert store.get_task(task_id)["status"] == expected_task_status
+    if exit_code == 42:
+        transitions = [
+            event["data"] for event in store.events(mission["id"])
+            if event["kind"] == "task-status-transition"
+        ]
+        assert [(event["from"], event["to"]) for event in transitions] == [
+            ("RUNNING", "FAILED"), ("FAILED", "READY"),
+        ]
+        assert transitions[1]["cause"] == "provider-handoff"
+        result = next(event for event in store.events(mission["id"]) if event["kind"] == "provider-result-diagnosed")
+        assert result["data"]["failure"]["class"] == "provider-error"
+        assert "quota reached" not in str(result["data"])
+    if amendment_status is not None:
+        assert store.db.execute("SELECT status FROM amendments WHERE task_id=?", (task_id,)).fetchone()[0] == amendment_status
+    assert "quota reached" not in capsys.readouterr().out
+    if exit_code == 42:
+        resumed = hook.before_iteration()
+        assert resumed["revision"] == 2
+        assert "revised after quota reset" in resumed["prompt"]
+        assert resumed["task_id"] == task_id
+        assert hook.before_launch(resumed, selection, config, 2)
+        assert store.get_task(task_id)["status"] == "RUNNING"
+        assert store.get_operation(resumed["operation_id"])["status"] == "RUNNING"
+        hook.after_iteration(resumed, selection, config, 2, 0, 1.0)
+        assert store.get_task(task_id)["status"] == "VERIFYING"
+
+
+def test_quota_failure_waits_for_capacity_then_starts_amended_operation(tmp_path, monkeypatch) -> None:
+    from llm_tools import ralph_robin
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("quota continuation", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "original task")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    wake_target = common.now_epoch() + 600
+    hook.suspend_allowed = lambda: True
+    hook.prepare_suspend = lambda target: (target, common.WakeArm(True, "fixture", True, target_epoch=target))
+    selections = iter([
+        {"index": 0, "provider": "codex", "route": "", "rotation_reason": "ready", "all_rate_limited": False, "decision": {"usable": True}, "decisions": []},
+        {"index": 0, "provider": "codex", "route": "", "rotation_reason": "all-rate-limited", "all_rate_limited": True, "decision": {"usable": False, "reason": "rate-limited"}, "decisions": [{"provider": "codex", "usable": False, "reason": "rate-limited", "wait_until": wake_target}]},
+        {"index": 0, "provider": "codex", "route": "", "rotation_reason": "ready-after-reset", "all_rate_limited": False, "decision": {"usable": True}, "decisions": []},
+    ])
+    monkeypatch.setattr(ralph_robin, "select_provider", lambda *_args: next(selections))
+    monkeypatch.setattr(ralph_robin, "guard_against_auto_suspend", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(ralph_robin, "wait_until_epoch", lambda *_args: True)
+    run_count = 0
+    operation_ids: list[str] = []
+
+    def run_provider(scheduler_config):
+        nonlocal run_count
+        run_count += 1
+        if run_count == 1:
+            store.amend_task(task_id, prompt="pending amendment applied at quota boundary")
+            return 1
+        operation_ids.extend(
+            row[0] for row in store.db.execute("SELECT id FROM operations WHERE task_id=? ORDER BY rowid", (task_id,))
+        )
+        return 0
+
+    monkeypatch.setattr(ralph_robin, "run_scheduler_inline", run_provider)
+    suspend_calls: list[int] = []
+
+    def suspend_with_wake(target, **kwargs):
+        suspend_calls.append(target)
+        assert kwargs["wake_arm"].armed and kwargs["wake_arm"].confirmed
+        assert kwargs["pre_suspend_check"]() == ""
+        return common.SuspendOutcome(True, target, target, 0, True, "fixture", "ok")
+
+    monkeypatch.setattr(common, "suspend_with_wake", suspend_with_wake)
+
+    result = ralph_robin.main(
+        [
+            "--prompt", "objective", "--providers", "codex", "--cwd", str(tmp_path),
+            "--max-iterations", "1", "--max-duration", "0", "--min-iteration-seconds", "0",
+            "--poll-interval", "1", "--log-dir", str(tmp_path / "ralph-logs"),
+            "--state-file", str(tmp_path / "ralph-state.json"),
+        ],
+        bridge_hooks=hook,
+    )
+
+    assert result == 0
+    assert run_count == 2
+    assert suspend_calls == [wake_target]
+    assert len(operation_ids) == 2 and operation_ids[0] != operation_ids[1]
+    assert store.get_task(task_id)["status"] == "VERIFYING"
+    assert store.db.execute("SELECT status FROM amendments WHERE task_id=?", (task_id,)).fetchone()[0] == "APPLIED"
+    assert any(event["kind"] == "suspend-intent" for event in store.events(mission["id"]))
+
+
 def test_mission_tmux_socket_uses_short_private_user_runtime_path(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / ("runtime-" + "x" * 100)))
     path = mission_socket_path("a" * 32)
@@ -1280,7 +1405,59 @@ def test_controller_return_cannot_leave_mission_claiming_running(tmp_path, monke
     events = store.events(mission["id"])
     assert any(event["kind"] == "controller-exited-unexpectedly" for event in events)
     mode = next(event for event in events if event["kind"] == "controller-mode")
-    assert mode["data"] == {"verified": True, "actual_mode": "headless", "controller_pid": os.getpid()}
+    assert mode["data"]["verified"] is True
+    assert mode["data"]["actual_mode"] == "headless"
+    assert mode["data"]["controller_pid"] == os.getpid()
+    assert mode["data"]["process_start"]
+    source = mode["data"]["runtime_source"]
+    assert source["module_path"].endswith("llm_tools/bridge_runtime.py")
+    assert source["version"]
+    assert source["commit"]
+    assert len(source["source_sha256"]) == 64
+    assert source["fingerprint_basis"] == "source-file-bytes-at-controller-start"
+    if source["dirty"]:
+        assert source["dirty_hash"] == source["source_sha256"]
+    else:
+        assert source["dirty_hash"] is None
+    assert mode["data"]["wall_epoch"] > 0
+    assert mode["data"]["monotonic_seconds"] > 0
+    assert mode["data"]["boottime_seconds"] > 0
+
+
+@pytest.mark.parametrize(
+    ("actual_sleep", "suspended", "simulated", "joined"),
+    [(True, True, False, True), (False, False, False, False), (True, False, False, False), (False, False, True, False)],
+)
+def test_verified_wake_cycle_joins_once_to_the_next_verified_provider_process(
+    tmp_path, monkeypatch, actual_sleep, suspended, simulated, joined,
+) -> None:
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation_id = store.begin_operation(task_id, iteration=1, station="codex")
+    store.mark_operation_running(operation_id)
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    hook._capture_session_after_launch = lambda *_args: None
+    monkeypatch.setattr("llm_tools.bridge_runtime._process_start_token", lambda _pid: "boot:123")
+
+    hook.on_suspend_event("suspend-intent", {"cycle_id": "cycle-1"})
+    hook.on_suspend_event("suspend-outcome", {
+        "cycle_id": "cycle-1", "actual_sleep": actual_sleep,
+        "suspended": suspended, "simulated": simulated,
+    })
+    hook._record_process(operation_id, 4242)
+    hook._record_process(operation_id, 4243)
+
+    events = [event for event in store.events(mission["id"]) if event["kind"] == "suspend-provider-started"]
+    assert len(events) == int(joined)
+    if joined:
+        assert events[0]["data"]["cycle_id"] == "cycle-1"
+        assert events[0]["data"]["operation_id"] == operation_id
+        assert events[0]["data"]["task_id"] == task_id
+        assert events[0]["data"]["process_pid"] == 4242
+        assert events[0]["data"]["process_start"] == "boot:123"
 
 
 @pytest.mark.parametrize("stop_fails", [False, True])

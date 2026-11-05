@@ -47,7 +47,7 @@ class OperationStatus(StrEnum):
 
 
 class ViewName(StrEnum):
-    """The console views in F1-F8 order."""
+    """The console views in F1-F9 order."""
 
     OVERVIEW = "Overview"
     TASKS = "Tasks"
@@ -57,6 +57,7 @@ class ViewName(StrEnum):
     HEALTH = "Health"
     ACTIONS = "Actions"
     USAGE = "Usage"
+    AGENTS = "Agents"
 
 
 class ColorRole(StrEnum):
@@ -111,6 +112,11 @@ class EventKind(StrEnum):
 
     CAPACITY_REFRESH = "capacity-refresh"
     CAPACITY_REFRESH_ERROR = "capacity-refresh-error"
+    CAPACITY_WAKE_ARMED = "capacity-wake-armed"
+    CAPACITY_WAKE_UNAVAILABLE = "capacity-wake-unavailable"
+    CAPACITY_WAKE_RESUMED = "capacity-wake-resumed"
+    CAPACITY_WAKE_RESUME_UNVERIFIED = "capacity-wake-resume-unverified"
+    CAPACITY_WAKE_PLAN = "capacity-wake-plan"
     COMMAND_APPLIED = "command-applied"
     COMMAND_FAILED = "command-failed"
     COMMAND_QUEUED = "command-queued"
@@ -132,6 +138,7 @@ class EventKind(StrEnum):
     MISSION_CREATED = "mission-created"
     MISSION_REOPENED = "mission-reopened"
     MISSION_STATUS = "mission-status"
+    MISSION_SUSPEND_WHEN_RATE_LIMITED = "mission-suspend-when-rate-limited"
     NATIVE_SESSION_RESTORATION = "native-session-restoration"
     OPERATION_ABORTED_BEFORE_LAUNCH = "operation-aborted-before-launch"
     OPERATION_EXITED = "operation-exited"
@@ -146,14 +153,23 @@ class EventKind(StrEnum):
     PROVIDER_HANDOFF_EXHAUSTED = "provider-handoff-exhausted"
     PROVIDER_HANDOFF_SELECTED = "provider-handoff-selected"
     PROVIDER_SELECTION = "provider-selection"
+    PROVIDER_RESULT_DIAGNOSED = "provider-result-diagnosed"
     PROVIDER_SWITCHED = "provider-switched"
     PROVIDER_WAIT = "provider-wait"
     REPOSITORY_CHECKPOINT = "repository-checkpoint"
+    PROMPT_ASSEMBLED = "prompt-assembled"
+    MISSION_POLICY_CHANGED = "mission-policy-changed"
     REVIEW_HOLD = "review-hold"
     REVIEW_HOLD_RELEASED = "review-hold-released"
     ROTATION_APPLIED = "rotation-applied"
     ROTATION_CHANGED = "rotation-changed"
     ROTATION_REJECTED = "rotation-rejected"
+    SUSPEND_INTENT = "suspend-intent"
+    SUSPEND_DECISION = "suspend-decision"
+    SUSPEND_OUTCOME = "suspend-outcome"
+    SUSPEND_PROVIDER_STARTED = "suspend-provider-started"
+    SUSPEND_REFUSED = "suspend-refused"
+    SUSPEND_WORK_RESUMED = "suspend-work-resumed"
     STATION_HANDOFF = "station-handoff"
     STATION_OBSERVATION = "station-observation"
     STATION_STOPPED = "station-stopped"
@@ -179,6 +195,7 @@ class EventKind(StrEnum):
     TASK_PROPOSED = "task-proposed"
     TASK_PROVIDER_CONTINUATION = "task-provider-continuation"
     TASK_READY = "task-ready"
+    TASK_STATUS_TRANSITION = "task-status-transition"
     TASK_REJECTED = "task-rejected"
     TASK_REORDERED = "task-reordered"
     TASK_STATUS = "task-status"

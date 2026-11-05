@@ -54,6 +54,7 @@ Each relayed provider line is prefixed with `[time provider]` by default, so a q
 | `-H`, `--headless`                                                  | Force non-interactive provider command and captured PTY.                                                                                                      |
 | `-T`, `--tmux SESSION[:WINDOW]`                                     | Execute through tmux via `llm-scheduler`.                                                                                                                     |
 | `-g`, `--command-template TEMPLATE`                                 | Override provider syntax. Supports `{provider}`, `{prompt}`, `{prompt_file}`, and `{cwd}`.                                                                        |
+| `--command-template-providers LIST`                                 | Providers the command template was written for. Default: the provider named by the template's executable, else every provider. Other providers launch their own default command. |
 | `-y`, `--auto-confirm`                                              | Auto-confirm recognised safe trust prompts. This is the default.                                                                                              |
 | `-Y`, `--no-auto-confirm`                                           | Disable safe auto-confirmation.                                                                                                                               |
 | `-q`, `--headless-idle-timeout SECONDS`                             | Abort headless fresh mode after no output progress. Default: `600`. Use `0` to disable.                                                                       |
@@ -89,6 +90,12 @@ An overnight Ralph run waits out reset windows by suspending the whole machine �
 The suspend backend is feature-detected (systemd today) and degrades to an awake wait where the tools are missing. Tuning knobs (`LLM_TOOLS_NO_INHIBIT`, `LLM_TOOLS_SUSPEND_DRIFT_TOLERANCE`, `LLM_RALPH_MIN_AWAKE_SECONDS`, `LLM_RALPH_MAX_SUSPENDS`, `LLM_SCHEDULER_SUSPEND_MIN_LEAD`, `LLM_TOOLS_WATCHDOG_DEVICE`) are documented in [AGENTS.md](../AGENTS.md). Run `llm-scheduler --wake-test` to see what your host supports.
 
 When all providers are blocked, Ralph sets an RTC wake for the earliest known reset across the rotation and resumes its own loop after wake. This differs from `llm-scheduler --suspend-until-ready`, which wakes into one selected provider — Ralph wakes back into cross-provider rotation.
+
+The same path applies when every provider was skipped, aborted or failed during one pass (for example a quota error ends the only provider's run). Ralph re-reads capacity after the failure, because the view taken before the launch is stale. If the re-read shows a known reset time, Ralph goes through the same central suspend path: it arms the wake first, suspends once, and verifies the wake on resume. If no reset time is known (for example a monetary balance), Ralph waits awake for one poll interval and logs `all_blocked_wait` with `reason_code: unknown-recovery-time`. It never logs or reports a suspend that did not happen. A Bridge mission that has not opted in to suspend, or whose safety check refuses, waits awake and records the reason in a `suspend-decision` event.
+
+A Bridge mission saves its command template together with the providers it was created for. After a rotation change, a provider outside that set launches its own default command, so the launched CLI always matches the provider named in the log and the output labels. During a capacity wait, Bridge also ends the wait when the mission rotation changes or a new runnable task is added, in addition to stop, pause and cancel.
+
+Under Bridge, a failed operation that was classified as a quota failure does not count against the provider-failure budget (`max_provider_failures`). The task returns to READY, so the controller starts the next operation as soon as capacity returns, without operator action.
 
 ## `llm-sleep-soak` — prove sleep/wake is reliable
 

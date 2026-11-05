@@ -13,6 +13,27 @@ from llm_tools.bridge_store import BridgeStore, MissionLock
 from llm_tools.terminal import TerminalAction
 
 
+def test_console_suspend_keeps_the_wake_owner_alive_until_completion(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+    import subprocess
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    with BridgeStore(tmp_path / "state" / "bridge.sqlite3") as store:
+        mission = store.create_mission("sleep fixture", "objective", cwd=tmp_path)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = dispatch_console_command(mission["id"], "suspend-until-credits")
+    assert json.loads(result)["ok"] is True
+    argv, options = calls[-1]
+    assert "suspend-until-credits" in argv and mission["id"] in argv
+    assert options["timeout"] is None
+
+
 def test_mission_cli_create_status_tasks_events_and_evidence(tmp_path: Path, monkeypatch, capsys) -> None:
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))

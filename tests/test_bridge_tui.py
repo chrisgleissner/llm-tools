@@ -153,7 +153,10 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     stations_x = nav.index("Providers") + 2
     state.handle_mouse(2, stations_x, 24, 80)
     assert state.view == "Providers"
-    state.handle_mouse(2, 78, 24, 80)
+    state.handle_key("KEY_F8")
+    _nav, entries = bridge_tui._nav_layout(state.view_index, 80, "  ")
+    usage_x = next(x for _index, x, label in entries if "Usage" in label)
+    state.handle_mouse(2, usage_x, 24, 80)
     assert state.view == "Usage"
     state.handle_key("KEY_F7")
     state.handle_mouse(3, 2, 24, 80)
@@ -549,6 +552,105 @@ def test_systems_preserves_and_renders_quota_budget_and_reset_windows() -> None:
     assert "codex (last selected) · weekly 34% left, resets 3h (cooldown) · balance 12.5 USD left" in rendered
     assert "epoch" not in rendered and "None" not in rendered
     assert "private_payload" not in str(state.snapshot)
+
+
+def test_agent_enter_inspects_when_station_navigation_is_unavailable() -> None:
+    calls = []
+    state = bridge_tui._ConsoleState("M", lambda *_args: calls.append(_args), lambda _id: {}, full=True)
+    state.snapshot = {"agent_map": {"agents": [{
+        "id": "root", "kind": "bridge-root", "mission_id": "other", "station": "codex",
+        "capabilities": {"inspect": True, "navigate": False, "reason": "Headless operation"},
+    }]}}
+    state.view_index = bridge_tui.VIEWS.index("Agents")
+    state.handle_key("KEY_ENTER")
+    assert state.agent_inspector and calls == []
+    state.handle_key("\x1b")
+    assert not state.agent_inspector
+
+
+def test_agent_inspector_keeps_provider_role_and_separate_activity_freshness() -> None:
+    snapshot = bridge_tui._bounded_snapshot({"agent_map": {"observed_at": 200, "agents": [{
+        "id": "child", "kind": "native-child", "name": "Halley", "role": "reviewer",
+        "role_source": "observed", "provider": "codex", "status": "notLoaded",
+        "native_status": "notLoaded", "activity": "last observed tool: exec",
+        "freshness": "stale", "activity_freshness": "fresh", "activity_age_seconds": 5,
+        "lifecycle_freshness": "stale", "lifecycle_age_seconds": 150,
+        "capabilities": {"inspect": True, "navigate": False, "reason": "inspect only"},
+    }]}})
+    state = bridge_tui._ConsoleState("M", lambda *_args: "", lambda _id: {}, full=True, snapshot=snapshot)
+    state.view_index = bridge_tui.VIEWS.index("Agents")
+    state.agent_inspector = True
+    rendered = "\n".join(state.rows())
+    assert "role: reviewer (observed)" in rendered
+    assert "freshness: stale" in rendered
+    assert "activity freshness: fresh · age 5s" in rendered
+    assert "lifecycle freshness: stale · age 150s" in rendered
+
+
+def test_usage_dashboard_maps_original_quota_colors_to_bridge_roles(monkeypatch) -> None:
+    from tests.fakes import FakeScreen
+
+    dashboard = (
+        "Provider  Remaining\n"
+        "──────────────────\n"
+        "Codex      \x1b[0;31m 9% █░\x1b[0m\n"
+        "Claude     \x1b[0;32m80% ██\x1b[0m\n"
+    )
+    state = bridge_tui._ConsoleState(
+        "M-color", lambda *_: "", lambda _id: {}, full=True,
+        snapshot={"usage": {
+            "status": "ready", "age_seconds": 0, "text": dashboard,
+        }},
+    )
+    state.view_index = bridge_tui.VIEWS.index("Usage")
+
+    rows = state.rows()
+    segments = state.row_segments()
+
+    assert rows[3:5] == ["Codex       9% █░", "Claude     80% ██"]
+    assert segments is not None
+    assert (" 9% █░", "error") in segments[3]
+    assert ("80% ██", "ok") in segments[4]
+
+    screen = FakeScreen(24, 100)
+    screen.install(monkeypatch)
+    bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
+    drawn = [segment for line in screen.segments() for segment in line]
+    assert any("9% █░" in text and role == "error" for _x, text, role in drawn)
+    assert any("80% ██" in text and role == "ok" for _x, text, role in drawn)
+
+
+def test_usage_dashboard_draws_color_and_no_color_through_bridge_palette(monkeypatch) -> None:
+    from tests.fakes import FakeWindow as RecordingWindow
+
+    dashboard = "Provider  Remaining\n──────────────────\nCodex      \x1b[0;31m 9% █░\x1b[0m\n"
+    state = bridge_tui._ConsoleState(
+        "M-color", lambda *_: "", lambda _id: {}, full=True,
+        snapshot={"usage": {"status": "ready", "age_seconds": 0, "text": dashboard}},
+    )
+    state.view_index = bridge_tui.VIEWS.index("Usage")
+    monkeypatch.setattr(bridge_tui.curses, "has_colors", lambda: True)
+    monkeypatch.setattr(bridge_tui.curses, "start_color", lambda: None)
+    monkeypatch.setattr(bridge_tui.curses, "use_default_colors", lambda: None)
+    monkeypatch.setattr(bridge_tui.curses, "init_pair", lambda *_args: None)
+    monkeypatch.setattr(bridge_tui.curses, "color_pair", lambda pair: pair << 30)
+    monkeypatch.setattr(bridge_tui.curses, "COLORS", 256, raising=False)
+    monkeypatch.setattr(bridge_tui.curses, "COLOR_PAIRS", 256, raising=False)
+    monkeypatch.setattr(bridge_tui.curses, "doupdate", lambda: None)
+    monkeypatch.setattr(bridge_tui, "sync_window_size", lambda _window: None)
+
+    def draw(env: dict[str, str]) -> int:
+        bridge_tui.initialize_colors(env, is_tty=True)
+        screen = RecordingWindow(24, 100)
+        bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
+        return next(call.attr for call in screen.calls if "9% █░" in call.text)
+
+    color_attr = draw({"TERM": "xterm-256color"})
+    mono_attr = draw({"TERM": "xterm-256color", "NO_COLOR": "1"})
+
+    assert color_attr >> 30
+    assert not mono_attr >> 30
+    assert "Codex       9% █░" in state.rows()[3]
 
 
 def test_stations_enter_selects_view_and_shows_recent_operation_history() -> None:

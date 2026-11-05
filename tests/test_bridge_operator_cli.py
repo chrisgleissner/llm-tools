@@ -36,7 +36,7 @@ def test_mission_create_and_list_are_readable_and_json_is_unchanged(tmp_path, st
     text = capsys.readouterr().out
     mission = BridgeStore(state / "bridge.sqlite3").list_missions()[0]
     short = mission["id"][:8]
-    assert text.strip() == f'Created mission {short} "Fix the tests" · task 1 · start with: llm-bridge start --mission {short}'
+    assert text.strip() == f'Created mission {short} "Fix the tests" · task 1 · teams on · token spend medium · start with: llm-bridge start --mission {short}'
     assert "frozen_tool_config" not in text
 
     listing = _out(capsys, "mission", "list")

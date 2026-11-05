@@ -40,6 +40,8 @@ _REGISTRY: tuple[tuple[Action, Mapping[str, float]], ...] = (
      {"RUNNING": 0, "PAUSED": 2}),
     (Action("pause", "Pause", "Hold after the current provider turn", mutable=True),
      {"RUNNING": 1}),
+    (Action("suspend-until-credits", "Suspend until credits recover", "Arm a recovery wake, then sleep when safe", mutable=True, slash="/suspend-until-credits"),
+     {"RUNNING": 2, "PAUSED": 1, "STOPPED": 2}),
     (Action("task add --help", "Add task", "Write a new task for the queue", mutable=True, slash="Ctrl-E", handler="compose"),
      {"CREATED": 1, "RUNNING": 2, "PAUSED": 3, "STOPPED": 2}),
     (Action("task amend --task {task}", "Amend task", "Edit the selected task's text", task=True, mutable=True, slash="Ctrl-R", handler="amend"),

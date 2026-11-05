@@ -30,7 +30,8 @@ def test_thousand_iterations_keep_tasks_evidence_and_resources_bounded(tmp_path,
     def executor(cfg):
         nonlocal calls
         calls += 1
-        return 75 if calls % 101 == 0 else 0
+        # Exercise recoverable provider failures; interactive aborts stay held.
+        return 1 if calls % 101 == 0 else 0
     monkeypatch.setattr(ralph_robin, "run_scheduler_inline", executor)
     before_fds = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
     tracemalloc.start()

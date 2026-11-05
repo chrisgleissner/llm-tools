@@ -1285,8 +1285,14 @@ class BridgeStore:
                 return None
             if json.loads(task["pending_json"]) or not self._dependencies_complete(int(task["id"])):
                 return None
+            # A quota failure is recoverable: the capacity wait resumes the task
+            # when credits return, so it must not use up the budget meant for
+            # crashes and broken CLIs. Otherwise repeated quota windows would
+            # eventually leave the task BLOCKED with nothing for the loop to run.
             failures = int(self.db.execute(
-                "SELECT COUNT(*) FROM operations WHERE task_id=? AND status='EXITED' AND exit_code<>0 AND exit_code<>?",
+                "SELECT COUNT(*) FROM operations o WHERE o.task_id=? AND o.status='EXITED' AND o.exit_code<>0 AND o.exit_code<>? "
+                "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.mission_id=o.mission_id AND e.kind='provider-result-diagnosed' "
+                "AND json_extract(e.data_json,'$.operation_id')=o.id AND json_extract(e.data_json,'$.failure.class')='capacity')",
                 (task["id"], OPERATOR_DECLINED_EXIT_CODE),
             ).fetchone()[0])
             if failures > max_failures:

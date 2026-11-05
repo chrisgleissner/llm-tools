@@ -191,6 +191,15 @@ def _hermetic_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_bridge_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Managed dogfood runs must not point tests at their supervising mission."""
+    for key in tuple(os.environ):
+        if key.startswith("LLM_BRIDGE_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "isolated-xdg-state"))
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_cache_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Unit readers/samplers must never append to the developer's usage history."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "isolated-xdg-cache"))

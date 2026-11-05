@@ -88,6 +88,31 @@ def test_console_never_inherits_the_managed_marker(mission: dict[str, object], m
     assert json.loads(response)["status"] == "APPLIED", response
 
 
+def test_managed_agent_map_resolves_own_prefix_and_refuses_other_scopes(mission, monkeypatch, capsys, tmp_path_factory) -> None:
+    from llm_tools import bridge_agents
+
+    own = str(mission["id"])
+    monkeypatch.setenv("LLM_BRIDGE_MANAGED", "1")
+    monkeypatch.setenv("LLM_BRIDGE_MISSION_ID", own)
+    scopes = []
+
+    def observed(_store, *, mission_id):
+        scopes.append(mission_id)
+        return {"agents": [], "errors": {}, "total": 0, "freshness": "unavailable"}
+
+    monkeypatch.setattr(bridge_agents, "build_agent_map", observed)
+    assert main(["agents", "--mission", own[:8], "--json"]) == 0
+    assert scopes == [own]
+    capsys.readouterr()
+    assert main(["agents", "--all-missions"]) == 2
+    assert bridge.MANAGED_SCOPE_REFUSAL in capsys.readouterr().err
+    with bridge.open_store() as store:
+        other = store.create_mission("other", "objective", cwd=tmp_path_factory.mktemp("other-agent-map"))
+    assert main(["agents", "--mission", other["id"][:8]]) == 2
+    assert bridge.MANAGED_SCOPE_REFUSAL in capsys.readouterr().err
+    assert scopes == [own]
+
+
 def test_controller_launch_drops_the_managed_marker(mission: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
     from llm_tools import bridge_runtime
 

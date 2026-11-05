@@ -59,10 +59,11 @@ def state(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     directory.chmod(0o700)
     work = tmp_path_factory.mktemp("startup-work")
     env = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items() if not key.startswith("LLM_BRIDGE_") and key != "LLM_TOOLS_CONFIG"},
         "LLM_BRIDGE_STATE_DIR": str(directory),
         "PYTHONPATH": str(ROOT),
         "LLM_TOOLS_NO_INHIBIT": "1",
+        "XDG_CONFIG_HOME": str(directory / "config"),
         "STARTUP_TEST_WORK": str(work),
     }
     result = subprocess.run(

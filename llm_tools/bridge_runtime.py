@@ -151,6 +151,8 @@ class BridgeMissionHooks:
         self._waiting_message = ""
         self._hold_message = ""
         self._hold_message_tried = 0.0
+        self._suspend_block_reason = ""
+        self._pending_wake_cycle_id: str | None = None
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
@@ -176,7 +178,16 @@ class BridgeMissionHooks:
         if station:
             self._last_selected_station = station
 
+    _wait_baseline: tuple[Any, ...] | None = None
+
+    def _wait_signature(self) -> tuple[Any, ...]:
+        """What an operator can change during a capacity wait: the rotation and the runnable tasks."""
+        config = self.store.get_mission(self.mission_id)["config"]
+        ready = tuple(int(task["id"]) for task in self.store.ready_tasks(self.mission_id, limit=50))
+        return (str(config.get("providers", "")), str(config.get("routes", "")), ready)
+
     def on_wait(self, selection: dict[str, Any], target_epoch: int | None) -> None:
+        self._wait_baseline = self._wait_signature()
         projection = self._selection_projection(selection)
         data = {
             "target_epoch": target_epoch,
@@ -289,6 +300,7 @@ class BridgeMissionHooks:
 
             tasks = self.store.ready_tasks(self.mission_id, limit=1)
             if tasks:
+                self._wait_baseline = None  # a wait that ended is over; scheduler waits must not compare against it
                 task = tasks[0]
                 current = self.store.begin_iteration(int(task["id"]))
                 self._iteration += 1
@@ -314,11 +326,15 @@ class BridgeMissionHooks:
                     if rejection
                     else ""
                 )
+                task_content = (
+                    "Same as the mission objective above."
+                    if current["prompt"] == mission["objective"] else current["prompt"]
+                )
                 prompt = (
                     "LLM Bridge mission context. Provider session continuity is RECONSTRUCTED from durable state; "
                     "this is not an exact native conversation restore.\n\n"
                     f"Mission objective:\n{mission['objective']}\n\n"
-                    f"Task {current['ordinal']} ({current['title']}), revision {current['revision']}:\n{current['prompt']}\n\n"
+                    f"Task {current['ordinal']} ({current['title']}), revision {current['revision']}:\n{task_content}\n\n"
                     f"Acceptance criteria:\n{_format_acceptance(current['acceptance'])}\n\n"
                     f"{rejection_text}"
                     f"Durable checkpoint (latest bounded history):\n{_format_checkpoint(checkpoint)}\n\n"
@@ -331,6 +347,9 @@ class BridgeMissionHooks:
                     "task_id": int(current["id"]),
                     "revision": int(current["revision"]),
                     "prompt": prompt,
+                    "source_content_bytes": len(mission["objective"].encode("utf-8")) + (
+                        0 if current["prompt"] == mission["objective"] else len(current["prompt"].encode("utf-8"))
+                    ),
                     "task_title": str(current["title"]),
                     "iteration": self._iteration,
                 }
@@ -482,6 +501,15 @@ class BridgeMissionHooks:
             "LLM_BRIDGE_CONTROLS": json.dumps(controls, ensure_ascii=True, sort_keys=True),
         }
         prior_prompt = str(getattr(scheduler_config, "prompt_text", ""))
+        incoming_bytes = len(prior_prompt.encode("utf-8"))
+        from .bridge_policy import apply_prefix_once
+
+        prior_prompt, policy_applied = apply_prefix_once(
+            prior_prompt,
+            mission.get("config"),
+            already_applied=bool(getattr(scheduler_config, "bridge_policy_applied", False)),
+        )
+        scheduler_config.bridge_policy_applied = policy_applied
         scheduler_config.prompt_text = (
             "Managed execution context (LLM Bridge): this provider process is launched and supervised by LLM Bridge; "
             "do not describe it as a direct or unmanaged invocation. These identifiers name the durable operation.\n"
@@ -491,6 +519,18 @@ class BridgeMissionHooks:
             "Proposals require operator acceptance and are never scheduled automatically.\n\n"
             + prior_prompt
         )
+        self.store.record_runtime_event(self.mission_id, "prompt-assembled", {
+            "operation_id": operation_id,
+            "incoming_bytes": incoming_bytes,
+            "assembled_bytes": len(scheduler_config.prompt_text.encode("utf-8")),
+            "bridge_added_bytes": len(scheduler_config.prompt_text.encode("utf-8")) - incoming_bytes,
+            "source_content_bytes": context.get("source_content_bytes"),
+            "total_wrapper_bytes": (
+                len(scheduler_config.prompt_text.encode("utf-8")) - int(context["source_content_bytes"])
+                if isinstance(context.get("source_content_bytes"), int) else None
+            ),
+            "token_count": None,
+        })
         self._session_providers[operation_id] = provider
         try:
             self._session_cwds[operation_id] = str(Path(getattr(scheduler_config, "cwd", mission["cwd"])).expanduser().resolve(strict=True))
@@ -594,7 +634,12 @@ class BridgeMissionHooks:
         if config.get("pause_after_iteration"):
             return True
         stop_after = config.get("stop_after_task")
-        return stop_after is not None and self.store.get_task(int(stop_after))["status"] == "COMPLETED"
+        if stop_after is not None and self.store.get_task(int(stop_after))["status"] == "COMPLETED":
+            return True
+        # A rotation change or a newly runnable task ends the wait, so the loop
+        # selects again instead of sleeping until the old reset time.
+        baseline = self._wait_baseline
+        return baseline is not None and self._wait_signature() != baseline
 
     def _record_session_outcome(self, operation_id: str, provider: str, cwd: str) -> None:
         expected = self._session_restore_expectations.pop(operation_id, None)
@@ -710,6 +755,51 @@ class BridgeMissionHooks:
             return True
         return self.store.get_task(task_id)["status"] in {"PAUSED", "CANCELLED"}
 
+    def suspend_allowed(self) -> bool:
+        """Suspend only when this mission opted in and no mission/device work is active."""
+        mission = self.store.get_mission(self.mission_id)
+        if mission["status"] != "RUNNING" or not mission["config"].get("suspend_when_rate_limited"):
+            self._suspend_block_reason = "mission-not-running-or-suspend-disabled"
+            return False
+        from .bridge_power import suspend_block_reason
+
+        self._suspend_block_reason = suspend_block_reason(self.store)
+        return not self._suspend_block_reason
+
+    def on_suspend_event(self, kind: str, data: dict[str, Any]) -> None:
+        """Correlate Ralph's real suspend ledger cycle with this mission."""
+        if kind not in {
+            "suspend-decision", "suspend-intent", "suspend-outcome", "suspend-work-resumed",
+        }:
+            return
+        self.store.record_runtime_event(self.mission_id, kind, data)
+        if kind == "suspend-intent":
+            self._pending_wake_cycle_id = None
+        elif kind == "suspend-outcome":
+            cycle_id = data.get("cycle_id")
+            self._pending_wake_cycle_id = (
+                str(cycle_id)
+                if isinstance(cycle_id, str)
+                and data.get("actual_sleep") is True
+                and data.get("suspended") is True
+                and data.get("simulated") is False
+                else None
+            )
+        if kind == "suspend-outcome":
+            from .bridge_power import reconcile_shared_wake
+
+            reconcile_shared_wake()
+
+    def prepare_suspend(self, target_epoch: int) -> tuple[int, common.WakeArm] | None:
+        """Join the shared Bridge wake plan before Ralph enters its suspend cycle."""
+        from .bridge_power import shared_wake_target, update_wake_request
+
+        arm = update_wake_request(self.mission_id, target_epoch)
+        planned = shared_wake_target()
+        if not arm.armed or planned is None or arm.target_epoch != planned:
+            return None
+        return planned, arm
+
     def _record_process(self, operation_id: str, process_pid: int) -> None:
         token = _process_start_token(process_pid)
         if not token:
@@ -718,6 +808,17 @@ class BridgeMissionHooks:
             # small interval remains uncertain and cannot be force-signalled.
             return
         self.store.record_operation_process(operation_id, process_pid=process_pid, process_start=token)
+        if self._pending_wake_cycle_id:
+            operation = self.store.get_operation(operation_id)
+            self.store.record_runtime_event(self.mission_id, "suspend-provider-started", {
+                "cycle_id": self._pending_wake_cycle_id,
+                "operation_id": operation_id,
+                "task_id": int(operation["task_id"]),
+                "process_pid": int(process_pid),
+                "process_start": token,
+                **common.diagnostic_clock_fields(),
+            })
+            self._pending_wake_cycle_id = None
         if operation_id in self._codex_owned_operations:
             self._observe_owned_codex_session(operation_id, force=True)
         else:
@@ -750,7 +851,45 @@ class BridgeMissionHooks:
                 str(selection.get("provider") or scheduler_config.provider),
                 str(Path(scheduler_config.cwd).expanduser().resolve(strict=True)),
             )
+            task_before = self.store.get_task(int(operation["task_id"]))
             task = self.store.finish_operation(operation_id, exit_code=int(status), logs_path=logs_path)
+            provider_output = ""
+            if logs_path:
+                try:
+                    with Path(logs_path).open("rb") as stream:
+                        stream.seek(0, os.SEEK_END)
+                        stream.seek(max(0, stream.tell() - 65536))
+                        provider_output = stream.read(65536).decode("utf-8", "replace")
+                except OSError:
+                    pass
+            failure = common.provider_failure_diagnostic(provider_output, int(status))
+            diagnostic_path = Path(logs_path).with_suffix(".diagnostic.json") if logs_path else None
+            if diagnostic_path is not None:
+                detail = common.read_provider_diagnostic(diagnostic_path)
+                if detail is not None:
+                    failure.update({key: detail[key] for key in (
+                        "provider_exit_status", "scheduler_status", "provider_quota_diagnostic", "provider_credit_diagnostic", "blocking_prompt",
+                    )})
+                    for key in ("class", "code", "cause"):
+                        failure[key] = detail[key]
+            self.store.record_runtime_event(self.mission_id, "provider-result-diagnosed", {
+                "operation_id": operation_id,
+                "task_id": int(task["id"]),
+                "provider": str(selection.get("provider") or scheduler_config.provider),
+                "route": str(selection.get("route") or ""),
+                "failure": failure,
+                **common.diagnostic_clock_fields(),
+            })
+            if task_before["status"] != task["status"]:
+                self.store.record_runtime_event(self.mission_id, "task-status-transition", {
+                    "task_id": int(task["id"]),
+                    "operation_id": operation_id,
+                    "from": task_before["status"],
+                    "to": task["status"],
+                    "cause": failure["cause"],
+                    "failure_class": failure["class"],
+                    **common.diagnostic_clock_fields(),
+                })
             checkpoint = repository_checkpoint(getattr(scheduler_config, "cwd", self.store.get_mission(self.mission_id)["cwd"]))
             self.store.record_runtime_event(self.mission_id, "operation-progress", {
                 "operation_id": operation_id,
@@ -786,11 +925,29 @@ class BridgeMissionHooks:
                     "reason": reason or "the provider command could not be launched",
                 })
             elif status != 0:
-                continued = self.store.continue_task_after_provider_failure(
+                if (
+                    status not in {common.AUTONOMY_ABORT_STATUS, OPERATOR_DECLINED_EXIT_CODE, LAUNCH_REFUSED_STATUS}
+                    and task["status"] in {"BLOCKED", "FAILED"}
+                ):
+                    # The completed provider invocation is the amendment boundary.
+                    # Apply pending text before deciding whether this known
+                    # provider failure can be handed to another route.
+                    task = self.store.begin_iteration(int(task["id"]))
+                continued = None if status == common.AUTONOMY_ABORT_STATUS else self.store.continue_task_after_provider_failure(
                     operation_id,
                     max_failures=self.max_provider_failures,
                 )
                 if continued is not None:
+                    self.store.record_runtime_event(self.mission_id, "task-status-transition", {
+                        "task_id": int(continued["id"]),
+                        "operation_id": operation_id,
+                        "from": task["status"],
+                        "to": continued["status"],
+                        "revision": int(continued["revision"]),
+                        "cause": "provider-handoff",
+                        "failure_class": failure["class"],
+                        **common.diagnostic_clock_fields(),
+                    })
                     self.store.record_runtime_event(self.mission_id, "task-provider-continuation", {
                         "task_id": int(task["id"]),
                         "operation_id": operation_id,
@@ -1586,6 +1743,36 @@ def _clean_line(text: Any, limit: int = 300) -> str:
     return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
+def _runtime_source_identity() -> dict[str, Any]:
+    """Identify on-disk source bytes and checkout revision at controller startup."""
+    package_root = Path(__file__).resolve().parent.parent
+    source_files = ("bridge_runtime.py", "bridge_refresh.py", "bridge_power.py", "common.py", "ralph_robin.py", "scheduler.py")
+    digest = hashlib.sha256()
+    for name in source_files:
+        path = package_root / "llm_tools" / name
+        try:
+            digest.update(name.encode("ascii") + b"\0" + path.read_bytes())
+        except OSError:
+            digest.update(name.encode("ascii") + b"\0unavailable")
+    from .bridge_progress import _git
+    from .bridge import package_version
+
+    commit_bytes = _git(package_root, "rev-parse", "--verify", "HEAD")
+    status_bytes = _git(package_root, "status", "--porcelain", "--", "llm_tools/bridge_runtime.py", "llm_tools/bridge_refresh.py", "llm_tools/bridge_power.py", "llm_tools/common.py", "llm_tools/ralph_robin.py", "llm_tools/scheduler.py")
+    dirty = bool(status_bytes)
+    return {
+        "module_path": str(Path(__file__).resolve()),
+        "package_root": str(package_root),
+        "version": package_version()[:40],
+        "commit": commit_bytes.decode("ascii", "replace").strip()[:40] if commit_bytes else None,
+        "dirty": dirty if status_bytes is not None else None,
+        "dirty_hash": digest.hexdigest() if dirty else None,
+        "source_sha256": digest.hexdigest(),
+        "fingerprint_basis": "source-file-bytes-at-controller-start",
+        "source_files": list(source_files),
+    }
+
+
 def _last_logged_error(log_path: Path) -> str:
     """The last ``error:`` line in the tail of the controller log, if the log has one yet."""
     try:
@@ -1749,6 +1936,9 @@ def ralph_argv(mission: dict[str, Any], runtime: Path, *, providers: str, routes
     command_template = str(config.get("command_template", ""))
     if command_template:
         argv.extend(["--command-template", command_template])
+        owners = str(config.get("command_template_providers", ""))
+        if owners:
+            argv.extend(["--command-template-providers", owners])
     return argv
 
 
@@ -1893,6 +2083,9 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             "verified": True,
             "actual_mode": actual_mode,
             "controller_pid": os.getpid(),
+            "process_start": _process_start_token(os.getpid()) or None,
+            "runtime_source": _runtime_source_identity(),
+            **common.diagnostic_clock_fields(),
         })
         refresh_worker: CapacityRefreshWorker | None = None
         try:
@@ -1905,6 +2098,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                 mission_id,
                 store_path(),
                 interval_seconds=int(mission["config"].get("capacity_refresh_seconds", 60)),
+                initial_refresh_delay_seconds=0,
             )
             refresh_worker.start()
             argv = ralph_argv(mission, runtime, providers=providers, routes=routes)

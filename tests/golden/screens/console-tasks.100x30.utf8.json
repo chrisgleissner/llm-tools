@@ -7,7 +7,7 @@
   "rows": [
     "LLM BRIDGE · ▌ Release 2.0 hardening · ● RUNNING",
     "■ codex · task 4 running 20m · 5h 62% left · week 31% left",
-    "1 Overview  [2 Tasks]  3 Providers  4 Activity  5 Sessions  6 Health  7 Actions  8 Usage",
+    "1 Overview  [2 Tasks]  3 Providers  4 Activity  5 Sessions  6 Health  7 Actions  8 Usage  9 Agents",
     "  2   ✕ FAILED     P2           Fix the flaky login test",
     "  4   ● RUNNING    P1           Update the CI matrix",
     "  5   ○ QUEUED     P1  after 4  Publish the release notes",
@@ -39,7 +39,7 @@
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " · ", "dim"], [39, "● RUNNING", "state_running"]],
     [[0, "■", "provider_codex"], [1, " codex · task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m · 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left · week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
-    [[0, "1 Overview  ", "muted"], [12, "[2 Tasks]", "accent"], [21, "  3 Providers  4 Activity  5 Sessions  6 Health  7 Actions  8 Usage", "muted"]],
+    [[0, "1 Overview  ", "muted"], [12, "[2 Tasks]", "accent"], [21, "  3 Providers  4 Activity  5 Sessions  6 Health  7 Actions  8 Usage  9 Agents", "muted"]],
     [[2, "2 ", "muted"], [4, "  ", "info"], [6, "✕ FAILED   ", "state_failed"], [17, "  ", "info"], [19, "P2", "muted"], [21, "  ", "info"], [23, "       ", "muted"], [30, "  Fix the flaky login test", "info"]],
     [[2, "4 ", "muted"], [4, "  ", "info"], [6, "● RUNNING  ", "state_running"], [17, "  ", "info"], [19, "P1", "muted"], [21, "  ", "info"], [23, "       ", "muted"], [30, "  Update the CI matrix", "info"]],
     [[2, "5 ", "muted"], [4, "  ", "info"], [6, "○ QUEUED   ", "state_waiting"], [17, "  ", "info"], [19, "P1", "muted"], [21, "  ", "info"], [23, "after 4", "muted"], [30, "  Publish the release notes", "info"]],

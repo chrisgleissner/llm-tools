@@ -8,12 +8,13 @@ from typing import Any, Callable
 
 def collect_usage() -> dict[str, Any]:
     from . import usage
+    from .bridge_theme import colors_disabled
     cfg = usage.Config()
     cfg.show_remaining_time = True
     # The source column is a long cache path that pushes rows past 170 cells.
     cfg.show_source = False
     cfg.show_copilot_credits = True
-    cfg.color_enabled = False
+    cfg.color_enabled = cfg.color_enabled and not colors_disabled()
     cfg.progress_enabled = False
     # Keep every remaining column on one line; the Bridge view clips and pans
     # wide rows instead of wrapping them, so a table row is never split.

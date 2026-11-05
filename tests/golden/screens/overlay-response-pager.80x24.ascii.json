@@ -6,7 +6,7 @@
   "cursor_visible": null,
   "rows": [
     "Command response",
-    "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-8/Tab switch view",
+    "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-9/Tab switch view",
     "Task 3 | Write the migration guide | revision 2 | line group 7",
     "Task 3 | Write the migration guide | revision 2 | line group 8",
     "",
@@ -32,7 +32,7 @@
   ],
   "segments": [
     [[0, "Command response", "heading"]],
-    [[0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-8/Tab switch view", "dim"]],
+    [[0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-9/Tab switch view", "dim"]],
     [[0, "Task 3 | Write the migration guide | revision 2 | line group 7", "dim"]],
     [[0, "Task 3 | Write the migration guide | revision 2 | line group 8", "dim"]],
     [],

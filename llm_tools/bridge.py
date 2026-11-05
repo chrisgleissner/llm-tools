@@ -112,6 +112,11 @@ def status_snapshot(
     lifecycle = snapshot.get("lifecycle")
     if isinstance(lifecycle, dict):
         lifecycle["controller_running"] = controller_running(mission_id)
+    mission = snapshot.get("mission")
+    if isinstance(mission, dict):
+        from .bridge_policy import effective_settings
+
+        mission["execution_policy"] = effective_settings(mission.get("config"))
     return cast("dict[str, Any]", snapshot)  # a TypedDict is a plain dict at run time
 
 
@@ -132,6 +137,11 @@ def console_snapshot(
     if view == "Usage":
         from .bridge_usage import embedded_usage
         result["usage"] = embedded_usage.snapshot()
+    if view == "Agents":
+        from .bridge_agents import build_agent_map
+
+        with open_store(readonly=True) as store:
+            result["agent_map"] = build_agent_map(store)
     return result
 
 
@@ -159,7 +169,7 @@ BUILTIN_PROVIDERS = "claude,codex,opencode"
 def _is_read_only(args: argparse.Namespace) -> bool:
     """Commands that only read state may resolve a folder's finished mission."""
     command = getattr(args, "command", "")
-    if command in {"status", "events", "doctor"}:
+    if command in {"status", "events", "doctor", "agents"}:
         return True
     if command == "task":
         return getattr(args, "task_action", "") in {"list", "show"}
@@ -176,17 +186,20 @@ def _resolve_parsed_mission(args: argparse.Namespace, *, optional: bool = False,
     ``lenient`` keeps an unknown ID unchanged so the action that uses it
     reports the failure (the console builds terminal actions before any lookup).
     """
-    if not hasattr(args, "mission"):
+    attribute = "agent_mission" if getattr(args, "command", "") == "agents" else "mission"
+    if not hasattr(args, attribute):
         return
-    if args.mission is None and optional:
+    reference = getattr(args, attribute)
+    if reference is None and (optional or attribute == "agent_mission"):
         return
     try:
         with open_store(readonly=True) as store:
-            args.mission = resolve_mission_ref(
-                store, args.mission,
+            resolved = resolve_mission_ref(
+                store, reference,
                 read_only=_is_read_only(args),
                 prefer_station=getattr(args, "command", "") in {"attach", "detach"},
             )
+            setattr(args, attribute, resolved)
     except MissionNotFound:
         if not lenient:
             raise
@@ -821,7 +834,9 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             text=True,
             env=env,
             check=False,
-            timeout=15,
+            # A deliberate suspend can include an awake wait after an early
+            # resume. Keep its owner alive to finish the shared wake ledger.
+            timeout=None if words[0] == "suspend-until-credits" else 15,
         )
         if result.returncode:
             detail = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
@@ -1019,6 +1034,8 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     routes_action.help = routes_help + "%(rotation_routes)s"
     routes_action.rotation_routes = _RotationDefaultText(lambda providers, routes: f" (default: {routes})" if routes else "")  # type: ignore[attr-defined]
     create.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the first task; repeat for several")
+    create.add_argument("--teams", choices=("on", "off"), default=None, help="provider-native team guidance (default: on; global default: [bridge].teams)")
+    create.add_argument("--token-spend", choices=("low", "medium", "high"), default=None, help="token spend preference (default: medium; global default: [bridge].token_spend)")
     create.add_argument("--headless", action="store_true", help="Headless mode: the provider runs without a terminal and there is no station, so nothing to attach to; without --headless or --native the mission runs in Background mode (a station shows the activity log)")
     create.add_argument("--native", dest="native_tui", action="store_true", help="Native mode: the provider's own interactive terminal runs in a station; open it with attach")
     create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the command that checks a finished task; repeat per argument; supports {context}, {cwd}, {mission_id}, {task_id}, {revision}")
@@ -1095,7 +1112,10 @@ def _build_parser(
     _add_json_arg(listing)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
     _add_mission_arg(mission_set, default_mission)
-    mission_set.add_argument("--auto-continue", dest="auto_continue", choices=("on", "off"), required=True, help="on: start the next task without waiting for review of the previous one; off: hold until you approve, reject or continue (the default for native missions)")
+    mission_set.add_argument("--auto-continue", dest="auto_continue", choices=("on", "off"), help="on: start the next task without waiting for review of the previous one; off: hold until you approve, reject or continue (the default for native missions)")
+    mission_set.add_argument("--teams", choices=("on", "off"), help="enable or disable provider-native team guidance")
+    mission_set.add_argument("--token-spend", choices=("low", "medium", "high"), help="set token spend preference")
+    mission_set.add_argument("--suspend-when-rate-limited", choices=("on", "off"), help="on: suspend at an idle capacity wait when no Bridge operation is active; off: wait awake (default)")
     _add_json_arg(mission_set)
     colour = mission_sub.add_parser("colour", aliases=["color"], help="pin the mission's identity colour (1-8) or return to the automatic one")
     _add_mission_arg(colour, default_mission)
@@ -1105,6 +1125,16 @@ def _build_parser(
     status = sub.add_parser("status")
     _add_mission_arg(status, default_mission)
     _add_json_arg(status)
+
+    agents = sub.add_parser("agents", help="inspect live Bridge provider operations and native Codex child agents")
+    agent_scope = agents.add_mutually_exclusive_group()
+    agent_scope.add_argument("--mission", dest="agent_mission", help="limit the map to one Bridge mission")
+    agent_scope.add_argument("--all-missions", dest="agent_all_missions", action="store_true", help="include operations from every Bridge mission (default)")
+    _add_json_arg(agents)
+
+    suspend = sub.add_parser("suspend-until-credits", help="suspend at the earliest verified credit recovery with a wake timer armed")
+    _add_mission_arg(suspend, default_mission)
+    _add_json_arg(suspend)
 
     tasks = sub.add_parser("task")
     task_sub = tasks.add_subparsers(dest="task_action", required=True)
@@ -1367,9 +1397,17 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     _reject_conflicting_modes(args)
     args.cwd = _validated_cwd(args.cwd)
     args.providers, args.routes = creation_rotation(args.providers, args.routes)
-    config: dict[str, Any] = {"providers": args.providers, "routes": args.routes, "headless": args.headless, "native_tui": args.native_tui, "frozen_tool_config": _frozen_tool_config(), **_log_retention_config(args)}
+    from . import bridge_policy, config as toolconfig
+
+    policy = bridge_policy.defaults_from_tool_config(toolconfig.load_config())
+    if args.teams is not None:
+        policy["team_policy_enabled"] = args.teams == "on"
+    if args.token_spend is not None:
+        policy["token_spend"] = args.token_spend
+    config: dict[str, Any] = {"providers": args.providers, "routes": args.routes, "headless": args.headless, "native_tui": args.native_tui, "frozen_tool_config": _frozen_tool_config(), **policy, **_log_retention_config(args)}
     if args.command_template:
         config["command_template"] = args.command_template
+        config["command_template_providers"] = args.providers
     if args.trust_folder:
         config["trust_folder"] = True
     if auto_continue:
@@ -1616,6 +1654,40 @@ def _set_mission_auto_continue(store: BridgeStore, mission_id: str, enabled: boo
     return {"schema_version": 1, "mission_id": mission_id, "auto_continue": enabled, "detail": detail}
 
 
+def _set_mission_policy(store: BridgeStore, mission_id: str, *, teams: str | None, token_spend: str | None) -> dict[str, Any]:
+    """Update mission execution guidance without changing any saved prompt text."""
+    from . import bridge_policy
+
+    mission = store.get_mission(mission_id)
+    current = bridge_policy.effective_settings(mission.get("config"))
+    resolved = {
+        "team_policy_enabled": current["teams_enabled"] if teams is None else teams == "on",
+        "token_spend": token_spend if token_spend is not None else (
+            bridge_policy.DEFAULT_TOKEN_SPEND if current["legacy"] else current["token_spend"]
+        ),
+    }
+    resolved["team_policy_enabled"], resolved["token_spend"] = bridge_policy.validate_settings(
+        resolved["team_policy_enabled"], resolved["token_spend"]
+    )
+    store.set_mission_config_values(mission_id, resolved, event_kind="mission-policy-changed")
+    return {
+        "schema_version": 1,
+        "mission_id": mission_id,
+        "execution_policy": bridge_policy.effective_settings(resolved),
+        "detail": f"Teams {'on' if resolved['team_policy_enabled'] else 'off'} · token spend {resolved['token_spend']}",
+    }
+
+
+def _set_mission_suspend_when_rate_limited(store: BridgeStore, mission_id: str, enabled: bool) -> dict[str, Any]:
+    """Enable or disable RTC-backed suspend during safe capacity waits."""
+    store.set_mission_config_value(
+        mission_id, "suspend_when_rate_limited", enabled, event_kind="mission-suspend-when-rate-limited",
+    )
+    detail = "Capacity-wait suspend " + ("on" if enabled else "off")
+    detail += " · Bridge sleeps only at an idle boundary with no active operation and an armed wake" if enabled else " · Bridge waits awake"
+    return {"schema_version": 1, "mission_id": mission_id, "suspend_when_rate_limited": enabled, "detail": detail}
+
+
 def _print_result(result: Any, as_json: bool, human: Callable[[Any], str] | None = None) -> None:
     """Print ``result``: stable sorted JSON for ``--json``, otherwise readable text."""
     if as_json:
@@ -1686,7 +1758,7 @@ MANAGED_SCOPE_REFUSAL = "A managed provider may only address its own mission"
 # Commands a managed provider may run: read-only inspection and recording a
 # proposal (which still needs the operator's acceptance).
 MANAGED_ALLOWED: frozenset[tuple[str, str]] = frozenset({
-    ("status", ""), ("events", ""), ("help", ""),
+    ("status", ""), ("events", ""), ("agents", ""), ("help", ""),
     ("task", "list"), ("task", "show"),
     ("proposal", "create"), ("proposal", "list"),
     ("mission", "list"), ("missions", ""),
@@ -1783,6 +1855,10 @@ def _managed_scope_violation(args: argparse.Namespace) -> bool:
     """
     own = os.environ.get(MANAGED_MISSION_ENV, "").strip().lower()
     named = getattr(args, "mission", None)
+    if args.command == "agents":
+        if getattr(args, "agent_all_missions", False):
+            return True
+        named = getattr(args, "agent_mission", None) or own
     if not own or not named:
         return False
     return str(named).lower() != own
@@ -1858,7 +1934,8 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command != "_controller":
             _resolve_parsed_mission(args, optional=args.command == "doctor")
             if _managed_session() and _managed_scope_violation(args):
-                print(f"llm-bridge: {MANAGED_SCOPE_REFUSAL}; mission {str(args.mission)[:8]} is not yours", file=sys.stderr)
+                reference = getattr(args, "mission", getattr(args, "agent_mission", None))
+                print(f"llm-bridge: {MANAGED_SCOPE_REFUSAL}; mission {str(reference or 'all missions')[:8]} is not yours", file=sys.stderr)
                 return 2
         if args.command == "view":
             from .bridge_viewer import read_source, run_document
@@ -2040,7 +2117,15 @@ def _main(argv: list[str] | None = None) -> int:
                     prompt, config = _mission_creation_inputs(args, auto_continue=bool(args.auto_continue))
                     result = _create_mission_with_task(store, args, prompt, config)
                 elif args.mission_action == "set":
-                    result = _set_mission_auto_continue(store, args.mission, args.auto_continue == "on")
+                    if not any((args.auto_continue, args.teams, args.token_spend, args.suspend_when_rate_limited)):
+                        raise ValueError("mission set requires --auto-continue, --teams, --token-spend, or --suspend-when-rate-limited")
+                    result = {"schema_version": 1, "mission_id": args.mission}
+                    if args.auto_continue is not None:
+                        result.update(_set_mission_auto_continue(store, args.mission, args.auto_continue == "on"))
+                    if args.teams is not None or args.token_spend is not None:
+                        result.update(_set_mission_policy(store, args.mission, teams=args.teams, token_spend=args.token_spend))
+                    if args.suspend_when_rate_limited is not None:
+                        result.update(_set_mission_suspend_when_rate_limited(store, args.mission, args.suspend_when_rate_limited == "on"))
                     _print_result(result, bool(getattr(args, "json", False)), lambda value: value["detail"])
                     return 0
                 elif args.mission_action in {"colour", "color"}:
@@ -2061,6 +2146,32 @@ def _main(argv: list[str] | None = None) -> int:
             result = status_snapshot(args.mission)
             _print_result(result, args.json, fmt.format_status)
             return 0
+        if args.command == "agents":
+            from .bridge_agents import build_agent_map, format_agent_map
+
+            with open_store(readonly=True) as store:
+                agent_mission = args.agent_mission
+                if _managed_session() and not args.agent_all_missions and agent_mission is None:
+                    agent_mission = os.environ.get(MANAGED_MISSION_ENV)
+                result = build_agent_map(store, mission_id=agent_mission)
+            if args.json:
+                _json_print(result)
+            else:
+                print(f"Live agent map · {result['total']} agent(s) · {result['freshness']}")
+                for line in format_agent_map(result):
+                    print(line)
+                for error in result["errors"].values():
+                    print(f"Unavailable: {error}")
+            return 0
+        if args.command == "suspend-until-credits":
+            from .bridge_power import suspend_until_credits
+
+            result = suspend_until_credits(args.mission)
+            if args.json:
+                _json_print(result)
+            else:
+                print(result.get("message") or result.get("reason") or result.get("status"))
+            return 0 if result.get("ok") is True else 2
         if args.command == "events":
             with open_store(readonly=True) as store:
                 result = {"schema_version": 1, "events": store.events(args.mission, after=args.after, limit=args.limit)}

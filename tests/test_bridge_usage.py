@@ -62,3 +62,43 @@ def test_usage_collector_reuses_public_api_without_subprocess(monkeypatch):
     assert observed[0].show_remaining_time and not observed[0].show_source  # the cache-path column made rows ~170 cells wide
     assert observed[0].show_copilot_credits
     assert not observed[0].progress_enabled and not observed[0].color_enabled
+
+
+def test_embedded_snapshot_reuses_usage_color_cells_without_changing_plain_text(monkeypatch) -> None:
+    from llm_tools.bridge_documents import render_ansi_segments
+    from llm_tools import usage
+
+    rows = [
+        usage.UsageRow("Codex", "5h", 9, "9%", None, "fixture"),
+        usage.UsageRow("Claude", "5h", 80, "80%", None, "fixture"),
+        usage.UsageRow("Spend", "monthly", None, "-", None, "fixture", amount=25, currency="$", spent=True),
+    ]
+    monkeypatch.setattr(usage, "_build_usage_rows", lambda _cfg, _data: (rows, False))
+    cfg = usage.Config()
+    cfg.show_remaining_time = False
+    cfg.monthly_budget = 100
+    cfg.terminal_width = 200
+
+    cfg.color_enabled = False
+    monochrome = usage.dashboard_snapshot(cfg, provider_data={})
+    cfg.color_enabled = True
+    colored = usage.dashboard_snapshot(cfg, provider_data={})
+    plain_segments = render_ansi_segments(monochrome["text"])
+    color_segments = render_ansi_segments(colored["text"])
+    plain_text = "\n".join("".join(text for text, _role in line) for line in plain_segments)
+    color_text = "\n".join("".join(text for text, _role in line) for line in color_segments)
+    roles = {role for line in color_segments for _text, role in line}
+
+    assert plain_text == color_text
+    assert "  9% " in color_text and " 80% " in color_text
+    assert "\x1b[" not in monochrome["text"] and "\x1b[" in colored["text"]
+    assert {"error", "ok"} <= roles
+
+
+def test_usage_ansi_cells_keep_distinct_guidance_colors_and_plain_columns() -> None:
+    from llm_tools.bridge_documents import render_ansi_segments
+
+    source = "\x1b[0;31mempty\x1b[0m   \x1b[0;33mlow\x1b[0m   \x1b[0;32mpace\x1b[0m   \x1b[0;36mheadroom\x1b[0m   \x1b[2;37minactive\x1b[0m"
+    cells = render_ansi_segments(source)[0]
+    assert {("empty", "error"), ("low", "warn"), ("pace", "ok"), ("headroom", "tool"), ("inactive", "dim")} <= set(cells)
+    assert "".join(text for text, _role in cells) == "empty   low   pace   headroom   inactive"

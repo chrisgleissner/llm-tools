@@ -283,18 +283,19 @@ def test_suspend_with_wake_success_reliable(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
     monkeypatch.setattr(common, "have_cmd", lambda name: True)
     monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common, "suspend_clock_sample", iter([(100.0, 90.0), (120.0, 90.0)]).__next__)
 
     def fake_run(args, **kwargs):
         return FakeProc(0, "")
 
     monkeypatch.setattr(common.subprocess, "run", fake_run)
     # Simulate the machine sleeping to the target: the wall-clock wait lands at 2000.
-    def fake_wait(target, e=None):
+    def fake_wait(target, e=None, *_i):
         clock["t"] = target
     monkeypatch.setattr(common, "wall_clock_wait_until", fake_wait)
 
     out = common.suspend_with_wake(2000, who="ralph-robin", env=env)
-    assert out.suspended is True and out.reliable is True and out.drift_seconds == 0
+    assert out.suspended is True and out.sleep_observed is True and out.reliable is True and out.drift_seconds == 0
     # Ledger has a matching start+done -> nothing incomplete.
     assert common.incomplete_suspend_cycles(common.suspend_ledger_path(env)) == []
 
@@ -305,11 +306,74 @@ def test_suspend_with_wake_unreliable_drift(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
     monkeypatch.setattr(common, "have_cmd", lambda name: True)
     monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common, "suspend_clock_sample", iter([(100.0, 90.0), (1120.0, 90.0)]).__next__)
     monkeypatch.setattr(common.subprocess, "run", lambda *a, **k: FakeProc(0, ""))
     # Woke 1000s after target -> RTC clearly did not fire on time.
-    monkeypatch.setattr(common, "wall_clock_wait_until", lambda target, e=None: clock.update(t=target + 1000))
+    monkeypatch.setattr(common, "wall_clock_wait_until", lambda target, e=None, *_i: clock.update(t=target + 1000))
     out = common.suspend_with_wake(2000, who="ralph-robin", env=env)
-    assert out.suspended is True and out.reliable is False and out.drift_seconds == 1000
+    assert out.suspended is True and out.sleep_observed is True and out.reliable is False and out.drift_seconds == 1000
+
+
+def test_suspend_with_wake_accepted_but_awake_is_not_reported_as_sleep(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _cache_env(tmp_path) | {"LLM_SCHEDULER_SUSPEND_MIN_LEAD": "10"}
+    clock = {"t": 1000}
+    monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
+    monkeypatch.setattr(common, "have_cmd", lambda name: True)
+    monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common.subprocess, "run", lambda *a, **k: FakeProc(0, ""))
+    monkeypatch.setattr(common, "wall_clock_wait_until", lambda target, e=None, *_i: clock.update(t=target))
+    monkeypatch.setattr(common, "suspend_clock_sample", iter([(100.0, 90.0), (110.0, 100.0)]).__next__)
+
+    outcome = common.suspend_with_wake(2000, who="ralph-robin", env=env)
+
+    assert outcome.suspended is False
+    assert outcome.sleep_observed is False
+    assert outcome.reason == "sleep-not-observed"
+    assert outcome.reliable is False
+    ledger = [json.loads(line) for line in common.suspend_ledger_path(env).read_text().splitlines()]
+    assert ledger[-1]["reason"] == "sleep-not-observed"
+    assert ledger[-1]["reliable"] is False
+
+
+def test_suspend_with_wake_unavailable_sleep_clock_remains_unknown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _cache_env(tmp_path) | {"LLM_SCHEDULER_SUSPEND_MIN_LEAD": "10"}
+    clock = {"t": 1000}
+    monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
+    monkeypatch.setattr(common, "have_cmd", lambda name: True)
+    monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common.subprocess, "run", lambda *a, **k: FakeProc(0, ""))
+    monkeypatch.setattr(common, "wall_clock_wait_until", lambda target, e=None, *_i: clock.update(t=target))
+    monkeypatch.setattr(common, "suspend_clock_sample", lambda: None)
+
+    outcome = common.suspend_with_wake(2000, who="ralph-robin", env=env)
+
+    assert outcome.suspended is False
+    assert outcome.sleep_observed is None
+    assert outcome.reason == "sleep-unverified"
+    assert outcome.reliable is False
+
+
+def test_suspend_with_wake_rejection_disarms_wake_and_closes_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env = _cache_env(tmp_path) | {"LLM_SCHEDULER_SUSPEND_MIN_LEAD": "10"}
+    calls: list[list[str]] = []
+    monkeypatch.setattr(common, "now_epoch", lambda e=None: 1000)
+    monkeypatch.setattr(common, "have_cmd", lambda name: name in {"systemctl", "systemd-run", "rtcwake"})
+    monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="cycle-wake"))
+
+    def run(args: list[str], **_kwargs: object) -> FakeProc:
+        calls.append(args)
+        return FakeProc(1 if args == ["systemctl", "suspend"] else 0)
+
+    monkeypatch.setattr(common.subprocess, "run", run)
+    monkeypatch.setattr(common, "wall_clock_wait_until", lambda *_a, **_k: pytest.fail("rejected suspend must not wait for target"))
+
+    out = common.suspend_with_wake(2000, who="ralph-robin", cycle_id="rejected", env=env)
+
+    assert out == common.SuspendOutcome(False, 1000, 2000, None, False, "systemd-timer", "suspend-rejected")
+    assert ["systemctl", "--user", "stop", "cycle-wake.timer"] in calls
+    ledger = [json.loads(line) for line in common.suspend_ledger_path(env).read_text().splitlines()]
+    assert [record["event"] for record in ledger] == ["suspend_start", "suspend_done"]
+    assert ledger[-1]["reason"] == "suspend-rejected"
 
 
 def test_suspend_with_wake_arms_watchdog(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -334,8 +398,9 @@ def test_suspend_with_wake_arms_watchdog(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
     monkeypatch.setattr(common, "have_cmd", lambda name: True)
     monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common, "suspend_clock_sample", iter([(100.0, 90.0), (120.0, 90.0)]).__next__)
     monkeypatch.setattr(common.subprocess, "run", lambda *a, **k: FakeProc(0, ""))
-    monkeypatch.setattr(common, "wall_clock_wait_until", lambda target, e=None: clock.update(t=target))
+    monkeypatch.setattr(common, "wall_clock_wait_until", lambda target, e=None, *_i: clock.update(t=target))
     monkeypatch.setattr(common, "Watchdog", FakeDog)
     out = common.suspend_with_wake(2000, who="ralph-robin", watchdog=True, env=env)
     assert out.suspended is True and armed["timeout"] is not None and armed["disarmed"] is True
@@ -398,7 +463,7 @@ def test_soak_summarize() -> None:
 def test_soak_run_cycle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     env = {"LLM_USAGE_NOW_EPOCH": "1000"}
     logs = common.setup_run_logs(tmp_path / "logs", "soak")
-    monkeypatch.setattr(common, "suspend_with_wake", lambda *a, **k: common.SuspendOutcome(True, 1122, 1120, 2, True, "systemd-timer", "ok"))
+    monkeypatch.setattr(common, "suspend_with_wake", lambda *a, **k: common.SuspendOutcome(True, 1122, 1120, 2, True, "systemd-timer", "ok", sleep_observed=True))
     monkeypatch.setattr(sleep_soak, "scrape_resume_errors", lambda since, e=None: [])
     cfg = sleep_soak.SoakConfig(period=120)
     result = sleep_soak.run_cycle(cfg, logs, 1, env)
@@ -446,7 +511,32 @@ def test_soak_main_unreliable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
     monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
     monkeypatch.setattr(common, "power_backend", lambda e=None: "systemd")
     monkeypatch.setattr(sleep_soak.time, "sleep", lambda s: None)
-    monkeypatch.setattr(common, "suspend_with_wake", lambda *a, **k: common.SuspendOutcome(True, 9999, 9000, 999, False, "systemd-timer", "ok"))
+    monkeypatch.setattr(common, "suspend_with_wake", lambda *a, **k: common.SuspendOutcome(True, 9999, 9000, 999, False, "systemd-timer", "ok", sleep_observed=True))
     monkeypatch.setattr(sleep_soak, "scrape_resume_errors", lambda since, e=None: [])
     rc = sleep_soak.main(["--cycles", "2", "--gap", "0"])
     assert rc == 1  # an unreliable wake fails the soak
+
+
+def test_accepted_suspend_that_stays_awake_still_sees_operator_requests(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """If systemctl accepts the request but the machine does not sleep, a stop must end the wait."""
+    env = _cache_env(tmp_path) | {"LLM_SCHEDULER_SUSPEND_MIN_LEAD": "10"}
+    clock = {"t": 1000}
+    monkeypatch.setattr(common, "now_epoch", lambda e=None: clock["t"])
+    monkeypatch.setattr(common, "have_cmd", lambda name: True)
+    monkeypatch.setattr(common, "arm_rtc_wake", lambda *a, **k: common.WakeArm(True, "systemd-timer", False, unit="u"))
+    monkeypatch.setattr(common, "suspend_clock_sample", iter([(100.0, 90.0), (100.5, 90.0)]).__next__)
+    monkeypatch.setattr(common.subprocess, "run", lambda args, **kwargs: FakeProc(0, ""))
+    polls = {"n": 0}
+
+    def sleep(_seconds: float) -> None:
+        clock["t"] += 1
+
+    def interrupt() -> bool:
+        polls["n"] += 1
+        return polls["n"] >= 4
+
+    monkeypatch.setattr(common.time, "sleep", sleep)
+    out = common.suspend_with_wake(100000, who="ralph-robin", env=env, should_interrupt=interrupt)
+
+    assert out.suspended is False and out.reason == "sleep-not-observed"
+    assert clock["t"] < 1100, "the wait ended at the operator request, not at the far reset time"

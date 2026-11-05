@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from llm_tools.bridge_monitor import project_snapshot
 from llm_tools.bridge_refresh import CapacityRefreshWorker
 from llm_tools.bridge_store import BridgeStore
@@ -288,7 +290,10 @@ def test_latest_event_queries_use_mission_kind_id_index(tmp_path) -> None:
     indexed_kinds = (
         "provider-selection", "capacity-refresh", "provider-wait", "task-verified",
         "controller-heartbeat", "controller-mode", "station-observation",
-        "provider-handoff", "controller-ownership", *suspend_kinds,
+        "provider-handoff", "controller-ownership",
+        "suspend-intent", "suspend-refused", "suspend-outcome", "suspend-work-resumed",
+        "capacity-wake-armed", "capacity-wake-unavailable", "capacity-wake-resumed",
+        *suspend_kinds,
     )
     indexed_queries = [
         ("SELECT * FROM events INDEXED BY events_mission_kind_id WHERE mission_id=? AND kind=? ORDER BY id DESC LIMIT 1", (mission["id"], kind))
@@ -299,6 +304,72 @@ def test_latest_event_queries_use_mission_kind_id_index(tmp_path) -> None:
         assert "events_mission_kind_id" in plan
         assert "TEMP B-TREE" not in plan
     store.close()
+
+
+@pytest.mark.parametrize(
+    ("simulated", "actual_sleep", "status_text"),
+    [
+        (False, True, "work resumed after sleep"),
+        (True, False, "simulation only; no work resumed from sleep"),
+    ],
+)
+def test_automatic_suspend_cycle_events_project_numeric_power_evidence(
+    tmp_path, simulated: bool, actual_sleep: bool, status_text: str,
+) -> None:
+    from llm_tools.bridge_runtime import BridgeMissionHooks
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("suspend-projection", "objective", cwd=tmp_path)
+    hooks = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hooks.bind(store)
+    shared = {
+        "cycle_id": "ralph-robin-cycle-1",
+        "target_epoch": 5000,
+        "woke_epoch": 5002 if actual_sleep else 5000,
+        "drift_seconds": 2 if actual_sleep else 0,
+        "reliable": actual_sleep,
+        "method": "systemd-timer",
+        "wake_armed": not simulated,
+        "wake_method": "systemd-timer" if not simulated else "simulated",
+        "wake_confirmed": False,
+        "actual_sleep": actual_sleep,
+        "simulated": simulated,
+        "reason": "simulated" if simulated else "ok",
+    }
+    hooks.on_suspend_event("suspend-intent", shared)
+    hooks.on_suspend_event("suspend-outcome", shared)
+    hooks.on_suspend_event("suspend-work-resumed", shared)
+
+    snapshot = project_snapshot(store, mission["id"])
+
+    assert snapshot["suspend"]["status"] == "suspend-work-resumed"
+    assert snapshot["suspend"]["status_text"] == status_text
+    assert snapshot["suspend"]["cycle_id"] == shared["cycle_id"]
+    assert snapshot["suspend"]["target_epoch"] == 5000
+    assert snapshot["suspend"]["woke_epoch"] == shared["woke_epoch"]
+    assert snapshot["suspend"]["drift_seconds"] == shared["drift_seconds"]
+    assert snapshot["suspend"]["reliable"] is actual_sleep
+    assert snapshot["suspend"]["method"] == "systemd-timer"
+    assert snapshot["suspend"]["wake_armed"] is not simulated
+    assert snapshot["suspend"]["wake_confirmed"] is False
+    assert snapshot["suspend"]["simulated"] is simulated
+    assert snapshot["suspend"]["actual_sleep"] is actual_sleep
+    store.close()
+
+
+def test_unknown_sleep_observation_is_not_reported_as_staying_awake(tmp_path):
+    with BridgeStore(tmp_path / "bridge.sqlite3") as store:
+        mission = store.create_mission("unknown sleep", "objective", cwd=tmp_path)
+        store.record_runtime_event(mission["id"], "suspend-outcome", {
+            "actual_sleep": None, "reason": "sleep-unverified", "target_epoch": 5000,
+        })
+        snapshot = project_snapshot(store, mission["id"])
+        assert snapshot["suspend"]["actual_sleep"] is None
+        assert snapshot["suspend"]["status_text"] == "suspend requested; actual sleep is unknown"
+        store.record_runtime_event(mission["id"], "capacity-wake-resume-unverified", {
+            "actual_sleep": None, "target_epoch": 5000,
+        })
+        assert project_snapshot(store, mission["id"])["suspend"]["status_text"] == "sleep observation unavailable; wake is unverified"
 
 
 def test_viewed_station_and_native_history_are_independent_of_executing_station(tmp_path):

@@ -7,7 +7,7 @@
   "rows": [
     "LLM BRIDGE · ▌ Release 2.0 hardening · ● RUNNING",
     "■ codex · task 4 running 20m · 5h 62% left · week 31% left",
-    "Overview  Tasks  [Providers]  Activity  Sessions  Health  Actions  Usage",
+    "Overview  Tasks  [Providers]  Activity  Sessions  Health  Actions  Usage  Agents",
     "  Viewing codex · last launched codex · operation 5eed0005 RUNNING",
     "  mode background",
     "> ■ codex  default model  ● running task 4 20m  [viewed]",
@@ -28,12 +28,12 @@
     "",
     "",
     "› type a command · /help · Ctrl-K actions",
-    "Enter mark viewed · ↑↓ select · Tab/F1-8 views · Ctrl-D exit · ? help"
+    "Enter mark viewed · ↑↓ select · Tab/F1-9 views · Ctrl-D exit · ? help"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " · ", "dim"], [39, "● RUNNING", "state_running"]],
     [[0, "■", "provider_codex"], [1, " codex · task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m · 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left · week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
-    [[0, "Overview  Tasks  ", "muted"], [17, "[Providers]", "accent"], [28, "  Activity  Sessions  Health  Actions  Usage", "muted"]],
+    [[0, "Overview  Tasks  ", "muted"], [17, "[Providers]", "accent"], [28, "  Activity  Sessions  Health  Actions  Usage  Agents", "muted"]],
     [[2, "Viewing codex · last launched codex · operation 5eed0005 ", "muted"], [59, "RUNNING", "state_running"]],
     [[2, "mode background", "muted"]],
     [[0, "> ■ codex  default model  ● running task 4 20m  [viewed]", "selected"]],
@@ -54,6 +54,6 @@
     [],
     [],
     [[0, "› ", "muted"], [2, "type a command · /help · Ctrl-K actions", "dim+dim"]],
-    [[0, "Enter", "key"], [5, " mark viewed", "muted"], [17, " · ", "dim"], [20, "↑↓", "key"], [22, " select", "muted"], [29, " · ", "dim"], [32, "Tab/F1-8", "key"], [40, " views", "muted"], [46, " · ", "dim"], [49, "Ctrl-D", "key"], [55, " exit", "muted"], [60, " · ", "dim"], [63, "?", "key"], [64, " help", "muted"]]
+    [[0, "Enter", "key"], [5, " mark viewed", "muted"], [17, " · ", "dim"], [20, "↑↓", "key"], [22, " select", "muted"], [29, " · ", "dim"], [32, "Tab/F1-9", "key"], [40, " views", "muted"], [46, " · ", "dim"], [49, "Ctrl-D", "key"], [55, " exit", "muted"], [60, " · ", "dim"], [63, "?", "key"], [64, " help", "muted"]]
   ]
 }

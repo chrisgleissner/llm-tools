@@ -462,3 +462,31 @@ def render_markdown_segments(source: str, width: int, wrap: bool = True) -> tupl
         return tuple(rendered or ((("", "info"),),))
     except Exception:
         return tuple(tuple((part, "info") for part in row) for row in ("[plain source · Markdown renderer unavailable]", *source.splitlines()))
+
+
+def render_ansi_segments(source: str) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """Use Rich's ANSI reader to turn trusted renderer output into Bridge roles."""
+    from rich.text import Text
+
+    parsed = Text.from_ansi(source)
+    lines = parsed.split("\n")
+    rendered: list[tuple[tuple[str, str], ...]] = []
+    for line in lines:
+        roles = ["info"] * len(line.plain)
+        for span in line.spans:
+            style = span.style
+            color = getattr(style, "color", None)
+            number = getattr(color, "number", None)
+            if getattr(style, "dim", False):
+                role = "dim"
+            else:
+                role = {1: "error", 3: "warn", 2: "ok", 6: "tool"}.get(number if isinstance(number, int) else -1, "info")
+            roles[span.start:span.end] = [role] * (span.end - span.start)
+        segments: list[tuple[str, str]] = []
+        start = 0
+        for index in range(1, len(line.plain) + 1):
+            if index == len(line.plain) or roles[index] != roles[start]:
+                segments.append((line.plain[start:index], roles[start]))
+                start = index
+        rendered.append(tuple(segments or [("", "info")]))
+    return tuple(rendered) if rendered else ((('', 'info'),),)

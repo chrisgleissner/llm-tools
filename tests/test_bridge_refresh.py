@@ -87,6 +87,47 @@ def test_refresh_worker_waits_for_inflight_selection_then_stops_without_writes(t
     assert not any(event["kind"] == "capacity-refresh-error" for event in events)
 
 
+def test_refresh_finishing_after_stop_cannot_rearm_its_wake_request(tmp_path, monkeypatch) -> None:
+    from llm_tools import bridge_power
+
+    database = tmp_path / "bridge.sqlite3"
+    store = BridgeStore(database)
+    mission = store.create_mission("mission", "objective", cwd=tmp_path)
+    store.set_mission_status(mission["id"], "RUNNING")
+    store.set_mission_config_value(mission["id"], "suspend_when_rate_limited", True, event_kind="mission-suspend-when-rate-limited")
+    entered = threading.Event()
+    release = threading.Event()
+    updates: list[int | None] = []
+    update = bridge_power.update_wake_request
+
+    def tracked_update(owner, target, **kwargs):
+        updates.append(target)
+        return update(owner, target, **kwargs)
+
+    monkeypatch.setattr(bridge_power, "update_wake_request", tracked_update)
+
+    def selector(_mission):
+        entered.set()
+        release.wait(2)
+        return {
+            "provider": "codex", "route": "codex-spark", "all_rate_limited": True,
+            "decisions": [{"usable": False, "reason": "rate-limited", "wait_until": 5000,
+                           "windows": [{"kind": "reset_window", "reset_epoch": 5000}]}],
+        }
+
+    worker = CapacityRefreshWorker(mission["id"], database, interval_seconds=5, initial_refresh_delay_seconds=0, selector=selector)
+    worker.start()
+    assert entered.wait(1)
+    stopper = threading.Thread(target=worker.stop)
+    stopper.start()
+    assert worker._stop.wait(1)
+    release.set()
+    stopper.join(2)
+    assert not stopper.is_alive()
+    assert updates == [None]
+    assert bridge_power.shared_wake_target() is None
+
+
 def test_capacity_observation_reuses_ralph_selection_and_sanitizes_provider_data(monkeypatch) -> None:
     from llm_tools import config as toolconfig
     from llm_tools import ralph_robin

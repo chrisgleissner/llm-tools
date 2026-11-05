@@ -14,9 +14,11 @@ import pytest
 from llm_tools.bridge_sessions import (
     NativeSessionIdentity,
     codex_session_records,
+    codex_session_records_by_id,
     codex_owned_argv,
     confirm_restored,
     discover_owned_codex_session,
+    discover_owned_codex_root_session,
     new_session_argv,
     parse_session_metadata,
     resume_argv,
@@ -27,6 +29,23 @@ from tests.conftest import scaled
 
 CODEX_ID = "12345678-1234-4234-8234-123456789abc"
 CLAUDE_ID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+
+
+def test_codex_root_discovery_uses_parent_link_and_operation_start_boundary(monkeypatch, tmp_path):
+    cwd = str(tmp_path.resolve())
+    root = NativeSessionIdentity("codex", CODEX_ID, cwd, "codex:session_meta")
+    child = NativeSessionIdentity("codex", CLAUDE_ID, cwd, "codex:session_meta", CODEX_ID)
+    stale_root = NativeSessionIdentity("codex", "fedcba98-7654-4321-8765-0123456789ab", cwd, "codex:session_meta")
+    monkeypatch.setattr(
+        "llm_tools.bridge_sessions._owned_codex_session_candidates",
+        lambda *_args, **_kwargs: [(root, 110), (child, 120), (stale_root, 90)],
+    )
+    assert discover_owned_codex_root_session(1234, "boot:1", cwd=cwd, started_after=100) == root
+    monkeypatch.setattr(
+        "llm_tools.bridge_sessions._owned_codex_session_candidates",
+        lambda *_args, **_kwargs: [(root, 110), (stale_root, 115)],
+    )
+    assert discover_owned_codex_root_session(1234, "boot:1", cwd=cwd, started_after=100) is None
 
 
 def _fake_cli(path: Path, help_text: str) -> Path:
@@ -195,6 +214,19 @@ def test_codex_metadata_file_scan_reads_only_exact_structured_first_line(tmp_pat
     assert records[0].identity.session_id == CODEX_ID
     assert records[0].path == transcript
     assert records[0].modified_ns == transcript.stat().st_mtime_ns
+
+
+def test_codex_session_lookup_by_id_validates_header_without_root_cwd_assumption(tmp_path: Path) -> None:
+    child_cwd = tmp_path / "child-project"
+    child_cwd.mkdir()
+    transcript = tmp_path / "codex" / "sessions" / f"{CLAUDE_ID}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text(json.dumps({"type": "session_meta", "payload": {
+        "id": CLAUDE_ID, "cwd": str(child_cwd), "parentThreadId": CODEX_ID,
+    }}) + "\n" + json.dumps({"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "secret"}}) + "\n")
+    records = codex_session_records_by_id(transcript.parent, {CLAUDE_ID})
+    assert records[CLAUDE_ID].identity.parent_session_id == CODEX_ID
+    assert records[CLAUDE_ID].identity.cwd == str(child_cwd.resolve())
 
 
 def _codex_transcript(path: Path, session_id: str, cwd: Path) -> None:

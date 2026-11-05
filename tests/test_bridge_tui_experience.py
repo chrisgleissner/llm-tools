@@ -209,6 +209,7 @@ def test_bridge_overview_quiet_mission_hides_empty_rows() -> None:
         "Now         idle",
         "Next        nothing ready",
         "Tasks       none yet — Ctrl-E adds a task",
+        "Policy      legacy (unchanged)",
     ]
     queued = make_state({"mission": {"status": "RUNNING"}, "pending_commands": [{}, {}, {}]}).rows()
     assert "Queue       3 commands waiting for the controller" in queued
@@ -248,7 +249,7 @@ def test_overview_rows_are_not_selectable_and_scroll_without_markers(monkeypatch
     state.selected = 50
     bridge_tui._draw_full(tiny, state)  # type: ignore[arg-type]
     assert 0 < state.selected < 50  # clamped to the last page
-    assert [view for view in bridge_tui.VIEWS if make_state(view=view).selectable] == ["Tasks", "Providers", "Actions"]
+    assert [view for view in bridge_tui.VIEWS if make_state(view=view).selectable] == ["Tasks", "Providers", "Actions", "Agents"]
     mouse_state = make_state(full_snapshot())
     mouse_state.handle_mouse(5, 5, 34, 120)
     assert mouse_state.selected == 0
