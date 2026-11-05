@@ -72,7 +72,9 @@ def test_the_job_that_runs_repository_tests_has_no_oidc_token() -> None:
     text = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
     test_job = text[text.index("\n  test:"):text.index("\n  coverage-upload:")]
     assert "id-token" not in test_job and "coverage run -m pytest" in test_job
-    upload_job = text[text.index("\n  coverage-upload:"):]
+    start = text.index("\n  coverage-upload:")
+    following = re.search(r"\n  [a-z0-9-]+:\n", text[start + 1:])
+    upload_job = text[start:start + 1 + following.start()] if following else text[start:]
     assert "coverage run" not in upload_job and "pip install" not in upload_job
 
 

@@ -38,7 +38,7 @@ export SOURCE_DATE_EPOCH
 work=${BRIDGE_BUILD_DIR:-${TMPDIR:-/tmp}/bridge-image-build}
 rm -rf "$work/src" "$work/context"
 mkdir -p "$work/src" "$work/context/bin/amd64" "$work/context/bin/arm64" "$work/context/data"
-git -C "$repo" archive "$commit" coordinator web container | tar -x -C "$work/src"
+git -C "$repo" archive "$commit" rust-toolchain.toml coordinator web container | tar -x -C "$work/src"
 
 target_dir=${CARGO_TARGET_DIR:-$work/cargo-target}
 for pair in amd64:x86_64-unknown-linux-musl arm64:aarch64-unknown-linux-musl; do
