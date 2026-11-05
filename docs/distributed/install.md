@@ -74,6 +74,15 @@ replicated events in the container on x86-64 (`benchmarks.md`). Idle RSS is abou
 Argon2id verification slots (19 MiB each) and the allocator keep memory. Log files
 are capped at 3 x 1 MB by the `json-file` options.
 
+Client addresses: the login rate limits and the per-address connection cap
+(`max_connections_per_ip`, default 32) key on the client address the coordinator
+sees. Docker's userland proxy, used for connections to a port published on
+loopback, and the port forwarder of rootless Docker replace the client address
+with a gateway address, so all clients that arrive that way share one address and
+one set of limits. Rootful Docker keeps the real address for LAN clients that are
+forwarded by iptables. When several people or a reverse proxy share one address,
+raise `max_connections_per_ip` in `/data/config.toml`.
+
 Verified on x86-64 (rootless Docker 29.9): init, idempotent init, health check,
 loopback-only publishing, administrator setup, worker add and token create through
 `exec`, a native worker connecting with `--allow-control` and answering

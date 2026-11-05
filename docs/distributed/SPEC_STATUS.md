@@ -101,15 +101,15 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | AUTH-008 | [ ] |  |
 | AUTH-009 | [ ] |  |
 | AUTH-010 | [ ] |  |
-| SEC-001 | [~] | Worker code runs only after explicit enroll + run; standalone never imports it. Coordinator binds loopback by default (pending). |
-| SEC-002 | [~] | Worker refuses non-wss URLs and verifies the coordinator certificate against the enrolled CA (test_wss_verifies_the_server_against_the_given_ca). |
-| SEC-003 | [ ] |  |
-| SEC-004 | [ ] |  |
-| SEC-005 | [ ] |  |
+| SEC-001 | [x] | Standalone Bridge never imports the worker; the worker runs only after `worker enroll` + `worker run`. The coordinator binds 127.0.0.1 by default and refuses a non-loopback bind without `lan_enabled = true` (coordinator/tests/api.rs non_loopback_bind_needs_lan_enabled); `container/compose.yaml` publishes on 127.0.0.1 unless `BRIDGE_PUBLISH_ADDRESS` is set. Mutations need `--allow-control`, terminals `--allow-terminal-view` (D5, D7 L4). |
+| SEC-002 | [x] | Workers connect only over `wss://`, verify the coordinator certificate against the enrolled CA (test_wss_verifies_the_server_against_the_given_ca) and authenticate with a per-worker token (coordinator/tests/worker.rs worker_authentication). The CA is name-constrained (coordinator/tests/certs.rs, D7 H2). |
+| SEC-003 | [x] | A worker is identified by its stable name and a per-worker token stored as a hash; `worker revoke` closes the live connection and the token stops working (worker_authentication). Generation high-water marks survive revoke, so a re-added worker cannot be confused with an old connection (re_added_worker_gets_a_generation_above_every_earlier_one). |
+| SEC-004 | [x] | No Bridge, worker or terminal-stream module uses `shell=True`; subprocesses are started with argument vectors. Terminal input is typed with `tmux send-keys -H` (hex bytes, no shell). The coordinator starts no processes. |
+| SEC-005 | [x] | The worker sends only typed command results, mission/task/event data and terminal output; it never reads provider credential files or sends environment variables (bridge_worker module contract; audit test test_audit_records_security_actions_without_secrets). No worker image is shipped, so credentials are never placed in a container configuration (D6). |
 | SEC-006 | [x] | Worker `WriterRegistry`: one writer per mission, none while a local tmux client is attached, view only on read-only workers; coordinator never grants roles. Tests: test_second_writer_and_local_client_get_view_only, test_writer_role_is_dropped_when_a_local_client_attaches, Playwright terminal.spec.ts (second tab view only, input never reaches the pane). |
-| SEC-007 | [~] | Worker: `<state>/worker/audit.jsonl` (0600, 1 MiB + one rotation) records enrolment, connections, mutating/refused commands and terminal sessions with input byte counts only; `llm-bridge worker audit` (test_audit_*). Coordinator: `audit` table for login, setup, password, worker and token actions. Review of coverage pending SEC-009. |
+| SEC-007 | [x] | Worker: `<state>/worker/audit.jsonl` (0600, 1 MiB + one rotation) records enrolment, connections, mutating/refused commands and terminal sessions with input byte counts only; `llm-bridge worker audit` (test_audit_*). Coordinator: `audit` table for login, setup, password, worker, token and stale-generation actions. Coverage reviewed in SEC-009. |
 | SEC-008 | [x] | docs/distributed/threat-model.md: assets, five trust boundaries, threats with mitigations and residual risk, out-of-scope items. |
-| SEC-009 | [ ] |  |
+| SEC-009 | [x] | One Opus security architecture review on 2026-11-05: no critical findings; H1, H2, M1-M3, M5 and L1-L7 fixed with tests that fail on revert (commits 94fc75a, 0f47ea9); M4 accepted and documented. Findings and disposition: DECISIONS.md D7. |
 | WEB-001 | [ ] |  |
 | WEB-002 | [ ] |  |
 | WEB-003 | [ ] |  |
