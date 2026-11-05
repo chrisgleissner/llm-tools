@@ -24,13 +24,13 @@ export function minutes(secs: number): string {
 }
 
 /** Wire a "show / hide" toggle to a password input. */
-export function revealable(f: Field): HTMLElement {
-  const btn = h("button", { type: "button", class: "btn ghost icon reveal", "aria-label": "Show password", "aria-pressed": "false" }, icon("eye", 20));
+export function revealable(f: Field, what = "password"): HTMLElement {
+  const btn = h("button", { type: "button", class: "btn ghost icon reveal", "aria-label": `Show ${what}`, "aria-pressed": "false" }, icon("eye", 20));
   btn.addEventListener("click", () => {
     const show = f.input.type === "password";
     f.input.type = show ? "text" : "password";
     btn.setAttribute("aria-pressed", String(show));
-    btn.setAttribute("aria-label", show ? "Hide password" : "Show password");
+    btn.setAttribute("aria-label", `${show ? "Hide" : "Show"} ${what}`);
     btn.replaceChildren(icon(show ? "eyeOff" : "eye", 20));
   });
   const row = h("div", { class: "input-row" }, f.input, btn);
@@ -269,7 +269,7 @@ export function newPasswordFields(policy: api.PasswordPolicy, username: () => st
   const pass = field(ids.passId, ids.passLabel, "password", { autocomplete: "new-password", required: true }, "", "strength-text strength-tip policy-list");
   const confirm = field(ids.confirmId, ids.confirmLabel, "password", { autocomplete: "new-password", required: true });
   revealable(pass);
-  revealable(confirm);
+  revealable(confirm, "repeated password");
   capsWarning(pass);
   const meter = h("div", { class: "meter", "data-level": "0", "aria-hidden": "true" }, h("i"), h("i"), h("i"), h("i"));
   const meterText = h("p", { class: "hint", id: "strength-text", role: "status" });

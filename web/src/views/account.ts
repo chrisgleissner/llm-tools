@@ -15,7 +15,7 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
   const policy = me?.password_policy ?? DEFAULT_POLICY;
   const s = me?.session;
   const cur = field("current-password", "Current password", "password", { autocomplete: "current-password", required: true });
-  revealable(cur);
+  revealable(cur, "current password");
   const np = newPasswordFields(policy, () => me?.username ?? "", { passId: "new-password", passLabel: "New password", confirmId: "new-password-confirm", confirmLabel: "Repeat new password" });
   const keep = h("input", { type: "checkbox", id: "keep-tokens" });
   const error = h("p", { class: "form-error box", role: "alert" });
