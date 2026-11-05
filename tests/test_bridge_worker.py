@@ -300,3 +300,32 @@ def test_run_audits_start_end_and_stop(state, monkeypatch):
     worker.run(session, lambda config: Once(), stop=stop, idle=0.01)
     actions = [entry["action"] for entry in worker.read_audit(10)]
     assert actions[-4:] == ["worker.start", "connection.accepted", "connection.ended", "worker.stop"]
+
+
+def test_service_unit_install_and_uninstall(state, tmp_path, capsys, monkeypatch):
+    directory, _ = state
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    assert main(["worker", "install-service"]) == 2  # not enrolled: no unit that cannot start
+    assert "not enrolled" in capsys.readouterr().err and not worker.service_unit_path().exists()
+    worker.enroll("ws", "wss://c:1", TOKEN, ca_pem=None, allow_control=False)
+    assert main(["worker", "install-service", "--print"]) == 0
+    text = capsys.readouterr().out
+    assert "-m llm_tools.bridge worker run" in text and f"LLM_BRIDGE_STATE_DIR={directory}" in text and TOKEN not in text
+    assert "UMask=0077" in text and "Restart=on-failure" in text and "WorkingDirectory=" + str(home) in text
+    calls = []
+    monkeypatch.setattr(__import__("shutil"), "which", lambda name, path=None: "/usr/bin/" + name)
+    unit, steps = worker.install_service(run=lambda argv: calls.append(argv) or 0)
+    assert unit == home / ".config/systemd/user/llm-bridge-worker.service" and "worker run" in unit.read_text()
+    assert calls[-1] == ["systemctl", "--user", "enable", "--now", "llm-bridge-worker.service"] and "enable-linger" in steps[0]
+    assert "could not enable" in worker.install_service(run=lambda argv: 1)[1][0]
+    assert worker.uninstall_service(run=lambda argv: calls.append(argv) or 0) and not unit.exists()
+    assert calls[-2][:3] == ["systemctl", "--user", "disable"] and not worker.uninstall_service(run=lambda argv: 0)
+    monkeypatch.setattr(__import__("shutil"), "which", lambda name, path=None: None)
+    assert "not available" in worker.install_service()[1][0]
+    actions = [entry["action"] for entry in worker.read_audit(20)]
+    assert actions.count("service.install") == 3 and "service.uninstall" in actions
+    monkeypatch.setattr(worker, "install_service", lambda: (unit, ["do this"]))
+    assert main(["worker", "install-service"]) == 0 and "Do this." in capsys.readouterr().out
+    monkeypatch.setattr(worker, "uninstall_service", lambda: False)
+    assert main(["worker", "uninstall-service"]) == 0 and "No worker service" in capsys.readouterr().out

@@ -1300,6 +1300,9 @@ def _build_parser(
     worker_audit = worker_sub.add_parser("audit", help="show this worker's security audit log (no tokens or terminal content)")
     worker_audit.add_argument("--limit", metavar="N", type=_db_int, default=50, help="newest entries shown (default: 50)")
     _add_json_arg(worker_audit)
+    worker_install = worker_sub.add_parser("install-service", help="install and start a systemd user unit that runs the worker")
+    worker_install.add_argument("--print", action="store_true", help="print the unit instead of installing it")
+    worker_sub.add_parser("uninstall-service", help="stop and remove the worker's systemd user unit")
     worker_sub.add_parser("unenroll", help="delete this host's enrolment, token and coordinator CA")
     worker_list = worker_sub.add_parser("list", help="list the workers registered with the configured coordinator")
     _add_json_arg(worker_list)
@@ -1960,6 +1963,18 @@ def _worker_command(args: argparse.Namespace) -> int:
         _print_result({"entries": entries}, args.json, lambda value: "\n".join(
             " ".join([str(entry.get("ts", "?")), str(entry.get("action", "?"))] + [f"{key}={entry[key]}" for key in sorted(entry) if key not in {"ts", "action"} and entry[key] is not None])
             for entry in value["entries"]) or "No worker audit entries.")
+        return 0
+    if args.worker_action == "install-service":
+        if args.print:
+            print(worker.service_unit_text(), end="")
+            return 0
+        unit, steps = worker.install_service()
+        print(f"Wrote {unit}.")
+        for step in steps:
+            print(step[:1].upper() + step[1:] + ".")
+        return 0
+    if args.worker_action == "uninstall-service":
+        print("Worker service removed." if worker.uninstall_service() else "No worker service is installed.")
         return 0
     if args.worker_action == "unenroll":
         removed = worker.unenroll()

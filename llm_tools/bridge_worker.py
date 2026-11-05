@@ -193,6 +193,90 @@ def unenroll(env: dict[str, str] | None = None) -> bool:
     return removed
 
 
+SERVICE_NAME = "llm-bridge-worker"
+
+
+def service_unit_path(env: dict[str, str] | None = None) -> Path:
+    from .common import home_dir
+
+    return home_dir(env) / ".config" / "systemd" / "user" / f"{SERVICE_NAME}.service"
+
+
+def service_unit_text(env: dict[str, str] | None = None) -> str:
+    """A systemd user unit for ``llm-bridge worker run`` (WORK-010, COORD-009).
+
+    The unit bakes the operator's PATH (so missions the worker continues can
+    find provider CLIs), the package location and any state-directory
+    override. It restarts only on failure: ``worker run`` exits 0 after
+    SIGTERM, which systemd sends on stop.
+    """
+    from . import common
+    from .usage_service import _service_home, _service_path, _systemd_assignment, _systemd_word, _unit_value
+
+    environ = os.environ if env is None else env
+    exec_start = " ".join(_systemd_word(part, "the worker command") for part in common.python_module_argv("llm_tools.bridge", "worker", "run"))
+    lines = [_systemd_assignment("PYTHONUNBUFFERED", "1"), _systemd_assignment("PATH", _unit_value(_service_path(env), "PATH")),
+             _systemd_assignment("PYTHONPATH", _unit_value(common.package_root(), "the package directory"))]
+    if environ.get("LLM_BRIDGE_STATE_DIR"):
+        lines.append(_systemd_assignment("LLM_BRIDGE_STATE_DIR", _unit_value(Path(environ["LLM_BRIDGE_STATE_DIR"]).expanduser(), "the state directory")))
+    environment = "\n".join(lines)
+    return f"""[Unit]
+Description=LLM Bridge worker (outbound connection to a Bridge coordinator)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart={exec_start}
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+{environment}
+WorkingDirectory={_service_home(env)}
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def install_service(env: dict[str, str] | None = None, *, run: Callable[[list[str]], int] | None = None) -> tuple[Path, list[str]]:
+    """Write the unit and enable it; returns the unit path and any manual steps left."""
+    import shutil
+    import subprocess
+
+    load_config(env)  # refuse to install a service that cannot start
+    unit = service_unit_path(env)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(service_unit_text(env), encoding="utf-8")
+    audit("service.install", env, unit=unit)
+    runner = run or (lambda argv: subprocess.run(argv, check=False).returncode)
+    if not shutil.which("systemctl"):
+        return unit, [f"systemctl is not available; start it with: systemctl --user enable --now {SERVICE_NAME}.service"]
+    if runner(["systemctl", "--user", "daemon-reload"]) or runner(["systemctl", "--user", "enable", "--now", f"{SERVICE_NAME}.service"]):
+        return unit, [f"systemctl could not enable the unit; inspect: systemctl --user status {SERVICE_NAME}.service"]
+    return unit, ["to keep the worker running while you are logged out, run once: loginctl enable-linger"]
+
+
+def uninstall_service(env: dict[str, str] | None = None, *, run: Callable[[list[str]], int] | None = None) -> bool:
+    import shutil
+    import subprocess
+
+    unit = service_unit_path(env)
+    runner = run or (lambda argv: subprocess.run(argv, check=False, stderr=subprocess.DEVNULL).returncode)
+    if shutil.which("systemctl") and unit.exists():
+        runner(["systemctl", "--user", "disable", "--now", f"{SERVICE_NAME}.service"])
+    existed = unit.exists()
+    unit.unlink(missing_ok=True)
+    if existed:
+        if shutil.which("systemctl"):
+            runner(["systemctl", "--user", "daemon-reload"])
+        audit("service.uninstall", env)
+    return existed
+
+
 def tls_context(env: dict[str, str] | None = None) -> ssl.SSLContext:
     """Verify the coordinator against the enrolled CA, or the system store when none was given."""
     ca = worker_dir(env) / CA_FILE

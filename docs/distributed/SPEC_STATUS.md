@@ -60,7 +60,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | WORK-007 | [~] | Outcome vocabulary ok/accepted/applied/rejected/failed/uncertain in bridge_commands.execute. |
 | WORK-008 | [~] | Reconnect resends hello; event replication resumes from welcome cursor with nack resend; duplicate commands return stored outcome. Coordinator side pending. |
 | WORK-009 | [ ] |  |
-| WORK-010 | [~] | worker run: reconnect with jittered backoff, silence timeout, SIGINT/SIGTERM stop (test_run_*). Service unit pending. |
+| WORK-010 | [x] | worker run: reconnect with jittered backoff, silence timeout, SIGINT/SIGTERM stop (test_run_*). `llm-bridge worker install-service` writes a systemd user unit (Restart=on-failure, UMask=0077, baked PATH/PYTHONPATH/state dir); unit checked with `systemd-analyze --user verify` and its ExecStart run against a closed port (test_service_unit_install_and_uninstall). |
 | COORD-001 | [~] | Rust coordinator builds and tests on x86-64; ARM64 cross-build succeeds; ARM64 execution unverified. |
 | COORD-002 | [x] | Tokio, axum, serde, rusqlite (bundled), rustls/ring; no aws-lc-rs (coordinator/Cargo.toml). |
 | COORD-003 | [ ] |  |
