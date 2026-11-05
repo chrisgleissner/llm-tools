@@ -60,6 +60,34 @@ about 2 MiB before the first login and 15-35 MiB afterwards, because the two Arg
 slots and the allocator keep memory. How to apply the limit is described in
 `install.md`.
 
+## x86-64 container under memory pressure
+
+Same host and image, one run per limit on 2026-11-05. For each limit the
+compose file's `mem_limit`/`memswap_limit` were set through
+`BRIDGE_MEMORY_LIMIT`, the volume was initialised, the administrator was
+created, and then 30 concurrent logins with the correct password were sent,
+followed by 200 concurrent `GET /api/v1/missions` with the session. The
+login limiter admits 5 of the 30 logins per minute from one address (the
+other 25 get 429), so at most two Argon2id hashes (19 MiB each) run at once.
+Peak is the container cgroup's `memory.peak`.
+
+| Limit | Logins | Peak | Result |
+|---|---|---|---|
+| 96 MiB | 5 x 200, 25 x 429 | 41 MiB | 199 of 200 GETs answered, 1 closed during the TLS handshake. |
+| 64 MiB | 5 x 200, 25 x 429 | 42 MiB | 200 of 200 GETs answered. |
+| 48 MiB | 5 x 200, 25 x 429 | 42 MiB | 164 of 200 GETs answered, 36 closed during the TLS handshake; no restart. |
+| 40 MiB, 32 MiB, 24 MiB | connections dropped | - | An allocation failed during the concurrent Argon2id hashes, the process aborted and Docker restarted it (`restart: unless-stopped`, not reported as an OOM kill). The restarted process was healthy and kept its data. |
+
+Docker's userland proxy makes all 200 parallel GET connections come from one
+address, so the per-address connection cap (32, see `coordinator.md`) can close
+connections above it during the TLS handshake. The number closed varied
+between runs (0 to 36). This run does not separate that effect from memory
+at 48 MiB; the process did not restart there.
+
+The coordinator needs about 42 MiB while two password hashes run. Below
+about 48 MiB a login burst ends the process. The shipped limit of 96 MiB
+keeps about twice that peak as headroom.
+
 ## Raspberry Pi Zero 2 W
 
 Not measured (no hardware available). Do not read any figure above as a measurement
