@@ -8,7 +8,7 @@ proves it by changing no golden file.
 
 Cases are the product of
 
-* screens   - the eight console views, the console overlays (help, approve confirmation,
+* screens   - the nine console views, the console overlays (help, approve confirmation,
               response pager, document viewer, composer), the home screen (list, new-mission
               form with the provider checklist, saved confirmation) and the mission picker;
 * sizes     - 80x24, 100x30 and 140x40 (columns x rows);
@@ -322,6 +322,32 @@ def _console_view(view: str, keys: tuple[str, ...] = ()) -> Callable[[Case], Fak
     return build
 
 
+def _agents_view(case: Case, *, inspector: bool = False) -> FakeScreen:
+    state = case.console_state("Agents")
+    state.snapshot["agent_map"] = {
+        "observed_at": NOW, "freshness": "partial", "errors": {},
+        "agents": [
+            {"id": "root", "kind": "bridge-root", "parent_id": None,
+             "name": "Review changes", "provider": "codex", "status": "running",
+             "model": "gpt-6.1-sol", "model_source": "observed",
+             "reasoning_effort": "medium", "effort_source": "observed",
+             "age_seconds": 1200, "mission_id": MISSION_ID,
+             "activity": "task 4: Review changes", "freshness": "observed",
+             "capabilities": {"inspect": True, "navigate": True, "reason": "Existing Bridge station"}},
+            {"id": "child", "kind": "native-child", "parent_id": "root",
+             "name": "Independent review", "provider": "codex", "status": "completed",
+             "model": "gpt-6-luna", "model_source": "observed",
+             "reasoning_effort": "high", "effort_source": "observed",
+             "age_seconds": 60, "finished_at": NOW - 20,
+             "activity": "provider task completed", "freshness": "last observed",
+             "capabilities": {"inspect": True, "navigate": False, "reason": "Native child attachment unavailable"}},
+        ],
+    }
+    state.selected = 1
+    state.agent_inspector = inspector
+    return _draw_console(case.screen(), state)
+
+
 def _overlay_help(case: Case) -> FakeScreen:
     state = case.console_state("Tasks")
     state.handle_key("?")
@@ -544,6 +570,8 @@ SCREENS: dict[str, Callable[[Case], FakeScreen]] = {
     "console-health": _console_view("Health"),
     "console-actions": _console_view("Actions"),
     "console-usage": _console_view("Usage"),
+    "console-agents": _agents_view,
+    "overlay-agent-inspector": lambda case: _agents_view(case, inspector=True),
     "overlay-help": _overlay_help,
     "overlay-approve-confirm": _overlay_approve,
     "overlay-response-pager": _overlay_pager,

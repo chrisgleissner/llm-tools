@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from functools import lru_cache
+from contextlib import nullcontext
 from pathlib import Path
 import threading
 import time
@@ -108,19 +109,29 @@ def _safe_decision(selection: dict[str, Any]) -> dict[str, Any]:
         decisions.append(item)
     common.prune_usage_log()
     selected = cast("dict[str, Any]", selection.get("decision") if isinstance(selection.get("decision"), dict) else {})
+    all_rate_limited = bool(selection.get("all_rate_limited"))
+    eligibility = [
+        int(item["wait_until"])
+        for item in decisions
+        if item.get("usable") is not True and isinstance(item.get("wait_until"), int)
+    ]
     return {
         "provider": str(selection.get("provider") or selected.get("provider") or ""),
         "route": str(selection.get("route") or ""),
         "selected_model": str(selection.get("selected_model") or selected.get("selected_model") or ""),
         "rotation_reason": str(selection.get("rotation_reason") or ""),
-        "all_rate_limited": bool(selection.get("all_rate_limited")),
+        "all_rate_limited": all_rate_limited,
+        "capacity_source": "Ralph selection; provider source remains provider-specific",
+        "freshness": "selection-read; shared provider cache is capped at 55 seconds",
+        "next_eligibility_epoch": min(eligibility) if all_rate_limited and eligibility else None,
         "decision": scalar(selected, ("usable", "reason", "wait_until")),
         "decisions": decisions,
         "observed_at": utc_now(),
+        **common.diagnostic_clock_fields(),
     }
 
 
-def refresh_capacity_observation(mission: dict[str, Any]) -> dict[str, Any]:
+def refresh_capacity_observation(mission: dict[str, Any], *, fresh: bool = False) -> dict[str, Any]:
     """Ask the existing Ralph selection path for read-only usage decisions."""
     from . import common, config as toolconfig, ralph_robin
 
@@ -146,7 +157,8 @@ def refresh_capacity_observation(mission: dict[str, Any]) -> dict[str, Any]:
     ralph_robin.resolve_policies(cfg, raw_conf)
     null_path = Path("/dev/null")
     null = common.RunLogs(run_dir=null_path, text_log=null_path, event_log=null_path)
-    with common.shared_usage_reads(SHARED_READ_MAX_AGE_SECONDS):
+    read_scope = nullcontext() if fresh else common.shared_usage_reads(SHARED_READ_MAX_AGE_SECONDS)
+    with read_scope:
         selection = ralph_robin.select_provider(cfg, null, 0, set())
     return _safe_decision(selection)
 
@@ -183,6 +195,9 @@ class CapacityRefreshWorker:
         self._last_refresh: tuple[str, int] | None = None
         self._refresh_loaded = False
         self._pruned: dict[str, int] = {}
+        self._last_wake_plan: tuple[int | None, bool] | None = None
+        self._last_wake_signature: tuple[Any, ...] | None = None
+        self._last_clock_pair: tuple[int, tuple[float, float] | None] | None = None
         self._thread = threading.Thread(target=self._run, name=f"bridge-refresh-{mission_id[:8]}", daemon=True)
 
     def start(self) -> None:
@@ -190,10 +205,28 @@ class CapacityRefreshWorker:
 
     def stop(self) -> None:
         self._stop.set()
-        # Synchronize with any event write already in progress. The next worker
-        # write rechecks _stop while holding this lock and cannot occur later.
         with self._write_lock:
-            pass
+            try:
+                from . import common
+                from .bridge_power import shared_wake_owners, update_wake_request
+
+                arm = update_wake_request(self.mission_id, None)
+                owners = shared_wake_owners()
+                with BridgeStore(self.database) as store:
+                    store.record_runtime_event(self.mission_id, "capacity-wake-plan", {
+                        "action": "owner-released",
+                        "owner": self.mission_id,
+                        "owners": owners,
+                        "target_epoch": arm.target_epoch,
+                        "method": arm.method,
+                        "unit": arm.unit,
+                        "armed": arm.armed,
+                        "confirmed": arm.confirmed,
+                        "result": "retained-prior" if "retained prior" in arm.detail else "armed" if arm.armed else "unavailable",
+                        **common.diagnostic_clock_fields(),
+                    })
+            except (OSError, ValueError):
+                pass
         # Capacity readers have bounded subprocess/network timeouts but can be
         # slower than a stop request. They are daemonized; the stop flag keeps
         # a late result from reaching SQLite after this method returns.
@@ -303,6 +336,7 @@ class CapacityRefreshWorker:
         process_start = _process_identity(pid)
         while not self._stop.is_set():
             now = time.monotonic()
+            self._observe_sleep_resume()
             if now >= next_heartbeat:
                 try:
                     mission = self._connection().get_mission(self.mission_id)
@@ -324,6 +358,7 @@ class CapacityRefreshWorker:
                     mission = self._connection().get_mission(self.mission_id)
                     observation = self.selector(mission)
                     self._record_refresh(observation)
+                    self._refresh_manual_wake(mission, observation)
                 except Exception as exc:
                     self._record("capacity-refresh-error", {
                         "reason": type(exc).__name__,
@@ -338,6 +373,98 @@ class CapacityRefreshWorker:
                 next_prune = time.monotonic() + (self.prune_interval_seconds if finished else PRUNE_RETRY_SECONDS)
             timeout = max(0.05, min(next_refresh - time.monotonic(), next_heartbeat - time.monotonic(), next_prune - time.monotonic()))
             self._stop.wait(timeout)
+
+    def _refresh_manual_wake(self, mission: dict[str, Any], observation: dict[str, Any]) -> None:
+        """Pre-arm the shared wake while a paused or detached opted-in mission waits."""
+        from . import bridge_power, common
+
+        with self._write_lock:
+            if self._stop.is_set():
+                return
+            raw_config = mission.get("config")
+            config = raw_config if isinstance(raw_config, dict) else {}
+            waiting = (
+                mission.get("status") in {"RUNNING", "PAUSED"}
+                and config.get("suspend_when_rate_limited") is True
+            )
+            target = bridge_power.recovery_target(observation) if waiting else None
+            arm = bridge_power.update_wake_request(
+                self.mission_id,
+                target,
+                interval_seconds=self.interval_seconds,
+            )
+            earliest = bridge_power.shared_wake_target()
+            arm_covers_earliest = bool(arm.armed and arm.target_epoch is not None and earliest is not None and arm.target_epoch <= earliest)
+            armed_target = arm.target_epoch if arm_covers_earliest else None
+            state = (armed_target, arm_covers_earliest)
+            owners = bridge_power.shared_wake_owners()
+            signature = (target, state, arm.method, arm.unit, arm.confirmed, arm.detail[:128], tuple(owners))
+            if signature == self._last_wake_signature:
+                return
+            self._last_wake_signature = signature
+            self._last_wake_plan = state
+            store = self._connection()
+            if target is not None:
+                kind = "capacity-wake-armed" if arm_covers_earliest else "capacity-wake-unavailable"
+                store.record_runtime_event(self.mission_id, kind, {
+                    "target_epoch": armed_target or target,
+                    "mission_target_epoch": target,
+                    "method": arm.method,
+                    "confirmed": arm.confirmed,
+                    "provider": observation.get("provider"),
+                    "route": observation.get("route"),
+                    "reason": "shared-wake-retained-prior" if "retained prior" in arm.detail else "wake-arm-failed" if not arm_covers_earliest else "",
+                })
+            store.record_runtime_event(self.mission_id, "capacity-wake-plan", {
+                "action": "armed" if arm_covers_earliest else "unavailable" if target is not None else "released-or-no-target",
+                "owner": self.mission_id,
+                "owners": owners,
+                "target_epoch": armed_target or target,
+                "mission_target_epoch": target,
+                "method": arm.method,
+                "unit": arm.unit,
+                "armed": arm.armed,
+                "confirmed": arm.confirmed,
+                "provider": observation.get("provider"),
+                "route": observation.get("route"),
+                "result": "retained-prior" if "retained prior" in arm.detail else "armed" if arm.armed else "unavailable",
+                **common.diagnostic_clock_fields(),
+            })
+
+    def _observe_sleep_resume(self) -> None:
+        """Correlate a real suspend gap with the last confirmed Bridge wake plan."""
+        from . import common
+
+        wall = common.now_epoch()
+        suspend_clock = common.suspend_clock_sample()
+        prior = self._last_clock_pair
+        self._last_clock_pair = (wall, suspend_clock)
+        if prior is None or self._last_wake_plan is None:
+            return
+        target, armed = self._last_wake_plan
+        if not armed or target is None:
+            return
+        suspend_gap = common.suspend_clock_gap_seconds(prior[1], suspend_clock)
+        if suspend_gap is None:
+            if prior[1] is not None:
+                self._record("capacity-wake-resume-unverified", {
+                    "actual_sleep": None,
+                    "target_epoch": target,
+                    "reason": "suspend-inclusive clock unavailable",
+                })
+            return
+        if suspend_gap < common.SUSPEND_OBSERVED_MIN_GAP_SECONDS:
+            return
+        drift = wall - target
+        self._record("capacity-wake-resumed", {
+            "actual_sleep": True,
+            "suspend_seconds": int(suspend_gap),
+            "target_epoch": target,
+            "woke_epoch": wall,
+            "drift_seconds": int(drift),
+            "reliable": abs(drift) <= common.suspend_drift_tolerance(),
+            "method": "bridge-wake-plan",
+        })
 
 
 __all__ = ["CapacityRefreshWorker", "refresh_capacity_observation"]

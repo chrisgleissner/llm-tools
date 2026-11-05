@@ -257,6 +257,7 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_USAGE_STALE_RECOVERY_MAX_WAIT` (wall-clock cap on total stale-recovery time, since each re-drive carries its own network timeout; default 20.0s)
 * `LLM_TEST_STRICT_RUNTIME_GUARD` (test-only: set to `1` to make the pytest session guard fail on any new non-listening entry in the real `$XDG_RUNTIME_DIR/llm-bridge` or `/tmp/lb-<uid>`; by default only attributable escapes and leaked `_controller` processes fail, because other suites may run concurrently. Every test already gets a private short `XDG_RUNTIME_DIR` under `/tmp/lbt-*`)
 * `LLM_BRIDGE_STATE_DIR` (Bridge state directory; default `${XDG_STATE_HOME:-$HOME/.local/state}/llm-tools/llm-bridge`)
+* `LLM_BRIDGE_CODEX_APP_SERVER_CMD` (test/local override for the bounded read-only native agent observer; defaults to the installed `codex app-server`)
 * `LLM_BRIDGE_THEME` (`dark`, `light`, `high-contrast`, `neutral` or `mono`; `dark`/`light` also fix the background; wins over `[bridge.theme] name`)
 * `LLM_BRIDGE_BACKGROUND` (`dark` or `light`; the terminal background when the theme name does not fix it; Bridge exports the detected value so a tmux station inherits it)
 * `LLM_BRIDGE_COLOR_<ROLE>` (override one Bridge colour role with an SGR string, hex colour or colour name; applied after `[bridge.theme.roles]` and `LLM_TOOLS_COLOR_<ROLE>`)

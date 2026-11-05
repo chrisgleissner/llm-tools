@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import json
 import stat
+from datetime import datetime
 from typing import Any, Mapping, cast
 import uuid
 
@@ -29,6 +30,7 @@ class NativeSessionIdentity:
     session_id: str
     cwd: str
     source: str
+    parent_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,9 @@ _SESSION_SOURCES = {
     "copilot": frozenset({"copilot:session.start"}),
 }
 _CODEX_NO_DAEMON = re.compile(r"(?<![A-Za-z0-9_-])--no-daemon(?:\s|[=<]|[\]\)]|$)")
+_CODEX_ACTIVITY_LINE_BYTES = 16 * 1024
+_CODEX_ACTIVITY_MAX_LINES = 100_000
+_CODEX_TOOL_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
 _CAPABILITIES: dict[str, _Capability] = {
     "codex": _Capability("codex", ("resume",), re.compile(r"(?im)^\s*resume(?:\s|$)"), _UUID),
     "claude": _Capability(
@@ -170,7 +175,13 @@ def parse_session_metadata(
         return None
     if observed_cwd != expected_cwd:
         return None
-    return NativeSessionIdentity(normalized_provider, session_id, expected_cwd, source)
+    parent_id: str | None = None
+    if normalized_provider == "codex":
+        payload = record.get("payload")
+        candidate = payload.get("parentThreadId") or payload.get("parent_thread_id") if isinstance(payload, Mapping) else None
+        if isinstance(candidate, str) and candidate:
+            parent_id = candidate
+    return NativeSessionIdentity(normalized_provider, session_id, expected_cwd, source, parent_id)
 
 
 def codex_session_records(
@@ -237,6 +248,182 @@ def codex_session_records(
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
             continue
     return records
+
+
+def codex_session_records_by_id(
+    sessions_dir: str | os.PathLike[str],
+    session_ids: set[str],
+    *,
+    max_files: int = 4096,
+) -> dict[str, NativeSessionRecord]:
+    """Find exact Codex session headers without assuming child workdirs match the root.
+
+    Only validated first-line metadata is read. A session ID with multiple matching files is
+    omitted as ambiguous, and callers still need to verify its explicit parent relationship.
+    """
+    wanted = {value for value in session_ids if _UUID.fullmatch(value)}
+    if not wanted:
+        return {}
+    root = Path(sessions_dir).expanduser()
+    try:
+        root_stat = root.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(root_stat.st_mode) or root.is_symlink():
+            return {}
+    except OSError:
+        return {}
+    found: dict[str, NativeSessionRecord | None] = {}
+    visited = 0
+    considered = 0
+    for directory, child_dirs, filenames in os.walk(root, followlinks=False):
+        child_dirs.sort(reverse=True)
+        filenames.sort(reverse=True)
+        visited += 1
+        if visited > max_files:
+            break
+        for filename in filenames:
+            session_id = next((candidate for candidate in wanted if candidate in filename), None)
+            if session_id is None or not filename.endswith(".jsonl"):
+                continue
+            considered += 1
+            if considered > max_files:
+                break
+            path = Path(directory) / filename
+            try:
+                info = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                with open_regular_file(path, follow_symlinks=False) as stream:
+                    first_line = stream.readline(65537)
+                if len(first_line) > 65536 or not first_line.strip():
+                    continue
+                raw = json.loads(first_line)
+                if not isinstance(raw, Mapping):
+                    continue
+                fields = _session_fields("codex", raw)
+                if fields is None or fields[0] != session_id:
+                    continue
+                identity = parse_session_metadata("codex", raw, cwd=fields[1])
+                if identity is None:
+                    continue
+                record = NativeSessionRecord(identity, path, info.st_mtime_ns)
+                found[session_id] = record if session_id not in found else None
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                continue
+        if considered > max_files:
+            break
+    return {key: record for key, record in found.items() if record is not None}
+
+
+def codex_session_activity_tail(
+    path: str | os.PathLike[str],
+    *,
+    session_id: str,
+    parent_id: str,
+    sessions_root: str | os.PathLike[str],
+    max_bytes: int = 4 * 1024 * 1024,
+) -> dict[str, str | None] | None:
+    """Stream safe lifecycle and tool labels from one exact parent-bound Codex session.
+
+    The session header is identity checked and the read has byte, line and per-record limits.
+    Prompt text, tool arguments, tool results, messages and reasoning are never retained.
+    """
+    target = Path(path)
+    try:
+        root = Path(sessions_root).resolve(strict=True)
+        if not target.resolve(strict=True).is_relative_to(root):
+            return None
+        info = target.stat(follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or target.is_symlink():
+            return None
+        with open_regular_file(target, follow_symlinks=False) as stream:
+            opened = os.fstat(stream.fileno())
+            if not os.path.samestat(info, opened):
+                return None
+            if opened.st_size > max_bytes:
+                return None
+            header = stream.readline(65537)
+            if len(header) > 65536:
+                return None
+            raw_header = json.loads(header)
+            payload = raw_header.get("payload") if isinstance(raw_header, dict) else None
+            cwd = payload.get("cwd") if isinstance(payload, Mapping) else None
+            identity = parse_session_metadata("codex", raw_header, cwd=cwd) if isinstance(raw_header, dict) and isinstance(cwd, str) else None
+            if identity is None or identity.session_id != session_id or identity.parent_session_id != parent_id:
+                return None
+            latest_activity: tuple[tuple[float, int], dict[str, str | None]] | None = None
+            latest_lifecycle: tuple[tuple[float, int], dict[str, str | None]] | None = None
+            consumed = len(header)
+            for sequence in range(_CODEX_ACTIVITY_MAX_LINES):
+                remaining = opened.st_size - consumed
+                if remaining <= 0:
+                    break
+                line = stream.readline(min(_CODEX_ACTIVITY_LINE_BYTES + 1, remaining))
+                if not line:
+                    break
+                consumed += len(line)
+                if len(line) > _CODEX_ACTIVITY_LINE_BYTES or not line.endswith(b"\n"):
+                    continue
+                try:
+                    event = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                event_type = event.get("type")
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                timestamp = event.get("timestamp")
+                timestamp_text = timestamp if isinstance(timestamp, str) else None
+                timestamp_epoch: float | None = None
+                if timestamp_text:
+                    try:
+                        timestamp_epoch = datetime.fromisoformat(timestamp_text.replace("Z", "+00:00")).timestamp()
+                    except (ValueError, OverflowError):
+                        pass
+                order_key = (timestamp_epoch if timestamp_epoch is not None else float("-inf"), sequence)
+                activity: str | None = None
+                lifecycle: str | None = None
+                if event_type == "event_msg":
+                    lifecycle_type = payload.get("type")
+                    if lifecycle_type == "task_started":
+                        lifecycle = "task_started"
+                        activity = "last provider event: task started"
+                    elif lifecycle_type == "task_complete":
+                        lifecycle = "task_complete"
+                        activity = "last provider event: task completed"
+                    elif lifecycle_type == "turn_aborted":
+                        lifecycle = "turn_aborted"
+                        activity = "last provider event: turn aborted"
+                elif event_type == "response_item" and payload.get("type") in {"function_call", "custom_tool_call"}:
+                    name = payload.get("name")
+                    if isinstance(name, str) and _CODEX_TOOL_LABEL.fullmatch(name):
+                        activity = f"last observed tool: {name}"
+                if activity is not None:
+                    value = {"activity": activity, "timestamp": timestamp_text}
+                    if latest_activity is None or order_key > latest_activity[0]:
+                        latest_activity = (order_key, value)
+                if lifecycle is not None:
+                    value = {"lifecycle": lifecycle, "lifecycle_timestamp": timestamp_text}
+                    if latest_lifecycle is None or order_key > latest_lifecycle[0]:
+                        latest_lifecycle = (order_key, value)
+            else:
+                return None
+            if latest_activity is None and latest_lifecycle is None:
+                return None
+            result: dict[str, str | None] = {
+                "activity": None,
+                "timestamp": None,
+                "lifecycle": None,
+                "lifecycle_timestamp": None,
+            }
+            if latest_activity is not None:
+                result.update(latest_activity[1])
+            if latest_lifecycle is not None:
+                result.update(latest_lifecycle[1])
+            return result
+    except (OSError, RuntimeError, ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 _BOOT_ID = ""
@@ -384,25 +571,57 @@ def discover_owned_codex_session(
     still match its persisted boot-scoped start token, and exactly one unique
     `session_meta` ID+CWD must be open writable by that PID or a live child.
     """
-    if int(process_pid) < 2 or not start_token:
+    candidates = _owned_codex_session_candidates(process_pid, start_token, cwd=cwd)
+    if len(candidates) != 1:
         return None
+    return candidates[0][0]
+
+
+def discover_owned_codex_root_session(
+    process_pid: int,
+    start_token: str,
+    *,
+    cwd: str | os.PathLike[str],
+    started_after: float,
+) -> NativeSessionIdentity | None:
+    """Find the unique parentless Codex session opened by this exact live process after launch.
+
+    Codex keeps writable JSONL handles for spawned children in the same process tree. The ordinary
+    discovery helper remains conservative when several IDs are open; Bridge's map can identify its
+    root by the provider's explicit parentThreadId metadata and the operation start boundary.
+    """
+    candidates = _owned_codex_session_candidates(process_pid, start_token, cwd=cwd)
+    roots = [identity for identity, modified_at in candidates
+             if identity.parent_session_id is None and modified_at >= float(started_after)]
+    return roots[0] if len(roots) == 1 else None
+
+
+def _owned_codex_session_candidates(
+    process_pid: int,
+    start_token: str,
+    *,
+    cwd: str | os.PathLike[str],
+) -> list[tuple[NativeSessionIdentity, float]]:
+    """Read bounded first-line metadata through writable FDs in a verified process tree."""
+    if int(process_pid) < 2 or not start_token:
+        return []
     try:
         expected_cwd = _absolute_cwd(cwd)
         codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve(strict=True)
         sessions_root = (codex_home / "sessions").resolve(strict=True)
         if not sessions_root.is_dir():
-            return None
+            return []
     except (OSError, RuntimeError, ValueError, TypeError):
-        return None
+        return []
     owned = _owned_processes(int(process_pid), start_token)
     if not owned:
-        return None
-    identities: dict[tuple[str, str, str], NativeSessionIdentity] = {}
+        return []
+    identities: dict[tuple[str, str, str], tuple[NativeSessionIdentity, float]] = {}
     for pid, token in owned.items():
         current = _proc_stat(pid)
         if current is None or current[0] == "Z" or current[3] != token:
             continue
-        process_identities: dict[tuple[str, str, str], NativeSessionIdentity] = {}
+        process_identities: dict[tuple[str, str, str], tuple[NativeSessionIdentity, float]] = {}
         try:
             fd_entries = os.scandir(f"/proc/{pid}/fd")
         except OSError:
@@ -455,7 +674,7 @@ def discover_owned_codex_session(
                         and _fd_is_writable(pid, fd_entry.name)
                         and (final_info.st_dev, final_info.st_ino) == (info.st_dev, info.st_ino)
                     ):
-                        process_identities[(identity.provider, identity.session_id, identity.cwd)] = identity
+                        process_identities[(identity.provider, identity.session_id, identity.cwd)] = (identity, info.st_mtime)
                 except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
                     continue
         after = _proc_stat(pid)
@@ -463,15 +682,13 @@ def discover_owned_codex_session(
             # Discard this process's candidates rather than attributing a
             # reused or exited PID to the session it previously held.
             if pid == int(process_pid):
-                return None
+                return []
             continue
         identities.update(process_identities)
-    if len(identities) != 1:
-        return None
     root_after = _proc_stat(int(process_pid))
     if root_after is None or root_after[3] != start_token or root_after[0] == "Z":
-        return None
-    return next(iter(identities.values()))
+        return []
+    return list(identities.values())
 
 
 def provider_session_metadata(
@@ -686,6 +903,7 @@ __all__ = [
     "codex_owned_argv",
     "confirm_restored",
     "discover_owned_codex_session",
+    "discover_owned_codex_root_session",
     "new_session_argv",
     "provider_session_metadata",
     "parse_session_metadata",

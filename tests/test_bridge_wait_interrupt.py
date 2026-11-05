@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 
 from llm_tools import common, ralph_robin, scheduler
+from llm_tools.bridge_power import _root, _write_plan, shared_wake_target, update_wake_request
+from llm_tools.bridge_runtime import BridgeMissionHooks
 from llm_tools.bridge_store import BridgeStore
 from tests.conftest import scaled
 
@@ -47,6 +49,124 @@ def test_bridge_cross_provider_wait_stays_awake_and_interruptible(monkeypatch, t
 
     assert result is True
     assert calls >= 2
+
+
+def test_opted_in_bridge_capacity_wait_uses_rtc_suspend_path(monkeypatch, tmp_path) -> None:
+    logs = common.RunLogs(run_dir=tmp_path, text_log=tmp_path / "run.log", event_log=tmp_path / "events.jsonl")
+    target = common.now_epoch() + 600
+    outcomes = []
+
+    def suspend(target_epoch: int, **kwargs: object) -> common.SuspendOutcome:
+        outcomes.append(target_epoch)
+        return common.SuspendOutcome(True, target_epoch, target_epoch, 0, True, "rtcwake", "ok", sleep_observed=True)
+
+    monkeypatch.setattr(common, "suspend_with_wake", suspend)
+    result = ralph_robin.suspend_machine_until(
+        ralph_robin.RalphConfig(), logs, target, time.monotonic(), 0,
+        ralph_robin.SuspendState(), lambda: False, lambda: True,
+    )
+
+    assert result is True
+    assert outcomes == [target]
+
+
+def test_opted_in_bridge_wait_uses_shared_prearmed_target_and_records_cycle(monkeypatch, tmp_path) -> None:
+    logs = common.RunLogs(run_dir=tmp_path, text_log=tmp_path / "run.log", event_log=tmp_path / "events.jsonl")
+    original_target = common.now_epoch() + 600
+    shared_target = original_target - 120
+    arm = common.WakeArm(True, "systemd-timer", False, unit="shared-wake", target_epoch=shared_target)
+    planned = []
+    outcomes = []
+    events = []
+
+    def prepare(target: int):
+        planned.append(target)
+        return shared_target, arm
+
+    def suspend(target: int, **kwargs: object) -> common.SuspendOutcome:
+        outcomes.append((target, kwargs.get("wake_arm")))
+        return common.SuspendOutcome(True, target + 2, target, 2, True, "systemd-timer", "ok", sleep_observed=True)
+
+    monkeypatch.setattr(common, "suspend_with_wake", suspend)
+    result = ralph_robin.suspend_machine_until(
+        ralph_robin.RalphConfig(), logs, original_target, time.monotonic(), 0,
+        ralph_robin.SuspendState(), lambda: False, lambda: True,
+        lambda kind, data: events.append((kind, data)), prepare,
+    )
+
+    assert result is True
+    assert planned == [original_target]
+    assert outcomes == [(shared_target, arm)]
+    assert events[0][0] == "suspend-decision"
+    assert events[0][1]["branch"] == "suspend"
+    events = events[1:]
+    assert [kind for kind, _data in events] == ["suspend-intent", "suspend-outcome", "suspend-work-resumed"]
+    assert all(data["cycle_id"].startswith("ralph-robin-") for _kind, data in events)
+    assert events[0][1]["wake_armed"] is True
+    assert events[0][1]["wake_method"] == "systemd-timer"
+    assert events[0][1]["wake_confirmed"] is False
+    assert events[1][1]["woke_epoch"] == shared_target + 2
+    assert events[1][1]["drift_seconds"] == 2
+    assert events[1][1]["actual_sleep"] is True
+
+
+def test_automatic_bridge_suspend_outcome_reconciles_later_owner(tmp_path, monkeypatch) -> None:
+    env = {"XDG_CACHE_HOME": str(tmp_path), "LLM_USAGE_NOW_EPOCH": "1000"}
+    database = tmp_path / "bridge.sqlite3"
+    with BridgeStore(database) as store:
+        mission_id = store.create_mission("mission", "objective", cwd=tmp_path)["id"]
+        hooks = BridgeMissionHooks(mission_id, handle=None, headless=True, controller_logs=tmp_path)
+        hooks.bind(store)
+        armed: list[int] = []
+        monkeypatch.setattr(
+            common, "arm_rtc_wake",
+            lambda target, who, _env: armed.append(target) or common.WakeArm(True, "systemd-timer", False, unit=f"{who}.timer", target_epoch=target),
+        )
+        monkeypatch.setattr(common, "disarm_rtc_wake", lambda *_args: None)
+        monkeypatch.setattr("llm_tools.bridge_power.subprocess.run", lambda *_args, **_kwargs: type("Proc", (), {"returncode": 1})())
+        update_wake_request("first-owner", 4000, env=env)
+        update_wake_request("later-owner", 6000, env=env)
+        _write_plan(_root(env), None, None, 1000)  # common suspend consumed the 4000 wake
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "4000")
+
+        hooks.on_suspend_event("suspend-outcome", {"cycle_id": "cycle", "reason": "ok"})
+
+        assert shared_wake_target(env) == 6000
+        assert armed == [4000, 4000, 6000]
+
+
+def test_opted_in_bridge_capacity_wait_respects_pending_control(monkeypatch, tmp_path) -> None:
+    logs = common.RunLogs(run_dir=tmp_path, text_log=tmp_path / "run.log", event_log=tmp_path / "events.jsonl")
+    monkeypatch.setattr(common, "suspend_with_wake", lambda *_args, **_kwargs: pytest.fail("must not suspend"))
+    result = ralph_robin.suspend_machine_until(
+        ralph_robin.RalphConfig(), logs, common.now_epoch() + 600, time.monotonic(), 0,
+        ralph_robin.SuspendState(), lambda: True, lambda: True,
+    )
+
+    assert result is True
+
+
+def test_opted_in_bridge_capacity_wait_stays_awake_when_wake_cannot_arm(monkeypatch, tmp_path) -> None:
+    logs = common.RunLogs(run_dir=tmp_path, text_log=tmp_path / "run.log", event_log=tmp_path / "events.jsonl")
+    target = common.now_epoch() + 600
+    interrupted = lambda: False
+    waits = []
+    monkeypatch.setattr(
+        common, "suspend_with_wake",
+        lambda *_args, **_kwargs: common.SuspendOutcome(False, None, target, None, False, "none", "arm-failed"),
+    )
+    monkeypatch.setattr(ralph_robin, "wait_until_epoch", lambda epoch, callback=None: waits.append((epoch, callback)))
+    state = ralph_robin.SuspendState()
+
+    result = ralph_robin.suspend_machine_until(
+        ralph_robin.RalphConfig(), logs, target, time.monotonic(), 0,
+        state, interrupted, lambda: True,
+    )
+
+    assert result is True
+    assert state.disabled and state.disabled_reason == "arm-failed"
+    assert waits == [(target, interrupted)]
 
 
 def test_scheduler_capacity_wait_returns_special_boundary_status(monkeypatch, tmp_path) -> None:

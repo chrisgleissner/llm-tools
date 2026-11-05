@@ -20,6 +20,33 @@ import pytest
 from tests.conftest import scaled
 
 
+def _send_ctrl_d_until_exit(master: int, process: subprocess.Popen[bytes], deadline: float) -> None:
+    """Ask the program to quit with Ctrl-D without ever blocking on a full pseudo-terminal.
+
+    The program redraws while it handles input, so its output must be drained.
+    A blocking ``os.write`` into a pseudo-terminal whose output nobody reads
+    deadlocks once both buffers are full (the program stops reading input while
+    it waits to write). Write only when the descriptor is writable.
+    """
+    while process.poll() is None and time.monotonic() < deadline:
+        _, writable, _ = select.select([], [master], [], 0)
+        if writable:
+            try:
+                os.write(master, b"\x04")
+            except OSError:
+                break  # the program closed its terminal: it is exiting
+        readable, _, _ = select.select([master], [], [], 0.05)
+        if readable:
+            try:
+                os.read(master, 65536)
+            except OSError:
+                pass  # end of output while the program exits
+    try:
+        process.wait(timeout=scaled(2))
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _read_until(
     master: int,
     process: subprocess.Popen[bytes],
@@ -242,14 +269,7 @@ def test_real_curses_editor_roundtrip_dispatches_and_removes_private_file(tmp_pa
         _wait_for_missing(task_file)
         assert not task_file.exists()
         deadline = time.monotonic() + 5
-        while process.poll() is None and time.monotonic() < deadline:
-            os.write(master, b"\x04")
-            ready, _, _ = select.select([master], [], [], 0.05)
-            if ready:
-                try:
-                    os.read(master, 65536)
-                except OSError:
-                    pass
+        _send_ctrl_d_until_exit(master, process, deadline)
         assert process.poll() is not None
         assert process.returncode == 0
     finally:
@@ -352,14 +372,7 @@ def test_real_compact_console_pty_dispatches_and_exits(tmp_path: Path) -> None:
         os.write(master, b"status\r")
         assert _wait_for_record(master, process, record) == "('pty-mission', 'status', '')\n"
         deadline = time.monotonic() + 5
-        while process.poll() is None and time.monotonic() < deadline:
-            os.write(master, b"\x04")
-            ready, _, _ = select.select([master], [], [], 0.05)
-            if ready:
-                try:
-                    os.read(master, 65536)
-                except OSError:
-                    pass
+        _send_ctrl_d_until_exit(master, process, deadline)
         assert process.returncode == 0
     finally:
         if process.poll() is None:
@@ -434,9 +447,7 @@ def test_real_curses_orders_inspection_and_ctrl_r_prefilled_amendment(tmp_path: 
         _wait_for_missing(Path(shlex.split(command)[-1]))
         os.write(master, b"\x1b\x15\x1b")  # Dismiss result, clear any draft, return to body shortcuts.
         deadline = time.monotonic() + 5
-        while process.poll() is None and time.monotonic() < deadline:
-            os.write(master, b"\x04")
-            select.select([master], [], [], 0.05)
+        _send_ctrl_d_until_exit(master, process, deadline)
         assert process.returncode == 0
     finally:
         if process.poll() is None:

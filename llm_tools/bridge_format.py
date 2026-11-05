@@ -167,7 +167,11 @@ def format_mission_created(result: dict[str, Any]) -> str:
     mission = result["mission"]
     task = result.get("task") or {}
     mid = short_id(mission["id"])
-    return f"Created mission {mid} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · task {task_number(task) or 1} · start with: llm-bridge start --mission {mid}"
+    config = mission.get("config") or {}
+    policy = config.get("team_policy_enabled")
+    token_spend = config.get("token_spend")
+    suffix = f" · teams {'on' if policy else 'off'} · token spend {token_spend}" if isinstance(policy, bool) and isinstance(token_spend, str) else ""
+    return f"Created mission {mid} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · task {task_number(task) or 1}{suffix} · start with: llm-bridge start --mission {mid}"
 
 
 def format_mission_colour(result: dict[str, Any]) -> str:
@@ -591,6 +595,13 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     rotation = rotation_names(config)
     if rotation:
         lines.append(f"Rotation    {' → '.join(rotation)}")
+    policy = mission.get("execution_policy")
+    if not isinstance(policy, dict):
+        from .bridge_policy import effective_settings
+
+        policy = effective_settings(config)
+    policy_label = "legacy (unchanged)" if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend')}"
+    lines.append(f"Policy      {policy_label}")
     context = snapshot.get("station_context") or {}
     current = snapshot.get("current_task")
     if current:

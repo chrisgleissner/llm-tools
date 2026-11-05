@@ -341,6 +341,22 @@ def test_mission_create_auto_continue_flag_and_mission_set(tmp_path, state, caps
         assert [event["kind"] for event in store.events(mission) if event["kind"] == "mission-auto-continue"] == ["mission-auto-continue"] * 2
 
 
+def test_mission_set_suspend_when_rate_limited(tmp_path, state, capsys) -> None:
+    folder = tmp_path / "work"
+    folder.mkdir()
+    created = json.loads(_cli(capsys, "mission", "create", "--prompt", "obj", "--cwd", str(folder), "--providers", "codex", "--json"))
+    mission = created["mission"]["id"]
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        assert "suspend_when_rate_limited" not in store.get_mission(mission)["config"]
+
+    out = json.loads(_cli(capsys, "mission", "set", "--mission", mission, "--suspend-when-rate-limited", "on", "--json"))
+    assert out["suspend_when_rate_limited"] is True
+    assert "armed wake" in out["detail"]
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        assert store.get_mission(mission)["config"]["suspend_when_rate_limited"] is True
+        assert [event["kind"] for event in store.events(mission) if event["kind"] == "mission-suspend-when-rate-limited"] == ["mission-suspend-when-rate-limited"]
+
+
 def test_continue_command_cli_and_console(tmp_path, state, capsys) -> None:
     folder = tmp_path / "work"
     folder.mkdir()

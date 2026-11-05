@@ -17,9 +17,13 @@
 # ---------------------------------------------------------------------------
 # LLM Bridge
 # ---------------------------------------------------------------------------
-# Bridge settings are supplied on `llm-bridge` commands. The only [bridge]
-# table the config parser accepts is [bridge.theme] (name, background, roles);
-# see below and docs/llm-bridge/colour-guide.md. Mission creation flags include
+# Bridge team guidance defaults apply to new missions. CLI flags override
+# them; `llm-bridge mission set` changes a saved mission. `teams` encourages
+# provider-native subagents when supported, with a single-agent fallback.
+# `token_spend` is low, medium, or high. Existing missions without saved
+# policy keys retain their legacy prompts until explicitly changed. Appearance
+# settings remain under [bridge.theme]; see docs/llm-bridge/colour-guide.md.
+# Mission creation flags include
 # --providers, --routes, --headless, and --native; see `llm-bridge mission create
 # --help`. Three modes exist. --native runs the selected provider CLI's
 # interactive UI in a tmux station. With neither flag (autonomous), the provider
@@ -45,7 +49,12 @@
 # ${XDG_STATE_HOME:-~/.local/state}/llm-tools/llm-bridge and can be relocated
 # with LLM_BRIDGE_STATE_DIR.
 #
-# Theme (the only Bridge settings stored in this file). `llm-bridge theme`
+# Team and token spend defaults (`llm-bridge mission create` flags override).
+#[bridge]
+#teams = true
+#token_spend = "medium"
+#
+# Theme. `llm-bridge theme`
 # previews the result. Env overrides: LLM_BRIDGE_THEME, LLM_BRIDGE_BACKGROUND,
 # LLM_BRIDGE_COLOR_<ROLE>.
 #[bridge.theme]

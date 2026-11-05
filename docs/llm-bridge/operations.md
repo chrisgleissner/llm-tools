@@ -290,6 +290,48 @@ the next task straight away.
   `review-hold-released` event (`how` is `approved`, `rejected`, `continue` or
   `auto-continue`; `summary` is a human sentence).
 
+### Provider native teams and token spend preference
+
+New missions default to provider-native team guidance enabled and Medium token
+spend preference. Set global defaults in the shared `config.toml`:
+
+```toml
+[bridge]
+teams = true
+token_spend = "medium" # low | medium | high
+```
+
+Override either choice for one mission with `mission create --teams on|off`
+and `--token-spend low|medium|high`. Change a saved mission with, for
+example, `llm-bridge mission set --mission ID --teams off --token-spend low`.
+`llm-bridge status --json` reports `mission.execution_policy`; readable status
+and the station Overview show the effective settings. Explicit model, effort,
+authorization, and user prompt choices keep their existing precedence.
+
+The teams guidance asks for native subagents only when the provider supports
+them and the work benefits from separation. Unsupported providers continue as
+one agent. With teams disabled, every token spend preference omits Bridge-added
+delegation guidance. Low minimizes extra passes and repeated context, escalating
+when that cannot meet requirements. Medium adjusts reasoning and review to task
+risk and uncertainty. High permits more capable reasoning and independent
+skeptical checks when worthwhile. These preferences never weaken mandatory
+validation or acceptance. Existing missions with no saved policy retain legacy
+prompts until an operator sets either value; setting teams on for such a mission
+uses Medium unless `--token-spend` is also supplied. Repeated task invocations
+receive the same short policy prefix, so it adds prompt overhead each time.
+User-supplied task and mission text is stored unchanged and appears after the
+prefix.
+
+The team-enabled policy is 104–106 whitespace-delimited words (750–773 UTF-8
+bytes, depending on preference). These are measured text sizes, not tokenizer
+counts. Each launch records `prompt-assembled` with incoming, assembled and
+Bridge-added UTF-8 byte counts, plus total wrapper bytes relative to distinct
+source content when assembled by the controller. Token count remains unknown without verified
+provider usage. Identical task and mission objective content appears once in
+the assembled context; distinct task content and stored original text are
+preserved. No equivalent direct-provider run has established marginal token
+overhead or parity.
+
 While holding, `status` prints `Needs you   task 1 awaits your review ·
 /approve 1 or /reject 1 reason · /continue to start the next task now` and
 `Holding     the next task has not started for 3m · task 1 awaits your review`.
@@ -334,8 +376,8 @@ Open the full terminal UI directly with:
 llm-bridge control --mission MISSION_ID
 ```
 
-It offers eight views on F1–F8: Overview, Tasks, Providers, Activity,
-Sessions, Health, Actions and Usage. The names used before the rename (Bridge,
+It offers nine views on F1–F9: Overview, Tasks, Providers, Activity,
+Sessions, Health, Actions, Usage and Agents. The names used before the rename (Bridge,
 Orders, Stations, Log, Systems, Palette) are still accepted wherever a view is
 named. A status-coloured header names the
 mission and its state, and a footer lists the keys that apply to the current
@@ -355,11 +397,38 @@ Providers, Sessions, Actions and Usage views use aligned columns. Tasks are fetc
 and Page Down navigate them, and Ctrl-F opens the Tasks filter. Search and
 page controls make tasks past the first page reachable without loading the
 whole queue into the terminal process. Activity and Sessions views show recent
-bounded histories. Keyboard and mouse operate those views:
+bounded histories.
+
+The Agents view shows roots across missions and exact parent-bound Codex children.
+Use `llm-bridge agents --mission ID` for one mission or `--all-missions` for the
+combined CLI map. Managed providers can inspect only their own mission. Root age
+measures the current Bridge operation; child age uses the provider's session
+creation timestamp. Known completion freezes elapsed age. Missing creation or
+completion metadata stays unknown. Age ticks locally without a model call.
+
+The inspector distinguishes observed model/effort from configured values and
+unknown fields. Codex's read-only persisted-thread API can report `notLoaded`
+even while a worker is doing work in another runtime. Bridge retains that
+native status separately from observed task lifecycle and labels bounded,
+exact-session activity as last observed, with its
+timestamp and partial or stale freshness. It reads tool names and lifecycle
+tags, never tool arguments, results or hidden reasoning. Other providers expose
+Bridge roots only; their native child enumeration is currently unavailable.
+Enter switches only to an existing live Bridge station where supported;
+otherwise it opens the inspector. No navigation action resumes or forks an agent.
+`LLM_BRIDGE_CODEX_APP_SERVER_CMD` overrides the read-only observation command for
+local protocol fixtures; ordinary use discovers the installed Codex CLI.
+
+The Usage view retains the usage renderer's cell colours through Bridge's
+palette, including separate red, yellow, green and cyan guidance. Explicit
+`NO_COLOR`, `LLM_USAGE_NO_COLOR` and monochrome terminals still suppress colour.
+Text and column fitting use the same dashboard as `llm-usage`.
+
+Keyboard and mouse operate those views:
 
 | Input | Action |
 | --- | --- |
-| Tab / Shift-Tab, Left / Right, F1–F8 | Change view while body focus is active |
+| Tab / Shift-Tab, Left / Right, F1–F9 | Change view while body focus is active |
 | Up / Down, PgUp/PgDn, Home/End | Navigate the selected list or open document |
 | Click a view label | Change view |
 | Click an Actions row, then Enter | Select and run that action |
@@ -367,6 +436,7 @@ bounded histories. Keyboard and mouse operate those views:
 | Page Up / Page Down in Tasks | Previous / next 200-task page |
 | Ctrl-F, type query, Enter | Filter Tasks by task title or prompt; Escape cancels and restores the command draft |
 | Tasks: `v` | Open the selected task's complete prompt (the preview below the list shows its start) |
+| Agents: `i`, Enter, Escape | Inspect the selected agent, switch to an existing root station where available, return to the map |
 | Body Ctrl-E | Compose a new multiline task |
 | Tasks body Ctrl-R | Compose an amendment of the selected task |
 | Composer Ctrl-O | Open `$VISUAL` or `$EDITOR` |
@@ -479,13 +549,17 @@ When mouse capture blocks terminal selection, try Shift-drag or tmux copy mode.
 `pause` prevents a new provider iteration from starting. If a provider is
 already working, it runs until that invocation returns, then the controller
 waits for `resume`. When provider capacity is unavailable, Ralph's managed
-readiness wait keeps the machine awake and remains interruptible. Separately,
-Bridge's background capacity-observation worker emits a fresh read-only
+readiness wait keeps the machine awake and remains interruptible by default. To
+opt in to RTC-backed sleep during an all-rate-limited wait, run
+`llm-bridge mission set --mission ID --suspend-when-rate-limited on`. Bridge
+sleeps only when no operation is active and its existing suspend path arms a
+wake. Pause, stop and cancel changes made during sleep take effect after wake.
+While the managed wait is awake, pause, stop, cancel, and boundary steering
+interrupt it promptly. Separately, Bridge's background capacity-observation worker emits a fresh read-only
 capacity snapshot every 60 seconds by default, configurable with
 `--capacity-refresh-seconds`; those provider reads do not run on the terminal
-input path. Pause, stop, and boundary steering interrupt the managed wait
-promptly. Bridge does not automatically suspend the operating system; a user
-or external power manager can still put the machine to sleep independently.
+input path. A user or external power manager can still put the machine to
+sleep independently.
 `resume` continues an active controller or starts one if needed.
 `stop` never cancels a mission. With no controller (a saved mission that is
 `CREATED`, `STOPPED` or `PAUSED`) it changes nothing and says `Nothing to stop ·
@@ -614,9 +688,10 @@ hints appear only inside a Bridge-owned station, not in other tmux sessions.
 Mission state defaults to
 `${XDG_STATE_HOME:-~/.local/state}/llm-tools/llm-bridge`. Set
 `LLM_BRIDGE_STATE_DIR` to use another directory. Bridge stores its SQLite
-database, private runtime files, and logs there. The shared `config.toml` has
-no Bridge settings other than `[bridge.theme]`; choose providers, routes, and
-execution mode on the mission creation/start commands. The selected shared tool configuration is
+database, private runtime files, and logs there. Shared `config.toml` supports
+`[bridge]` team and execution defaults plus `[bridge.theme]` appearance settings;
+choose providers, routes, and execution mode on mission creation/start commands.
+The selected shared tool configuration is
 captured for the mission so later changes do not silently alter its routing.
 
 Bridge tmux sockets use a short private runtime path under
@@ -696,6 +771,53 @@ screen).
 
 ## Capacity phrasing, safety and limits
 
+### Suspend until credits recover
+
+Use `llm-bridge suspend-until-credits --mission ID`, or choose **Suspend until
+credits recover** in Actions. Bridge refreshes the selected rotation's capacity
+and requires a genuine future reset. A balance with no scheduled reset, missing
+usage, or an already usable rotation cannot supply a recovery wake time. The
+command reports a refusal with its reason when it cannot establish a safe plan.
+
+Automatic capacity sleep is opt-in with `mission set --mission ID
+--suspend-when-rate-limited on`. Keep the mission controller running: its
+background capacity worker also arms a wake while waiting for known credit
+recovery, even when the mission is paused or the UI is detached. This arming
+happens while the computer is awake, so a subsequent manual OS suspend already
+has a wake planned. A detached UI alone does not provide this service; the
+controller must remain alive. Arming a wake does not unpause a mission.
+
+Wake requests are coordinated across missions. The earliest eligible request
+owns the next wake; withdrawing one request preserves other owners. The shared
+power backend arms the wake before requesting sleep, and verifies timer
+availability. RTC readback is stronger evidence than a user timer: a systemd
+WakeSystem timer is checked for activity, and actual wake reliability is
+measured from the resumed wall clock. Firmware operations must hold a sleep
+block inhibitor and the device locks. A provider or uncertain active device
+operation prevents the explicit sleep action.
+
+External hardware tools must hold an OS sleep block inhibitor throughout a
+critical operation. Bridge checks these generic OS inhibitors alongside typed
+managed operation and process identity; application device locks remain the
+hardware tool's responsibility.
+
+Intent, target, arm result, sleep/wake outcome and drift are mission-correlated
+events. Simulated outcomes are labelled as such; they do not establish hardware
+wake reliability. Host firmware, OS power support and a functioning wake backend
+remain prerequisites. Unknown recovery times keep the computer awake.
+
+For a retrospective, correlate the mission and operation IDs with the suspend
+cycle ID and wake unit. Controller startup records the source snapshot and
+process identity. Provider results record normalized failure causes and native
+versus scheduler exit status when the transport supplies them; retained output
+is identified by its private path, byte count and digest. Capacity observations
+include their source, freshness and next eligibility. Power records distinguish
+awake waits, timer arming, accepted sleep requests, observed sleep and subsequent
+work. An accepted suspend command alone proves neither sleep nor resumed model
+work. Existing private log rotation and retention still apply.
+
+### Capacity display and task verification
+
 Capacity lines use plain language, for example
 `5h 66% left, lasts past reset, resets 2h 5m`. "Lasts past reset" means the
 current pace will not exhaust the window before it resets. A background worker
@@ -714,6 +836,13 @@ restoration and context recall. Claude and Copilot live restoration is
 unverified.
 
 ## Provider trust boundary
+
+Headless direct Codex `exec` commands use structured JSON events, including
+absolute executable paths and pinned model/effort arguments. Prompt detection
+reads assistant and provider error events; completed tool output remains in
+the bounded operation log and does not become a new interactive prompt.
+Wrappers and non-Codex custom command templates retain raw heuristic scanning,
+because their output has no verified provider event boundary.
 
 Providers run as your user, in your mission folder. Bridge narrows what a
 provider can do by habit or by prompt injection; it does not sandbox it.

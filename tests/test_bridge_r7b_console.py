@@ -292,7 +292,7 @@ def test_tabs_are_never_glued_and_the_active_one_is_visible(width: int) -> None:
     narrow, entries = bridge_tui._nav_layout(7, 60, "  ")
     assert narrow.startswith("< ") and len(entries) < 8  # scrolls with an indicator
     eighty, entries = bridge_tui._nav_layout(6, 80, "  ")
-    assert len(entries) == 8 and "Actions]  Usage" in eighty
+    assert len(entries) == 9 and "Actions]  Usage  Agents" in eighty
 
 
 # --- 7: usage table first ---------------------------------------------------------------------

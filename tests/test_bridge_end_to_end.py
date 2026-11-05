@@ -30,9 +30,12 @@ def controller_released(state, mission):
     return True
 
 
-def test_provider_abort_hands_same_task_to_next_provider(tmp_path, env):
+def test_provider_failure_hands_same_task_to_next_provider(tmp_path, env):
     state = tmp_path / "state"
     env["LLM_BRIDGE_STATE_DIR"] = str(state)
+    config = tmp_path / "tool-config.toml"
+    config.write_text('[ralph]\nretry_delays = ""\n')
+    env["LLM_TOOLS_CONFIG"] = str(config)
     ready = {"available": True, "five_hour": {"remaining": 80}, "week": {"remaining": 80}}
     env["LLM_SCHEDULER_USAGE_JSON"] = json.dumps({"codex": ready, "claude": ready})
     fake = tmp_path / "handoff.py"
@@ -43,7 +46,7 @@ with Path('providers').open('a') as out: out.write(provider+'\\n')
 if provider == 'codex':
     Path('checkpoint.txt').write_text('prior provider work')
     print('route unavailable', flush=True)
-    raise SystemExit(75)
+    raise SystemExit(1)
 assert Path('checkpoint.txt').read_text() == 'prior provider work'
 assert 'Durable checkpoint' in Path(sys.argv[2]).read_text()
 Path('result.txt').write_text('completed by second provider')
@@ -65,7 +68,7 @@ print('work completed', flush=True)
         wait_for(lambda: status() == "COMPLETED", timeout=8)
         with BridgeStore(path) as store:
             operations = store.db.execute("SELECT station,exit_code FROM operations WHERE task_id=? ORDER BY rowid", (task,)).fetchall()
-            assert [(row[0], row[1]) for row in operations] == [("codex", 75), ("claude", 0)]
+            assert [(row[0], row[1]) for row in operations] == [("codex", 1), ("claude", 0)]
             assert store.get_task(task)["revision"] == 1
             assert store.get_task(task)["evidence"]
         assert (tmp_path / "providers").read_text().splitlines() == ["codex", "claude"]

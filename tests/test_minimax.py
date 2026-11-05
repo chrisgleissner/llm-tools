@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -146,7 +147,7 @@ def test_read_minimax_parses_quota_show_json(env: dict[str, str], fake_bin: Path
         "base_resp": {"status_code": 0, "status_msg": "success"},
     }
     fake.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json, sys\n"
         "print(json.dumps(" + json.dumps(payload) + "))\n",
         encoding="utf-8",
@@ -176,7 +177,7 @@ def test_read_minimax_parses_stdout_json_with_stderr_warning(env: dict[str, str]
         ]
     }
     fake.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json, sys\n"
         "sys.stdout.write(json.dumps(" + json.dumps(payload) + "))\n"
         "sys.stderr.write('warning: using cached auth\\n')\n",
@@ -194,7 +195,7 @@ def test_read_minimax_parses_stdout_json_with_stderr_warning(env: dict[str, str]
 def test_read_minimax_classifies_stderr_error_envelope(env: dict[str, str], fake_bin: Path) -> None:
     fake = fake_bin / "mmx"
     fake.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json, sys\n"
         "sys.stderr.write(json.dumps({'error': {'code': 1, 'message': 'please login first'}}))\n"
         "sys.exit(1)\n",
@@ -211,7 +212,7 @@ def test_read_minimax_ignores_non_matching_model(env: dict[str, str], fake_bin: 
     fake = fake_bin / "mmx"
     # CLI returns only a "video" row; the "general" model is missing.
     fake.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import json, sys\n"
         "print(json.dumps({'model_remains':[{'model_name':'video','current_interval_remaining_percent':100,'current_weekly_remaining_percent':100}]}))\n",
         encoding="utf-8",
@@ -228,7 +229,7 @@ def test_read_minimax_ignores_non_matching_model(env: dict[str, str], fake_bin: 
 def test_read_minimax_handles_cli_timeout(env: dict[str, str], fake_bin: Path) -> None:
     fake = fake_bin / "mmx"
     fake.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import time\n"
         "time.sleep(5)\n",
         encoding="utf-8",
@@ -246,7 +247,7 @@ def test_read_minimax_handles_cli_timeout(env: dict[str, str], fake_bin: Path) -
 def test_read_minimax_handles_nonzero_exit(env: dict[str, str], fake_bin: Path) -> None:
     fake = fake_bin / "mmx"
     fake.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import sys\n"
         "sys.stderr.write('auth error')\n"
         "sys.exit(1)\n",
@@ -265,7 +266,7 @@ def test_read_minimax_handles_nonzero_exit(env: dict[str, str], fake_bin: Path) 
 def test_read_minimax_handles_invalid_json(env: dict[str, str], fake_bin: Path) -> None:
     fake = fake_bin / "mmx"
     fake.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "print('not json at all')\n",
         encoding="utf-8",
     )

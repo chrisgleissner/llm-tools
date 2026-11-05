@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from llm_tools.bridge import main
+from llm_tools.bridge import main, open_store
 
 
 def _create(capsys, monkeypatch, tmp_path: Path, name: str, *argv: str) -> dict[str, Any]:
@@ -45,6 +45,37 @@ def test_auto_continue_applies_to_mission_create_only(tmp_path, monkeypatch, cap
     legacy = _create(capsys, monkeypatch, tmp_path, "legacy", *COMMON, *cwd, "--no-start", "--auto-continue")
     assert explicit["mission"]["config"]["auto_continue"] is True
     assert "auto_continue" not in legacy["mission"]["config"]
+
+
+def test_team_policy_defaults_config_and_cli_precedence(tmp_path, monkeypatch, capsys) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('[bridge]\nteams = false\ntoken_spend = "high"\n', encoding="utf-8")
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(config))
+    cwd = ["--cwd", str(tmp_path)]
+    defaulted = _create(capsys, monkeypatch, tmp_path, "defaults", "mission", "create", "--prompt", "Keep exact", *cwd)
+    assert defaulted["mission"]["config"]["team_policy_enabled"] is False
+    assert defaulted["mission"]["config"]["token_spend"] == "high"
+    explicit = _create(capsys, monkeypatch, tmp_path, "explicit", "mission", "create", "--prompt", "Keep exact", *cwd,
+                       "--teams", "on", "--token-spend", "low")
+    assert explicit["mission"]["config"]["team_policy_enabled"] is True
+    assert explicit["mission"]["config"]["token_spend"] == "low"
+    assert explicit["mission"]["objective"] == explicit["task"]["original_prompt"] == "Keep exact"
+
+
+def test_mission_set_updates_team_policy_without_touching_task_text(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    with open_store() as store:
+        mission = store.create_mission("Keep", "Original\nobjective", cwd=tmp_path, initial_prompt="Original\ntask")
+        mission_id = mission["id"]
+        task_id = int(mission["initial_task_id"])
+    assert main(["mission", "set", "--mission", mission_id, "--teams", "on", "--token-spend", "high", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["execution_policy"] == {"teams_enabled": True, "token_spend": "high", "legacy": False}
+    with open_store(readonly=True) as store:
+        saved = store.get_mission(mission_id)
+        task = store.get_task(task_id)
+    assert saved["objective"] == "Original\nobjective"
+    assert task["original_prompt"] == task["prompt"] == "Original\ntask"
 
 
 def test_rejected_options_create_no_mission(tmp_path, monkeypatch, capsys) -> None:

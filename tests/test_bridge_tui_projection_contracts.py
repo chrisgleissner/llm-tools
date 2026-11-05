@@ -112,10 +112,10 @@ def test_capacity_summary_classifies_active_alternate_and_opaque_routes() -> Non
 
 def test_navigation_hit_testing_clamps_inputs_and_uses_current_view_markers() -> None:
     labels = bridge_tui._nav_labels(0)
-    assert labels[0].startswith("[1 Overview]") and labels[-1] == "8 Usage"
+    assert labels[0].startswith("[1 Overview]") and labels[-1] == "9 Agents"
     assert bridge_tui._nav_index_at(0, 0, 80, " ") == 0
-    assert bridge_tui._nav_index_at(79, 0, 80, " ") == 7
-    assert bridge_tui._nav_index_at(100, 0, 80, " ") == 7
+    assert bridge_tui._nav_index_at(79, 0, 80, " ") == 8
+    assert bridge_tui._nav_index_at(100, 0, 80, " ") == 8
     assert bridge_tui._nav_line(1, "  ").count("  ") > 0
 
 

@@ -110,6 +110,20 @@ def test_copilot_section_rejects_unknown_key(monkeypatch: pytest.MonkeyPatch, tm
         load_config()
 
 
+@pytest.mark.parametrize("body", ['[bridge]\nteams = "on"\n', '[bridge]\ntoken_spend = "fast"\n', '[bridge]\ntoken_spend = []\n'])
+def test_bridge_policy_defaults_are_validated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: str) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", body)
+    with pytest.raises(SystemExit):
+        load_config()
+
+
+def test_bridge_policy_defaults_parse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(tmp_path / "config.toml"))
+    _write_toml({}, tmp_path / "config.toml", '[bridge]\nteams = false\ntoken_spend = "high"\n')
+    assert load_config()["bridge"] == {"teams": False, "token_spend": "high"}
+
+
 def test_config_path_uses_explicit_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     explicit = tmp_path / "my-config.toml"
     monkeypatch.setenv("LLM_TOOLS_CONFIG", str(explicit))

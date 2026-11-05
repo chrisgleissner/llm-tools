@@ -89,7 +89,7 @@ def test_every_destination_visible_and_clickable_at_eighty_columns() -> None:
     from llm_tools.bridge_tui import VIEWS, _nav_layout, _nav_index_at
     for selected in range(8):
         text, entries = _nav_layout(selected, 80, "  ")
-        assert len(entries) == 8 and len(text) <= 80
+        assert len(entries) == 9 and len(text) <= 80
         for index, x, label in entries:
             assert VIEWS[index] in label
             assert _nav_index_at(x + 2, selected, 80, "  ") == index

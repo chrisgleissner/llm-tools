@@ -43,6 +43,11 @@ CLI defaults and saved modes remain compatible. CLI creation rotates over the pr
 llm-tools config ([ralph] wins over [defaults]); without such a config it uses
 the built-in claude,codex,opencode. --providers or --routes override either.
 
+New missions use provider-native team guidance (teams on) and the Medium token
+spend preference by default. Set --teams on|off and --token-spend low|medium|high
+on create, or change a saved mission with mission set --teams/--token-spend. Older
+missions without saved policy keep their original prompts. See help mission create.
+
 Typing in the Bridge command line: bare commands and Codex/Claude-style slash
 commands are the same: /start, /attach, /pause, /status and /approve [N] work
 like their bare forms (N is the task to approve; it may be omitted when exactly
@@ -54,7 +59,10 @@ different: it removes a station client from outside, normally another terminal's
 (for example one still open at the machine while you are on SSH). Do not use it
 to leave your own session. Detaching or exiting Bridge does not stop the mission.
 Pause waits at the current invocation boundary and never suspends the host.
-Stop and cancel are separate explicit operations.
+Capacity waits stay awake by default; `mission set --suspend-when-rate-limited
+on` opts in to RTC-backed sleep at an idle boundary with no active operation.
+Pause, stop and cancel changes made during sleep take effect after the armed
+wake. Stop and cancel are separate explicit operations.
 
 More: help keys, remote, prompts, markdown, providers, states, verification, recovery.
 Every public command also has --help. ID and task numbers are placeholders.
@@ -78,7 +86,7 @@ Observers (read-only clients) are never detached.
 Command line: slash commands such as /start, /attach, /approve [N] and /help are
 accepted exactly like the bare commands; Escape returns focus without side effects.
 
-Bridge body: F1-F8 select Overview, Tasks, Providers, Activity, Sessions, Health,
+Bridge body: F1-F9 select Overview, Tasks, Providers, Activity, Sessions, Health,
 Actions, Usage. Line 1 is a live status strip (provider, task, inactivity,
 capacity). Typing a view name (overview, providers, activity, sessions, health, actions,
 usage) switches to it; the older names orders, stations, log, systems and palette still
@@ -379,6 +387,8 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "mission create": ("Save an objective and its first task; no provider starts", "mission create --name demo --native --file prompt.md --cwd ."),
     "mission list": ("List saved missions; no state changes or provider work", "mission list --json"),
     "status": ("Inspect desired state, observed work and blockers", "status --mission ID"),
+    "agents": ("Inspect current Bridge operations and provider-owned child agents; use --mission ID or --all-missions", "agents --all-missions --json"),
+    "suspend-until-credits": ("Arm a wake timer and suspend after a fresh capacity and safety check", "suspend-until-credits --mission ID"),
     "task": ("Add, inspect, amend and verify mission tasks", "task list --mission ID"),
     "task add": ("Save a new task for the specified mission", "task add --mission ID --file prompt.md"),
     "task list": ("List tasks in the specified mission", "task list --mission ID --json"),

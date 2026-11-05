@@ -47,7 +47,7 @@ def snapshot_with(**changes) -> dict[str, object]:
 # --- 1. view names, order and aliases -------------------------------------------------------
 
 def test_views_use_plain_names_in_documented_f_key_order() -> None:
-    assert VIEWS == ("Overview", "Tasks", "Providers", "Activity", "Sessions", "Health", "Actions", "Usage")
+    assert VIEWS == ("Overview", "Tasks", "Providers", "Activity", "Sessions", "Health", "Actions", "Usage", "Agents")
     state = make_state()
     for number, name in enumerate(VIEWS, start=1):
         state.handle_key(f"KEY_F{number}")
@@ -68,7 +68,7 @@ def test_old_and_new_view_names_normalize(old: str, new: str) -> None:
     assert normalize_view("nonsense") == "nonsense"
 
 
-def test_all_eight_view_names_fit_the_80_column_navigation_in_every_state() -> None:
+def test_all_nine_view_names_fit_the_80_column_navigation_in_every_state() -> None:
     for index in range(len(VIEWS)):
         text, entries = bridge_tui._nav_layout(index, 80, "  ")
         assert cell_width(text) <= 80 and len(entries) == len(VIEWS), (index, text)
@@ -564,9 +564,9 @@ def labels(status: str, **kwargs) -> list[str]:
 
 def test_actions_are_ordered_for_the_mission_state() -> None:
     assert labels("CREATED") == ["Start", "Add task", "Amend task", "Proposals", "Status", "Cancel mission", "Help"]
-    assert labels("RUNNING") == ["Attach", "Pause", "Add task", "Steer", "Stop", "Amend task", "Proposals", "Status", "Detach", "Cancel mission", "Help"]
-    assert labels("PAUSED")[:3] == ["Resume", "Attach", "Add task"]
-    assert labels("STOPPED")[:3] == ["Start", "Resume", "Add task"]
+    assert labels("RUNNING") == ["Attach", "Pause", "Suspend until credits recover", "Add task", "Steer", "Stop", "Amend task", "Proposals", "Status", "Detach", "Cancel mission", "Help"]
+    assert labels("PAUSED")[:4] == ["Resume", "Suspend until credits recover", "Attach", "Add task"]
+    assert labels("STOPPED")[:4] == ["Start", "Resume", "Suspend until credits recover", "Add task"]
     assert labels("STOPPING")[0] == "Stop"
     for terminal in ("COMPLETED", "CANCELLED", "FAILED"):
         assert labels(terminal) == ["Status", "Help"]  # read-only

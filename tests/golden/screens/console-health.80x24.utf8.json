@@ -7,7 +7,7 @@
   "rows": [
     "LLM BRIDGE · ▌ Release 2.0 hardening · ● RUNNING",
     "■ codex · task 4 running 20m · 5h 62% left · week 31% left",
-    "Overview  Tasks  Providers  Activity  Sessions  [Health]  Actions  Usage",
+    "Overview  Tasks  Providers  Activity  Sessions  [Health]  Actions  Usage  Agents",
     "  Mode                  configured background · actual unverified",
     "  Lifecycle             RUNNING",
     "  Controller heartbeat  active · 2s ago · owner lock held",
@@ -28,12 +28,12 @@
     "",
     "",
     "› type a command · /help · Ctrl-K actions",
-    "↑↓ scroll · Tab/F1-8 views · Ctrl-D exit · ? help"
+    "↑↓ scroll · Tab/F1-9 views · Ctrl-D exit · ? help"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " · ", "dim"], [39, "● RUNNING", "state_running"]],
     [[0, "■", "provider_codex"], [1, " codex · task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m · 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left · week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
-    [[0, "Overview  Tasks  Providers  Activity  Sessions  ", "muted"], [48, "[Health]", "accent"], [56, "  Actions  Usage", "muted"]],
+    [[0, "Overview  Tasks  Providers  Activity  Sessions  ", "muted"], [48, "[Health]", "accent"], [56, "  Actions  Usage  Agents", "muted"]],
     [[2, "Mode", "heading"], [6, "                  configured background · actual unverified", "info"]],
     [[2, "Lifecycle", "heading"], [11, "             ", "info"], [24, "RUNNING", "state_running"]],
     [[2, "Controller heartbeat", "heading"], [22, "  active · ", "info"], [33, "2s ago", "muted"], [39, " · owner lock held", "info"]],
@@ -54,6 +54,6 @@
     [],
     [],
     [[0, "› ", "muted"], [2, "type a command · /help · Ctrl-K actions", "dim+dim"]],
-    [[0, "↑↓", "key"], [2, " scroll", "muted"], [9, " · ", "dim"], [12, "Tab/F1-8", "key"], [20, " views", "muted"], [26, " · ", "dim"], [29, "Ctrl-D", "key"], [35, " exit", "muted"], [40, " · ", "dim"], [43, "?", "key"], [44, " help", "muted"]]
+    [[0, "↑↓", "key"], [2, " scroll", "muted"], [9, " · ", "dim"], [12, "Tab/F1-9", "key"], [20, " views", "muted"], [26, " · ", "dim"], [29, "Ctrl-D", "key"], [35, " exit", "muted"], [40, " · ", "dim"], [43, "?", "key"], [44, " help", "muted"]]
   ]
 }

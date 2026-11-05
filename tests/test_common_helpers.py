@@ -326,3 +326,42 @@ def test_credit_exhausted_does_not_change_output_is_retryable() -> None:
     # so the existing contract holds (a clean exit is trusted for everything
     # except the explicit credit envelope).
     assert common.output_is_retryable(0, '{"error_type":"usage_limit_exceeded"}', trust_clean_exit=True) is False
+
+
+def test_provider_failure_classification_requires_verified_error_provenance() -> None:
+    success = common.provider_failure_diagnostic(
+        'old tool output: {"error_type":"usage_limit_exceeded"}; quota is available now', 0,
+    )
+    assert success["class"] == "success"
+    guarded = common.provider_failure_diagnostic(
+        "ERROR: usage limit reached; choose a cheaper model", 75, guard_reason="interactive prompt detected",
+    )
+    assert guarded["class"] == "scheduler-guard"
+    assert guarded["cause"] == "interactive-prompt"
+    provider_error = common.provider_failure_diagnostic(
+        '{"error_type":"usage_limit_exceeded"}', 75, provider_quota_diagnostic=True,
+    )
+    assert provider_error["class"] == "capacity"
+    assert provider_error["code"] == "quota-exhausted"
+    assert provider_error["source"] == "verified-provider-error"
+
+
+def test_provider_diagnostic_rejects_wrong_types_before_semantic_checks(tmp_path: Path) -> None:
+    import json
+
+    payload = common.provider_failure_diagnostic("", 130)
+    payload.update(provider_exit_status=130, scheduler_status=130,
+                   provider_quota_diagnostic=False, provider_credit_diagnostic=False,
+                   blocking_prompt=False)
+    path = tmp_path / "diagnostic.json"
+    path.write_text(json.dumps(payload))
+    assert common.read_provider_diagnostic(path) == payload
+    for key in payload:
+        path.write_text(json.dumps({**payload, key: []}))
+        assert common.read_provider_diagnostic(path) is None, key
+
+
+def test_provider_diagnostic_rejects_excessive_json_nesting(tmp_path: Path) -> None:
+    path = tmp_path / "diagnostic.json"
+    path.write_text("[" * 2000 + "]" * 2000)
+    assert common.read_provider_diagnostic(path) is None

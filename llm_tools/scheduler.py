@@ -88,6 +88,9 @@ Scopes:
 class SchedulerConfig:
     provider: str = ""
     prompt_text: str = ""
+    # Bridge-owned prompt assembly guard; user prompt contents are never inspected
+    # to decide whether the managed policy prefix has already been applied.
+    bridge_policy_applied: bool = field(default=False, repr=False, compare=False)
     prompt_file: str = ""
     prompt_source: str = ""
     at_time: str = ""
@@ -500,7 +503,7 @@ def provider_model_flags(provider: str, model: str) -> list[str]:
 
 def model_missing_slash(provider: str, model: str | None) -> bool:
     """True when ``model`` is pinned for a provider that requires ``provider/model`` but lacks the separator."""
-    return bool(model) and provider in SLASH_MODEL_PROVIDERS and "/" not in model
+    return model is not None and bool(model) and provider in SLASH_MODEL_PROVIDERS and "/" not in model
 
 
 def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
@@ -552,6 +555,63 @@ def provider_default_argv(cfg: SchedulerConfig, prompt: str) -> list[str]:
         common.err(ZAI_LAUNCH_HINT)
         raise SystemExit(2)
     return ["copilot", *m, "-C", cfg.cwd, "--prompt", prompt]
+
+
+_CODEX_GLOBAL_OPTIONS_WITH_VALUE = {
+    "-c", "--config", "--enable", "--disable", "--remote", "--remote-auth-token-env",
+    "-i", "--image", "-m", "--model", "-p", "--profile", "-s", "--sandbox",
+    "--local-provider", "-C", "--cd", "-a", "--ask-for-approval", "--add-dir",
+}
+_CODEX_EXEC_OPTIONS_WITH_VALUE = _CODEX_GLOBAL_OPTIONS_WITH_VALUE | {
+    "-o", "--output-last-message", "--output-schema", "--thread-source", "--color",
+}
+
+
+def _codex_exec_index(argv: list[str]) -> int | None:
+    if not argv or Path(argv[0]).name.casefold() not in {"codex", "codex.exe"}:
+        return None
+    index = 1
+    while index < len(argv):
+        option = argv[index]
+        if option in {"exec", "e"}:
+            return index
+        if option == "--" or not option.startswith("-"):
+            return None
+        index += 2 if option in _CODEX_GLOBAL_OPTIONS_WITH_VALUE else 1
+    return None
+
+
+def _codex_exec_has_json(argv: list[str], index: int) -> bool:
+    cursor = index + 1
+    while cursor < len(argv):
+        option = argv[cursor]
+        if option == "--":
+            return False
+        if option == "--json":
+            return True
+        if option.startswith("-"):
+            cursor += 2 if option in _CODEX_EXEC_OPTIONS_WITH_VALUE else 1
+        else:
+            # Codex accepts options after its prompt. Template prompts remain a
+            # single argv element, so scanning later option tokens cannot match
+            # text embedded in the prompt itself.
+            cursor += 1
+    return False
+
+
+def codex_exec_json_argv(argv: list[str]) -> list[str]:
+    """Enable structured output only for a direct Codex CLI exec invocation."""
+    index = _codex_exec_index(argv)
+    if index is None:
+        return argv
+    if _codex_exec_has_json(argv, index):
+        return argv
+    return [*argv[:index + 1], "--json", *argv[index + 1:]]
+
+
+def is_codex_exec_json(argv: list[str]) -> bool:
+    index = _codex_exec_index(argv)
+    return index is not None and _codex_exec_has_json(argv, index)
 
 
 def command_argv(cfg: SchedulerConfig, logs: common.RunLogs, prompt: str) -> list[str]:
@@ -891,6 +951,7 @@ def run_fresh_headless(cfg: SchedulerConfig, argv: list[str], output_file: Path,
     if cfg.claude_stream_json:
         return run_fresh_claude_stream_json(cfg, argv, output_file, status_file)
     if cfg.exact_stdout:
+        argv = codex_exec_json_argv(argv)
         return run_fresh_exact_stdout(cfg, argv, output_file, status_file)
     status, _text = common.run_pty_capture(
         argv,
@@ -1038,6 +1099,137 @@ class ClaudeStreamRenderer:
         return rendered.encode("utf-8", "replace")
 
 
+class CodexStreamRenderer:
+    """Render Codex JSONL while scanning assistant text separately from tool output."""
+
+    def __init__(self) -> None:
+        self.scannable = b""
+        self.log_line = b""
+        self.provider_error = False
+        self.provider_credit_diagnostic = False
+
+    def render_line(self, line: bytes) -> bytes:
+        self.scannable = b""
+        self.log_line = b""
+        self.provider_error = False
+        stripped = line.strip()
+        if not stripped:
+            return b""
+        try:
+            event = json.loads(stripped.decode("utf-8", "replace"))
+        except json.JSONDecodeError:
+            self.scannable = line
+            return line
+        if not isinstance(event, dict):
+            return b""
+
+        event_type = str(event.get("type") or "")
+        item = event.get("item")
+        rendered = ""
+        log_text = ""
+        scannable = TOOL_ACTIVITY_SCAN_MARKER
+        if event_type in {"item.started", "item.updated", "item.completed"} and isinstance(item, dict):
+            item_type = str(item.get("type") or "")
+            if item_type == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    rendered = text
+                    scannable = text
+            elif item_type == "command_execution":
+                output = item.get("aggregated_output")
+                if isinstance(output, str) and output:
+                    log_text = output
+                if event_type == "item.started":
+                    rendered = "Command started."
+                elif isinstance(item.get("exit_code"), int):
+                    rendered = f"Command finished with exit code {item['exit_code']}."
+                else:
+                    rendered = "Command activity updated."
+                scannable = TOOL_ACTIVITY_SCAN_MARKER
+            elif item_type == "file_change":
+                changes = item.get("changes")
+                paths = [str(change.get("path")) for change in changes if isinstance(change, dict) and change.get("path")] if isinstance(changes, list) else []
+                rendered = "Files changed: " + ", ".join(paths) if paths else "File changes completed."
+                scannable = TOOL_ACTIVITY_SCAN_MARKER
+            elif item_type == "mcp_tool_call":
+                server = str(item.get("server") or "MCP")
+                tool = str(item.get("tool") or "tool")
+                rendered = f"MCP tool: {server}.{tool}"
+                scannable = TOOL_ACTIVITY_SCAN_MARKER
+            elif item_type == "web_search":
+                rendered = "Web search activity updated."
+                scannable = TOOL_ACTIVITY_SCAN_MARKER
+            elif item_type == "reasoning":
+                rendered = "Reasoning updated."
+                scannable = TOOL_ACTIVITY_SCAN_MARKER
+            elif item_type == "error":
+                message = item.get("message")
+                if isinstance(message, str):
+                    rendered = message
+                    scannable = message
+                    self.provider_error = True
+                    self.provider_credit_diagnostic = common.output_signals_credit_exhausted(message)
+            else:
+                scannable = TOOL_ACTIVITY_SCAN_MARKER
+        elif event_type == "turn.failed":
+            error = event.get("error")
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                rendered = str(error["message"])
+                scannable = rendered
+                self.provider_error = True
+                self.provider_credit_diagnostic = common.output_signals_credit_exhausted(rendered)
+        elif event_type == "error" and isinstance(event.get("message"), str):
+            rendered = str(event["message"])
+            scannable = rendered
+            self.provider_error = True
+            self.provider_credit_diagnostic = common.output_signals_credit_exhausted(rendered)
+
+        self.scannable = scannable.encode("utf-8", "replace")
+        self.log_line = (log_text or rendered).encode("utf-8", "replace")
+        if rendered and not rendered.endswith("\n"):
+            rendered += "\n"
+        if log_text and not log_text.endswith("\n"):
+            log_text += "\n"
+        if log_text:
+            self.log_line = log_text.encode("utf-8", "replace")
+        return rendered.encode("utf-8", "replace")
+
+
+_QUOTA_DIAGNOSTIC_RE = re.compile(
+    r"\b(?:rate[ _-]?limit(?:ed)?|quota|usage limit|monthly spend limit|out of credits?)\b",
+    re.I,
+)
+_PLAIN_PROVIDER_ERROR_RE = re.compile(
+    r"(?im)^\s*(?:error|fatal|provider error|http(?:\s+status)?|status)\s*(?::|=)?\s*"
+)
+_EXPLICIT_PROMPT_CUE_RE = re.compile(
+    r"\bwhat do you want to do\?"
+    r"|\benter to confirm\b|\besc to cancel\b|\buse (?:the )?arrow keys\b"
+    r"|\bpress (?:enter|return) to\b|\bproceed\?\s*(?:\[[yYnN]/[yYnN]\]|\([yYnN]/[yYnN]\))",
+    re.I,
+)
+_LIMIT_MENU_CUE_RE = re.compile(
+    r"\badjust monthly spend limit\b|\brate[- ]limit options\b|\bupgrade to max\b"
+    r"|\bbuy more (?:credits|tokens)\b|\bdowngrade to (?:a )?(?:simpler|smaller|cheaper) model\b",
+    re.I,
+)
+
+
+def provider_quota_diagnostic(text: str, *, structured: bool = False) -> bool:
+    """Whether an error channel reports quota exhaustion rather than an input prompt."""
+    if not _QUOTA_DIAGNOSTIC_RE.search(text):
+        return False
+    return structured or bool(_PLAIN_PROVIDER_ERROR_RE.search(text))
+
+
+def has_explicit_prompt_cue(text: str) -> bool:
+    return bool(
+        _EXPLICIT_PROMPT_CUE_RE.search(text)
+        or _LIMIT_MENU_CUE_RE.search(text)
+        or common.QUESTION_LINE_RE.search(text)
+    )
+
+
 class ProgressGuard:
     """Detect no-progress and waiting-for-input conditions in a captured run.
 
@@ -1054,10 +1246,25 @@ class ProgressGuard:
         now = time.time()
         self.last_progress = now
         self.question_seen_at: float | None = None
+        self.provider_quota_diagnostic_seen = False
 
-    def note_output(self, combined_tail: str) -> bool:
+    def note_output(
+        self,
+        combined_tail: str,
+        *,
+        structured_provider_error: bool = False,
+        current_output: str = "",
+    ) -> bool:
         """Record fresh output. Returns True if an interactive prompt was seen."""
         self.last_progress = time.time()
+        if provider_quota_diagnostic(combined_tail, structured=structured_provider_error):
+            self.provider_quota_diagnostic_seen = True
+            if not has_explicit_prompt_cue(current_output or combined_tail):
+                # Quota diagnostics are provider failures, not evidence that a
+                # CLI is waiting for input. Keep the native exit status so
+                # Ralph can refresh capacity and Bridge can retry the task.
+                self.question_seen_at = None
+                return False
         combined_tail = common.blocking_tail(combined_tail)
         if any(pattern.search(combined_tail) for pattern in common.BLOCKING_PROMPT_PATTERNS):
             return True
@@ -1263,6 +1470,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     combined_parts: list[bytes] = []
     retained_bytes = 0
     output_truncated = False
+    provider_credit_diagnostic = False
 
     def append_combined(data: bytes) -> None:
         nonlocal retained_bytes, output_truncated
@@ -1285,6 +1493,45 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     blocking = False
     abort_reason = ""
     guard = ProgressGuard()
+    codex_json = is_codex_exec_json(argv)
+    renderer = CodexStreamRenderer() if codex_json else None
+    stdout_buffer = b""
+    discard_stdout_line = False
+    scan_buffer = b""
+
+    def scan_prompt(data: bytes, *, structured_provider_error: bool = False) -> bool:
+        nonlocal scan_buffer
+        if not data:
+            return False
+        scan_buffer = (scan_buffer + data)[-8000:]
+        return guard.note_output(
+            common.strip_ansi(scan_buffer.decode("utf-8", "replace")),
+            structured_provider_error=structured_provider_error,
+            current_output=common.strip_ansi(data.decode("utf-8", "replace")),
+        )
+
+    def write_stdout(data: bytes) -> bool:
+        nonlocal provider_credit_diagnostic
+        if renderer is None:
+            append_combined(data)
+            try:
+                sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(data, stream_name="stdout", enabled=stdout_color)))
+                sys.stdout.buffer.flush()
+            except OSError:
+                pass
+            return scan_prompt(data)
+        rendered = renderer.render_line(data)
+        provider_credit_diagnostic = provider_credit_diagnostic or renderer.provider_credit_diagnostic
+        if renderer.log_line:
+            append_combined(renderer.log_line)
+        if rendered:
+            try:
+                sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(rendered, stream_name="stdout", enabled=stdout_color)))
+                sys.stdout.buffer.flush()
+            except OSError:
+                pass
+        return scan_prompt(renderer.scannable, structured_provider_error=renderer.provider_error)
+
     while open_fds:
         if time.time() - start > timeout:
             break
@@ -1300,25 +1547,64 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
             except OSError:
                 chunk = b""
             if not chunk:
+                if open_fds.get(fd) == "stdout" and stdout_buffer:
+                    if write_stdout(stdout_buffer):
+                        blocking = True
+                    stdout_buffer = b""
                 open_fds.pop(fd, None)
+                if blocking:
+                    break
                 continue
-            append_combined(chunk)
+            guard.last_progress = time.time()
             if open_fds.get(fd) == "stdout":
-                try:
-                    sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(chunk, stream_name="stdout", enabled=stdout_color)))
-                    sys.stdout.buffer.flush()
-                except OSError:
-                    pass
+                if renderer is None:
+                    # Keep the raw-output path byte-for-byte for custom provider commands.
+                    append_combined(chunk)
+                    try:
+                        sys.stdout.buffer.write(stdout_ts.apply(highlight_provider_text(chunk, stream_name="stdout", enabled=stdout_color)))
+                        sys.stdout.buffer.flush()
+                    except OSError:
+                        pass
+                    if scan_prompt(chunk):
+                        blocking = True
+                        break
+                else:
+                    if discard_stdout_line:
+                        newline = chunk.find(b"\n")
+                        if newline < 0:
+                            continue
+                        chunk = chunk[newline + 1:]
+                        discard_stdout_line = False
+                    stdout_buffer += chunk
+                    lines = stdout_buffer.splitlines(keepends=True)
+                    if lines and not lines[-1].endswith((b"\n", b"\r")):
+                        stdout_buffer = lines.pop()
+                    else:
+                        stdout_buffer = b""
+                    for line in lines:
+                        if cfg.max_output_bytes > 0 and len(line) > cfg.max_output_bytes:
+                            output_truncated = True
+                            if scan_prompt(TOOL_ACTIVITY_SCAN_MARKER.encode()):
+                                blocking = True
+                                break
+                            continue
+                        if write_stdout(line):
+                            blocking = True
+                            break
+                    if cfg.max_output_bytes > 0 and len(stdout_buffer) > cfg.max_output_bytes:
+                        stdout_buffer = b""
+                        discard_stdout_line = True
+                        output_truncated = True
             else:
+                append_combined(chunk)
                 try:
                     sys.stderr.buffer.write(stderr_ts.apply(highlight_provider_text(chunk, stream_name="stderr", enabled=stderr_color)))
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-            tail = common.strip_ansi(b"".join(combined_parts)[-8000:].decode("utf-8", "replace"))
-            if guard.note_output(tail):
-                blocking = True
-                break
+                if scan_prompt(chunk):
+                    blocking = True
+                    break
         if blocking:
             abort_reason = "interactive prompt detected"
             exit_code = common.AUTONOMY_ABORT_STATUS
@@ -1338,6 +1624,16 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
             time.sleep(0.2)
     if proc.poll() is not None and not blocking and exit_code == 124:
         exit_code = int(proc.returncode)
+    native_exit_code = proc.returncode if proc.poll() is not None else None
+    if (
+        not blocking
+        and exit_code == common.AUTONOMY_ABORT_STATUS
+        and guard.provider_quota_diagnostic_seen
+    ):
+        # 75 is llm-scheduler's own interactive-abort status. If a provider
+        # emitted an error-channel quota diagnostic and returned the same
+        # numeric code, preserve it as an ordinary provider failure instead.
+        exit_code = 1
     if abort_reason:
         append_combined(f"\nllm-scheduler: autonomous abort: {abort_reason}\n".encode())
     output_text = b"".join(combined_parts).decode("utf-8", "replace")
@@ -1345,6 +1641,22 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
         output_text = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n" + output_text
     output_file.write_text(output_text, encoding="utf-8")
     status_file.write_text(str(exit_code), encoding="utf-8")
+    diagnostic = common.provider_failure_diagnostic(
+        output_text,
+        int(native_exit_code if native_exit_code is not None else exit_code),
+        guard_reason=abort_reason if exit_code == common.AUTONOMY_ABORT_STATUS else "",
+        provider_quota_diagnostic=guard.provider_quota_diagnostic_seen or provider_credit_diagnostic,
+    )
+    diagnostic.update({
+        "provider_exit_status": native_exit_code,
+        "scheduler_status": exit_code,
+        "provider_quota_diagnostic": guard.provider_quota_diagnostic_seen,
+        "provider_credit_diagnostic": provider_credit_diagnostic,
+        "blocking_prompt": blocking,
+    })
+    status_file.with_suffix(".diagnostic.json").write_text(
+        json.dumps(diagnostic, separators=(",", ":")), encoding="utf-8",
+    )
     return exit_code
 
 
@@ -1531,7 +1843,31 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     output = output_file.read_text(encoding="utf-8", errors="replace")
     with logs.text_log.open("a", encoding="utf-8") as fh:
         fh.write(output)
-    common.log_event(logs, "attempt_result", {"attempt": attempt, "status": status, "output": output})
+    failure = common.provider_failure_diagnostic(output, status)
+    diagnostic_path = status_file.with_suffix(".diagnostic.json")
+    scheduler_diagnostic = common.read_provider_diagnostic(diagnostic_path) or {}
+    if scheduler_diagnostic:
+        failure.update({key: scheduler_diagnostic[key] for key in (
+            "provider_exit_status", "scheduler_status", "provider_quota_diagnostic", "provider_credit_diagnostic", "blocking_prompt",
+        )})
+        failure["class"] = scheduler_diagnostic["class"]
+        failure["code"] = scheduler_diagnostic["code"]
+        failure["cause"] = scheduler_diagnostic["cause"]
+    if scheduler_diagnostic.get("provider_quota_diagnostic") is True or scheduler_diagnostic.get("provider_credit_diagnostic") is True:
+        classified = common.provider_failure_diagnostic(
+            output,
+            int(status if scheduler_diagnostic.get("provider_exit_status") is None else scheduler_diagnostic["provider_exit_status"]),
+            guard_reason=(
+                str(scheduler_diagnostic.get("cause"))
+                if scheduler_diagnostic.get("class") == "scheduler-guard" else ""
+            ),
+            provider_quota_diagnostic=True,
+        )
+        failure.update(classified)
+        for key in ("provider_exit_status", "scheduler_status", "provider_quota_diagnostic", "provider_credit_diagnostic", "blocking_prompt"):
+            if key in scheduler_diagnostic:
+                failure[key] = scheduler_diagnostic[key]
+    common.log_event(logs, "attempt_result", {"attempt": attempt, "status": status, "failure": failure})
     if (
         cfg.provider == "claude"
         and status not in (0, 124, 130, 143, common.AUTONOMY_ABORT_STATUS)
@@ -1544,7 +1880,7 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
         common.log_event(logs, "operator_declined", {"attempt": attempt, "provider": cfg.provider, "reason": "folder-trust-declined", "exit_code": status})
         return common.OPERATOR_DECLINED_STATUS
     if status == common.AUTONOMY_ABORT_STATUS:
-        common.log_event(logs, "autonomy_abort", {"attempt": attempt, "output": output})
+        common.log_event(logs, "autonomy_abort", {"attempt": attempt, "failure": failure})
         # An autonomy abort on a route means the provider ran but produced no
         # observable progress (idle timeout, blocked prompt, hung tool call,
         # etc.). For opaque routes this is the *only* signal the orchestrator
@@ -1568,7 +1904,13 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     # forever, because the capacity reader still reports the gateway balance
     # as usable. Returning AUTONOMY_ABORT_STATUS makes ralph rotate away (and
     # skip retries on the same exhausted model).
-    if common.output_signals_credit_exhausted(output):
+    credit_diagnostic = (
+        scheduler_diagnostic.get("provider_credit_diagnostic") is True
+        if cfg.exact_stdout and isinstance(scheduler_diagnostic, dict)
+        else False if cfg.exact_stdout
+        else common.output_signals_credit_exhausted(output)
+    )
+    if credit_diagnostic:
         if cfg.route_id:
             _record_route_runtime_block(cfg, logs, output, reason="credit-exhausted")
         elif cfg.model and cfg.provider:

@@ -18,10 +18,11 @@ import sys
 import termios
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 if TYPE_CHECKING:
     from urllib.error import HTTPError
@@ -3061,13 +3062,30 @@ def log_text(logs: RunLogs, message: str) -> None:
 
 
 def log_event(logs: RunLogs, event_type: str, data: dict[str, Any] | None = None) -> None:
+    clocks = diagnostic_clock_fields()
     obj = {
         "ts": datetime.now(timezone.utc).astimezone().isoformat(),
+        **clocks,
         "type": event_type,
         "data": data or {},
     }
     with logs.event_log.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(obj, separators=(",", ":")) + "\n")
+
+
+def diagnostic_clock_fields() -> dict[str, float | None]:
+    """Return bounded clock readings for correlating events across suspend."""
+    clock_gettime = getattr(time, "clock_gettime", None)
+    boottime_clock = getattr(time, "CLOCK_BOOTTIME", None)
+    try:
+        boottime = float(clock_gettime(boottime_clock)) if callable(clock_gettime) and boottime_clock is not None else None
+    except (OSError, ValueError, OverflowError):
+        boottime = None
+    return {
+        "wall_epoch": time.time(),
+        "monotonic_seconds": time.monotonic(),
+        "boottime_seconds": boottime,
+    }
 
 
 def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str, str]:
@@ -4327,6 +4345,136 @@ def output_signals_credit_exhausted(output: str) -> bool:
     return bool(CREDIT_EXHAUSTED_RE.search(output))
 
 
+def provider_failure_diagnostic(
+    output: str,
+    status: int,
+    *,
+    guard_reason: str = "",
+    provider_quota_diagnostic: bool = False,
+) -> dict[str, Any]:
+    """Classify a provider result without persisting provider text or payloads."""
+    import hashlib
+    text = output[-65536:]
+    trusted_credit_error = provider_quota_diagnostic and output_signals_credit_exhausted(text)
+    code: str | None = None
+    if guard_reason:
+        if guard_reason in {"interactive-prompt", "idle-timeout", "question-timeout", "other-scheduler-guard"}:
+            cause = guard_reason
+        elif guard_reason == "interactive prompt detected":
+            cause = "interactive-prompt"
+        elif guard_reason.startswith("no output progress for "):
+            cause = "idle-timeout"
+        elif guard_reason.startswith("question required a response for "):
+            cause = "question-timeout"
+        else:
+            cause = "other-scheduler-guard"
+        failure_class = "scheduler-guard"
+        code = "autonomy-abort"
+    elif status == 0 and not trusted_credit_error:
+        failure_class, cause = "success", "completed"
+    elif provider_quota_diagnostic or trusted_credit_error:
+        failure_class, cause = "capacity", "provider-quota"
+        code = "quota-exhausted"
+    elif status in {130, 143}:
+        failure_class, cause = "interrupted", "operator-or-signal"
+    elif status == 124:
+        failure_class, cause = "timeout", "scheduler-timeout"
+    else:
+        failure_class, cause = "provider-error", "nonzero-exit"
+        code = code or f"exit-{status}"
+    raw = text.encode("utf-8", "replace")
+    return {
+        "schema_version": 1,
+        "class": failure_class,
+        "code": str(code)[:64] if code else None,
+        "cause": cause,
+        "source": "scheduler-guard" if guard_reason else "verified-provider-error" if provider_quota_diagnostic else "process-exit",
+        "status": int(status),
+        "output_chars": len(output),
+        "retained_sha256": hashlib.sha256(raw).hexdigest() if raw else None,
+        "retained_bytes": len(text.encode("utf-8", "replace")),
+    }
+
+
+_PROVIDER_DIAGNOSTIC_KEYS = frozenset({
+    "schema_version", "class", "code", "cause", "source", "status", "output_chars",
+    "retained_sha256", "retained_bytes", "provider_exit_status", "scheduler_status",
+    "provider_quota_diagnostic", "provider_credit_diagnostic", "blocking_prompt",
+})
+_PROVIDER_DIAGNOSTIC_CAUSES = frozenset({
+    "completed", "provider-quota", "interactive-prompt", "idle-timeout", "question-timeout",
+    "other-scheduler-guard", "operator-or-signal", "scheduler-timeout", "nonzero-exit",
+})
+
+
+def read_provider_diagnostic(path: str | Path, *, max_bytes: int = 16384) -> dict[str, Any] | None:
+    """Read the small scheduler diagnostic sidecar only when its schema is valid."""
+    if max_bytes < 1 or max_bytes > 16384:
+        raise ValueError("provider diagnostic size limit must be between 1 and 16384 bytes")
+    try:
+        with Path(path).open("rb") as stream:
+            raw = stream.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            return None
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(value, dict) or set(value) != _PROVIDER_DIAGNOSTIC_KEYS:
+        return None
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        return None
+    if any(not isinstance(value[key], str) for key in ("class", "cause", "source")):
+        return None
+    for key in ("status", "scheduler_status", "output_chars", "retained_bytes"):
+        if type(value[key]) is not int or value[key] < 0 and key in {"output_chars", "retained_bytes"}:
+            return None
+        if key in {"status", "scheduler_status"} and not -255 <= value[key] <= 255:
+            return None
+        if key in {"output_chars", "retained_bytes"} and value[key] > 2**63 - 1:
+            return None
+    if any(type(value[key]) is not bool for key in ("provider_quota_diagnostic", "provider_credit_diagnostic", "blocking_prompt")):
+        return None
+    if value["provider_exit_status"] is not None:
+        if type(value["provider_exit_status"]) is not int or not -255 <= value["provider_exit_status"] <= 255:
+            return None
+    classes = {"scheduler-guard", "success", "capacity", "interrupted", "timeout", "provider-error"}
+    sources = {"scheduler-guard", "verified-provider-error", "process-exit"}
+    if value["class"] not in classes or value["source"] not in sources or value["cause"] not in _PROVIDER_DIAGNOSTIC_CAUSES:
+        return None
+    code = value["code"]
+    if code is not None and (not isinstance(code, str) or code not in {"autonomy-abort", "quota-exhausted"} and not re.fullmatch(r"exit-[0-9]{1,3}", code)):
+        return None
+    if value["class"] == "scheduler-guard" and (value["cause"] not in {"interactive-prompt", "idle-timeout", "question-timeout", "other-scheduler-guard"} or code != "autonomy-abort"):
+        return None
+    if value["class"] == "capacity" and (value["cause"] != "provider-quota" or code != "quota-exhausted"):
+        return None
+    if value["class"] == "success" and (value["cause"] != "completed" or code is not None or value["status"] != 0):
+        return None
+    if value["class"] == "interrupted" and (value["cause"] != "operator-or-signal" or value["status"] not in {130, 143}):
+        return None
+    if value["class"] == "timeout" and (value["cause"] != "scheduler-timeout" or value["status"] != 124):
+        return None
+    if value["class"] == "provider-error" and (value["cause"] != "nonzero-exit" or value["status"] == 0):
+        return None
+    if value["class"] == "capacity" and value["source"] != "verified-provider-error":
+        return None
+    if value["source"] == "scheduler-guard" and value["class"] != "scheduler-guard":
+        return None
+    if value["source"] == "verified-provider-error" and value["class"] not in {"capacity", "scheduler-guard"}:
+        return None
+    if value["source"] == "process-exit" and value["class"] in {"capacity", "scheduler-guard"}:
+        return None
+    digest = value["retained_sha256"]
+    if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        return None
+    has_provider_error = value["provider_quota_diagnostic"] or value["provider_credit_diagnostic"]
+    if value["class"] == "capacity" and not has_provider_error:
+        return None
+    if has_provider_error and value["class"] not in {"capacity", "scheduler-guard"}:
+        return None
+    return {key: value[key] for key in _PROVIDER_DIAGNOSTIC_KEYS}
+
+
 # Fields that may appear, in any combination and order, inside the `[ ]` marker
 # prepended to each relayed provider line. "time" is the wall-clock HH:MM:SS;
 # "provider" is the provider name (codex/claude/...), "model" is the selected
@@ -4790,13 +4938,13 @@ def ledger_record_start(path: Path, cycle_id: str, target_epoch: int, env: dict[
     and it is hard-reset, the next boot still finds a start with no matching
     ``done`` -- ground truth that a cycle failed to resume.
     """
-    record = {"event": "suspend_start", "cycle_id": cycle_id, "target_epoch": int(target_epoch), "started_epoch": now_epoch(env)}
+    record = {"event": "suspend_start", "cycle_id": cycle_id, "target_epoch": int(target_epoch), "started_epoch": now_epoch(env), **diagnostic_clock_fields()}
     record.update(extra)
     _append_ledger(path, record)
 
 
 def ledger_record_done(path: Path, cycle_id: str, woke_epoch: int, reliable: bool, env: dict[str, str] | None = None, **extra: Any) -> None:
-    record = {"event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": int(woke_epoch), "reliable": bool(reliable)}
+    record = {"event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": int(woke_epoch), "reliable": bool(reliable), **diagnostic_clock_fields()}
     record.update(extra)
     _append_ledger(path, record)
 
@@ -4845,6 +4993,22 @@ class WakeArm:
     confirmed: bool        # RTC wakealarm read back at/near target
     unit: str = ""
     detail: str = ""
+    target_epoch: int | None = None
+
+
+@contextmanager
+def wake_planner_lock(env: dict[str, str] | None = None) -> Iterator[None]:
+    """Serialize wake-plan owners and the full suspend cycle across processes."""
+    path = cache_root(env) / "llm-bridge" / "capacity-wakes" / "planner.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    with path.open("a+") as lock:
+        os.chmod(path, 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def arm_rtc_wake(target_epoch: int, who: str, env: dict[str, str] | None = None) -> WakeArm:
@@ -4874,7 +5038,7 @@ def arm_rtc_wake(target_epoch: int, who: str, env: dict[str, str] | None = None)
             alarm = read_rtc_wakealarm(env)
             confirmed = alarm is not None and abs(alarm - target_epoch) <= tolerance
             if confirmed:
-                return WakeArm(True, "rtcwake", True, detail=proc.stdout.strip())
+                return WakeArm(True, "rtcwake", True, detail=proc.stdout.strip(), target_epoch=int(target_epoch))
 
     if power_backend(env) == "systemd":
         unit = f"{who}-wake-{int(time.time())}"
@@ -4888,7 +5052,7 @@ def arm_rtc_wake(target_epoch: int, who: str, env: dict[str, str] | None = None)
                 # systemd only programs the RTC at suspend time, so it is not yet
                 # confirmable here; the post-resume drift check is the verification.
                 _ = now
-                return WakeArm(True, "systemd-timer", False, unit=unit, detail=proc.stdout.strip())
+                return WakeArm(True, "systemd-timer", False, unit=unit, detail=proc.stdout.strip(), target_epoch=int(target_epoch))
         return WakeArm(False, "none", False, detail=proc.stdout.strip())
 
     return WakeArm(False, "none", False)
@@ -4904,16 +5068,56 @@ def disarm_rtc_wake(arm: WakeArm, env: dict[str, str] | None = None) -> None:
 
 @dataclass
 class SuspendOutcome:
-    suspended: bool          # the machine was (or would have been) put to sleep
+    suspended: bool          # the machine's sleep was observed, not merely requested
     woke_epoch: int | None   # wall clock observed after resume
     target_epoch: int
     drift_seconds: int | None
     reliable: bool           # woke within tolerance of target (wake verified by behaviour)
     method: str              # how the wake was armed
-    reason: str              # "ok" | "missing-backend" | "insufficient-lead" | "arm-failed" | "simulated"
+    reason: str              # includes sleep-not-observed and sleep-unverified after accepted requests
+    detail: str = ""
+    sleep_observed: bool | None = False
 
 
-def wall_clock_wait_until(target_epoch: int, env: dict[str, str] | None = None) -> None:
+SUSPEND_OBSERVED_MIN_GAP_SECONDS = 2.0
+
+
+def suspend_clock_sample() -> tuple[float, float] | None:
+    """Read suspend-inclusive BOOTTIME and suspend-exclusive MONOTONIC clocks.
+
+    On platforms without both clocks, an accepted suspend request cannot prove
+    that the machine actually slept, so callers must preserve that uncertainty.
+    """
+    clock_gettime = getattr(time, "clock_gettime", None)
+    boottime = getattr(time, "CLOCK_BOOTTIME", None)
+    monotonic = getattr(time, "CLOCK_MONOTONIC", None)
+    if not callable(clock_gettime) or boottime is None or monotonic is None:
+        return None
+    try:
+        return float(clock_gettime(boottime)), float(clock_gettime(monotonic))
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def suspend_clock_gap_seconds(
+    before: tuple[float, float] | None,
+    after: tuple[float, float] | None,
+) -> float | None:
+    """Estimate time spent suspended, immune to wall-clock/NTP adjustments."""
+    if before is None or after is None:
+        return None
+    boottime_delta = after[0] - before[0]
+    monotonic_delta = after[1] - before[1]
+    if boottime_delta < 0 or monotonic_delta < 0:
+        return None
+    return max(0.0, boottime_delta - monotonic_delta)
+
+
+def wall_clock_wait_until(
+    target_epoch: int,
+    env: dict[str, str] | None = None,
+    should_interrupt: Callable[[], bool] | None = None,
+) -> bool:
     """Wait until wall-clock time reaches ``target_epoch``, in bounded chunks.
 
     ``time.sleep`` counts CLOCK_MONOTONIC, which the kernel freezes across
@@ -4921,20 +5125,29 @@ def wall_clock_wait_until(target_epoch: int, env: dict[str, str] | None = None) 
     resume and overshoot. Re-checking the wall clock between short chunks ends
     the wait as soon as real time catches up -- right at the RTC wake -- no
     matter how long the machine was actually asleep.
+
+    Returns True at the target, or False when ``should_interrupt`` ended the
+    wait early. With a callback the chunk is at most one second, so an operator
+    request is seen promptly when a suspend was accepted but the machine stayed
+    awake.
     """
     raw = (env or os.environ).get("LLM_TOOLS_WAIT_POLL_SECONDS", "30") or "30"
     try:
         chunk = max(1.0, float(raw))
     except ValueError:
         chunk = 30.0
+    if callable(should_interrupt):
+        chunk = 1.0
     while True:
+        if callable(should_interrupt) and should_interrupt():
+            return False
         remaining = target_epoch - now_epoch(env)
         if remaining <= 0:
-            return
+            return True
         time.sleep(min(float(remaining), chunk))
 
 
-def suspend_with_wake(
+def _suspend_with_wake_locked(
     target_epoch: int,
     *,
     who: str,
@@ -4942,6 +5155,9 @@ def suspend_with_wake(
     min_lead: int | None = None,
     watchdog: bool = False,
     cycle_id: str | None = None,
+    wake_arm: WakeArm | None = None,
+    pre_suspend_check: Callable[[], str] | None = None,
+    should_interrupt: Callable[[], bool] | None = None,
     env: dict[str, str] | None = None,
 ) -> SuspendOutcome:
     """Suspend the machine now and reliably wake it at ``target_epoch``.
@@ -4981,13 +5197,35 @@ def suspend_with_wake(
         _log("suspend_skipped", {"cycle_id": cycle_id, "reason": "insufficient-lead", "lead": lead, "min_lead": floor})
         return SuspendOutcome(False, None, int(target_epoch), None, False, "none", "insufficient-lead")
 
-    arm = arm_rtc_wake(target_epoch, who, env)
+    arm = arm_rtc_wake(target_epoch, who, env) if wake_arm is None else wake_arm
+    if wake_arm is not None:
+        valid = arm.armed and arm.target_epoch == int(target_epoch)
+        if valid and arm.method == "rtcwake":
+            current_alarm = read_rtc_wakealarm(env)
+            valid = current_alarm is not None and abs(current_alarm - int(target_epoch)) <= suspend_drift_tolerance(env)
+        elif valid and arm.method == "systemd-timer":
+            active = subprocess.run(
+                ["systemctl", "--user", "is-active", "--quiet", f"{arm.unit}.timer"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+            valid = bool(arm.unit) and active.returncode == 0
+        else:
+            valid = False
+        if not valid:
+            _log("suspend_skipped", {"cycle_id": cycle_id, "reason": "prearmed-wake-invalid", "target_epoch": int(target_epoch)})
+            return SuspendOutcome(False, None, int(target_epoch), None, False, arm.method, "arm-failed")
     _log("wake_armed", {"cycle_id": cycle_id, "armed": arm.armed, "method": arm.method, "confirmed": arm.confirmed, "unit": arm.unit, "target_epoch": int(target_epoch)})
     if not arm.armed:
         # Never suspend with no wake armed -- that is exactly how a box ends up
         # asleep until someone touches it. Fall back to an awake wait instead.
         _log("suspend_skipped", {"cycle_id": cycle_id, "reason": "arm-failed"})
         return SuspendOutcome(False, None, int(target_epoch), None, False, arm.method, "arm-failed")
+
+    if pre_suspend_check is not None:
+        reason = pre_suspend_check()
+        if reason:
+            _log("suspend_skipped", {"cycle_id": cycle_id, "reason": "pre-suspend-check-failed", "detail": reason})
+            return SuspendOutcome(False, None, int(target_epoch), None, False, arm.method, "pre-suspend-check-failed", reason)
 
     dog: Watchdog | None = None
     if watchdog:
@@ -5010,19 +5248,97 @@ def suspend_with_wake(
     _log("suspend_request", {"cycle_id": cycle_id, "method": arm.method, "target_epoch": int(target_epoch)})
 
     subprocess.run(["sync"], check=False)
-    subprocess.run(["systemctl", "suspend"], check=False)
+    clock_before = suspend_clock_sample()
+    suspend = subprocess.run(["systemctl", "suspend"], check=False)
+    if suspend.returncode != 0:
+        disarm_rtc_wake(arm, env)
+        if dog is not None:
+            dog.disarm()
+        woke = now_epoch(env)
+        ledger_record_done(
+            ledger, cycle_id, woke, False, env,
+            drift_seconds=None, method=arm.method, reason="suspend-rejected",
+        )
+        trim_ledger(ledger)
+        _log("suspend_rejected", {"cycle_id": cycle_id, "returncode": suspend.returncode, "method": arm.method})
+        return SuspendOutcome(False, woke, int(target_epoch), None, False, arm.method, "suspend-rejected")
 
     # systemctl suspend returns asynchronously; poll the wall clock so we proceed
     # exactly when real time reaches the target (the RTC wake), not before.
-    wall_clock_wait_until(int(target_epoch), env)
+    wall_clock_wait_until(int(target_epoch), env, should_interrupt)
+    clock_after = suspend_clock_sample()
+    sleep_gap = suspend_clock_gap_seconds(clock_before, clock_after)
     if dog is not None:
         dog.keepalive()
         dog.disarm()
 
     woke = now_epoch(env)
     drift = woke - int(target_epoch)
+    if sleep_gap is None:
+        _log("suspend_unverified", {"cycle_id": cycle_id, "target_epoch": int(target_epoch), "reason": "suspend-clock-unavailable"})
+        ledger_record_done(
+            ledger, cycle_id, woke, False, env,
+            drift_seconds=drift, method=arm.method, reason="sleep-unverified", sleep_gap_seconds=None,
+        )
+        trim_ledger(ledger)
+        return SuspendOutcome(
+            False, woke, int(target_epoch), drift, False, arm.method, "sleep-unverified",
+            "suspend-inclusive clock unavailable; sleep was not verified", None,
+        )
+    sleep_observed = sleep_gap >= SUSPEND_OBSERVED_MIN_GAP_SECONDS
+    if not sleep_observed:
+        _log("suspend_not_observed", {
+            "cycle_id": cycle_id,
+            "target_epoch": int(target_epoch),
+            "sleep_gap_seconds": round(sleep_gap, 3),
+        })
+        ledger_record_done(
+            ledger, cycle_id, woke, False, env,
+            drift_seconds=drift, method=arm.method, reason="sleep-not-observed",
+            sleep_gap_seconds=round(sleep_gap, 3),
+        )
+        trim_ledger(ledger)
+        return SuspendOutcome(
+            False, woke, int(target_epoch), drift, False, arm.method, "sleep-not-observed",
+            f"accepted suspend request but observed only {sleep_gap:.3f}s of suspend time", False,
+        )
     reliable = abs(drift) <= suspend_drift_tolerance(env)
-    ledger_record_done(ledger, cycle_id, woke, reliable, env, drift_seconds=drift, method=arm.method)
+    ledger_record_done(
+        ledger, cycle_id, woke, reliable, env,
+        drift_seconds=drift, method=arm.method, sleep_gap_seconds=round(sleep_gap, 3), sleep_observed=True,
+    )
     trim_ledger(ledger)
-    _log("suspend_resumed", {"cycle_id": cycle_id, "woke_epoch": woke, "drift_seconds": drift, "reliable": reliable, "method": arm.method})
-    return SuspendOutcome(True, woke, int(target_epoch), drift, reliable, arm.method, "ok")
+    _log("suspend_resumed", {
+        "cycle_id": cycle_id, "woke_epoch": woke, "drift_seconds": drift,
+        "reliable": reliable, "method": arm.method, "sleep_gap_seconds": round(sleep_gap, 3),
+    })
+    return SuspendOutcome(True, woke, int(target_epoch), drift, reliable, arm.method, "ok", "", True)
+
+
+def suspend_with_wake(
+    target_epoch: int,
+    *,
+    who: str,
+    logs: "RunLogs | None" = None,
+    min_lead: int | None = None,
+    watchdog: bool = False,
+    cycle_id: str | None = None,
+    wake_arm: WakeArm | None = None,
+    pre_suspend_check: Callable[[], str] | None = None,
+    should_interrupt: Callable[[], bool] | None = None,
+    env: dict[str, str] | None = None,
+) -> SuspendOutcome:
+    """Run the shared suspend cycle while owning the machine wake planner."""
+    with wake_planner_lock(env):
+        return _suspend_with_wake_locked(
+            target_epoch,
+            who=who,
+            logs=logs,
+            min_lead=min_lead,
+            watchdog=watchdog,
+            cycle_id=cycle_id,
+            wake_arm=wake_arm,
+            pre_suspend_check=pre_suspend_check,
+            should_interrupt=should_interrupt,
+            env=env,
+        )

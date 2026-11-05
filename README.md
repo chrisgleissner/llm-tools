@@ -127,6 +127,24 @@ llm-bridge
 
 Your agents work. Bridge keeps the plan, the evidence and the controls. Close the laptop. The mission waits.
 
+```mermaid
+flowchart LR
+    User[Operator] --> Bridge["Bridge: mission, tasks, acceptance and checkpoints"]
+    Bridge --> Ralph["Ralph: capacity selection and safe wake planning"]
+    Ralph --> Provider["Provider CLI: native agent work and teams"]
+    Provider --> Children["Native child agents"]
+    Provider -. verified session metadata .-> Observer["Read-only agent observation adapters"]
+    Children -. provider-supported metadata .-> Observer
+    Observer --> Controls["Bridge controls: agent map, inspector and navigation"]
+    Controls --> User
+```
+
+Bridge owns the durable job and its execution policy. The provider owns native
+agents, their models, messages and results. Thin observation adapters show the
+provider metadata that can be verified locally; missing fields and unsupported
+navigation remain explicit. Monitoring starts no model calls. See the
+[operations guide](./docs/llm-bridge/operations.md) for controls and provider limits.
+
 <p>
 <img src="./docs/img/llm-bridge-dark.png" width="49%" alt="Overview in a dark terminal with the Recent activity section"/>
 <img src="./docs/img/llm-bridge-light.png" width="49%" alt="Tasks view in a light terminal with the selected task previewed below the list"/>
@@ -136,6 +154,8 @@ Your agents work. Bridge keeps the plan, the evidence and the controls. Close th
 - **Providers keep their own UI.** Native mode runs the real CLI in a private tmux station.
 - **You approve, not the exit code.** Finished work waits in `VERIFYING` until you approve it, or a verifier you configured passes.
 - **Capacity stays visible:** `claude · 5h 77% left, resets 4h 43m · weekly 56% left, resets 6d 5h`.
+- **Capacity waits stay awake by default.** Opt a mission into RTC-backed sleep with `llm-bridge mission set --mission ID --suspend-when-rate-limited on`; Bridge sleeps only when no operation is active and a wake is armed.
+- **Sleep to a known credit reset.** Use `llm-bridge suspend-until-credits --mission ID` or **Suspend until credits recover** in Actions. With opt-in enabled and its controller running, Bridge also prearms a recovery wake for manual OS suspend while waiting for credits, including paused missions and detached UIs. See [power prerequisites and safety](./docs/llm-bridge/operations.md#suspend-until-credits-recover).
 - **Many missions, many repos.** `Ctrl-]` then `m` jumps between them; on the CLI, use an ID prefix or just `cd` into the folder.
 
 Day one is in [Your first Bridge mission](#your-first-bridge-mission).
@@ -151,7 +171,20 @@ In a station, `Ctrl-]` is the prefix:
 | `Ctrl-]` then `d` | Detach; the mission keeps running |
 | `Ctrl-]` then `?` | Help |
 
-The controls feel like Codex and Claude Code: eight tabs on `F1`–`F8` (Overview, Tasks, Providers, Activity, Sessions, Health, Actions, Usage), `Ctrl-K` for actions, and slash commands such as `/start`, `/approve`, `/reject 2 needs tests`, `/finish` and `/missions`.
+The controls feel like Codex and Claude Code: nine tabs on `F1`–`F9` (Overview, Tasks, Providers, Activity, Sessions, Health, Actions, Usage, Agents), `Ctrl-K` for actions, and slash commands such as `/start`, `/approve`, `/reject 2 needs tests`, `/finish` and `/missions`.
+
+The Agents view shows mission roots and verified native Codex children, with
+age, model, effort, status and last observed activity. Select a row to inspect
+it or switch to an existing Bridge station. Native child attachment and team
+visibility for other providers remain unavailable; unknown fields stay explicit.
+
+New missions default to provider-native team guidance and a Medium token spend
+preference. Set `--teams on|off` and `--token-spend low|medium|high`, or set
+global defaults with `[bridge].teams` and `[bridge].token_spend` in
+`~/.config/llm-tools/config.toml`. `llm-bridge mission set` changes a saved
+mission; older missions without saved policy keep their original prompts until
+explicitly configured. The [Bridge operations guide](./docs/llm-bridge/operations.md#provider-native-teams-and-token-spend-preference)
+covers the three preferences, provider fallback, and repeated-invocation prompt overhead.
 
 [Go deeper →](./docs/llm-bridge/operations.md)
 

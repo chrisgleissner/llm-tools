@@ -23,7 +23,7 @@ tests cannot silently skip there. Live probes separate and bounded/opt-in.
 | Stop/resume (I) | Prevent new launch; checkpoint or honest STOPPING timeout; force uncertainty recorded before owned group termination |
 | Reboot/reconstruct (J,L,M,N) | No prior tmux/provider process needed; retain tasks/config/evidence/station history and reconcile uncertainty |
 | Native restore (K) | Captured verified id + documented argv; identity mismatch RECONSTRUCTED, no global last-session assumption |
-| Machine sleep (G) | Existing fake power backend; stop/pause/resume never suspend; all-exhausted path owned by Ralph and commands interrupt waits |
+| Machine sleep (G) | Existing fake power backend; stop/pause/resume never suspend; Bridge opt-in sleeps only with no active operation and uses the existing armed RTC wake path |
 | Long run (P) | Thousands iterations/handoffs/failures; stable operation ids, bounded resources/failure policy, actual storage growth reported |
 | Real providers (R) | Per version/capability launch/render/input/mouse/resize/resume/cleanup; unavailable NOT VERIFIED; installation alone never pass |
 | Legacy tools (Q) | Existing regression suite and branch coverage >=85%, existing config/JSON/default contracts preserved |

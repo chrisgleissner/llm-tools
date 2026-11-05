@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -88,6 +89,7 @@ Options:
   -H, --headless                           Use non-interactive provider command on captured PTY.
   -T, --tmux SESSION[:WINDOW]              Execute through tmux via llm-scheduler.
   -g, --command-template TEMPLATE          Override provider command; placeholders: {provider}, {prompt}, {prompt_file}, {cwd}.
+      --command-template-providers LIST    Providers the template is for (default: the one its executable names, else all).
   -y, --auto-confirm                       Acknowledge only known safe prompts (default).
   -Y, --no-auto-confirm                    Disable automatic prompt acknowledgement.
   -q, --headless-idle-timeout SECONDS      Abort headless runs with no output progress (0 disables).
@@ -127,6 +129,8 @@ class RalphConfig:
     exec_mode: str = "fresh"
     tmux_target: str = ""
     command_template: str = ""
+    # Providers the command template was written for; empty means "infer from the template".
+    command_template_providers: tuple[str, ...] = ()
     auto_confirm: bool = True
     headless: bool = True
     log_dir: Path = field(default_factory=common.ralph_log_dir)
@@ -484,6 +488,10 @@ def parse_args(argv: list[str]) -> RalphConfig:
             cfg.tmux_target = need_value("--tmux requires SESSION[:WINDOW]")
         elif arg in ("-g", "--command-template"):
             cfg.command_template = need_value("--command-template requires a template")
+        elif arg == "--command-template-providers":
+            cfg.command_template_providers = tuple(
+                name.strip() for name in need_value("--command-template-providers requires a provider list").split(",") if name.strip()
+            )
         elif arg in ("-y", "--auto-confirm"):
             cfg.auto_confirm = True
             i += 1
@@ -1449,6 +1457,31 @@ def prefix_fields_for_scheduler(cfg: RalphConfig, selected_model: str) -> list[s
     return [*fields[:idx], "model", *fields[idx:]]
 
 
+def command_template_for(cfg: RalphConfig, provider: str) -> str:
+    """The command template to launch ``provider`` with, or ``""`` for its own default.
+
+    A template is written for specific providers (the ones the mission was
+    created with, or the one its executable names). Applying it to another
+    provider would run the wrong CLI under that provider's name, so a rotation
+    that selects a provider outside that set launches the provider's default
+    command. A template that names no provider (a test or custom script), or
+    that takes the provider as a ``{provider}`` placeholder, applies to every
+    provider.
+    """
+    if not cfg.command_template:
+        return ""
+    if "{provider}" in cfg.command_template:
+        return cfg.command_template
+    owners = set(cfg.command_template_providers)
+    if not owners:
+        try:
+            executable = Path(shlex.split(cfg.command_template)[0]).name.lower()
+        except (ValueError, IndexError):
+            executable = ""
+        owners = {executable} if executable in common.KNOWN_PROVIDERS else set()
+    return cfg.command_template if not owners or provider in owners else ""
+
+
 def scheduler_config_for(
     cfg: RalphConfig,
     selected_provider: str,
@@ -1482,7 +1515,7 @@ def scheduler_config_for(
         cwd=cfg.cwd,
         exec_mode=cfg.exec_mode,
         tmux_target=cfg.tmux_target,
-        command_template=cfg.command_template,
+        command_template=command_template_for(cfg, selected_provider),
         auto_confirm=cfg.auto_confirm,
         headless=cfg.headless,
         log_dir=logs.run_dir,
@@ -1496,7 +1529,7 @@ def scheduler_config_for(
         # wake into a single configured provider instead of the rotation.
         suspend_until_ready=cfg.suspend_until_ready,
         exact_stdout=True,
-        claude_stream_json=selected_provider == "claude" and not cfg.command_template,
+        claude_stream_json=selected_provider == "claude" and not command_template_for(cfg, selected_provider),
         ralph_robin_active=True,
         ralph_robin_providers=",".join(cfg.providers),
         # Stamp every relayed provider line with the configured marker (default
@@ -1604,29 +1637,62 @@ def suspend_until_available(
     max_duration: int,
     reason: str,
     should_interrupt: Any | None = None,
+    *,
+    state: "SuspendState | None" = None,
+    suspend_allowed: Any | None = None,
+    suspend_event: Any | None = None,
+    suspend_plan: Any | None = None,
+    refresh_selection: Any | None = None,
 ) -> bool:
     """Wait for a blocked provider to free up instead of giving up.
 
-    Sleeps until the soonest provider reset (or one poll interval when no reset
-    time is known), bounded by the remaining --max-duration budget. Returns True
-    when the loop should retry, or False when the time budget is exhausted.
+    A known future recovery time goes through :func:`suspend_machine_until`, the
+    same central path the all-rate-limited branch uses, with the same safety,
+    interrupt, event and wake-plan callbacks: the wake is armed before the
+    machine sleeps, and the awake fallbacks keep their recorded reasons. With no
+    known recovery time, or no suspend state to track churn, this is an explicit
+    awake wait for one poll interval that logs why. It never reports a suspend
+    that did not happen.
+
+    ``refresh_selection`` re-reads capacity. It is used when ``selection`` was
+    taken before a provider launch (every reason except ``all-providers-skipped``),
+    because the failed run may have exhausted capacity since then.
+
+    Returns True when the loop should retry, or False when the time budget is
+    exhausted.
     """
+    if callable(refresh_selection) and reason != "all-providers-skipped":
+        try:
+            selection = refresh_selection()
+            common.log_event(logs, "all_blocked_refresh", {"reason": reason, "recovery_known": soonest_wait_until(selection) is not None})
+        except Exception as exc:  # a failed re-read must not strand the loop; keep the earlier view
+            common.log_event(logs, "all_blocked_refresh_failed", {"reason": reason, "error": type(exc).__name__})
     target = soonest_wait_until(selection)
     now = common.now_epoch()
+    if target is not None and state is not None:
+        common.log_event(logs, "all_blocked_suspend_request", {"reason": reason, "target_epoch": target})
+        return suspend_machine_until(
+            cfg, logs, target, start_monotonic, max_duration, state,
+            should_interrupt, suspend_allowed, suspend_event, suspend_plan,
+        )
     if target is not None:
         wait_until = target
+        reason_code = "no-suspend-state"
         wait_msg = f"until {common.format_local_epoch(target)} (epoch {target})"
     else:
         wait_until = now + int(cfg.poll_interval)
-        wait_msg = f"{int(cfg.poll_interval)}s before retrying"
+        reason_code = "unknown-recovery-time"
+        wait_msg = f"{int(cfg.poll_interval)}s before retrying (recovery time unknown)"
     if max_duration:
         remaining = max_duration - (monotonic() - start_monotonic)
         if remaining <= 0:
             return False
         wait_until = min(wait_until, now + int(remaining))
-    common.log_event(logs, "all_blocked_wait" if callable(should_interrupt) else "all_blocked_suspend", {"reason": reason, "wait_seconds": max(0, wait_until - now), "wait_until": wait_until, "awake_for_control": callable(should_interrupt)})
-    wording = "waiting awake" if callable(should_interrupt) else "suspending"
-    status_line(f"all configured providers blocked ({reason}); {wording} {wait_msg}", level="warn")
+    common.log_event(logs, "all_blocked_wait", {
+        "reason": reason, "reason_code": reason_code, "wait_seconds": max(0, wait_until - now),
+        "wait_until": wait_until, "awake_for_control": callable(should_interrupt),
+    })
+    status_line(f"all configured providers blocked ({reason}); waiting awake {wait_msg}", level="warn")
     # Wall-clock poll so the wait still ends on time if the machine is suspended
     # (e.g. a closed lid) while we idle -- time.sleep alone freezes across that.
     if callable(should_interrupt):
@@ -1690,6 +1756,9 @@ def suspend_machine_until(
     max_duration: int,
     state: SuspendState,
     should_interrupt: Any | None = None,
+    suspend_allowed: Any | None = None,
+    suspend_event: Any | None = None,
+    suspend_plan: Any | None = None,
 ) -> bool:
     """Wait out the earliest provider renewal, suspending the machine when it is
     safe to and waiting awake otherwise.
@@ -1712,18 +1781,34 @@ def suspend_machine_until(
             target_epoch = now + int(remaining)
     common.log_event(logs, "suspend_until_renewal", {"target_epoch": target_epoch, "wait_seconds": int(wait_s)})
 
+    def record_decision(branch: str, reason_code: str, reason: str = "") -> None:
+        if callable(suspend_event):
+            suspend_event("suspend-decision", {
+                "branch": branch,
+                "reason_code": reason_code,
+                "reason": reason[:256],
+                "target_epoch": target_epoch,
+                **common.diagnostic_clock_fields(),
+            })
+
     if callable(should_interrupt):
-        # Bridge operator requests are polled through the owning controller.
-        # Keep its process awake so pause/stop/cancel commands remain responsive.
-        common.log_event(logs, "bridge_wait_awake", {"target_epoch": target_epoch})
-        if callable(should_interrupt):
+        if should_interrupt():
+            record_decision("awake", "operator-boundary")
+            return True
+        if not callable(suspend_allowed) or not suspend_allowed():
+            # Bridge operator requests are polled through the owning controller.
+            # Keep the default awake wait responsive; opted-in missions may sleep
+            # only after their Bridge hook confirms there is no active operation.
+            owner = getattr(suspend_allowed, "__self__", None)
+            reason = str(getattr(owner, "_suspend_block_reason", "mission-policy-or-safety"))
+            record_decision("awake", "bridge-suspend-not-eligible", reason)
+            common.log_event(logs, "bridge_wait_awake", {"target_epoch": target_epoch, "reason": reason})
             wait_until_epoch(target_epoch, should_interrupt)
-        else:
-            wait_until_epoch(target_epoch)
-        return True
+            return True
 
     block = suspend_block_reason(state)
     if block:
+        record_decision("awake", "suspend-churn-guard", block)
         status_line(
             f"all providers rate-limited; staying awake ({block}) until earliest renewal {common.format_local_epoch(target_epoch)}",
             level="warn",
@@ -1739,10 +1824,70 @@ def suspend_machine_until(
         f"all providers rate-limited; suspending until earliest renewal {common.format_local_epoch(target_epoch)} (epoch {target_epoch})",
         level="warn",
     )
-    outcome = common.suspend_with_wake(target_epoch, who="ralph-robin", logs=logs, watchdog=cfg.watchdog)
+    wake_arm: common.WakeArm | None = None
+    if callable(suspend_plan):
+        planned = suspend_plan(target_epoch)
+        if isinstance(planned, tuple) and len(planned) == 2 and isinstance(planned[0], int) and isinstance(planned[1], common.WakeArm):
+            target_epoch, wake_arm = planned
+        else:
+            record_decision("awake", "shared-wake-unavailable", "wake request did not produce the earliest verified shared target")
+            common.log_event(logs, "suspend_fallback_awake", {"reason": "shared-wake-unavailable", "target_epoch": target_epoch})
+            wait_until_epoch(target_epoch, should_interrupt)
+            return True
+    cycle_id = f"ralph-robin-{target_epoch}-{int(time.time() * 1000)}-{os.getpid()}"
+    cycle_data = {
+        "cycle_id": cycle_id,
+        "wake_owner": getattr(getattr(suspend_allowed, "__self__", None), "mission_id", None),
+        "wake_plan_id": f"{getattr(getattr(suspend_allowed, '__self__', None), 'mission_id', 'ralph-robin')}:{target_epoch}",
+        "target_epoch": target_epoch,
+        "wake_armed": bool(wake_arm and wake_arm.armed),
+        "wake_method": wake_arm.method if wake_arm else "",
+        "wake_unit": wake_arm.unit if wake_arm else "",
+        "wake_confirmed": bool(wake_arm and wake_arm.confirmed),
+        "wake_result": (
+            "retained-prior" if wake_arm and "retained prior" in wake_arm.detail
+            else "armed" if wake_arm and wake_arm.armed
+            else "unavailable" if wake_arm else "not-provided"
+        ),
+        **common.diagnostic_clock_fields(),
+    }
+    if callable(suspend_event):
+        record_decision("suspend", "wake-armed-and-safety-clear")
+        suspend_event("suspend-intent", cycle_data)
+
+    def recheck_suspend_safety() -> str:
+        if callable(suspend_allowed) and not suspend_allowed():
+            return "Bridge suspend eligibility changed before sleep"
+        return ""
+
+    outcome = common.suspend_with_wake(
+        target_epoch, who="ralph-robin", logs=logs, watchdog=cfg.watchdog,
+        cycle_id=cycle_id, wake_arm=wake_arm,
+        pre_suspend_check=recheck_suspend_safety if callable(suspend_allowed) else None,
+        should_interrupt=should_interrupt if callable(should_interrupt) else None,
+    )
+    outcome_data = {
+        **cycle_data,
+        "woke_epoch": outcome.woke_epoch,
+        "drift_seconds": outcome.drift_seconds,
+        "reliable": outcome.reliable,
+        "method": outcome.method,
+        "reason": outcome.reason,
+        "suspended": outcome.suspended,
+        "actual_sleep": outcome.sleep_observed,
+        "simulated": outcome.reason == "simulated",
+        "wake_armed": bool(wake_arm and wake_arm.armed) if wake_arm else outcome.suspended,
+        "wake_method": wake_arm.method if wake_arm else outcome.method,
+        "wake_confirmed": bool(wake_arm and wake_arm.confirmed) if wake_arm else None,
+        **common.diagnostic_clock_fields(),
+    }
+    if callable(suspend_event):
+        suspend_event("suspend-outcome", outcome_data)
     if outcome.suspended:
         state.suspends += 1
         state.last_resume_monotonic = monotonic()
+        if callable(suspend_event):
+            suspend_event("suspend-work-resumed", outcome_data)
         if not outcome.reliable:
             state.disabled = True
             state.disabled_reason = f"unreliable-wake(drift={outcome.drift_seconds}s)"
@@ -1751,7 +1896,8 @@ def suspend_machine_until(
     else:
         # Never sleep with no guaranteed wake: fall back to an awake wait. If the
         # backend simply cannot arm a wake here, disable further suspends too.
-        common.log_event(logs, "suspend_fallback_awake", {"reason": outcome.reason})
+        record_decision("awake", outcome.reason, outcome.detail)
+        common.log_event(logs, "suspend_fallback_awake", {"reason": outcome.reason, "detail": outcome.detail[:256], "cycle_id": cycle_id})
         if outcome.reason in ("arm-failed", "missing-backend"):
             state.disabled = True
             state.disabled_reason = outcome.reason
@@ -1844,6 +1990,28 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
         callback = getattr(bridge_hooks, "wait_interrupted", None) if bridge_hooks is not None else None
         return bool(callback()) if callable(callback) else False
 
+    def bridge_suspend_allowed() -> bool:
+        callback = getattr(bridge_hooks, "suspend_allowed", None) if bridge_hooks is not None else None
+        return bool(callback()) if callable(callback) else False
+
+    def suspend_kwargs() -> dict[str, Any]:
+        return {
+            "state": suspend_state,
+            "suspend_allowed": bridge_suspend_allowed if bridge_hooks is not None else None,
+            "suspend_event": getattr(bridge_hooks, "on_suspend_event", None) if bridge_hooks is not None else None,
+            "suspend_plan": getattr(bridge_hooks, "prepare_suspend", None) if bridge_hooks is not None else None,
+            "refresh_selection": refresh_blocked_selection,
+        }
+
+    def refresh_blocked_selection() -> dict[str, Any]:
+        """Re-read capacity after a failed run: the pre-launch view is stale."""
+        fresh = select_provider(cfg, logs, current_index, set())
+        common.log_event(logs, "selection", {**fresh, "skipped": [], "refreshed_after": "provider-failure"})
+        observe_wait = getattr(bridge_hooks, "on_wait", None) if bridge_hooks is not None else None
+        if callable(observe_wait):
+            observe_wait(fresh, soonest_wait_until(fresh))
+        return fresh
+
     while True:
         if out_of_time():
             return stop_timed_out()
@@ -1891,7 +2059,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
                 observe_wait = getattr(bridge_hooks, "on_wait", None)
                 if callable(observe_wait):
                     observe_wait(selection, soonest_wait_until(selection))
-            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-skipped", bridge_wait_interrupted if bridge_hooks is not None else None):
+            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-skipped", bridge_wait_interrupted if bridge_hooks is not None else None, **suspend_kwargs()):
                 return stop_timed_out()
             skipped = set()
             continue
@@ -1925,7 +2093,13 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
                 common.log_event(logs, "final", {"status": "dry-run"})
                 print("dry-run: no prompt submitted", file=sys.stderr)
                 return 0
-            if not suspend_machine_until(cfg, logs, target, start_monotonic, max_duration, suspend_state, bridge_wait_interrupted if bridge_hooks is not None else None):
+            if not suspend_machine_until(
+                cfg, logs, target, start_monotonic, max_duration, suspend_state,
+                bridge_wait_interrupted if bridge_hooks is not None else None,
+                bridge_suspend_allowed if bridge_hooks is not None else None,
+                getattr(bridge_hooks, "on_suspend_event", None) if bridge_hooks is not None else None,
+                getattr(bridge_hooks, "prepare_suspend", None) if bridge_hooks is not None else None,
+            ):
                 return stop_timed_out()
             skipped = set()
             continue
@@ -2013,7 +2187,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
             rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
             if len(skipped) >= rotation_size:
                 # All providers aborted this pass. Do not stop: wait and retry.
-                if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-autonomy-abort", bridge_wait_interrupted if bridge_hooks is not None else None):
+                if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-autonomy-abort", bridge_wait_interrupted if bridge_hooks is not None else None, **suspend_kwargs()):
                     return stop_timed_out()
                 skipped = set()
                 continue
@@ -2036,7 +2210,7 @@ def main(argv: list[str] | None = None, *, bridge_hooks: Any | None = None) -> i
         rotation_size = len(cfg.routes) if cfg.routes else len(cfg.providers)
         if len(skipped) >= rotation_size:
             # Every provider hard-failed this pass. Do not stop: wait and retry.
-            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-failed", bridge_wait_interrupted if bridge_hooks is not None else None):
+            if not suspend_until_available(cfg, logs, selection, start_monotonic, max_duration, "all-providers-failed", bridge_wait_interrupted if bridge_hooks is not None else None, **suspend_kwargs()):
                 return stop_timed_out()
             skipped = set()
             continue

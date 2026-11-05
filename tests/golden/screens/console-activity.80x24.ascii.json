@@ -7,7 +7,7 @@
   "rows": [
     "LLM BRIDGE | | Release 2.0 hardening | * RUNNING",
     "# codex | task 4 running 20m | 5h 62% left | week 31% left",
-    "Overview  Tasks  Providers  [Activity]  Sessions  Health  Actions  Usage",
+    "Overview  Tasks  Providers  [Activity]  Sessions  Health  Actions  Usage  Agents",
     "  03:11:00  Task 1 verified (approved by you)",
     "  03:11:15  Session native created | codex",
     "  03:11:25  Preparing claude on task 2",
@@ -33,7 +33,7 @@
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " | ", "dim"], [13, "|", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " | ", "dim"], [39, "* RUNNING", "state_running"]],
     [[0, "#", "provider_codex"], [1, " codex | task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m | 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left | week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
-    [[0, "Overview  Tasks  Providers  ", "muted"], [28, "[Activity]", "accent"], [38, "  Sessions  Health  Actions  Usage", "muted"]],
+    [[0, "Overview  Tasks  Providers  ", "muted"], [28, "[Activity]", "accent"], [38, "  Sessions  Health  Actions  Usage  Agents", "muted"]],
     [[2, "03:11:00", "muted"], [10, "  Task 1 verified (approved by you)", "info"]],
     [[2, "03:11:15", "dim"], [10, "  ", "info"], [12, "Session native created | codex", "dim"]],
     [[2, "03:11:25", "dim"], [10, "  ", "info"], [12, "Preparing claude on task 2", "dim"]],

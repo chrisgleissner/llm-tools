@@ -40,6 +40,14 @@ def _latest_of_kinds(store: BridgeStore, mission_id: str, kinds: tuple[str, ...]
 
 
 _SUSPEND_EVENT_KINDS = (
+    "suspend-intent",
+    "suspend-refused",
+    "suspend-outcome",
+    "suspend-work-resumed",
+    "capacity-wake-armed",
+    "capacity-wake-unavailable",
+    "capacity-wake-resumed",
+    "capacity-wake-resume-unverified",
     "suspend_until_renewal",
     "suspend_deferred_awake",
     "suspend_unreliable",
@@ -58,6 +66,36 @@ def _latest_suspend_event(store: BridgeStore, mission_id: str) -> dict[str, Any]
         if row is not None:
             candidates.append(row)
     return _decode_event(max(candidates, key=lambda row: int(row["id"]))) if candidates else None
+
+
+def _suspend_status_text(kind: str, data: dict[str, Any]) -> str:
+    if kind == "suspend-intent":
+        return "simulation requested; host will stay awake" if data.get("simulated") else (
+            "suspend requested; wake armed" if data.get("wake_armed") else "suspend requested; wake not confirmed"
+        )
+    if kind == "suspend-refused":
+        return f"suspend refused: {data.get('reason') or 'unsafe'}"
+    if kind == "suspend-outcome":
+        if data.get("simulated"):
+            return "simulation only; host stayed awake"
+        if data.get("actual_sleep") is True:
+            return "slept and woke reliably" if data.get("reliable") is True else "slept; wake was late or unreliable"
+        if data.get("reason") == "sleep-unverified":
+            return "suspend requested; actual sleep is unknown"
+        return f"stayed awake: {data.get('reason') or 'suspend unavailable'}"
+    if kind == "suspend-work-resumed":
+        if data.get("simulated"):
+            return "simulation only; no work resumed from sleep"
+        return "work resumed after sleep" if data.get("actual_sleep") is True else "work resumed after wake check"
+    if kind == "capacity-wake-armed":
+        return "wake timer armed for manual sleep"
+    if kind == "capacity-wake-unavailable":
+        return f"wake timer unavailable: {data.get('reason') or 'arming failed'}"
+    if kind == "capacity-wake-resumed":
+        return "host resumed from sleep; wake was reliable" if data.get("reliable") is True else "host resumed from sleep; wake was late"
+    if kind == "capacity-wake-resume-unverified":
+        return "sleep observation unavailable; wake is unverified"
+    return kind.replace("_", " ")
 
 
 # Events written by the controller's own bookkeeping. They drown the operator's
@@ -517,6 +555,8 @@ def _project_snapshot(
         actual_mode = "background"
     configured_mode = configured["configured_mode"]
     suspend_data = (latest_suspend or {}).get("data", {})
+    suspend_data = suspend_data if isinstance(suspend_data, dict) else {}
+    suspend_kind = str((latest_suspend or {}).get("kind", "unknown"))
     db = store.db
     pending_rows = store.db.execute(
         "SELECT id FROM commands INDEXED BY commands_mission_fifo WHERE mission_id=? AND status='QUEUED' ORDER BY rowid LIMIT 100", (mission_id,)
@@ -604,10 +644,23 @@ def _project_snapshot(
             },
         },
         "suspend": {
-            "status": (latest_suspend or {}).get("kind", "unknown"),
+            "status": suspend_kind,
+            "status_text": _suspend_status_text(suspend_kind, suspend_data) if latest_suspend else "unknown",
             "at": (latest_suspend or {}).get("created_at"),
-            "target_epoch": suspend_data.get("target_epoch") if isinstance(suspend_data, dict) else None,
-            "reason": suspend_data.get("reason") if isinstance(suspend_data, dict) else None,
+            "cycle_id": suspend_data.get("cycle_id"),
+            "target_epoch": suspend_data.get("target_epoch"),
+            "woke_epoch": suspend_data.get("woke_epoch"),
+            "drift_seconds": suspend_data.get("drift_seconds"),
+            "reliable": suspend_data.get("reliable"),
+            "method": suspend_data.get("method"),
+            "wake_method": suspend_data.get("wake_method"),
+            "wake_armed": suspend_data.get("wake_armed", suspend_data.get("armed")),
+            "wake_confirmed": suspend_data.get("wake_confirmed", suspend_data.get("confirmed")),
+            "actual_sleep": suspend_data.get("actual_sleep", suspend_data.get("suspended")),
+            "simulated": suspend_data.get("simulated"),
+            "provider": suspend_data.get("provider"),
+            "route": suspend_data.get("route"),
+            "reason": suspend_data.get("reason"),
             "source": "persisted event" if latest_suspend else "unavailable",
         },
         "health": {"status": "warning" if stall_warning else "unknown", "consecutive_failed_operations": failed_streak, "max_provider_failures": failure_budget, "failure_budget_source": "persisted provider-handoff event" if isinstance(handoff_budget, int) else ("configured mission rotation" if configured_failure_budget is not None else "unknown"), "stall_warning": stall_warning,

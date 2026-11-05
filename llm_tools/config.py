@@ -56,6 +56,7 @@ from .capacity import ALL_PROVIDERS
 # Allowed keys per section. Unknown keys are a hard error so typos surface
 # immediately instead of being silently ignored.
 _TOP_LEVEL_KEYS = frozenset({"defaults", "providers", "ralph", "scheduler", "routes", "budget", "copilot", "usage", "bridge"})
+_BRIDGE_KEYS = frozenset({"theme", "teams", "token_spend"})
 _USAGE_KEYS = frozenset({"providers"})
 _BUDGET_KEYS = frozenset({"monthly", "currency"})
 _COPILOT_KEYS = frozenset({"monthly_spend_limit", "currency"})
@@ -264,6 +265,15 @@ def _validate(raw: Any) -> dict[str, Any]:
     _validate_copilot(raw.get("copilot"))
     _validate_section(raw.get("usage"), "usage", _USAGE_KEYS)
     _validate_usage(raw.get("usage"))
+    bridge = raw.get("bridge")
+    if bridge is not None:
+        _validate_section(bridge, "bridge", _BRIDGE_KEYS)
+        if "teams" in bridge and not isinstance(bridge["teams"], bool):
+            _fail("bridge.teams must be true or false")
+        if "token_spend" in bridge and (
+            not isinstance(bridge["token_spend"], str) or bridge["token_spend"] not in {"low", "medium", "high"}
+        ):
+            _fail("bridge.token_spend must be low, medium, or high")
     providers = raw.get("providers")
     if providers is not None:
         if not isinstance(providers, dict):

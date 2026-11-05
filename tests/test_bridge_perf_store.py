@@ -155,12 +155,15 @@ def test_heartbeat_worker_keeps_one_connection(tmp_path: Path, monkeypatch: pyte
             return [event["kind"] for event in store.events(mission["id"])].count("controller-heartbeat")
 
     wait_for(lambda: heartbeats() >= 3, 15)  # one heartbeat per second
+    active_connections = len(opened)
     worker.stop()
     with BridgeStore(database) as store:
         kinds = [event["kind"] for event in store.events(mission["id"])]
     assert kinds.count("controller-heartbeat") >= 3
     assert "capacity-refresh" in kinds
-    assert len(opened) == 1
+    assert active_connections == 1
+    # Stop records wake ownership from its own thread, separate from refreshes.
+    assert len(opened) <= 2
     assert worker._store is None
 
 

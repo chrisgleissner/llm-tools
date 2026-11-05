@@ -517,13 +517,13 @@ def _clipboard_argv() -> list[str] | None:
 
 
 PALETTE_COMMANDS = tuple(action.command for action in ACTIONS)
-# F1-F8 select the views in this order. Activity and Sessions (history) sit
+# F1-F9 select the views in this order. Activity and Sessions (history) sit
 # together after the working views; Health (diagnostics) is next to Actions.
 # Names used before the 1.3 rename stay accepted everywhere a view is named.
 # Words typed in the command line that switch view (the rest are CLI commands).
 _VIEW_COMMANDS = {
     "overview": "Overview", "control": "Overview", "providers": "Providers", "activity": "Activity",
-    "sessions": "Sessions", "health": "Health", "actions": "Actions", "usage": "Usage",
+    "sessions": "Sessions", "health": "Health", "actions": "Actions", "usage": "Usage", "agents": "Agents",
     "palette": "Actions", "log": "Activity", "systems": "Health", "stations": "Providers",
 }
 
@@ -546,7 +546,7 @@ _MAX_STATION_ROWS = 32
 _MAX_EVENT_ROWS = 80
 _MAX_DETAIL_TEXT = 16000
 _MAX_DETAIL_ITEMS = 12
-_SELECTABLE_VIEWS = frozenset({"Tasks", "Providers", "Actions"})
+_SELECTABLE_VIEWS = frozenset({"Tasks", "Providers", "Actions", "Agents"})
 _BRIDGE_LABEL = 12
 _SYSTEM_LABEL = 22
 _SESSION_COLUMNS = ("op", "task", "provider", "model", "status", "native session", "restoration")
@@ -1040,6 +1040,9 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
         if key in mission
     }
     result["mission"]["role"] = bridge_theme.mission_role(mission.get("id"), _dict(mission.get("config")))  # type: ignore[index]  # projection values are typed object; the surrounding code builds them as dicts
+    from .bridge_policy import effective_settings
+
+    result["mission"]["execution_policy"] = effective_settings(_dict(mission.get("config")))  # type: ignore[index]
     result["tasks"] = _project_tasks(data.get("tasks"))
     current_task = _dict(data.get("current_task"))
     if current_task:
@@ -1158,6 +1161,43 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
     usage = _dict(data.get("usage"))
     if usage:
         result["usage"] = usage
+    agent_map = _dict(data.get("agent_map"))
+    if agent_map:
+        agents = []
+        for item in _items(agent_map.get("agents"))[:200]:
+            agent: dict[str, object] = {
+                key: (_text(item.get(key), limit) if isinstance(item.get(key), str) else item.get(key))
+                for key, limit in (
+                    ("id", 160), ("provider", 60), ("kind", 40), ("mission_id", 80), ("mission_name", 100),
+                    ("operation_id", 80), ("station", 60), ("native_id", 160), ("identity_source", 60),
+                    ("native_parent_id", 160), ("native_root_id", 160), ("lifecycle_source", 60),
+                    ("name", 100), ("parent_id", 160), ("root_id", 160), ("created_at", 80),
+                    ("finished_at", 80), ("status", 40), ("activity", 180), ("model", 100),
+                    ("role", 80), ("role_source", 24),
+                    ("native_status", 40), ("last_activity_at", 80),
+                    ("model_source", 24), ("configured_model", 100), ("reasoning_effort", 40),
+                    ("effort_source", 24), ("configured_effort", 40), ("freshness", 40),
+                    ("activity_freshness", 24), ("lifecycle_freshness", 24),
+                ) if key in item
+            }
+            for key in ("age_seconds", "activity_age_seconds", "lifecycle_age_seconds"):
+                age_value = item.get(key)
+                agent[key] = age_value if isinstance(age_value, (int, float)) and not isinstance(age_value, bool) else None
+            capabilities = _dict(item.get("capabilities"))
+            agent["capabilities"] = {
+                "inspect": capabilities.get("inspect") is True,
+                "navigate": capabilities.get("navigate") is True,
+                "reason": _text(capabilities.get("reason") or "unavailable", 160),
+            }
+            agents.append(agent)
+        result["agent_map"] = {
+            "observed_at": agent_map.get("observed_at") if isinstance(agent_map.get("observed_at"), (int, float)) else 0,
+            "age_tick": 0,
+            "freshness": _text(agent_map.get("freshness") or "unknown", 24),
+            "agents": agents,
+            "errors": {str(key): _text(value, 180) for key, value in _dict(agent_map.get("errors")).items()},
+            "total": len(agents),
+        }
     return result
 
 
@@ -1892,6 +1932,11 @@ def _h_mission_status(ctx: _EventContext) -> str:
     return f"{_MISSION_STATE_WORDS.get(ctx.new_state, 'Mission ' + (ctx.new_state.lower() or 'changed'))}{ctx.reason}"
 
 
+@_humanizer(EventKind.MISSION_SUSPEND_WHEN_RATE_LIMITED)
+def _h_mission_suspend_when_rate_limited(ctx: _EventContext) -> str:
+    return "Capacity-wait suspend " + ("on" if ctx.data.get("value") is True else "off")
+
+
 @_humanizer(EventKind.TASK_ADDED)
 def _h_task_added(ctx: _EventContext) -> str:
     title = _text(ctx.data.get("title") or "", 60)
@@ -1904,6 +1949,11 @@ def _h_task_status(ctx: _EventContext) -> tuple[str, bool]:
         return f"{ctx.task} waiting on a new dependency", False
     word = _TASK_STATE_WORDS.get(ctx.new_state, ctx.new_state.lower() or "updated")
     return f"{ctx.task} {word}{ctx.reason}", ctx.new_state == "RUNNING"
+
+
+@_humanizer(EventKind.TASK_STATUS_TRANSITION)
+def _h_task_status_transition(ctx: _EventContext) -> str:
+    return f"{ctx.task} {ctx.old_state.lower()} → {ctx.new_state.lower()}" + ctx.reason
 
 
 @_humanizer(EventKind.OPERATION_RUNNING)
@@ -1936,6 +1986,13 @@ def _h_provider_selection(ctx: _EventContext) -> str:
     return f"Selected {ctx.owner}".rstrip() + (f" ({ctx.model})" if ctx.model else "")
 
 
+@_humanizer(EventKind.PROVIDER_RESULT_DIAGNOSED)
+def _h_provider_result_diagnosed(ctx: _EventContext) -> str:
+    failure = ctx.data.get("failure")
+    cause = failure.get("cause") if isinstance(failure, dict) else None
+    return "Provider result recorded" + (f" · {_text(cause, 60)}" if _known(cause) else "")
+
+
 @_humanizer(EventKind.CAPACITY_REFRESH)
 def _h_capacity_refresh(ctx: _EventContext) -> str:
     brief = _text(ctx.data.get("capacity_brief") or "", 80)
@@ -1945,6 +2002,28 @@ def _h_capacity_refresh(ctx: _EventContext) -> str:
 @_humanizer(EventKind.CAPACITY_REFRESH_ERROR)
 def _h_capacity_refresh_error(ctx: _EventContext) -> str:
     return "Capacity refresh failed" + (f" ({_text(ctx.data['reason'], 60)})" if _known(ctx.data.get("reason")) else "")
+
+
+@_humanizer(EventKind.SUSPEND_DECISION, EventKind.SUSPEND_INTENT, EventKind.SUSPEND_REFUSED, EventKind.SUSPEND_OUTCOME,
+            EventKind.SUSPEND_PROVIDER_STARTED,
+            EventKind.SUSPEND_WORK_RESUMED, EventKind.CAPACITY_WAKE_ARMED,
+            EventKind.CAPACITY_WAKE_UNAVAILABLE, EventKind.CAPACITY_WAKE_RESUMED,
+            EventKind.CAPACITY_WAKE_RESUME_UNVERIFIED, EventKind.CAPACITY_WAKE_PLAN)
+def _h_suspend_capacity(ctx: _EventContext) -> str:
+    labels = {
+        "suspend-decision": "Suspend path",
+        "suspend-intent": "Capacity suspend requested",
+        "suspend-refused": "Capacity suspend refused",
+        "suspend-outcome": "Capacity suspend finished",
+        "suspend-work-resumed": "Capacity-wait work resumed",
+        "suspend-provider-started": "Provider resumed after verified sleep",
+        "capacity-wake-armed": "Capacity wake armed",
+        "capacity-wake-unavailable": "Capacity wake unavailable",
+        "capacity-wake-resumed": "Capacity wake observed",
+        "capacity-wake-resume-unverified": "Capacity wake could not be verified",
+        "capacity-wake-plan": "Shared wake plan updated",
+    }
+    return _with_reason(labels.get(ctx.kind, "Capacity suspend updated"), ctx.data)
 
 
 @_humanizer(EventKind.CONTROLLER_HEARTBEAT)
@@ -2419,6 +2498,84 @@ def _fit_usage_table(table: list[str], width: int) -> list[str]:
     return [line.rstrip() for line in lines]
 
 
+def _remove_segment_range(segments: list[Segment], begin: int, end: int | None) -> list[Segment]:
+    """Remove a header-indexed text range from styled usage columns."""
+    output: list[Segment] = []
+    offset = 0
+    for text, role in segments:
+        stop = offset + len(text)
+        left = text[:max(0, min(len(text), begin - offset))] if offset < begin else ""
+        right = text[max(0, min(len(text), (end or stop) - offset)):] if end is not None and stop > end else ""
+        if end is None and stop > begin:
+            right = ""
+        if left:
+            output.append((left, role))
+        if end is not None and right:
+            output.append((right, role))
+        offset = stop
+    return _merge_segments(output)
+
+
+def _fit_usage_segments(table: list[list[Segment]], width: int) -> list[list[Segment]]:
+    """Apply the usage table's existing optional-column fit to styled rows."""
+    lines = [_segments_text(line) for line in table]
+
+    def widest() -> int:
+        return max((cell_width(line.rstrip()) for line in lines), default=0)
+
+    if width > 0 and widest() > width:
+        for name in _USAGE_OPTIONAL_COLUMNS:
+            columns = [(match.start(), match.group()) for match in re.finditer(r"\S+(?: \S+)*", lines[0])]
+            names = [label for _start, label in columns]
+            if name not in names:
+                continue
+            position = names.index(name)
+            begin = columns[position][0]
+            end = columns[position + 1][0] if position + 1 < len(columns) else None
+            table = [_remove_segment_range(line, begin, end) for line in table]
+            lines = [_segments_text(line) for line in table]
+            if widest() <= width:
+                break
+        if len(lines) > 1 and lines[1].strip() and set(lines[1].strip()) <= {"─", "-", " "}:
+            table[1] = _remove_segment_range(table[1], len(lines[0].rstrip()), None)
+    fitted: list[list[Segment]] = []
+    for line in table:
+        remaining = len(_segments_text(line).rstrip())
+        parts: list[Segment] = []
+        for text, role in line:
+            piece = text[:remaining]
+            remaining -= len(piece)
+            if piece:
+                parts.append((piece, role))
+            if remaining <= 0:
+                break
+        fitted.append(parts)
+    return fitted
+
+
+def _slice_segments(segments: list[Segment], start: int, width: int) -> list[Segment]:
+    """Take a terminal-cell slice while preserving each segment's role."""
+    if width <= 0:
+        return []
+    skipped = 0
+    used = 0
+    result: list[Segment] = []
+    for text, role in segments:
+        size = cell_width(text)
+        if skipped + size <= start:
+            skipped += size
+            continue
+        local_start = max(0, start - skipped)
+        piece = cell_slice(text, local_start, local_start + width - used)
+        if piece:
+            result.append((piece, role))
+            used += cell_width(piece)
+        skipped += size
+        if used >= width:
+            break
+    return result
+
+
 def _nav_labels(view_index: int, numbered: bool = True) -> list[str]:
     """Tab labels; the active one in brackets. Without numbers the F-key order still applies."""
     return [
@@ -2442,7 +2599,7 @@ def _nav_layout(view_index: int, width: int, separator: str) -> tuple[str, list[
 
     Tabs are always at least two spaces apart, so neighbours never read as one
     label. The numbered form needs about 86 columns. Narrower rows drop the
-    numbers (F1-F8 and Tab still follow the same order); below about 72 columns
+    numbers (F1-F9 and Tab still follow the same order); below about 72 columns
     the row scrolls around the active tab and shows `<` / `>` for hidden tabs.
     """
     gap = separator if len(separator) >= 2 else "  "
@@ -2869,6 +3026,7 @@ _AGE_PATHS: tuple[tuple[str, ...], ...] = (
     ("capacity", "source_age_seconds"),
     ("execution", "seconds_since_verified_progress"),
     ("execution", "operation_elapsed_seconds"),
+    ("agent_map", "age_tick"),
 )
 _RUNNING_AGE_PATH = ("execution", "operation_elapsed_seconds")  # grows only while an operation executes
 
@@ -2935,6 +3093,7 @@ class _ConsoleState:
     completion_prefix: str = ""
     completion_candidates: list[str] = field(default_factory=list)
     task_detail: bool = False
+    agent_inspector: bool = False
     detail_scroll: int = 0
     history: deque[str] = field(default_factory=lambda: deque(maxlen=50))
     history_index: int | None = None
@@ -3774,6 +3933,9 @@ class _ConsoleState:
                 self.last_refresh = 0.0
             return True
         if key == "\x1b":
+            if self.view == "Agents" and self.agent_inspector:
+                self.agent_inspector = False
+                return True
             if self.task_detail:
                 self.task_detail = False
                 return True
@@ -3813,12 +3975,30 @@ class _ConsoleState:
                 station = self.selected_station_name()
                 if station:
                     self._dispatch("station " + shlex.quote(station))
+            elif self.view == "Agents" and not self.input_focused:
+                from .bridge_agents import ordered_agents
+
+                ordered = ordered_agents(_dict(self.snapshot.get("agent_map")))
+                if ordered:
+                    agent, _depth = ordered[min(max(0, self.selected), len(ordered) - 1)]
+                    navigable = _dict(agent.get("capabilities")).get("navigate") is True
+                    if navigable and agent.get("kind") == "bridge-root" and agent.get("mission_id") != self.mission_id:
+                        self._dispatch("attach --mission " + shlex.quote(str(agent.get("mission_id"))))
+                    elif navigable and agent.get("kind") == "bridge-root" and agent.get("station"):
+                        self._dispatch("station " + shlex.quote(str(agent.get("station"))))
+                    else:
+                        self.agent_inspector = True
+                        self.detail_scroll = 0
             else:
                 command = self.command
                 if self._confirm_or_dispatch(command):
                     self.command = ""
                     self.command_cursor = 0
                     self.input_focused = False
+            return True
+        if key in {"i", "I"} and self.view == "Agents" and not self.input_focused:
+            self.agent_inspector = not self.agent_inspector
+            self.detail_scroll = 0
             return True
         if key in {"KEY_RESIZE", "KEY_MOUSE"}:
             return True
@@ -4092,6 +4272,10 @@ class _ConsoleState:
             return self._provider_layout()[1]
         if self.view == "Tasks" and not self.task_detail:
             return list(range(max(1, len(_items(self.snapshot.get("tasks"))))))  # without rendering every row
+        if self.view == "Agents":
+            from .bridge_agents import ordered_agents
+
+            return list(range(len(ordered_agents(_dict(self.snapshot.get("agent_map"))))))
         return list(range(len(self.rows())))
 
     def _selection_max(self) -> int:
@@ -4129,6 +4313,8 @@ class _ConsoleState:
             return self._log_rows()
         if view == "Sessions":
             return self._session_rows() or [_station_label(station) for station in _items(self.snapshot.get("stations"))] or ["No session activity recorded."]
+        if view == "Agents":
+            return self._agent_rows()
         if view == "Actions":
             return self._palette_rows()
         return []
@@ -4136,6 +4322,8 @@ class _ConsoleState:
     def row_segments(self) -> list[list[Segment]] | None:
         """Per-row coloured segments for the views that style elements, aligned with `rows()`."""
         view = self.view
+        if view == "Usage":
+            return self._usage_segments()
         if view == "Tasks" and not self.task_detail:
             return self._order_list()[0] or None
         if view == "Providers":
@@ -4157,23 +4345,38 @@ class _ConsoleState:
             return self._activity_layout()[1]
         return None
 
-    def _usage_rows(self) -> list[str]:
+    def _usage_segments(self) -> list[list[Segment]]:
+        """Render llm-usage's ANSI cell colors through Rich and Bridge's palette."""
+        from .bridge_documents import render_ansi_segments
+
         usage = _dict(self.snapshot.get("usage"))
-        status = str(usage.get("status") or "refreshing")
+        text = str(usage.get("text") or "Loading full llm-usage dashboard...")
+        styled = [[(localize_cells(part), role) for part, role in line] for line in render_ansi_segments(text)]
+        lines = [_segments_text(line) for line in styled]
+        parts = ["Usage", str(usage.get("status") or "refreshing")]
         age = _int_or_none(usage.get("age_seconds"))
-        parts = ["Usage", status]
         parts.append(f"updated {_age(age)} ago" if age is not None else "first sample pending")
         if usage.get("error"):
             parts.append(f"last refresh failed: {_text(usage.get('error'), 60)}")
-        # One cell per character before the columns are cut, so an ASCII locale keeps them aligned.
-        lines = localize_cells(str(usage.get("text") or "Loading full llm-usage dashboard...")).splitlines()
-        table, legend = _split_usage_text(lines)
-        if table is None:
-            return [_SEP.join(parts), *lines]
-        rows = [_SEP.join(parts), *_fit_usage_table(table, self.content_width)]
+        status = [(_SEP.join(parts), _status_role(_SEP.join(parts)))]
+        table_start = next((index for index, line in enumerate(lines) if _USAGE_HEADER.match(line)), None)
+        if table_start is None:
+            return [status, *styled]
+        table = _fit_usage_segments(styled[table_start:], self.content_width)
+        while table and not _segments_text(table[-1]).strip():
+            table.pop()
+        if table:
+            table[0] = [(_segments_text(table[0]), "heading")]
+        if len(table) > 1 and _segments_text(table[1]).strip() and set(_segments_text(table[1]).strip()) <= {"─", "-", " "}:
+            table[1] = [(_segments_text(table[1]), "dim")]
+        result = [status, *table]
+        legend = [line for line in styled[1:table_start] if _segments_text(line).strip()]
         if legend:
-            rows += ["", *(legend if self.usage_legend else ["l shows the legend"])]
-        return rows
+            result.extend([[], *(legend if self.usage_legend else [[("l shows the legend", "dim")]])])
+        return result
+
+    def _usage_rows(self) -> list[str]:
+        return [_segments_text(line) for line in self._usage_segments()]
 
     def _bridge_rows(self) -> list[str]:
         data = self.snapshot
@@ -4199,6 +4402,9 @@ class _ConsoleState:
             row("Next", "task " + _task_label(next_task) if next_task else "nothing ready"),
             row("Tasks", orders),
         ]
+        policy = _dict(_dict(data.get("mission")).get("execution_policy"))
+        policy_text = "legacy (unchanged)" if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
+        rows.append(row("Policy", policy_text))
         needs = _needs_you_rows(data)
         for index, text in enumerate(needs):
             rows.append(row("Needs you" if index == 0 else "", text))
@@ -4377,6 +4583,46 @@ class _ConsoleState:
                     row.append(("  ", "info"))
             rows.append(row)
         return header, rows
+
+    def _agent_rows(self) -> list[str]:
+        from .bridge_agents import format_agent_map, ordered_agents
+
+        agent_map = _dict(self.snapshot.get("agent_map"))
+        if self.agent_inspector:
+            ordered = ordered_agents(agent_map)
+            if not ordered:
+                return ["No agent selected.", "Esc returns to the map."]
+            item, _depth = ordered[min(max(0, self.selected), len(ordered) - 1)]
+            model = item.get("model") if item.get("model_source") == "observed" else item.get("configured_model")
+            effort = item.get("reasoning_effort") if item.get("effort_source") == "observed" else item.get("configured_effort")
+            model_source = item.get("model_source") if item.get("model_source") == "observed" else ("configured" if _known(item.get("configured_model")) else "unknown")
+            effort_source = item.get("effort_source") if item.get("effort_source") == "observed" else ("configured" if _known(item.get("configured_effort")) else "unknown")
+            capability = _dict(item.get("capabilities"))
+            role = item.get("role") if item.get("role_source") == "observed" else "unknown"
+            activity_age = item.get("activity_age_seconds")
+            activity_age_text = f"{int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else "unknown"
+            lifecycle_age = item.get("lifecycle_age_seconds")
+            lifecycle_age_text = f"{int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else "unknown"
+            return [
+                f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status'), 30)}",
+                f"role: {_text(role, 80)} ({_text(item.get('role_source') or 'unknown', 20)})",
+                f"mission: {_text(item.get('mission_name') or item.get('mission_id'), 100)}",
+                f"age: {_span(item.get('age_seconds'), 2) if item.get('age_seconds') is not None else 'unknown'}",
+                f"model: {_text(model, 100)} ({_text(model_source, 20)})",
+                f"reasoning effort: {_text(effort, 40)} ({_text(effort_source, 20)})",
+                f"activity: {_text(item.get('activity'), 180)}",
+                f"last observed: {_text(item.get('last_activity_at') or 'unknown', 80)}",
+                f"native status: {_text(item.get('native_status') or 'unknown', 40)}",
+                f"parent: {_text(item.get('parent_id') or 'none', 100)}",
+                f"freshness: {_text(item.get('freshness'), 40)} · identity: {_text(item.get('identity_source') or 'provider metadata', 60)}",
+                f"activity freshness: {_text(item.get('activity_freshness') or 'unknown', 24)} · age {activity_age_text}",
+                f"lifecycle freshness: {_text(item.get('lifecycle_freshness') or 'unknown', 24)} · age {lifecycle_age_text}",
+                f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}",
+                "Esc returns to the map.",
+            ]
+        rows = format_agent_map(agent_map)
+        rows.append("↑↓ select · Enter inspect/switch · i inspect · /agents refresh")
+        return rows
 
     def _system_rows(self) -> list[str]:
         data = self.snapshot
@@ -4828,7 +5074,7 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
         return ["type text to find in tasks", "Enter search", "Esc cancel", "Ctrl-U clear"], ""
     if state.input_focused:
         return ["Enter run", "Tab complete", "Ctrl-P/Ctrl-N history", "Ctrl-U clear", "Esc back to view"], "/help commands"
-    views = "Tab/F1-8 views"
+    views = "Tab/F1-9 views"
     # The empty command line already says "type a command or /help".
     view = state.view
     if view == "Overview":
@@ -5201,15 +5447,16 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
         index = start + offset
         if state.view == "Usage":
             clean = "".join(char if unicodedata.category(char) not in {"Cc", "Cs"} else " " for char in value)
-            if index == 0:
-                role = _status_role(clean)  # the status line carries the colour
-            elif _USAGE_HEADER.match(clean):
-                role = "heading"
-            elif clean.strip() and set(clean.strip()) <= {"─", "-", " "}:
-                role = "dim"
+            if segment_rows is not None and index < len(segment_rows):
+                parts = _slice_segments(segment_rows[index], horizontal, avail)
+                _put_segments(window, y, gutter, _clip_segments(parts, avail, mark=False), avail)
             else:
-                role = "info"
-            _put(window, y, gutter, cell_slice(clean, horizontal, avail), avail, role=role)
+                role = roles[index] if roles is not None and index < len(roles) else "info"
+                if index > 0 and _USAGE_HEADER.match(clean):
+                    role = "heading"
+                elif index > 0 and clean.strip() and set(clean.strip()) <= {"─", "-", " "}:
+                    role = "dim"
+                _put(window, y, gutter, cell_slice(clean, horizontal, avail), avail, role=role)
             continue
         value = _clip(value, avail) if not wrapped_view else value
         if state.selectable and index == selected_row:
@@ -5278,7 +5525,7 @@ def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
         return
     _put(window, 0, 0, "Command response", width, role="heading")
     if height >= 2:
-        _put(window, 1, 0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-8/Tab switch view", width, role="dim")
+        _put(window, 1, 0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-9/Tab switch view", width, role="dim")
     rows = _response_rows(state, width)
     content_top = 2
     footer_rows = 1 if height >= 4 else 0
