@@ -235,3 +235,41 @@ Not measured on the device (hardware arrives 2026-11-06). The emulated ARM64
 figures above show the memory behaviour on the same CPU architecture; their time
 figures must not be read as Pi Zero 2 W performance. The sizing that `install.md` gives for it (Raspberry Pi Zero 2 W
 target profile) is derived from the x86-64 figures and is labelled as such there.
+
+## Web interface: bundle size and initial load (Pixel 4 emulation, x86-64 host)
+
+Platform: x86-64 desktop (Intel Core i7-6700K, 4.0 GHz, 8 threads), release coordinator serving `web/dist` over
+HTTPS on loopback, Chromium driven by Playwright with the built-in `Pixel 4` profile (353x745 CSS px, device scale
+factor 3, touch). This is **emulation**: the CPU is throttled with the DevTools protocol
+(`Emulation.setCPUThrottlingRate`, 4x), which slows script and layout work but is not a Pixel 4 and not a measured
+phone. The network is loopback without throttling and the cache is disabled, so these figures show the cost of
+parsing, executing and rendering the application, not of a slow radio. Run on 2026-11-05 by
+`web/e2e/budget.spec.ts`; five loads per mode, median reported. The first-run page (setup form) is the page
+measured, because a fresh coordinator always serves it first.
+
+| Measurement | No throttling | 4x CPU throttling |
+|---|---|---|
+| First contentful paint (median) | 56 ms | 160 ms |
+| `DOMContentLoaded` / `load` (median) | 25 ms / 25 ms | 69 ms / 70 ms |
+| Setup form heading visible after `goto` (median) | 72 ms | 222 ms |
+| Requests / bytes transferred (HTML, JS, CSS, as served, no compression) | 5 / 97.9 kB | 5 / 97.9 kB |
+
+Bundle sizes (bytes, raw / gzip level 9). The coordinator serves files uncompressed today, so the raw figures are
+what crosses the network; the gzip column shows what a compressing reverse proxy would send.
+
+| Part | Raw | gzip |
+|---|---|---|
+| Initial JavaScript (`app-*.js`) | 58 304 | 20 174 |
+| Initial CSS (`app-*.css`, includes the xterm.js stylesheet) | 28 141 | 7 001 |
+| Terminal chunks (xterm.js and terminal panel), loaded only on a mission page | 362 116 | 95 120 |
+
+Before the terminal code was split into a lazily loaded chunk, the initial JavaScript was 378 531 bytes.
+
+**Budget** (`web/budget.json`, enforced by `web/e2e/budget.spec.ts`, which fails the build when exceeded):
+initial JavaScript at most 70 000 bytes raw and 25 000 gzip; initial CSS at most 34 000 raw and 9 000 gzip; both
+together at most 100 000 raw and 32 000 gzip; lazy chunks at most 400 000 raw and 100 000 gzip. The test also fails
+when the entry imports the terminal chunk statically. The load test fails when the median first contentful paint
+under 4x CPU throttling exceeds 4 000 ms or the form takes more than 5 000 ms to appear. These time limits are
+deliberately loose (about 25 times the measured values) so that a slower or busier CI runner does not fail the test;
+they catch order-of-magnitude regressions, not small ones. The measured values are in the table above and are also
+written to `web/test-results/load-metrics.json` and uploaded by the CI `web` job.
