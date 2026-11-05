@@ -43,7 +43,9 @@ async fn setup_token_is_single_use() {
     let env = boot().await;
     let api = env.api();
     let (_, st) = api.send(api.bare(Method::GET, "/api/v1/auth/state")).await;
-    assert_eq!(st, json!({"setup_required": true, "authenticated": false}));
+    assert_eq!(st["setup_required"], true);
+    assert_eq!(st["authenticated"], false);
+    assert!(st["password_policy"]["min_length"].is_u64(), "the public state publishes the password policy");
     let token = std::fs::read_to_string(env.dir.join("setup-token")).unwrap();
     let body = |t: &str, pw: &str| json!({"setup_token": t, "username": "admin", "password": pw});
     let post = |b| api.send(api.bare(Method::POST, "/api/v1/auth/setup").json(&b));

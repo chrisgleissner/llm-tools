@@ -5,8 +5,22 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+/// Session lifetime of a device the administrator chose to remember at sign-in.
 pub const SESSION_IDLE_SECS: i64 = 8 * 3600;
 pub const SESSION_ABSOLUTE_SECS: i64 = 7 * 86_400;
+/// Session lifetime without "remember this device": the cookie is a browser-session cookie and the
+/// server expires the session sooner as well.
+pub const SESSION_IDLE_SECS_SHORT: i64 = 2 * 3600;
+pub const SESSION_ABSOLUTE_SECS_SHORT: i64 = 12 * 3600;
+
+/// `(idle, absolute)` seconds for a session.
+pub const fn session_policy(remember: bool) -> (i64, i64) {
+    if remember {
+        (SESSION_IDLE_SECS, SESSION_ABSOLUTE_SECS)
+    } else {
+        (SESSION_IDLE_SECS_SHORT, SESSION_ABSOLUTE_SECS_SHORT)
+    }
+}
 pub const COMPLETED_COMMAND_KEEP_SECS: i64 = 7 * 86_400;
 pub const MAX_OPEN_COMMANDS_PER_WORKER: i64 = 1000;
 const AUDIT_KEEP: i64 = 100_000;
@@ -113,6 +127,9 @@ pub enum HelloOutcome {
 pub struct Session {
     pub csrf: String,
     pub token_hash: String,
+    pub remember: bool,
+    pub expires_at: i64,
+    pub idle_secs: i64,
 }
 
 fn json_col(s: Option<String>) -> Option<Value> {
@@ -155,7 +172,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -166,6 +183,11 @@ INSERT INTO worker_generations(name, high) SELECT name, generation FROM workers;
 CREATE TABLE known_addrs(hash TEXT PRIMARY KEY, last_success INTEGER NOT NULL);
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
+
+/// Version 3: sessions record whether the device was remembered at sign-in (it selects the
+/// idle and absolute lifetime). Sessions that exist at migration keep the original, longer policy.
+/// The statement list is built in code because a database may not have a `sessions` table yet.
+const MIGRATE_V3_COLUMN: &str = "ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 1;";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -195,6 +217,16 @@ impl Db {
         }
         if version < 2 {
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V2} PRAGMA user_version = 2; COMMIT;"))?;
+        }
+        if version < 3 {
+            let has_column: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='remember'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let alter = if has_column || !has_table { "" } else { MIGRATE_V3_COLUMN };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 3; COMMIT;"))?;
         }
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
@@ -233,26 +265,34 @@ impl Db {
     }
 
     // ---- sessions ----
+    /// A session with the longer ("remembered device") lifetime.
     pub fn session_create(&self, token_hash: &str, csrf: &str) -> R<()> {
+        self.session_create_with(token_hash, csrf, true)
+    }
+    pub fn session_create_with(&self, token_hash: &str, csrf: &str, remember: bool) -> R<()> {
         let now = crate::now();
+        let (_, absolute) = session_policy(remember);
         self.c().execute(
-            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at) VALUES(?,?,?,?,?)",
-            params![token_hash, csrf, now, now, now + SESSION_ABSOLUTE_SECS],
+            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember) VALUES(?,?,?,?,?,?)",
+            params![token_hash, csrf, now, now, now + absolute, remember],
         )?;
         Ok(())
     }
     pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
         let now = crate::now();
         let c = self.c();
-        let row: Option<(String, i64, i64)> = c
+        let row: Option<(String, i64, i64, bool)> = c
             .query_row(
-                "SELECT csrf, last_seen, expires_at FROM sessions WHERE token_hash=?",
+                "SELECT csrf, last_seen, expires_at, remember FROM sessions WHERE token_hash=?",
                 params![token_hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)),
             )
             .optional()?;
-        let Some((csrf, last_seen, expires_at)) = row else { return Ok(None) };
-        if now >= expires_at || now - last_seen >= SESSION_IDLE_SECS {
+        let Some((csrf, last_seen, expires_at, remember)) = row else {
+            return Ok(None);
+        };
+        let (idle_secs, _) = session_policy(remember);
+        if now >= expires_at || now - last_seen >= idle_secs {
             c.execute("DELETE FROM sessions WHERE token_hash=?", params![token_hash])?;
             return Ok(None);
         }
@@ -262,6 +302,9 @@ impl Db {
         Ok(Some(Session {
             csrf,
             token_hash: token_hash.to_string(),
+            remember,
+            expires_at,
+            idle_secs,
         }))
     }
     pub fn session_delete(&self, token_hash: &str) -> R<()> {
@@ -593,8 +636,8 @@ impl Db {
         let now = crate::now();
         let c = self.c();
         c.execute(
-            "DELETE FROM sessions WHERE expires_at <= ?1 OR last_seen <= ?2",
-            params![now, now - SESSION_IDLE_SECS],
+            "DELETE FROM sessions WHERE expires_at <= ?1 OR last_seen <= ?2 - CASE remember WHEN 1 THEN ?3 ELSE ?4 END",
+            params![now, now, SESSION_IDLE_SECS, SESSION_IDLE_SECS_SHORT],
         )?;
         c.execute(
             "DELETE FROM commands WHERE state='done' AND updated_at < ?",

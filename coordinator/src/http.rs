@@ -175,8 +175,16 @@ fn no_extra(m: &Map<String, Value>, allowed: &[&str]) -> Result<(), ApiError> {
 // ---------------------------------------------------------------- authentication
 
 pub enum Principal {
-    Session { token_hash: String, csrf: String },
-    Token { name: String },
+    Session {
+        token_hash: String,
+        csrf: String,
+        remember: bool,
+        expires_at: i64,
+        idle_secs: i64,
+    },
+    Token {
+        name: String,
+    },
 }
 
 fn cookie_value(headers: &HeaderMap) -> Option<String> {
@@ -205,6 +213,9 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
         Some(s) => Ok(Principal::Session {
             token_hash: hash,
             csrf: s.csrf,
+            remember: s.remember,
+            expires_at: s.expires_at,
+            idle_secs: s.idle_secs,
         }),
         None => Err(unauthorized()),
     }
@@ -279,8 +290,10 @@ async fn verify_blocking(st: &AppState, password: String, phc: String) -> bool {
         .expect("verify task")
 }
 
-fn session_cookie(value: &str, max_age: u64) -> String {
-    format!("{COOKIE}={value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age}")
+/// `max_age: None` makes a browser-session cookie (no `Max-Age`): the browser drops it on exit.
+fn session_cookie(value: &str, max_age: Option<u64>) -> String {
+    let age = max_age.map(|a| format!("; Max-Age={a}")).unwrap_or_default();
+    format!("{COOKIE}={value}; HttpOnly; Secure; SameSite=Strict; Path={}{age}", "/")
 }
 
 fn limited(retry: u64) -> ApiError {
@@ -308,10 +321,23 @@ async fn healthz() -> Response {
 
 async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
     let setup_required = st.db.admin_get()?.is_none();
-    let mut body = json!({"setup_required": setup_required, "authenticated": false});
-    if let Ok(Principal::Session { csrf, .. }) = authenticate(&st, &headers) {
+    let mut body = json!({
+        "setup_required": setup_required,
+        "authenticated": false,
+        "password_policy": {"min_length": auth::MIN_PASSWORD_LEN, "max_length": auth::MAX_PASSWORD_LEN},
+    });
+    if let Ok(Principal::Session {
+        csrf,
+        remember,
+        expires_at,
+        idle_secs,
+        ..
+    }) = authenticate(&st, &headers)
+    {
         body["authenticated"] = json!(true);
         body["csrf_token"] = json!(csrf);
+        body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
+        body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
     } else if matches!(authenticate(&st, &headers), Ok(Principal::Token { .. })) {
         body["authenticated"] = json!(true);
     }
@@ -401,11 +427,16 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
         }
     };
     let parsed = parse_body(&body.bytes).and_then(|m| {
-        no_extra(&m, &["username", "password"])?;
-        Ok((str_field(&m, "username")?.to_string(), str_field(&m, "password")?.to_string()))
+        no_extra(&m, &["username", "password", "remember"])?;
+        let remember = match m.get("remember") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "remember must be true or false")),
+        };
+        Ok((str_field(&m, "username")?.to_string(), str_field(&m, "password")?.to_string(), remember))
     });
     drop(body);
-    let (username, password) = match parsed {
+    let (username, password, remember) = match parsed {
         Ok(c) => c,
         Err(e) => {
             attempt.release();
@@ -437,12 +468,14 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     attempt.succeed();
     st.db.known_addr_remember(&addr)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create(&auth::sha256_hex(&token), &csrf)?;
+    st.db.session_create_with(&auth::sha256_hex(&token), &csrf, remember)?;
     st.db.audit(&username, "login.success", "", &ip);
     let mut r = json_ok(StatusCode::OK, json!({"csrf_token": csrf}));
     r.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie(&token, crate::db::SESSION_ABSOLUTE_SECS as u64).parse().expect("cookie"),
+        session_cookie(&token, remember.then_some(crate::db::SESSION_ABSOLUTE_SECS as u64))
+            .parse()
+            .expect("cookie"),
     );
     Ok(r)
 }
@@ -453,7 +486,7 @@ async fn logout(State(st): State<St>, Authed(p, ip): Authed) -> ApiResult {
     }
     st.db.audit(&p.actor(), "logout", "", &ip);
     let mut r = json_ok(StatusCode::OK, json!({"ok": true}));
-    r.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0).parse().expect("cookie"));
+    r.headers_mut().insert(header::SET_COOKIE, session_cookie("", Some(0)).parse().expect("cookie"));
     Ok(r)
 }
 
@@ -487,7 +520,7 @@ async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buff
         &ip,
     );
     let mut r = json_ok(StatusCode::OK, json!({"ok": true, "revoked_api_tokens": revoked}));
-    r.headers_mut().insert(header::SET_COOKIE, session_cookie("", 0).parse().expect("cookie"));
+    r.headers_mut().insert(header::SET_COOKIE, session_cookie("", Some(0)).parse().expect("cookie"));
     Ok(r)
 }
 
@@ -534,9 +567,37 @@ async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): 
     Ok(json_ok(StatusCode::OK, json!({"ok": true})))
 }
 
-async fn list_missions(State(st): State<St>, _a: Authed) -> ApiResult {
+/// `GET /missions` query: `q` (case-insensitive substring of name, id, folder or worker), `worker`,
+/// `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`),
+/// `limit` (1-500) and `offset`. Without `limit` every match is returned. The reply carries
+/// `total` (matches before paging) and `statuses` (match counts per status ignoring the status
+/// filter, for filter chips).
+async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    let bad = |m: &str| err(StatusCode::BAD_REQUEST, "invalid-request", m.to_string());
+    let num = |k: &str| -> Result<Option<usize>, ApiError> {
+        q.get(k)
+            .map(|v| v.parse::<usize>().map_err(|_| bad(&format!("{k} must be a non-negative integer"))))
+            .transpose()
+    };
+    let limit = num("limit")?.map(|l| l.clamp(1, 500));
+    let offset = num("offset")?.unwrap_or(0);
+    let sort = q.get("sort").map(String::as_str);
+    if !matches!(sort, None | Some("name" | "status" | "worker" | "updated")) {
+        return Err(bad("sort must be name, status, worker or updated"));
+    }
+    let descending = match q.get("order").map(String::as_str) {
+        None | Some("asc") => false,
+        Some("desc") => true,
+        Some(_) => return Err(bad("order must be asc or desc")),
+    };
+    let needle = q.get("q").map(|v| v.to_lowercase()).filter(|v| !v.is_empty());
+    let statuses: Vec<String> = q
+        .get("status")
+        .map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_uppercase).collect())
+        .unwrap_or_default();
     let workers: HashMap<String, crate::db::WorkerRow> = st.db.workers_list()?.into_iter().map(|w| (w.name.clone(), w)).collect();
-    let missions: Vec<Value> = st
+    let text = |info: &Value, k: &str| info.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut rows: Vec<(String, bool, Value)> = st
         .db
         .missions_list()?
         .into_iter()
@@ -544,10 +605,43 @@ async fn list_missions(State(st): State<St>, _a: Authed) -> ApiResult {
             let w = workers.get(&worker)?;
             let newer_event = matches!((w.hello_at, w.last_event_at), (Some(h), Some(e)) if h < e);
             let stale = !st.hub.online(&worker) || newer_event;
-            Some(json!({"worker": worker, "stale": stale, "mission": info}))
+            Some((worker, stale, info))
+        })
+        .filter(|(worker, _, info)| {
+            q.get("worker").is_none_or(|w| w == worker)
+                && needle.as_ref().is_none_or(|n| {
+                    [worker.as_str(), &text(info, "name"), &text(info, "id"), &text(info, "folder")]
+                        .iter()
+                        .any(|f| f.to_lowercase().contains(n.as_str()))
+                })
         })
         .collect();
-    Ok(json_ok(StatusCode::OK, json!({"missions": missions})))
+    let mut by_status: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (_, _, info) in &rows {
+        *by_status.entry(text(info, "status")).or_default() += 1;
+    }
+    rows.retain(|(_, _, info)| statuses.is_empty() || statuses.contains(&text(info, "status").to_uppercase()));
+    if let Some(sort) = sort {
+        let key = |r: &(String, bool, Value)| match sort {
+            "name" => text(&r.2, "name").to_lowercase(),
+            "status" => text(&r.2, "status"),
+            "worker" => r.0.clone(),
+            _ => text(&r.2, "updated_at"),
+        };
+        rows.sort_by(|a, b| key(a).cmp(&key(b)).then_with(|| text(&a.2, "id").cmp(&text(&b.2, "id"))));
+        if descending {
+            rows.reverse();
+        }
+    }
+    let total = rows.len();
+    let page = rows.into_iter().skip(offset).take(limit.unwrap_or(usize::MAX));
+    let missions: Vec<Value> = page
+        .map(|(worker, stale, info)| json!({"worker": worker, "stale": stale, "mission": info}))
+        .collect();
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"missions": missions, "total": total, "offset": offset, "statuses": by_status}),
+    ))
 }
 
 async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
