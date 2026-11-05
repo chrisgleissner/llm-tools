@@ -186,6 +186,15 @@ mission; older missions without saved policy keep their original prompts until
 explicitly configured. The [Bridge operations guide](./docs/llm-bridge/operations.md#provider-native-teams-and-token-spend-preference)
 covers the three preferences, provider fallback, and repeated-invocation prompt overhead.
 
+Distributed mode is optional and off by default. `llm-bridge worker enroll`
+stores a coordinator URL and worker token for this host, and `llm-bridge worker
+run` connects outbound to that coordinator so missions can be listed and
+controlled from another machine. A worker accepts only read operations unless
+it was enrolled with `--allow-control`. `--target local` (the default) runs a
+command on this host; other targets fail rather than fall back to local
+execution. See [docs/distributed](./docs/distributed/protocol.md); this mode is
+still being built.
+
 [Go deeper →](./docs/llm-bridge/operations.md)
 
 ## llm-usage

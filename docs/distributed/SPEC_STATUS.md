@@ -35,7 +35,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | ARCH-007 | [ ] |  |
 | ARCH-008 | [ ] |  |
 | ARCH-009 | [ ] |  |
-| LOCAL-001 | [ ] |  |
+| LOCAL-001 | [~] | Full suite passes with no coordinator configuration; final offline verification pending. |
 | LOCAL-002 | [ ] |  |
 | LOCAL-003 | [ ] |  |
 | LOCAL-004 | [x] | Commands without --target run locally unchanged; full suite passes. |
@@ -51,16 +51,16 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | CLI-006 | [ ] |  |
 | CLI-007 | [ ] |  |
 | CLI-008 | [ ] |  |
-| WORK-001 | [ ] |  |
-| WORK-002 | [ ] |  |
-| WORK-003 | [ ] |  |
-| WORK-004 | [ ] |  |
-| WORK-005 | [ ] |  |
+| WORK-001 | [~] | llm_tools/bridge_worker.py reuses bridge_commands.execute; `llm-bridge worker run`. End-to-end with coordinator pending. |
+| WORK-002 | [x] | Worker opens the outbound WebSocket (bridge_ws.WebSocketClient, websocket_connector); no listener (tests/test_bridge_ws.py, test_bridge_worker.py). |
+| WORK-003 | [x] | hello carries worker_id (persisted), name, software/protocol versions, platform, capabilities, mission inventory, event cursor (test_hello_reports_inventory_and_only_permitted_operations). |
+| WORK-004 | [~] | hello and results contain no environment or credentials; token kept 0600 and excluded from status/public(). Audit pending. |
+| WORK-005 | [x] | Remote commands run through bridge_commands.execute, the same path as the local CLI (test_commands_ack_then_result_and_duplicates_do_not_repeat). |
 | WORK-006 | [~] | Request ID is the durable command ID; duplicate delivery returns stored outcome, re-checked under write lock (test_duplicate_delivery_*, test_apply_rechecks_*). |
 | WORK-007 | [~] | Outcome vocabulary ok/accepted/applied/rejected/failed/uncertain in bridge_commands.execute. |
-| WORK-008 | [ ] |  |
+| WORK-008 | [~] | Reconnect resends hello; event replication resumes from welcome cursor with nack resend; duplicate commands return stored outcome. Coordinator side pending. |
 | WORK-009 | [ ] |  |
-| WORK-010 | [ ] |  |
+| WORK-010 | [~] | worker run: reconnect with jittered backoff, silence timeout, SIGINT/SIGTERM stop (test_run_*). Service unit pending. |
 | COORD-001 | [ ] |  |
 | COORD-002 | [ ] |  |
 | COORD-003 | [ ] |  |
@@ -75,12 +75,12 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | PROTO-002 | [x] | Envelope v/type/id/worker_id/generation/payload validated strictly by bridge_protocol.decode (tests/test_bridge_protocol.py). |
 | PROTO-003 | [~] | command.ack distinct from command.result in protocol and parser; worker/coordinator implementation pending. |
 | PROTO-004 | [ ] |  |
-| PROTO-005 | [ ] |  |
+| PROTO-005 | [~] | Worker side: global event cursor, ascending batches, nack resend (test_control_messages_and_event_replication). |
 | PROTO-006 | [x] | Task mutations accept expected_revision, checked under the SQLite write lock; mismatch is outcome rejected, code conflict (test_stale_revision_*, test_conflicting_amendments_only_one_wins). |
 | PROTO-007 | [ ] |  |
 | PROTO-008 | [ ] |  |
 | PROTO-009 | [ ] |  |
-| PROTO-010 | [ ] |  |
+| PROTO-010 | [~] | Worker persists max generation before accepting commands and rejects lower generations (test_generation_fencing). Coordinator side pending. |
 | NET-001 | [ ] |  |
 | NET-002 | [ ] |  |
 | NET-003 | [ ] |  |
@@ -101,8 +101,8 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | AUTH-008 | [ ] |  |
 | AUTH-009 | [ ] |  |
 | AUTH-010 | [ ] |  |
-| SEC-001 | [ ] |  |
-| SEC-002 | [ ] |  |
+| SEC-001 | [~] | Worker code runs only after explicit enroll + run; standalone never imports it. Coordinator binds loopback by default (pending). |
+| SEC-002 | [~] | Worker refuses non-wss URLs and verifies the coordinator certificate against the enrolled CA (test_wss_verifies_the_server_against_the_given_ca). |
 | SEC-003 | [ ] |  |
 | SEC-004 | [ ] |  |
 | SEC-005 | [ ] |  |

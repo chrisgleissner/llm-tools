@@ -1285,6 +1285,20 @@ def _build_parser(
     gc = sub.add_parser("gc", help="close the idle tmux stations of finished missions (stations with a live provider or an attached terminal are kept)")
     _add_json_arg(gc)
 
+    worker = sub.add_parser("worker", help="optional: connect this host to a Bridge coordinator (off unless enrolled and run)")
+    worker_sub = worker.add_subparsers(dest="worker_action", required=True)
+    worker_enroll = worker_sub.add_parser("enroll", help="store the coordinator URL, CA and worker token for this host")
+    worker_enroll.add_argument("--name", required=True, help="worker name used as the remote target, for example workstation")
+    worker_enroll.add_argument("--coordinator", required=True, metavar="URL", help="coordinator base URL, for example wss://bridge.home.arpa:8443")
+    worker_enroll.add_argument("--token-file", required=True, metavar="PATH", help="file holding the worker token printed by the coordinator ('-' reads stdin)")
+    worker_enroll.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
+    worker_enroll.add_argument("--allow-control", action="store_true", help="accept mutating remote commands; without it the worker is read-only remotely")
+    _add_json_arg(worker_enroll)
+    worker_status = worker_sub.add_parser("status", help="show this host's enrolment without the token")
+    _add_json_arg(worker_status)
+    worker_sub.add_parser("run", help="run the worker in the foreground until interrupted")
+    worker_sub.add_parser("unenroll", help="delete this host's enrolment, token and coordinator CA")
+
     finish = sub.add_parser("finish", help="ask the native provider to exit so its task moves to verification")
     _add_mission_arg(finish, default_mission)
     _add_json_arg(finish)
@@ -1912,6 +1926,39 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
 
+def _worker_command(args: argparse.Namespace) -> int:
+    """``llm-bridge worker``: enrolment and the foreground worker loop (WORK-001, WORK-010)."""
+    from . import bridge_worker as worker
+
+    if args.worker_action == "enroll":
+        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
+        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        config = worker.enroll(args.name, args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control))
+        _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
+                      f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
+        return 0
+    if args.worker_action == "status":
+        _print_result(worker.load_config().public(), args.json, lambda value: "\n".join(f"{key}: {value[key]}" for key in sorted(value)))
+        return 0
+    if args.worker_action == "unenroll":
+        removed = worker.unenroll()
+        print("Worker enrolment removed." if removed else "This host is not enrolled as a worker.")
+        return 0
+    import signal
+    import threading
+
+    stop = threading.Event()
+    session = worker.default_session(package_version())
+    previous = {signum: signal.signal(signum, lambda *_: stop.set()) for signum in (signal.SIGINT, signal.SIGTERM)}
+    print(f"Worker {session.config.name} connecting to {session.config.coordinator_url}; Ctrl-C stops it.", flush=True)
+    try:
+        worker.run(session, worker.websocket_connector(), stop=stop, log=lambda text: print(text, file=sys.stderr, flush=True))
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    return 0
+
+
 def _split_target(arguments: list[str]) -> tuple[str | None, list[str]]:
     """Remove a leading ``--target NAME`` and validate the name."""
     if arguments[0] == "--target":
@@ -2382,6 +2429,8 @@ def _main(argv: list[str] | None = None) -> int:
                     return 2
             _print_result(result, args.json, lambda value: fmt.format_command_receipt(args.command, value, args.mission))
             return 0
+        if args.command == "worker":
+            return _worker_command(args)
         if args.command == "theme":
             _print_theme(args)
             return 0
@@ -2440,7 +2489,7 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("steer", value, args.mission))
             return 0
         _build_parser().error(f"unsupported command {args.command}")
-    except (ValueError, KeyError, OSError, RuntimeError, TransitionError, commands.CommandFailure) as exc:
+    except (ValueError, KeyError, OSError, RuntimeError, TransitionError, commands.CommandFailure) as exc:  # WorkerConfigError is a ValueError
         print(f"llm-bridge: {exc}", file=sys.stderr)
         return 2
     return 0

@@ -1563,6 +1563,20 @@ class BridgeStore:
             for row in self.db.execute(query, params)
         ]
 
+    def last_event_id(self) -> int:
+        """Highest event ID in this database: the worker's replication cursor."""
+        return int(self.db.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0])
+
+    def events_since(self, after: int, *, limit: int) -> list[dict[str, Any]]:
+        """Events of every mission after ``after``, ascending; IDs may have pruning gaps."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("event page limit must be between 1 and 1000")
+        rows = self.db.execute("SELECT * FROM events WHERE id>? ORDER BY id LIMIT ?", (after, limit))
+        return [{**{key: row[key] for key in row.keys() if key != "data_json"}, "data": json.loads(row["data_json"])} for row in rows]
+
+    def command_exists(self, command_id: str) -> bool:
+        return self.db.execute("SELECT 1 FROM commands WHERE id=?", (command_id,)).fetchone() is not None
+
     def prune_plumbing_events(
         self,
         mission_id: str,
