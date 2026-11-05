@@ -34,6 +34,9 @@ MESSAGE_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "command.result": (frozenset({"schema_version", "request_id", "operation", "outcome", "result", "error"}), frozenset()),
     "events": (frozenset({"after", "through", "events"}), frozenset()),
     "events.nack": (frozenset({"expected_after"}), frozenset()),
+    "terminal.open": (frozenset({"session_id", "mission_id", "mode", "cols", "rows"}), frozenset()),
+    "terminal.close": (frozenset({"session_id"}), frozenset()),
+    "terminal.status": (frozenset({"session_id", "state", "mode", "reason"}), frozenset()),
     "ping": (frozenset(), frozenset()),
     "pong": (frozenset(), frozenset()),
     "error": (frozenset({"code", "message"}), frozenset({"details", "in_reply_to"})),
@@ -110,6 +113,18 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         _int(payload["event_cursor"], "event_cursor")
         if not isinstance(payload["capabilities"], list) or not isinstance(payload["missions"], list):
             raise ProtocolError("invalid-message", "hello: capabilities and missions must be lists")
+    elif kind.startswith("terminal."):
+        if not isinstance(payload["session_id"], str) or not _ID.fullmatch(payload["session_id"]):
+            raise ProtocolError("invalid-message", "session_id must be 1-128 characters of [A-Za-z0-9_.-]")
+        if kind == "terminal.open":
+            if not isinstance(payload["mission_id"], str) or payload["mode"] not in {"view", "write"}:
+                raise ProtocolError("invalid-message", "terminal.open: bad mission_id or mode")
+            for name in ("cols", "rows"):
+                if _int(payload[name], name, minimum=1) > 1000:
+                    raise ProtocolError("invalid-message", f"{name} must be at most 1000")
+        elif kind == "terminal.status":
+            if payload["state"] not in {"opened", "refused", "closed"} or payload["mode"] not in {"view", "write"} or not isinstance(payload["reason"], str):
+                raise ProtocolError("invalid-message", "terminal.status: bad state, mode or reason")
     elif kind == "error":
         if not isinstance(payload["code"], str) or not isinstance(payload["message"], str):
             raise ProtocolError("invalid-message", "error: code and message must be strings")

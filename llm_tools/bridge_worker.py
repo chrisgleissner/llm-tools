@@ -16,6 +16,7 @@ import dataclasses
 import json
 import os
 import platform
+import queue
 import random
 import re
 import ssl
@@ -147,13 +148,15 @@ class WorkerSession:
     """Protocol state for one worker; pure apart from the store and the config file."""
 
     def __init__(self, config: WorkerConfig, *, open_store: Callable[[], BridgeStore], software_version: str,
-                 save: Callable[[WorkerConfig], None] = _save) -> None:
+                 save: Callable[[WorkerConfig], None] = _save, terminal_launcher: "TerminalLauncher | None" = None) -> None:
         self.config = config
         self.open_store = open_store
         self.software_version = software_version
         self.save = save
         self.generation = 0
         self.cursor: int | None = None  # coordinator's event cursor; None until welcome
+        self.terminal_launcher = terminal_launcher
+        self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
         return Message(kind, self.config.worker_id, self.generation, payload)
@@ -206,12 +209,36 @@ class WorkerSession:
             return []
         if message.type == "error":
             return []
+        if message.type == "terminal.open":
+            return self._terminal_open(dict(message.payload))
+        if message.type == "terminal.close":
+            if self.terminal_launcher is not None:
+                self.terminal_launcher.close(str(message.payload["session_id"]))
+            return []
         if message.type != "command":
             return [self.error("unsupported-message", f"workers do not accept {message.type}", message.id)]
         if message.generation != self.generation or message.generation < self.config.max_generation:
             return [self.error("stale-generation", "command from an older coordinator connection", message.id)]
         request = commands.CommandRequest.from_json(dict(message.payload))
         return self._command(request)
+
+    def terminal_status(self, session_id: str, state: str, mode: str, reason: str) -> None:
+        """Queue a ``terminal.status`` for the run loop (called from terminal threads)."""
+        try:
+            self.outbox.put_nowait(self.message("terminal.status", {"session_id": session_id, "state": state, "mode": mode, "reason": reason[:500]}))
+        except queue.Full:
+            pass
+
+    def _terminal_open(self, payload: dict[str, Any]) -> list[Message]:
+        session_id, mission_id, mode = str(payload["session_id"]), str(payload["mission_id"]), str(payload["mode"])
+        if self.terminal_launcher is None:
+            return [self.message("terminal.status", {"session_id": session_id, "state": "refused", "mode": "view", "reason": "terminal access is not available on this worker"})]
+        with self.open_store() as store:
+            known = store.mission_id_if_exists(mission_id)
+        if known is None:
+            return [self.message("terminal.status", {"session_id": session_id, "state": "refused", "mode": "view", "reason": "unknown mission"})]
+        self.terminal_launcher.open(self, session_id, known, mode, allow_write=self.config.allow_control)
+        return []
 
     def _command(self, request: commands.CommandRequest) -> list[Message]:
         spec = commands.OPERATIONS.get(request.operation)
@@ -243,6 +270,55 @@ class WorkerSession:
 Connector = Callable[[WorkerConfig], Any]
 
 
+class TerminalLauncher:
+    """Runs each remote terminal session in its own thread with its own WebSocket."""
+
+    def __init__(self, connect: Callable[[WorkerConfig, str], Any], source_factory: Callable[[str], Any] | None = None) -> None:
+        self.connect = connect
+        self.source_factory = source_factory
+        self._stops: dict[str, threading.Event] = {}
+        self._lock = threading.Lock()
+
+    def open(self, session: "WorkerSession", session_id: str, mission_id: str, mode: str, *, allow_write: bool) -> None:
+        stop = threading.Event()
+        with self._lock:
+            if session_id in self._stops or len(self._stops) >= 16:
+                session.terminal_status(session_id, "refused", "view", "too many terminal sessions or duplicate session id")
+                return
+            self._stops[session_id] = stop
+        thread = threading.Thread(target=self._run, args=(session, session_id, mission_id, mode, allow_write, stop), daemon=True)
+        thread.start()
+
+    def close(self, session_id: str) -> None:
+        with self._lock:
+            stop = self._stops.get(session_id)
+        if stop is not None:
+            stop.set()
+
+    def _run(self, session: "WorkerSession", session_id: str, mission_id: str, mode: str, allow_write: bool, stop: threading.Event) -> None:
+        from .bridge_terminal_stream import TerminalSession, TmuxPaneSource
+
+        try:
+            try:
+                source = (self.source_factory or TmuxPaneSource)(mission_id)
+            except Exception as exc:  # noqa: BLE001 - reported to the coordinator, not raised
+                session.terminal_status(session_id, "refused", "view", str(exc)[:200] or type(exc).__name__)
+                return
+            try:
+                connection = self.connect(session.config, session_id)
+            except Exception as exc:  # noqa: BLE001
+                source.close()
+                session.terminal_status(session_id, "refused", "view", f"terminal connection failed: {type(exc).__name__}")
+                return
+            terminal = TerminalSession(session_id, mission_id, mode, source, connection, allow_write=allow_write, stop=stop)
+            session.terminal_status(session_id, "opened", "write" if mode == "write" and allow_write else "view", terminal.reason)
+            reason = terminal.run()
+            session.terminal_status(session_id, "closed", "view", reason)
+        finally:
+            with self._lock:
+                self._stops.pop(session_id, None)
+
+
 def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, log: Callable[[str], None] = lambda text: None,
         idle: float = 0.5, max_backoff: float = 60.0) -> None:
     """Keep one coordinator connection alive until ``stop`` is set (WORK-010).
@@ -271,6 +347,11 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                         replies = [session.error(exc.code, str(exc))]
                     for reply in replies:
                         connection.send_text(reply.encode())
+                while True:
+                    try:
+                        connection.send_text(session.outbox.get_nowait().encode())
+                    except queue.Empty:
+                        break
                 batch = session.next_events()
                 if batch is not None:
                     connection.send_text(batch.encode())
@@ -295,7 +376,17 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
 def default_session(software_version: str, env: dict[str, str] | None = None) -> WorkerSession:
     config = load_config(env)
     return WorkerSession(config, open_store=lambda: BridgeStore(store_path(env)), software_version=software_version,
-                         save=lambda value: _save(value, env))
+                         save=lambda value: _save(value, env), terminal_launcher=TerminalLauncher(terminal_connector(env)))
+
+
+def terminal_connector(env: dict[str, str] | None = None) -> Callable[[WorkerConfig, str], Any]:
+    from .bridge_ws import WebSocketClient
+
+    def connect(config: WorkerConfig, session_id: str) -> Any:
+        return WebSocketClient.connect(config.coordinator_url.rstrip("/") + f"/api/v1/worker/terminal/{session_id}",
+                                       headers={"Authorization": f"Bearer {config.token}"}, context=tls_context(env))
+
+    return connect
 
 
 def websocket_connector(env: dict[str, str] | None = None) -> Connector:

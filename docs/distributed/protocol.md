@@ -98,3 +98,41 @@ the effect and rejects a mismatch with error code `conflict`.
 `hello.capabilities` lists the operations the worker supports. The coordinator
 refuses a request for an operation the target worker did not advertise with
 `unsupported-operation`, without sending it.
+
+## Terminal sessions (PROTO-009, SEC-006, WEB-007, WEB-008)
+
+Terminal bytes never travel on the control connection. The control connection
+only opens and closes sessions:
+
+| Type | Direction | Payload |
+|---|---|---|
+| `terminal.open` | coordinator → worker | `session_id` (1–128 of `[A-Za-z0-9_.-]`), `mission_id`, `mode` (`view` or `write`), `cols`, `rows` (1–1000). |
+| `terminal.close` | coordinator → worker | `session_id`. |
+| `terminal.status` | worker → coordinator | `session_id`, `state` (`opened`, `refused`, `closed`), `mode` (the highest mode the worker allows this session; the live role is reported in `s` frames), `reason` (text, may be empty). |
+
+On `terminal.open` the worker validates the mission, decides the granted mode
+and opens a second WebSocket to
+`wss://<coordinator>/api/v1/worker/terminal/<session_id>` with the same worker
+token. The coordinator accepts that connection only for a session it opened for
+that worker and that has not been attached yet. Frames on it are JSON text:
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"t":"o","d":"<base64>"}` | worker → coordinator | Output bytes of the provider pane. The first `o` frame is a full screen snapshot preceded by a clear-screen sequence. |
+| `{"t":"s","cols":N,"rows":N,"mode":"view"\|"write","reason":"..."}` | worker → coordinator | Pane size and granted mode; sent first and whenever they change. |
+| `{"t":"x","reason":"..."}` | worker → coordinator | Session ended; the worker closes the socket. |
+| `{"t":"i","d":"<base64>"}` | coordinator → worker | Keyboard or paste input, at most 64 KiB decoded. Dropped by the worker unless the session holds the writer role. |
+| `{"t":"r","cols":N,"rows":N}` | coordinator → worker | Resize request from the writer; applied only when no local tmux client is attached to the station. |
+
+Single writer: the worker grants `write` to at most one session per mission,
+and only while no local tmux client is attached to that station. Any other
+request is granted `view` with a reason. Losing the writer role (a local
+client attached) is reported with an `s` frame. Viewers are unlimited.
+
+Bounds: the worker reads at most 64 KiB per frame and its sends block, so a
+slow coordinator slows reading. The tmux control client runs with
+`pause-after=5`: when it falls 5 s behind, tmux pauses the pane's output and
+the worker resumes it and sends a fresh snapshot instead of the backlog.
+The coordinator keeps at most 256 KiB per browser viewer and closes a viewer
+that falls further behind (close code 1013); the browser reconnects and
+receives a fresh snapshot.
