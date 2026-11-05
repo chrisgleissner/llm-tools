@@ -11,7 +11,6 @@ pub fn init(dir: &std::path::Path, sans: &Sans) -> Result<(), String> {
 
 /// `init` with an explicit listen address. A non-loopback `bind` also sets `lan_enabled = true`.
 pub fn init_with(dir: &std::path::Path, sans: &Sans, bind: Option<&str>) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
     if ["config.toml", "ca.pem", "ca.key", "server.pem", "server.key", crate::DB_FILE]
         .iter()
         .all(|f| dir.join(f).exists())
@@ -21,7 +20,7 @@ pub fn init_with(dir: &std::path::Path, sans: &Sans, bind: Option<&str>) -> Resu
     }
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     // Best effort: a mounted volume may belong to another user, and init never chowns.
-    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    crate::restrict_permissions(dir, 0o700);
     // Precedence: --bind, then BRIDGE_COORDINATOR_BIND / BRIDGE_COORDINATOR_LAN_ENABLED, then the
     // built-in defaults. The written config.toml therefore matches the environment `init` ran in.
     // At start-up the environment still overrides config.toml.

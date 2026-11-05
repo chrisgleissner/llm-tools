@@ -12,6 +12,7 @@ import re
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -35,7 +36,7 @@ def _binary() -> Path | None:
     if override:
         return Path(override)
     for profile in ("release", "debug"):
-        candidate = ROOT / "coordinator" / "target" / profile / "bridge-coordinator"
+        candidate = ROOT / "coordinator" / "target" / profile / ("bridge-coordinator.exe" if os.name == "nt" else "bridge-coordinator")
         if candidate.exists():
             return candidate
     return None
@@ -98,6 +99,8 @@ class Coordinator:
 
 @pytest.fixture
 def system(tmp_path, monkeypatch, capsys):
+    if sys.platform == "win32":
+        pytest.skip("workers and the mission store are not supported on Windows (docs/distributed/DECISIONS.md D8)")
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
     assert main(["mission", "create", "--prompt", "Objective\n", "--cwd", str(tmp_path), "--providers", "codex", "--json"]) == 0
@@ -213,6 +216,29 @@ def test_remote_cli_has_local_semantics(system, tmp_path, capsys):
     assert code == 2 and "read-only" in err
     code, _, err = run("--target", "ws", "task", "show", "--mission", mission_id, "--task", "7")
     assert code == 2 and "ws:" in err
+
+
+def test_remote_client_reaches_the_coordinator_without_a_worker(tmp_path, monkeypatch, capsys):
+    """The part of the CLI that Windows supports: remote login/status/logout and worker list."""
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    coordinator = Coordinator(tmp_path / "coordinator")
+    try:
+        coordinator.run("worker", "add", "ws")
+        token_file = tmp_path / "api-token"
+        token_file.write_text(coordinator.api_token)
+        assert main(["remote", "login", "--coordinator", f"https://localhost:{coordinator.port}", "--token-file", str(token_file),
+                     "--ca-file", str(coordinator.data / "ca.pem")]) == 0
+        capsys.readouterr()
+        assert main(["remote", "status", "--json"]) == 0
+        assert json.loads(capsys.readouterr().out)["coordinator_url"] == f"https://localhost:{coordinator.port}"
+        assert main(["worker", "list", "--json"]) == 0
+        workers = json.loads(capsys.readouterr().out)
+        assert [(worker["name"], worker["state"]) for worker in workers] == [("ws", "offline")]
+        assert main(["--target", "ws", "status", "--mission", "abc"]) != 0  # an offline worker is reported, never run locally
+        capsys.readouterr()
+        assert main(["remote", "logout"]) == 0
+    finally:
+        coordinator.stop()
 
 
 def _handshake(port: int, ca: Path) -> dict:

@@ -25,6 +25,15 @@ pub fn machine_hostname() -> Option<String> {
         .iter()
         .find_map(|p| std::fs::read_to_string(p).ok().and_then(|t| clean_hostname(&t)))
         .or_else(|| std::env::var("HOSTNAME").ok().and_then(|t| clean_hostname(&t)))
+        // Windows sets COMPUTERNAME; macOS has no /proc or /etc/hostname, so ask `hostname`.
+        .or_else(|| std::env::var("COMPUTERNAME").ok().and_then(|t| clean_hostname(&t)))
+        .or_else(|| {
+            let out = std::process::Command::new("hostname").output().ok()?;
+            out.status
+                .success()
+                .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+                .and_then(|t| clean_hostname(&t))
+        })
 }
 
 /// `<host>` and `<host>.home.arpa` (RFC 8375 home network name).

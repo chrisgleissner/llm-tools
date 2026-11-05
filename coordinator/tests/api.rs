@@ -2,9 +2,11 @@ mod common;
 use common::*;
 use reqwest::Method;
 use serde_json::json;
-use std::os::unix::fs::PermissionsExt;
 
+/// Unix permission bits. Windows has no permission bits; the data directory's ACL applies there.
+#[cfg(unix)]
 fn mode(p: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p).unwrap().permissions().mode() & 0o777
 }
 
@@ -17,9 +19,12 @@ fn init_is_idempotent_and_private() {
     bridge_coordinator::init::init(&dir, &sans()).unwrap();
     let after: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(dir.join(f)).unwrap()).collect();
     assert_eq!(before, after, "init must never overwrite existing files");
-    assert_eq!(mode(&dir), 0o700);
-    for f in ["ca.key", "server.key", "setup-token", "coordinator.sqlite3"] {
-        assert_eq!(mode(&dir.join(f)), 0o600, "{f}");
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&dir), 0o700);
+        for f in ["ca.key", "server.key", "setup-token", "coordinator.sqlite3"] {
+            assert_eq!(mode(&dir.join(f)), 0o600, "{f}");
+        }
     }
     assert!(std::fs::read_to_string(dir.join("config.toml")).unwrap().contains("127.0.0.1:8443"));
     let _ = std::fs::remove_dir_all(&dir);

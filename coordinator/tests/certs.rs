@@ -96,8 +96,11 @@ fn new_ca_replaces_the_ca_and_keeps_the_old_one() {
     assert!(!accepted(&dir, "coord.example.test"), "the new CA covers the new names only");
     // The server loads and the files are private.
     certs::load_server_config(&dir).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(dir.join("ca.key")).unwrap().permissions().mode() & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.join("ca.key")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -105,6 +108,18 @@ fn new_ca_replaces_the_ca_and_keeps_the_old_one() {
 /// nameConstraints extension with exactly the expected permitted subtrees; validity of at most 5 years.
 #[test]
 fn ca_extensions_as_openssl_sees_them() {
+    // The text format below is OpenSSL 3's. Linux must have it; other platforms may ship LibreSSL
+    // (macOS) or no command line tool (Windows) and skip this one cross-check. The certificate
+    // properties are also asserted without OpenSSL in the other tests of this file.
+    let version = Command::new("openssl").arg("version").output();
+    let has_openssl = matches!(&version, Ok(o) if o.status.success() && String::from_utf8_lossy(&o.stdout).starts_with("OpenSSL "));
+    if !has_openssl {
+        if cfg!(target_os = "linux") {
+            panic!("the openssl command line tool is needed for this test on Linux");
+        }
+        eprintln!("skipped: no OpenSSL command line tool on this platform");
+        return;
+    }
     let dir = init_with("coord.example.test", "192.0.2.9");
     let out = Command::new("openssl")
         .args(["x509", "-in"])
@@ -151,11 +166,26 @@ fn ca_extensions_as_openssl_sees_them() {
             .output()
             .unwrap();
         let s = String::from_utf8_lossy(&o.stdout).trim().split('=').nth(1).unwrap().to_string();
-        let d = Command::new("date").args(["-u", "-d", &s, "+%s"]).output().unwrap();
-        String::from_utf8_lossy(&d.stdout).trim().parse::<i64>().unwrap() / 86_400
+        days_since_epoch(&s)
     };
     let validity = days("-enddate") - days("-startdate");
     assert!((1000..=1826).contains(&validity), "validity {validity} days");
     assert!(certs::ca_is_constrained(&dir));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Whole days since 1970-01-01 for an OpenSSL date such as `Nov  5 22:01:59 2031 GMT`.
+fn days_since_epoch(text: &str) -> i64 {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let month = months.iter().position(|m| *m == parts[0]).unwrap() as i64 + 1;
+    let day: i64 = parts[1].parse().unwrap();
+    let year: i64 = parts[3].parse().unwrap();
+    // Days from civil (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }

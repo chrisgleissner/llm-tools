@@ -5,6 +5,7 @@ use bridge_coordinator::{db_path, ops};
 use common::*;
 use rustls::pki_types::pem::PemObject;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -136,6 +137,7 @@ async fn backup_and_restore_round_trip() {
     api.add_worker("w1").await;
     let out = env.dir.join("backup.sqlite3");
     ops::backup(&env.dir, &out).unwrap(); // online: the server is running
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o600);
     assert!(ops::backup(&env.dir, &out).unwrap_err().contains("refusing to overwrite"));
     api.add_worker("w2").await;
@@ -167,6 +169,7 @@ fn backup_restore_cli_and_setup_token() {
     assert!(o.status.success(), "{}", text(&o));
     let after = std::fs::read_to_string(dir.join("setup-token")).unwrap();
     assert_ne!(before, after);
+    #[cfg(unix)]
     assert_eq!(std::fs::metadata(dir.join("setup-token")).unwrap().permissions().mode() & 0o777, 0o600);
     let bk = dir.join("b.sqlite3");
     assert!(run(&["backup", "--data-dir", d, "--output", bk.to_str().unwrap()], None).status.success());
@@ -305,9 +308,19 @@ fn environment_variables_select_data_dir_and_override_config() {
     }
     assert!(healthy, "health succeeds against the environment-configured bind");
     let started = std::time::Instant::now();
-    Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap();
-    let status = child.wait().unwrap();
-    assert!(status.success(), "{status:?}");
+    // SIGTERM is a Unix signal; Windows has no equivalent for a console-less child, so the process
+    // is terminated and only the exit time and the following health failure are checked there.
+    #[cfg(unix)]
+    {
+        Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{status:?}");
+    }
+    #[cfg(not(unix))]
+    {
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert!(!run_env(&["health"], None, &env).status.success());
 
@@ -327,6 +340,7 @@ fn environment_variables_select_data_dir_and_override_config() {
 fn init_accepts_an_existing_empty_directory() {
     let dir = tmp_dir();
     std::fs::create_dir_all(&dir).unwrap();
+    #[cfg(unix)]
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     let o = run(&["init", "--data-dir", dir.to_str().unwrap(), "--hostname", "a.test"], None);
     assert!(o.status.success(), "{}", text(&o));

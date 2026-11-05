@@ -155,8 +155,15 @@ async fn run(args: Args) -> Result<(), String> {
         ["serve"] => {
             let srv = server::start_with(&dir, args.web_dir.as_deref()).await?;
             eprintln!("bridge-coordinator listening on https://{}", srv.addr);
-            let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
-            tokio::select! { _ = term.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+            #[cfg(unix)]
+            {
+                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
+                tokio::select! { _ = term.recv() => {}, _ = tokio::signal::ctrl_c() => {} }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
             eprintln!("shutting down");
             srv.stop().await;
             Ok(())

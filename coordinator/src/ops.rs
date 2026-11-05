@@ -15,12 +15,10 @@ pub const LOCK_FILE: &str = "coordinator.lock";
 /// Exclusive advisory lock held for the lifetime of `serve`. The kernel releases it when the
 /// process exits, so a crash never leaves a stale lock. `restore` takes the same lock.
 pub fn lock_data_dir(dir: &Path) -> Result<std::fs::File, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let f = std::fs::OpenOptions::new()
+    let f = crate::private_options(0o600)
         .create(true)
         .truncate(false)
         .write(true)
-        .mode(0o600)
         .open(dir.join(LOCK_FILE))
         .map_err(|e| format!("cannot open {}: {e}", dir.join(LOCK_FILE).display()))?;
     f.try_lock()
@@ -267,12 +265,10 @@ fn integrity_ok(path: &Path) -> Result<i64, String> {
 
 /// Copy `src` into a new 0600 file `tmp` with the SQLite online backup API.
 fn copy_database(src: &Path, tmp: &Path) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::remove_file(tmp);
-    std::fs::OpenOptions::new()
+    crate::private_options(0o600)
         .write(true)
         .create_new(true)
-        .mode(0o600)
         .open(tmp)
         .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
     let result = (|| {

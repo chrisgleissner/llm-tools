@@ -93,6 +93,25 @@ loopback-only publishing, administrator setup, worker add and token create throu
 stopped, password reset, certificate renewal, restart with data kept, and stop in
 0.3 s.
 
+## Windows
+
+On Windows (x86-64 and ARM64) the coordinator and the remote client are supported;
+workers and the standalone Bridge are not (decision D8 in `DECISIONS.md`). Build or
+download `bridge-coordinator.exe`, then run it from PowerShell:
+
+```powershell
+.\bridge-coordinator.exe init --data-dir $env:LOCALAPPDATA\bridge-coordinator
+.\bridge-coordinator.exe serve --data-dir $env:LOCALAPPDATA\bridge-coordinator
+```
+
+Windows has no permission bits, so the files are created normally; the access control
+list inherited from the data directory protects `ca.key`, `server.key`, `setup-token`
+and the database. Use a directory only your account can read. There is no systemd unit;
+run the coordinator as a service with your usual tool, or use the container
+deployment. `llm-bridge --target NAME COMMAND`, `llm-bridge remote login` and
+`llm-bridge worker list` work on Windows; every other command prints
+`not supported on Windows` and exits with status 2.
+
 ## Native install with systemd (alternative)
 
 You need a prebuilt `bridge-coordinator` binary for the target architecture, and

@@ -21,6 +21,11 @@ pub const fn session_policy(remember: bool) -> (i64, i64) {
         (SESSION_IDLE_SECS_SHORT, SESSION_ABSOLUTE_SECS_SHORT)
     }
 }
+/// How stale a stored session `last_seen` or API token `last_used` may get before a request
+/// rewrites it. Each rewrite is a committed, fsync'd transaction; a browser polling the API
+/// would otherwise cause one a minute. The shortest idle timeout is two hours, so five minutes
+/// moves an idle expiry by at most 4%.
+pub const TOUCH_EVERY_SECS: i64 = 300;
 pub const COMPLETED_COMMAND_KEEP_SECS: i64 = 7 * 86_400;
 pub const MAX_OPEN_COMMANDS_PER_WORKER: i64 = 1000;
 const AUDIT_KEEP: i64 = 100_000;
@@ -228,8 +233,7 @@ impl Db {
             let alter = if has_column || !has_table { "" } else { MIGRATE_V3_COLUMN };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 3; COMMIT;"))?;
         }
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
@@ -296,7 +300,7 @@ impl Db {
             c.execute("DELETE FROM sessions WHERE token_hash=?", params![token_hash])?;
             return Ok(None);
         }
-        if now - last_seen >= 60 {
+        if now - last_seen >= TOUCH_EVERY_SECS {
             c.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", params![now, token_hash])?;
         }
         Ok(Some(Session {
@@ -351,7 +355,7 @@ impl Db {
     pub fn token_revoke(&self, name: &str) -> R<bool> {
         Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)
     }
-    /// Name of the unexpired API token with this hash, touching `last_used` at most once a minute.
+    /// Name of the unexpired API token with this hash, touching `last_used` at most every `TOUCH_EVERY_SECS`.
     pub fn token_lookup(&self, hash: &str) -> R<Option<String>> {
         let c = self.c();
         let row: Option<(String, Option<i64>, Option<i64>)> = c
@@ -364,7 +368,7 @@ impl Db {
         if expires_at.is_some_and(|e| now >= e) {
             return Ok(None);
         }
-        if last.is_none_or(|l| now - l >= 60) {
+        if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
         Ok(Some(name))
@@ -437,8 +441,16 @@ impl Db {
         let rows = st.query_map([], worker_row)?.collect();
         rows
     }
-    pub fn worker_seen(&self, name: &str) -> R<()> {
-        self.c().execute("UPDATE workers SET last_seen=? WHERE name=?", params![crate::now(), name])?;
+    /// Record that a worker was seen now. A connected worker's heartbeat calls this every ping;
+    /// `min_interval` skips the update while the stored value is younger than that many seconds,
+    /// so an idle connection does not commit (and fsync) a transaction per ping. An UPDATE that
+    /// matches no row writes nothing to the database files.
+    pub fn worker_seen(&self, name: &str, min_interval: i64) -> R<()> {
+        let now = crate::now();
+        self.c().execute(
+            "UPDATE workers SET last_seen=?1 WHERE name=?2 AND (last_seen IS NULL OR last_seen <= ?1 - ?3)",
+            params![now, name, min_interval],
+        )?;
         Ok(())
     }
 

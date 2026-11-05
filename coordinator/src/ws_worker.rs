@@ -17,6 +17,10 @@ use tokio::time::{interval, timeout, Instant};
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(20);
+/// How often a connected worker's `last_seen` is persisted. The live state comes from the hub;
+/// the stored value matters after a disconnect (written then, unthrottled) or a coordinator crash,
+/// where it is at most this stale. Ten minutes keeps an idle worker to six small commits an hour.
+const LAST_SEEN_EVERY_SECS: i64 = 0;
 const SILENCE_LIMIT: Duration = Duration::from_secs(60);
 
 fn plain(status: StatusCode, text: &'static str) -> Response {
@@ -279,7 +283,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             _ = tick.tick() => {
                 if last_heard.elapsed() > SILENCE_LIMIT { final_close = Some((1001, "silent for 60 s")); break }
                 match st.db.worker_get(&name) {
-                    Ok(Some(w)) if w.worker_id.as_deref() == Some(worker_id.as_str()) => { let _ = st.db.worker_seen(&name); }
+                    Ok(Some(w)) if w.worker_id.as_deref() == Some(worker_id.as_str()) => { let _ = st.db.worker_seen(&name, LAST_SEEN_EVERY_SECS); }
                     Ok(None) => { final_close = Some((1008, "worker revoked")); break }
                     _ => {}
                 }
@@ -291,7 +295,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         let _ = socket.send(close_frame(code, reason)).await;
     }
     if st.hub.unregister(&name, conn_id) {
-        let _ = st.db.worker_seen(&name);
+        let _ = st.db.worker_seen(&name, 0);
         st.hub
             .publish(json!({"type": "worker", "worker": name, "state": "offline", "generation": generation}));
     }

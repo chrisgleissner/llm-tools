@@ -222,6 +222,14 @@ unknown or offline target fails and never falls back to local execution. Copy
 `ca.pem` and `setup-token` out of the coordinator as described in the install guide.
 The same command line is shown by `llm-bridge help distributed`.
 
+Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64 and
+macOS ARM64 and Intel support every role. Windows x86-64 and ARM64 support the
+coordinator, the web interface and the remote client (`llm-bridge --target`, `remote`,
+`worker list`) only; the tmux station, console, controller and worker need tmux and a
+POSIX terminal. Other commands on Windows exit with status 2 and a one-line message, or
+with `--json` an error envelope with code `unsupported-platform`. See decision D8 in
+[DECISIONS](./docs/distributed/DECISIONS.md).
+
 Documentation: [install](./docs/distributed/install.md) (container and native
 install, certificate trust, backup, recovery, Raspberry Pi Zero 2 W target profile),
 [operations](./docs/distributed/operations.md) (worker service, audit log, backup,

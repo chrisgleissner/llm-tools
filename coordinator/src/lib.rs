@@ -40,11 +40,36 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// `OpenOptions` whose created files get `mode` on Unix. Windows has no permission bits: files are
+/// created normally and the access control list of the data directory is the protection.
+pub fn private_options(mode: u32) -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    options
+}
+
+/// Restrict `path` to its owner (`mode`, for example 0o700 or 0o600). Best effort, and a no-op on
+/// Windows, where the data directory's access control list applies.
+pub fn restrict_permissions(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = (path, mode);
+}
+
 /// Write `contents` to a new file with the given mode; never overwrites. Returns false if it exists.
 pub fn write_new(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<bool> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    match std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path) {
+    match private_options(mode).write(true).create_new(true).open(path) {
         Ok(mut f) => {
             f.write_all(contents)?;
             f.sync_all()?;
@@ -58,10 +83,9 @@ pub fn write_new(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<boo
 /// Atomically replace a file (write temp with mode, rename).
 pub fn write_replace(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("tmp-new");
     let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
+    let mut f = private_options(mode).write(true).create_new(true).open(&tmp)?;
     f.write_all(contents)?;
     f.sync_all()?;
     std::fs::rename(&tmp, path)

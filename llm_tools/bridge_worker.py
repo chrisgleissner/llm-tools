@@ -20,6 +20,7 @@ import queue
 import random
 import re
 import ssl
+import sys
 import tempfile
 import threading
 import time
@@ -77,16 +78,18 @@ def _atomic_private_write(path: Path, text: str) -> None:
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
+            if hasattr(os, "fchmod"):  # Windows has no permission bits; the profile directory's ACL protects the file
+                os.fchmod(handle.fileno(), 0o600)
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        if sys.platform != "win32":  # a directory cannot be opened for fsync on Windows
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise

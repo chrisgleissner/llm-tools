@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
+try:  # POSIX-only; Windows runs only the remote client (docs/distributed/DECISIONS.md)
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    fcntl = None  # type: ignore[assignment]
 import json
 import os
 import re

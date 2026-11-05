@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import socket
 import stat
@@ -157,6 +158,7 @@ def _no_live_provider_launch(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: 
     isolated_home = guard / "home"
     isolated_home.mkdir()
     monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("USERPROFILE", str(isolated_home))  # Path.home() on Windows
     for name in ("codex", "claude", "copilot", "kilo", "mmx", "opencode"):
         path = guard / name
         path.write_text("#!/bin/sh\necho 'Unexpected live provider launch blocked by test harness' >&2\nexit 123\n")
@@ -244,9 +246,43 @@ def _load_markers() -> dict[str, list[str]]:
     return {f"{path}::{name}": list(kinds) for path, names in raw.items() for name, kinds in names.items()}
 
 
+# --- Windows ------------------------------------------------------------------
+#
+# Windows runs the remote client, the typed command layer, the protocol and the integration tests
+# against a coordinator built for Windows (docs/distributed/DECISIONS.md D8). Everything else needs a
+# facility Windows does not have, and is skipped there with the reason below. Nothing is skipped on
+# Linux or macOS by this code.
+
+_MISSING_POSIX_MODULE = re.compile(r"No module named '(_?curses|termios|fcntl|pty|tty|pwd|grp|resource)'")
+WINDOWS_NO_TMUX = "tmux and POSIX pseudo-terminals do not exist on Windows (docs/distributed/DECISIONS.md D8)"
+# Test module (file stem) -> reason. Windows has no tmux, curses, termios, fcntl locks, POSIX signals,
+# or shebang executables, so these modules cannot run there. Keep entries narrow and justified.
+WINDOWS_SKIPPED_MODULES: dict[str, str] = {}
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector: Any):
+    """On Windows, a test module that imports a POSIX-only standard-library module is skipped with that reason."""
+    outcome = yield
+    if not _WINDOWS or not isinstance(collector, pytest.Module):
+        return
+    report = outcome.get_result()
+    if report.failed:
+        found = _MISSING_POSIX_MODULE.search(str(report.longrepr))
+        if found:
+            report.outcome = "skipped"
+            report.longrepr = (str(collector.path), 0, f"Skipped: needs the POSIX module '{found.group(1)}', which Windows does not provide (docs/distributed/DECISIONS.md D8)")
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     manifest = _load_markers()
     for item in items:
+        if _WINDOWS:
+            reason = WINDOWS_SKIPPED_MODULES.get(Path(str(item.fspath)).stem)
+            if reason:
+                item.add_marker(pytest.mark.skip(reason=reason))
+            elif {"tmux", "pty"} & set(manifest.get(_marker_key(item.nodeid), ())):
+                item.add_marker(pytest.mark.skip(reason=WINDOWS_NO_TMUX))
         for kind in manifest.get(_marker_key(item.nodeid), ()):
             if kind in RESOURCE_MARKERS:
                 item.add_marker(getattr(pytest.mark, kind))
@@ -333,8 +369,9 @@ def _write_markers() -> None:
 
 # Resolved once at import: tests replace PATH, and teardown must still find them.
 _RM = shutil.which("rm") or "/bin/rm"
+_WINDOWS = sys.platform == "win32"
 _TMUX = shutil.which("tmux")
-_POSIX_SPAWN = os.posix_spawn
+_POSIX_SPAWN = getattr(os, "posix_spawn", None)
 _WAITPID = os.waitpid
 _REAL_RUNTIME_ENV = os.environ.get("XDG_RUNTIME_DIR", "")
 _SESSION_RUNTIME_DIRS: set[str] = set()
@@ -344,7 +381,7 @@ _ESCAPED_SOCKETS: dict[str, str] = {}  # socket path -> test id that asked for i
 
 
 def _real_bridge_dirs() -> list[Path]:
-    dirs = [Path("/tmp") / f"lb-{os.getuid()}"]
+    dirs = [] if _WINDOWS else [Path("/tmp") / f"lb-{os.getuid()}"]
     if _REAL_RUNTIME_ENV:
         dirs.insert(0, Path(_REAL_RUNTIME_ENV) / "llm-bridge")
     return dirs
@@ -422,6 +459,15 @@ def _quiet_run(argv: list[str]) -> None:
     blocking ``waitpid`` (both captured at import) avoids all of them; ``rm``
     and ``tmux kill-server`` do not block.
     """
+    if _POSIX_SPAWN is None:  # Windows: no posix_spawn; nothing patches subprocess for these short commands
+        try:
+            if argv[0] == _RM:
+                shutil.rmtree(argv[-1], ignore_errors=True)
+            else:
+                subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except OSError:
+            pass
+        return
     actions = [(os.POSIX_SPAWN_OPEN, fd, os.devnull, os.O_RDWR, 0) for fd in (0, 1, 2)]
     try:
         pid = _POSIX_SPAWN(argv[0], argv, os.environ.copy(), file_actions=actions)
@@ -475,7 +521,7 @@ def _private_runtime_dir(tmp_path: Path):
     are still active, so it avoids Python-level directory walking and uses
     ``rm -rf`` and ``os.listdir`` only.
     """
-    runtime = Path(tempfile.mkdtemp(prefix="lbt-", dir="/tmp"))
+    runtime = Path(tempfile.mkdtemp(prefix="lbt-", dir=None if _WINDOWS else "/tmp"))
     runtime.chmod(0o700)
     process_hygiene.write_owner(str(runtime))
     _SESSION_RUNTIME_DIRS.add(str(runtime))
@@ -517,7 +563,7 @@ def env(tmp_path: Path, _private_runtime_dir: Path) -> dict[str, str]:
         "HOME": str(home),
         "XDG_CACHE_HOME": str(home / ".cache"),
         "XDG_RUNTIME_DIR": os.environ["XDG_RUNTIME_DIR"],
-        "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
+        "PATH": os.pathsep.join([str(fake_bin), str(Path(sys.executable).parent), str(ROOT), out.get("PATH", "")]),
         # Most tests assert direct reader/CLI behaviour. Service behaviour is
         # covered explicitly and opts back in so the suite does not spawn a
         # background sampler for every llm-usage subprocess.
@@ -565,7 +611,7 @@ def env(tmp_path: Path, _private_runtime_dir: Path) -> dict[str, str]:
 
 @pytest.fixture()
 def fake_bin(env: dict[str, str]) -> Path:
-    return Path(env["PATH"].split(":", 1)[0])
+    return Path(env["PATH"].split(os.pathsep, 1)[0])
 
 
 def write_exe(path: Path, text: str) -> Path:

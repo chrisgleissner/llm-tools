@@ -99,3 +99,42 @@ is documented as an accepted risk.
 | L6 An over-long integer in a message raised an unhandled exception in the worker. | Fixed: it is a protocol error. |
 | L7 The session cookie had no `__Host-` prefix, the systemd unit lacked system call filtering, and the remote CLI followed redirects with the bearer token. | Fixed: `__Host-bridge_session`, `SystemCallFilter=@system-service`, `ProtectProc=invisible`, `ProcSubset=pid`; redirects are refused. |
 
+
+## D8 Platform support and Windows (operator addendum 4, TEST-013, TEST-016)
+
+CI runs on six GitHub-hosted platforms: Linux x86-64 (`ubuntu-latest`), Linux ARM64
+(`ubuntu-24.04-arm`), macOS ARM64 (`macos-latest`), macOS x86-64 (`macos-15-intel`; GitHub
+still offers an Intel image, `macos-26-intel` is the other label), Windows x86-64
+(`windows-latest`) and Windows ARM64 (`windows-11-arm`, available to public repositories).
+
+Decision, from the facilities each component needs:
+
+| Component | Linux | macOS | Windows |
+|---|---|---|---|
+| Coordinator (`bridge-coordinator`), web interface | supported | supported | supported |
+| Remote client: `llm-bridge --target NAME COMMAND`, `remote login\|status\|logout`, `worker list` | supported | supported | supported |
+| Standalone Bridge, tmux station, console, controller, `worker` commands, `ralph-robin` suspend paths, `llm-sleep-soak` | supported | supported (no systemd suspend or RTC wake) | not supported |
+
+Windows lacks tmux, POSIX pseudo-terminals, `curses`, `termios`, `fcntl` file locks and POSIX
+signals, which the station, console, controller and worker use. Porting them would mean a
+second terminal and locking implementation with no operator asking for it, so the Windows
+scope is the coordinator and the remote client.
+
+On Windows every other `llm-bridge` command exits with status 2 and one line,
+`llm-bridge: '<command>' is not supported on Windows. Windows supports the remote client only: ...`.
+With `--json` it prints `{"schema_version": 1, "outcome": "failed", "error": {"code":
+"unsupported-platform", "message": ..., "details": {"platform": "windows", "command": ...}}}`
+on standard output. There is no traceback (`llm_tools.bridge.unsupported_on_windows`,
+`tests/test_windows_policy.py`).
+
+Files the coordinator creates are mode 0600 (directory 0700) on Unix. Windows has no
+permission bits: the files are created normally and the access control list of the data
+directory (by default the user profile) is the protection. Keep the data directory in a
+location only the service account can read.
+
+The Python test suite skips on Windows only what needs a missing facility, centrally in
+`tests/conftest.py`: modules that import `curses`, `termios`, `fcntl` or `pty`, tests marked
+`tmux` or `pty`, and the modules in `WINDOWS_SKIPPED_MODULES`, each with its reason. Nothing is
+skipped on Linux or macOS by that code. The evidence for each skip is the CI run listed in
+`SPEC_STATUS.md`.
+

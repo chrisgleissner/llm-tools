@@ -84,3 +84,26 @@ def test_pages_artifact_excludes_repository_tooling() -> None:
     for excluded in ("check_site.py", "README.md", "assets/src/"):
         assert f"--exclude '{excluded}'" in text
     assert "path: _site" in text
+
+
+def _jobs(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    parts = re.split(r"\n  ([A-Za-z0-9_-]+):\n", text[text.index("\njobs:\n") + 6:])
+    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)} | ({parts[-2]: parts[-1]} if len(parts) > 2 else {})
+
+
+def test_every_test_job_has_a_timeout_and_matrices_do_not_fail_fast() -> None:
+    for name, body in _jobs(WORKFLOWS / "test.yml").items():
+        assert re.search(r"^    timeout-minutes: \d+$", body, re.M), f"job {name} needs timeout-minutes"
+        if "matrix:" in body:
+            assert "fail-fast: false" in body, f"job {name} must set fail-fast: false"
+
+
+def test_the_platform_matrix_covers_six_hosted_platforms() -> None:
+    text = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    for label in ("ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "macos-15-intel", "windows-latest", "windows-11-arm"):
+        assert label in text, label
+    jobs = _jobs(WORKFLOWS / "test.yml")
+    assert "cargo clippy --locked --all-targets -- -D warnings" in jobs["cross-platform"]
+    assert "BRIDGE_COORDINATOR_BIN" in jobs["cross-platform"] and "BRIDGE_REQUIRE_COORDINATOR" in jobs["cross-platform"]
+    assert "chromium" in jobs["web-cross"] and "firefox" in jobs["web-cross"]

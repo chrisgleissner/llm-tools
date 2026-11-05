@@ -2041,10 +2041,42 @@ def _split_target(arguments: list[str]) -> tuple[str | None, list[str]]:
         return None, arguments
 
 
+# Windows supports the remote client only (docs/distributed/DECISIONS.md D8): the coordinator,
+# `remote login|status|logout`, `worker list` and any command sent with `--target NAME`. Everything
+# else needs tmux, a POSIX terminal or POSIX file locks.
+WINDOWS_SUPPORTED_USAGE = "llm-bridge --target NAME COMMAND, llm-bridge remote login|status|logout, llm-bridge worker list"
+
+
+def unsupported_on_windows(arguments: list[str]) -> dict[str, Any] | None:
+    """The structured refusal for a local command on Windows, or None when the command is supported."""
+    if sys.platform != "win32":
+        return None
+    if any(word in {"-h", "--help", "--version"} for word in arguments):
+        return None
+    if arguments[:1] in (["remote"], ["help"]) or arguments[:2] == ["worker", "list"]:
+        return None
+    command = " ".join(word for word in arguments[:2] if not word.startswith("-")) or "(none)"
+    message = (f"'{command}' is not supported on Windows. Windows supports the remote client only: "
+               f"{WINDOWS_SUPPORTED_USAGE}. Run local commands on Linux or macOS.")
+    return {"schema_version": 1, "outcome": "failed",
+            "error": commands.CommandError("unsupported-platform", message, {"platform": "windows", "command": command}).to_json()}
+
+
+def _refuse_on_windows(arguments: list[str]) -> int | None:
+    refusal = unsupported_on_windows(arguments)
+    if refusal is None:
+        return None
+    if "--json" in arguments:
+        print(json.dumps(refusal, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"llm-bridge: {refusal['error']['message']}", file=sys.stderr)
+    return 2
+
+
 def _main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
-        if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"} and not _managed_session():
+        if sys.platform != "win32" and sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"} and not _managed_session():
             from .bridge_launcher import run_launcher
 
             from . import bridge_theme
@@ -2080,6 +2112,10 @@ def _main(argv: list[str] | None = None) -> int:
     if arguments == ["--version"]:
         print(f"llm-bridge {package_version()}")
         return 0
+    if target == commands.LOCAL_TARGET:
+        refused = _refuse_on_windows(arguments)
+        if refused is not None:
+            return refused
     if arguments and arguments[0] in {"--prompt-file", "--file", "--prompt"}:
         if _managed_session():
             print(f"llm-bridge: {MANAGED_REFUSAL}", file=sys.stderr)
