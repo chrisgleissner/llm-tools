@@ -1,6 +1,7 @@
 import * as api from "../api";
 import type { BridgeEvent } from "../api";
 import { button, debounce, emptyState, fill, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
+import { icon } from "../icons";
 import { isStale, onStream, store, subscribe, worker } from "../store";
 import type { TerminalPanel } from "../terminal";
 import { announce, confirmDialog } from "../ui";
@@ -205,6 +206,24 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
               taskOffset = 0;
               renderTasksDebounced();
             }),
+            (() => {
+              const sel = h("select", { id: "task-sort", "aria-label": "Sort tasks by" }, ...([["ordinal", "Task number"], ["title", "Title"], ["status", "Status"], ["priority", "Priority"]] as const).map(([k, label]) => h("option", { value: k, selected: k === tSort }, label)));
+              sel.addEventListener("change", () => {
+                tSort = sel.value as TaskSort;
+                tOrder = "asc";
+                taskOffset = 0;
+                renderTasks();
+              });
+              return sel;
+            })(),
+            (() => {
+              const dir = h("button", { type: "button", class: "btn icon", id: "task-sort-order", "aria-label": tOrder === "asc" ? "Ascending. Activate for descending." : "Descending. Activate for ascending." }, icon(tOrder === "asc" ? "chevronUp" : "chevronDown", 20));
+              dir.addEventListener("click", () => {
+                tOrder = tOrder === "asc" ? "desc" : "asc";
+                renderTasks();
+              });
+              return dir;
+            })(),
             h(
               "ul",
               { class: "chips", "aria-label": "Filter tasks by status", style: "flex-basis:100%" },

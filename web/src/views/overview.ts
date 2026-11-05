@@ -43,6 +43,7 @@ export function overview(root: HTMLElement): () => void {
   let disposed = false;
   let lastKey = "";
   let timer = 0;
+  let retries = 0;
 
   const missionName = (w: string, id: string) => store.missions.find((m) => m.worker === w && m.mission.id === id)?.mission.name || id.slice(0, 8);
 
@@ -66,6 +67,8 @@ export function overview(root: HTMLElement): () => void {
     checked = picked.length;
     snapshotsLoaded = true;
     render();
+    // A worker that is still starting may not answer yet: look again shortly (a few times at most).
+    if (snapshots.length < picked.length && retries++ < 4) schedule(3000);
   }
 
   async function loadActivity(): Promise<void> {
@@ -180,6 +183,7 @@ export function overview(root: HTMLElement): () => void {
     const k = key();
     if (k !== lastKey) {
       lastKey = k;
+      retries = 0;
       schedule();
     }
   });

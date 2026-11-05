@@ -343,7 +343,7 @@ table.kv th { width: 40%; font-weight: 600; background: none; font-size: inherit
   table.rt th[scope="row"] { font-size: var(--text-base); }
   table.rt td > *, table.rt th > a { text-align: right; }
   table.rt .row-actions { justify-content: flex-end; }
-  .ts { align-items: flex-end; }
+  table.rt .ts { align-items: flex-end; }
   .cell-stack { align-items: flex-end; }
   .pager .btn span { display: none; }
 }

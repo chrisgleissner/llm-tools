@@ -166,8 +166,8 @@ export function emptyState(opts: { icon: IconName; title: string; text: Child; a
 
 export function pager(label: string, offset: number, size: number, total: number, go: (offset: number) => void): HTMLElement {
   const last = Math.min(total, offset + size);
-  const prev = h("button", { type: "button", class: "btn", disabled: offset <= 0 }, icon("chevronLeft", 18), h("span", {}, "Previous"));
-  const next = h("button", { type: "button", class: "btn", disabled: offset + size >= total }, h("span", {}, "Next"), icon("chevronRight", 18));
+  const prev = h("button", { type: "button", class: "btn", "aria-label": "Previous page", disabled: offset <= 0 }, icon("chevronLeft", 18), h("span", {}, "Previous"));
+  const next = h("button", { type: "button", class: "btn", "aria-label": "Next page", disabled: offset + size >= total }, h("span", {}, "Next"), icon("chevronRight", 18));
   prev.addEventListener("click", () => go(Math.max(0, offset - size)));
   next.addEventListener("click", () => go(offset + size));
   return h("nav", { class: "pager", "aria-label": label }, prev, h("span", { class: "muted pager-count", "aria-live": "polite" }, total === 0 ? "0 results" : `${offset + 1}-${last} of ${total}`), next);
