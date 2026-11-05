@@ -186,21 +186,18 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
                         }
                     }
                 }
-                "terminal.status" => {
+                "terminal.status"
                     if !matches!(p["state"].as_str(), Some("opened" | "refused" | "closed"))
                         || !matches!(p["mode"].as_str(), Some("view" | "write"))
-                        || !p["reason"].is_string()
-                    {
-                        return perr("invalid-message", "terminal.status: bad state, mode or reason");
-                    }
+                        || !p["reason"].is_string() =>
+                {
+                    return perr("invalid-message", "terminal.status: bad state, mode or reason");
                 }
                 _ => {}
             }
         }
-        "error" => {
-            if !p["code"].is_string() || !p["message"].is_string() {
-                return perr("invalid-message", "error: code and message must be strings");
-            }
+        "error" if !p["code"].is_string() || !p["message"].is_string() => {
+            return perr("invalid-message", "error: code and message must be strings");
         }
         _ => {}
     }

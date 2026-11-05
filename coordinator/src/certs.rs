@@ -110,6 +110,11 @@ fn server_pem(ca_key: &KeyPair, names: Vec<String>) -> Result<(String, String), 
     params.distinguished_name.push(DnType::CommonName, "Bridge Coordinator");
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    // Strict X.509 verification (Python 3.13+ VERIFY_X509_STRICT, RFC 5280) needs the authority key
+    // identifier on a CA-issued certificate. ExplicitNoCa also writes the subject key identifier
+    // and a critical basicConstraints CA:FALSE.
+    params.is_ca = IsCa::ExplicitNoCa;
+    params.use_authority_key_identifier_extension = true;
     set_validity(&mut params, 825);
     let key = KeyPair::generate().map_err(|e| e.to_string())?;
     let ca = ca_certificate(ca_key, None)?;

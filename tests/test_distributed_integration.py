@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import ssl
 import subprocess
 import threading
@@ -46,6 +47,16 @@ if BINARY is None and os.environ.get("BRIDGE_REQUIRE_COORDINATOR") == "1":
 pytestmark = pytest.mark.skipif(BINARY is None, reason="bridge-coordinator is not built")
 
 
+def strict_context(ca: Path) -> ssl.SSLContext:
+    """Client context with RFC 5280 strict checks, the default of Python 3.13 and later.
+
+    Set explicitly so a certificate defect (missing key usage or key identifiers) fails on
+    every Python version, not only on the newest interpreter in CI."""
+    context = ssl.create_default_context(cafile=str(ca))
+    context.verify_flags |= ssl.VERIFY_X509_STRICT
+    return context
+
+
 class Coordinator:
     def __init__(self, data: Path) -> None:
         self.data = data
@@ -58,7 +69,7 @@ class Coordinator:
         assert match, line
         self.address = match.group(1)
         self.port = int(self.address.rsplit(":", 1)[1])
-        self.context = ssl.create_default_context(cafile=str(data / "ca.pem"))
+        self.context = strict_context(data / "ca.pem")
         self.api_token = self.run("token", "create", "cli")
 
     def run(self, *args: str) -> str:
@@ -202,3 +213,29 @@ def test_remote_cli_has_local_semantics(system, tmp_path, capsys):
     assert code == 2 and "read-only" in err
     code, _, err = run("--target", "ws", "task", "show", "--mission", mission_id, "--task", "7")
     assert code == 2 and "ws:" in err
+
+
+def _handshake(port: int, ca: Path) -> dict:
+    with socket.create_connection(("127.0.0.1", port), timeout=scaled(10)) as raw:
+        with strict_context(ca).wrap_socket(raw, server_hostname="localhost") as tls:
+            return tls.getpeercert()
+
+
+def test_generated_certificates_pass_strict_verification_before_and_after_renewal(tmp_path):
+    coordinator = Coordinator(tmp_path / "coordinator")
+    try:
+        assert ("DNS", "localhost") in _handshake(coordinator.port, coordinator.data / "ca.pem")["subjectAltName"]
+    finally:
+        coordinator.stop()
+    before = (coordinator.data / "server.pem").read_text()
+    coordinator.run("cert", "renew", "--hostname", "localhost")
+    assert (coordinator.data / "server.pem").read_text() != before
+    process = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(coordinator.data)], stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        match = re.search(r"https://\S+:(\d+)", process.stderr.readline())
+        assert match
+        assert ("DNS", "localhost") in _handshake(int(match.group(1)), coordinator.data / "ca.pem")["subjectAltName"]
+    finally:
+        process.terminate()
+        process.wait(timeout=scaled(10))
+        process.stderr.close()

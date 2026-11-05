@@ -180,9 +180,13 @@ def test_wss_verifies_the_server_against_the_given_ca(tmp_path):
     def run(*args):
         subprocess.run(["openssl", *args], check=True, capture_output=True, cwd=tmp_path)
 
-    run("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=test ca")
+    run("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=test ca",
+        "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-addext", "subjectKeyIdentifier=hash")
     run("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "srv.key", "-out", "srv.csr", "-subj", "/CN=localhost")
-    (tmp_path / "ext").write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+    (tmp_path / "ext").write_text(
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n"
+        "extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n"
+    )
     run("x509", "-req", "-in", "srv.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "srv.pem", "-days", "2", "-extfile", "ext")
     server_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     server_context.load_cert_chain(tmp_path / "srv.pem", tmp_path / "srv.key")
@@ -193,7 +197,9 @@ def test_wss_verifies_the_server_against_the_given_ca(tmp_path):
         server.read(conn)
 
     server = Server(script, context=server_context)
-    client = WebSocketClient.connect(f"wss://localhost:{server.port}/", context=ssl.create_default_context(cafile=str(tmp_path / "ca.pem")))
+    strict = ssl.create_default_context(cafile=str(tmp_path / "ca.pem"))
+    strict.verify_flags |= ssl.VERIFY_X509_STRICT
+    client = WebSocketClient.connect(f"wss://localhost:{server.port}/", context=strict)
     client.send_text("hi")
     assert client.receive_text(timeout=5) == "secure"
     client.close()

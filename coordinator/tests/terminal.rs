@@ -48,6 +48,7 @@ async fn browser(env: &Env, api: &Api, query: &str) -> Ws {
     env.ws(&format!("/api/v1/terminal?{query}"), &refs).await.expect("browser upgrade")
 }
 
+#[allow(clippy::result_large_err)] // callers inspect the handshake error
 async fn attach(env: &Env, token: &str, session: &str) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
     env.ws(&format!("/api/v1/worker/terminal/{session}"), &[("authorization", &format!("Bearer {token}"))])
         .await

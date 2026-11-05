@@ -122,6 +122,8 @@ impl Env {
         api.login("admin", PASSWORD).await;
         api
     }
+    // Test helper: callers inspect the handshake error, so it is returned unboxed.
+    #[allow(clippy::result_large_err)]
     pub async fn ws(&self, path: &str, headers: &[(&str, &str)]) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
         let tcp = TcpStream::connect(self.addr).await.unwrap();
         let tls = TlsConnector::from(self.tls.clone())
@@ -219,6 +221,8 @@ pub struct Fw {
 }
 
 impl Fw {
+    // Test helper: callers inspect the handshake error, so it is returned unboxed.
+    #[allow(clippy::result_large_err)]
     pub async fn raw(env: &Env, token: &str) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
         env.ws("/api/v1/worker/connect", &[("authorization", &format!("Bearer {token}"))]).await
     }
