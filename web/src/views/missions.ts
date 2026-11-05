@@ -33,10 +33,17 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   let disposed = false;
 
   const body = h("div", { id: "missions-body" });
+  const rest = h("div", { class: "toolbar-rest" });
   const controls = h("div", { class: "toolbar", id: "missions-controls" });
   const live = h("p", { class: "sr-only", role: "status", id: "missions-live" });
   root.append(h("h1", {}, workerFilter ? `Missions on ${workerFilter}` : "Missions"), controls, live, body);
 
+  // The search box is created once: rebuilding it on every result would drop focus and the caret while the user types.
+  const search = searchBox("mission-search", "Search missions", q, (v) => {
+    q = v.trim();
+    changed();
+  });
+  controls.append(search, rest);
   const filtered = () => Boolean(q || statuses.length || workerFilter);
 
   function syncUrl(): void {
@@ -113,11 +120,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
       changed();
     });
     const active = document.activeElement?.id;
-    controls.replaceChildren(
-      searchBox("mission-search", "Search missions", q, (v) => {
-        q = v.trim();
-        changed();
-      }),
+    rest.replaceChildren(
       sel,
       dir,
       ...(workerSel ? [workerSel] : []),
@@ -137,6 +140,8 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
       ),
     );
     if (active && active !== "mission-search") document.getElementById(active)?.focus();
+    const box = search.querySelector("input");
+    if (box && box.value !== q && document.activeElement !== box) box.value = q;
   }
   function setSort2(k: Sort): void {
     sort = k;

@@ -145,7 +145,7 @@ p { margin: var(--space-2) 0; }
   display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-4);
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
-.brand { white-space: nowrap; display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 700; color: var(--text); text-decoration: none; font-size: var(--text-lg); min-height: var(--target); }
+.brand { min-width: var(--target); white-space: nowrap; display: inline-flex; align-items: center; gap: var(--space-2); font-weight: 700; color: var(--text); text-decoration: none; font-size: var(--text-lg); min-height: var(--target); }
 .brand .icon { color: var(--accent); }
 .top .spacer { flex: 1 1 auto; }
 .tools { display: flex; align-items: center; gap: var(--space-2); }
@@ -312,6 +312,7 @@ a.tile:hover { border-color: var(--accent); }
 .toolbar .search { flex: 1 1 220px; position: relative; }
 .toolbar .search input { padding-left: calc(var(--space-3) + 24px); }
 .toolbar .search .icon { position: absolute; left: var(--space-3); top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.toolbar-rest { display: contents; }
 .toolbar select { width: auto; min-width: 9rem; }
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
 table { border-collapse: collapse; width: 100%; }

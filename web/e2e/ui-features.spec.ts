@@ -103,6 +103,7 @@ test.describe("with a seeded worker", () => {
       await page.getByRole("button", { name: "Previous" }).click();
       await page.getByLabel("Search missions").fill("docs sweep 04");
       await expect(page.locator("#missions-table tbody tr")).toHaveCount(1);
+      await expect(page.getByLabel("Search missions"), "typing keeps focus while results arrive").toBeFocused();
       await expect(page.locator("#missions-table tbody tr")).toContainText("Docs sweep 04");
       await expect(page).toHaveURL(/q=docs/);
       await page.getByLabel("Search missions").fill("zzz-no-such-mission");
