@@ -223,6 +223,7 @@ main.auth { max-width: none; min-height: 100vh; min-height: 100dvh; padding: var
 .btn.danger.solid { background: var(--danger); color: var(--on-danger); }
 .btn.danger.solid:hover:not(:disabled) { background: var(--danger-strong); }
 .btn.small { min-height: 36px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+@media (max-width: 720px), (pointer: coarse) { .btn.small { min-height: var(--target); } }
 .btn.copy { min-width: var(--target); }
 .btn.busy { position: relative; color: transparent !important; pointer-events: none; }
 .btn.busy::after { content: ""; position: absolute; width: 18px; height: 18px; border: 2px solid var(--on-accent); border-right-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
@@ -336,7 +337,7 @@ table.kv th { width: 40%; font-weight: 600; background: none; font-size: inherit
 @media (max-width: 720px) {
   .rt .table-wrap, .table-wrap.rt { border: 0; background: none; overflow: visible; }
   table.rt, table.rt tbody, table.rt tr, table.rt td, table.rt th { display: block; width: 100%; }
-  table.rt thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  table.rt thead { display: none; } /* labels move into each cell; sorting uses the sort control */
   table.rt tr { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); margin: 0 0 var(--space-3); padding: var(--space-2) var(--space-3); box-shadow: var(--shadow); }
   table.rt td, table.rt th { border: 0; padding: var(--space-1) 0; display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); text-align: right; min-height: 32px; }
   table.rt td::before, table.rt th[scope="row"]::before { content: attr(data-label); color: var(--muted); font-size: var(--text-sm); font-weight: 600; text-align: left; flex: none; }
