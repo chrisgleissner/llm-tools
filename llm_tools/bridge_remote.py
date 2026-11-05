@@ -18,6 +18,7 @@ import os
 import re
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -285,12 +286,22 @@ def _print(value: Any, as_json: bool, human: Callable[[Any], str]) -> int:
     return 0
 
 
-def _format_workers(workers: list[dict[str, Any]]) -> str:
+def _last_seen(value: Any, now: float | None = None) -> str:
+    """``last_seen`` epoch seconds as an age ("4m ago"); "never" when absent."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return "never"
+    from .common import fmt_duration
+
+    age = (time.time() if now is None else now) - value
+    return "just now" if age < 60 else f"{fmt_duration(age)} ago"
+
+
+def _format_workers(workers: list[dict[str, Any]], now: float | None = None) -> str:
     if not workers:
         return "No workers are registered with the coordinator."
     lines = []
     for worker in workers:
-        lines.append(f"{worker.get('name', '?'):<20} {worker.get('state', '?'):<8} last seen {worker.get('last_seen') or 'never'}")
+        lines.append(f"{worker.get('name', '?'):<20} {worker.get('state', '?'):<8} last seen {_last_seen(worker.get('last_seen'), now)}")
     return "\n".join(lines)
 
 
