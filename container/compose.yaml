@@ -1,8 +1,14 @@
 # LLM Bridge coordinator. Defaults publish only on 127.0.0.1.
-# LAN access is an explicit opt-in: set BRIDGE_PUBLISH_ADDRESS (for example the
-# host's LAN address, or 0.0.0.0) in .env next to this file.
-# First run:  docker compose run --rm coordinator init --hostname bridge.home.arpa --ip <LAN address>
+# LAN access is an explicit opt-in: in .env next to this file set
+#   BRIDGE_PUBLISH_ADDRESS=<host LAN address>   (or 0.0.0.0 for every interface)
+#   BRIDGE_PUBLIC_NAMES=bridge.home.arpa,<host LAN address>
+# BRIDGE_PUBLIC_NAMES are the names browsers and workers use; they go into the
+# certificate (with localhost) and into the URLs `info` prints.
+# First run:  docker compose run --rm coordinator init
 # Then:       docker compose up -d
+# Admin:      docker compose exec coordinator info | health | backup --output /data/backup.sqlite3
+#             docker compose exec -T coordinator admin reset-password < new-password.txt
+# See docs/distributed/install.md (Container deployment).
 services:
   coordinator:
     image: ${BRIDGE_IMAGE:-llm-bridge-coordinator:latest}
@@ -13,6 +19,9 @@ services:
     security_opt: ["no-new-privileges:true"]
     ports:
       - "${BRIDGE_PUBLISH_ADDRESS:-127.0.0.1}:${BRIDGE_PORT:-8443}:8443"
+    environment:
+      BRIDGE_COORDINATOR_PUBLIC_NAMES: ${BRIDGE_PUBLIC_NAMES:-localhost}
+      BRIDGE_COORDINATOR_PUBLIC_PORT: ${BRIDGE_PORT:-8443}
     volumes:
       - bridge-data:/data
     mem_limit: ${BRIDGE_MEMORY_LIMIT:-96m}

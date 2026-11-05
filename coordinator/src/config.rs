@@ -50,6 +50,14 @@ pub const DEFAULT_DATA_DIR: &str = "/var/lib/bridge-coordinator";
 pub const ENV_DATA_DIR: &str = "BRIDGE_COORDINATOR_DATA_DIR";
 pub const ENV_BIND: &str = "BRIDGE_COORDINATOR_BIND";
 pub const ENV_LAN_ENABLED: &str = "BRIDGE_COORDINATOR_LAN_ENABLED";
+/// Comma-separated host names and addresses browsers and workers use to reach the coordinator.
+/// When set, they replace discovery for the certificate (`init`, `cert renew`) and for the URLs
+/// `info` prints. Needed in a container, where the discovered names are container-internal.
+pub const ENV_PUBLIC_NAMES: &str = "BRIDGE_COORDINATOR_PUBLIC_NAMES";
+/// Port in the printed URLs when it differs from the bind port (a published container port).
+pub const ENV_PUBLIC_PORT: &str = "BRIDGE_COORDINATOR_PUBLIC_PORT";
+/// Set by the container image: network exposure is decided by the published port, not `lan_enabled`.
+pub const ENV_CONTAINER: &str = "BRIDGE_COORDINATOR_CONTAINER";
 
 /// `config.toml` text written by `init`, generated from [`Config::default`] so the file and the
 /// built-in defaults cannot differ. A non-loopback `bind` also sets `lan_enabled = true` at the

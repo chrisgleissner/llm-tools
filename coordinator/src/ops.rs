@@ -57,7 +57,10 @@ fn cert_covers(dir: &Path, host: &str) -> bool {
 /// HTTPS URLs for the configured bind address, each with whether the certificate covers it.
 pub fn urls(dir: &Path, cfg: &Config) -> Result<Vec<(String, bool)>, String> {
     let addr = cfg.bind_addr()?;
-    let port = addr.port();
+    let port = std::env::var(crate::config::ENV_PUBLIC_PORT)
+        .ok()
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .unwrap_or(addr.port());
     let fmt = |h: &str| {
         if h.contains(':') {
             format!("https://[{h}]:{port}/")
@@ -65,7 +68,9 @@ pub fn urls(dir: &Path, cfg: &Config) -> Result<Vec<(String, bool)>, String> {
             format!("https://{h}:{port}/")
         }
     };
-    let hosts: Vec<String> = if addr.ip().is_unspecified() {
+    let hosts: Vec<String> = if let Some(s) = netinfo::public_sans() {
+        s.hostnames.into_iter().chain(s.ips.iter().map(|i| i.to_string())).collect()
+    } else if addr.ip().is_unspecified() {
         let s = netinfo::discovered_sans();
         s.hostnames.into_iter().chain(s.ips.iter().map(|i| i.to_string())).collect()
     } else if addr.ip().is_loopback() {
@@ -112,7 +117,9 @@ pub fn report(dir: &Path, with_trust_steps: bool) -> Result<String, String> {
     out += &format!("Bind address:      {}\n", cfg.bind);
     out += &format!(
         "LAN access:        {}\n",
-        if cfg.lan_enabled {
+        if std::env::var_os(crate::config::ENV_CONTAINER).is_some_and(|v| !v.is_empty()) {
+            "decided by the container's published port (BRIDGE_PUBLISH_ADDRESS in compose.yaml)"
+        } else if cfg.lan_enabled {
             "enabled (lan_enabled = true)"
         } else {
             "disabled (loopback only)"

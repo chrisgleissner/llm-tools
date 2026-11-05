@@ -98,8 +98,34 @@ pub fn local_ips() -> Vec<IpAddr> {
     ips
 }
 
-/// Names and addresses of this machine for the default certificate.
+/// Parse `BRIDGE_COORDINATOR_PUBLIC_NAMES`: addresses become IP SANs, everything else a DNS name.
+pub fn parse_public_names(text: &str) -> Sans {
+    let mut sans = Sans {
+        hostnames: vec![],
+        ips: vec![],
+    };
+    for item in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match item.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+            Ok(ip) => sans.ips.push(ip),
+            Err(_) => sans.hostnames.extend(clean_hostname(item)),
+        }
+    }
+    sans
+}
+
+/// Configured public names (`BRIDGE_COORDINATOR_PUBLIC_NAMES`), when set and non-empty.
+pub fn public_sans() -> Option<Sans> {
+    let text = std::env::var(crate::config::ENV_PUBLIC_NAMES).ok()?;
+    let sans = parse_public_names(&text);
+    (!sans.hostnames.is_empty() || !sans.ips.is_empty()).then_some(sans)
+}
+
+/// Names and addresses for the default certificate: the configured public names, else this
+/// machine's discovered names and addresses.
 pub fn discovered_sans() -> Sans {
+    if let Some(sans) = public_sans() {
+        return sans;
+    }
     Sans {
         hostnames: machine_hostname().map(|h| names_for_host(&h)).unwrap_or_default(),
         ips: local_ips(),
@@ -109,6 +135,13 @@ pub fn discovered_sans() -> Sans {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_names_split_into_dns_names_and_addresses() {
+        let s = parse_public_names(" bridge.home.arpa, 192.168.1.20 ,[fd00::1],,bad name ");
+        assert_eq!(s.hostnames, vec!["bridge.home.arpa".to_string()]);
+        assert_eq!(s.ips, vec!["192.168.1.20".parse::<IpAddr>().unwrap(), "fd00::1".parse::<IpAddr>().unwrap()]);
+    }
 
     #[test]
     fn fib_trie_local_addresses() {
