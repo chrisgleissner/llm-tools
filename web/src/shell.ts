@@ -149,9 +149,19 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   paintTheme(themeBtn);
   themeBtn.addEventListener("click", () => cycleTheme(themeBtn));
   let last: string = store.conn;
+  // The first connection after page load is expected and not announced; later changes are.
+  let seenLive = store.conn === "live";
   const dispose = subscribe(() => {
     if (store.conn === last) return;
     last = store.conn;
+    if (store.conn === "live" && !seenLive) {
+      seenLive = true;
+      conn.className = `conn ${store.conn}`;
+      const first = conn.querySelector("#conn-text");
+      if (first) first.textContent = connLabel();
+      return;
+    }
+    if (store.conn === "live") seenLive = true;
     conn.className = `conn ${store.conn}`;
     const t = conn.querySelector("#conn-text");
     if (t) t.textContent = connLabel();

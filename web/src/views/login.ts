@@ -172,8 +172,9 @@ function setupView(root: HTMLElement, opts: LoginOpts): void {
     if (msg && focus) user.input.focus();
     return !msg;
   }
-  token.input.addEventListener("blur", () => token.input.value && validateToken(false));
-  user.input.addEventListener("blur", () => user.input.value && validateUser(false));
+  const notSubmit = (e: FocusEvent): boolean => (e.relatedTarget as HTMLButtonElement | null)?.type !== "submit";
+  token.input.addEventListener("blur", (e) => notSubmit(e) && token.input.value && validateToken(false));
+  user.input.addEventListener("blur", (e) => notSubmit(e) && user.input.value && validateUser(false));
 
   const form = h(
     "form",
@@ -303,8 +304,10 @@ export function newPasswordFields(policy: api.PasswordPolicy, username: () => st
     if (pass.input.getAttribute("aria-invalid")) validatePassword(false);
     if (confirm.input.value) validateConfirm(false);
   });
-  pass.input.addEventListener("blur", () => pass.input.value && validatePassword(false));
-  confirm.input.addEventListener("blur", () => confirm.input.value && validateConfirm(false));
+  // A blur caused by pressing the submit button must not insert an error message and move the button away from the pointer.
+  const notSubmit = (e: FocusEvent): boolean => (e.relatedTarget as HTMLButtonElement | null)?.type !== "submit";
+  pass.input.addEventListener("blur", (e) => notSubmit(e) && pass.input.value && validatePassword(false));
+  confirm.input.addEventListener("blur", (e) => notSubmit(e) && confirm.input.value && validateConfirm(false));
   confirm.input.addEventListener("input", () => confirm.input.getAttribute("aria-invalid") && validateConfirm(false));
   repaint();
   return { pass, confirm, nodes: [pass.wrap, confirm.wrap], repaint, validatePassword, validateConfirm };
