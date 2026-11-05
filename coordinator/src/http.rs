@@ -753,6 +753,40 @@ async fn security_headers(mut r: Response) -> Response {
     r
 }
 
+/// Who may call a route without further credentials.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Access {
+    /// Anyone (health, auth state, setup, login; the SPA shell is the router fallback).
+    Public,
+    /// An admin session cookie or an API bearer token (the `Authed` extractor).
+    Authed,
+    /// A worker token as bearer (worker WebSocket and worker terminal attach).
+    WorkerToken,
+}
+
+/// Every route [`router`] serves with the methods it accepts and its access class.
+/// `tests/routes.rs` checks this table against the `.route(...)` lines of `router` and then
+/// requests each entry without credentials, so a route added to one but not the other fails.
+pub const ROUTES: &[(&str, &[&str], Access)] = &[
+    ("/healthz", &["GET"], Access::Public),
+    ("/api/v1/auth/state", &["GET"], Access::Public),
+    ("/api/v1/auth/setup", &["POST"], Access::Public),
+    ("/api/v1/auth/login", &["POST"], Access::Public),
+    ("/api/v1/auth/logout", &["POST"], Access::Authed),
+    ("/api/v1/auth/password", &["POST"], Access::Authed),
+    ("/api/v1/workers", &["GET", "POST"], Access::Authed),
+    ("/api/v1/workers/{name}", &["DELETE"], Access::Authed),
+    ("/api/v1/missions", &["GET"], Access::Authed),
+    ("/api/v1/commands", &["POST"], Access::Authed),
+    ("/api/v1/commands/{id}", &["GET"], Access::Authed),
+    ("/api/v1/events", &["GET"], Access::Authed),
+    ("/api/v1/stream", &["GET"], Access::Authed),
+    ("/api/v1/diagnostics", &["GET"], Access::Authed),
+    ("/api/v1/worker/connect", &["GET"], Access::WorkerToken),
+    ("/api/v1/terminal", &["GET"], Access::Authed),
+    ("/api/v1/worker/terminal/{session_id}", &["GET"], Access::WorkerToken),
+];
+
 pub fn router(st: St) -> Router {
     Router::new()
         .route("/healthz", get(healthz))

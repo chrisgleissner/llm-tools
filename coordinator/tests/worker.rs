@@ -2,6 +2,7 @@ mod common;
 use common::*;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
+use rustls::pki_types::pem::PemObject;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
@@ -354,7 +355,7 @@ async fn tls_versions_and_suites() {
     use tokio::net::TcpStream;
     let ca = std::fs::read(env.dir.join("ca.pem")).unwrap();
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut ca.as_slice()) {
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(ca.as_slice()) {
         roots.add(c.unwrap()).unwrap();
     }
     let connect = |versions: &[&'static rustls::SupportedProtocolVersion]| {
@@ -384,4 +385,37 @@ async fn next(ws: &mut Ws) -> Value {
         Some(Ok(WsMsg::Text(t))) => serde_json::from_str::<Value>(t.as_str()).unwrap(),
         other => panic!("unexpected {other:?}"),
     }
+}
+
+/// COORD-004 / DATA-007: completed commands are deleted after 7 days by the maintenance pass;
+/// newer completed commands and commands that have not completed are kept.
+#[test]
+fn completed_command_retention() {
+    use bridge_coordinator::db::{Db, COMPLETED_COMMAND_KEEP_SECS};
+    let dir = tmp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Db::open(&bridge_coordinator::db_path(&dir)).unwrap();
+    assert!(db.worker_add("w1", "hash").unwrap());
+    let now = bridge_coordinator::now();
+    let add = |id: &str, done: bool, age: i64| {
+        db.command_insert("w1", "mission.list", false, &request(id, "mission.list")).unwrap();
+        if done {
+            db.command_done("w1", id, &serde_json::json!({"ok": true})).unwrap().expect("done");
+        }
+        db.command_age(id, now - age).unwrap();
+    };
+    let keep = COMPLETED_COMMAND_KEEP_SECS;
+    add("old-done", true, keep + 3600);
+    add("fresh-done", true, keep - 3600);
+    add("old-open", false, keep + 3600);
+    db.maintenance().unwrap();
+    assert!(db.command_get("old-done").unwrap().is_none(), "completed command past retention is deleted");
+    assert!(db.command_get("fresh-done").unwrap().is_some(), "completed command inside retention is kept");
+    assert!(
+        db.command_get("old-open").unwrap().is_some(),
+        "a command that has not completed is never pruned"
+    );
+    assert_eq!(keep, 7 * 86_400, "retention is the documented seven days");
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
 }

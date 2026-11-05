@@ -2639,6 +2639,33 @@
    "subprocess"
   ]
  },
+ "tests/test_distributed_approvals.py": {
+  "test_proposals_are_listed_accepted_and_rejected_through_the_coordinator": [
+   "subprocess"
+  ],
+  "test_read_only_worker_lists_proposals_but_refuses_decisions": [
+   "subprocess"
+  ],
+  "test_standalone_first_run_needs_no_coordinator_module_or_socket": [
+   "subprocess"
+  ]
+ },
+ "tests/test_distributed_crash.py": {
+  "test_coordinator_sigkill_during_command_never_loses_or_repeats_the_effect": [
+   "subprocess"
+  ]
+ },
+ "tests/test_distributed_offline.py": {
+  "test_round_trip_opens_only_loopback_sockets": [
+   "subprocess"
+  ],
+  "test_round_trip_in_a_network_namespace_without_a_route": [
+   "subprocess"
+  ],
+  "test_inner_round_trip": [
+   "subprocess"
+  ]
+ },
  "tests/test_kilo.py": {
   "test_read_kilo_balance_above_minimum": [
    "subprocess"

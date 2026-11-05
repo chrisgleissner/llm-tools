@@ -276,6 +276,12 @@ impl Db {
         )?;
         Ok(())
     }
+    /// Test hook: backdate a command's last update so retention can be exercised without waiting.
+    pub fn command_age(&self, id: &str, updated_at: i64) -> R<()> {
+        self.c()
+            .execute("UPDATE commands SET updated_at=? WHERE request_id=?", params![updated_at, id])?;
+        Ok(())
+    }
     pub fn sessions_clear(&self) -> R<()> {
         self.c().execute("DELETE FROM sessions", [])?;
         Ok(())

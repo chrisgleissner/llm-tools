@@ -36,6 +36,7 @@ LOCAL_TARGET = "local"
 ALL_TARGET = "all"
 _REQUEST_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 _TARGET_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+_INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
 
 # Outcome vocabulary (WORK-007). ``ok`` is the outcome of a read.
 OUTCOMES = ("ok", "accepted", "applied", "rejected", "failed", "uncertain")
@@ -172,6 +173,10 @@ def _validated_params(spec: OperationSpec, raw: Mapping[str, Any]) -> dict[str, 
             raise CommandFailure("invalid-argument", f"{spec.operation}: parameter {name!r} must be {param.kind.__name__}")
         if param.item is not None and not all(_is_kind(element, param.item) for element in value):
             raise CommandFailure("invalid-argument", f"{spec.operation}: parameter {name!r} must be a list of {param.item.__name__}")
+        numbers = [value] if param.kind is int else (value if param.item is int else [])
+        if any(not _INT64_MIN <= number <= _INT64_MAX for number in numbers):
+            # SQLite integers are 64-bit; a larger value would surface as an internal OverflowError.
+            raise CommandFailure("invalid-argument", f"{spec.operation}: parameter {name!r} is out of range")
         values[name] = list(value) if isinstance(value, list) else value
     return values
 
