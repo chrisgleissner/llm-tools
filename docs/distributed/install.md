@@ -350,8 +350,8 @@ What writes to storage while the coordinator runs:
   what keeps acknowledged commands and replicated events across a power loss. Leave it
   that way and keep the data directory on persistent storage, not on a RAM disk. The
   measured volumes are in `benchmarks.md` (Storage writes): about 545 bytes per
-  replicated event and about 68 KiB per command. An idle coordinator writes nothing
-  per worker heartbeat. A connected worker's `last_seen` is stored at most every ten
+  replicated event, about 68 KiB per command and about 104 KiB per idle hour per
+  connected worker. An idle coordinator writes nothing per worker heartbeat. A connected worker's `last_seen` is stored at most every ten
   minutes, and an open browser session or API token is touched at most every five
   minutes.
 - **Docker's container log.** `compose.yaml` uses the `json-file` driver with up to

@@ -187,6 +187,7 @@ temporary directory, then `~/.cache`) and skips with that reason when none works
 | `db_bytes` from `GET /api/v1/diagnostics` for the same events | 896 bytes/event | 2048 bytes/event |
 | 1000 `mission.list` commands round-tripped through a worker (16 in flight) | 66.6 MiB written, 68 KiB/command | 150 MiB |
 | Idle for 50 s: one connected worker (pinged every 20 s) and an API client reading the worker list every 5 s | 0 bytes | 8 KiB |
+| Idle for one hour, one connected worker, no clients | 104 KiB (16-20 KiB per 10 minutes) | not asserted (one-hour run) |
 
 Reading the figures:
 
@@ -212,9 +213,10 @@ Reading the figures:
   coordinator crash is therefore at most ten minutes. A session's `last_seen` and an
   API token's `last_used` are touched at most every five minutes (`TOUCH_EVERY_SECS`
   in `coordinator/src/db.rs`; previously every minute). The shortest idle timeout is
-  two hours, so expiry moves by at most 4 %. With one commit costing about 12 KiB
-  (the measured 24 KiB for two pings), an idle worker now costs about 72 KiB per hour
-  (derived). The hourly maintenance pass deletes nothing on an idle system and
+  two hours, so expiry moves by at most 4 %. Measured over one idle hour with one
+  connected worker (2026-11-05, same host): 104 KiB written in total, 16-20 KiB per
+  ten minutes, which is the one `last_seen` commit per ten minutes. Before the
+  change the same hour cost about 2.2 MiB. The hourly maintenance pass deletes nothing on an idle system and
   writes nothing. Reverting the throttle (setting `LAST_SEEN_EVERY_SECS` to 0) makes
   the idle test fail with 24576 bytes.
 - Is a change to commands justified? At the rate an operator issues commands, no. Ten commands
