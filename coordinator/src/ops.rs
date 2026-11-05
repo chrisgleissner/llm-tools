@@ -55,6 +55,11 @@ fn cert_covers(dir: &Path, host: &str) -> bool {
     der.as_ref().windows(needle.len()).any(|w| w == needle.as_slice())
 }
 
+/// True when the container image set `BRIDGE_COORDINATOR_CONTAINER`.
+pub fn in_container() -> bool {
+    std::env::var_os(crate::config::ENV_CONTAINER).is_some_and(|v| !v.is_empty())
+}
+
 /// HTTPS URLs for the configured bind address, each with whether the certificate covers it.
 pub fn urls(dir: &Path, cfg: &Config) -> Result<Vec<(String, bool)>, String> {
     let addr = cfg.bind_addr()?;
@@ -71,6 +76,10 @@ pub fn urls(dir: &Path, cfg: &Config) -> Result<Vec<(String, bool)>, String> {
     };
     let hosts: Vec<String> = if let Some(s) = netinfo::public_sans() {
         s.hostnames.into_iter().chain(s.ips.iter().map(|i| i.to_string())).collect()
+    } else if in_container() {
+        // Names discovered inside a container (a random host name that changes with every
+        // `docker compose run`, a bridge-network address) are not reachable names.
+        vec!["localhost".into()]
     } else if addr.ip().is_unspecified() {
         let s = netinfo::discovered_sans();
         s.hostnames.into_iter().chain(s.ips.iter().map(|i| i.to_string())).collect()
@@ -111,14 +120,19 @@ pub fn report(dir: &Path, with_trust_steps: bool) -> Result<String, String> {
             if covered {
                 ""
             } else {
-                "   (not in the server certificate; run `cert renew`)"
+                "   (not in the server certificate: run `cert renew`; if renew refuses the name, it is\n\
+                 \x20    outside the CA's name constraints and needs `cert new-ca`)"
             }
         );
+    }
+    if in_container() && netinfo::public_sans().is_none() {
+        out += "  Other devices need BRIDGE_PUBLIC_NAMES (container/compose.yaml) set before `init`,\n  \
+                or `cert new-ca` after setting it.\n";
     }
     out += &format!("Bind address:      {}\n", cfg.bind);
     out += &format!(
         "LAN access:        {}\n",
-        if std::env::var_os(crate::config::ENV_CONTAINER).is_some_and(|v| !v.is_empty()) {
+        if in_container() {
             "decided by the container's published port (BRIDGE_PUBLISH_ADDRESS in compose.yaml)"
         } else if cfg.lan_enabled {
             "enabled (lan_enabled = true)"

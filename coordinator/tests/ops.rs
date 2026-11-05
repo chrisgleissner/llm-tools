@@ -403,3 +403,42 @@ fn restore_lists_the_credentials_it_reinstated() {
     assert_eq!(db.session_count().unwrap(), 0, "browser sessions are not carried over");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn container_without_public_names_lists_only_localhost_and_says_how_to_add_names() {
+    let dir = tmp_dir();
+    let d = dir.to_str().unwrap();
+    let env = [
+        ("BRIDGE_COORDINATOR_DATA_DIR", d),
+        ("BRIDGE_COORDINATOR_BIND", "0.0.0.0:8443"),
+        ("BRIDGE_COORDINATOR_LAN_ENABLED", "true"),
+        ("BRIDGE_COORDINATOR_CONTAINER", "1"),
+        ("BRIDGE_COORDINATOR_PUBLIC_NAMES", "localhost"),
+    ];
+    assert!(run_env(&["init"], None, &env).status.success());
+    let info = text(&run_env(&["info"], None, &env));
+    let urls: Vec<&str> = info.lines().filter(|l| l.trim_start().starts_with("https://")).collect();
+    // The random container host name and bridge-network address are never offered.
+    assert_eq!(urls, vec!["  https://localhost:8443/"], "{info}");
+    assert!(info.contains("BRIDGE_PUBLIC_NAMES") && info.contains("cert new-ca"), "{info}");
+
+    // With public names the hint disappears and the names are listed as covered.
+    let named = [env[0], env[1], env[2], env[3], ("BRIDGE_COORDINATOR_PUBLIC_NAMES", "bridge.home.arpa")];
+    let dir2 = tmp_dir();
+    let named2: Vec<(&str, &str)> = named
+        .iter()
+        .map(|&(k, v)| {
+            if k == "BRIDGE_COORDINATOR_DATA_DIR" {
+                (k, dir2.to_str().unwrap())
+            } else {
+                (k, v)
+            }
+        })
+        .collect();
+    assert!(run_env(&["init"], None, &named2).status.success());
+    let info = text(&run_env(&["info"], None, &named2));
+    assert!(
+        info.contains("https://bridge.home.arpa:8443/\n") && !info.contains("BRIDGE_PUBLIC_NAMES"),
+        "{info}"
+    );
+}
