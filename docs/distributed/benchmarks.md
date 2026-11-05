@@ -88,8 +88,54 @@ The coordinator needs about 42 MiB while two password hashes run. Below
 about 48 MiB a login burst ends the process. The shipped limit of 96 MiB
 keeps about twice that peak as headroom.
 
+## ARM64, emulated (QEMU raspi3b TCG, mem=512M)
+
+Guest: DietPi v10.8.2, Debian 13 arm64, kernel 6.18.60+rpt-rpi-v8, 4 emulated
+Cortex-A53 cores, 478 MB usable RAM, root file system on an emulated SD card
+(ext4). QEMU emulates every instruction (TCG) on the x86-64 host above, so
+**time figures are far slower than real hardware and are not a prediction for
+the Pi Zero 2 W**. Memory and database figures do not depend on emulation speed.
+Binary: the static `aarch64-unknown-linux-musl` release build that the image
+uses. One run on 2026-11-05.
+
+The measurement harness (`coordinator/tests/bench.rs`) was cross-compiled for
+aarch64-musl and run inside the guest, so client and server share the guest as
+they share the host in the x86-64 run. The database was on the SD card
+(`TMPDIR=/var/tmp`; `/tmp` is a RAM disk in DietPi).
+
+| Measurement | Result |
+|---|---|
+| Startup to `/healthz` | 767 ms |
+| Idle RSS (2 s after healthy) | 3.2 MiB |
+| RSS after administrator setup and one login | 3.4 MiB |
+| RSS after 1000 events | 6.2 MiB |
+| Peak RSS (`VmHWM`) up to and including the 1000-event load | 22.1 MiB |
+| RSS after 10 000 events | 15.1 MiB |
+| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 7.75 / 9.03 ms |
+| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 51.37 / 72.60 ms |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 1506 events/s |
+| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 174.2 / 220.3 ms |
+| Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
+
+RSS falls back after a login here but not in the x86-64 host run. The musl
+build's allocator returns the Argon2id working memory to the system, while the
+glibc host build keeps it. The peak is what a memory limit must cover.
+
+Native systemd service installed with `deploy/install.sh --lan` (inside the
+guest; the guest port is forwarded only to the host's loopback):
+
+| Measurement | Result |
+|---|---|
+| `install.sh` run (user, `init`, unit, `info`) | 9.8 s |
+| Service RSS / peak (`VmRSS` / `VmHWM`) after administrator setup, a worker, remote commands and a restart | 4.6 MiB / 22.2 MiB |
+| Unit `MemoryPeak` (`MemoryMax=96M`) | 20.5 MiB |
+| `systemctl restart` to healthy | 1.45 s |
+| `systemctl stop` | 0.21 s |
+| Guest memory used with the service running | 80 MB of 478 MB |
+
 ## Raspberry Pi Zero 2 W
 
-Not measured (no hardware available). Do not read any figure above as a measurement
-for that device. The sizing that `install.md` gives for it (Raspberry Pi Zero 2 W
+Not measured on the device (hardware arrives 2026-11-06). The emulated ARM64
+figures above show the memory behaviour on the same CPU architecture; their time
+figures must not be read as Pi Zero 2 W performance. The sizing that `install.md` gives for it (Raspberry Pi Zero 2 W
 target profile) is derived from the x86-64 figures and is labelled as such there.
