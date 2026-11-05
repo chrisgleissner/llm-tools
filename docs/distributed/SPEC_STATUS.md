@@ -30,7 +30,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | ARCH-002 | [ ] |  |
 | ARCH-003 | [ ] |  |
 | ARCH-004 | [ ] |  |
-| ARCH-005 | [~] | llm_tools/bridge_commands.py: shared typed layer; 7 operations so far. |
+| ARCH-005 | [~] | llm_tools/bridge_commands.py: 20 operations (mission list/status/events/pause/stop/cancel/continue, task list/show/add/amend/verify/reject/priority/reorder/dependency/pause/resume/cancel/retry). TUI/web pending. |
 | ARCH-006 | [x] | bridge_commands.dispatch runs in-process; CLI status/mission list/events/pause/stop/cancel/continue call it (test_cli_mission_controls_route_through_the_command_layer). |
 | ARCH-007 | [ ] |  |
 | ARCH-008 | [ ] |  |
@@ -44,7 +44,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | LOCAL-007 | [ ] |  |
 | LOCAL-008 | [ ] |  |
 | CLI-001 | [~] | CommandRequest/CommandResult/CommandError with operation IDs, typed params, request IDs (tests/test_bridge_commands.py). More operations pending. |
-| CLI-002 | [~] | CLI uses the layer for 7 operations; TUI and web pending. |
+| CLI-002 | [~] | CLI mission controls and task show/add/mutations dispatch through the layer (test_cli_*_route_through_the_command_layer); TUI and web pending. |
 | CLI-003 | [~] | --target local implemented; remote targets pending coordinator. |
 | CLI-004 | [ ] |  |
 | CLI-005 | [~] | Named non-local targets exit 2 without local fallback (test_target_option); remote pending. |
@@ -71,12 +71,12 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | COORD-008 | [ ] |  |
 | COORD-009 | [ ] |  |
 | COORD-010 | [ ] |  |
-| PROTO-001 | [ ] |  |
-| PROTO-002 | [ ] |  |
-| PROTO-003 | [ ] |  |
+| PROTO-001 | [~] | docs/distributed/protocol.md (v1, JSON over WebSocket); llm_tools/bridge_protocol.py parser. Coordinator side pending. |
+| PROTO-002 | [x] | Envelope v/type/id/worker_id/generation/payload validated strictly by bridge_protocol.decode (tests/test_bridge_protocol.py). |
+| PROTO-003 | [~] | command.ack distinct from command.result in protocol and parser; worker/coordinator implementation pending. |
 | PROTO-004 | [ ] |  |
 | PROTO-005 | [ ] |  |
-| PROTO-006 | [ ] |  |
+| PROTO-006 | [x] | Task mutations accept expected_revision, checked under the SQLite write lock; mismatch is outcome rejected, code conflict (test_stale_revision_*, test_conflicting_amendments_only_one_wins). |
 | PROTO-007 | [ ] |  |
 | PROTO-008 | [ ] |  |
 | PROTO-009 | [ ] |  |
@@ -140,8 +140,8 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | TEST-004 | [ ] |  |
 | TEST-005 | [ ] |  |
 | TEST-006 | [ ] |  |
-| TEST-007 | [ ] |  |
-| TEST-008 | [ ] |  |
+| TEST-007 | [~] | Conflicting amendments and duplicate delivery tests in tests/test_bridge_commands.py; multi-process concurrency pending. |
+| TEST-008 | [~] | Seeded byte/structure mutation fuzz of bridge_protocol.decode (8 seeds x 400 cases) and deep-nesting test. |
 | TEST-009 | [ ] |  |
 | TEST-010 | [ ] |  |
 | TEST-011 | [ ] |  |

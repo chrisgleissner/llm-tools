@@ -122,6 +122,7 @@ class Param:
     kind: type
     required: bool = False
     default: Any = None
+    item: type | None = None  # element type of a list parameter
 
 
 Handler = Callable[[BridgeStore | None, "CommandRequest", dict[str, Any]], dict[str, Any]]
@@ -156,6 +157,11 @@ def unknown_target_message(name: str) -> str:
     return f"unknown target {name!r}: distributed mode is not configured on this host (known targets: local)"
 
 
+def _is_kind(value: Any, kind: type) -> bool:
+    # bool is an int subclass; never accept True where a number is expected.
+    return isinstance(value, kind) and not (kind is int and isinstance(value, bool))
+
+
 def _validated_params(spec: OperationSpec, raw: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(raw) - set(spec.params)
     if unknown:
@@ -168,10 +174,11 @@ def _validated_params(spec: OperationSpec, raw: Mapping[str, Any]) -> dict[str, 
             values[name] = param.default
             continue
         value = raw[name]
-        # bool is an int subclass; never accept True where a count is expected.
-        if not isinstance(value, param.kind) or (param.kind is int and isinstance(value, bool)):
+        if not _is_kind(value, param.kind):
             raise CommandFailure("invalid-argument", f"{spec.operation}: parameter {name!r} must be {param.kind.__name__}")
-        values[name] = value
+        if param.item is not None and not all(_is_kind(element, param.item) for element in value):
+            raise CommandFailure("invalid-argument", f"{spec.operation}: parameter {name!r} must be a list of {param.item.__name__}")
+        values[name] = list(value) if isinstance(value, list) else value
     return values
 
 
@@ -224,6 +231,45 @@ def _mission_control(action: str) -> Handler:
     return handler
 
 
+def _task_show(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert store is not None and request.mission_id is not None
+    try:
+        return dict(_cli()._require_task(store, request.mission_id, params["task_id"]))
+    except TransitionError as exc:
+        raise CommandFailure("not-found", str(exc)) from None
+
+
+def _task_list(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert store is not None and request.mission_id is not None
+    limit, offset = params["limit"], params["offset"]
+    if not 0 <= limit <= 1000 or offset < 0:
+        raise CommandFailure("invalid-argument", "task.list: limit must be 0-1000 and offset non-negative")
+    return {
+        "tasks": store.list_tasks(request.mission_id, limit=limit, offset=offset),
+        "total": store.task_counters(request.mission_id)["total"],
+        "offset": offset,
+    }
+
+
+def _operator(action: str) -> Handler:
+    """Apply an operator payload ``{"action": action, **params}`` through the durable command path."""
+
+    def handler(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+        cli = _cli()
+        assert request.mission_id is not None
+        payload: dict[str, Any] = {"action": action}
+        payload.update((name, value) for name, value in params.items() if not (name == "expected_revision" and value is None))
+        with cli.open_store() as writer:
+            return dict(cli._apply_operator_command(writer, request.mission_id, payload, command_id=request.request_id))
+
+    return handler
+
+
+def _task_op(operation: str, summary: str, extra: Mapping[str, Param] | None = None) -> OperationSpec:
+    params = {"task_id": Param(int, required=True), **(extra or {}), "expected_revision": Param(int)}
+    return OperationSpec(operation, summary, True, True, params, _operator(operation))
+
+
 _NO_PARAMS: Mapping[str, Param] = {}
 
 OPERATIONS: dict[str, OperationSpec] = {
@@ -243,6 +289,41 @@ OPERATIONS: dict[str, OperationSpec] = {
         OperationSpec("mission.stop", "Stop a mission after the current step", True, True, _NO_PARAMS, _mission_control("stop")),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),
+        OperationSpec(
+            "task.list",
+            "Page a mission's tasks in scheduling order",
+            False,
+            True,
+            {"limit": Param(int, default=50), "offset": Param(int, default=0)},
+            _task_list,
+        ),
+        OperationSpec("task.show", "Show one task by global ID", False, True, {"task_id": Param(int, required=True)}, _task_show),
+        OperationSpec(
+            "task.add",
+            "Add a task",
+            True,
+            True,
+            {
+                "prompt": Param(str, required=True),
+                "title": Param(str, default=""),
+                "priority": Param(int, default=0),
+                "order": Param(int),
+                "depends_on": Param(list, default=[], item=int),
+                "acceptance": Param(list, default=[], item=str),
+            },
+            _operator("task.add"),
+        ),
+        _task_op("task.amend", "Amend a task prompt; creates a new revision", {"prompt": Param(str, required=True)}),
+        _task_op("task.verify", "Record verification evidence; approve completes the task",
+                 {"evidence": Param(str, default=""), "approved": Param(bool, default=False)}),
+        _task_op("task.reject", "Reject a task result", {"reason": Param(str, required=True)}),
+        _task_op("task.priority", "Set task priority", {"priority": Param(int, required=True)}),
+        _task_op("task.reorder", "Set task order among equal priorities", {"order": Param(int, required=True)}),
+        _task_op("task.dependency", "Add a prerequisite task", {"depends_on": Param(int, required=True)}),
+        _task_op("task.pause", "Pause a task"),
+        _task_op("task.resume", "Resume a paused task"),
+        _task_op("task.cancel", "Cancel a task"),
+        _task_op("task.retry", "Retry a failed task"),
     )
 }
 
@@ -329,6 +410,6 @@ def execute(request: CommandRequest) -> CommandResult:
     outcome = outcome_of(spec, result)
     error = None
     if outcome == "rejected":
-        message = str((result.get("result") or {}).get("error", "rejected"))
-        error = CommandError("rejected", message)
+        detail = result.get("result") or {}
+        error = CommandError(str(detail.get("code", "rejected")), str(detail.get("error", "rejected")))
     return CommandResult(request.request_id, request.operation, outcome, result=result, error=error)

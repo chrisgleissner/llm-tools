@@ -33,3 +33,20 @@ exception during a mutation is reported as `uncertain`, never as `failed`.
 existing command line is unchanged. `local` (or no option) runs in-process.
 Any other name fails with exit 2 until it resolves through a configured
 coordinator; there is no fallback to local execution.
+
+## D4 Worker transport (WORK-002, PROTO-001, PROTO-009, SEC-002)
+
+Workers open one outbound WebSocket over TLS to the coordinator and send JSON
+messages (docs/distributed/protocol.md). Workers therefore need no listening
+port and no firewall change. The Python side uses a small RFC 6455 client on
+`ssl` (standard library only) instead of adding a dependency; HTTPS long-polling
+was rejected because terminal streaming needs low-latency traffic in both
+directions. Workers authenticate with a per-worker bearer token over verified
+TLS; the coordinator stores only its hash, so revocation is deleting the record.
+
+## D5 Remote control is opt-in per worker (SEC-001, AUTH-008)
+
+An enrolled worker accepts only read operations unless it was enrolled with
+`--allow-control`. The worker enforces this itself and advertises only the
+allowed operations in `hello.capabilities`, so a compromised coordinator
+cannot mutate a read-only worker.

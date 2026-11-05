@@ -181,3 +181,66 @@ def test_cli_mission_controls_route_through_the_command_layer(mission, capsys, m
     assert main(["stop", "--mission", mission_id, "--json"]) == 0
     capsys.readouterr()
     assert seen == ["mission.pause", "mission.continue", "mission.cancel", "mission.stop"]
+
+
+def _first_task(state, mission_id):
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        return store.list_tasks(mission_id)[0]
+
+
+def test_task_reads_match_cli_and_report_missing_tasks(mission, capsys):
+    state, mission_id = mission
+    task = _first_task(state, mission_id)
+    assert main(["task", "show", "--mission", mission_id, "--task", "1", "--json"]) == 0
+    shown = commands.execute(CommandRequest("task.show", {"task_id": task["id"]}, mission_id=mission_id))
+    assert shown.result == json.loads(capsys.readouterr().out)
+    assert main(["task", "list", "--mission", mission_id, "--json"]) == 0
+    listed = commands.execute(CommandRequest("task.list", mission_id=mission_id))
+    assert listed.result["tasks"] == json.loads(capsys.readouterr().out)
+    assert (listed.result["total"], listed.result["offset"]) == (1, 0)
+    assert commands.execute(CommandRequest("task.show", {"task_id": 999}, mission_id=mission_id)).error.code == "not-found"
+    assert commands.execute(CommandRequest("task.list", {"limit": 5000}, mission_id=mission_id)).error.code == "invalid-argument"
+
+
+def test_task_add_through_cli_and_layer_store_identical_payloads(mission, capsys):
+    state, mission_id = mission
+    assert main(["task", "add", "--mission", mission_id, "--prompt", "Second", "--acceptance", "tests pass", "--json"]) == 0
+    capsys.readouterr()
+    added = commands.execute(CommandRequest("task.add", {"prompt": "Second", "acceptance": ["tests pass"]}, mission_id=mission_id, request_id="add-2"))
+    assert added.outcome == "applied" and added.result["result"]["original_prompt"] == "Second"
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        payloads = [row[0] for row in store.db.execute("SELECT payload_json FROM commands WHERE payload_json LIKE '%task.add%' ORDER BY rowid")]
+    assert len(payloads) == 2 and payloads[0] == payloads[1]
+    bad = commands.execute(CommandRequest("task.add", {"prompt": "x", "depends_on": ["1"]}, mission_id=mission_id))
+    assert bad.error.code == "invalid-argument" and "list of int" in bad.error.message
+
+
+def test_stale_revision_is_a_conflict_and_changes_nothing(mission):
+    state, mission_id = mission
+    task = _first_task(state, mission_id)
+    stale = commands.execute(CommandRequest("task.priority", {"task_id": task["id"], "priority": 7, "expected_revision": task["revision"] + 1}, mission_id=mission_id))
+    assert (stale.outcome, stale.error.code) == ("rejected", "conflict")
+    assert _first_task(state, mission_id)["priority"] == task["priority"]
+    fresh = commands.execute(CommandRequest("task.priority", {"task_id": task["id"], "priority": 7, "expected_revision": task["revision"]}, mission_id=mission_id))
+    assert fresh.outcome == "applied" and _first_task(state, mission_id)["priority"] == 7
+
+
+def test_conflicting_amendments_only_one_wins(mission):
+    """Two clients amend the same revision; the second is rejected, not silently applied (TEST-007)."""
+    state, mission_id = mission
+    task = _first_task(state, mission_id)
+    first = commands.execute(CommandRequest("task.amend", {"task_id": task["id"], "prompt": "A", "expected_revision": task["revision"]}, mission_id=mission_id))
+    second = commands.execute(CommandRequest("task.amend", {"task_id": task["id"], "prompt": "B", "expected_revision": task["revision"]}, mission_id=mission_id))
+    assert first.outcome == "applied" and (second.outcome, second.error.code) == ("rejected", "conflict")
+
+
+def test_cli_task_mutations_route_through_the_command_layer(mission, capsys, monkeypatch):
+    _, mission_id = mission
+    seen = []
+    real = commands.dispatch
+    monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
+    for argv in (["priority", "--task", "1", "--value", "3"], ["reorder", "--task", "1", "--value", "2"], ["pause", "--task", "1"], ["resume", "--task", "1"],
+                 ["amend", "--task", "1", "--prompt", "new"], ["cancel", "--task", "1"]):
+        assert main(["task", argv[0], "--mission", mission_id, *argv[1:], "--json"]) == 0, argv
+    capsys.readouterr()
+    assert seen == ["task.priority", "task.reorder", "task.pause", "task.resume", "task.amend", "task.cancel"]

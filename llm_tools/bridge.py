@@ -278,8 +278,11 @@ def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[s
             result = _apply_operator_effect(store, mission_id, payload)
             return store.finish_command(command["id"], status="APPLIED", result=result)
     except _RejectedOperatorCommand as exc:
+        rejection = {"error": str(exc)}
+        if exc.code:
+            rejection["code"] = exc.code
         with store._transaction():
-            return store.finish_command(command["id"], status="REJECTED", result={"error": str(exc)})
+            return store.finish_command(command["id"], status="REJECTED", result=rejection)
 
 
 def _native_provider_running(store: BridgeStore, mission: dict[str, Any]) -> bool:
@@ -296,10 +299,29 @@ def _native_provider_running(store: BridgeStore, mission: dict[str, Any]) -> boo
 class _RejectedOperatorCommand(Exception):
     """A validation failure that must be acknowledged after rolling back effects."""
 
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class _StaleRevision(TransitionError):
+    """The caller's expected task revision no longer matches (PROTO-006)."""
+
+
+def _check_expected_revision(store: BridgeStore, mission_id: str, payload: dict[str, Any]) -> None:
+    """Reject a task mutation made against an outdated revision; runs under the write lock."""
+    expected = payload.get("expected_revision")
+    if expected is None:
+        return
+    current = int(_require_task(store, mission_id, int(payload["task_id"]))["revision"])
+    if int(expected) != current:
+        raise _StaleRevision(f"task revision is {current}, not the expected {int(expected)}; reload and retry")
+
 
 def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     action = str(payload.get("action", ""))
     try:
+        _check_expected_revision(store, mission_id, payload)
         result: dict[str, Any]
         if action == "pause":
             current = str(store.get_mission(mission_id)["status"])
@@ -506,6 +528,8 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
             if row is not None:
                 result["task_ordinal"] = int(row[0])
         return result
+    except _StaleRevision as exc:
+        raise _RejectedOperatorCommand(str(exc), code="conflict") from exc
     except (ValueError, KeyError, OSError, TransitionError) as exc:
         raise _RejectedOperatorCommand(str(exc)) from exc
 
@@ -516,7 +540,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
         if args.task_action == "add":
             prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
             dep_ids = _dependency_ids(store, args.mission, args.depends_on)
-            command_result = _apply_operator_command(store, args.mission, {"action": "task.add", "prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": args.acceptance})
+            command_result = commands.dispatch(commands.CommandRequest("task.add", {"prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": list(args.acceptance)}, mission_id=args.mission))
             result = command_result if preserve_receipt or command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
         elif args.task_action == "list":
             if getattr(args, "all", False):
@@ -526,7 +550,8 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
             result.total = store.task_counters(args.mission)["total"]
             result.offset = max(0, args.offset)
         elif args.task_action == "show":
-            result = _resolve_task(store, args.mission, args.task, args.task_by_id)
+            task_id = int(_resolve_task(store, args.mission, args.task, args.task_by_id)["id"])
+            result = commands.dispatch(commands.CommandRequest("task.show", {"task_id": task_id}, mission_id=args.mission))
         else:
             task = _resolve_task(store, args.mission, args.task, args.task_by_id)
             payload: dict[str, Any] = {"task_id": int(task["id"])}
@@ -545,7 +570,8 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
                 payload.update(action="task.dependency", depends_on=int(store.task_by_ordinal(args.mission, args.add)["id"]))
             else:
                 payload["action"] = "task." + args.task_action
-            result = _apply_operator_command(store, args.mission, payload)
+            params = {name: value for name, value in payload.items() if name != "action"}
+            result = commands.dispatch(commands.CommandRequest(str(payload["action"]), params, mission_id=args.mission))
     return result
 
 
