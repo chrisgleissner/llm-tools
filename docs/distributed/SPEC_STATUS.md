@@ -29,10 +29,10 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | ARCH-001 | [ ] |  |
 | ARCH-002 | [ ] |  |
 | ARCH-003 | [ ] |  |
-| ARCH-004 | [ ] |  |
+| ARCH-004 | [x] | Coordinator stores, routes and projects only; commands execute on the worker via bridge_commands (D1, coordinator/src/hub.rs). |
 | ARCH-005 | [~] | llm_tools/bridge_commands.py: 20 operations (mission list/status/events/pause/stop/cancel/continue, task list/show/add/amend/verify/reject/priority/reorder/dependency/pause/resume/cancel/retry). TUI/web pending. |
 | ARCH-006 | [x] | bridge_commands.dispatch runs in-process; CLI status/mission list/events/pause/stop/cancel/continue call it (test_cli_mission_controls_route_through_the_command_layer). |
-| ARCH-007 | [ ] |  |
+| ARCH-007 | [~] | Worker reconnects after coordinator restart and execution is local (test_worker_survives_coordinator_restart); long partition tests pending. |
 | ARCH-008 | [ ] |  |
 | ARCH-009 | [ ] |  |
 | LOCAL-001 | [~] | Full suite passes with no coordinator configuration; final offline verification pending. |
@@ -45,11 +45,11 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | LOCAL-008 | [ ] |  |
 | CLI-001 | [~] | CommandRequest/CommandResult/CommandError with operation IDs, typed params, request IDs (tests/test_bridge_commands.py). More operations pending. |
 | CLI-002 | [~] | CLI mission controls and task show/add/mutations dispatch through the layer (test_cli_*_route_through_the_command_layer); TUI and web pending. |
-| CLI-003 | [~] | --target local implemented; remote targets pending coordinator. |
-| CLI-004 | [ ] |  |
-| CLI-005 | [~] | Named non-local targets exit 2 without local fallback (test_target_option); remote pending. |
+| CLI-003 | [x] | --target local|NAME|all; remote via coordinator (bridge_remote.py; test_remote_cli_has_local_semantics against the real coordinator). |
+| CLI-004 | [x] | --target all aggregates read operations only; mutations refused (test_target_all_*, integration test). |
+| CLI-005 | [x] | Unknown target 404 unknown-target exit 2; offline/silent exit 3 with queued request ID; no coordinator configured exit 2; never local fallback (tests/test_bridge_remote.py, integration). |
 | CLI-006 | [ ] |  |
-| CLI-007 | [ ] |  |
+| CLI-007 | [x] | Remote transport carries typed CommandRequest JSON, never shell commands or human output (bridge_remote.request_for). |
 | CLI-008 | [ ] |  |
 | WORK-001 | [~] | llm_tools/bridge_worker.py reuses bridge_commands.execute; `llm-bridge worker run`. End-to-end with coordinator pending. |
 | WORK-002 | [x] | Worker opens the outbound WebSocket (bridge_ws.WebSocketClient, websocket_connector); no listener (tests/test_bridge_ws.py, test_bridge_worker.py). |
@@ -61,8 +61,8 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | WORK-008 | [~] | Reconnect resends hello; event replication resumes from welcome cursor with nack resend; duplicate commands return stored outcome. Coordinator side pending. |
 | WORK-009 | [ ] |  |
 | WORK-010 | [~] | worker run: reconnect with jittered backoff, silence timeout, SIGINT/SIGTERM stop (test_run_*). Service unit pending. |
-| COORD-001 | [ ] |  |
-| COORD-002 | [ ] |  |
+| COORD-001 | [~] | Rust coordinator builds and tests on x86-64; ARM64 cross-build succeeds; ARM64 execution unverified. |
+| COORD-002 | [x] | Tokio, axum, serde, rusqlite (bundled), rustls/ring; no aws-lc-rs (coordinator/Cargo.toml). |
 | COORD-003 | [ ] |  |
 | COORD-004 | [ ] |  |
 | COORD-005 | [ ] |  |
@@ -74,13 +74,13 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | PROTO-001 | [~] | docs/distributed/protocol.md (v1, JSON over WebSocket); llm_tools/bridge_protocol.py parser. Coordinator side pending. |
 | PROTO-002 | [x] | Envelope v/type/id/worker_id/generation/payload validated strictly by bridge_protocol.decode (tests/test_bridge_protocol.py). |
 | PROTO-003 | [~] | command.ack distinct from command.result in protocol and parser; worker/coordinator implementation pending. |
-| PROTO-004 | [ ] |  |
+| PROTO-004 | [x] | Coordinator journal redelivers until result; worker dedups by request_id (cargo test worker redelivery; test_duplicate_delivery_*; integration duplicate cancel). |
 | PROTO-005 | [~] | Worker side: global event cursor, ascending batches, nack resend (test_control_messages_and_event_replication). |
 | PROTO-006 | [x] | Task mutations accept expected_revision, checked under the SQLite write lock; mismatch is outcome rejected, code conflict (test_stale_revision_*, test_conflicting_amendments_only_one_wins). |
 | PROTO-007 | [ ] |  |
 | PROTO-008 | [ ] |  |
 | PROTO-009 | [ ] |  |
-| PROTO-010 | [~] | Worker persists max generation before accepting commands and rejects lower generations (test_generation_fencing). Coordinator side pending. |
+| PROTO-010 | [x] | Coordinator increments/persists generation and closes older connection (cargo test); worker persists max generation and rejects older (test_generation_fencing). |
 | NET-001 | [ ] |  |
 | NET-002 | [ ] |  |
 | NET-003 | [ ] |  |
@@ -136,9 +136,9 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | OPS-005 | [ ] |  |
 | TEST-001 | [ ] |  |
 | TEST-002 | [ ] |  |
-| TEST-003 | [ ] |  |
+| TEST-003 | [~] | Local vs remote JSON parity for mission list, task list/show, status (test_remote_cli_has_local_semantics, test_remote_commands_match_local_semantics_and_are_idempotent). |
 | TEST-004 | [ ] |  |
-| TEST-005 | [ ] |  |
+| TEST-005 | [~] | Registration, discovery, remote control, events and reconnection covered by tests/test_distributed_integration.py; approvals/terminal pending. |
 | TEST-006 | [ ] |  |
 | TEST-007 | [~] | Conflicting amendments and duplicate delivery tests in tests/test_bridge_commands.py; multi-process concurrency pending. |
 | TEST-008 | [~] | Seeded byte/structure mutation fuzz of bridge_protocol.decode (8 seeds x 400 cases) and deep-nesting test. |
@@ -146,10 +146,10 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | TEST-010 | [ ] |  |
 | TEST-011 | [ ] |  |
 | TEST-012 | [ ] |  |
-| TEST-013 | [ ] |  |
+| TEST-013 | [~] | Coordinator cross-built for aarch64-unknown-linux-gnu with cargo-zigbuild (ELF aarch64, 3.15 MB). No qemu-user or ARM host available to run it; x86-64 tested. |
 | TEST-014 | [ ] |  |
 | TEST-015 | [ ] |  |
-| TEST-016 | [ ] |  |
+| TEST-016 | [~] | CI: coordinator job (fmt, clippy, test); Python job builds the coordinator and requires the cross-component tests. TypeScript pending. |
 | TEST-017 | [ ] |  |
 | QUAL-001 | [ ] |  |
 | QUAL-002 | [ ] |  |
