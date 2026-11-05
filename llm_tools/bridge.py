@@ -2327,32 +2327,22 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "proposal":
             with open_store() as store:
                 if args.proposal_action == "list":
-                    # Task numbers rise with creation, so "above number N" is "above the highest ID numbered N or less".
-                    after_id = int(store.db.execute("SELECT COALESCE(MAX(id),0) FROM tasks WHERE mission_id=? AND ordinal<=?", (args.mission, max(0, args.after))).fetchone()[0])
-                    result = {
-                        "proposals": store.list_proposals(
-                            args.mission, status=args.status, limit=args.limit, after_task_id=after_id,
-                        ),
-                    }
+                    result = commands.dispatch(commands.CommandRequest("proposal.list", {"status": args.status, "limit": args.limit, "after": args.after}, mission_id=args.mission))
+                elif args.proposal_action in {"accept", "reject"}:
+                    result = commands.dispatch(commands.CommandRequest("proposal.decide", {
+                        "task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or ""),
+                    }, mission_id=args.mission))
                 else:
-                    if args.proposal_action == "create":
-                        prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-                        payload = {
-                            "action": "task.propose",
-                            "source_operation_id": args.source_operation_id,
-                            "prompt": prompt,
-                            "title": args.title,
-                            "priority": args.priority,
-                            "depends_on": _dependency_ids(store, args.mission, args.depends_on),
-                            "acceptance": args.acceptance,
-                        }
-                    else:
-                        payload = {
-                            "action": "task.proposal-decision",
-                            "task_id": int(store.task_by_ordinal(args.mission, args.task)["id"]),
-                            "accept": args.proposal_action == "accept",
-                            "reason": getattr(args, "reason", ""),
-                        }
+                    prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+                    payload = {
+                        "action": "task.propose",
+                        "source_operation_id": args.source_operation_id,
+                        "prompt": prompt,
+                        "title": args.title,
+                        "priority": args.priority,
+                        "depends_on": _dependency_ids(store, args.mission, args.depends_on),
+                        "acceptance": args.acceptance,
+                    }
                     result = _apply_operator_command(store, args.mission, payload)
             if isinstance(result, dict) and result.get("status") == "REJECTED":
                 detail = result.get("result") or {}

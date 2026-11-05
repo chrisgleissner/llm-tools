@@ -101,6 +101,9 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["task", "reorder", "--mission", "m1", "--task", "2", "--value", "5"], "task.reorder", {"task_number": 2, "order": 5}),
         (["task", "retry", "--mission", "m1", "--task", "2"], "task.retry", {"task_number": 2}),
         (["task", "add", "--mission", "m1", "--prompt", "x"], "task.add", {"prompt": "x", "title": "", "priority": 0, "order": None, "acceptance": []}),
+        (["proposal", "list", "--mission", "m1"], "proposal.list", {"status": "PENDING", "limit": 100, "after": 0}),
+        (["proposal", "accept", "--mission", "m1", "--task", "3"], "proposal.decide", {"task_number": 3, "accept": True, "reason": ""}),
+        (["proposal", "reject", "--mission", "m1", "--task", "3", "--reason", "no"], "proposal.decide", {"task_number": 3, "accept": False, "reason": "no"}),
     ],
 )
 def test_request_mapping(argv, operation, params):

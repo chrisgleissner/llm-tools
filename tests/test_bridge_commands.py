@@ -260,3 +260,32 @@ def test_remote_style_references_resolve_on_the_worker(mission):
         payload = json.loads(store.db.execute("SELECT payload_json FROM commands WHERE id='pause-by-number'").fetchone()[0])
     assert payload == {"action": "task.pause", "task_id": task["id"]}
     assert commands.execute(CommandRequest("mission.status", mission_id="zz")).error.code == "invalid-argument"
+
+
+def test_proposal_operations_list_and_decide_by_task_number(mission, capsys, monkeypatch):
+    state, mission_id = mission
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        store.set_mission_status(mission_id, "RUNNING")
+        source = _first_task(state, mission_id)
+        operation = store.begin_operation(source["id"], iteration=1, station="codex")
+        store.finish_operation(operation, exit_code=0)
+    for prompt in ("Keep", "Drop"):
+        assert main(["proposal", "create", "--mission", mission_id, "--operation", operation, "--prompt", prompt, "--json"]) == 0
+    capsys.readouterr()
+    pending = commands.execute(CommandRequest("proposal.list", mission_id=mission_id))
+    assert [item["original_prompt"] for item in pending.result["proposals"]] == ["Keep", "Drop"]
+    assert [item["original_prompt"] for item in commands.execute(CommandRequest("proposal.list", {"after": 2}, mission_id=mission_id)).result["proposals"]] == ["Drop"]
+    assert commands.execute(CommandRequest("proposal.list", {"status": "maybe"}, mission_id=mission_id)).error.code == "invalid-argument"
+    assert commands.execute(CommandRequest("proposal.list", {"limit": 0}, mission_id=mission_id)).error.code == "invalid-argument"
+    accepted = commands.execute(CommandRequest("proposal.decide", {"task_number": 2, "accept": True}, mission_id=mission_id[:8], request_id="accept-2"))
+    assert accepted.outcome == "applied" and accepted.result["result"]["proposal_status"] == "ACCEPTED"
+    seen = []
+    real = commands.dispatch
+    monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
+    assert main(["proposal", "reject", "--mission", mission_id, "--task", "3", "--reason", "no", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["result"]["proposal_status"] == "REJECTED"
+    assert main(["proposal", "list", "--mission", mission_id, "--status", "ALL", "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["proposals"]) == 2
+    assert seen == ["proposal.decide", "proposal.list"]
+    again = commands.execute(CommandRequest("proposal.decide", {"task_number": 2, "accept": False}, mission_id=mission_id))
+    assert again.outcome == "rejected"

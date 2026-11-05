@@ -192,6 +192,11 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
     if command in {"pause", "cancel", "continue"} or (command == "stop" and not getattr(args, "force", False)):
         request = make(f"mission.{command}")
         return request, lambda value: fmt.format_command_receipt(command, value, request.mission_id or "")
+    if command == "proposal" and args.proposal_action == "list":
+        return make("proposal.list", {"status": args.status, "limit": args.limit, "after": args.after}), lambda value: fmt.format_proposals(value["proposals"])
+    if command == "proposal" and args.proposal_action in {"accept", "reject"}:
+        params = {"task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or "")}
+        return make("proposal.decide", params), lambda value: fmt.format_proposal_result(args.proposal_action, value)
     if command == "task":
         action = args.task_action
         if action == "list":
@@ -217,7 +222,7 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         operation = f"task.{action}"
         commands.lookup(operation)
         return make(operation, {**_task_selector(args), **extra}), lambda value: fmt.format_task_result(action, value)
-    raise ValueError(f"{command} is not available with --target {target}; remote commands: status, events, mission list, pause, stop, cancel, continue, task")
+    raise ValueError(f"{command} is not available with --target {target}; remote commands: status, events, mission list, pause, stop, cancel, continue, task, proposal list|accept|reject")
 
 
 def _envelope_exit(envelope: dict[str, Any]) -> tuple[int, str | None]:

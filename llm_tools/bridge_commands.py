@@ -245,6 +245,17 @@ def _task_list(store: BridgeStore | None, request: CommandRequest, params: dict[
     }
 
 
+def _proposal_list(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert store is not None and request.mission_id is not None
+    status = params["status"].upper()
+    if status not in {"PENDING", "ACCEPTED", "REJECTED", "ALL"} or not 1 <= params["limit"] <= 1000:
+        raise CommandFailure("invalid-argument", "proposal.list: status must be PENDING, ACCEPTED, REJECTED or ALL and limit 1-1000")
+    # Task numbers rise with creation, so "above number N" is "above the highest ID numbered N or less".
+    after_id = int(store.db.execute("SELECT COALESCE(MAX(id),0) FROM tasks WHERE mission_id=? AND ordinal<=?",
+                                    (request.mission_id, max(0, params["after"]))).fetchone()[0])
+    return {"proposals": store.list_proposals(request.mission_id, status=status, limit=params["limit"], after_task_id=after_id)}
+
+
 def _operator(action: str) -> Handler:
     """Apply an operator payload ``{"action": action, **params}`` through the durable command path."""
 
@@ -317,6 +328,22 @@ OPERATIONS: dict[str, OperationSpec] = {
         _task_op("task.priority", "Set task priority", {"priority": Param(int, required=True)}),
         _task_op("task.reorder", "Set task order among equal priorities", {"order": Param(int, required=True)}),
         _task_op("task.dependency", "Add a prerequisite task", {"depends_on": Param(int, required=True)}),
+        OperationSpec(
+            "proposal.list",
+            "List agent proposals",
+            False,
+            True,
+            {"status": Param(str, default="PENDING"), "limit": Param(int, default=100), "after": Param(int, default=0)},
+            _proposal_list,
+        ),
+        OperationSpec(
+            "proposal.decide",
+            "Accept or reject an agent proposal",
+            True,
+            True,
+            {**_TASK_SELECTOR, "accept": Param(bool, required=True), "reason": Param(str, default="")},
+            _operator("task.proposal-decision"),
+        ),
         _task_op("task.pause", "Pause a task"),
         _task_op("task.resume", "Resume a paused task"),
         _task_op("task.cancel", "Cancel a task"),
