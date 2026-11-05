@@ -16,7 +16,20 @@ export interface MockOptions {
   workers?: "none" | "some";
   missions?: "none" | "some";
   sessionRemembered?: boolean;
+  /** Answer the terminal WebSocket with a fixed provider screen (used for the site screenshots). */
+  terminalScreen?: boolean;
 }
+
+const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
+const ESC = "\x1b[";
+const TERMINAL_SCREEN =
+  `${ESC}1mcodex${ESC}0m  task 2 of 6: Implement the new tokenizer\r\n\r\n` +
+  `${ESC}36m>${ESC}0m Reading src/tokenizer.rs and the tests that cover it\r\n` +
+  `${ESC}36m>${ESC}0m Editing src/tokenizer.rs ${ESC}32m+42${ESC}0m ${ESC}31m-7${ESC}0m\r\n` +
+  `${ESC}36m>${ESC}0m Running cargo test\r\n` +
+  `   ${ESC}32m128 passed${ESC}0m, 0 failed\r\n\r\n` +
+  `${ESC}33mThe task is ready for review.${ESC}0m Approve it from the web console or with ${ESC}1m/approve${ESC}0m.\r\n\r\n` +
+  `${ESC}2m/home/demo/acme-api${ESC}0m $ `;
 
 const platform = { system: "Linux", machine: "x86_64", python: "3.12.3" };
 const caps = [{ operation: "mission.status", mutating: false }, { operation: "task.pause", mutating: true }];
@@ -92,8 +105,13 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
   const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS;
-  await page.routeWebSocket(/\/api\/v1\/(stream|terminal)/, () => {
+  await page.routeWebSocket(/\/api\/v1\/stream/, () => {
     /* connected, silent: the page shows "Live" */
+  });
+  await page.routeWebSocket(/\/api\/v1\/terminal/, (ws) => {
+    if (!opts.terminalScreen) return;
+    ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "write", reason: "" }));
+    ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
   });
   await page.route("**/api/v1/**", async (route) => {
     const req = route.request();
@@ -140,7 +158,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const op = body.request.operation;
       const first = (JSON.parse(req.postData() ?? "{}") as { request: { mission_id?: string } }).request.mission_id === MISSIONS[0]!.mission.id;
       const results: Record<string, unknown> = {
-        "mission.status": { mission: { id: MISSIONS[0]!.mission.id, name: MISSIONS[0]!.mission.name, status: "RUNNING", cwd: "/home/dev/parser", created_at: iso(86400), updated_at: iso(95) }, task_counts: first ? { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 } : { COMPLETED: 2 }, needs_you: first ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : null, health: { state: "healthy" } },
+        "mission.status": { mission: { id: MISSIONS[0]!.mission.id, name: MISSIONS[0]!.mission.name, status: "RUNNING", cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: first ? { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 } : { COMPLETED: 2 }, needs_you: first ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : null, health: { state: "healthy" } },
         "task.list": { tasks: TASKS, total: TASKS.length, offset: 0 },
         "session.list": { sessions: SESSIONS },
         "usage.snapshot": USAGE,
