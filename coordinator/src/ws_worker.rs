@@ -20,7 +20,7 @@ const PING_EVERY: Duration = Duration::from_secs(20);
 /// How often a connected worker's `last_seen` is persisted. The live state comes from the hub;
 /// the stored value matters after a disconnect (written then, unthrottled) or a coordinator crash,
 /// where it is at most this stale. Ten minutes keeps an idle worker to six small commits an hour.
-const LAST_SEEN_EVERY_SECS: i64 = 0;
+const LAST_SEEN_EVERY_SECS: i64 = 600;
 const SILENCE_LIMIT: Duration = Duration::from_secs(60);
 
 fn plain(status: StatusCode, text: &'static str) -> Response {

@@ -14,6 +14,7 @@ import os
 import pwd
 import shutil
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -33,7 +34,14 @@ N = 1000
 EVENTS_WRITE_BYTES_BOUND = 1536 * 1024  # measured 0.54 MiB for 1000 events (545-573 bytes/event, about one database byte written per byte stored)
 COMMANDS_WRITE_BYTES_BOUND = 150 * 1024 * 1024  # measured 66-67 MiB for 1000 commands (68 KiB/command: five committed transactions each, a few 4 KiB pages per commit)
 DB_GROWTH_BYTES_PER_EVENT_BOUND = 1024  # measured 527-552 bytes/event of file growth; benchmarks.md has 557-558 over 10 000 events
-DIAGNOSTICS_GROWTH_BYTES_PER_EVENT_BOUND = 2048  # db_bytes counts pages not yet checkpointed twice (page_count and the WAL file)
+DIAGNOSTICS_GROWTH_BYTES_PER_EVENT_BOUND = 2048
+# Idle: a connected worker, pinged every 20 s, and an API client reading the worker list every 5 s.
+# Measured 0 bytes over 50 s (2026-11-05). Before the heartbeat throttle (ws_worker.rs
+# LAST_SEEN_EVERY_SECS) each ping committed a last_seen update: 24-32 KiB in the same window,
+# about 2.2 MiB per worker-hour. The bound allows one small commit (a throttled last_seen or
+# last_used touch landing in the window) and nothing per ping.
+IDLE_SECONDS = 50
+IDLE_WRITE_BYTES_BOUND = 8 * 1024  # db_bytes counts pages not yet checkpointed twice (page_count and the WAL file)
 
 
 def _write_bytes(pid: int) -> int:
@@ -139,3 +147,20 @@ def test_one_thousand_command_round_trips_stay_within_the_write_bound(tmp_path, 
         written = _write_bytes(pid) - writes_before
         print(f"COMMANDS write_bytes={written} ({written / N:.0f}/command)")
         assert written <= COMMANDS_WRITE_BYTES_BOUND, f"{written} bytes written for {N} commands"
+
+
+def test_an_idle_coordinator_with_a_connected_worker_writes_nothing_per_heartbeat(tmp_path, monkeypatch, capsys, block_dir):
+    with running_system(tmp_path, monkeypatch, capsys, allow_control=False, data_dir=block_dir / "coordinator") as system:
+        _synced(system, system.state / "bridge.sqlite3")
+        status, _ = system.coordinator.request("GET", "/api/v1/workers")  # the token's last_used touch happens here, before measuring
+        assert status == 200
+        pid = system.coordinator.process.pid
+        writes_before = _write_bytes(pid)
+        deadline = time.monotonic() + IDLE_SECONDS  # spans at least two 20-second worker pings
+        while time.monotonic() < deadline:
+            status, body = system.coordinator.request("GET", "/api/v1/workers")
+            assert status == 200 and [w["name"] for w in body["workers"]] == ["ws"]
+            time.sleep(5)
+        written = _write_bytes(pid) - writes_before
+        print(f"IDLE write_bytes={written} over {IDLE_SECONDS} s")
+        assert written <= IDLE_WRITE_BYTES_BOUND, f"{written} bytes written in {IDLE_SECONDS} s of idle"
