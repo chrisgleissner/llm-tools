@@ -127,7 +127,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | DATA-003 | [ ] |  |
 | DATA-004 | [ ] |  |
 | DATA-005 | [ ] |  |
-| DATA-006 | [ ] |  |
+| DATA-006 | [~] | Worker/standalone: `llm-bridge backup`/`restore` (online backup API, integrity check, refuses while controllers run, keeps the replaced database, raises the event id sequence), docs/distributed/operations.md, tests/test_bridge_backup.py. Coordinator database procedure pending. |
 | DATA-007 | [ ] |  |
 | OPS-001 | [ ] |  |
 | OPS-002 | [ ] |  |

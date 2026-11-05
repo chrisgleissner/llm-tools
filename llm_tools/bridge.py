@@ -1285,6 +1285,12 @@ def _build_parser(
     gc = sub.add_parser("gc", help="close the idle tmux stations of finished missions (stations with a live provider or an attached terminal are kept)")
     _add_json_arg(gc)
 
+    backup = sub.add_parser("backup", help="write a consistent copy of the Bridge database (missions, tasks, events)")
+    backup.add_argument("--output", metavar="FILE", required=True, help="new file to write; an existing file is never overwritten")
+    _add_json_arg(backup)
+    restore = sub.add_parser("restore", help="replace the Bridge database with a backup; the current one is kept beside it")
+    restore.add_argument("--input", metavar="FILE", required=True, help="backup written by llm-bridge backup")
+    _add_json_arg(restore)
     worker = sub.add_parser("worker", help="optional: connect this host to a Bridge coordinator (off unless enrolled and run)")
     worker_sub = worker.add_subparsers(dest="worker_action", required=True)
     worker_enroll = worker_sub.add_parser("enroll", help="store the coordinator URL, CA and worker token for this host")
@@ -2483,6 +2489,17 @@ def _main(argv: list[str] | None = None) -> int:
                     print(f"llm-bridge: {(result.get('result') or {}).get('error', args.command + ' rejected')}", file=sys.stderr)
                     return 2
             _print_result(result, args.json, lambda value: fmt.format_command_receipt(args.command, value, args.mission))
+            return 0
+        if args.command in {"backup", "restore"}:
+            from . import bridge_backup
+
+            if args.command == "backup":
+                facts = bridge_backup.backup(Path(args.output), store_path=store_path())
+                _print_result(facts, args.json, lambda value: f"Backed up {value['missions']} missions to {value['path']} ({value['bytes']} bytes, sha256 {value['sha256'][:16]}).")
+            else:
+                facts = bridge_backup.restore(Path(args.input), store_path=store_path())
+                _print_result(facts, args.json, lambda value: f"Restored {value['missions']} missions from {value['restored_from']}."
+                              + (f" The replaced database is kept at {value['previous_database']}." if value["previous_database"] else ""))
             return 0
         if args.command == "worker":
             return _worker_command(args)
