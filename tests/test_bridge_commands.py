@@ -289,3 +289,14 @@ def test_proposal_operations_list_and_decide_by_task_number(mission, capsys, mon
     assert seen == ["proposal.decide", "proposal.list"]
     again = commands.execute(CommandRequest("proposal.decide", {"task_number": 2, "accept": False}, mission_id=mission_id))
     assert again.outcome == "rejected"
+
+
+def test_console_commands_reach_the_same_command_layer(mission, monkeypatch):
+    """CLI-002: console mutations go through the CLI into the same typed operations as remote and web requests."""
+    _, mission_id = mission
+    seen = []
+    real = commands.dispatch
+    monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
+    for line in ("priority 1 5", "pause 1", "resume 1", "cancel 1"):
+        bridge.dispatch_console_command(mission_id, line)
+    assert seen == ["task.priority", "task.pause", "task.resume", "task.cancel"]

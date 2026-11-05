@@ -44,7 +44,7 @@ One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]
 | LOCAL-007 | [ ] |  |
 | LOCAL-008 | [ ] |  |
 | CLI-001 | [~] | CommandRequest/CommandResult/CommandError with operation IDs, typed params, request IDs (tests/test_bridge_commands.py). More operations pending. |
-| CLI-002 | [~] | CLI mission controls and task show/add/mutations dispatch through the layer (test_cli_*_route_through_the_command_layer); TUI and web pending. |
+| CLI-002 | [x] | Every remote-capable mutation runs through `bridge_commands.dispatch`: CLI (test_cli_*_route_through_the_command_layer), TUI console (test_console_commands_reach_the_same_command_layer, console commands are CLI command lines), remote `--target` and web (coordinator forwards typed requests that the worker executes with `bridge_commands.execute`). Console read views use the bounded projection (`bridge_monitor`), which has no business rules. Local-only actions (start/resume launch, steer, station view, provider-originated `proposal create`) stay in the CLI. |
 | CLI-003 | [x] | --target local|NAME|all; remote via coordinator (bridge_remote.py; test_remote_cli_has_local_semantics against the real coordinator). |
 | CLI-004 | [x] | --target all aggregates read operations only; mutations refused (test_target_all_*, integration test). |
 | CLI-005 | [x] | Unknown target 404 unknown-target exit 2; offline/silent exit 3 with queued request ID; no coordinator configured exit 2; never local fallback (tests/test_bridge_remote.py, integration). |
