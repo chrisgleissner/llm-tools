@@ -1,0 +1,29 @@
+# LLM Bridge coordinator. Defaults publish only on 127.0.0.1.
+# LAN access is an explicit opt-in: set BRIDGE_PUBLISH_ADDRESS (for example the
+# host's LAN address, or 0.0.0.0) in .env next to this file.
+# First run:  docker compose run --rm coordinator init --hostname bridge.home.arpa --ip <LAN address>
+# Then:       docker compose up -d
+services:
+  coordinator:
+    image: ${BRIDGE_IMAGE:-llm-bridge-coordinator:latest}
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "${BRIDGE_PUBLISH_ADDRESS:-127.0.0.1}:${BRIDGE_PORT:-8443}:8443"
+    volumes:
+      - bridge-data:/data
+    mem_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
+    memswap_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
+    pids_limit: 64
+    cpus: ${BRIDGE_CPUS:-1.0}
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+volumes:
+  bridge-data:
