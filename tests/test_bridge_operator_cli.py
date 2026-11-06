@@ -94,7 +94,8 @@ def test_lifecycle_commands_print_one_line_receipts(tmp_path, state, capsys) -> 
     # With the controller lock held, resume only records the request and never launches a provider.
     with MissionLock(state / "locks", mid):
         assert _out(capsys, "resume", "--mission", mid).strip() == f"Resume requested · mission {short} is RUNNING"
-    assert _out(capsys, "stop", "--mission", mid).strip() == f"Stop requested · mission {short} is STOPPING"
+    with MissionLock(state / "locks", mid):  # a live controller finishes the stop itself
+        assert _out(capsys, "stop", "--mission", mid).strip() == f"Stop requested · mission {short} is STOPPING"
     assert _out(capsys, "cancel", "--mission", mid, "--yes").strip() == f"Cancel requested · mission {short} is CANCELLED"
 
 
@@ -215,15 +216,16 @@ def test_native_stop_with_active_provider_explains_how_to_finish(tmp_path, state
         store.set_mission_status(mid, "RUNNING")
         operation = store.begin_operation(1, iteration=1, station="codex")
         store.mark_operation_running(operation, process_pid=os.getpid(), process_start="t")
-    out = _out(capsys, "stop", "--mission", mid)
-    assert out.splitlines()[0] == f"Stop requested · mission {mid[:8]} is STOPPING"
-    assert bridge_format.NATIVE_STOP_HINT in out
-    assert "exit the provider (e.g. /quit) or use stop --force" in out
-    status = _out(capsys, "status", "--mission", mid)
-    assert bridge_format.NATIVE_STOP_HINT in status
-    # The JSON receipt carries the same explanation for the console.
-    reply = json.loads(dispatch_console_command(mid, "stop"))
-    assert reply["result"]["detail"] == bridge_format.NATIVE_STOP_HINT
+    with MissionLock(state / "locks", mid):  # the native provider's controller is alive
+        out = _out(capsys, "stop", "--mission", mid)
+        assert out.splitlines()[0] == f"Stop requested · mission {mid[:8]} is STOPPING"
+        assert bridge_format.NATIVE_STOP_HINT in out
+        assert "exit the provider (e.g. /quit) or use stop --force" in out
+        status = _out(capsys, "status", "--mission", mid)
+        assert bridge_format.NATIVE_STOP_HINT in status
+        # The JSON receipt carries the same explanation for the console.
+        reply = json.loads(dispatch_console_command(mid, "stop"))
+        assert reply["result"]["detail"] == bridge_format.NATIVE_STOP_HINT
 
 
 def test_non_native_stop_has_no_provider_wait_hint(tmp_path, state, capsys) -> None:

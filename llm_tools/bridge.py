@@ -514,10 +514,19 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 # Stop never cancels. With no controller there is nothing to stop;
                 # only `cancel` ends a mission for good.
                 return {"mission_status": mission["status"], "noop": True, "detail": fmt.nothing_to_stop(mission_id, mission["status"])}
-            if mission["status"] in STARTED_MISSION_STATUSES:
+            orphaned = mission["status"] in STARTED_MISSION_STATUSES and not controller_running(mission_id)
+            if orphaned:
+                # Nobody is left to turn STOPPING into STOPPED, so the stop is final here. A provider run
+                # the dead controller left behind is only ended by `stop --force`; say so.
+                store.set_mission_status(mission_id, "STOPPED")
+            elif mission["status"] in STARTED_MISSION_STATUSES:
                 store.set_mission_status(mission_id, "STOPPING")
             mission = store.get_mission(mission_id)
             result = {"mission_status": mission["status"]}
+            if orphaned and store.db.execute(
+                "SELECT 1 FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING') LIMIT 1", (mission_id,)
+            ).fetchone():
+                result["detail"] = f"the controller is gone and a provider run may still be active · end it with: llm-bridge stop --force --mission {fmt.short_id(mission_id)}"
             if mission["status"] == "STOPPING" and _native_provider_running(store, mission):
                 # A native provider waits for operator input and never exits on
                 # its own, so a plain stop would otherwise look hung.

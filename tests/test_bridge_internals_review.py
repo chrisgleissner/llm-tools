@@ -145,3 +145,34 @@ def test_int005_crash_reconciliation_still_blocks_a_running_task(tmp_path) -> No
     store.reconcile_interrupted_operations(mission_id)
 
     assert store.get_task(task_id)["status"] == "BLOCKED"
+
+
+def test_int006_stop_on_a_running_mission_without_a_controller_ends_stopped(tmp_path, monkeypatch) -> None:
+    from llm_tools import bridge
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    store = BridgeStore(tmp_path / "state" / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path, config={"headless": True})
+    store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")  # the controller died; nobody holds the mission lock
+
+    result = bridge._apply_operator_command(store, mission["id"], {"action": "stop"})
+
+    assert result["result"]["mission_status"] == "STOPPED"
+    assert store.get_mission(mission["id"])["status"] == "STOPPED"
+
+
+def test_int006_stop_with_a_live_controller_still_requests_stopping(tmp_path, monkeypatch) -> None:
+    from llm_tools import bridge
+    from llm_tools.bridge_store import MissionLock
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    store = BridgeStore(tmp_path / "state" / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path, config={"headless": True})
+    store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+
+    with MissionLock(tmp_path / "state" / "locks", mission["id"]):
+        result = bridge._apply_operator_command(store, mission["id"], {"action": "stop"})
+
+    assert result["result"]["mission_status"] == "STOPPING"
