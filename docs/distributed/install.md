@@ -99,6 +99,16 @@ loopback-only publishing, administrator setup, worker add and token create throu
 stopped, password reset, certificate renewal, restart with data kept, and stop in
 0.3 s.
 
+### Enable passkeys (optional)
+
+1. Create `container/tailscale.env` with `TS_AUTHKEY=...`, `BRIDGE_TAILSCALE_CERT_NAME=bridge.<tailnet>.ts.net`, `BRIDGE_COORDINATOR_TLS_CERT_FILE=/certs/bridge.crt`, and `BRIDGE_COORDINATOR_TLS_KEY_FILE=/certs/bridge.key`; protect it with `chmod 600 container/tailscale.env`.
+2. From the repository root, run `cd container` then `docker compose --env-file tailscale.env --profile tailscale up -d`; use both flags for future Compose commands.
+3. Install the Tailscale app on your phone and join the same tailnet.
+4. The renewer obtains a certificate after Tailscale connects and renews it every 60 days; the coordinator switches to valid replacement files for new handshakes without restart.
+5. Open `https://bridge.<tailnet>.ts.net:8443` once the renewer has created the certificate.
+
+If you already have a trusted certificate and hostname, supply those files instead; no domain provider integration is required.
+
 ## Windows
 
 On Windows (x86-64 and ARM64) the coordinator and the remote client are supported;

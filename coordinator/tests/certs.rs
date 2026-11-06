@@ -14,6 +14,94 @@ fn init_with(hostname: &str, ip: &str) -> std::path::PathBuf {
     dir
 }
 
+#[tokio::test]
+async fn configured_certificate_files_reload_for_new_tls_handshakes() {
+    use rustls::pki_types::{pem::PemObject, ServerName};
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
+
+    let dir = tmp_dir();
+    bridge_coordinator::init::init(
+        &dir,
+        &Sans {
+            hostnames: vec!["localhost".into(), "bridge.tail.test".into()],
+            ips: vec!["127.0.0.1".parse().unwrap()],
+        },
+    )
+    .unwrap();
+    let cert_path = dir.join("mounted-cert.pem");
+    let key_path = dir.join("mounted-key.pem");
+    let ca_key = std::fs::read_to_string(dir.join("ca.key")).unwrap();
+    let config_path = dir.join("config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap().replace("8443", "0");
+    config.push_str(&format!(
+        "\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_cert_name = \"bridge.tail.test\"\n",
+        cert_path, key_path
+    ));
+    std::fs::write(&config_path, config).unwrap();
+
+    let server = bridge_coordinator::server::start(&dir).await.unwrap();
+    let roots = common::client_tls(&std::fs::read(dir.join("ca.pem")).unwrap());
+    let connector = TlsConnector::from(roots);
+    async fn presented_cert(connector: &TlsConnector, addr: std::net::SocketAddr, name: &'static str) -> Vec<u8> {
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let tls = connector.connect(ServerName::try_from(name).unwrap(), stream).await.unwrap();
+        tls.get_ref().1.peer_certificates().unwrap()[0].as_ref().to_vec()
+    }
+    let first = presented_cert(&connector, server.addr, "localhost").await;
+    let internal_expected: Vec<u8> = rustls::pki_types::CertificateDer::pem_slice_iter(&std::fs::read(dir.join("server.pem")).unwrap())
+        .next()
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let (cert_a, key_a) = certs::issue_unchecked(&ca_key, vec!["bridge.tail.test".into()]).unwrap();
+    let expected_a: Vec<u8> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_a.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    std::fs::write(&cert_path, cert_a).unwrap();
+    std::fs::write(&key_path, key_a).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            if presented_cert(&connector, server.addr, "bridge.tail.test").await == expected_a {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("file-backed certificate should replace the internal-CA fallback");
+
+    let (cert_b, key_b) = certs::issue_unchecked(&ca_key, vec!["bridge.tail.test".into()]).unwrap();
+    let expected: Vec<u8> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_b.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    std::fs::write(&cert_path, cert_b).unwrap();
+    std::fs::write(&key_path, key_b).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let got = presented_cert(&connector, server.addr, "bridge.tail.test").await;
+            if got == expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("replacement certificate should be used on a subsequent handshake");
+    assert_eq!(first, internal_expected, "LAN SNI continues to receive the internal-CA certificate");
+    assert_eq!(presented_cert(&connector, server.addr, "localhost").await, internal_expected);
+    assert_ne!(expected_a, expected);
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn issue(dir: &std::path::Path, name: &str) -> String {
     let key = std::fs::read_to_string(dir.join("ca.key")).unwrap();
     certs::issue_unchecked(&key, vec![name.to_string()]).unwrap().0

@@ -24,8 +24,12 @@ services:
     environment:
       BRIDGE_COORDINATOR_PUBLIC_NAMES: ${BRIDGE_PUBLIC_NAMES:-localhost}
       BRIDGE_COORDINATOR_PUBLIC_PORT: ${BRIDGE_PORT:-8443}
+      BRIDGE_COORDINATOR_TLS_CERT_FILE: ${BRIDGE_COORDINATOR_TLS_CERT_FILE:-}
+      BRIDGE_COORDINATOR_TLS_KEY_FILE: ${BRIDGE_COORDINATOR_TLS_KEY_FILE:-}
+      BRIDGE_COORDINATOR_TLS_CERT_NAME: ${BRIDGE_TAILSCALE_CERT_NAME:-}
     volumes:
       - bridge-data:/data
+      - tailscale-certs:/certs
     # About twice the measured peak RSS (48 MiB; docs/distributed/benchmarks.md).
     mem_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
     memswap_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
@@ -48,5 +52,66 @@ services:
       options:
         max-size: "1m"
         max-file: "3"
+  # Optional tailnet access and a trusted *.ts.net origin for passkeys.
+  # Shares the coordinator network namespace so its HTTPS listener is reachable
+  # on the tailnet without publishing another host port.
+  tailscale:
+    image: tailscale/tailscale:stable
+    profiles: ["tailscale"]
+    restart: unless-stopped
+    network_mode: service:coordinator
+    depends_on:
+      coordinator:
+        condition: service_started
+    env_file:
+      - ${BRIDGE_TAILSCALE_ENV_FILE:-./tailscale.env}
+    environment:
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_AUTH_ONCE: "true"
+      TS_HOSTNAME: ${BRIDGE_TAILSCALE_HOSTNAME:-bridge}
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - tailscale-certs:/certs
+      - tailscale-runtime:/var/run/tailscale
+    cap_add: [NET_ADMIN, NET_RAW]
+  tailscale-cert-renewer:
+    image: tailscale/tailscale:stable
+    profiles: ["tailscale"]
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        until tailscale --socket=/var/run/tailscale/tailscaled.sock status >/dev/null 2>&1; do sleep 2; done;
+        while :; do
+          now=$$(date +%s); last=$$(cat /certs/.last-renewed 2>/dev/null || echo 0);
+          if [ ! -s /certs/bridge.crt ] || [ ! -s /certs/bridge.key ] || [ $$((now - last)) -ge 5184000 ]; then
+            if tailscale --socket=/var/run/tailscale/tailscaled.sock cert --cert-file=/certs/bridge.crt.next --key-file=/certs/bridge.key.next "$${BRIDGE_TAILSCALE_CERT_NAME}" &&
+            chown 65532:65532 /certs/bridge.crt.next /certs/bridge.key.next &&
+            chmod 0644 /certs/bridge.crt.next && chmod 0600 /certs/bridge.key.next &&
+            mv -f /certs/bridge.crt.next /certs/bridge.crt &&
+            mv -f /certs/bridge.key.next /certs/bridge.key; then
+              date +%s > /certs/.last-renewed;
+            else
+              echo 'Tailscale certificate renewal failed; retrying in five minutes' >&2;
+              sleep 300;
+            fi;
+          else
+            sleep 300;
+          fi;
+        done
+    environment:
+      BRIDGE_TAILSCALE_CERT_NAME: ${BRIDGE_TAILSCALE_CERT_NAME:-}
+    depends_on:
+      tailscale:
+        condition: service_started
+    volumes:
+      - tailscale-certs:/certs
+      - tailscale-runtime:/var/run/tailscale
+    mem_limit: 32m
+    pids_limit: 16
 volumes:
   bridge-data:
+  tailscale-state:
+  tailscale-certs:
+  tailscale-runtime:

@@ -10,7 +10,7 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::PrivateKeyDer;
 use rustls::ServerConfig;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub struct Sans {
@@ -298,4 +298,113 @@ pub fn load_server_config(dir: &Path) -> Result<Arc<ServerConfig>, String> {
     let cert = std::fs::read(dir.join("server.pem")).map_err(|e| format!("cannot read server.pem: {e}"))?;
     let key = std::fs::read(dir.join("server.key")).map_err(|e| format!("cannot read server.key: {e}"))?;
     Ok(Arc::new(build_config(&cert, &key)?))
+}
+
+/// TLS certificate resolver for operator-managed files. Only a complete,
+/// key-matched pair replaces the active key; partial writes keep the last good one.
+pub struct ReloadingFileCertResolver {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    external_name: String,
+    internal: Arc<rustls::sign::CertifiedKey>,
+    external: std::sync::RwLock<Option<Arc<rustls::sign::CertifiedKey>>>,
+    fingerprint: std::sync::RwLock<[u8; 32]>,
+}
+
+impl std::fmt::Debug for ReloadingFileCertResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReloadingFileCertResolver").finish_non_exhaustive()
+    }
+}
+
+impl ReloadingFileCertResolver {
+    pub fn load(cert_path: PathBuf, key_path: PathBuf, external_name: String, fallback_dir: &Path) -> Result<Arc<Self>, String> {
+        let pair = read_tls_file(&cert_path).ok().zip(read_tls_file(&key_path).ok());
+        let external_pair = pair.and_then(|(cert, key)| certified_key(&cert, &key).ok().map(|loaded| (fingerprint(&cert, &key), Arc::new(loaded))));
+        let internal_cert = read_tls_file(&fallback_dir.join("server.pem")).map_err(|e| format!("cannot read fallback server certificate: {e}"))?;
+        let internal_key = read_tls_file(&fallback_dir.join("server.key")).map_err(|e| format!("cannot read fallback server key: {e}"))?;
+        let internal = Arc::new(certified_key(&internal_cert, &internal_key)?);
+        let (fingerprint, external) =
+            external_pair.map_or_else(|| (fingerprint(&internal_cert, &internal_key), None), |(digest, loaded)| (digest, Some(loaded)));
+        Ok(Arc::new(Self {
+            cert_path,
+            key_path,
+            external_name: external_name.to_ascii_lowercase(),
+            internal,
+            external: std::sync::RwLock::new(external),
+            fingerprint: std::sync::RwLock::new(fingerprint),
+        }))
+    }
+
+    /// Read both files on every poll. Atomic replacements are detected, while
+    /// temporarily mismatched cert/key writes leave the active identity intact.
+    pub fn reload_if_changed(&self) -> Result<bool, String> {
+        let cert = read_tls_file(&self.cert_path).map_err(|e| format!("cannot read TLS certificate file: {e}"))?;
+        let key = read_tls_file(&self.key_path).map_err(|e| format!("cannot read TLS key file: {e}"))?;
+        let fingerprint = fingerprint(&cert, &key);
+        if *self.fingerprint.read().map_err(|_| "TLS resolver lock poisoned")? == fingerprint {
+            return Ok(false);
+        }
+        let next = Arc::new(certified_key(&cert, &key)?);
+        *self.external.write().map_err(|_| "TLS resolver lock poisoned")? = Some(next);
+        *self.fingerprint.write().map_err(|_| "TLS resolver lock poisoned")? = fingerprint;
+        Ok(true)
+    }
+}
+
+impl rustls::server::ResolvesServerCert for ReloadingFileCertResolver {
+    fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let use_external = client_hello.server_name().is_some_and(|name| name.eq_ignore_ascii_case(&self.external_name));
+        if use_external {
+            if let Some(key) = self.external.read().ok()?.as_ref() {
+                return Some(Arc::clone(key));
+            }
+        }
+        Some(Arc::clone(&self.internal))
+    }
+}
+
+fn certified_key(cert_pem: &[u8], key_pem: &[u8]) -> Result<rustls::sign::CertifiedKey, String> {
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    if certs.is_empty() {
+        return Err("no certificate found in PEM".into());
+    }
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| format!("no private key found in PEM: {e}"))?;
+    rustls::sign::CertifiedKey::from_der(certs, key, &provider()).map_err(|e| e.to_string())
+}
+
+fn read_tls_file(path: &Path) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if metadata.len() > 1024 * 1024 {
+        return Err("TLS certificate and key files must be at most 1 MiB".into());
+    }
+    std::fs::read(path).map_err(|e| e.to_string())
+}
+
+fn fingerprint(cert: &[u8], key: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    digest.update((cert.len() as u64).to_be_bytes());
+    digest.update(cert);
+    digest.update((key.len() as u64).to_be_bytes());
+    digest.update(key);
+    digest.finalize().into()
+}
+
+pub fn load_reloading_file_server_config(
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    external_name: String,
+    fallback_dir: &Path,
+) -> Result<(Arc<ServerConfig>, Arc<ReloadingFileCertResolver>), String> {
+    let resolver = ReloadingFileCertResolver::load(cert_path, key_path, external_name, fallback_dir)?;
+    let mut cfg = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|e| e.to_string())?
+        .with_no_client_auth()
+        .with_cert_resolver(resolver.clone());
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok((Arc::new(cfg), resolver))
 }

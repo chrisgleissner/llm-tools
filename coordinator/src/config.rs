@@ -17,6 +17,12 @@ pub struct Config {
     /// Directory with the built web interface (`index.html`, `app.js`, ...). Unset: `web` next to
     /// the executable, else `/usr/share/bridge-coordinator/web`.
     pub web_dir: Option<String>,
+    /// Optional operator-managed TLS certificate and key. When both are set, the
+    /// server watches these files and uses a valid replacement on new handshakes.
+    pub tls_cert_file: Option<String>,
+    pub tls_key_file: Option<String>,
+    /// Exact SNI hostname for the operator-managed identity; all other names use the internal CA.
+    pub tls_cert_name: Option<String>,
     /// Total concurrent TCP connections; further connections are closed immediately (NET-010).
     pub max_connections: usize,
     /// Concurrent TCP connections from one client address (IPv6 clients counted by /64).
@@ -43,6 +49,9 @@ impl Default for Config {
             max_events_per_worker: 50_000,
             allowed_origins: vec![],
             web_dir: None,
+            tls_cert_file: None,
+            tls_key_file: None,
+            tls_cert_name: None,
             max_connections: 256,
             max_connections_per_ip: 32,
             worker_reserve_connections: 16,
@@ -132,6 +141,19 @@ impl Config {
         }
         if let Some(v) = std::env::var_os(ENV_LAN_ENABLED) {
             cfg.lan_enabled = parse_bool(ENV_LAN_ENABLED, &v.to_string_lossy())?;
+        }
+        if let Some(v) = std::env::var("BRIDGE_COORDINATOR_TLS_CERT_FILE").ok().filter(|v| !v.trim().is_empty()) {
+            cfg.tls_cert_file = Some(v);
+        }
+        if let Some(v) = std::env::var("BRIDGE_COORDINATOR_TLS_KEY_FILE").ok().filter(|v| !v.trim().is_empty()) {
+            cfg.tls_key_file = Some(v);
+        }
+        if let Some(v) = std::env::var("BRIDGE_COORDINATOR_TLS_CERT_NAME").ok().filter(|v| !v.trim().is_empty()) {
+            cfg.tls_cert_name = Some(v);
+        }
+        let file_provider_fields = [cfg.tls_cert_file.is_some(), cfg.tls_key_file.is_some(), cfg.tls_cert_name.is_some()];
+        if file_provider_fields.iter().any(|set| *set) && !file_provider_fields.iter().all(|set| *set) {
+            return Err("tls_cert_file, tls_key_file and tls_cert_name must be configured together".into());
         }
         if cfg.max_events_per_worker == 0 {
             return Err("max_events_per_worker must be at least 1".into());
