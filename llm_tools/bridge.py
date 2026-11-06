@@ -953,7 +953,9 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             # resume. Keep its owner alive to finish the shared wake ledger.
             timeout=None if words[0] == "suspend-until-credits" else 15,
         )
-        if result.returncode:
+        # `doctor` exits 1 to report "no provider can run"; its report is the answer, not an error.
+        reported = words[0] == "doctor" and result.returncode == 1 and bool(result.stdout.strip())
+        if result.returncode and not reported:
             detail = result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
             return f"error: {detail}"
         if words[0] == "start" and args is not None:

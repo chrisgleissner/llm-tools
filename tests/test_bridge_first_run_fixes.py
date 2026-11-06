@@ -820,7 +820,8 @@ def test_doctor_for_a_mission_checks_the_missions_own_rotation(tmp_path, state, 
     _install(bin_dir, "codex")
     monkeypatch.setenv("PATH", str(bin_dir))
     mid = _create(tmp_path, capsys, "doc")["mission"]["id"]
-    report = json.loads(_run(capsys, "doctor", "--mission", mid, "--json"))
+    assert main(["doctor", "--mission", mid, "--json"]) == 1  # codex is installed but not signed in
+    report = json.loads(capsys.readouterr().out)
     assert [item["name"] for item in report["providers"]] == ["codex"]
     assert "frozen_tool_config" not in json.dumps(report)
 

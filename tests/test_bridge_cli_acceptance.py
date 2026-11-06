@@ -92,7 +92,7 @@ def test_console_file_path_and_cli_share_durable_commands(tmp_path, monkeypatch,
         tasks = store.list_tasks(mission)
         assert len(tasks) == 2 and tasks[1]["id"] == created_task_id and tasks[1]["prompt"] == path.read_text()
     assert "Unknown command 'echo'" in dispatch_console_command(mission, "echo not-a-shell")
-    assert main(["doctor", "--mission", mission, "--json"]) == 0
+    assert main(["doctor", "--mission", mission, "--json"]) == 1  # exit 1: the isolated HOME has no signed-in provider
     assert json.loads(capsys.readouterr().out)["sqlite_integrity"] == "ok"
 
 
