@@ -6,7 +6,7 @@
   "cursor_visible": false,
   "rows": [
     "LLM BRIDGE  * here: ~/projects/release",
-    "Run Codex, Claude Code, Copilot, Kilo and OpenCode on your tasks | switch as li",
+    "Run Codex, Claude Code, Copilot, Kilo and OpenCode on your tasks",
     "",
     "Choose a mission | 6 saved",
     "  STATUS             ID          MISSION                     TASKS     UPDATED",
@@ -32,7 +32,7 @@
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [12, "* here: ", "brand"], [20, "~/projects/release", "heading"]],
-    [[0, "Run Codex, Claude Code, Copilot, Kilo and OpenCode on your tasks | switch as li", "muted"]],
+    [[0, "Run Codex, Claude Code, Copilot, Kilo and OpenCode on your tasks", "muted"]],
     [],
     [[0, "Choose a mission | 6 saved", "heading"]],
     [[0, "  STATUS             ID          MISSION                     TASKS     UPDATED ", "dim"]],

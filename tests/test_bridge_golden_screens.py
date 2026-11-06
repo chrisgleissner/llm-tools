@@ -524,9 +524,28 @@ def _home_form(case: Case) -> FakeScreen:
         directory=f"{FIXED_HOME}/projects/release",
         native=True,
         provider_cursor=1,
+        signins={"claude": (False, "claude, then /login"), "kilo": (False, "kilo auth login")},
+        exhausted={"copilot": bridge_launcher.CapacityNote("rate-limited", NOW + 24 * 86400 + 5 * 3600)},
     )
     state.cursors = [len(state.objective), 0, len(state.directory)]
     state.focus = 1  # row 1 is the (blank) providers row of the form
+    return _draw_launcher(case, state)
+
+
+def _home_form_start_waits(case: Case) -> FakeScreen:
+    """The Start row when the only selected provider has no quota: it says so instead of `Starts ... now`."""
+    state = _launcher(
+        case,
+        creating=True,
+        objective="# Ship the 2.1 patch",
+        providers="copilot",
+        directory=f"{FIXED_HOME}/projects/release",
+        native=True,
+        signins={"claude": (False, "claude, then /login")},
+        exhausted={"copilot": bridge_launcher.CapacityNote("rate-limited", NOW + 24 * 86400 + 5 * 3600)},
+    )
+    state.cursors = [len(state.objective), 0, len(state.directory)]
+    state.focus = 5
     return _draw_launcher(case, state)
 
 
@@ -605,6 +624,7 @@ SCREENS: dict[str, Callable[[Case], FakeScreen]] = {
     "console-slash-list-filtered": _slash_list("/s"),
     "home-list": _home_list,
     "home-form": _home_form,
+    "home-form-start-waits": _home_form_start_waits,
     "home-saved": _home_saved,
     "home-saved-note": _home_saved_with_note,
     "mission-picker": _mission_picker,

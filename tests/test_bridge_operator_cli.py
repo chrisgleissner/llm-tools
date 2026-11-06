@@ -124,7 +124,8 @@ def test_status_events_doctor_and_proposals_are_readable(tmp_path, state, capsys
     assert verbose[0].split() == ["ID", "TIME", "KIND", "EVENT"]
     assert any("provider-selection" in line and "Selected codex (m)" in line for line in verbose)
 
-    doctor = _out(capsys, "doctor", "--mission", mid)
+    assert main(["doctor", "--mission", mid]) == 1  # the isolated HOME has no signed-in provider
+    doctor = capsys.readouterr().out
     assert "integrity ok" in doctor and f'Mission          {short} "Fix the tests"' in doctor
     assert "frozen_tool_config" not in doctor
     assert _out(capsys, "proposal", "list", "--mission", mid).strip() == "No proposals."
@@ -184,7 +185,8 @@ def test_doctor_does_not_infer_a_mission(tmp_path, state, monkeypatch, capsys) -
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.create_mission("proj", "o", cwd=tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert json.loads(_out(capsys, "doctor", "--json"))["mission"] is None
+    assert main(["doctor", "--json"]) == 1  # the isolated HOME has no signed-in provider
+    assert json.loads(capsys.readouterr().out)["mission"] is None
 
 
 def test_console_accepts_slash_commands_and_exit_hint(tmp_path, state, capsys) -> None:

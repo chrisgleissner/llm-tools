@@ -79,8 +79,7 @@ _FIRST_LOAD_WAIT = 0.1
 _ESCAPE_SECONDS = 0.06
 _SEQUENCE_SECONDS = 0.03
 _PASTE_STALL_SECONDS = 2.0
-_EMPTY_STATE = ("A mission is a goal plus ordered tasks run by Codex/Claude in this folder"
-                " \u00b7 N to create one")
+_NBSP = "\u00a0"
 _SUBTITLE = "Run AI coding agents on your tasks \u00b7 switch as limits run out"
 _DISPLAY_NAMES = {"codex": "Codex", "claude": "Claude Code", "copilot": "Copilot", "kilo": "Kilo", "opencode": "OpenCode",
                   "minimax": "MiniMax"}
@@ -155,14 +154,54 @@ def detect_installed() -> tuple[str, ...]:
     return tuple(name for name in PROVIDER_ORDER if provider_installed(name))
 
 
-def subtitle(installed: tuple[str, ...]) -> str:
-    """The home screen subtitle, naming only the provider CLIs that are installed and enabled."""
+def _listed_names(installed: tuple[str, ...]) -> str:
+    """`Codex, Claude Code and Copilot`; empty when no provider is installed."""
     names = [_DISPLAY_NAMES.get(name, name) for name in installed]
     if not names:
+        return ""
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
+
+
+def subtitle(installed: tuple[str, ...], width: int | None = None) -> str:
+    """The home screen subtitle, naming only the provider CLIs that are installed and enabled.
+
+    The ``switch as limits run out`` tail is left off when ``width`` cells cannot hold it.
+    """
+    listed = _listed_names(installed)
+    if not listed:
         return _SUBTITLE
-    listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" and {names[-1]}"
     text = f"Run {listed} on your tasks"
-    return text + (f" {glyph('sep')} switch as limits run out" if len(names) > 1 else "")
+    if len(installed) > 1:
+        full = text + f" {glyph('sep')} switch as limits run out"
+        if width is None or cell_width(localize(full)) < width:
+            return full
+    return text
+
+
+def empty_state_lines(installed: tuple[str, ...], width: int) -> list[str]:
+    """The explanation shown when there are no missions, wrapped at word boundaries.
+
+    It names only the installed providers (a neutral phrase when there are none), and
+    ``N to create one`` always stays on one line.
+    """
+    runner = _listed_names(installed) or "your AI coding CLI"
+    action = _NBSP.join(f"{glyph('sep')} N to create one".split(" "))
+    text = localize(f"A mission is a goal plus ordered tasks run by {runner} in this folder") + " " + action
+    return [line.replace(_NBSP, " ") for line in textwrap.wrap(text, max(10, width - 1))]
+
+
+def configured_providers(installed: tuple[str, ...], config: dict[str, Any] | None = None,
+                         routes: tuple[RouteChoice, ...] = ()) -> str | None:
+    """The available members of the user's configured rotation, or ``None`` when the config names none."""
+    route_ids = {choice.route_id for choice in routes}
+    for table, key in (("ralph", "routes"), ("ralph", "providers"), ("defaults", "providers")):
+        section = (config or {}).get(table)
+        names = section.get(key) if isinstance(section, dict) else None
+        if isinstance(names, list):
+            chosen = [str(n) for n in names if str(n) in installed or (key == "routes" and str(n) in route_ids)]
+            if chosen:
+                return ",".join(dict.fromkeys(chosen))
+    return None
 
 
 def default_providers(installed: tuple[str, ...], config: dict[str, Any] | None = None,
@@ -176,14 +215,9 @@ def default_providers(installed: tuple[str, ...], config: dict[str, Any] | None 
     installed, else the first installed provider. With nothing installed the
     selection stays ``codex`` and validation explains that no CLI was found.
     """
-    route_ids = {choice.route_id for choice in routes}
-    for table, key in (("ralph", "routes"), ("ralph", "providers"), ("defaults", "providers")):
-        section = (config or {}).get(table)
-        names = section.get(key) if isinstance(section, dict) else None
-        if isinstance(names, list):
-            chosen = [str(n) for n in names if str(n) in installed or (key == "routes" and str(n) in route_ids)]
-            if chosen:
-                return ",".join(dict.fromkeys(chosen))
+    configured = configured_providers(installed, config, routes)
+    if configured is not None:
+        return configured
     from . import bridge_doctor
 
     signed_in = bridge_doctor.preferred_first_provider(installed)
@@ -202,8 +236,8 @@ def _load_config() -> dict[str, Any]:
         return {}
 
 
-def detect_routes(config: dict[str, Any] | None) -> tuple[RouteChoice, ...]:
-    """Declared routes whose launch CLI is installed, in declaration order.
+def detect_routes(config: dict[str, Any] | None, *, installed_only: bool = True) -> tuple[RouteChoice, ...]:
+    """Declared routes whose launch CLI is installed (or every declared route), in declaration order.
 
     A route that shares its id with a bare provider is skipped: the bare name
     already resolves to that declared route.
@@ -215,10 +249,112 @@ def detect_routes(config: dict[str, Any] | None) -> tuple[RouteChoice, ...]:
         return ()
     choices = []
     for route_id, policy in declared.items():
-        if route_id in PROVIDER_ORDER or policy.provider not in PROVIDER_ORDER or not provider_installed(policy.provider):
+        if route_id in PROVIDER_ORDER or policy.provider not in PROVIDER_ORDER:
+            continue
+        if installed_only and not provider_installed(policy.provider):
             continue
         choices.append(RouteChoice(str(route_id), str(policy.provider), policy.model or None))
     return tuple(choices)
+
+
+@dataclass(frozen=True)
+class CapacityNote:
+    """A provider whose quota is used up: why, and the epoch it resets (``None`` when unknown)."""
+
+    reason: str
+    resets_at: float | None = None
+
+
+# Decision reasons that mean "no quota left" (as opposed to unreadable capacity, which never blocks a start).
+_EXHAUSTED_REASONS = frozenset({"rate-limited", "budget-exhausted", "insufficient-balance"})
+# A wait this short is a poll interval, not a reset time.
+_MIN_RESET_LEAD = 90.0
+_CAPACITY_MAX_AGE = 55.0
+
+
+def capacity_check_enabled() -> bool:
+    """False when ``LLM_BRIDGE_NO_CAPACITY_CHECK`` is set (tests set it; the form then reads no usage)."""
+    return os.environ.get("LLM_BRIDGE_NO_CAPACITY_CHECK", "").strip().lower() in {"", "0", "false", "no"}
+
+
+def read_capacity(names: tuple[str, ...], env: dict[str, str] | None = None) -> dict[str, CapacityNote]:
+    """The providers among ``names`` that have no quota left, from the same read the controller uses.
+
+    Providers whose capacity cannot be read are left out: an unreadable provider is not reported as empty.
+    Reads reuse the cross-process snapshot cache for up to ``_CAPACITY_MAX_AGE`` seconds.
+    """
+    from . import common
+
+    environment = dict(os.environ if env is None else env)
+    exhausted: dict[str, CapacityNote] = {}
+    with common.shared_usage_reads(_CAPACITY_MAX_AGE):
+        for name in names:
+            try:
+                _snapshot, decision = common.usage_snapshot_and_decision(name, None, "auto", "1", "60", environment)
+            except Exception:  # one unreadable provider must not hide the others
+                continue
+            reason = str(decision.get("reason") or "")
+            if decision.get("usable") is True or reason not in _EXHAUSTED_REASONS:
+                continue
+            wait = decision.get("wait_until")
+            resets_at = float(wait) if isinstance(wait, (int, float)) and wait - common.now_epoch() > _MIN_RESET_LEAD else None
+            exhausted[name] = CapacityNote(reason, resets_at)
+    return exhausted
+
+
+class CapacityReader:
+    """Reads provider capacity once on a worker thread, so the form never waits for a provider."""
+
+    def __init__(self, names: tuple[str, ...], read: Callable[[tuple[str, ...]], dict[str, CapacityNote]] = read_capacity) -> None:
+        self._names = names
+        self._read = read
+        self._thread: Any = None
+        self._result: dict[str, CapacityNote] | None = None
+        self._taken = False
+
+    @property
+    def started(self) -> bool:
+        return self._thread is not None
+
+    @property
+    def pending(self) -> bool:
+        return self._thread is not None and not self._taken
+
+    def start(self) -> None:
+        import threading
+
+        if self._thread is not None:
+            return
+
+        def work() -> None:
+            try:
+                self._result = self._read(self._names)
+            except Exception:
+                self._result = {}
+
+        self._thread = threading.Thread(target=work, name="bridge-form-capacity", daemon=True)
+        self._thread.start()
+
+    def poll(self) -> dict[str, CapacityNote] | None:
+        """The result once, the first time it is ready; ``None`` before that and afterwards."""
+        if self._thread is None or self._taken or self._result is None:
+            return None
+        self._taken = True
+        return self._result
+
+
+def offered_entries(config: dict[str, Any] | None = None) -> list[tuple[str, str]]:
+    """``(name, launch CLI)`` of everything the new-mission form can offer, installed or not.
+
+    This is the provider list ``llm-bridge doctor`` checks: every provider the
+    llm-tools config has not disabled, then every declared route.
+    """
+    config = _load_config() if config is None else config
+    disabled = disabled_launch_clis()
+    entries = [(name, name) for name in PROVIDER_ORDER if name not in disabled]
+    entries += [(route.route_id, route.provider) for route in detect_routes(config, installed_only=False)
+                if route.provider not in disabled]
+    return entries
 
 
 def controller_running(mission_id: str) -> bool | None:
@@ -228,6 +364,23 @@ def controller_running(mission_id: str) -> bool | None:
     probes (another launcher, ``status``) cannot mask each other.
     """
     return _controller_running(mission_id, on_error=None)
+
+
+def bridge_doctor_order() -> tuple[str, ...]:
+    """Bridge's built-in order of preference for an automatic provider pick."""
+    from . import bridge_doctor
+
+    return bridge_doctor.PREFERRED_ORDER
+
+
+def _duration(seconds: float) -> str:
+    """`24d`, `5h` or `12m`: the largest whole unit, for a short annotation."""
+    total = max(0, int(seconds))
+    if total >= 86400:
+        return f"{total // 86400}d"
+    if total >= 3600:
+        return f"{total // 3600}h"
+    return f"{max(1, total // 60)}m"
 
 
 def _flat(text: object) -> str:
@@ -480,6 +633,14 @@ class Launcher:
     theme_hint_since: float = field(default_factory=time.monotonic)
     # Provider launch CLIs the llm-tools config disables; they are not offered.
     disabled: tuple[str, ...] = ()
+    # Sign-in state per launch CLI (``(False, "codex login")`` = not signed in); empty means unknown.
+    signins: dict[str, tuple[bool | None, str]] = field(default_factory=dict)
+    # Providers with no quota left, from the background capacity read; empty until it finishes.
+    exhausted: dict[str, CapacityNote] = field(default_factory=dict)
+    # Set once the operator toggles a provider; an automatic pick is never changed after that.
+    providers_touched: bool = False
+    # True while the provider selection is the automatic pick, not a configured rotation or the operator's choice.
+    auto_providers: bool = False
     # Confirmation of the last save, shown while that mission stays selected.
     notice: str = ""
     notice_id: str | None = None
@@ -640,7 +801,70 @@ class Launcher:
     def selection(self) -> list[str]:
         return [item.strip() for item in self.providers.split(",") if item.strip()]
 
+    def launch_cli(self, name: str) -> str:
+        """The provider CLI that choice ``name`` (a provider or a route id) launches."""
+        return next((route.provider for route in self.routes if route.route_id == name), name)
+
+    def annotation(self, name: str) -> tuple[str, str] | None:
+        """``(text, colour role)`` saying why choice ``name`` may not run, or ``None`` when nothing is known against it."""
+        state = self.signins.get(self.launch_cli(name))
+        if state is not None and state[0] is False:
+            return (f"(not signed in: {state[1]})" if state[1] else "(not signed in)"), "dim"
+        note = self.exhausted.get(name)
+        if note is not None:
+            if note.resets_at is None:
+                return "(no quota left)", "warn"
+            return f"(quota empty {glyph('sep')} resets in {_duration(note.resets_at - time.time())})", "warn"
+        return None
+
+    def has_annotations(self) -> bool:
+        return any(self.annotation(name) for name in self.installed_providers())
+
+    def apply_capacity(self, exhausted: dict[str, CapacityNote]) -> None:
+        """Take the capacity read, and move an automatic provider pick off a provider with no quota.
+
+        The operator's own choice and a configured rotation are never changed here.
+        """
+        self.exhausted = dict(exhausted)
+        if not self.auto_providers or self.providers_touched or not exhausted:
+            return
+        current = self.selection()
+        if not current or current[0] not in exhausted:
+            return
+        installed = self.installed_providers()
+        order = [name for name in bridge_doctor_order() if name in installed and name not in exhausted]
+        signed_in = [name for name in order if (self.signins.get(name) or (None,))[0] is True]
+        fallback = [name for name in order if (self.signins.get(name) or (None,))[0] is not False]
+        candidates = signed_in or fallback
+        if candidates:
+            self.providers = candidates[0]
+
+    def _quota_phrase(self, name: str) -> str:
+        """`copilot has no quota until Dec 1` (or `... until 14:30` within a day, `... left` when no reset is known)."""
+        note = self.exhausted[name]
+        if note.resets_at is None:
+            return f"{name} has no quota left"
+        when = datetime.fromtimestamp(note.resets_at)
+        if note.resets_at - time.time() < 86400:
+            return f"{name} has no quota until {when:%H:%M}"
+        return f"{name} has no quota until {when:%b} {when.day}"
+
+    def start_hint(self) -> str:
+        """What the Start row will do, given the capacity read so far."""
+        chosen = self.selection()
+        usable = [name for name in chosen if name not in self.exhausted]
+        blocked = [name for name in chosen if name in self.exhausted]
+        if chosen and not usable:
+            earliest = min(blocked, key=lambda name: self.exhausted[name].resets_at or float("inf"))
+            return f"{self._quota_phrase(earliest)} {glyph('sep')} Start waits for it"
+        first = usable[:1]
+        text = f"Starts {first[0] if first else 'the first provider'} now {glyph('sep')} uses provider capacity"
+        if first and blocked and chosen.index(blocked[0]) < chosen.index(first[0]):
+            text += f" {glyph('sep')} {self._quota_phrase(blocked[0])}"
+        return text
+
     def toggle_provider(self, name: str) -> None:
+        self.providers_touched = True
         chosen = self.selection()
         if name in chosen:
             chosen.remove(name)
@@ -668,14 +892,14 @@ class Launcher:
 
     def picker_vertical(self, width: int) -> bool:
         """Use a vertical checklist when routes exist or one line cannot hold the providers."""
-        if self.routes:
+        if self.routes or self.has_annotations():
             return True
         needed = 2 + cell_width(_PROVIDERS_LABEL) + sum(cell_width(self._provider_item(n, False)) + 1
                                                           for n in self.installed_providers())
         return needed > width - 1
 
     def is_vertical(self) -> bool:
-        return bool(self.routes) if self.vertical is None else self.vertical
+        return bool(self.routes or self.has_annotations()) if self.vertical is None else self.vertical
 
     def form_layout(self, height: int, width: int) -> FormLayout:
         """Rows of the six form fields and, for a vertical picker, of its visible items."""
@@ -865,6 +1089,13 @@ class Launcher:
         if key == "\x1b":
             self.creating = False
             self.error = ""
+        elif key == curses.KEY_F5:
+            # Start from any field; the same checks as the Start row.
+            try:
+                self.validate()
+                return "start"
+            except (ValueError, OSError, RuntimeError) as exc:
+                self.error = str(exc)
         elif key == "\x05" and self.focus == 0:
             return "compose-objective"
         elif self.focus == 1 and key in {curses.KEY_UP, curses.KEY_DOWN} and self.is_vertical():
@@ -1077,14 +1308,19 @@ def field_hint(state: Launcher, width: int = 200) -> str:
 
 def _field_hint(state: Launcher, width: int) -> str:
     if state.focus == 0:
-        hint = "Type the task · Tab moves on to Start · Ctrl-E full editor · paste supported"
+        hint = "Type or paste the task · F5 start now · Tab more options · Ctrl-E full editor"
         if state.objective:
             hint += f" · {len(state.objective.encode('utf-8'))} bytes · {state.objective.count(chr(10)) + 1} {'line' if chr(10) not in state.objective else 'lines'}"
         return hint
     if state.focus == 1:
+        items = state.choices()
+        under = items[min(state.provider_cursor, len(items) - 1)][0] if items else ""
+        note = state.annotation(under) if under in state.selection() else None
+        if note is not None:
+            return f"{under} {note[0].strip('()')} {glyph('sep')} Space removes it from the rotation"
         if state.is_vertical():
-            return "↑/↓ choose · Space toggle · Tab next field · numbers show rotation order"
-        return "←/→ choose · Space toggle · numbers show rotation order"
+            return "↑/↓ choose · Space adds to the rotation; [1] runs first · Tab next field"
+        return "←/→ choose · Space adds to the rotation; [1] runs first"
     if state.focus == 2:
         return "Path to work in · Tab next"
     if state.focus == 3:
@@ -1093,8 +1329,8 @@ def _field_hint(state: Launcher, width: int) -> str:
         return full if cell_width(localize(full)) < width else short
     if state.focus == 4:
         return "Enter to save · no provider is started"
-    first = state.selection()[:1]
-    text = f"Starts {first[0] if first else 'the first provider'} now · uses provider capacity"
+    first = [name for name in state.selection() if name not in state.exhausted][:1]
+    text = state.start_hint()
     if first == ["claude"] and state.native:
         from . import bridge_doctor
 
@@ -1185,8 +1421,12 @@ def _draw_checklist(put: Callable[..., int], state: Launcher, layout: FormLayout
             put(row, 0, " " * width, row_role, room=width)
         item = state._provider_item(name, under)
         put(row, 4, item, row_role, room=width, attr=curses.A_UNDERLINE if under else 0)
+        extra = 4 + item_width + 2
         if detail:
-            put(row, 4 + item_width + 2, detail, row_role if under else "dim", room=width)
+            extra += put(row, extra, detail, row_role if under else "dim", room=width) + 2
+        tag = state.annotation(name)
+        if tag is not None:
+            put(row, extra, tag[0], row_role if under else tag[1], room=width)
 
 
 def list_footer(state: Launcher) -> str:
@@ -1231,10 +1471,11 @@ def footer_segments(text: str) -> list[tuple[str, str]]:
 def form_footer(state: Launcher) -> str:
     sep = f" {glyph('sep')} "
     if state.focus == 1 and state.is_vertical():
-        return sep.join(["Tab next field", "Enter next", "Esc back"])
+        return sep.join(["Tab next field", "Enter next", "F5 start", "Esc back"])
     if state.focus >= 4:
-        return sep.join([f"Tab/{glyph('updown')} fields", "Enter " + ("save" if state.focus == 4 else "start"), "Esc back"])
-    return sep.join([f"Tab/{glyph('updown')} fields", "Enter next", "Esc back"])
+        keys = [f"Tab/{glyph('updown')} fields", "Enter " + ("save" if state.focus == 4 else "start")]
+        return sep.join([*keys, *(["F5 start"] if state.focus == 4 else []), "Esc back"])
+    return sep.join([f"Tab/{glyph('updown')} fields", "Enter next", "F5 start", "Esc back"])
 
 
 def _draw_list_header(put: Callable[..., int], cols: ListColumns, stale_w: int) -> None:
@@ -1345,7 +1586,7 @@ def _draw(window: curses.window, state: Launcher) -> None:
     here = f"{glyph('here')} here: "
     put(0, 12, here, "brand")
     put(0, 12 + cell_width(localize(here)), short_path(state.cwd, max(10, width - 14 - cell_width(localize(here)))), "heading")
-    line(1, subtitle(state.installed_providers()), "muted")
+    line(1, subtitle(state.installed_providers(), width), "muted")
     caret_at: dict[int, int] = {}
     caret: tuple[int, int] | None = None
     if state.creating:
@@ -1446,7 +1687,7 @@ def _draw(window: curses.window, state: Launcher) -> None:
         if state.loading and not state.missions:
             line(_BODY_Y + 2, "Loading missions...", "dim")
         elif not state.missions:
-            for offset, text in enumerate(textwrap.wrap(localize(_EMPTY_STATE), max(10, width - 1))[:2]):
+            for offset, text in enumerate(empty_state_lines(state.installed_providers(), width)[:3]):
                 line(_BODY_Y + 2 + offset, text, "dim")
         elif not count:
             line(_BODY_Y + 2, f'No mission matches "{state.filter_text}". Esc clears the filter.', "dim")
@@ -1545,6 +1786,18 @@ def _read_home(db: sqlite3.Connection, cwd: str) -> tuple[list[dict[str, Any]], 
     return order_missions(missions, cwd), stats
 
 
+def _read_signins(installed: tuple[str, ...], routes: tuple[RouteChoice, ...]) -> dict[str, tuple[bool | None, str]]:
+    """Sign-in state of every launch CLI the form offers, read from the files the provider CLIs write (offline).
+
+    ``LLM_BRIDGE_NO_SIGNIN_CHECK=1`` (the switch ``mission create`` already honours) leaves it empty.
+    """
+    if os.environ.get("LLM_BRIDGE_NO_SIGNIN_CHECK", "").strip().lower() not in {"", "0", "false", "no"}:
+        return {}
+    from . import bridge_doctor
+
+    return {cli: bridge_doctor.signin_state(cli) for cli in dict.fromkeys([*installed, *(route.provider for route in routes)])}
+
+
 def _load_home(cwd: str) -> tuple[list[dict[str, Any]], dict[str, MissionStats]]:
     """First load: opens the store, which also creates or migrates the database."""
     with BridgeStore(store_path()) as store:
@@ -1635,10 +1888,23 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
     reloader = bridge_redraw.BackgroundReload(read_home, probe, fast=_RELOAD_FAST, slow=_RELOAD_SLOW, after=_RELOAD_IDLE_AFTER)
     state = Launcher(cwd, directory=short_path(cwd, 4096), installed=installed, routes=routes,
                      providers=default_providers(installed, config, routes),
+                     auto_providers=configured_providers(installed, config, routes) is None,
+                     signins=_read_signins(installed, routes),
                      burst_window=_BURST_SECONDS, input_pending=_stdin_pending,
                      reloader=reloader, loading=True,
                      disabled=tuple(name for name in PROVIDER_ORDER if name in disabled and provider_installed(name)),
                      theme_hint=theme_guess_hint())
+    # Capacity is read once, on a worker thread, the first time the form opens.
+    capacity = CapacityReader(installed)
+
+    def apply_capacity() -> bool:
+        if state.creating and not capacity.started and capacity_check_enabled():
+            capacity.start()
+        result = capacity.poll()
+        if result is None:
+            return False
+        state.apply_capacity(result)
+        return True
 
     def apply_reload(outcome: tuple[bool, Any] | None) -> bool:
         if outcome is None:
@@ -1685,6 +1951,8 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
             hold = state.paste_decoder.active or queued or state.creating
             if apply_reload(reloader.poll(now, last_activity, hold=hold)):
                 planner.mark()
+            if apply_capacity():
+                planner.mark()
             can_draw = (not state.paste_decoder.active or state.paste_interrupted) and not queued
             if can_draw and planner.should_draw(now):  # skipped while input is queued: keeps burst gaps tiny
                 with bridge_redraw.collect() as timed:
@@ -1693,6 +1961,8 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
                 planner.drawn(timed.next_deadline(time.monotonic()))
             now = time.monotonic()
             timers: list[float | None] = [reloader.wake_in(now) if not hold else None]
+            if capacity.pending:
+                timers.append(0.25)
             if state.escape_pending:
                 timers.append(state.escape_at + _ESCAPE_SECONDS - now)
             if state.paste_decoder.active:

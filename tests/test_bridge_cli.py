@@ -71,10 +71,10 @@ def test_mission_cli_create_status_tasks_events_and_evidence(tmp_path: Path, mon
 
     assert main(["mission", "list", "--json"]) == 0
     assert [item["id"] for item in json.loads(capsys.readouterr().out)["missions"]] == [mission_id]
-    assert main(["doctor", "--mission", mission_id, "--json"]) == 0
+    assert main(["doctor", "--mission", mission_id, "--json"]) == 1  # exit 1: the isolated HOME has no signed-in provider
     doctor = json.loads(capsys.readouterr().out)
     assert doctor["sqlite_integrity"] == "ok" and doctor["mission"]["id"] == mission_id
-    assert main(["doctor", "--json"]) == 0
+    assert main(["doctor", "--json"]) == 1  # exit 1: the isolated HOME has no signed-in provider
     assert json.loads(capsys.readouterr().out)["mission"] is None
 
 

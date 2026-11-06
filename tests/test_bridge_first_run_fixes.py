@@ -820,7 +820,8 @@ def test_doctor_for_a_mission_checks_the_missions_own_rotation(tmp_path, state, 
     _install(bin_dir, "codex")
     monkeypatch.setenv("PATH", str(bin_dir))
     mid = _create(tmp_path, capsys, "doc")["mission"]["id"]
-    report = json.loads(_run(capsys, "doctor", "--mission", mid, "--json"))
+    assert main(["doctor", "--mission", mid, "--json"]) == 1  # codex is installed but not signed in
+    report = json.loads(capsys.readouterr().out)
     assert [item["name"] for item in report["providers"]] == ["codex"]
     assert "frozen_tool_config" not in json.dumps(report)
 
@@ -832,9 +833,11 @@ def test_doctor_checks_a_route_through_its_launch_cli(tmp_path, state, capsys, m
     config = tmp_path / "routes.toml"
     config.write_text('[routes.kilo-fast]\nprovider = "kilo"\nmodel = "kilo/x"\n[routes.kilo-fast.capacity]\npolicy = "opaque"\n')
     monkeypatch.setenv("LLM_TOOLS_CONFIG", str(config))
-    monkeypatch.setattr(bridge, "default_rotation", lambda: ("claude", "kilo-fast"))
-    report = json.loads(_run(capsys, "doctor", "--json"))
-    assert [(c["name"], c["launch_cli"], c["installed"]) for c in report["providers"]] == [("kilo-fast", "kilo", True)]
+    assert main(["doctor", "--json"]) == 1  # no provider is signed in
+    report = json.loads(capsys.readouterr().out)
+    # Without a mission, doctor checks what the home form offers: every provider, then every declared route.
+    assert ("kilo-fast", "kilo", True) in [(c["name"], c["launch_cli"], c["installed"]) for c in report["providers"]]
+    assert report["providers"][-1]["name"] == "kilo-fast"
 
 
 def test_missions_listing_shows_the_mission_task_number(tmp_path, state, capsys) -> None:

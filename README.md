@@ -53,7 +53,7 @@ Next             Ready. In your project folder run llm-bridge, press N, type the
                  Claude Code asks once to trust a new folder: choose "Yes, I trust this folder".
 ```
 
-If tmux is missing, or no provider is signed in, the `Next` line says what to fix. No `pipx`, or another route? See [install paths](./docs/reference.md#install-paths). Check the installed version with `llm-bridge --version`.
+If tmux is missing, or no provider is signed in, the `Next` line says what to fix. `doctor` lists every provider the new-mission form offers, exits 1 when no provider can run (so scripts can gate on it), and `doctor --json` carries `ready` and `blocking` fields. No `pipx`, or another route? See [install paths](./docs/reference.md#install-paths). Check the installed version with `llm-bridge --version`.
 
 ## Your first Bridge mission
 
@@ -61,7 +61,7 @@ Run this in a folder you are happy for an agent to edit, for example a new empty
 
 1. Run `llm-bridge` and press `N`. The home screen starts no provider.
 2. Type the task, for example `Create a file named hello.txt containing the word hello, then stop.`
-3. The form selects the first provider that is installed and signed in, shown as `[1] claude`. Press `Tab` five times to reach **Start and open provider**. Its hint reads `Starts claude now · uses provider capacity`. Press `Enter`. This is the step that uses paid capacity.
+3. The form selects the first provider that is installed and signed in, shown as `[1] claude`. Press `F5` to start from any field, or press `Tab` five times to reach **Start and open provider** and press `Enter`. The hint on that row reads `Starts claude now · uses provider capacity`. When a provider's quota is used up, the row says so, for example `copilot has no quota until Dec 1 · Start waits for it`, and the form prefers a provider that has capacity. Providers that are not signed in are marked, for example `[ ] codex (not signed in: codex login)`. This is the step that uses paid capacity.
 4. The provider opens in its own terminal inside Bridge. Claude Code may first ask whether you trust the folder. Choose **Yes, I trust this folder**. The first option is **No, exit**. If you pick it, Claude exits with status 1. Bridge does not start it again. It holds the task, and the status and the Needs you row say `Claude Code was not allowed to trust this folder · trust it and run /start again, or choose another provider with /rotation`. Run `/start` to start Claude again, and the prompt returns.
 5. When the provider says it is done, exit it with `/exit`. Bridge then shows:
 

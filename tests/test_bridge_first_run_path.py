@@ -133,7 +133,7 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
     terminal.keys("n")
     form = terminal.wait_for("Objective:")
     assert "[1] claude" in form and "[1] codex" not in form
-    assert "Tab moves on to Start" in form
+    assert "F5 start now" in form
     terminal.type("Create a file named hello.txt containing the word hello, then stop.")
     terminal.keys("Tab", "Tab", "Tab", "Tab", "Tab")  # Providers, Folder, Mode, Save, Start
     start = terminal.wait_for("Starts claude now")
@@ -190,7 +190,7 @@ def test_doctor_next_steps_cover_the_unready_machines(tmp_path: Path) -> None:
     assert signed_out == ["Sign in to a provider first: codex · run: codex login"]
 
     nothing = bridge_doctor.next_steps(tmux_available=True, providers=[missing], folder=tmp_path, env=env)
-    assert nothing == ["Install and sign in to a provider CLI (Claude Code or Codex), then run llm-bridge doctor again."]
+    assert nothing == ["Install and sign in to one provider CLI (install one of: codex, claude, copilot, kilo, opencode, minimax), then run llm-bridge doctor again."]
 
     (tmp_path / ".claude.json").write_text(json.dumps({"projects": {str(tmp_path): {"hasTrustDialogAccepted": True}}}))
     trusted = bridge_doctor.next_steps(tmux_available=True, providers=[claude_ready], folder=tmp_path / "child", env=env)
