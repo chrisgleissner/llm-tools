@@ -221,7 +221,7 @@ def test_usage_and_lifecycle_empty_branches_render_without_claims() -> None:
         "lifecycle": {"status": "RUNNING", "heartbeat": {}},
     })
     state.choose_view(7)
-    assert state.rows() == ["Usage · ready · updated 0s ago", "one", "two"]
+    assert state.rows() == ["Usage · ready · updated 0s ago · live llm-usage read", "one", "two"]
     state.choose_view(bridge_tui.VIEWS.index("Health"))
     rows = state.rows()
     assert rows == ["Lifecycle             RUNNING"]

@@ -100,7 +100,7 @@ How the scripted parts reach Bridge's own code paths:
 
 Encoding. `--max-kb 600` (the default for `limits`) raises the CRF of the MP4 and WebM until each file is at most 600 KB. Both are written for reliable playback: H.264 High, `yuv420p`, `-movflags +faststart`, a key frame every second (`-g 30 -keyint_min 30 -sc_threshold 0`), and VP9 with the same key frame interval. The key frames dominate the size of a text clip, which is why the CRF ends up high (34 to 40).
 
-Known limits of what is shown. The Usage view (`F8`) reads the real provider readers, which have no injection, so the demo does not show the quota bars of `llm-usage`; Bridge's own capacity lines are used instead. At 60 columns Bridge shortens the tab strip, truncates long Recent lines and cuts `Task 1` in the station status line to `<sk 1 >`; that is Bridge's output and is not changed for the recording.
+Known limits of what is shown. The Usage view (`F8`) renders the injected capacity (`LLM_SCHEDULER_USAGE_JSON` or `LLM_SCHEDULER_USAGE_JSON_FILE`) through the `llm-usage` table, the same snapshots the controller reads, so its numbers match the Overview and Providers views. At 60 columns Bridge shortens the tab strip, truncates long Recent lines and cuts `Task 1` in the station status line to `<sk 1 >`; that is Bridge's output and is not changed for the recording.
 
 ### Full walkthrough
 

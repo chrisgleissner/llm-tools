@@ -543,10 +543,10 @@ def test_actions_rows_teach_the_slash_command_and_align() -> None:
 
 def test_usage_header_has_no_none_age_and_rows_are_clipped_not_wrapped() -> None:
     state = make_state({"usage": {"status": "refreshing", "age_seconds": None, "text": "Provider  " + "X" * 200}}, view="Usage")
-    assert state.rows()[0] == "Usage · refreshing · first sample pending"
+    assert state.rows()[0] == "Usage · refreshing · first sample pending · live llm-usage read"
     assert "None" not in state.rows()[0]
     state.snapshot["usage"] = {"status": "unavailable", "age_seconds": 125, "error": "RuntimeError", "text": "row"}  # type: ignore[index]
-    assert state.rows()[0] == "Usage · unavailable · updated 2m ago · last refresh failed: RuntimeError"
+    assert state.rows()[0] == "Usage · unavailable · updated 2m ago · last refresh failed: RuntimeError · live llm-usage read"
     state.snapshot["usage"] = {"status": "ready", "age_seconds": 3, "text": "Provider  " + "X" * 200 + "END"}  # type: ignore[index]
     screen = Screen(20, 80)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]

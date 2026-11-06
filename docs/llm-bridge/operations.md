@@ -433,6 +433,12 @@ The Usage view retains the usage renderer's cell colours through Bridge's
 palette, including separate red, yellow, green and cyan guidance. Explicit
 `NO_COLOR`, `LLM_USAGE_NO_COLOR` and monochrome terminals still suppress colour.
 Text and column fitting use the same dashboard as `llm-usage`.
+The status line names the source (`live llm-usage read`). By default the view lists only the
+mission's rotation providers; `a` shows every enabled provider whose CLI is installed. Under a
+capacity injection (`LLM_SCHEDULER_USAGE_JSON`, `LLM_SCHEDULER_USAGE_JSON_FILE`) the view renders the
+same snapshots the controller reads. When a live read still differs from the controller's last
+observation by more than 5 percentage points for a window, a line under the status gives the
+controller's figures and their age. An exhausted weekly or monthly window reads `× empty`.
 
 Keyboard and mouse operate those views:
 

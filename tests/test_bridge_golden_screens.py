@@ -230,7 +230,7 @@ USAGE_TEXT = "\n".join([
 
 
 def _usage_block() -> dict[str, Any]:
-    return {"status": "ready", "age_seconds": 12, "error": "", "text": USAGE_TEXT, "rows": [
+    return {"status": "ready", "age_seconds": 12, "error": "", "text": USAGE_TEXT, "all_text": USAGE_TEXT, "rotation": ["claude", "codex"], "rows": [
         {"provider": "codex", "model": "gpt-5", "scope": "5h", "remaining_percent": 62.0},
         {"provider": "claude", "model": "sonnet-4", "scope": "5h", "remaining_percent": 8.0},
     ]}
