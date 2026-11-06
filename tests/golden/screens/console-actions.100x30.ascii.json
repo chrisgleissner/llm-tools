@@ -19,7 +19,7 @@
     "  Stop                           /stop                   Stop after the current step; progress is...",
     "  Amend task                     Ctrl-R                  Edit the selected task's text | unavaila...",
     "  Status                         /status                 Print the mission state, blockers and queue",
-    "  Detach                         /detach                 Leave the provider terminal; work keeps ...",
+    "  Leave                          /leave                  Leave the provider terminal; work keeps ...",
     "  Cancel mission                 /cancel                 Cancel mission and unfinished tasks (ask...",
     "  Help                           /help                   Read the offline quick-start",
     "",
@@ -34,7 +34,7 @@
     "",
     "",
     "> type a command | Ctrl-K filters actions",
-    "Enter run action | Up/Down select | Ctrl-K filter | Tab/F1-9 views | Ctrl-D exit | ? help"
+    "Enter run action | Up/Down select | Tab/F1-9 views | Ctrl-D exit | Ctrl-G command line | ? help"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " | ", "dim"], [13, "|", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " | ", "dim"], [39, "# NEEDS YOU", "state_review"]],
@@ -51,7 +51,7 @@
     [[2, "Stop                           ", "info"], [33, "/stop                 ", "key"], [55, "  ", "info"], [57, "Stop after the current step; progress is...", "muted"]],
     [[2, "Amend task                     Ctrl-R                  Edit the selected task's text | unavaila...", "dim"]],
     [[2, "Status                         ", "info"], [33, "/status               ", "key"], [55, "  ", "info"], [57, "Print the mission state, blockers and queue", "muted"]],
-    [[2, "Detach                         ", "info"], [33, "/detach               ", "key"], [55, "  ", "info"], [57, "Leave the provider terminal; work keeps ...", "muted"]],
+    [[2, "Leave                          ", "info"], [33, "/leave                ", "key"], [55, "  ", "info"], [57, "Leave the provider terminal; work keeps ...", "muted"]],
     [[2, "Cancel mission                 ", "info"], [33, "/cancel               ", "key"], [55, "  ", "info"], [57, "Cancel mission and unfinished tasks (ask...", "muted"]],
     [[2, "Help                           ", "info"], [33, "/help                 ", "key"], [55, "  ", "info"], [57, "Read the offline quick-start", "muted"]],
     [],
@@ -66,6 +66,6 @@
     [],
     [],
     [[0, "> ", "muted"], [2, "type a command | Ctrl-K filters actions", "dim+dim"]],
-    [[0, "Enter", "key"], [5, " run action", "muted"], [16, " | ", "dim"], [19, "Up/Down", "key"], [26, " select", "muted"], [33, " | ", "dim"], [36, "Ctrl-K", "key"], [42, " filter", "muted"], [49, " | ", "dim"], [52, "Tab/F1-9", "key"], [60, " views", "muted"], [66, " | ", "dim"], [69, "Ctrl-D", "key"], [75, " exit", "muted"], [80, " | ", "dim"], [83, "?", "key"], [84, " help", "muted"]]
+    [[0, "Enter", "key"], [5, " run action", "muted"], [16, " | ", "dim"], [19, "Up/Down", "key"], [26, " select", "muted"], [33, " | ", "dim"], [36, "Tab/F1-9", "key"], [44, " views", "muted"], [50, " | ", "dim"], [53, "Ctrl-D", "key"], [59, " exit", "muted"], [64, " | ", "dim"], [67, "Ctrl-G", "key"], [73, " command line", "muted"], [86, " | ", "dim"], [89, "?", "key"], [90, " help", "muted"]]
   ]
 }

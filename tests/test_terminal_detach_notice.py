@@ -91,7 +91,7 @@ def test_detach_from_a_finished_mission_does_not_promise_it_keeps_running(tmp_pa
     code, out = _attach_and_detach(tmp_path, f"mission-{MISSION}", bridge_env, finish="CANCELLED")
 
     assert code == 0
-    assert out == "Detached from mission f292f491 (c64bridge) · the mission is cancelled\n"
+    assert out == "Mission f292f491 cancelled · 0/1 tasks\n"
 
 
 def test_other_sessions_keep_tmux_s_own_line(tmp_path: Path, bridge_env: dict[str, str]) -> None:

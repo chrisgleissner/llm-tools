@@ -224,7 +224,7 @@ class BridgeMissionHooks:
         """Tell the operator, in the provider pane, which task waits for their decision."""
         if self.handle is None or not self.native_tui:
             return
-        message = f"Task {hold['task_ordinal']} is waiting for your review. Ctrl-] then B, then /approve or /reject."
+        message = f"Task {hold['task_ordinal']} ready for review · Ctrl-] B then /approve"
         now = time.monotonic()
         if message == self._hold_message or now - self._hold_message_tried < 5.0:
             return
@@ -253,7 +253,7 @@ class BridgeMissionHooks:
         text = ""
         if not self.store.auto_continue_default(config) and not (config.get("verifier") or {}).get("argv"):
             ordinal = self.store.get_task(task_id)["ordinal"]
-            text = f"Task {ordinal} is waiting for your review. Ctrl-] then B, then /approve or /reject."
+            text = f"Task {ordinal} ready for review · Ctrl-] B then /approve"
         try:
             TmuxTerminalBackend().set_review_hint(self.handle, text)
         except (OSError, RuntimeError, subprocess.SubprocessError):

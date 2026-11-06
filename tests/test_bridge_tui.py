@@ -167,7 +167,7 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["pause"]
-    assert {"steer --help", "attach", "detach", "task add --help", "proposal list", "start"} <= set(bridge_tui.PALETTE_COMMANDS)
+    assert {"steer --help", "attach", "leave", "task add --help", "proposal list", "start"} <= set(bridge_tui.PALETTE_COMMANDS)
     assert not {"usage", "control", "orders", "events"} & set(bridge_tui.PALETTE_COMMANDS)  # view tabs are not actions
 
 

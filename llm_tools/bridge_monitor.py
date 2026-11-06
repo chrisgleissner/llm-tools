@@ -309,8 +309,12 @@ def waiting_from_wait(data: dict[str, Any], now: float, since: str | None = None
     }
 
 
-def waiting_message(waiting: dict[str, Any], now: float) -> str:
-    """The sentence shown in an empty provider pane while the mission waits."""
+def waiting_message(waiting: dict[str, Any], now: float, *, console: bool = False) -> str:
+    """The sentence shown in an empty provider pane while the mission waits.
+
+    With ``console=True`` it is the Overview's wording: the options are slash commands, because the
+    console is the Ctrl-] then B screen that the provider-pane sentence points to.
+    """
     parts = []
     for entry in waiting.get("entries", []):
         name = entry.get("name") or entry.get("provider") or "?"
@@ -327,7 +331,10 @@ def waiting_message(waiting: dict[str, Any], now: float) -> str:
     elif not parts and until is not None:
         parts.append(f"next provider ready in {countdown(until - now)}")
     subject = "capacity" if waiting.get("reason") == "capacity" else "a usable provider"
-    return f"Waiting for {subject}: {'; '.join(parts) or 'no provider is ready yet'}. Ctrl-] then B for options."
+    text = f"Waiting for {subject}: {'; '.join(parts) or 'no provider is ready yet'}"
+    if console:
+        return f"{text} · /rotation to add a provider · /stop to stop waiting"
+    return f"{text}. Ctrl-] then B for options."
 
 
 def _attach_task_ordinals(store: BridgeStore, records: list[dict[str, Any]]) -> None:

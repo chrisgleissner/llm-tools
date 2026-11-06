@@ -44,6 +44,7 @@ from .common import fmt_duration
 from . import terminal
 from .terminal import TerminalAction
 from .bridge_actions import ACTIONS, Action, actions_for
+from .bridge_wording import NEXT_NOTHING, approval_row, controller_hint, finished_next, proposals_row
 from .bridge_event_text import (  # noqa: F401  (moved to bridge_event_text so the CLI can phrase events; other modules and tests reach these through bridge_tui)
     _HUMANIZERS,
     _MISSION_STATE_WORDS,
@@ -152,9 +153,9 @@ def compose_document(
     notice = ""  # transient warnings only; the status line below carries the keys
     if restored_from is not None:
         try:
-            notice = f"Restored draft from {time.strftime('%H:%M', time.localtime(restored_from.stat().st_mtime))} · Ctrl-D discard"
+            notice = f"Restored draft from {time.strftime('%H:%M', time.localtime(restored_from.stat().st_mtime))} · Ctrl-X discard"
         except OSError:
-            notice = "Restored draft · Ctrl-D discard"
+            notice = "Restored draft · Ctrl-X discard"
     draft_dir = default_state_dir() / "drafts"
     draft_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(draft_dir, 0o700)
@@ -365,7 +366,7 @@ def compose_document(
                         paste_decoder.reset()
                     preferred_column = None
                     continue
-                if key == "\x13" or key == curses.KEY_F2:
+                if key == "\x13":  # F-keys only switch views, so F2 does not save here
                     checkpoint()
                     return buffer.text
                 if key == "\x0f":
@@ -411,7 +412,11 @@ def compose_document(
                     name = retain_draft()
                     notice = f"Draft retained at {name}"
                     return None
-                if key == "\x04":
+                if key == "\x04":  # Ctrl-D closes like Esc and never discards; Ctrl-X discards
+                    name = retain_draft()
+                    notice = f"Draft retained at {name}"
+                    return None
+                if key == "\x18":
                     with write_lock:  # an in-flight periodic write must not recreate the discarded draft
                         discarded = True
                         checkpoint_path.unlink(missing_ok=True)
@@ -482,7 +487,7 @@ def compose_document(
 
 def _composer_status(size_bytes: int, max_bytes: int, line_count: int) -> str:
     """Composer footer: the keys, the line count, and the byte count only when the limit is near."""
-    parts = ["F2/Ctrl-S Save", "Esc close (draft kept)", "Ctrl-D Discard", f"{line_count} {'line' if line_count == 1 else 'lines'}"]
+    parts = ["Ctrl-S Save", "Esc close (draft kept)", "Ctrl-X Discard", f"{line_count} {'line' if line_count == 1 else 'lines'}"]
     if size_bytes * 5 > max_bytes * 4:
         parts.append(f"{size_bytes}/{max_bytes} bytes")
     return _SEP.join(parts)
@@ -594,6 +599,7 @@ _IDLE_BACKOFF_SECONDS = 10.0  # without input for this long the change probe slo
 _IDLE_REFRESH_SECONDS = 1.0
 _STATUS_SECONDS = 8.0  # how long a command result stays in the bottom row
 _OUTPUT_IDLE_THRESHOLD_SECONDS = 30
+_RECALL_HINT = "Ctrl-P recalls the command"  # the command line is empty after a failure, so Up would move the body selection
 _MAX_COMMAND_CHARS = 4096
 _MAX_OUTPUT_LINES = 80
 _MAX_OUTPUT_LINE_CHARS = 2000
@@ -894,7 +900,7 @@ def _last_run_line(snapshot: dict[str, object], task: dict[str, object]) -> str 
 
 
 # Console-only shortcuts that expand to public commands.
-_CONSOLE_ALIASES = ("approve", "reject", "overview", "providers", "activity", "health", "actions", "sessions", "home")
+_CONSOLE_ALIASES = ("approve", "reject", "leave", "overview", "providers", "activity", "health", "actions", "sessions", "home")
 
 
 def _expand_console_alias(command: str, snapshot: dict[str, object]) -> tuple[str, str | None]:
@@ -969,6 +975,8 @@ _SLASH_FIRST = ("start", "approve", "reject", "resume", "pause", "stop", "status
 _SLASH_ALIAS_TEXT = {
     "approve": "Approve a task that awaits review (asks first)",
     "reject": "Send a task back with a reason",
+    "leave": "Leave the provider terminal; work keeps running",
+    "resume": "Continue after a pause or a stop",
     "overview": "Show the Overview view",
     "providers": "Show the Providers view",
     "activity": "Show the Activity view",
@@ -1390,14 +1398,20 @@ def _clock_epoch() -> float:
 
 
 def _local_clock(value: object) -> str:
-    """Local HH:MM:SS for an ISO/epoch timestamp."""
+    """Local time of an ISO/epoch timestamp: `HH:MM:SS` today, `Mon 03:13` within the last week, else `2026-11-06 03:13`."""
     from . import common
 
     epoch = common.parse_epoch(value, use_date=False)
     if epoch is None:
         return "--:--:--"
     try:
-        return time.strftime("%H:%M:%S", time.localtime(epoch))
+        moment = time.localtime(epoch)
+        now = common.now_epoch()
+        if time.localtime(now)[:3] == moment[:3]:
+            return time.strftime("%H:%M:%S", moment)
+        if 0 <= now - epoch < 7 * 86400:
+            return time.strftime("%a %H:%M", moment)
+        return time.strftime("%Y-%m-%d %H:%M", moment)
     except (OverflowError, OSError, ValueError):  # a timestamp outside the platform's range
         return "--:--:--"
 
@@ -1618,14 +1632,13 @@ def _controller_line(data: dict[str, object]) -> str:
         return f"failed — {_text(lifecycle.get('failure_reason'), 160)}"
     if status in ENDED_MISSION_STATUSES:
         return f"mission {status.lower()} — controller finished"
-    if status == "CREATED":
-        return "not started — type start"
     if status == "STOPPING":
         return "stopping after the current step"
-    if status == "STOPPED":
-        return "stopped — type start or resume"
+    hint = controller_hint(status, "console")
+    if hint:
+        return hint
     if status in STARTED_MISSION_STATUSES and lifecycle.get("controller_running") is False:
-        return "not running — type resume"
+        return "not running — type /resume"
     if status == "PAUSED":
         context = _dict(data.get("station_context"))
         if context.get("executing_operation") and str(context.get("operation_status", "")).upper() in ACTIVE_OPERATION_STATUSES:
@@ -1661,17 +1674,17 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
     if waiting:
         from .bridge_monitor import waiting_message
 
-        rows.append(waiting_message(waiting, _clock_epoch()))
+        rows.append(waiting_message(waiting, _clock_epoch(), console=True))
     for task in tasks:
         if str(task.get("status", "")).upper() == "VERIFYING":
             number = _text(task_number(task) if task_number(task) is not None else "?", 12)
             if number == held:
                 rows.append(_review_hold_text(number))
                 continue
-            rows.append(f"task {number} awaits your approval — type /approve {number} (or F7 Actions)")
+            rows.append(approval_row("console", [number]))
     pending = _dict(data.get("proposal_counts")).get("PENDING")
     if isinstance(pending, (int, float)) and pending:
-        rows.append(f"{int(pending)} agent task proposal{'s' if pending != 1 else ''} to review — type proposals")
+        rows.append(proposals_row("console", int(pending)))
     from .bridge_format import declined_message, declined_provider
 
     stuck = []
@@ -1750,6 +1763,24 @@ def _station_status_is_implied(mission_status: str, task: dict[str, object]) -> 
     return mission_status == "RUNNING" or (mission_status == MISSION_NEEDS_YOU_LABEL and str(task.get("status") or "").upper() == "VERIFYING")
 
 
+def _strip_task_status(snapshot: dict[str, object], task: dict[str, object]) -> str:
+    """The task status the tmux strip shows.
+
+    The provider's operation row turns EXITED before the controller moves the task on, so a
+    RUNNING task whose newest operation exited with status 0 is shown as VERIFYING, the state
+    the controller records next, in step with the "Provider exited" message in the pane.
+    """
+    status = str(task.get("status") or "unknown")
+    if status.upper() != "RUNNING" or _known(_dict(snapshot.get("station_context")).get("executing_operation")):
+        return status
+    operations = _items(snapshot.get("operations"))
+    last = operations[-1] if operations else {}
+    same_task = str(last.get("task_id")) == str(task.get("id")) if last.get("task_id") is not None and task.get("id") is not None else True
+    if same_task and str(last.get("status") or "").upper() == "EXITED" and str(last.get("exit_code")) == "0":
+        return "VERIFYING"
+    return status
+
+
 def _station_status_parts(snapshot: dict[str, object]) -> tuple[str, str]:
     """`(mission label, task/state text)` for the tmux status line.
 
@@ -1760,8 +1791,9 @@ def _station_status_parts(snapshot: dict[str, object]) -> tuple[str, str]:
     mission_status = _mission_state_word(snapshot, _text(_mission(snapshot).get("status") or "unknown", 16).upper())
     task = _dict(snapshot.get("current_task"))
     if task:
-        idle = _station_idle_phrase(snapshot) if str(task.get("status") or "").upper() == "RUNNING" else ""
-        label = f"Task {_text(task_number(task) or '?', 8)} " + (idle or status_label(_text(task.get('status') or 'unknown', 12).upper()))
+        task_status = _strip_task_status(snapshot, task)
+        idle = _station_idle_phrase(snapshot) if task_status.upper() == "RUNNING" else ""
+        label = f"Task {_text(task_number(task) or '?', 8)} " + (idle or status_label(_text(task_status, 12).upper()))
     else:
         label = "No task"
     if not _station_status_is_implied(mission_status, task):
@@ -1782,7 +1814,7 @@ def _station_status_segments(snapshot: dict[str, object]) -> list[Segment]:
     task = _dict(snapshot.get("current_task"))
     out: list[Segment] = []
     if task:
-        status = str(task.get("status") or "unknown")
+        status = _strip_task_status(snapshot, task)
         idle = _station_idle_phrase(snapshot) if status.upper() == "RUNNING" else ""
         out.append((f"Task {_text(task_number(task) or '?', 8)} ", "info"))
         out.append((idle, _idle_role(idle)) if idle else _state_segment(_text(status, 12)))
@@ -1936,10 +1968,9 @@ def _owner_windows(snapshot: dict[str, object], owner: str) -> list[str]:
 
 
 def _next_task(snapshot: dict[str, object]) -> dict[str, object] | None:
-    current = _dict(snapshot.get("current_task"))
+    """The first task waiting to start. A READY current task counts: while nothing runs it is the next task."""
     return next(
-        (task for task in _items(snapshot.get("tasks"))
-         if str(task.get("status", "")).upper() in {"READY", "QUEUED"} and task.get("id") != current.get("id")),
+        (task for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() in {"READY", "QUEUED"}),
         None,
     )
 
@@ -2024,7 +2055,7 @@ def _status_strip(snapshot: dict[str, object], width: int = 0) -> tuple[str, str
             ], width), "warn"
         return _fit_strip([f"task {number} awaits your review{more}", f"type /approve {number}"], width), "warn"
     following = _next_task(snapshot)
-    upcoming = f"next: task {_text(task_number(following) if task_number(following) is not None else '?', 12)}" if following else "no task waiting · Ctrl-E adds one"
+    upcoming = f"task {_text(task_number(following) if task_number(following) is not None else '?', 12)} ready" if following else "no task waiting · Ctrl-E adds one"
     if status == "STOPPING":
         return _fit_strip(["stopping after the current step"], width), "warn"
     if status in {"CREATED", "STOPPED"}:
@@ -2563,7 +2594,7 @@ def _provider_state(
     return f"not ready{reason}", "warn"
 
 
-_CLOCK_ROW = re.compile(r"^(?P<clock>[\d-]{2}:[\d-]{2}:[\d-]{2})  (?P<text>.*)$")
+_CLOCK_ROW = re.compile(r"^(?P<clock>[\d-]{2}:[\d-]{2}:[\d-]{2}|\w{2,4} \d{2}:\d{2}|\d{4}-\d{2}-\d{2} \d{2}:\d{2})  (?P<text>.*)$")
 
 
 def _activity_row_segments(row: str, role: str) -> list[Segment]:
@@ -2609,6 +2640,28 @@ def _provider_header_segments(name: str, model: str, state: str, role: str, flag
     for flag in flags:
         out += [("  ", "info"), (flag, "accent" if flag == "[viewed]" else "muted")]
     return out
+
+
+def _finished_operation_text(data: dict[str, object]) -> str:
+    """`last operation exited 0 · 1m ago · awaiting review` when the newest operation is no longer running, else ``""``.
+
+    Reads the operation row that the Sessions view shows, so Health and Sessions agree.
+    """
+    if _known(_dict(data.get("station_context")).get("executing_operation")):
+        return ""
+    operations = _items(data.get("operations"))
+    last = operations[-1] if operations else {}
+    status = str(last.get("status") or "").upper()
+    if not status or status in ACTIVE_OPERATION_STATUSES:
+        return ""
+    exit_code = last.get("exit_code")
+    age = _relative_epoch(last.get("updated_at") or last.get("created_at"), _clock_epoch())
+    review = any(str(task.get("status") or "").upper() == "VERIFYING" for task in (*_items(data.get("tasks")), _dict(data.get("current_task"))))
+    return _SEP.join(part for part in (
+        f"last operation {status.lower()}" + ("" if exit_code is None else f" {_text(exit_code, 8)}"),
+        age or "",
+        "awaiting review" if review else "",
+    ) if part)
 
 
 def _recent_operation_segments(op: dict[str, object], age: str | None) -> list[Segment]:
@@ -2728,6 +2781,7 @@ class _ConsoleState:
     usage_legend: bool = False
     usage_all: bool = False
     saved_notice: bool = False  # show "saved as ID" in the status strip until the first key
+    outside_station: bool = False  # opened by `llm-bridge control` in the user's own terminal, so Ctrl-] keys do not apply
     usage_reader: Callable[[], dict[str, object]] | None = field(default=None, repr=False)
     content_width: int = 0  # columns available to view content; set by the last draw (0 = unknown)
     response_overlay: bool = False
@@ -3007,7 +3061,7 @@ class _ConsoleState:
                 # Like Codex CLI and Claude Code, the command line stays empty after a
                 # failure; the failed command is the newest history entry (Up / Ctrl-P).
                 self.rejected_submission = self.submitted_draft
-                recall_hint = "↑ recalls the command"
+                recall_hint = _RECALL_HINT
             self.submitted_draft = None
             if result_text:
                 response_lines = result_text.splitlines() or [result_text]
@@ -3200,7 +3254,7 @@ class _ConsoleState:
             # this returns True) and the refused command is the newest history entry for Up / Ctrl-P.
             self.history.append(typed.strip())
             self.history_index = None
-            self.output.append(f"{problem}{_SEP}↑ recalls the command")
+            self.output.append(f"{problem}{_SEP}{_RECALL_HINT}")
             return True
         reason = _confirmation_reason(command)
         if reason:
@@ -3434,6 +3488,9 @@ class _ConsoleState:
             return True
         if key == "KEY_BTAB" and not self.input_focused:
             self.choose_view((self.view_index - 1) % len(VIEWS))
+            return True
+        if key in {"KEY_UP", "KEY_DOWN"} and self.input_focused and not self.search_editing:
+            self._history(-1 if key == "KEY_UP" else 1)  # Up/Down walk the history while the command line has focus
             return True
         if key == "\x10":  # Ctrl-P recalls the previous command.
             if self.search_editing:
@@ -3797,6 +3854,7 @@ class _ConsoleState:
             pending_proposals=int(pending) if isinstance(pending, (int, float)) and not isinstance(pending, bool) else 0,
             selected_task=self.selected_task_anchor,
             holding=_review_hold_task(self.snapshot) is not None,
+            has_terminal=str(_dict(self.snapshot.get("station_mode")).get("configured_mode") or "").lower() != "headless",
         )
         query = self.palette_filter.casefold()
         return [action for action in actions if query in f"{action.label} {action.effect} {action.typed}".casefold()]
@@ -4071,10 +4129,9 @@ class _ConsoleState:
         def row(label: str, value: str) -> str:
             return f"{label:<{_BRIDGE_LABEL}}{value}"
 
-        next_task = next(
-            (task for task in tasks if task.get("status") in {"READY", "QUEUED"} and task.get("id") != current_task.get("id")),
-            None,
-        )
+        if str(current_task.get("status") or "").upper() in {"READY", "QUEUED"}:
+            current_task = {}  # waiting to start: it is the Next task below, and nothing runs now
+        next_task = next((task for task in tasks if task.get("status") in {"READY", "QUEUED"}), None)
         order_counts = _count_phrase(_dict(data.get("task_counts")))
         proposals = _dict(data.get("proposal_counts"))
         proposal_total = sum(count for count in proposals.values() if isinstance(count, (int, float)))
@@ -4084,7 +4141,7 @@ class _ConsoleState:
         rows = [
             row("Controller", _controller_line(data)),
             row("Now", ("task " + _task_label(current_task) + (_SEP + _idle_phrase(data) if _idle_phrase(data) else "")) if current_task else "idle"),
-            row("Next", "task " + _task_label(next_task) if next_task else "nothing ready"),
+            row("Next", "task " + _task_label(next_task) if next_task else finished_next(str(_mission(data).get("status") or "").upper(), "console") or NEXT_NOTHING),
             row("Tasks", orders),
         ]
         policy = _dict(_dict(data.get("mission")).get("execution_policy"))
@@ -4373,9 +4430,10 @@ class _ConsoleState:
         if isinstance(execution, dict):
             elapsed = _int_or_none(execution.get("operation_elapsed_seconds"))
             verified = _int_or_none(execution.get("seconds_since_verified_progress"))
+            finished = _finished_operation_text(data)
             add("Execution", _SEP.join(part for part in (
                 f"iteration {_text(execution['iteration'], 8)}" if _known(execution.get("iteration")) else "",
-                f"operation running {_span(elapsed)}" if elapsed is not None else "",
+                finished or (f"operation running {_span(elapsed)}" if elapsed is not None else ""),
                 f"last verified progress {_age(verified)} ago" if verified is not None else "no verified progress yet",
             ) if part))
         elif _known(execution):
@@ -4485,6 +4543,19 @@ class _ConsoleState:
             ])
         return rows
 
+    def action_note(self, avail: int) -> str:
+        """The selected action's full description, when its row is cut at ``avail`` columns; else ``""``."""
+        actions = self.palette_actions()
+        if not actions:
+            return ""
+        index = min(max(0, self.selected), len(actions) - 1)
+        row = self._palette_rows()[index]
+        if cell_width(row) <= avail:
+            return ""
+        action = actions[index]
+        unavailable = self.action_unavailable(action)
+        return f"{action.effect}{_SEP}unavailable: {unavailable}" if unavailable else action.effect
+
     def handle_mouse(self, y: int, x: int, height: int, width: int) -> None:
         if self.response_overlay:
             return
@@ -4500,7 +4571,8 @@ class _ConsoleState:
             self.choose_view(_nav_index_at(x, self.view_index, width, "  " if self.full else " "))
         elif self.view == "Actions" and y >= nav_y + 1:
             count = len(self.palette_actions())
-            start = _scroll_start(self.selected, max(1, count), max(1, height-6))
+            note_rows = 1 if self.action_note(max(1, width - 2)) else 0
+            start = _scroll_start(self.selected, max(1, count), max(1, height - 6 - note_rows))
             self.selected = max(0, min(count-1, start + y - nav_y - 1))
         elif self.full and y >= 3 and self.selectable:
             rows = self.rows()
@@ -4699,12 +4771,19 @@ def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
         status = "PAUSING"
     status = _mission_state_word(state.snapshot, status)
     shown = _state_text(status)
-    room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
+    badge = ""
+    if state.outside_station:
+        badge = "outside station" if status in ENDED_MISSION_STATUSES else f"outside station{_SEP}/attach"
+    room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2 - (len(badge) + len(_SEP) if badge else 0)
+    if badge and room < 12:  # no space for the mission name next to the badge: the name wins
+        badge = ""
+        room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
     name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room))
     chip_role = _mission_role_of(state.snapshot, state.mission_id)
     return [
         ("LLM BRIDGE", "brand"), (_SEP, "dim"), (glyph("chip"), chip_role), (" " + name, "info"), (_SEP, "dim"),
         (shown, _mission_status_role(status)),
+        *([(_SEP, "dim"), (badge, "warn")] if badge else []),
     ]
 
 
@@ -4821,7 +4900,7 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     # The empty command line already says "type a command or /help".
     view = state.view
     if view == "Overview":
-        items = ["o objective", "Ctrl-E add task", views, "Ctrl-D exit", "Ctrl-K actions"]
+        items = ["o objective", "Ctrl-E add task", views, "Ctrl-D exit"]  # Ctrl-K is on the prompt line
         if _inside_station():
             items.insert(0, "Ctrl-] P provider")
             if not state.full:
@@ -4829,7 +4908,7 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     elif view == "Tasks" and state.task_detail:
         items = ["Esc back", "↑↓ scroll", "v view prompt", "Ctrl-R amend", "PgUp/PgDn page", views, "Ctrl-D exit"]
     elif view == "Tasks":
-        items = ["Enter inspect", "Ctrl-E add task", "Ctrl-R amend", "v view prompt", "Ctrl-F find", "↑↓ select", views, "Ctrl-D exit", "PgUp/PgDn page"]
+        items = ["Enter inspect", "↑↓ select", "Ctrl-E add task", "Ctrl-R amend", "v view prompt", "Ctrl-F find", views, "Ctrl-D exit", "PgUp/PgDn page"]
         if state.search_query:
             items.insert(0, "Esc clear filter")
     elif view == "Providers":
@@ -4837,7 +4916,7 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     elif view == "Activity":
         items = ["PgUp older", "PgDn newer", "Ctrl-T show all" if state.hide_plumbing else "Ctrl-T hide bookkeeping", "↑↓ scroll", views, "Ctrl-D exit"]
     elif view == "Actions":
-        items = ["Enter run action", "↑↓ select", "Ctrl-K filter", views, "Ctrl-D exit", "Ctrl-G command line"]
+        items = ["Enter run action", "↑↓ select", views, "Ctrl-D exit", "Ctrl-G command line"]  # Ctrl-K is on the prompt line
     elif view == "Usage":
         items = ["↑↓ scroll", "l legend", "Shift-←/→ pan", views, "Ctrl-D exit"]
     else:
@@ -4845,16 +4924,25 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     return items, "? help"
 
 
+_QUIT_HINT = "Ctrl-D exit"
+
+
 def _hint_chosen(state: _ConsoleState, width: int) -> list[str]:
-    """The hint items that fit `width` (lowest-value ones dropped first), closing hint last."""
+    """The hint items that fit `width` (lowest-value ones dropped first), closing hint last.
+
+    The key that leaves the console and the closing `? help` hint are never dropped.
+    """
     items, closing = _hint_items(state)
     chosen = list(items)
     while chosen:
         parts = [*chosen, closing] if closing else chosen
         if cell_width(localize(_SEP.join(parts))) <= width:
             return parts
-        chosen.pop()
-    return [_clip(closing or items[0], width)]
+        droppable = [index for index, item in enumerate(chosen) if item != _QUIT_HINT]
+        if not droppable:
+            break
+        chosen.pop(droppable[-1])
+    return [_clip(closing or items[0], width)]  # too narrow even for the quit key: `? help` explains it
 
 
 def _hint(state: _ConsoleState, width: int = 100) -> str:
@@ -5166,6 +5254,9 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
     preview_task = state.selected_task() if state.view == "Tasks" and not state.task_detail else None
     list_height = _orders_list_height(content_height, width, len(rows)) if preview_task is not None else None
     visible = list_height if list_height is not None else content_height
+    action_note = state.action_note(avail) if state.view == "Actions" and content_height > 2 else ""
+    if action_note:
+        visible = content_height - 1  # the last content row shows the selected action's full description
     if state.selectable:
         selected_row = state.detail_scroll if state.view == "Tasks" and state.task_detail else state.selected_row()
         start = _scroll_start(selected_row, len(display), visible)
@@ -5212,6 +5303,8 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
         else:
             role = roles[index] if roles is not None and index < len(roles) else _row_role(state.view, value)
             _put(window, y, gutter, value, avail, role=role)
+    if action_note:
+        _put(window, content_top + content_height - 1, gutter, _clip(action_note, avail), avail, role="muted")
     if preview_task is not None and list_height is not None:
         separator_y = content_top + list_height
         _put_segments(window, separator_y, gutter, _order_separator_segments(preview_task, avail), avail)
@@ -5269,7 +5362,7 @@ def _draw_response_overlay(window: curses.window, state: _ConsoleState) -> None:
         return
     _put(window, 0, 0, "Command response", width, role="heading")
     if height >= 2:
-        _put(window, 1, 0, "Arrows/PgUp/PgDn scroll | Esc/Enter close | F1-9/Tab switch view", width, role="dim")
+        _put(window, 1, 0, _SEP.join(("Arrows/PgUp/PgDn scroll", "Esc/Enter close", "F1-9/Tab switch view")), width, role="dim")
     rows = _response_rows(state, width)
     content_top = 2
     footer_rows = 1 if height >= 4 else 0
@@ -5601,10 +5694,11 @@ def _terminal_outcome(source_mission: str, action: TerminalAction) -> str:
     return f"Switched to mission {_short_id(action.mission_id, 4)}."
 
 
-def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool, initial_view: str = "Overview") -> int:
+def _run(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, full: bool, initial_view: str = "Overview", outside_station: bool = False) -> int:
     # Ignore stale exported dimensions from a detached tmux station.
     curses.use_env(False)
     state = _ConsoleState(mission_id, dispatch, snapshot, full)
+    state.outside_station = outside_station
     global JUST_SAVED_MISSION
     if JUST_SAVED_MISSION == mission_id:
         state.saved_notice, JUST_SAVED_MISSION = True, None
@@ -5992,6 +6086,6 @@ def run_console(mission_id: str, dispatch: Dispatch, snapshot: Snapshot) -> int:
 def run_control(mission_id: str, dispatch: Dispatch, snapshot: Snapshot, *, initial_view: str = "Overview") -> int:
     """Run the full-screen terminal control UI."""
     try:
-        return _run(mission_id, dispatch, snapshot, full=True, initial_view=initial_view)
+        return _run(mission_id, dispatch, snapshot, full=True, initial_view=initial_view, outside_station=True)
     except bridge_hangup.TerminalGone:
         return bridge_hangup.abandon_terminal()

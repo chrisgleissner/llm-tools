@@ -145,7 +145,7 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
     from llm_tools.terminal import tmux_version
     version = tmux_version() or (99, 0)
     if version >= (3, 5):
-        exited = terminal.wait_for("is waiting for your review. Ctrl-] then B, then /approve or /reject.")
+        exited = terminal.wait_for("ready for review · Ctrl-] B then /approve")
         assert "Provider exited (status 0)" in exited
     else:
         # tmux < 3.5 does not expose pane_dead_status, so the station footer

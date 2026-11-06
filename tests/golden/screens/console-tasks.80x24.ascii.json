@@ -28,7 +28,7 @@
     "              - Removed commands...",
     "",
     "> type a command | /help | Ctrl-K actions",
-    "Enter inspect | Ctrl-E add task | Ctrl-R amend | v view prompt | ? help"
+    "Enter inspect | Up/Down select | Ctrl-E add task | Ctrl-D exit | ? help"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " | ", "dim"], [13, "|", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " | ", "dim"], [39, "# NEEDS YOU", "state_review"]],
@@ -54,6 +54,6 @@
     [[2, "            ", "muted"], [14, "- Removed commands...", "info"]],
     [],
     [[0, "> ", "muted"], [2, "type a command | /help | Ctrl-K actions", "dim+dim"]],
-    [[0, "Enter", "key"], [5, " inspect", "muted"], [13, " | ", "dim"], [16, "Ctrl-E", "key"], [22, " add task", "muted"], [31, " | ", "dim"], [34, "Ctrl-R", "key"], [40, " amend", "muted"], [46, " | ", "dim"], [49, "v", "key"], [50, " view prompt", "muted"], [62, " | ", "dim"], [65, "?", "key"], [66, " help", "muted"]]
+    [[0, "Enter", "key"], [5, " inspect", "muted"], [13, " | ", "dim"], [16, "Up/Down", "key"], [23, " select", "muted"], [30, " | ", "dim"], [33, "Ctrl-E", "key"], [39, " add task", "muted"], [48, " | ", "dim"], [51, "Ctrl-D", "key"], [57, " exit", "muted"], [62, " | ", "dim"], [65, "?", "key"], [66, " help", "muted"]]
   ]
 }

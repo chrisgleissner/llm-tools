@@ -123,19 +123,31 @@ a command; Ctrl-G focuses the retained draft; click the input to focus it.
 
 Command input: Left/Right move; Home/End or Ctrl-A/Ctrl-E move to endpoints.
 Backspace/Delete remove adjacent text. Ctrl-U clears. After a command is refused or fails the line is empty and the command is in history; Ctrl-P recalls it.
-Ctrl-P/Ctrl-N recall history and restore the pre-history draft. Tab completes.
+Ctrl-P/Ctrl-N, or Up/Down while the command line has focus, recall history and restore the pre-history draft. Tab completes.
 Enter submits an explicit command. ? is ordinary input. Escape returns to the
 body with the draft retained. Ctrl-C cancels local editing first. Ctrl-D exits
 only with empty input and no unresolved mutation; exit does not stop work.
 
 Body Ctrl-E composes/adds a task; Tasks body Ctrl-R amends the selected task.
-Ctrl-E in command input means End. Ctrl-K opens Actions from any view with the filter ready. Activity: Ctrl-T hides or shows controller bookkeeping rows. Body Ctrl-F opens Tasks search; Enter applies,
+Ctrl-K opens Actions from any view with the filter ready. Activity: Ctrl-T hides or shows controller bookkeeping rows. Body Ctrl-F opens Tasks search; Enter applies,
 Escape cancels and restores the command draft. Clear the query to show all tasks.
 Actions lists what applies to the current state, with the command for each; / filters them. Single-click selects; Enter/double-click
-activates the selected action. Disabled actions explain their unavailable target.
+activates the selected action. A description that does not fit its row is shown in full on the last row of the list. Disabled actions explain their unavailable target.
 
-Composer: Enter newline; Tab indent; PgUp/PgDn page; F2/Ctrl-S saves. Ctrl-O opens VISUAL/EDITOR.
-Escape closes and keeps the draft; Ctrl-E in the console reopens it. Ctrl-D discards.
+Composer: Enter newline; Tab indent; PgUp/PgDn page; Ctrl-S saves. Ctrl-O opens VISUAL/EDITOR.
+Escape or Ctrl-D closes and keeps the draft; Ctrl-E in the console reopens it. Ctrl-X discards it.
+
+Keys that mean different things in different places (the only exceptions):
+  Key      Console body              Command input                 Composer
+  Ctrl-D   exit the console          exit when the line is empty   close, draft kept
+  Ctrl-E   add a task                move to end of line           (none)
+  Ctrl-K   open Actions              open Actions                  kill to end of line
+  Ctrl-R   amend selected task       (none)                        (none)
+  Ctrl-S   (none)                    (none)                        save
+  Ctrl-X   (none)                    (none)                        discard the draft
+  Up/Down  select a row              recall history                move the caret
+  o v l i  single-key view actions   typed as text                 typed as text
+F-keys only switch views, everywhere. Printable text in the body starts a command.
 Viewer: Up/Down, PgUp/PgDn or Space page; Home/End go first/last; / searches,
 n/N visit matches; Escape cancels search before closing, q closes the viewer.
 m toggles source/render, w toggles wrap, Left/Right scroll unwrapped lines.
@@ -195,8 +207,8 @@ reported as uncertain, never as success.""",
 
 A 30 KiB or larger document belongs in the multiline composer or a file, not a
 quoted command. In the home Objective field, open the composer with Ctrl-E.
-Enter inserts a newline; F2/Ctrl-S saves back to the form without starting work.
-Escape retains a draft; explicit discard is separate. Check byte/line count and
+Enter inserts a newline; Ctrl-S saves back to the form without starting work.
+Escape or Ctrl-D retains a draft; Ctrl-X discards it. Check byte/line count and
 tail before saving. The interactive ceiling is 1 MiB of encoded UTF-8 source,
 not a provider context limit. Oversize transactions must leave prior text intact.
 
@@ -626,6 +638,7 @@ _CONSOLE_SHORTCUTS = (
     ("/amend N FILE", "llm-bridge task amend --task N --file FILE"),
     ("/proposals [STATUS]", "llm-bridge proposal list --status STATUS"),
     ("/home", "llm-bridge missions --pick (the mission picker)"),
+    ("/leave", "Ctrl-] d in the station: leave the provider terminal, work keeps running"),
 )
 
 
@@ -711,7 +724,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "missions": ("List every mission, live ones first; --pick switches to one (in a station: Ctrl-] then M)", "missions --json"),
     "gc": ("Close the idle tmux stations of finished missions; a station with a live provider process or an attached terminal is kept", "gc --json"),
     "finish": ("Ask the native provider to exit (its own /exit or /quit) so the task moves to verification", "finish --mission ID"),
-    "detach": ("Detach a station client from outside; your own terminal uses Ctrl-] d", "detach --mission ID"),
+    "detach": ("Detach another terminal from the station, from outside; to leave your own terminal press Ctrl-] d (in the console: /leave)", "detach --mission ID"),
     "doctor": ("Inspect local prerequisites and persistence; exits 1 when no provider can run; mission is optional", "doctor --json"),
     "control": ("Inspect and steer the mission in Bridge controls; no autostart", "control --mission ID"),
     "usage": ("Inspect background capacity observations for this mission", "usage --mission ID"),

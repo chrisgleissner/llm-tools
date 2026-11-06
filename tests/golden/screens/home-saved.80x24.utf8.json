@@ -28,7 +28,7 @@
     "",
     "~/projects/docs · 000000d4 · claude",
     "Saved 000000d4 · S start · o controls",
-    "↑↓ select · Enter controls · S start · N new mission · / filter · ? help · Q qu"
+    "↑↓ select · Enter open · S start · N new mission · / filter · ? help · Q quit"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [12, "● here: ", "brand"], [20, "~/projects/release", "heading"]],
@@ -54,6 +54,6 @@
     [],
     [[0, "~/projects/docs · 000000d4 · claude", "muted"]],
     [[0, "Saved 000000d4", "ok"], [14, " · ", "dim"], [17, "S", "key"], [18, " start", "muted"], [24, " · ", "dim"], [27, "o", "key"], [28, " controls", "muted"]],
-    [[0, "↑↓", "key"], [2, " select", "muted"], [9, " · ", "dim"], [12, "Enter", "key"], [17, " controls", "muted"], [26, " · ", "dim"], [29, "S", "key"], [30, " start", "muted"], [36, " · ", "dim"], [39, "N", "key"], [40, " new mission", "muted"], [52, " · ", "dim"], [55, "/", "key"], [56, " filter", "muted"], [63, " · ", "dim"], [66, "?", "key"], [67, " help", "muted"], [72, " · ", "dim"], [75, "Q", "key"], [76, " qu", "muted"]]
+    [[0, "↑↓", "key"], [2, " select", "muted"], [9, " · ", "dim"], [12, "Enter", "key"], [17, " open", "muted"], [22, " · ", "dim"], [25, "S", "key"], [26, " start", "muted"], [32, " · ", "dim"], [35, "N", "key"], [36, " new mission", "muted"], [48, " · ", "dim"], [51, "/", "key"], [52, " filter", "muted"], [59, " · ", "dim"], [62, "?", "key"], [63, " help", "muted"], [68, " · ", "dim"], [71, "Q", "key"], [72, " quit", "muted"]]
   ]
 }

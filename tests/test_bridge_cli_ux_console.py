@@ -139,7 +139,7 @@ class _EscWindow(FakeScreen):
 
 
 def test_composer_footer_labels_escape_and_counts_lines() -> None:
-    assert bridge_tui._composer_status(0, 1_048_576, 1) == "F2/Ctrl-S Save · Esc close (draft kept) · Ctrl-D Discard · 1 line"
+    assert bridge_tui._composer_status(0, 1_048_576, 1) == "Ctrl-S Save · Esc close (draft kept) · Ctrl-X Discard · 1 line"
     assert bridge_tui._composer_status(40, 1_048_576, 3).endswith("· 3 lines")
     assert "bytes" not in bridge_tui._composer_status(838_860, 1_048_576, 3)  # exactly 80 percent
     assert bridge_tui._composer_status(838_861, 1_048_576, 3).endswith("· 838861/1048576 bytes")
@@ -150,7 +150,7 @@ def test_composer_shows_the_new_footer(monkeypatch, tmp_path) -> None:
     screen = _screen(monkeypatch, keys=("a",))
     with pytest.raises(ScriptExhausted):
         bridge_tui.compose_document("", title="Add task prompt", window=screen)
-    assert screen.rows()[-1] == "F2/Ctrl-S Save · Esc close (draft kept) · Ctrl-D Discard · 1 line"
+    assert screen.rows()[-1] == "Ctrl-S Save · Esc close (draft kept) · Ctrl-X Discard · 1 line"
 
 
 def test_empty_composer_shows_a_dim_placeholder_until_the_first_keystroke(monkeypatch, tmp_path, glyph_mode) -> None:
@@ -218,7 +218,7 @@ def test_restored_composer_says_when_the_draft_was_written_and_removes_the_old_f
     with pytest.raises(ScriptExhausted):
         bridge_tui.compose_document("Add a fuzz test", title="Add task prompt", window=screen, restored_from=old,
                                     draft_prefix=bridge_tui.TASK_DRAFT_PREFIX)
-    assert screen.rows()[-2] == "Restored draft from 18:42 · Ctrl-D discard"
+    assert screen.rows()[-2] == "Restored draft from 18:42 · Ctrl-X discard"
     assert not old.exists()
     assert bridge_tui.LAST_RECOVERY_DRAFT is not None and bridge_tui.LAST_RECOVERY_DRAFT.read_text() == "Add a fuzz test"
 

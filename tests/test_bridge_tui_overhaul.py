@@ -168,12 +168,12 @@ def test_strip_without_a_known_owner_or_elapsed_time() -> None:
 
 
 @pytest.mark.parametrize("status,tasks,expected,role", [
-    ("CREATED", [{"id": 1, "status": "READY"}], "not started · next: task 1 · type /start", "dim"),
+    ("CREATED", [{"id": 1, "status": "READY"}], "not started · task 1 ready · type /start", "dim"),
     ("CREATED", [], "not started · no task waiting · Ctrl-E adds one", "dim"),
-    ("STOPPED", [{"id": 2, "status": "QUEUED"}], "stopped · next: task 2 · type /start", "dim"),
-    ("PAUSED", [{"id": 3, "status": "READY"}], "paused · next: task 3 · type /resume", "warn"),
+    ("STOPPED", [{"id": 2, "status": "QUEUED"}], "stopped · task 2 ready · type /start", "dim"),
+    ("PAUSED", [{"id": 3, "status": "READY"}], "paused · task 3 ready · type /resume", "warn"),
     ("STOPPING", [], "stopping after the current step", "warn"),
-    ("RUNNING", [{"id": 7, "status": "READY"}], "idle · next: task 7", "dim"),
+    ("RUNNING", [{"id": 7, "status": "READY"}], "idle · task 7 ready", "dim"),
     ("RUNNING", [], "idle · no task waiting · Ctrl-E adds one", "dim"),
     ("RUNNING", [{"id": 4, "status": "VERIFYING"}], "task 4 awaits your review · type /approve 4", "warn"),
     ("RUNNING", [{"id": 4, "status": "VERIFYING"}, {"id": 5, "status": "VERIFYING"}], "task 4 awaits your review (+1 more) · type /approve 4", "warn"),
@@ -568,9 +568,9 @@ def labels(status: str, **kwargs) -> list[str]:
 
 def test_actions_are_ordered_for_the_mission_state() -> None:
     assert labels("CREATED") == ["Start", "Add task", "Amend task", "Proposals", "Status", "Cancel mission", "Help"]
-    assert labels("RUNNING") == ["Attach", "Pause", "Suspend until credits recover", "Add task", "Steer", "Stop", "Amend task", "Proposals", "Status", "Detach", "Cancel mission", "Help"]
+    assert labels("RUNNING") == ["Attach", "Pause", "Suspend until credits recover", "Add task", "Steer", "Stop", "Amend task", "Proposals", "Status", "Leave", "Cancel mission", "Help"]
     assert labels("PAUSED")[:4] == ["Resume", "Suspend until credits recover", "Attach", "Add task"]
-    assert labels("STOPPED")[:4] == ["Start", "Resume", "Suspend until credits recover", "Add task"]
+    assert labels("STOPPED")[:3] == ["Resume", "Suspend until credits recover", "Add task"]
     assert labels("STOPPING")[0] == "Stop"
     for terminal in ("COMPLETED", "CANCELLED", "FAILED"):
         assert labels(terminal) == ["Status", "Help"]  # read-only
@@ -814,7 +814,7 @@ def failing_state(response: str):
 def test_failed_command_clears_the_line_and_is_recalled_with_up() -> None:
     state = failing_state("error: controller exited with status 2")
     assert state.command == "" and not state.input_focused
-    assert state.output[-1] == "error: controller exited with status 2 · ↑ recalls the command"
+    assert state.output[-1] == "error: controller exited with status 2 · Ctrl-P recalls the command"
     assert list(state.history) == ["/start"]
     state.handle_key("\x10")
     assert state.command == "/start" and state.input_focused
@@ -835,12 +835,12 @@ def test_up_arrow_key_name_also_recalls_via_ctrl_p_binding() -> None:
 
 def test_rejected_and_unknown_outcomes_get_the_recall_hint_but_success_does_not() -> None:
     rejected = failing_state('{"status": "REJECTED", "result": {"error": "task is not ready"}}')
-    assert rejected.output[-1] == "Rejected: task is not ready · ↑ recalls the command" and rejected.command == ""
+    assert rejected.output[-1] == "Rejected: task is not ready · Ctrl-P recalls the command" and rejected.command == ""
     unknown = make_state()
     unknown.dispatch = lambda *_: (_ for _ in ()).throw(RuntimeError("write failed"))
     unknown._dispatch("pause")
     settle(unknown)
-    assert "Outcome unknown: write failed · ↑ recalls the command" in unknown.output
+    assert "Outcome unknown: write failed · Ctrl-P recalls the command" in unknown.output
     assert unknown.command == "" and "Command not confirmed" in unknown.output[-1]
     ok = failing_state('{"status": "APPLIED", "result": {}}')
     assert "recalls" not in ok.output[-1] and ok.command == ""
@@ -848,7 +848,7 @@ def test_rejected_and_unknown_outcomes_get_the_recall_hint_but_success_does_not(
 
 def test_multiline_failures_append_the_hint_as_a_last_line() -> None:
     state = failing_state("error: first line\nsecond line")
-    assert list(state.output) == ["error: first line", "second line", "↑ recalls the command"]
+    assert list(state.output) == ["error: first line", "second line", "Ctrl-P recalls the command"]
     assert state.response_overlay and state.command == ""
 
 
@@ -911,7 +911,7 @@ def test_real_control_view_renders_new_tabs_status_strip_and_actions(tmp_path, e
             assert name in lines[2], lines[2]
         for old in ("Orders", "Stations", "Systems", "Palette", "Bridge]"):
             assert old not in lines[2]
-        assert lines[1].startswith("not started · next: task 1 · type /start")  # status strip, not the objective
+        assert lines[1].startswith("not started · task 1 ready · type /start")  # status strip, not the objective
         assert "Audit the thing" not in lines[1]
         backend.send_keys(handle, pane="provider", keys="\x1bOQ")  # F2
         wait_for(lambda: "[Tasks]" in screen()[2] and any("Follow-up work" in line for line in screen()))

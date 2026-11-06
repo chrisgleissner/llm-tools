@@ -122,13 +122,13 @@ def test_header_states_before_first_snapshot_and_for_long_names() -> None:
 # --- footer hints ------------------------------------------------------------------
 
 @pytest.mark.parametrize("view,expected", [
-    ("Overview", ["o objective", "Ctrl-E add task", "Ctrl-K actions", "Ctrl-D exit"]),
+    ("Overview", ["o objective", "Ctrl-E add task", "Ctrl-D exit"]),
     ("Tasks", ["Enter inspect", "Ctrl-E add task", "Ctrl-R amend", "v view prompt", "Ctrl-F find"]),
     ("Providers", ["Enter mark viewed", "↑↓ select"]),
     ("Health", ["↑↓ scroll"]),
     ("Activity", ["PgUp older", "PgDn newer", "Ctrl-T hide bookkeeping"]),
     ("Sessions", ["↑↓ scroll"]),
-    ("Actions", ["Enter run action", "Ctrl-K filter"]),
+    ("Actions", ["Enter run action", "Ctrl-D exit"]),
     ("Usage", ["Shift-←/→ pan"]),
 ])
 def test_each_view_lists_its_own_keys_and_ends_with_help(view: str, expected: list[str]) -> None:
@@ -192,8 +192,8 @@ def test_bridge_overview_rows_are_labelled_and_plain() -> None:
     assert rows[2] == "Next        task 3  ○ QUEUED  third"
     assert rows[3] == "Tasks       1 running · 1 verifying · 1 queued · 1 blocked · 2 proposals"
     needs = [row for row in rows if row.startswith("Needs you") or row.startswith(" " * 12 + "task") or "proposals to" in row]
-    assert needs[0] == "Needs you   task 1 awaits your approval — type /approve 1 (or F7 Actions)"
-    assert any("2 agent task proposals to review" in row for row in rows)
+    assert needs[0] == "Needs you   task 1 awaits your review · type /approve 1 (or F7 Actions)"
+    assert any("2 agent task proposals to review · type /proposals" in row for row in rows)
     assert any("task 4 BLOCKED — inspect in Tasks" in row for row in rows)
     assert "Criteria    0/4 verified" in rows
     assert rows[-1].startswith("Capacity    ■ codex / gpt-5 (active) · 5h 100% left, resets 4h 59m")
@@ -205,7 +205,7 @@ def test_bridge_overview_rows_are_labelled_and_plain() -> None:
 def test_bridge_overview_quiet_mission_hides_empty_rows() -> None:
     rows = make_state({"mission": {"status": "CREATED"}}).rows()
     assert rows == [
-        "Controller  not started — type start",
+        "Controller  not started — type /start",
         "Now         idle",
         "Next        nothing ready",
         "Tasks       none yet — Ctrl-E adds a task",
@@ -218,7 +218,7 @@ def test_bridge_overview_quiet_mission_hides_empty_rows() -> None:
 @pytest.mark.parametrize("snapshot,expected", [
     ({}, "status not loaded yet"),
     ({"mission": {"status": "COMPLETED"}}, "mission completed — controller finished"),
-    ({"mission": {"status": "STOPPED"}}, "stopped — type start or resume"),
+    ({"mission": {"status": "STOPPED"}}, "stopped — type /start or /resume"),
     ({"mission": {"status": "STOPPING"}}, "stopping after the current step"),
     ({"mission": {"status": "RUNNING"}}, "no heartbeat recorded yet"),
     ({"mission": {"status": "RUNNING"}, "lifecycle": {"heartbeat": {"reported_state": "ACTIVE", "age_seconds": 400}}},

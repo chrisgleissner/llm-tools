@@ -66,7 +66,7 @@ Run this in a folder you are happy for an agent to edit, for example a new empty
 5. When the provider says it is done, exit it with `/exit`. Bridge then shows:
 
    ```text
-   Provider exited (status 0) · Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject.
+   Provider exited (status 0) · Task 1 ready for review · Ctrl-] B then /approve
    ```
 
 6. Press `Ctrl-]`, then `B`. Type `/approve`, press `Enter`, then press `y` to confirm. The controls show `✓ COMPLETED` and `mission completed · 1/1 tasks completed`.

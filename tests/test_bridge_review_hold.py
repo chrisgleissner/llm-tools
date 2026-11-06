@@ -249,7 +249,7 @@ def test_hold_message_is_shown_in_the_provider_pane(tmp_path: Path, monkeypatch)
         sleeper.actions += [lambda: None, lambda: store.verify_task(first, approved=True)]
         hooks.before_iteration()
 
-        assert shown == ["Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject."]  # once, not per poll
+        assert shown == ["Task 1 ready for review · Ctrl-] B then /approve"]  # once, not per poll
 
 
 def test_hold_message_failure_does_not_stop_the_hold(tmp_path: Path, monkeypatch) -> None:
@@ -396,7 +396,7 @@ def test_format_status_hides_hold_without_one() -> None:
 
 
 @pytest.mark.parametrize(("config", "expected"), [
-    (NATIVE, "Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject."),
+    (NATIVE, "Task 1 ready for review · Ctrl-] B then /approve"),
     ({**NATIVE, "auto_continue": True}, ""),
     ({**NATIVE, "verifier": {"argv": ["true"], "timeout_seconds": 3}}, ""),
 ])

@@ -19,16 +19,16 @@
     "  Stop                           /stop                   Stop after the current…",
     "  Amend task                     Ctrl-R                  Edit the selected task…",
     "  Status                         /status                 Print the mission stat…",
-    "  Detach                         /detach                 Leave the provider ter…",
+    "  Leave                          /leave                  Leave the provider ter…",
     "  Cancel mission                 /cancel                 Cancel mission and unf…",
     "  Help                           /help                   Read the offline quick…",
     "",
     "",
     "",
-    "",
+    "  Accept the finished work (asks first)",
     "",
     "› type a command · Ctrl-K filters actions",
-    "Enter run action · ↑↓ select · Ctrl-K filter · Tab/F1-9 views · ? help"
+    "Enter run action · ↑↓ select · Tab/F1-9 views · Ctrl-D exit · ? help"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " · ", "dim"], [39, "◆ NEEDS YOU", "state_review"]],
@@ -45,15 +45,15 @@
     [[2, "Stop                           ", "info"], [33, "/stop                 ", "key"], [55, "  ", "info"], [57, "Stop after the current…", "muted"]],
     [[2, "Amend task                     Ctrl-R                  Edit the selected task…", "dim"]],
     [[2, "Status                         ", "info"], [33, "/status               ", "key"], [55, "  ", "info"], [57, "Print the mission stat…", "muted"]],
-    [[2, "Detach                         ", "info"], [33, "/detach               ", "key"], [55, "  ", "info"], [57, "Leave the provider ter…", "muted"]],
+    [[2, "Leave                          ", "info"], [33, "/leave                ", "key"], [55, "  ", "info"], [57, "Leave the provider ter…", "muted"]],
     [[2, "Cancel mission                 ", "info"], [33, "/cancel               ", "key"], [55, "  ", "info"], [57, "Cancel mission and unf…", "muted"]],
     [[2, "Help                           ", "info"], [33, "/help                 ", "key"], [55, "  ", "info"], [57, "Read the offline quick…", "muted"]],
     [],
     [],
     [],
-    [],
+    [[2, "Accept the finished work (asks first)", "muted"]],
     [],
     [[0, "› ", "muted"], [2, "type a command · Ctrl-K filters actions", "dim+dim"]],
-    [[0, "Enter", "key"], [5, " run action", "muted"], [16, " · ", "dim"], [19, "↑↓", "key"], [21, " select", "muted"], [28, " · ", "dim"], [31, "Ctrl-K", "key"], [37, " filter", "muted"], [44, " · ", "dim"], [47, "Tab/F1-9", "key"], [55, " views", "muted"], [61, " · ", "dim"], [64, "?", "key"], [65, " help", "muted"]]
+    [[0, "Enter", "key"], [5, " run action", "muted"], [16, " · ", "dim"], [19, "↑↓", "key"], [21, " select", "muted"], [28, " · ", "dim"], [31, "Tab/F1-9", "key"], [39, " views", "muted"], [45, " · ", "dim"], [48, "Ctrl-D", "key"], [54, " exit", "muted"], [59, " · ", "dim"], [62, "?", "key"], [63, " help", "muted"]]
   ]
 }

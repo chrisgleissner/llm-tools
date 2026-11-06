@@ -33,7 +33,7 @@ from .bridge_glyphs import (  # noqa: F401 - several names are re-exported
     FINISHED_STATES, GLYPHS, _locale_codeset, ascii_mode, glyph, localize, provider_role, state_look, state_text,
 )
 from .bridge_theme import mission_role
-from .bridge_states import CONTROLLED_MISSION_STATUSES, FINISHED_MISSION_STATUSES
+from .bridge_states import CONTROLLED_MISSION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES
 from .bridge_vocab import RunMode
 
 # The form's Mode row and Start button for each run mode (``{dash}`` is the localized dash glyph).
@@ -1429,15 +1429,19 @@ def _draw_checklist(put: Callable[..., int], state: Launcher, layout: FormLayout
             put(row, extra, tag[0], row_role if under else tag[1], room=width)
 
 
-def list_footer(state: Launcher) -> str:
-    """Key hints of the mission list; every key named here is handled by ``Launcher.key``."""
+def list_footer(state: Launcher, width: int | None = None) -> str:
+    """Key hints of the mission list; every key named here is handled by ``Launcher.key``.
+
+    With ``width``, the lowest-priority hints are dropped until the line fits; ``? help`` and
+    ``Q quit`` are always kept.
+    """
     sep = f" {glyph('sep')} "
     if state.filtering:
         return sep.join(["Type to filter", f"{glyph('updown')} select", "Enter open", "Esc clear filter"])
     if state.attach_ready():
         parts = [f"{glyph('updown')} select", "Enter attach", "o controls", "N new mission"]
     elif state.startable():
-        parts = [f"{glyph('updown')} select", "Enter controls", "S start", "N new mission"]
+        parts = [f"{glyph('updown')} select", "Enter open", "S start", "N new mission"]
     else:
         parts = [f"{glyph('updown')} select", "Enter open", "N new mission"]
     if len(state.missions) > _FILTER_HINT_MIN or state.filter_text:
@@ -1446,6 +1450,12 @@ def list_footer(state: Launcher) -> str:
     if state.filter_text:
         parts.append("Esc clear filter")
     parts.append("Q quit")
+    if width is not None:
+        for dropped in ("/ filter", "S start", "o controls", "N new mission", "Esc clear filter", f"{glyph('updown')} select"):
+            if cell_width(localize(sep.join(parts))) <= width:
+                break
+            if dropped in parts:
+                parts.remove(dropped)
     return sep.join(parts)
 
 
@@ -1705,7 +1715,7 @@ def _draw(window: curses.window, state: Launcher) -> None:
             segments_line(height - 2, [(parts[0][0], "ok"), *parts[1:]])
         elif state.theme_hint and not (count and state.selected and controller_note(shown[state.selected - 1], controllers.get(state.selected), state.review_task(shown[state.selected - 1]))):
             line(height - 2, state.theme_hint, "muted")
-        segments_line(height - 1, footer_segments(list_footer(state)))
+        segments_line(height - 1, footer_segments(list_footer(state, width - 1)))
     if caret is not None:
         try:
             curses.curs_set(1)
@@ -1846,8 +1856,8 @@ def _set_bracketed_paste(enabled: bool) -> None:
         pass
 
 
-def _announce_saved(mission_id: str) -> None:
-    """Have the console it opens next say once which id the saved mission has."""
+def _announce_saved(mission_id: str | None) -> None:
+    """Have the console it opens next say once which id the saved mission has; ``None`` withdraws the notice."""
     from . import bridge_tui
 
     bridge_tui.JUST_SAVED_MISSION = mission_id
@@ -2159,6 +2169,9 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
             # start attaches to the validated owned provider station. Once the
             # operator returns with Ctrl-] B/P or detaches (or the station was
             # closed), reopen the mission controls; the mission already exists.
+            _announce_saved(None)  # "saved as ID" described the screen before the provider ran
+            if _mission_status(mission_id) in ENDED_MISSION_STATUSES:
+                return 0  # a finished mission has nothing to control; attach already printed its one-line summary
             dispatch(["control", "--mission", mission_id])
             return 0
         break

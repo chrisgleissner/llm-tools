@@ -262,6 +262,6 @@ def test_a_command_refused_before_dispatch_clears_the_line_and_stays_in_history(
     state.input_focused = True
     state.handle_key("\n")
     assert state.command == "" and state.command_cursor == 0
-    assert state.output[-1].startswith("error: usage: reject") and "↑ recalls the command" in state.output[-1]
+    assert state.output[-1].startswith("error: usage: reject") and "Ctrl-P recalls the command" in state.output[-1]
     state.handle_key("\x10")  # Ctrl-P
     assert state.command == "/reject 1"
