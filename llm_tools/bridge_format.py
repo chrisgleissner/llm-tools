@@ -54,14 +54,18 @@ def plain_capacity_reason(reason: Any) -> str:
 NATIVE_STOP_HINT = "Stopping after the provider exits · exit the provider (e.g. /quit) or use stop --force"
 
 
-def nothing_to_pause(status: str) -> str:
+def nothing_to_pause(status: str, mission_id: Any = None) -> str:
+    """A no-op pause. A mission that is already paused says so (exit status 0, like every no-op)."""
+    if status == "PAUSED":
+        return f"Already paused · mission {short_id(mission_id)} is PAUSED · resume it with: llm-bridge resume"
     return f"Nothing to pause · mission is not running ({status})"
 
 
 def nothing_to_stop(mission_id: Any, status: str) -> str:
     """Stop never cancels: with no controller the mission just stays saved."""
     next_step = "resume it with: llm-bridge resume" if status == "PAUSED" else "start it with: llm-bridge start"
-    return f"Nothing to stop · mission {short_id(mission_id)} is saved ({status}) · {next_step}"
+    lead = "Already stopped" if status == "STOPPED" else "Nothing to stop"
+    return f"{lead} · mission {short_id(mission_id)} is saved ({status}) · {next_step}"
 _NAME_LIMIT = 40
 _TITLE_LIMIT = 70
 
@@ -375,11 +379,14 @@ def format_rotation(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_proposals(proposals: list[dict[str, Any]]) -> str:
+def format_proposals(proposals: list[dict[str, Any]], *, total: int | None = None) -> str:
     if not proposals:
         return "No proposals."
     rows = [[str(task_number(item)), str(item.get("proposal_status", "?")), _clip(item.get("title", ""), _TITLE_LIMIT)] for item in proposals]
-    return table(["TASK", "PROPOSAL", "TITLE"], rows)
+    text = table(["TASK", "PROPOSAL", "TITLE"], rows)
+    if total is not None and total > len(proposals):
+        text += f"\nshowing {len(proposals)} of {total} proposals \u00b7 --limit N shows more \u00b7 --after N continues after task N"
+    return text
 
 
 def format_proposal_result(action: str, result: dict[str, Any]) -> str:

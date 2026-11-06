@@ -150,7 +150,7 @@ installed but not signed in only produces a warning on stderr (`warning: codex
 is not signed in (run: codex login); it will be skipped until it is`), read
 offline from the same files as `doctor`; `LLM_BRIDGE_NO_SIGNIN_CHECK=1` turns the
 warning off. `start` refuses a cancelled or completed mission with a message and
-exit status 2, and prints `running` only after the controller has reported
+exit status 4 (wrong state), and prints `running` only after the controller has reported
 ready; a controller that fails first gives `mission ID could not start: REASON
 · fix it with: llm-bridge rotation --mission ID --set LIST`.
 
@@ -162,12 +162,61 @@ folder inference is ambiguous shows each mission's last-updated time, and the
 `Needs you` line and receipts spell out `--mission ID` so the command works as
 copied.
 
-`--mission` accepts a full mission ID or a unique prefix of 4 or more
+`--mission` (short `-m`) accepts a full mission ID or a unique prefix of 3 or more
 characters. When it is omitted, Bridge uses the one unfinished mission whose
 folder is the current folder or a parent of it; a live mission wins over
 stopped or failed ones. With no match, or several, the error lists candidates.
-CLI commands print human-readable text; add `--json` for the stable
+CLI commands print human-readable text; add `--json` (short `-j`) for the stable
 machine-readable form.
+
+### Command-line conventions
+
+* **One list command.** `llm-bridge mission list` and `llm-bridge missions` print the same
+  table: `ID`, `STATE`, `NEEDS YOU` (`review task 1` when a task awaits your review),
+  `TASKS` (done/total), `NAME`, `FOLDER` and `UPDATED`, live missions first. The
+  current provider and task are in `missions --json` (`provider`, `current_task`). `console` is
+  an internal command and is not listed.
+* **Task numbers.** A task is named by the number `task list` shows: `llm-bridge task approve 1`
+  is the same as `llm-bridge task approve --task 1` (short `-t`). `--task-id ID` takes the global
+  ID, which is internal; JSON task objects carry both `number` (an alias of `ordinal`, the
+  number you type) and `id` (the global ID). `proposal accept N` and `proposal reject N` take the
+  task number in the same way, and `llm-bridge view notes.md` reads a file without `--file`.
+* **Options are spelled out.** A long option is never accepted as a prefix: `stop --f` is an
+  error, not `stop --force`. Explicit aliases (`--prompt-file`, `-f`, `-m`, `-t`, `-j`) work.
+* **Pagination.** Every list command takes `--limit N` and ends a partial list with
+  `showing N of M <things> · --limit N shows more · <continuation>`: `events` (newest N,
+  `--after EVENT_ID` reads forward), `task list` (first N, `--offset N` continues; `--all` lists
+  every task), `proposal list` (`--after TASK_NUMBER`) and `mission list` / `missions` (live
+  first; 100 in text, all with `--json`). `--json` lists are objects (`{"tasks": [...],
+  "total": N, "offset": N}`, `{"missions": [...], "total": N}`, `{"events": [...]}`,
+  `{"proposals": [...]}`, `{"workers": [...]}`), never bare arrays.
+* **Coordinator URLs and `--target`.** `worker enroll --coordinator` and `remote login
+  --coordinator` accept either `https://HOST:PORT` or `wss://HOST:PORT` for the same coordinator
+  and store the scheme each command needs. `--target NAME` goes before the command (`llm-bridge
+  --target build-1 mission list`); after the command it is an error that shows the corrected
+  command line.
+
+### Exit status and error output
+
+| Status | Meaning |
+| --- | --- |
+| 0 | Success, or nothing to do (`Already paused`, `Already stopped`, `Nothing to pause`). |
+| 1 | Runtime failure: a provider, the controller, the disk or the network failed. `doctor` exits 1 when no provider can run. |
+| 2 | Usage error: unknown command or option, a value that is not valid, a command refused for a managed provider. |
+| 3 | Not found or ambiguous: no such mission, task, ID prefix or folder mission, or a prefix that matches several; also `task output`/`task diff` when there is nothing to show. With `--target`, 3 also means the target did not answer (the request stays queued). |
+| 4 | Wrong state: the mission or task is not in a state that allows the command (`start` on a cancelled mission, `task approve` on a task that is not in review, `finish` without a native provider, `attach` without a station). |
+
+With `--json`, an error is printed on standard output (not standard error) as
+
+```json
+{"error": {"code": "mission-not-found", "message": "no mission matches 'zzzz'", "hint": "run llm-bridge mission list"}}
+```
+
+with the same exit status. `hint` is the command that fixes the problem, or an empty string.
+The codes are `usage` (exit 2), `invalid-argument` (2), `mission-not-found` (3), `task-not-found`
+(3), `not-found` (3), `mission-ambiguous` (3), `wrong-state` (4), `conflict` (4, a task changed
+since you read it), `refused-in-managed-session` (2) and `failed` (1). The same table is in
+`llm-bridge --help` under "Exit status".
 
 Mission creation accepts `--verifier 'COMMAND'` (split like a shell, not run through one) or the command last after `--`, `--verifier-arg` (repeat once per argv element),
 `--verifier-timeout` (default 300 seconds), `--log-max-bytes` (default 4 MiB),
@@ -457,7 +506,8 @@ script, `ssh` without `-t`) it prints `llm-bridge: control needs an interactive
 terminal; use llm-bridge status` and exits 2. `llm-bridge usage` prints the
 `llm-usage` table once instead, so a script can read it.
 
-A mistyped command or option gets one line and exit status 2, for example
+A mistyped command or option gets one line and exit status 2 (an error object on standard
+output with `--json`), for example
 `llm-bridge: unknown command 'stauts' · did you mean status? · llm-bridge --help
 lists commands`. Internal commands (`console`, `_controller`, `_station-gc`) are
 not listed or suggested.
@@ -655,9 +705,10 @@ sleep independently.
 `resume` continues an active controller or starts one if needed.
 `stop` never cancels a mission. With no controller (a saved mission that is
 `CREATED`, `STOPPED` or `PAUSED`) it changes nothing and says `Nothing to stop ·
-mission ID is saved (CREATED) · start it with: llm-bridge start`. `pause` on a
-mission that is not running likewise says `Nothing to pause · mission is not
-running (CREATED)`. With a controller, `stop` asks it to stop at its next
+mission ID is saved (CREATED) · start it with: llm-bridge start` (`Already stopped
+· ...` when it is `STOPPED`). `pause` on a mission that is not running likewise says
+`Nothing to pause · mission is not running (CREATED)`, and on a paused one `Already
+paused · mission ID is PAUSED`. These no-ops exit 0. With a controller, `stop` asks it to stop at its next
 boundary and closes the owned station after the controller stops; in native mode it waits for the provider
 invocation to return and says how to finish if that takes a while; a later resume creates or reconnects the
 station as needed. `stop --force` reconciles unresolved work and terminates
@@ -754,7 +805,7 @@ running mission, inspect it and attach without disturbing the local session:
 
 ```bash
 llm-bridge mission list            # "INTERRUPTED (was RUNNING)" marks a mission whose controller is gone
-llm-bridge status --mission 3f9a   # unique ID prefix of 4+ characters
+llm-bridge status --mission 3f9a   # unique ID prefix of 3+ characters
 llm-bridge attach --mission 3f9a   # open the provider station
 # Ctrl-] then d detaches your terminal; mission and local session continue
 ```
@@ -819,7 +870,7 @@ running to return it).
 See `llm-bridge --help` and the command-specific `--help` output for all
 available CLI operations.
 
-Read a local textual artifact with `llm-bridge view --file notes.md`. Use
+Read a local textual artifact with `llm-bridge view notes.md` (`--file notes.md` also works). Use
 `--follow` explicitly for live output: Up pauses, End resumes; new output and
 file rotation/truncation are labelled. Retention remains bounded, and pruned
 content is unavailable. Without a TTY, `view` prints original source. Home `?`

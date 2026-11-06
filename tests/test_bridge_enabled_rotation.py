@@ -31,7 +31,7 @@ def _config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str) -> Path:
 
 
 def _create(tmp_path: Path, capsys, *extra: str, code: int = 0) -> str:
-    status = main(["mission", "create", "--prompt", "Do it", "--cwd", str(tmp_path), "--json", *extra])
+    status = main(["mission", "create", "--prompt", "Do it", "--cwd", str(tmp_path), *(["--json"] if code == 0 else []), *extra])
     captured = capsys.readouterr()
     assert status == code, captured.err
     return captured.out if code == 0 else captured.err

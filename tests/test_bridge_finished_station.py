@@ -199,7 +199,7 @@ def test_station_gc_command_prints_the_outcome(tmp_path, state, capsys) -> None:
 
 def test_attach_to_a_finished_mission_explains_instead_of_suggesting_start(tmp_path, state, capsys) -> None:
     mission_id = _mission(state, tmp_path, "COMPLETED")
-    assert main(["attach", "--mission", mission_id]) == 2
+    assert main(["attach", "--mission", mission_id]) == 4
     err = capsys.readouterr().err
     assert f"Mission {mission_id[:8]} is completed and its station was closed" in err and "llm-bridge start" not in err
 

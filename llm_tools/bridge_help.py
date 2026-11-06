@@ -71,7 +71,7 @@ wake. Stop and cancel are separate explicit operations.
 
 More help topics: @@TOPIC_LIST@@ (llm-bridge help lists them with descriptions).
 Every public command also has --help. ID and task numbers are placeholders.
---mission accepts a unique ID prefix (4+ characters) and may be omitted when you
+--mission accepts a unique ID prefix (3+ characters) and may be omitted when you
 run the command inside the mission's folder.""",
     "terms": """Words Bridge uses
 
@@ -196,8 +196,10 @@ shows what remote clients did on this worker.
 On the machine you type on (once):
   llm-bridge remote login --coordinator https://HOST:8443 --token-file T --ca-file ca.pem
   llm-bridge worker list                 workers, connection state and last seen
+Either https:// or wss:// names the same coordinator in both commands; Bridge
+stores the scheme each one needs.
 
-Then put --target WORKER before a command, for example:
+Then put --target WORKER before the command (after it, Bridge says where it goes):
   llm-bridge --target build-1 mission list
   llm-bridge --target build-1 task add --mission ID --file prompt.md
 The worker applies the same checks as a local command. A refused or offline
@@ -256,7 +258,7 @@ Use viewer export to choose an explicit destination. When a supported local
 clipboard helper is available, Copy source copies the complete source. Export
 is the reliable fallback; the viewer itself never sends clipboard escape sequences.
 Retained provider logs are bounded; pruned content cannot be recovered by paging.
-Open an artifact with llm-bridge view --file notes.md. Add --follow only to
+Open an artifact with llm-bridge view notes.md. Add --follow only to
 follow changes: scrolling up pauses, End resumes, and rotation/truncation is
 labelled. Without a TTY, view prints complete source; --follow requires a TTY.""",
     "providers": """Providers, routes and native stations
@@ -585,8 +587,7 @@ ROOT_GLOBAL_OPTIONS = (
 )
 
 # Extra sections appended after the global options on the top-level page, each already formatted
-# and separated from the previous one by a blank line (for example "Exit status").
-ROOT_HELP_TRAILER = ""
+# and separated from the previous one by a blank line. Set to EXIT_STATUS_TEXT below.
 
 
 def _rows(entries: tuple[tuple[str, str], ...], indent: str = "  ") -> list[str]:
@@ -689,7 +690,7 @@ def console_help() -> str:
 COMMANDS: dict[str, tuple[str, str]] = {
     "mission": ("Save and inspect durable missions", "mission list"),
     "mission create": ("Save an objective and its first task; no provider starts", "mission create --name demo --mode native --file prompt.md --cwd ."),
-    "mission list": ("List saved missions; no state changes or provider work", "mission list --json"),
+    "mission list": ("List every mission, live ones first (the same listing as missions); no state changes or provider work", "mission list --json"),
     "status": ("Inspect desired state, observed work and blockers", "status --mission ID"),
     "agents": ("Inspect current Bridge operations and provider-owned child agents; use --mission ID or --all-missions", "agents --all-missions --json"),
     "suspend-until-credits": ("Arm a wake timer and suspend after a fresh capacity and safety check", "suspend-until-credits --mission ID"),
@@ -734,7 +735,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "station": ("Select the viewed station; does not reroute a running task", "station --mission ID codex"),
     "steer": ("Change what happens at the next safe point: hand over to another provider, or add a review of a task", "steer --mission ID --kind handoff --to codex"),
     "help": ("Read offline workflow topics or a command help page", "help quickstart"),
-    "view": ("Read a UTF-8 artifact; following is opt-in and starts no work", "view --file notes.md"),
+    "view": ("Read a UTF-8 artifact; following is opt-in and starts no work", "view notes.md"),
     "mission set": ("Change a saved mission setting: automatic continue, team guidance, token spend, or suspending when rate limited", "mission set --mission ID --auto-continue on"),
     "mission colour": ("Pin the mission's identity colour (1-8) or return to the automatic one", "mission colour --mission ID 3"),
     "theme": ("Show the detected terminal background, the active colour theme and a swatch per role", "theme --theme light"),
@@ -836,6 +837,16 @@ def _row_text(text: str) -> str:
     if len(clause) > 1 and not clause[1].isupper():
         clause = clause[0].lower() + clause[1:]
     return clause
+
+
+EXIT_STATUS_TEXT = """Exit status
+  0  success or nothing to do         3  not found or ambiguous
+  1  runtime failure                  4  wrong state
+  2  usage error
+  With --json an error is {"error": {"code", "message", "hint"}} on standard
+  output, with the same status."""
+ROOT_HELP_TRAILER = EXIT_STATUS_TEXT
+
 
 
 def decorate_parser(parser: object) -> None:

@@ -100,7 +100,7 @@ def test_every_public_top_level_command_is_in_the_help_groups() -> None:
 
 
 def test_root_help_keeps_a_separate_trailer_for_the_exit_status_section(monkeypatch) -> None:
-    assert bridge_help.root_help().rstrip().endswith("llm-bridge help lists the topics.")
+    assert bridge_help.root_help().rstrip().endswith(bridge_help.EXIT_STATUS_TEXT.rstrip())  # CLIUX-016 fills the slot
     monkeypatch.setattr(bridge_help, "ROOT_HELP_TRAILER", "Exit status\n  0  success")
     assert _build_parser().format_help().rstrip().endswith("Exit status\n  0  success")
 

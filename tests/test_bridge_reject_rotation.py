@@ -195,7 +195,7 @@ def test_task_reject_requires_a_reason_and_the_right_state(tmp_path, state, caps
     assert exit_info.value.code == 2
     assert "--reason" in capsys.readouterr().err
 
-    assert main(["task", "reject", "--mission", mid, "--task", "1", "--reason", "nope"]) == 2
+    assert main(["task", "reject", "--mission", mid, "--task", "1", "--reason", "nope"]) == 4
     assert "not awaiting verification" in capsys.readouterr().err
     assert main(["task", "reject", "--mission", mid, "--task", "1", "--reason", "x" * 2001]) == 2
     assert "at most 2000" in capsys.readouterr().err
@@ -441,7 +441,7 @@ def test_start_override_is_refused_while_a_controller_owns_the_mission(tmp_path,
     monkeypatch.setattr(bridge, "start_mission", lambda *args, **kwargs: started.append(args) or 0)
     monkeypatch.setattr(bridge, "controller_running", lambda _mission: True)
 
-    assert main(["start", "--mission", mid, "--routes", "codex"]) == 2
+    assert main(["start", "--mission", mid, "--routes", "codex"]) == 4
     assert f"llm-bridge rotation --mission {mid[:8]} --set LIST" in capsys.readouterr().err
     assert started == []
     with BridgeStore(state / "bridge.sqlite3") as store:

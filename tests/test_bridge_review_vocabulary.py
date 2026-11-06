@@ -64,7 +64,7 @@ def test_task_json_keeps_the_enum_and_adds_the_label(tmp_path, state, capsys) ->
     task = json.loads(_run(capsys, "task", "show", "--mission", mid, "--task", "1", "--json"))
     assert task["status"] == "VERIFYING" and task["status_label"] == "REVIEW"
     listed = json.loads(_run(capsys, "task", "list", "--mission", mid, "--json"))
-    assert listed[0]["status"] == "VERIFYING" and listed[0]["status_label"] == "REVIEW"
+    assert listed["tasks"][0]["status"] == "VERIFYING" and listed["tasks"][0]["status_label"] == "REVIEW"
     snapshot = json.loads(_run(capsys, "status", "--mission", mid, "--json"))
     assert snapshot["current_task"]["status"] == "VERIFYING" and snapshot["current_task"]["status_label"] == "REVIEW"
 
@@ -87,7 +87,7 @@ def test_task_approve_pairs_with_task_reject(tmp_path, state, capsys) -> None:
     assert out.startswith('Approved · task 1 "work objective" · COMPLETED')
     shown = _run(capsys, "task", "show", "--mission", mid, "--task", "1")
     assert "  - reviewed (operator" in shown and "  - operator approved" in shown
-    again = _run(capsys, "task", "approve", "--mission", mid, "--task", "1", code=2)
+    again = _run(capsys, "task", "approve", "--mission", mid, "--task", "1", code=4)
     assert "task 1 is completed, not awaiting verification" in again
 
 

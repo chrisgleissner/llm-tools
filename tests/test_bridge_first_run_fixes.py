@@ -64,7 +64,8 @@ def test_stop_on_a_saved_mission_changes_nothing(tmp_path, state, capsys, status
             store.set_mission_status(mid, "RUNNING")
             store.set_mission_status(mid, "PAUSED" if status == "PAUSED" else "STOPPED")
     out = _run(capsys, "stop", "--mission", mid)
-    assert out.startswith(f"Nothing to stop · mission {mid[:8]} is saved ({status}) · ")
+    lead = "Already stopped" if status == "STOPPED" else "Nothing to stop"
+    assert out.startswith(f"{lead} · mission {mid[:8]} is saved ({status}) · ")
     assert "Stop requested" not in out and "CANCELLED" not in out
     assert ("start it with: llm-bridge start" in out) if status != "PAUSED" else ("resume it with: llm-bridge resume" in out)
     with BridgeStore(state / "bridge.sqlite3") as store:
@@ -131,7 +132,7 @@ def test_snapshot_tasks_carry_ordinal_and_keep_the_global_id(tmp_path, state, ca
     assert task["ordinal"] == 1 and task["id"] == second["task"]["id"] != 1
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.add_task(second["mission"]["id"], "dependent", depends_on=[task["id"]])
-    tasks = json.loads(_run(capsys, "task", "list", "--mission", second["mission"]["id"], "--json"))
+    tasks = json.loads(_run(capsys, "task", "list", "--mission", second["mission"]["id"], "--json"))["tasks"]
     assert tasks[1]["ordinal"] == 2 and tasks[1]["depends_on"] == [task["id"]] and tasks[1]["depends_on_ordinals"] == [1]
     events = json.loads(_run(capsys, "events", "--mission", second["mission"]["id"], "--json"))["events"]
     assert [event["task_ordinal"] for event in events if event["kind"] == "task-added"] == [1, 2]
@@ -142,13 +143,13 @@ def test_unknown_task_number_names_the_valid_range_without_long_ids(tmp_path, st
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.add_task(mid, "two")
         store.add_task(mid, "three")
-    err = _run(capsys, "task", "show", "--mission", mid, "--task", "5", code=2)
+    err = _run(capsys, "task", "show", "--mission", mid, "--task", "5", code=3)
     assert err.strip() == f"llm-bridge: mission {mid[:8]} has tasks 1–3; there is no task 5"
     assert not LONG_ID.search(err)
     other = _create(tmp_path, capsys, "other")["mission"]["id"]
-    err = _run(capsys, "task", "show", "--mission", other, "--task", "2", code=2)
+    err = _run(capsys, "task", "show", "--mission", other, "--task", "2", code=3)
     assert err.strip() == f"llm-bridge: mission {other[:8]} has task 1; there is no task 2"
-    assert main(["task", "cancel", "--mission", mid, "--task", "9"]) == 2
+    assert main(["task", "cancel", "--mission", mid, "--task", "9"]) == 3
     assert "there is no task 9" in capsys.readouterr().err
 
 
@@ -158,9 +159,9 @@ def test_task_id_option_takes_the_global_id_and_rejects_foreign_tasks(tmp_path, 
     global_id = second["task"]["id"]
     shown = _run(capsys, "task", "show", "--mission", second["mission"]["id"], "--task-id", str(global_id))
     assert shown.startswith('task 1 "second objective"')
-    err = _run(capsys, "task", "show", "--mission", first["mission"]["id"], "--task-id", str(global_id), code=2)
+    err = _run(capsys, "task", "show", "--mission", first["mission"]["id"], "--task-id", str(global_id), code=3)
     assert "belongs to another mission" in err and not LONG_ID.search(err)
-    assert "no task has the global ID 99" in _run(capsys, "task", "show", "--mission", first["mission"]["id"], "--task-id", "99", code=2)
+    assert "no task has the global ID 99" in _run(capsys, "task", "show", "--mission", first["mission"]["id"], "--task-id", "99", code=3)
     with pytest.raises(SystemExit):
         main(["task", "show", "--mission", first["mission"]["id"], "--task", "1", "--task-id", "1"])
     capsys.readouterr()
@@ -170,10 +171,10 @@ def test_dependencies_and_steering_use_mission_task_numbers(tmp_path, state, cap
     _create(tmp_path, capsys, "first")
     mid = _create(tmp_path, capsys, "second")["mission"]["id"]
     _run(capsys, "task", "add", "--mission", mid, "--prompt", "later", "--depends-on", "1")
-    tasks = json.loads(_run(capsys, "task", "list", "--mission", mid, "--json"))
+    tasks = json.loads(_run(capsys, "task", "list", "--mission", mid, "--json"))["tasks"]
     assert tasks[1]["depends_on_ordinals"] == [1]
-    assert _run(capsys, "task", "dependencies", "--mission", mid, "--task", "1", "--add", "2", code=2)  # would be a cycle
-    assert "there is no task 9" in _run(capsys, "task", "add", "--mission", mid, "--prompt", "x", "--depends-on", "9", code=2)
+    assert _run(capsys, "task", "dependencies", "--mission", mid, "--task", "1", "--add", "2", code=4)  # would be a cycle
+    assert "there is no task 9" in _run(capsys, "task", "add", "--mission", mid, "--prompt", "x", "--depends-on", "9", code=3)
     review = json.loads(_run(capsys, "steer", "--mission", mid, "--kind", "review", "--task", "1", "--json"))
     assert review["result"]["depends_on_ordinal"] == 1 and review["result"]["task_ordinal"] == 3
     text = _run(capsys, "steer", "--mission", mid, "--kind", "review", "--task", "2")
@@ -257,7 +258,7 @@ def test_verify_without_approve_only_records_evidence(tmp_path, state, capsys) -
     done = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--approve")
     assert done.startswith('Verified · task 1 "work objective" · COMPLETED')
     assert "  - operator approved (approval" in _run(capsys, "task", "show", "--mission", mid, "--task", "1")
-    err = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--approve", code=2)
+    err = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--approve", code=4)
     assert "task 1 is completed, not awaiting verification" in err
 
 
@@ -274,7 +275,7 @@ def test_verify_needs_evidence_or_approval(tmp_path, state, capsys) -> None:
     created = _create(tmp_path, capsys)
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
-    assert "requires verification evidence or explicit operator approval" in _run(capsys, "task", "verify", "--mission", mid, "--task", "1", code=2)
+    assert "requires verification evidence or explicit operator approval" in _run(capsys, "task", "verify", "--mission", mid, "--task", "1", code=4)
 
 
 def test_console_verify_alias_takes_evidence_literally(tmp_path, state, capsys) -> None:
@@ -439,7 +440,7 @@ def test_detach_picks_the_named_client_and_reports_it(tmp_path, state, capsys, m
     assert main(["detach", "--mission", mid, "--client", "/dev/pts/18"]) == 0
     assert capsys.readouterr().out.strip() == f"Detached /dev/pts/18 from mission {mid[:8]}"
     assert ("detach-client", "-t", "/dev/pts/18") in fake.calls
-    assert main(["detach", "--mission", mid]) == 2
+    assert main(["detach", "--mission", mid]) == 1
     assert "/dev/pts/21" in capsys.readouterr().err
 
 
@@ -481,7 +482,7 @@ def test_task_add_reopens_a_completed_mission(tmp_path, state, capsys) -> None:
 def test_task_add_to_a_cancelled_mission_says_so(tmp_path, state, capsys) -> None:
     mid = _create(tmp_path, capsys)["mission"]["id"]
     _run(capsys, "cancel", "--mission", mid)
-    err = _run(capsys, "task", "add", "--mission", mid, "--prompt", "x", code=2)
+    err = _run(capsys, "task", "add", "--mission", mid, "--prompt", "x", code=4)
     assert err.strip() == f"llm-bridge: mission {mid[:8]} was cancelled; create a new mission instead of adding a task"
     assert "terminal mission" not in err
 
@@ -494,7 +495,7 @@ def test_read_only_commands_use_the_folders_finished_mission(tmp_path, state, ca
     assert _run(capsys, "task", "show", "--task", "1").startswith("task 1 ")
     assert "Mission created" in _run(capsys, "events")
     # Commands other than task add that change things keep the rule and say how to continue.
-    err = _run(capsys, "resume", code=2)
+    err = _run(capsys, "resume", code=3)
     assert f"mission {mid[:8]} in folder" in err and "is finished (completed)" in err
     assert f"llm-bridge task add --mission {mid[:8]}" in err and "reopens it" in err and not LONG_ID.search(err)
     assert "terminal mission" not in err
@@ -509,7 +510,7 @@ def test_several_finished_missions_in_a_folder_are_listed(tmp_path, state, capsy
         out = json.loads(_run(capsys, "mission", "create", "--prompt", f"p{index}", "--cwd", str(folder), "--providers", "codex", "--json"))
         _run(capsys, "cancel", "--mission", out["mission"]["id"])
     monkeypatch.chdir(folder)
-    err = _run(capsys, "status", code=2)
+    err = _run(capsys, "status", code=3)
     assert "several finished missions match folder" in err
 
 
@@ -619,7 +620,7 @@ def test_attach_is_ambiguous_only_among_live_stations(tmp_path, state, capsys, m
     folder, ids = _folder_missions(tmp_path, capsys)
     monkeypatch.setattr(bridge_missions, "station_live", lambda mission_id: mission_id in ids[:2])
     monkeypatch.chdir(folder)
-    err = _run(capsys, "attach", code=2)
+    err = _run(capsys, "attach", code=3)
     assert "several missions match folder" in err
     assert ids[0][:8] in err and ids[1][:8] in err and ids[2][:8] not in err
 
@@ -632,10 +633,10 @@ def test_mission_list_and_ambiguity_errors_share_one_order(tmp_path, state, caps
     expected = [ids[0], ids[2], ids[1]]  # live first, then newest first
     listed = json.loads(_run(capsys, "mission", "list", "--json"))["missions"]
     assert [m["id"] for m in listed] == expected
-    human = _run(capsys, "mission", "list").splitlines()[1:]
+    human = _run(capsys, "mission", "list").splitlines()[2:]  # a count line and the header come first
     assert [line.split()[0] for line in human] == [i[:8] for i in expected]
     monkeypatch.chdir(folder)
-    err = _run(capsys, "status", code=2)
+    err = _run(capsys, "status", code=3)
     assert [line.split()[0] for line in err.splitlines()[1:]] == [i[:8] for i in expected]
     assert "(live)" in err.splitlines()[1] and "(live)" not in err.splitlines()[2]
     with BridgeStore(state / "bridge.sqlite3") as store:
@@ -730,11 +731,11 @@ def test_refused_transitions_use_operator_wording(tmp_path, state, capsys) -> No
     _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--approve")
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.set_mission_status(mid, "COMPLETED")
-    err = _run(capsys, "resume", "--mission", mid, code=2)
+    err = _run(capsys, "resume", "--mission", mid, code=4)
     assert err.strip() == f'llm-bridge: mission {mid[:8]} is finished (completed); add a task with: llm-bridge task add --prompt "..." to continue it'
-    err = _run(capsys, "task", "retry", "--mission", mid, "--task", "1", code=2)
+    err = _run(capsys, "task", "retry", "--mission", mid, "--task", "1", code=4)
     assert err.strip() == "llm-bridge: task 1 is completed and cannot become queued"
-    err = _run(capsys, "task", "reject", "--mission", mid, "--task", "1", "--reason", "x", code=2)
+    err = _run(capsys, "task", "reject", "--mission", mid, "--task", "1", "--reason", "x", code=4)
     assert "task 1 is completed, not awaiting verification" in err
     for message in (err, ):
         assert "->" not in message and "invalid" not in message
@@ -851,4 +852,4 @@ def test_missions_listing_shows_the_mission_task_number(tmp_path, state, capsys)
     current = next(item for item in entries["missions"] if item["id"] == mid)["current_task"]
     assert current["ordinal"] == 1 and current["id"] == second["task"]["id"] != 1
     row = next(line for line in _run(capsys, "missions").splitlines() if mid[:8] in line)
-    assert row.rstrip().endswith(" 1 second objective")
+    assert " 0/1 " in row  # the text listing shows done/total (CLIUX-033); the current task is in the JSON

@@ -64,7 +64,7 @@ def test_json_keeps_raw_fields_and_still_hides_bookkeeping_unless_verbose(tmp_pa
 
 def test_a_rejected_command_event_records_and_shows_the_reason(tmp_path, state, capsys) -> None:
     mission = _mission(tmp_path, capsys)
-    assert main(["task", "verify", "--mission", mission, "--task", "1", "--approve"]) == 2
+    assert main(["task", "verify", "--mission", mission, "--task", "1", "--approve"]) == 4
     error = capsys.readouterr().err.strip().removeprefix("llm-bridge: ")
     assert error
     out, _ = _events(capsys, "--mission", mission, "--verbose")

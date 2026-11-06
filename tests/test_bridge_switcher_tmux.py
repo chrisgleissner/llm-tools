@@ -401,7 +401,7 @@ def test_finish_reports_when_provider_does_not_exit(tmp_path: Path, env: dict[st
         wait_for(lambda: task_status(env, mission_id, task_id) == "RUNNING")
         wait_for_composer(mission_id, env)
         result = call_with_exit_timeout(env, 1.0, "finish", "--mission", mission_id)
-        assert result.returncode == 2
+        assert result.returncode == 4
         assert "Provider did not exit · switch to it with Ctrl-] then P" in result.stderr
         assert task_status(env, mission_id, task_id) == "RUNNING"  # never killed
     finally:
@@ -490,7 +490,7 @@ def test_finish_refuses_to_type_into_a_real_provider_dialog(tmp_path: Path, env:
         handle = handle_of(mission_id, env)
         wait_for(lambda: "Do you want to proceed" in TmuxTerminalBackend().capture(handle, pane="provider"))
         result = call(env, "finish", "--mission", mission_id, check=False)
-        assert result.returncode == 2
+        assert result.returncode == 4
         assert "Provider is asking something — switch to it with Ctrl-] then P" in result.stderr
         assert not received.exists(), "the provider must not have received any input"
         assert task_status(env, mission_id, task_id) == "RUNNING"

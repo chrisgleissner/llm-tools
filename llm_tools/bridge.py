@@ -16,7 +16,7 @@ from typing import Any, Callable, NoReturn, Sequence, TYPE_CHECKING, cast
 from . import bridge_commands as commands
 from . import bridge_format as fmt
 from .bridge_format import NATIVE_STOP_HINT
-from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
+from .bridge_store import BridgeStore, MissionLock, TaskNotFound, TransitionError, default_state_dir, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
 from .bridge_store import controller_running as _controller_running
 from .bridge_states import (
     ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
@@ -26,7 +26,9 @@ from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES, THEME_CHOICES
 from .bridge_vocab import RunMode
 from .bridge_missions import (  # noqa: F401  (re-exported: the CLI and tests reach these through bridge)
     MIN_MISSION_PREFIX,
+    MissionAmbiguous,
     MissionNotFound,
+    NoMissionInFolder,
     mission_choices as _mission_choices,
     mission_live as _mission_live,
     order_missions,
@@ -177,8 +179,28 @@ def console_snapshot(
     return result
 
 
+def _with_task_numbers(value: Any) -> Any:
+    """A copy of ``value`` in which every task also carries ``number``, an alias of ``ordinal``.
+
+    ``number`` is what users type after ``--task``; ``id`` is the global ID, which only
+    ``--task-id`` accepts.
+    """
+    if isinstance(value, dict):
+        copy: dict[str, Any] = {}
+        task = "ordinal" in value and ("mission_id" in value or "title" in value) and "number" not in value
+        for key, item in value.items():
+            copy[key] = _with_task_numbers(item)
+            if task and key == "ordinal" and isinstance(item, int) and not isinstance(item, bool):
+                copy["number"] = item
+        return copy
+    if isinstance(value, list):
+        return [_with_task_numbers(item) for item in value]
+    return value
+
+
 def _json_print(value: Any, *, compact: bool = False) -> None:
     """Print ``value`` as sorted JSON; ``compact`` is one line, for streams such as ``events --follow``."""
+    value = _with_task_numbers(value)
     if compact:
         print(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     else:
@@ -198,7 +220,84 @@ def strip_frozen_config(value: Any) -> Any:
     return value
 
 
+# Exit status (CLIUX-016). Every command uses this small set; `llm-bridge --help` and
+# docs/llm-bridge/operations.md list it. `--target` requests keep the remote client's own
+# status 3 for "the target did not answer" (bridge_remote.EXIT_UNAVAILABLE). The text is
+# bridge_help.EXIT_STATUS_TEXT.
+EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_FOUND, EXIT_WRONG_STATE = 0, 1, 2, 3, 4
+
+
+class WrongState(RuntimeError):
+    """The mission is not in a state that allows the command (a station that is not running, a controller that is)."""
+
+
+def _split_hint(message: str) -> tuple[str, str]:
+    """Split ``message`` into what went wrong and the command that fixes it, when it names one."""
+    first, newline, rest = message.partition("\n")
+    for separator in ("; ", " · "):
+        head, found, tail = first.partition(separator)
+        if found and "llm-bridge" in tail:
+            return head + newline + rest, tail
+    return message, ""
+
+
+def _fail(message: str, code: str, exit_status: int, as_json: bool) -> int:
+    """Report an error: ``llm-bridge: MESSAGE`` on stderr, or with ``--json`` an error object on stdout."""
+    if as_json:
+        text, hint = _split_hint(message)
+        print(json.dumps({"error": {"code": code, "message": text, "hint": hint}}, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"llm-bridge: {message}", file=sys.stderr)
+    return exit_status
+
+
+def _classify_error(exc: BaseException) -> tuple[str, int]:
+    """The error code and exit status for an exception raised by a command."""
+    if isinstance(exc, MissionAmbiguous):
+        return "mission-ambiguous", EXIT_NOT_FOUND
+    if isinstance(exc, (MissionNotFound, NoMissionInFolder)):
+        return "mission-not-found", EXIT_NOT_FOUND
+    if isinstance(exc, TaskNotFound):
+        return "task-not-found", EXIT_NOT_FOUND
+    if isinstance(exc, commands.CommandFailure):
+        if exc.code == "not-found":
+            return "not-found", EXIT_NOT_FOUND
+        return exc.code, EXIT_USAGE if exc.code.startswith("invalid") else EXIT_FAILED
+    if isinstance(exc, (TransitionError, WrongState)):
+        return "wrong-state", EXIT_WRONG_STATE
+    if isinstance(exc, KeyError):
+        return "not-found", EXIT_NOT_FOUND
+    if isinstance(exc, ValueError):
+        return "invalid-argument", EXIT_USAGE
+    return "failed", EXIT_FAILED
+
+
+def _fail_with(exc: BaseException, as_json: bool) -> int:
+    text = str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
+    code, status = _classify_error(exc)
+    return _fail(text, code, status, as_json)
+
+
+_REJECTION_CAUSES: dict[str, BaseException | None] = {}
+
+
+def _fail_rejected(result: dict[str, Any], default: str, as_json: bool) -> int:
+    """Report a command the store rejected: the exit status follows the exception that rejected it.
+
+    A refused transition is "wrong state" (4), a task or mission that is not there is "not found"
+    (3), an argument the effect could not use is a usage error (2).
+    """
+    detail = result.get("result") or {}
+    message = str(detail.get("error", default))
+    cause = _REJECTION_CAUSES.pop(str(result.get("id")), None)
+    if (cause is not None and not isinstance(cause, TransitionError)) or isinstance(cause, TaskNotFound):
+        code, status = _classify_error(cause)  # type: ignore[arg-type]
+        return _fail(message, code, status, as_json)
+    return _fail(message, "conflict" if detail.get("code") == "conflict" else "wrong-state", EXIT_WRONG_STATE, as_json)
+
+
 TASK_LIST_PAGE = 200
+MISSION_LIST_PAGE = 100
 BUILTIN_PROVIDERS = "claude,codex,opencode"
 RUN_MODES = tuple(str(mode) for mode in RunMode)
 
@@ -248,9 +347,9 @@ def _require_task(store: BridgeStore, mission_id: str, task_id: int) -> dict[str
     try:
         task = store.get_task(task_id)
     except KeyError:
-        raise TransitionError(f"no task has the global ID {task_id}; use --task N with the number shown by task list") from None
+        raise TaskNotFound(f"no task has the global ID {task_id}; use --task N with the number shown by task list") from None
     if task["mission_id"] != mission_id:
-        raise TransitionError(f"global task ID {task_id} belongs to another mission, not {mission_id[:8]}; use --task N with the number shown by task list")
+        raise TaskNotFound(f"global task ID {task_id} belongs to another mission, not {mission_id[:8]}; use --task N with the number shown by task list")
     return task
 
 
@@ -303,11 +402,28 @@ def _db_int(text: str) -> int:
     return value
 
 
+def _positional_into(dest: str) -> type[argparse.Action]:
+    """The action of an optional positional that is an alternative spelling of ``--option``: it fills ``dest``.
+
+    A positional with ``nargs="?"`` is matched once with no value when it is absent, and a plain
+    store would then overwrite what the option set; this one leaves the namespace alone.
+    """
+    import argparse
+
+    class _StorePositional(argparse.Action):
+        def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: Any, option_string: str | None = None) -> None:
+            if values is not None:
+                setattr(namespace, dest, values)
+
+    return _StorePositional
+
+
 def _add_task_selector(parser: argparse.ArgumentParser, *, required: bool = True, noun: str = "task", note: str = "") -> None:
-    """``--task N`` (the mission's own number) and the advanced ``--task-id`` (global ID)."""
+    """``--task N`` or a positional ``N`` (the mission's own number) and the advanced ``--task-id`` (global ID)."""
     group = parser.add_mutually_exclusive_group(required=required)
-    group.add_argument("--task", metavar="N", dest="task", type=_db_int, help=f"{noun} number within the mission, as shown by task list{note}")
+    group.add_argument("--task", "-t", metavar="N", dest="task", type=_db_int, help=f"{noun} number within the mission, as shown by task list{note}")
     group.add_argument("--task-id", metavar="ID", dest="task_by_id", type=_db_int, help=f"advanced: the {noun}'s global ID, unique across all missions (task JSON field id)")
+    group.add_argument("task_number", nargs="?", metavar="N", type=_db_int, action=_positional_into("task"), help=f"the {noun} number, same as --task N")
 
 
 def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[str, Any], *, command_id: str | None = None) -> dict[str, Any]:
@@ -332,6 +448,9 @@ def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[s
         rejection = {"error": str(exc)}
         if exc.code:
             rejection["code"] = exc.code
+        # Not part of the stored result (the wire format stays as it was): this process's command line
+        # uses it to pick the exit status, which depends on what kind of problem was rejected.
+        _REJECTION_CAUSES[command["id"]] = exc.__cause__
         with store._transaction():
             return store.finish_command(command["id"], status="REJECTED", result=rejection)
 
@@ -376,8 +495,8 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
         result: dict[str, Any]
         if action == "pause":
             current = str(store.get_mission(mission_id)["status"])
-            if current not in STARTED_MISSION_STATUSES:
-                return {"mission_status": current, "noop": True, "detail": fmt.nothing_to_pause(current)}
+            if current not in STARTED_MISSION_STATUSES or current == "PAUSED":
+                return {"mission_status": current, "noop": True, "detail": fmt.nothing_to_pause(current, mission_id)}
             store.set_mission_status(mission_id, "PAUSED")
             active = store.db.execute("SELECT COUNT(*) FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')", (mission_id,)).fetchone()[0]
             result = {"mission_status": "PAUSED", "work_status": "DEFERRED" if active else "APPLIED"}
@@ -666,7 +785,8 @@ def _cli_parser_class() -> type[argparse.ArgumentParser]:
         _arguments: list[str] = []
 
         def parse_args(self, args: Sequence[str] | None = None, namespace: argparse.Namespace | None = None) -> argparse.Namespace:  # type: ignore[override]
-            self._arguments = list(sys.argv[1:] if args is None else args)  # the root parser reports options of every command
+            # Shared through the class: a sub-command's parser reports its own errors and needs the whole command line.
+            _CliParser._arguments = list(sys.argv[1:] if args is None else args)
             return super().parse_args(args, namespace)
 
         def _command_for_arguments(self) -> argparse.ArgumentParser:
@@ -678,6 +798,26 @@ def _cli_parser_class() -> type[argparse.ArgumentParser]:
                         break
             return current
 
+        def _usage_exit(self, text: str) -> NoReturn:
+            """Exit 2 with ``llm-bridge: TEXT``; with ``--json`` print an error object on stdout instead."""
+            _fail(text, "usage", EXIT_USAGE, bool({"--json", "-j"} & set(self._arguments)))
+            raise SystemExit(EXIT_USAGE)
+
+        def _target_placement_message(self) -> str:
+            """``--target`` after the command: say where it goes, with the command line rewritten."""
+            words = list(self._arguments)
+            name = "NAME"
+            for index, word in enumerate(words):
+                if word == "--target" and index + 1 < len(words):
+                    name = words[index + 1]
+                    del words[index:index + 2]
+                    break
+                if word.startswith("--target="):
+                    name = word.split("=", 1)[1]
+                    del words[index]
+                    break
+            return f"--target goes before the command · llm-bridge --target {name} {' '.join(words)}".rstrip()
+
         def error(self, message: str) -> NoReturn:
             for action in self._actions:
                 if isinstance(action, argparse._SubParsersAction):
@@ -687,7 +827,7 @@ def _cli_parser_class() -> type[argparse.ArgumentParser]:
                         kind = "command" if " " not in self.prog else f"{self.prog.split()[-1]} command"
                         hint = _close_names(unknown.group(1), names, best_only=True)
                         suggestion = f" · did you mean {', '.join(hint)}?" if hint else ""
-                        self.exit(2, f"llm-bridge: unknown {kind} '{unknown.group(1)}'{suggestion} · {self.prog} --help lists commands\n")
+                        self._usage_exit(f"unknown {kind} '{unknown.group(1)}'{suggestion} · {self.prog} --help lists commands")
             if message.startswith("unrecognized arguments: "):
                 command = self._command_for_arguments()
                 words = message[len("unrecognized arguments: "):].split(" ")
@@ -696,11 +836,15 @@ def _cli_parser_class() -> type[argparse.ArgumentParser]:
                     if option.startswith("--") and action.help != argparse.SUPPRESS
                 )
                 wrong = next((word.split("=", 1)[0] for word in words if word.startswith("--")), None)
+                if wrong == "--target":
+                    self._usage_exit(self._target_placement_message())
                 if wrong is not None:
                     hint = _close_names(wrong, options, best_only=True)
                     suggestion = f" · did you mean {', '.join(hint)}?" if hint else ""
-                    self.exit(2, f"llm-bridge: unknown option '{wrong}'{suggestion} · {command.prog} --help lists options\n")
-                self.exit(2, f"llm-bridge: unrecognized arguments: {' '.join(words)} · {command.prog} --help shows the arguments\n")
+                    self._usage_exit(f"unknown option '{wrong}'{suggestion} · {command.prog} --help lists options")
+                self._usage_exit(f"unrecognized arguments: {' '.join(words)} · {command.prog} --help shows the arguments")
+            if {"--json", "-j"} & set(self._arguments):
+                self._usage_exit(message)
             super().error(message)
 
     globals()["_CliParser"] = _CliParser
@@ -1137,14 +1281,14 @@ def _read_prompt_args(parser: argparse.ArgumentParser, noun: str = "task") -> No
 
 
 def _add_mission_arg(parser: argparse.ArgumentParser, default_mission: str | None, *, required: bool = False, inferred: bool = True) -> None:
-    help_text = "mission ID or a unique prefix of 4+ characters"
+    help_text = f"mission ID or a unique prefix of {MIN_MISSION_PREFIX}+ characters"
     if inferred:
         help_text += "; omit it inside a mission's folder to use that mission"
-    parser.add_argument("--mission", metavar="ID", required=required and default_mission is None, default=default_mission, help=help_text)
+    parser.add_argument("--mission", "-m", metavar="ID", required=required and default_mission is None, default=default_mission, help=help_text)
 
 
 def _add_json_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--json", action="store_true", help="print the stable machine-readable JSON response instead of text")
+    parser.add_argument("--json", "-j", action="store_true", help="print the stable machine-readable JSON response instead of text; an error is then {\"error\": {\"code\", \"message\", \"hint\"}} on standard output")
 
 
 def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
@@ -1290,6 +1434,20 @@ class _OnlyCommand:
         return _SkippedParser()
 
 
+def _disable_abbreviations(parser: argparse.ArgumentParser) -> None:
+    """No parser accepts a prefix of a long option: ``stop --f`` is not ``stop --force`` (CLIUX-071).
+
+    Explicit aliases (``--prompt-file``, ``-f``, ``-m``) are separate option strings and keep working.
+    """
+    import argparse
+
+    parser.allow_abbrev = False
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                _disable_abbreviations(child)
+
+
 def _build_parser(
     *,
     parser_class: type[argparse.ArgumentParser] | None = None,
@@ -1308,7 +1466,9 @@ def _build_parser(
     help_parser = sub.add_parser("help", help="show offline Bridge workflow and recovery guidance")
     help_parser.add_argument("topic", nargs="*", help="a help topic or a command such as: task verify")
     view = sub.add_parser("view", help="read a local text artifact without starting work")
-    view.add_argument("--file", required=True, metavar="PATH", help="UTF-8 text artifact to open; the source stays unchanged")
+    view_source = view.add_mutually_exclusive_group(required=True)
+    view_source.add_argument("--file", metavar="PATH", help="UTF-8 text artifact to open; the source stays unchanged")
+    view_source.add_argument("path", nargs="?", metavar="PATH", action=_positional_into("file"), help="the same as --file PATH")
     view.add_argument("--follow", action="store_true", help="follow changes explicitly; Up pauses, End resumes")
 
     mission = sub.add_parser("mission", help="create or list missions")
@@ -1317,7 +1477,8 @@ def _build_parser(
     _read_prompt_args(create, "mission objective and first task")
     _add_mission_create_args(create)
     _add_json_arg(create)
-    listing = mission_sub.add_parser("list")
+    listing = mission_sub.add_parser("list", help="list every mission (the same listing as llm-bridge missions)")
+    listing.add_argument("--limit", metavar="N", type=_db_int, default=None, help=f"list at most N missions, live ones first (default: {MISSION_LIST_PAGE}; all with --json)")
     listing.add_argument("--include-config", action="store_true", help="with --json, include each mission's saved copy of the llm-tools config (large; left out by default)")
     _add_json_arg(listing)
     mission_set = mission_sub.add_parser("set", help="change a mission setting")
@@ -1432,7 +1593,9 @@ def _build_parser(
     for proposal_action in ("accept", "reject"):
         proposal_decision = proposal_sub.add_parser(proposal_action, help=f"{proposal_action} a pending proposal")
         _add_mission_arg(proposal_decision, default_mission)
-        proposal_decision.add_argument("--task", metavar="N", type=_db_int, required=True, help="task number of the proposal, as shown by proposal list")
+        decided = proposal_decision.add_mutually_exclusive_group(required=True)
+        decided.add_argument("--task", "-t", metavar="N", dest="task", type=_db_int, help="task number of the proposal, as shown by proposal list")
+        decided.add_argument("task_number", nargs="?", metavar="N", type=_db_int, action=_positional_into("task"), help="the proposal's task number, same as --task N")
         if proposal_action == "reject":
             proposal_decision.add_argument("--reason", metavar="TEXT", default="", help="why the proposal is rejected")
         _add_json_arg(proposal_decision)
@@ -1468,6 +1631,7 @@ def _build_parser(
 
     missions = sub.add_parser("missions", help="list every mission, live ones first, or pick one to switch to")
     missions.add_argument("--pick", action="store_true", help="open the interactive mission picker (needs a terminal)")
+    missions.add_argument("--limit", metavar="N", type=_db_int, default=None, help=f"list at most N missions, live ones first (default: {MISSION_LIST_PAGE}; all with --json)")
     missions.add_argument("--from", dest="from_mission", metavar="ID", help=argparse.SUPPRESS)  # internal: the station's Ctrl-] then M binding passes it
     missions.add_argument("--client", metavar="TTY", help="station client to switch; default: the most recently active one")
     _add_json_arg(missions)
@@ -1485,7 +1649,7 @@ def _build_parser(
     worker_sub = worker.add_subparsers(dest="worker_action", required=True)
     worker_enroll = worker_sub.add_parser("enroll", help="store the coordinator URL, CA and worker token for this host")
     worker_enroll.add_argument("--name", required=True, help="worker name used as the remote target, for example workstation")
-    worker_enroll.add_argument("--coordinator", required=True, metavar="URL", help="coordinator base URL, for example wss://bridge.home.arpa:8443")
+    worker_enroll.add_argument("--coordinator", required=True, metavar="URL", help="coordinator base URL, for example wss://bridge.home.arpa:8443 (https:// is accepted for the same coordinator)")
     worker_enroll.add_argument("--token-file", required=True, metavar="PATH", help="file holding the worker token printed by the coordinator ('-' reads stdin)")
     worker_enroll.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
     worker_enroll.add_argument("--allow-control", action="store_true", help="accept mutating remote commands and terminal input; without it the worker is read-only remotely")
@@ -1507,7 +1671,7 @@ def _build_parser(
     remote = sub.add_parser("remote", help="configure this CLI to reach other workers through a coordinator (used by --target)")
     remote_sub = remote.add_subparsers(dest="remote_action", required=True)
     remote_login = remote_sub.add_parser("login", help="store the coordinator URL, CA and API token")
-    remote_login.add_argument("--coordinator", required=True, metavar="URL", help="coordinator URL, for example https://bridge.home.arpa:8443")
+    remote_login.add_argument("--coordinator", required=True, metavar="URL", help="coordinator URL, for example https://bridge.home.arpa:8443 (wss:// is accepted for the same coordinator)")
     remote_login.add_argument("--token-file", required=True, metavar="PATH", help="file holding an API token from bridge-coordinator token create ('-' reads stdin)")
     remote_login.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
     remote_status = remote_sub.add_parser("status", help="show the configured coordinator without the token")
@@ -1577,6 +1741,7 @@ def _build_parser(
         from .bridge_help import decorate_parser
 
         decorate_parser(parser)
+    _disable_abbreviations(parser)
     return parser
 
 
@@ -1751,7 +1916,7 @@ def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prom
 def _legacy_prompt_mode(argv: list[str]) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(prog="llm-bridge")
+    parser = argparse.ArgumentParser(prog="llm-bridge", allow_abbrev=False)
     _read_prompt_args(parser, "mission objective and first task")
     _add_mission_create_args(parser, legacy=True)
     _add_json_arg(parser)
@@ -1795,7 +1960,7 @@ def _load_handle(mission_id: str):
 
     socket_path = mission_socket_path(mission_id)
     if not Path(socket_path).exists():
-        raise RuntimeError(no_station_message(mission_id))
+        raise WrongState(no_station_message(mission_id))
     try:
         return TmuxTerminalBackend().open_existing(
             socket_path=socket_path,
@@ -1804,7 +1969,7 @@ def _load_handle(mission_id: str):
         )
     except RuntimeError as exc:
         if str(exc).startswith("no live terminal station"):
-            raise RuntimeError(no_station_message(mission_id)) from exc
+            raise WrongState(no_station_message(mission_id)) from exc
         raise
 
 
@@ -1994,6 +2159,34 @@ def _set_mission_suspend_when_rate_limited(store: BridgeStore, mission_id: str, 
     return {"schema_version": 1, "mission_id": mission_id, "suspend_when_rate_limited": enabled, "detail": detail}
 
 
+def _proposal_page(args: argparse.Namespace, result: dict[str, Any]) -> dict[str, Any]:
+    """``proposal list`` result with ``total``: how many proposals match, so a full page can say so."""
+    proposals = result.get("proposals") or []
+    with open_store(readonly=True) as store:
+        after_id = int(store.db.execute("SELECT COALESCE(MAX(id),0) FROM tasks WHERE mission_id=? AND ordinal<=?", (args.mission, max(0, args.after))).fetchone()[0])
+        clause = "" if args.status == "ALL" else " AND proposal_status=?"
+        params: tuple[Any, ...] = (args.mission, after_id, *(() if args.status == "ALL" else (args.status,)))
+        total = int(store.db.execute("SELECT COUNT(*) FROM tasks WHERE mission_id=? AND origin='agent-proposal' AND id>?" + clause, params).fetchone()[0])
+    return {**result, "total": max(total, len(proposals))}
+
+
+def _print_missions(args: argparse.Namespace) -> int:
+    """``missions`` and ``mission list``: every mission, live ones first, at most ``--limit`` of them."""
+    from . import bridge_missions, bridge_switcher
+
+    with open_store(readonly=True) as store:
+        # One liveness probe for every mission listing and ambiguity message (tests that stub liveness patch it).
+        entries = bridge_switcher.collect_entries(store, station_probe=lambda mission_id: bridge_missions.station_live(mission_id))
+    total = len(entries)
+    limit = args.limit if args.limit is not None else (None if args.json else MISSION_LIST_PAGE)
+    page = entries if limit is None else entries[:max(0, limit)]
+    if args.json:
+        _json_print(bridge_switcher.missions_json(page, total))
+    else:
+        print(bridge_switcher.format_missions(page, total=total))
+    return 0
+
+
 def _events_command(args: argparse.Namespace) -> int:
     """``events``: the newest events (or the first ones after ``--after``), then new ones with ``--follow``."""
     newest = args.after is None
@@ -2071,12 +2264,12 @@ def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
     try:
         lock.acquire(timeout=TERMINAL_STOP_LOCK_WAIT_SECONDS, poll=0.05)
     except BlockingIOError as exc:
-        raise RuntimeError(f"mission {mission_id[:8]} still has an active controller; stop is pending") from exc
+        raise WrongState(f"mission {mission_id[:8]} still has an active controller; stop is pending") from exc
     try:
         with open_store() as store:
             mission = store.get_mission(mission_id)
             if mission["status"] not in {"COMPLETED", "FAILED", "CANCELLED", "STOPPED"}:
-                raise RuntimeError(f"mission {mission_id[:8]} changed state while stopping; run stop again")
+                raise WrongState(f"mission {mission_id[:8]} changed state while stopping; run stop again")
             from .bridge_runtime import mission_socket_path
             from .terminal import DeadStationError, TmuxTerminalBackend
 
@@ -2115,10 +2308,10 @@ def _print_task_evidence(args: argparse.Namespace, result: dict[str, Any]) -> in
     available = bool(result.get("available"))
     if getattr(args, "json", False):
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if available else 2
+        return EXIT_OK if available else EXIT_NOT_FOUND
     if not available:
         print(f"llm-bridge: {result.get('message')}", file=sys.stderr)
-        return 2
+        return EXIT_NOT_FOUND
     if args.task_action == "diff":
         sys.stdout.write(str(result["text"]))
         return 0
@@ -2143,7 +2336,7 @@ def _print_task_evidence(args: argparse.Namespace, result: dict[str, Any]) -> in
 
 def _proposal_text(args: argparse.Namespace) -> Callable[[Any], str]:
     if args.proposal_action == "list":
-        return lambda value: fmt.format_proposals(value["proposals"])
+        return lambda value: fmt.format_proposals(value["proposals"], total=value.get("total"))
     return lambda value: fmt.format_proposal_result(args.proposal_action, value)
 
 
@@ -2279,7 +2472,7 @@ def _worker_command(args: argparse.Namespace) -> int:
     if args.worker_action == "enroll":
         token = read_verbatim(args.token_file, "--token-file").strip()
         ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
-        config = worker.enroll(args.name, args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
+        config = worker.enroll(args.name, _coordinator_url(args.coordinator, "wss"), token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
                                allow_terminal_view=bool(args.allow_terminal_view))
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
                       f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
@@ -2324,6 +2517,19 @@ def _worker_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _coordinator_url(raw: str, scheme: str) -> str:
+    """The coordinator URL with the scheme the command stores: ``wss`` for a worker, ``https`` for the CLI.
+
+    ``https://HOST`` and ``wss://HOST`` name the same coordinator, so either is accepted for both
+    commands (CLIUX-041). Any other scheme is left for the command's own validation to report.
+    """
+    text = raw.strip()
+    head, separator, rest = text.partition("://")
+    if separator and head.lower() in {"https", "wss"}:
+        return f"{scheme}://{rest.rstrip('/')}"
+    return text
+
+
 def _remote_command(args: argparse.Namespace) -> int:
     """``llm-bridge remote``: where ``--target`` requests are sent."""
     from . import bridge_remote as remote
@@ -2331,7 +2537,7 @@ def _remote_command(args: argparse.Namespace) -> int:
     if args.remote_action == "login":
         token = read_verbatim(args.token_file, "--token-file").strip()
         ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
-        config = remote.login(args.coordinator, token, ca_pem=ca_pem)
+        config = remote.login(_coordinator_url(args.coordinator, "https"), token, ca_pem=ca_pem)
         print(f"Remote targets now go through {config.coordinator_url}. List them with: llm-bridge worker list")
         return 0
     if args.remote_action == "status":
@@ -2456,8 +2662,7 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
     args = _parse_arguments(arguments)
     if _managed_session() and not _managed_allows(args):
-        print(f"llm-bridge: {MANAGED_REFUSAL}", file=sys.stderr)
-        return 2
+        return _fail(MANAGED_REFUSAL, "refused-in-managed-session", EXIT_USAGE, bool(getattr(args, "json", False)))
     if target != commands.LOCAL_TARGET:
         # Never fall back to local execution for a named target (CLI-005).
         from .bridge_remote import run_cli
@@ -2496,8 +2701,7 @@ def _main(argv: list[str] | None = None) -> int:
             _resolve_parsed_mission(args, optional=args.command == "doctor")
             if _managed_session() and _managed_scope_violation(args):
                 reference = getattr(args, "mission", getattr(args, "agent_mission", None))
-                print(f"llm-bridge: {MANAGED_SCOPE_REFUSAL}; mission {str(reference or 'all missions')[:8]} is not yours", file=sys.stderr)
-                return 2
+                return _fail(f"{MANAGED_SCOPE_REFUSAL}; mission {str(reference or 'all missions')[:8]} is not yours", "refused-in-managed-session", EXIT_USAGE, bool(getattr(args, "json", False)))
         if args.command == "view":
             from .bridge_viewer import read_source, run_document
             path = Path(args.file).expanduser()
@@ -2551,11 +2755,7 @@ def _main(argv: list[str] | None = None) -> int:
                 config = mission["config"]
             if result.get("status") == "REJECTED":
                 # A finished mission is not restarted; say why instead of launching a controller.
-                if args.json:
-                    _json_print(result)
-                    return 0
-                print(f"llm-bridge: {(result.get('result') or {}).get('error', 'resume rejected')}", file=sys.stderr)
-                return 2
+                return _fail_rejected(result, "resume rejected", args.json)
             lock = MissionLock(state_dir() / "locks", args.mission)
             try:
                 lock.acquire()
@@ -2614,7 +2814,7 @@ def _main(argv: list[str] | None = None) -> int:
             requested_label = rotation_label(requested_providers, requested_routes)
             if saved_label and (str(config.get("providers", "")), str(config.get("routes", ""))) != (str(requested_providers or ""), str(requested_routes or "")):
                 if requested_label != saved_label and controller_running(args.mission):
-                    raise RuntimeError(
+                    raise WrongState(
                         f"mission {fmt.short_id(args.mission)} already has a controller; change its rotation with: "
                         f"llm-bridge rotation --mission {fmt.short_id(args.mission)} --set LIST"
                     )
@@ -2651,13 +2851,7 @@ def _main(argv: list[str] | None = None) -> int:
                     if args.from_mission:
                         source = resolve_mission_ref(store, args.from_mission)
                 return bridge_switcher.run_pick_cli(source, args.client)
-            with open_store(readonly=True) as store:
-                entries = bridge_switcher.collect_entries(store)
-            if args.json:
-                _json_print(bridge_switcher.missions_json(entries))
-            else:
-                print(bridge_switcher.format_missions(entries))
-            return 0
+            return _print_missions(args)
         if args.command == "gc":
             from . import bridge_switcher
 
@@ -2675,11 +2869,12 @@ def _main(argv: list[str] | None = None) -> int:
             try:
                 finished = finish_mission(args.mission)
             except FinishError as exc:
-                print(f"llm-bridge: {exc}", file=sys.stderr)
-                return 2
+                return _fail(str(exc), "wrong-state", EXIT_WRONG_STATE, args.json)
             _print_result(finished.as_json(), args.json, lambda value: value["detail"])
             return 0
         if args.command == "mission":
+            if args.mission_action == "list" and not args.json:
+                return _print_missions(args)
             with open_store(readonly=args.mission_action == "list") as store:
                 if args.mission_action == "create":
                     prompt, config = _mission_creation_inputs(args, auto_continue=bool(args.auto_continue))
@@ -2703,6 +2898,8 @@ def _main(argv: list[str] | None = None) -> int:
                     return 0
                 else:
                     result = commands.dispatch(commands.CommandRequest("mission.list", {"include_config": bool(args.include_config)}))
+                    total = len(result["missions"])
+                    result = {**result, "total": total, "missions": result["missions"] if args.limit is None else result["missions"][:max(0, args.limit)]}
             human = fmt.format_mission_created if args.mission_action == "create" else (lambda value: fmt.format_mission_list(value["missions"]))
             if not args.include_config:
                 result = strip_frozen_config(result)
@@ -2737,7 +2934,7 @@ def _main(argv: list[str] | None = None) -> int:
                 _json_print(result)
             else:
                 print(result.get("message") or result.get("reason") or result.get("status"))
-            return 0 if result.get("ok") is True else 2
+            return EXIT_OK if result.get("ok") is True else EXIT_FAILED
         if args.command == "events":
             return _events_command(args)
         if args.command == "proposal":
@@ -2761,28 +2958,26 @@ def _main(argv: list[str] | None = None) -> int:
                     }
                     result = _apply_operator_command(store, args.mission, payload)
             if isinstance(result, dict) and result.get("status") == "REJECTED":
-                detail = result.get("result") or {}
-                print(f"llm-bridge: {detail.get('error', 'proposal command rejected')}", file=sys.stderr)
-                return 2
+                return _fail_rejected(result, "proposal command rejected", bool(getattr(args, "json", False)))
+            if args.proposal_action == "list" and isinstance(result, dict):
+                result = _proposal_page(args, result)
             _print_result(result, bool(getattr(args, "json", False)), _proposal_text(args))
             return 0
         if args.command == "task":
             result = _task_result(args)
             if isinstance(result, dict) and result.get("status") == "REJECTED":
-                detail = result.get("result") or {}
-                print(f"llm-bridge: {detail.get('error', 'command rejected')}", file=sys.stderr)
-                return 2
+                return _fail_rejected(result, "command rejected", bool(getattr(args, "json", False)))
             if args.task_action in {"output", "diff"}:
                 return _print_task_evidence(args, result)
-            if getattr(args, "json", False) and isinstance(result, fmt.TaskPage) and result.total is not None and len(result) < result.total - result.offset:
-                print(f"llm-bridge: listed {len(result)} of {result.total} tasks from position {result.offset + 1}; use --all for every task", file=sys.stderr)
+            if getattr(args, "json", False) and isinstance(result, fmt.TaskPage):
+                # Every JSON list is an object, so a page can say how many tasks exist (CLIUX-015).
+                result = {"tasks": list(result), "total": result.total if result.total is not None else len(result), "offset": result.offset}
             _print_result(result, bool(getattr(args, "json", False)), _task_text(args))
             return 0
         if args.command == "continue":
             result = commands.dispatch(commands.CommandRequest("mission.continue", mission_id=args.mission))
-            if result.get("status") == "REJECTED" and not args.json:
-                print(f"llm-bridge: {(result.get('result') or {}).get('error', 'continue rejected')}", file=sys.stderr)
-                return 2
+            if result.get("status") == "REJECTED":
+                return _fail_rejected(result, "continue rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("continue", value, args.mission))
             return 0
         if args.command in {"pause", "stop", "cancel"}:
@@ -2881,9 +3076,8 @@ def _main(argv: list[str] | None = None) -> int:
                     result = {"mission": store.get_mission(args.mission), "no_provider_process": not provider_stopped}
             else:
                 result = commands.dispatch(commands.CommandRequest(f"mission.{args.command}", mission_id=args.mission))
-                if result.get("status") == "REJECTED" and not args.json:
-                    print(f"llm-bridge: {(result.get('result') or {}).get('error', args.command + ' rejected')}", file=sys.stderr)
-                    return 2
+                if result.get("status") == "REJECTED":
+                    return _fail_rejected(result, args.command + " rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt(args.command, value, args.mission))
             return 0
         if args.command in {"backup", "restore"}:
@@ -2936,8 +3130,7 @@ def _main(argv: list[str] | None = None) -> int:
             with open_store() as store:
                 result = _apply_operator_command(store, args.mission, {"action": "station.view", "station": args.name})
             if result.get("status") == "REJECTED":
-                print(f"llm-bridge: {(result.get('result') or {}).get('error', 'station update rejected')}", file=sys.stderr)
-                return 2
+                return _fail_rejected(result, "station update rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("station", value, args.mission))
             return 0
         if args.command == "rotation":
@@ -2957,14 +3150,12 @@ def _main(argv: list[str] | None = None) -> int:
                     "prompt": prompt,
                 })
             if result.get("status") == "REJECTED":
-                print(f"llm-bridge: {(result.get('result') or {}).get('error', 'steering rejected')}", file=sys.stderr)
-                return 2
+                return _fail_rejected(result, "steering rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("steer", value, args.mission))
             return 0
         _build_parser().error(f"unsupported command {args.command}")
     except (ValueError, KeyError, OSError, RuntimeError, TransitionError, commands.CommandFailure) as exc:  # WorkerConfigError is a ValueError
-        print(f"llm-bridge: {exc}", file=sys.stderr)
-        return 2
+        return _fail_with(exc, bool(getattr(args, "json", False)))
     return 0
 
 

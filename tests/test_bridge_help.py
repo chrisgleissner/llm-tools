@@ -26,7 +26,7 @@ def test_help_topics_and_root_create_no_state(tmp_path: Path, monkeypatch, capsy
     assert not state.exists()
     text = _build_parser().format_help()
     assert "_controller" not in text and "==SUPPRESS==" not in text
-    assert len(text.splitlines()) <= 75  # grouped by task; one line per command
+    assert len(text.splitlines()) <= 80  # grouped by task, one line per command, then the exit status
 
 
 def test_help_help_uses_public_parser(capsys) -> None:

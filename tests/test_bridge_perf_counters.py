@@ -140,12 +140,13 @@ def test_task_list_command_defaults_to_one_page_and_all_lists_everything(tmp_pat
                 store.add_task(mission["id"], f"t{index}")
     assert bridge.main(["task", "list", "--mission", mission["id"], "--json"]) == 0
     out = capsys.readouterr()
-    assert len(json.loads(out.out)) == 200 and "listed 200 of 230 tasks" in out.err
+    page = json.loads(out.out)
+    assert len(page["tasks"]) == 200 and page["total"] == 230 and out.err == ""  # the object says how many tasks exist
     assert bridge.main(["task", "list", "--mission", mission["id"], "--all", "--json"]) == 0
     out = capsys.readouterr()
-    assert len(json.loads(out.out)) == 230 and out.err == ""
+    assert len(json.loads(out.out)["tasks"]) == 230 and out.err == ""
     assert bridge.main(["task", "list", "--mission", mission["id"], "--limit", "5", "--offset", "225", "--json"]) == 0
-    assert [t["ordinal"] for t in json.loads(capsys.readouterr().out)] == [226, 227, 228, 229, 230]
+    assert [t["ordinal"] for t in json.loads(capsys.readouterr().out)["tasks"]] == [226, 227, 228, 229, 230]
     assert bridge.main(["task", "list", "--mission", mission["id"]]) == 0
     text = capsys.readouterr().out
     assert "showing 200 of 230 tasks" in text and "--all" in text

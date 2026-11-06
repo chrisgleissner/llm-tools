@@ -2190,7 +2190,7 @@ def test_force_stop_refuses_a_recorded_pid_it_cannot_identify_and_leaves_stoppin
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     store.mark_operation_running(operation, process_pid=process.pid)  # a pid with no start token cannot be verified
     try:
-        assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 2
+        assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 1
         error = capsys.readouterr().err
         assert f"could not confirm that provider process {process.pid} belongs to this mission; it was left running. Check with: ps -p {process.pid}" in error
         assert "verifiable" not in error

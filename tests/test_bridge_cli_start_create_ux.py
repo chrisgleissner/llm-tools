@@ -48,7 +48,7 @@ def test_start_refuses_a_cancelled_mission(tmp_path, state, capsys, monkeypatch)
     capsys.readouterr()
     monkeypatch.setattr(bridge, "start_mission", lambda *a, **k: pytest.fail("a cancelled mission must not launch a controller"))
 
-    assert main(["start", "--mission", mid]) == 2
+    assert main(["start", "--mission", mid]) == 4
     captured = capsys.readouterr()
     assert f"mission {mid[:8]} was cancelled and cannot be started" in captured.err
     assert "mission create --prompt" in captured.err
@@ -61,7 +61,7 @@ def test_start_refuses_a_completed_mission(tmp_path, state, capsys, monkeypatch)
         store.db.execute("UPDATE missions SET status='COMPLETED' WHERE id=?", (mid,))
         store.db.commit()
     monkeypatch.setattr(bridge, "start_mission", lambda *a, **k: pytest.fail("a completed mission must not launch a controller"))
-    assert main(["start", "--mission", mid]) == 2
+    assert main(["start", "--mission", mid]) == 4
     assert "finished (completed)" in capsys.readouterr().err
 
 
@@ -200,7 +200,7 @@ def test_ambiguity_listing_shows_when_each_mission_was_updated(tmp_path, state, 
         store.db.execute("UPDATE missions SET updated_at=? WHERE id=?", ("2026-03-04T05:06:07+00:00", first))
         store.db.commit()
     monkeypatch.chdir(folder)
-    assert main(["status"]) == 2
+    assert main(["status"]) == 3
     err = capsys.readouterr().err
     lines = [line for line in err.splitlines() if line.startswith("  ")]
     assert len(lines) == 2 and all(" updated " in line for line in lines)

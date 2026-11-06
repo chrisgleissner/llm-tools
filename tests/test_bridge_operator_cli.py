@@ -41,9 +41,10 @@ def test_mission_create_and_list_are_readable_and_json_is_unchanged(tmp_path, st
 
     listing = _out(capsys, "mission", "list")
     lines = listing.splitlines()
-    assert lines[0].split() == ["ID", "STATUS", "UPDATED", "NAME", "FOLDER"]
-    assert lines[1].startswith(short) and "CREATED" in lines[1] and "just now" in lines[1] and "Fix the tests" in lines[1]
-    assert str(tmp_path) in lines[1]
+    assert lines[0] == "1 mission · 0 live"
+    assert lines[1].split() == ["ID", "STATE", "NEEDS", "YOU", "TASKS", "NAME", "FOLDER", "UPDATED"]
+    assert lines[2].startswith(short) and "CREATED" in lines[2] and "just now" in lines[2] and "Fix the tests" in lines[2] and "0/1" in lines[2]
+    assert str(tmp_path) in lines[2]
     assert "frozen_tool_config" not in listing
 
     machine = json.loads(_out(capsys, "mission", "list", "--json"))
@@ -71,7 +72,7 @@ def test_task_commands_print_receipts_and_tables(tmp_path, state, capsys) -> Non
     assert "pending amendment" not in shown
     assert _out(capsys, "task", "pause", "--mission", mid, "--task", "2").startswith("Paused task 2")
     assert _out(capsys, "task", "priority", "--mission", mid, "--task", "2", "--value", "9").startswith("Priority set for task 2")
-    assert _out(capsys, "task", "verify", "--mission", mid, "--task", "2", "--approve", code=2)  # not awaiting verification
+    assert _out(capsys, "task", "verify", "--mission", mid, "--task", "2", "--approve", code=4)  # not awaiting verification
 
 
 def test_task_verify_receipt(tmp_path, state, capsys) -> None:
@@ -139,9 +140,9 @@ def test_mission_prefix_resolution_errors_and_success(tmp_path, state, monkeypat
         second = store.create_mission("second", "o", cwd=second_dir, mission_id="abcd2222" + "0" * 24)["id"]
     assert json.loads(_out(capsys, "status", "--mission", "abcd1", "--json"))["mission"]["id"] == first
     assert json.loads(_out(capsys, "status", "--mission", second, "--json"))["mission"]["id"] == second
-    err = _out(capsys, "status", "--mission", "abcd", code=2)
+    err = _out(capsys, "status", "--mission", "abcd", code=3)
     assert "ambiguous" in err and "abcd1111" in err and "abcd2222" in err and "first" in err
-    assert "no mission matches 'zzzz'; run llm-bridge mission list" in _out(capsys, "status", "--mission", "zzzz", code=2)
+    assert "no mission matches 'zzzz'; run llm-bridge mission list" in _out(capsys, "status", "--mission", "zzzz", code=3)
     assert "too short" in _out(capsys, "status", "--mission", "ab", code=2)
 
 
@@ -158,7 +159,7 @@ def test_mission_is_inferred_from_the_current_folder(tmp_path, state, monkeypatc
     assert json.loads(_out(capsys, "status", "--json"))["mission"]["id"] == mid
     assert "Mission     " + mid[:8] in _out(capsys, "status")
     monkeypatch.chdir(other)
-    err = _out(capsys, "status", code=2)
+    err = _out(capsys, "status", code=3)
     assert "no unfinished mission for folder" in err and "mission list" in err
 
 
@@ -177,7 +178,7 @@ def test_folder_inference_lists_candidates_and_prefers_live_missions(tmp_path, s
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.set_mission_status(live, "RUNNING")
         store.set_mission_status(live, "STOPPED")
-    err = _out(capsys, "status", code=2)
+    err = _out(capsys, "status", code=3)
     assert "several missions match" in err and stopped[:8] in err and live[:8] in err and "old stopped" in err
 
 
@@ -239,7 +240,7 @@ def test_attach_without_a_station_says_how_to_start_one(tmp_path, state, monkeyp
 
     mid = _create(tmp_path, capsys)["mission"]["id"]
     monkeypatch.setattr(bridge_runtime, "mission_socket_path", lambda _mission_id, **_kw: tmp_path / "none.sock")
-    err = _out(capsys, "attach", "--mission", mid, code=2)
+    err = _out(capsys, "attach", "--mission", mid, code=4)
     short = mid[:8]
     assert f"No provider station is running for mission {short} · start it with: llm-bridge start --mission {short}" in err
     assert "tmux" not in err.lower()
@@ -378,10 +379,11 @@ def test_rejected_lifecycle_command_exits_nonzero_in_text_mode(tmp_path, state, 
     mid = _create(tmp_path, capsys)["mission"]["id"]
     assert main(["cancel", "--mission", mid]) == 0
     capsys.readouterr()
-    assert main(["resume", "--mission", mid]) == 2  # a cancelled mission cannot be resumed
+    assert main(["resume", "--mission", mid]) == 4  # a cancelled mission cannot be resumed
     assert "was cancelled and cannot be resumed" in capsys.readouterr().err
-    assert main(["resume", "--mission", mid, "--json"]) == 0  # --json keeps its historical exit status
-    assert json.loads(capsys.readouterr().out)["status"] == "REJECTED"
+    assert main(["resume", "--mission", mid, "--json"]) == 4  # with --json the refusal is an error object on stdout (CLIUX-015)
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == "wrong-state" and "was cancelled and cannot be resumed" in error["message"]
 
 
 def test_completed_mission_stop_prints_station_receipt(tmp_path, state, capsys) -> None:
