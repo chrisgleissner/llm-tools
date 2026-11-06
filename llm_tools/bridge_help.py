@@ -638,7 +638,6 @@ _CONSOLE_SHORTCUTS = (
     ("/amend N FILE", "llm-bridge task amend --task N --file FILE"),
     ("/proposals [STATUS]", "llm-bridge proposal list --status STATUS"),
     ("/home", "llm-bridge missions --pick (the mission picker)"),
-    ("/leave", "Ctrl-] d in the station: leave the provider terminal, work keeps running"),
 )
 
 
@@ -661,6 +660,10 @@ def console_help() -> str:
                 continue
             if name in view_names:
                 continue  # listed once, under Views
+            if name == "detach":
+                # In the console /detach is an old name for /leave, which leaves your own terminal.
+                shown.append(("/leave", "leave the provider terminal; work keeps running"))
+                continue
             shown.append(("/" + name, text))
         lines += ["", title]
         lines += _rows(tuple(shown))

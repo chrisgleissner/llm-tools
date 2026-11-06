@@ -156,9 +156,10 @@ def test_console_help_is_generated_grouped_and_states_the_slash_mapping() -> Non
 
 def test_console_help_covers_every_public_top_level_command() -> None:
     text = topic_text("console")
+    console_names = {"detach": "leave"}  # CLIUX-059: in the console, /leave leaves your own terminal
     for path in _public_paths():
         if " " not in path:
-            assert "/" + path in text, path
+            assert "/" + console_names.get(path, path) in text, path
 
 
 def test_one_topic_registry_feeds_every_list_of_topics(capsys) -> None:
