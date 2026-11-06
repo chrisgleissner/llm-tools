@@ -717,6 +717,17 @@ capacity snapshot every 60 seconds by default, configurable with
 `--capacity-refresh-seconds`; those provider reads do not run on the terminal
 input path. A user or external power manager can still put the machine to
 sleep independently.
+A native Claude Code or Codex session that runs out of quota only prints a notice
+(for example `Usage limit reached · limit resets 11:40pm` or `You've hit your usage
+limit ... try again in 2 hours 13 minutes`) and waits for input. While a native
+provider runs, the controller reads its pane every couple of seconds. A line that
+begins with the provider's limit phrase on two consecutive reads (a sentence that only
+mentions a usage limit does not count) records a `provider-usage-limit` event, stops
+the provider, marks that provider rate-limited until the reset time (local time,
+the next day when the time has passed; the local-block backoff, 300 seconds by
+default, when no reset time is given) and continues the task with the next ready
+provider in the rotation. With no other ready provider the mission waits and `status`
+shows `Waiting for capacity` with the reset time.
 `resume` continues an active controller or starts one if needed.
 `stop` never cancels a mission. With no controller (a saved mission that is
 `CREATED`, `STOPPED` or `PAUSED`) it changes nothing and says `Nothing to stop ·

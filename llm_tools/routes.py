@@ -459,6 +459,23 @@ def _apply_local_block_override(
     return snapshot, decision
 
 
+def apply_local_block_to_provider_decision(
+    provider: str,
+    snapshot: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Provider-mode counterpart of the route block override.
+
+    A rotation of plain providers has no route ids, so a block recorded for a
+    provider (for example from a usage-limit notice on its native screen) is
+    stored under the provider name, which is also the id of the implicit route
+    ``--routes <provider>`` resolves to. The decision is changed exactly as for a route.
+    """
+    return _apply_local_block_override(route_for_provider({}, provider), snapshot, decision, env=env)
+
+
 def usage_snapshot_and_decision_for_route(
     route: RoutePolicy,
     scope: str,
@@ -777,6 +794,7 @@ __all__ = [
     "COST_POLICY_METERED_BUDGET",
     "COST_POLICY_UNKNOWN",
     "DEFAULT_LOCAL_BLOCK_BACKOFF_SECONDS",
+    "apply_local_block_to_provider_decision",
     "clear_local_block",
     "default_backoff_seconds",
     "is_locally_blocked",

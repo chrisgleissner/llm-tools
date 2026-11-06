@@ -542,6 +542,16 @@ def _h_provider_wait(ctx: _EventContext) -> str:
     return "Waiting for capacity" + (f", resumes {until}" if until else "") + (f" · {_text(ctx.data['reason'], 60)}" if _known(ctx.data.get("reason")) else "")
 
 
+@_humanizer(EventKind.PROVIDER_USAGE_LIMIT)
+def _h_provider_usage_limit(ctx: _EventContext) -> str:
+    station = _text(ctx.data.get("route") or ctx.data.get("provider") or "Provider", 40)
+    if ctx.data.get("reset_known"):
+        until = _relative_epoch(ctx.data.get("reset_epoch"))
+        return f"{station} usage limit reached" + (f", resets {until}" if until else "")
+    until = _relative_epoch(ctx.data.get("blocked_until"))
+    return f"{station} usage limit reached, reset time unknown" + (f"; trying again {until}" if until else "")
+
+
 @_humanizer(EventKind.TASK_VERIFIED)
 def _h_task_verified(ctx: _EventContext) -> str:
     return f"{ctx.task} verified" + (" (approved by you)" if ctx.data.get("approved") else "")

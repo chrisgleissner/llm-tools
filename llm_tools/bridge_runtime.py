@@ -25,6 +25,7 @@ from .bridge_states import (
     CONTROLLED_MISSION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, HALTED_MISSION_STATUSES,
     OPERATOR_DECLINED_EXIT_CODE, STATION_CLOSING_MISSION_STATUSES,
 )
+from .bridge_limit_notice import UsageLimitNotice, detect_usage_limit
 from .bridge_refresh import CapacityRefreshWorker
 from .bridge_progress import repository_checkpoint
 from .bridge_review import recorded_change
@@ -154,6 +155,12 @@ class BridgeMissionHooks:
         self._hold_message_tried = 0.0
         self._suspend_block_reason = ""
         self._pending_wake_cycle_id: str | None = None
+        # Native usage-limit watch: operation -> (notice, epoch the capacity block lasts until).
+        self._usage_limited: dict[str, tuple[UsageLimitNotice, int]] = {}
+        self._limit_watch_operation = ""
+        self._limit_next_look = 0.0
+        self._limit_seen_epoch: int | None = None
+        self._limit_candidate: UsageLimitNotice | None = None
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
@@ -597,7 +604,7 @@ class BridgeMissionHooks:
         scheduler_config.max_output_bytes = int(log_config.get("log_max_bytes", 4 * 1024 * 1024))
         scheduler_config.max_output_rotations = int(log_config.get("log_rotations", 3))
         scheduler_config.process_started = lambda process_pid: self._process_started(operation_id, process_pid, scheduler_config)
-        scheduler_config.process_observer = lambda: self._observe_owned_codex_session(operation_id)
+        scheduler_config.process_observer = lambda: self._observe_native_operation(operation_id, provider, route_id)
         scheduler_config.should_interrupt_wait = lambda: self._should_interrupt_wait(int(context["task_id"]))
         scheduler_config.command_argv_transform = self._native_session_argv_transform(operation_id, provider, scheduler_config)
         return True
@@ -758,6 +765,99 @@ class BridgeMissionHooks:
             restoration_state="RESTORED_NATIVE" if expected else "NATIVE_CREATED",
             session_id=identity.session_id, cwd=identity.cwd, source=identity.source)
         self._codex_observe_schedule[operation_id] = (-1, 0.0)  # found: stop looking
+
+    # Seconds between reads of the provider pane while a native provider runs.
+    USAGE_LIMIT_LOOK_SECONDS = 2.0
+
+    def _observe_native_operation(self, operation_id: str, provider: str, route_id: str) -> int | None:
+        """Per-second observer of a native run: session discovery and the usage-limit watch.
+
+        Returns a status when the watch ended the provider run, else ``None``.
+        """
+        self._observe_owned_codex_session(operation_id)
+        return self._observe_usage_limit(operation_id, provider, route_id)
+
+    def _observe_usage_limit(self, operation_id: str, provider: str, route_id: str) -> int | None:
+        """End a native run whose provider printed its usage-limit notice and keep it from being picked again.
+
+        A native provider that hits its quota only prints a notice and waits for input, so no exit
+        status ever reaches the controller. The pane is read through the station activity read; a
+        notice must be on two consecutive reads before it counts. The run then ends with the
+        autonomy-abort status, which makes Ralph rotate away; ``after_iteration`` records the
+        capacity block that keeps the provider out of the rotation until its reset.
+        """
+        if self.handle is None or not self.native_tui or provider not in ("claude", "codex"):
+            return None
+        found = self._usage_limited.get(operation_id)
+        if found is None:
+            if self._limit_watch_operation != operation_id:
+                self._limit_watch_operation, self._limit_next_look = operation_id, 0.0
+                self._limit_seen_epoch, self._limit_candidate = None, None
+            moment = time.monotonic()
+            if moment < self._limit_next_look:
+                return None
+            self._limit_next_look = moment + self.USAGE_LIMIT_LOOK_SECONDS
+            try:
+                reading = TmuxTerminalBackend().pane_activity_screen(self.handle, pane="provider", seen_epoch=self._limit_seen_epoch)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                return None
+            if reading is None:
+                return None
+            epoch, screen = reading
+            self._limit_seen_epoch = epoch
+            previous = self._limit_candidate
+            if screen is not None:  # an unchanged pane keeps the previous verdict
+                self._limit_candidate = detect_usage_limit(provider, screen, now=common.now_epoch())
+            if previous is None or self._limit_candidate is None:
+                return None
+            self._record_usage_limit(operation_id, provider, route_id, self._limit_candidate)
+        return common.AUTONOMY_ABORT_STATUS if self._end_provider_process(operation_id) else None
+
+    def _record_usage_limit(self, operation_id: str, provider: str, route_id: str, notice: UsageLimitNotice) -> None:
+        from . import routes
+
+        now = common.now_epoch()
+        blocked_until = notice.reset_epoch or now + routes.default_backoff_seconds()
+        self._usage_limited[operation_id] = (notice, blocked_until)
+        self.store.record_runtime_event(self.mission_id, "provider-usage-limit", {
+            "operation_id": operation_id,
+            "task_id": int(self.store.get_operation(operation_id)["task_id"]),
+            "provider": provider,
+            "route": route_id,
+            "notice": notice.notice,
+            "reset_text": notice.reset_text,
+            "reset_epoch": notice.reset_epoch,
+            "blocked_until": blocked_until,
+            "reset_known": notice.reset_epoch is not None,
+        })
+
+    def _end_provider_process(self, operation_id: str) -> bool:
+        """Stop the provider process tree of a native run; False while it could not be stopped."""
+        try:
+            operation = self.store.get_operation(operation_id)
+            pid, start = int(operation.get("process_pid") or 0), str(operation.get("process_start") or "")
+            if pid and start:
+                _terminate_owned_process_group(pid, start)
+        except (OSError, PermissionError, TimeoutError, KeyError, ValueError):
+            return False
+        return True
+
+    def _block_limited_provider(self, operation_id: str, provider: str, route_id: str) -> None:
+        """Mark the provider (or route) rate-limited until its reset, as a route runtime block.
+
+        Written after the scheduler returned: for a route the scheduler records its own, shorter
+        autonomy-abort block, which this replaces.
+        """
+        from . import routes
+
+        notice, blocked_until = self._usage_limited[operation_id]
+        routes.record_local_block(
+            route_id or provider,
+            reason="rate-limited",
+            blocked_until=blocked_until,
+            last_message=notice.notice,
+            backoff_seconds=routes.default_backoff_seconds(),
+        )
 
     def _capture_session_after_launch(self, operation_id: str) -> None:
         """Wait briefly for exact provider-owned metadata from the live pane."""
@@ -922,6 +1022,10 @@ class BridgeMissionHooks:
                 except OSError:
                     pass
             failure = common.provider_failure_diagnostic(provider_output, int(status))
+            limited = operation_id in self._usage_limited
+            if limited:
+                # The native provider printed a usage-limit notice: a capacity failure, not a crash.
+                self._block_limited_provider(operation_id, str(selection.get("provider") or scheduler_config.provider), str(selection.get("route") or ""))
             diagnostic_path = Path(logs_path).with_suffix(".diagnostic.json") if logs_path else None
             if diagnostic_path is not None:
                 detail = common.read_provider_diagnostic(diagnostic_path)
@@ -931,6 +1035,8 @@ class BridgeMissionHooks:
                     )})
                     for key in ("class", "code", "cause"):
                         failure[key] = detail[key]
+            if limited:
+                failure = common.provider_failure_diagnostic(provider_output, int(status), provider_quota_diagnostic=True)
             self.store.record_runtime_event(self.mission_id, "provider-result-diagnosed", {
                 "operation_id": operation_id,
                 "task_id": int(task["id"]),
@@ -990,14 +1096,14 @@ class BridgeMissionHooks:
                 })
             elif status != 0:
                 if (
-                    status not in {common.AUTONOMY_ABORT_STATUS, OPERATOR_DECLINED_EXIT_CODE, LAUNCH_REFUSED_STATUS}
+                    (limited or status not in {common.AUTONOMY_ABORT_STATUS, OPERATOR_DECLINED_EXIT_CODE, LAUNCH_REFUSED_STATUS})
                     and task["status"] in {"BLOCKED", "FAILED"}
                 ):
                     # The completed provider invocation is the amendment boundary.
                     # Apply pending text before deciding whether this known
                     # provider failure can be handed to another route.
                     task = self.store.begin_iteration(int(task["id"]))
-                continued = None if status == common.AUTONOMY_ABORT_STATUS else self.store.continue_task_after_provider_failure(
+                continued = None if status == common.AUTONOMY_ABORT_STATUS and not limited else self.store.continue_task_after_provider_failure(
                     operation_id,
                     max_failures=self.max_provider_failures,
                 )

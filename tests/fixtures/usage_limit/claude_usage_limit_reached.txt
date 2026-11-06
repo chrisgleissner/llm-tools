@@ -1,0 +1,12 @@
+● I've updated the retry handler and the tests pass. Now wiring the backoff into the
+  scheduler.
+
+● Update(llm_tools/scheduler.py)
+  ⎿  Updated llm_tools/scheduler.py with 4 additions and 1 removal
+
+  ⎿  Usage limit reached · limit resets 11:40pm
+
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  ? for shortcuts
