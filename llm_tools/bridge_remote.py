@@ -226,13 +226,14 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         extra: dict[str, Any] = {
             "amend": lambda: {"prompt": _read_text(args)},
             "verify": lambda: {"evidence": args.evidence, "approved": bool(args.approve)},
+            "approve": lambda: {"evidence": args.evidence, "approved": True},
             "reject": lambda: {"reason": args.reason},
             "priority": lambda: {"priority": args.value},
             "reorder": lambda: {"order": args.value},
         }.get(action, lambda: {})()
         if action == "dependencies":
             raise ValueError("task dependencies is not available remotely yet")
-        operation = f"task.{action}"
+        operation = "task.verify" if action == "approve" else f"task.{action}"
         commands.lookup(operation)
         return make(operation, {**_task_selector(args), **extra}), lambda value: fmt.format_task_result(action, value)
     raise ValueError(f"{command} is not available with --target {target}; remote commands: status, events, mission list, pause, stop, cancel, continue, task, proposal list|accept|reject")

@@ -47,7 +47,7 @@ def test_status_context_and_now_line_show_observation_only_while_running() -> No
     assert len(context) <= 24
     assert "waiting" not in context
     assert bridge_tui._station_status_context(_running_snapshot(5)) == "Task 1 RUNNING"
-    assert bridge_tui._station_status_context(_running_snapshot(120, status="VERIFYING")).endswith("VERIFYING")
+    assert bridge_tui._station_status_context(_running_snapshot(120, status="VERIFYING")).endswith("REVIEW")
 
     state = bridge_tui._ConsoleState("M", lambda *_: "", lambda *_: {}, full=True)
     state.snapshot = _running_snapshot(120)

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 from . import bridge_hangup, bridge_redraw
 from .bridge_format import printable
 from .bridge_glyphs import FINISHED_STATES, GLYPHS, provider_role, state_look, state_text
+from .bridge_vocab import MISSION_NEEDS_YOU_LABEL
 from .bridge_input import cell_slice, cell_width
 from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
 from .bridge_store import BridgeStore, controller_running, store_path
@@ -193,8 +194,8 @@ class MissionEntry:
 
     @property
     def display_status(self) -> str:
-        """The state word shown for the mission: ``REVIEW`` while a task awaits the operator."""
-        return "REVIEW" if self.in_review else self.status
+        """The state word shown for the mission: ``NEEDS YOU`` while a task awaits the operator."""
+        return MISSION_NEEDS_YOU_LABEL if self.in_review else self.status
 
     @property
     def short_id(self) -> str:

@@ -171,8 +171,8 @@ def test_strip_without_a_known_owner_or_elapsed_time() -> None:
     ("STOPPING", [], "stopping after the current step", "warn"),
     ("RUNNING", [{"id": 7, "status": "READY"}], "idle · next: task 7", "dim"),
     ("RUNNING", [], "idle · no task waiting · Ctrl-E adds one", "dim"),
-    ("RUNNING", [{"id": 4, "status": "VERIFYING"}], "task 4 awaits approval · type /approve 4", "warn"),
-    ("RUNNING", [{"id": 4, "status": "VERIFYING"}, {"id": 5, "status": "VERIFYING"}], "task 4 awaits approval (+1 more) · type /approve 4", "warn"),
+    ("RUNNING", [{"id": 4, "status": "VERIFYING"}], "task 4 awaits your review · type /approve 4", "warn"),
+    ("RUNNING", [{"id": 4, "status": "VERIFYING"}, {"id": 5, "status": "VERIFYING"}], "task 4 awaits your review (+1 more) · type /approve 4", "warn"),
     ("COMPLETED", [{"id": 1, "status": "COMPLETED"}, {"id": 2, "status": "COMPLETED"}], "mission completed · 2/2 tasks completed", "ok"),
     ("CANCELLED", [{"id": 1, "status": "CANCELLED"}], "mission cancelled · 0/1 tasks completed", "error"),
     ("FAILED", [], "mission failed", "error"),
@@ -236,7 +236,7 @@ def test_objective_stays_available_through_o() -> None:
     (event("task-added", {"title": "Do it"}, task_id=7), "Task 7 added · Do it", False),
     (event("task-ready", {"from": "QUEUED", "to": "READY"}, task_id=6), "Task 6 ready", False),
     (event("task-status", {"from": "READY", "to": "RUNNING"}, task_id=6), "Task 6 running", True),
-    (event("task-status", {"from": "RUNNING", "to": "VERIFYING"}, task_id=6), "Task 6 awaiting approval", False),
+    (event("task-status", {"from": "RUNNING", "to": "VERIFYING"}, task_id=6), "Task 6 awaiting review", False),
     (event("task-status", {"from": "VERIFYING", "to": "COMPLETED"}, task_id=6), "Task 6 completed", False),
     (event("task-status", {"from": "READY", "to": "QUEUED", "reason": "dependency-added"}, task_id=6), "Task 6 waiting on a new dependency", False),
     (event("operation-running", {"route_id": "codex", "model": "gpt-5", "process_pid": 1}, task_id=6), "Started codex (gpt-5) on task 6", False),
@@ -292,7 +292,7 @@ def test_activity_role_marks_problems_and_waits() -> None:
     assert bridge_tui._activity_role("Provider exited (1) on task 6") == "error"
     assert bridge_tui._activity_role("Provider exited (0) on task 6") == "info"
     assert bridge_tui._activity_role("Task 6 verification failed") == "error"
-    assert bridge_tui._activity_role("Task 6 awaiting approval") == "warn"
+    assert bridge_tui._activity_role("Task 6 awaiting review") == "warn"
     assert bridge_tui._activity_role("Task 6 completed") == "info"
 
 
@@ -614,10 +614,10 @@ def test_actions_view_follows_state_and_runs_the_selected_command() -> None:
     state, sent = actions_state("RUNNING", tasks=[{"id": 4, "ordinal": 4, "title": "t", "status": "VERIFYING"}])
     assert state.rows()[0].startswith("Approve task 4") and "/approve 4" in state.rows()[0]
     state.handle_key("\n")
-    assert state.confirm_command == "task verify --task 4 --approve"  # approval asks first
+    assert state.confirm_command == "task approve --task 4"  # approval asks first
     state.handle_key("y")
     settle(state)
-    assert sent == ["task verify --task 4 --approve"]
+    assert sent == ["task approve --task 4"]
 
 
 def test_pending_proposals_float_to_the_top_of_actions() -> None:

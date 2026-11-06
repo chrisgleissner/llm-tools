@@ -103,8 +103,8 @@ def test_follow_up_task_reopens_a_completed_mission_and_start_runs_it(tmp_path, 
         _wait(lambda: _released(state, mid))
         out = _call(env, "task", "add", "--mission", mid, "--prompt", "Follow-up job")
         assert "Mission reopened · start it with: llm-bridge start" in out
-        assert status() == "STOPPED"
-        assert "STOPPED" in _call(env, "status", "--mission", mid)
+        assert status() == "CREATED"
+        assert "CREATED" in _call(env, "status", "--mission", mid)
         _call(env, "start", "--mission", mid, "--headless")
         _wait(lambda: status() == "COMPLETED")
         _wait(lambda: _released(state, mid))

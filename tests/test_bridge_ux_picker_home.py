@@ -63,10 +63,10 @@ def test_home_list_shows_review_instead_of_running_with_a_detail_line(state: Pat
     grid = Grid(size=(34, 120))
     launcher._draw(grid, home)
     row = next(line for line in grid.text().splitlines() if mission_id[:8] in line)
-    assert "◆ REVIEW" in row and "RUNNING" not in row
+    assert "◆ NEEDS YOU" in row and "RUNNING" not in row
     assert "task 2 awaits your review · Enter to open" in grid.text()
     parts = launcher._mission_row(home, missions[0], launcher.plan_columns(missions, stats, 120), "live", 0, False, 0.0)
-    assert dict((text.strip(), role) for text, role in parts)["◆ REVIEW"] == "state_review"
+    assert dict((text.strip(), role) for text, role in parts)["◆ NEEDS YOU"] == "state_review"
 
 
 def test_home_review_applies_to_running_missions_only(state: Path, tmp_path: Path) -> None:
@@ -76,7 +76,7 @@ def test_home_review_applies_to_running_missions_only(state: Path, tmp_path: Pat
     assert home.review_task(missions[0]) is None
     grid = Grid(size=(34, 120))
     launcher._draw(grid, home)
-    assert "REVIEW" not in grid.text() and mission_id[:8] in grid.text()
+    assert "NEEDS YOU" not in grid.text() and mission_id[:8] in grid.text()
     # The periodic read-only refresh sees the same review state.
     assert launcher._refresh_home(str(tmp_path))[1][mission_id].review == 2
 
@@ -85,14 +85,14 @@ def test_picker_shows_review_state_and_detail_line(state: Path, tmp_path: Path) 
     mission_id, _ = review_mission(state, tmp_path)
     with BridgeStore(state / "bridge.sqlite3") as store:
         rows = sw.collect_entries(store, station_probe=lambda _m: False, controller_probe=lambda _m: True)
-    assert rows[0].review_ordinal == 2 and rows[0].display_status == "REVIEW" and rows[0].as_json()["review_task"] == 2
+    assert rows[0].review_ordinal == 2 and rows[0].display_status == "NEEDS YOU" and rows[0].as_json()["review_task"] == 2
     picker = sw.MissionPicker([*rows, entry("z", "Other", "COMPLETED")], home=str(tmp_path.parent))
     detail = picker.segment_lines(24, 80)[-2][0]
     assert "".join(text for text, _role in detail).startswith("task 2 awaits your review · Enter to open")
     assert detail[0][1] == "state_review"
     picker.key("KEY_DOWN")  # the selected row is drawn as one bar; look at the review row unselected
     row = next(line for line, _style in picker.segment_lines(24, 80) if any(mission_id[:8] in text for text, _role in line))
-    assert ("◆ REVIEW   ", "state_review") in row
+    assert ("◆ NEEDS YOU", "state_review") in row
     paused = [sw.MissionEntry(**{**rows[0].__dict__, "status": "PAUSED"})]
     assert paused[0].display_status == "PAUSED" and paused[0].as_json()["review_task"] is None
 

@@ -151,7 +151,7 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
         # tmux < 3.5 does not expose pane_dead_status, so the station footer
         # may omit its exit hint entirely. The Bridge pane still shows the
         # review state and the always-visible route to its approval controls.
-        screen = terminal.wait_for("VERIFYING")
+        screen = terminal.wait_for("REVIEW")
         assert "Bridge: Ctrl-] then B" in screen
     assert (repo / "hello.txt").read_text() == "hello\n"
 
@@ -159,7 +159,7 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
     terminal.keys("C-]")
     terminal.keys("B")
     controls = terminal.wait_for("type /approve 1")
-    assert "VERIFYING" in controls
+    assert "NEEDS YOU" in controls
     terminal.type("/approve")
     terminal.keys("Enter")
     confirm = terminal.wait_for("Y approve")

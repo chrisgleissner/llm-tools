@@ -95,7 +95,7 @@ def test_put_sanitizes_controls_without_collapsing_spaces() -> None:
 
 def test_header_uses_dot_separators_and_semantic_status_color() -> None:
     state = make_state(full_snapshot())
-    assert bridge_tui._header(state, 100) == "LLM BRIDGE · ▌ Fix the typo · ● RUNNING"
+    assert bridge_tui._header(state, 100) == "LLM BRIDGE · ▌ Fix the typo · ◆ NEEDS YOU"
     assert bridge_tui._mission_status_role("RUNNING") == "state_running"
     assert bridge_tui._mission_status_role("PAUSED") == "state_paused"
     assert bridge_tui._mission_status_role("FAILED") == "state_failed"
@@ -292,7 +292,7 @@ def event(kind: str, data: dict[str, object] | None = None, *, task_id: object =
     (event("operation-running", {"route_id": "codex", "model": "gpt-5", "process_pid": 77, "pane_id": ""}, task_id=2, operation_id="abcdef0123456789"),
      "op abcdef01 running · task 2 · codex gpt-5 · pid 77"),
     (event("operation-exited", {"exit_code": 0, "task_status": "VERIFYING", "logs_path": None}, task_id=2, operation_id="abcdef0123456789"),
-     "op abcdef01 exited 0 · task 2 · task now VERIFYING"),
+     "op abcdef01 exited 0 · task 2 · task now REVIEW"),
     (event("provider-selection", {"route": "kilo", "provider": "kilo", "selected_model": "m", "rotation_reason": "preferred"}), "selected kilo · m · preferred"),
     (event("capacity-refresh", {"provider": "codex"}), "capacity refreshed codex"),
     (event("command-queued", {"command": "task.add", "command_id": "c"}), "command queued: task.add"),
@@ -646,7 +646,7 @@ def test_all_views_fit_without_overflow_or_collapsed_spacing(width: int, full: b
         screen = Screen(height, width)
         (bridge_tui._draw_full if full else bridge_tui._draw_compact)(screen, state)  # type: ignore[arg-type]
         assert all(cell_width(line) <= width for line in screen.lines), view
-        assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo · ● RUNNING"), view
+        assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo · ◆ NEEDS YOU"), view
         assert "LLM BRIDGE Fix" not in screen.lines[0]
         assert screen.lines[2].lstrip().startswith(("1 Bridge", "< ", "[1 Bridge]")) or "[" in screen.lines[2]
         assert screen.lines[height - 1].rstrip().endswith("? help"), (view, screen.lines[height - 1])
@@ -659,7 +659,7 @@ def test_no_color_rendering_keeps_every_cue_in_text(monkeypatch) -> None:
     state = make_state(full_snapshot())
     screen = Screen(34, 100)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert "RUNNING" in screen.lines[0] and "Needs you" in "\n".join(screen.lines)
+    assert "NEEDS YOU" in screen.lines[0] and "Needs you" in "\n".join(screen.lines)
     attributes = (bridge_tui.curses.A_DIM | bridge_tui.curses.A_BOLD | bridge_tui.curses.A_REVERSE
                   | bridge_tui.curses.A_UNDERLINE)
     assert all(attr & ~attributes == 0 for _y, _x, _text, attr in screen.writes)  # attributes only, never color pairs
@@ -682,8 +682,8 @@ def orders_snapshot() -> dict[str, object]:
 def test_order_list_rows_align_id_state_and_priority() -> None:
     tasks = bridge_tui._items(orders_snapshot()["tasks"])
     assert bridge_tui._order_list_rows(tasks) == [
-        "2   ○ QUEUED     P5   after 1  Rewrite the quick start",
-        "10  ◆ VERIFYING  P12           Troubleshooting",
+        "2   ○ QUEUED  P5   after 1  Rewrite the quick start",
+        "10  ◆ REVIEW  P12           Troubleshooting",
     ]
     assert bridge_tui._order_list_rows([{"id": 1, "status": "queued", "title": "No priority"}]) == ["1  ○ QUEUED  No priority"]
 
@@ -723,16 +723,16 @@ def test_orders_view_shows_selected_task_preview_below_the_list() -> None:
     state = make_state(orders_snapshot(), view="Tasks")
     screen = Screen(30, 110)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert screen.lines[3].startswith("> 2   ○ QUEUED     P5   after 1  Rewrite the quick start")
-    assert screen.lines[4].startswith("  10  ◆ VERIFYING  P12           Troubleshooting")
+    assert screen.lines[3].startswith("> 2   ○ QUEUED  P5   after 1  Rewrite the quick start")
+    assert screen.lines[4].startswith("  10  ◆ REVIEW  P12           Troubleshooting")
     assert screen.lines[5].startswith("  ── task 2 · ○ QUEUED · priority 5 ──")
     assert any(line.strip().startswith("Acceptance  1. installs in five minutes") for line in screen.lines)
     assert any(line.strip().startswith("Prompt      Quick start") for line in screen.lines)
     state.handle_key("KEY_DOWN")  # the preview follows the selection
     screen = Screen(30, 110)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert screen.lines[4].startswith("> 10  ◆ VERIFYING")
-    assert screen.lines[5].startswith("  ── task 10 · ◆ VERIFYING · priority 12 ──")
+    assert screen.lines[4].startswith("> 10  ◆ REVIEW")
+    assert screen.lines[5].startswith("  ── task 10 · ◆ REVIEW · priority 12 ──")
     assert any("Prompt      Add a section." in line for line in screen.lines)
     assert not any("Quick start" in line for line in screen.lines)
     # Clicks on the separator and preview rows do not move the selection; list rows still select.

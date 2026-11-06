@@ -21,8 +21,9 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from .bridge_states import (
     ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
-    HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, TASK_STATES, TASK_TRANSITIONS,
+    HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, REOPENED_MISSION_STATUS, TASK_STATES, TASK_TRANSITIONS,
 )
+from .bridge_vocab import status_label
 
 
 if TYPE_CHECKING:
@@ -605,6 +606,7 @@ class BridgeStore:
             task["acceptance"] = json.loads(task.pop("acceptance_json"))
             task["evidence"] = json.loads(task.pop("evidence_json"))
             task["pending"] = json.loads(task.pop("pending_json"))
+            task["status_label"] = status_label(task["status"])
             tasks.append(task)
         dependencies: dict[int, list[tuple[int, int]]] = {int(task["id"]): [] for task in tasks}
         ids = list(dependencies)
@@ -750,10 +752,11 @@ class BridgeStore:
                 self._add_dependency_locked(mission_id, task_id, int(dep))
             self._event(mission_id, "task-added", {"title": title or derive_title(prompt), "priority": int(priority)}, task_id=task_id)
             if mission["status"] == "COMPLETED":
-                # A finished mission takes follow-up work: it goes back to a
-                # saved state that `start` continues from.
-                self.db.execute("UPDATE missions SET status='STOPPED',updated_at=? WHERE id=?", (now, mission_id))
-                self._event(mission_id, "mission-reopened", {"from": "COMPLETED", "to": "STOPPED", "reason": "task-added"}, task_id=task_id)
+                # A finished mission takes follow-up work: it goes back to the
+                # not-started state, which `start` continues from.  This is the one
+                # way out of COMPLETED, so it is not in MISSION_TRANSITIONS.
+                self.db.execute("UPDATE missions SET status=?,updated_at=? WHERE id=?", (REOPENED_MISSION_STATUS, now, mission_id))
+                self._event(mission_id, "mission-reopened", {"from": "COMPLETED", "to": REOPENED_MISSION_STATUS, "reason": "task-added"}, task_id=task_id)
         return task_id
 
     def _add_dependency_locked(self, mission_id: str, task_id: int, depends_on: int) -> None:
@@ -1483,7 +1486,7 @@ class BridgeStore:
             self.sync_review_hold_events(mission_id)
         ordinals = hold["tasks"]
         noun = f"task {ordinals[0]}" if len(ordinals) == 1 else f"tasks {', '.join(map(str, ordinals))}"
-        return {"released": ordinals, "detail": f"Continuing · {noun} stays awaiting approval while the next task starts"}
+        return {"released": ordinals, "detail": f"Continuing · {noun} stays in REVIEW while the next task starts"}
 
     def sync_review_hold_events(self, mission_id: str) -> dict[str, Any] | None:
         """Make ``review-hold`` / ``review-hold-released`` events match the current hold.
@@ -1521,7 +1524,7 @@ class BridgeStore:
         if status == "VERIFYING" and same_round:
             continued = marker in self._released_markers(self.get_mission(mission_id)["config"])
             how, text = ("continue", "continuing") if continued else ("auto-continue", "auto-continue is on")
-            text = f"task {ordinal} still awaits approval; {text} and the next task may start"
+            text = f"task {ordinal} still awaits your review; {text} and the next task may start"
         elif status == "COMPLETED":
             how, text = "approved", f"task {ordinal} approved"
         elif status in {"VERIFYING", "QUEUED", "READY", "FAILED"}:
