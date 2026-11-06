@@ -16,7 +16,7 @@ from typing import Any, Callable, NoReturn, Sequence, TYPE_CHECKING, cast
 from . import bridge_commands as commands
 from . import bridge_format as fmt
 from .bridge_format import NATIVE_STOP_HINT
-from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_title, prune_old_drafts, rotation_label, store_path
+from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
 from .bridge_store import controller_running as _controller_running
 from .bridge_states import (
     ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
@@ -1034,7 +1034,7 @@ def creation_rotation(providers: str | None, routes: str | None) -> tuple[str, s
     explicit = providers is not None or routes is not None
     resolved_providers, resolved_routes = resolve_rotation(providers, routes)
     enabled = bridge_rotation.current_enabled()
-    conf = toolconfig.load_config() if resolved_routes and enabled.names is not None else {}
+    conf = toolconfig.load_config() if resolved_routes else {}
     problem = bridge_rotation.check_rotation(enabled, conf, resolved_providers, resolved_routes, config_label=_config_label(), explicit=explicit)
     if problem:
         raise ValueError(problem)
@@ -1157,6 +1157,7 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     create.add_argument("--capacity-refresh-seconds", metavar="SECONDS", type=_db_int, default=60, help="seconds between background provider-capacity observations (default: 60)")
     create.add_argument("--auto-continue", action="store_true", help="native missions: start the next task as soon as a provider run ends, instead of holding until you approve or reject the reviewed task (background and headless missions never hold)")
     create.add_argument("--trust-folder", action="store_true", help="answer the provider's workspace-trust dialog for the mission folder automatically in Headless and Background modes; without it a run that stops at that dialog is aborted (trust the folder in the provider CLI once instead)")
+    create.add_argument("--new", action="store_true", help="create the mission without the warning that this folder already has an unfinished mission")
     create.add_argument("--command-template", metavar="ARGV", help="launch command template for tests or custom providers, in Ralph/scheduler syntax")
     create.add_argument("--include-config", action="store_true", help="with --json, include the mission's saved copy of the llm-tools config (large; left out by default)")
     if legacy:
@@ -1544,6 +1545,36 @@ def _reject_conflicting_modes(args: argparse.Namespace) -> None:
                          "Headless runs it without a terminal. Pass one of them, or neither for Background.")
 
 
+def _warn_not_signed_in(providers: Any, routes: Any, conf: dict[str, Any] | None = None) -> None:
+    """Warn on stderr about rotation entries that are installed but not signed in; never fails."""
+    from . import bridge_rotation
+    from . import config as toolconfig
+
+    if conf is None:
+        conf = toolconfig.load_config() if str(routes or "").strip() else {}
+    for line in bridge_rotation.signin_warnings(conf, providers, routes):
+        print(line, file=sys.stderr)
+
+
+def _warn_existing_folder_mission(store: BridgeStore, args: argparse.Namespace) -> None:
+    """Warn on stderr when the folder already has an unfinished mission; ``--new`` silences it."""
+    if getattr(args, "new", False):
+        return
+    from .bridge_missions import unfinished_in_folder
+
+    rows = unfinished_in_folder(store, args.cwd)
+    if not rows:
+        return
+    newest = rows[0]
+    short = str(newest["id"])[:8]
+    more = f" (and {len(rows) - 1} more)" if len(rows) > 1 else ""
+    print(
+        f"warning: this folder already has unfinished mission {short} \"{fmt.printable(str(newest['name'])[:40])}\" ({newest['status']}){more}; "
+        f"llm-bridge task add --mission {short} --prompt \"...\" adds to it · pass --new to create another mission here without this warning",
+        file=sys.stderr,
+    )
+
+
 def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -> tuple[str, dict[str, Any]]:
     """Validate the create options and build the objective text and mission config.
 
@@ -1555,6 +1586,7 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     _reject_conflicting_modes(args)
     args.cwd = _validated_cwd(args.cwd)
     args.providers, args.routes = creation_rotation(args.providers, args.routes)
+    _warn_not_signed_in(args.providers, args.routes)
     from . import bridge_policy, config as toolconfig
 
     policy = bridge_policy.defaults_from_tool_config(toolconfig.load_config())
@@ -1600,6 +1632,7 @@ def _legacy_prompt_mode(argv: list[str]) -> int:
     # The bare form has always ignored --auto-continue; only `mission create` honours it.
     prompt, config = _mission_creation_inputs(args, auto_continue=False)
     with open_store() as store:
+        _warn_existing_folder_mission(store, args)
         result = _create_mission_with_task(store, args, prompt, config)
     mission = result["mission"]
     if args.json:
@@ -1703,21 +1736,9 @@ def _rotation_entry(conf: dict[str, Any], name: str, position: int, *, routes_mo
 
 
 def _validated_rotation_names(conf: dict[str, Any], raw: str, *, routes_allowed: bool) -> list[str]:
-    import difflib
+    from . import bridge_rotation
 
-    from .capacity import ALL_PROVIDERS
-
-    names = _split_names(raw)
-    if not names:
-        raise ValueError("a rotation needs at least one provider or route name")
-    declared = list(conf.get("routes", {})) if routes_allowed and isinstance(conf.get("routes"), dict) else []
-    known = [*declared, *(name for name in ALL_PROVIDERS if name not in declared)]
-    for name in names:
-        if name not in known:
-            close = difflib.get_close_matches(name, known, n=3, cutoff=0.5)
-            hint = f" · did you mean {', '.join(close)}?" if close else ""
-            raise ValueError(f"unknown rotation entry '{name}'{hint} · available: {', '.join(known)}")
-    return names
+    return bridge_rotation.validate_names(conf, raw, routes_allowed=routes_allowed)
 
 
 def _rotation_result(args: argparse.Namespace) -> dict[str, Any]:
@@ -2395,10 +2416,15 @@ def _main(argv: list[str] | None = None) -> int:
             elif requested_providers is None:
                 requested_providers = config.get("providers")
             if not controller_running(args.mission):
-                require_launchable_rotation(
-                    config, requested_providers, requested_routes,
-                    explicit=getattr(args, "providers", None) is not None or getattr(args, "routes", None) is not None,
-                )
+                if mission["status"] in FINISHED_MISSION_STATUSES:
+                    # `resume` refuses a finished mission through the same transition rule; `start` must not report it as running.
+                    raise TransitionError(mission_transition_message(args.mission, str(mission["status"]), "RUNNING", verb="started"))
+                explicit_rotation = getattr(args, "providers", None) is not None or getattr(args, "routes", None) is not None
+                require_launchable_rotation(config, requested_providers, requested_routes, explicit=explicit_rotation)
+                if explicit_rotation:
+                    from . import bridge_rotation
+
+                    _warn_not_signed_in(requested_providers, requested_routes, bridge_rotation.parse_frozen(config.get("frozen_tool_config")))
             saved_label = rotation_label(config.get("providers"), config.get("routes"))
             requested_label = rotation_label(requested_providers, requested_routes)
             if saved_label and (str(config.get("providers", "")), str(config.get("routes", ""))) != (str(requested_providers or ""), str(requested_routes or "")):
@@ -2472,6 +2498,7 @@ def _main(argv: list[str] | None = None) -> int:
             with open_store(readonly=args.mission_action == "list") as store:
                 if args.mission_action == "create":
                     prompt, config = _mission_creation_inputs(args, auto_continue=bool(args.auto_continue))
+                    _warn_existing_folder_mission(store, args)
                     result = _create_mission_with_task(store, args, prompt, config)
                 elif args.mission_action == "set":
                     if not any((args.auto_continue, args.teams, args.token_spend, args.suspend_when_rate_limited)):

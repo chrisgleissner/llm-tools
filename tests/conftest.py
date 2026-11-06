@@ -162,6 +162,7 @@ def _no_live_provider_launch(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: 
     isolated_home.mkdir()
     monkeypatch.setenv("HOME", str(isolated_home))
     monkeypatch.setenv("USERPROFILE", str(isolated_home))  # Path.home() on Windows
+    monkeypatch.setenv("LLM_BRIDGE_NO_SIGNIN_CHECK", "1")  # mission create/start do not warn about sign-in; tests of the warning unset this
     for name in ("codex", "claude", "copilot", "kilo", "mmx", "opencode"):
         path = guard / name
         path.write_text("#!/bin/sh\necho 'Unexpected live provider launch blocked by test harness' >&2\nexit 123\n")

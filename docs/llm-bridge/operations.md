@@ -134,6 +134,26 @@ else the built-in `claude,codex,opencode`. `--routes` names configured route IDs
 `--providers`. An explicit `--providers` without `--routes` clears configured
 routes, so the providers you list are what runs.
 
+`mission create` and `start --providers/--routes` check every rotation entry
+with the check `rotation --set` uses: a name that is neither a provider nor a
+configured route is refused with a suggestion (`unknown rotation entry 'claud'
+· did you mean claude?`) before anything is saved. An entry whose CLI is
+installed but not signed in only produces a warning on stderr (`warning: codex
+is not signed in (run: codex login); it will be skipped until it is`), read
+offline from the same files as `doctor`; `LLM_BRIDGE_NO_SIGNIN_CHECK=1` turns the
+warning off. `start` refuses a cancelled or completed mission with a message and
+exit status 2, and prints `running` only after the controller has reported
+ready; a controller that fails first gives `mission ID could not start: REASON
+· fix it with: llm-bridge rotation --mission ID --set LIST`.
+
+`mission create` warns on stderr when the folder already has an unfinished
+mission (`warning: this folder already has unfinished mission 14f56611 "..."
+(CREATED); llm-bridge task add --mission 14f56611 ... adds to it`) and still
+creates the new one; `--new` suppresses the warning. The list printed when
+folder inference is ambiguous shows each mission's last-updated time, and the
+`Needs you` line and receipts spell out `--mission ID` so the command works as
+copied.
+
 `--mission` accepts a full mission ID or a unique prefix of 4 or more
 characters. When it is omitted, Bridge uses the one unfinished mission whose
 folder is the current folder or a parent of it; a live mission wins over

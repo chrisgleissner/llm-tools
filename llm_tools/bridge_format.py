@@ -258,6 +258,12 @@ def format_task_detail(task: dict[str, Any], now: float | None = None) -> str:
     return "\n".join(lines)
 
 
+def _mission_option(task: dict[str, Any]) -> str:
+    """`` --mission <prefix>`` for a task that names its mission, so a suggested command works from any folder."""
+    mission_id = task.get("mission_id")
+    return f" --mission {short_id(mission_id)}" if mission_id else ""
+
+
 def format_task_result(action: str, result: dict[str, Any]) -> str:
     """Receipt for one task command (add, amend, verify, pause, ...)."""
     inner = result.get("result") if isinstance(result.get("result"), dict) and "status" in result and "payload" in result else result
@@ -265,7 +271,7 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
     if action == "add":
         text = f"Added {format_task_line(inner)} · priority {inner.get('priority', 0)}"
         if inner.get("mission_reopened"):
-            text += "\nMission reopened · start it with: llm-bridge start"
+            text += f"\nMission reopened · start it with: llm-bridge start{_mission_option(inner)}"
         return text
     if action == "amend":
         number = inner.get("task_ordinal", inner.get("task_id"))
@@ -274,7 +280,7 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
     if action == "verify":
         if inner.get("status") == "VERIFYING":
             number = task_number(inner)
-            return f"Evidence recorded · task {number} still awaits approval · llm-bridge task verify --task {number} --approve"
+            return f"Evidence recorded · task {number} still awaits approval · llm-bridge task verify{_mission_option(inner)} --task {number} --approve"
         return f"Verified · {format_task_line(inner)}"
     if action == "reject":
         return f"Sent back · {format_task_line(inner)} · reason recorded"
@@ -512,7 +518,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
             subject = f"task {first} awaits approval"
         else:
             subject = f"tasks {', '.join(str(n) for n in awaiting)} await approval"
-        command = f"llm-bridge task verify --task {first} --approve"
+        command = f"llm-bridge task verify --mission {mid} --task {first} --approve"
         hold = snapshot.get("hold")
         if isinstance(hold, dict) and hold.get("reason") == "review":
             held = int(hold.get("task_ordinal") or first)
@@ -522,7 +528,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
             }
         return {
             "kind": "approval", "tasks": awaiting, "command": command,
-            "message": f"{subject} · {command} (or reject: llm-bridge task reject --task {first} --reason …)",
+            "message": f"{subject} · {command} (or reject: llm-bridge task reject --mission {mid} --task {first} --reason …)",
         }
     if mission.get("status") == "FAILED":
         reason = (snapshot.get("lifecycle") or {}).get("failure_reason")
@@ -532,12 +538,12 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(current, dict) and current.get("status") in {"FAILED", "BLOCKED"}:
         number = task_number(current)
         if current["status"] == "FAILED":
-            command = f"llm-bridge task retry --task {number}"
-            message = f"task {number} failed · {command} (inspect first: llm-bridge events)"
+            command = f"llm-bridge task retry --mission {mid} --task {number}"
+            message = f"task {number} failed · {command} (inspect first: llm-bridge events --mission {mid})"
             kind = "failed"
         else:
-            command = f"llm-bridge task retry --task {number}"
-            message = f"task {number} is blocked, its provider run ended without a result · check llm-bridge events, then {command}"
+            command = f"llm-bridge task retry --mission {mid} --task {number}"
+            message = f"task {number} is blocked, its provider run ended without a result · check llm-bridge events --mission {mid}, then {command}"
             kind = "blocked"
             declined = declined_provider(snapshot, current)
             if declined:
@@ -546,7 +552,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         return {"kind": kind, "tasks": [int(number)] if isinstance(number, int) else [], "command": command, "message": message}
     pending = int((snapshot.get("proposal_counts") or {}).get("PENDING", 0))
     if pending:
-        command = "llm-bridge proposal list"
+        command = f"llm-bridge proposal list --mission {mid}"
         return {"kind": "proposal", "tasks": [], "command": command, "message": f"{pending} proposed task{'s' if pending != 1 else ''} await your decision · {command}"}
     if isinstance(snapshot.get("waiting"), dict):
         command = f"llm-bridge rotation --mission {mid} --set LIST"

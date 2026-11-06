@@ -249,7 +249,7 @@ def test_verify_without_approve_only_records_evidence(tmp_path, state, capsys) -
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
     out = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--evidence", "tests passed")
-    assert out.strip() == "Evidence recorded · task 1 still awaits approval · llm-bridge task verify --task 1 --approve"
+    assert out.strip() == f"Evidence recorded · task 1 still awaits approval · llm-bridge task verify --mission {mid[:8]} --task 1 --approve"
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(created["task"]["id"])["status"] == "VERIFYING"
     shown = _run(capsys, "task", "show", "--mission", mid, "--task", "1")
@@ -468,7 +468,7 @@ def _completed_mission(tmp_path, state, capsys, name="done"):
 def test_task_add_reopens_a_completed_mission(tmp_path, state, capsys) -> None:
     mid, _ = _completed_mission(tmp_path, state, capsys)
     out = _run(capsys, "task", "add", "--mission", mid, "--prompt", "follow-up work", "--title", "Follow-up")
-    assert out.splitlines() == ['Added task 2 "Follow-up" · QUEUED · priority 0', "Mission reopened · start it with: llm-bridge start"]
+    assert out.splitlines() == ['Added task 2 "Follow-up" · QUEUED · priority 0', f"Mission reopened · start it with: llm-bridge start --mission {mid[:8]}"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_mission(mid)["status"] == "STOPPED"
         reopened = [e for e in store.events(mid) if e["kind"] == "mission-reopened"]
@@ -522,10 +522,10 @@ def test_status_says_what_needs_the_operator(tmp_path, state, capsys) -> None:
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
     text = _run(capsys, "status", "--mission", mid)
-    assert "Needs you   task 1 awaits approval · llm-bridge task verify --task 1 --approve (or reject: llm-bridge task reject --task 1 --reason …)" in text
+    assert f"Needs you   task 1 awaits approval · llm-bridge task verify --mission {mid[:8]} --task 1 --approve (or reject: llm-bridge task reject --mission {mid[:8]} --task 1 --reason …)" in text
     snapshot = _status_snapshot(state, mid)
     assert snapshot["needs_you"]["kind"] == "approval" and snapshot["needs_you"]["tasks"] == [1]
-    assert snapshot["needs_you"]["command"] == "llm-bridge task verify --task 1 --approve"
+    assert snapshot["needs_you"]["command"] == f"llm-bridge task verify --mission {mid[:8]} --task 1 --approve"
     _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--approve")
     assert "Needs you" not in _run(capsys, "status", "--mission", mid)
     assert _status_snapshot(state, mid)["needs_you"] is None
@@ -548,7 +548,7 @@ def test_needs_attention_covers_failures_blocks_proposals_and_capacity() -> None
     failed_mission = bridge_format.needs_attention({**base, "mission": {"id": "a" * 32, "status": "FAILED"}, "lifecycle": {"failure_reason": "tmux missing"}})
     assert failed_mission["kind"] == "failed" and "tmux missing" in failed_mission["message"] and "llm-bridge events --mission aaaaaaaa" in failed_mission["message"]
     failed_task = bridge_format.needs_attention({**base, "current_task": {"id": 9, "ordinal": 3, "status": "FAILED"}})
-    assert failed_task["kind"] == "failed" and failed_task["command"] == "llm-bridge task retry --task 3"
+    assert failed_task["kind"] == "failed" and failed_task["command"] == "llm-bridge task retry --mission aaaaaaaa --task 3"
     blocked = bridge_format.needs_attention({**base, "current_task": {"id": 9, "ordinal": 3, "status": "BLOCKED"}})
     assert blocked["kind"] == "blocked" and "task 3 is blocked" in blocked["message"]
     proposals = bridge_format.needs_attention({**base, "proposal_counts": {"PENDING": 2}})

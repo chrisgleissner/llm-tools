@@ -53,13 +53,13 @@ class TransitionError(ValueError):
     """A requested mission/task transition violates the durable state model."""
 
 
-def mission_transition_message(mission_id: str, old: str, new: str) -> str:
-    """Operator-facing wording for a refused mission state change."""
+def mission_transition_message(mission_id: str, old: str, new: str, *, verb: str = "") -> str:
+    """Operator-facing wording for a refused mission state change; ``verb`` names the refused action (default: resumed)."""
     short = str(mission_id)[:8]
     if old == "COMPLETED":
         return f"mission {short} is finished (completed); add a task with: llm-bridge task add --prompt \"...\" to continue it"
     if old == "CANCELLED":
-        return f"mission {short} was cancelled and cannot be {'resumed' if new == 'RUNNING' else 'changed'}; create a new mission with: llm-bridge mission create --prompt \"...\""
+        return f"mission {short} was cancelled and cannot be {verb or ('resumed' if new == 'RUNNING' else 'changed')}; create a new mission with: llm-bridge mission create --prompt \"...\""
     if new == "PAUSED":
         return f"mission {short} is {old.lower()}, not running, so there is nothing to pause"
     return f"mission {short} is {old.lower()} and cannot become {new.lower()}"

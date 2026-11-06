@@ -249,7 +249,7 @@ def test_a_later_successful_run_clears_the_failure_reason(store, tmp_path, state
 def test_detached_launch_reports_the_recorded_reason_instead_of_a_bare_exit_status(store, tmp_path, state, monkeypatch) -> None:
     mission_id = _failing_mission(tmp_path, store, providers="copilot", frozen=RESTRICTED)
     monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
-    with pytest.raises(RuntimeError, match=r"controller exited with status 2: copilot is disabled by \[usage\]\.providers"):
+    with pytest.raises(RuntimeError, match=r"could not start: copilot is disabled by \[usage\]\.providers.*fix it with: llm-bridge rotation --mission "):
         bridge_runtime.launch_controller(mission_id, headless=True)
 
 

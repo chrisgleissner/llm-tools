@@ -1813,10 +1813,13 @@ def controller_failure_reason(exc: BaseException, log_path: Path) -> str:
     return _clean_line(text if text else type(exc).__name__)
 
 
-def record_controller_failure(store: BridgeStore, mission_id: str, reason: str) -> None:
-    """Persist why the controller failed so status and the station can show it."""
+def record_controller_failure(store: BridgeStore, mission_id: str, reason: str, fix: str = "") -> None:
+    """Persist why the controller failed so status and the station can show it; ``fix`` is the command that resolves it."""
     try:
-        store.record_runtime_event(mission_id, "controller-failed", {"reason": _clean_line(reason), "controller_pid": os.getpid()})
+        data = {"reason": _clean_line(reason), "controller_pid": os.getpid()}
+        if fix:
+            data["fix"] = _clean_line(fix)
+        store.record_runtime_event(mission_id, "controller-failed", data)
     except (ValueError, TransitionError, OSError):
         pass  # recording the reason must not mask the failure itself
 
@@ -2059,7 +2062,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         _install_frozen_tool_config(mission, runtime)
         problem = rotation_problem(mission, providers, routes)
         if problem:
-            record_controller_failure(store, mission_id, problem)
+            record_controller_failure(store, mission_id, problem, f"llm-bridge rotation --mission {mission_id[:8]} --set LIST")
             store.set_mission_status(mission_id, "FAILED")
             print(f"controller failure: {problem}", file=sys.stderr, flush=True)
             return 2
@@ -2160,17 +2163,17 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                     pass
 
 
-def _recorded_failure(mission_id: str) -> str:
-    """`: <reason>` from the latest controller-failed event, or an empty string."""
+def _recorded_failure(mission_id: str) -> tuple[str, str]:
+    """``(reason, fix command)`` from the latest controller-failed event; empty strings when none."""
     try:
         with BridgeStore(store_path()) as store:
             row = store.db.execute(
                 "SELECT data_json FROM events WHERE mission_id=? AND kind='controller-failed' ORDER BY id DESC LIMIT 1", (mission_id,)
             ).fetchone()
-        reason = json.loads(row[0]).get("reason") if row else None
+        data = json.loads(row[0]) if row else {}
     except (OSError, ValueError, TypeError):
-        return ""
-    return f": {reason}" if reason else ""
+        return "", ""
+    return str(data.get("reason") or ""), str(data.get("fix") or "")
 
 
 def launch_controller(
@@ -2255,20 +2258,30 @@ def launch_controller(
         os.chmod(log_path, 0o600)
         proc = subprocess.Popen(command, cwd=mission["cwd"], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
 
+    short = mission_id[:8]
+    ready_status = ""
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if ready.is_file():
             try:
                 status = json.loads(ready.read_text(encoding="utf-8"))
                 if int(status.get("pid", -1)) == proc.pid and status.get("startup_token") == startup_token and status.get("status") in {"RUNNING", "COMPLETED", "STOPPED", "CANCELLED"}:
+                    ready_status = str(status["status"])
                     break
             except (OSError, ValueError, json.JSONDecodeError):
                 pass
         if proc.poll() is not None:
-            raise RuntimeError(f"mission controller exited with status {proc.returncode}{_recorded_failure(mission_id)}; inspect {log_path}")
+            reason, fix = _recorded_failure(mission_id)
+            if reason:
+                hint = f" · fix it with: {fix}" if fix else ""
+                raise RuntimeError(f"mission {short} could not start: {reason}{hint} · controller log: {log_path}")
+            raise RuntimeError(f"mission controller exited with status {proc.returncode}; inspect {log_path}")
         time.sleep(0.05)
     else:
         raise RuntimeError(f"mission controller did not become ready; inspect {log_path}")
+    if ready_status != "RUNNING":
+        # The controller found nothing to run (a finished or stopping mission); never report that as running.
+        raise RuntimeError(f"mission {short} is {ready_status.lower()}, so no provider was started · details: llm-bridge status --mission {short}")
 
     if headless or not (sys.stdin.isatty() and sys.stdout.isatty()):
         if headless:
