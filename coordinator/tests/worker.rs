@@ -504,13 +504,12 @@ async fn tls_versions_and_suites() {
             let tcp = TcpStream::connect(addr).await.unwrap();
             let s = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
                 .connect(rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(), tcp)
-                .await
-                .unwrap();
-            format!("{:?}", s.get_ref().1.negotiated_cipher_suite().unwrap().suite())
+                .await?;
+            Ok::<String, std::io::Error>(format!("{:?}", s.get_ref().1.negotiated_cipher_suite().unwrap().suite()))
         }
     };
-    assert!(connect(&[&rustls::version::TLS13]).await.starts_with("TLS13_"));
-    assert!(connect(&[&rustls::version::TLS12]).await.starts_with("TLS_ECDHE_"));
+    assert!(connect(&[&rustls::version::TLS13]).await.unwrap().starts_with("TLS13_"));
+    assert!(connect(&[&rustls::version::TLS12]).await.is_err(), "TLS 1.2 requires an explicit compatibility opt-in");
     let _ = Method::GET;
     env.stop().await;
 }
