@@ -13,7 +13,7 @@ interface Snapshot {
   id: string;
   name: string;
   counts: Record<string, number>;
-  needs: { kind?: string; tasks?: number[] } | null;
+  needs: { kind?: string; tasks?: number[]; message?: string } | null;
 }
 
 interface ActivityItem {
@@ -106,6 +106,7 @@ export function overview(root: HTMLElement): () => void {
       if (s.counts["FAILED"]) rows.push({ level: "bad", icon: "alert", id: "failed-task", text: [`${plural(s.counts["FAILED"], "failed task")} in `, link(s)] });
       if (s.counts["BLOCKED"]) rows.push({ level: "warn", icon: "ban", id: "blocked-task", text: [`${plural(s.counts["BLOCKED"], "blocked task")} in `, link(s)] });
       if (s.needs && s.needs.kind === "capacity") rows.push({ level: "warn", icon: "usage", id: "capacity", text: ["Provider capacity is limiting ", link(s)] });
+      if (s.needs && s.needs.kind === "provider") rows.push({ level: "warn", icon: "terminal", id: "provider-wait", text: [s.needs.message ?? "A provider is waiting for your input", " in ", link(s)] });
     }
     for (const m of store.missions) if (m.mission.status.toUpperCase() === "FAILED") rows.push({ level: "bad", icon: "alert", id: "failed-mission", text: ["Mission ", link({ worker: m.worker, id: m.mission.id, name: m.mission.name }), " failed"] });
     for (const w of store.workers) {

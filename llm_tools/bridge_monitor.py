@@ -356,6 +356,25 @@ def project_snapshot(
     # reviewed task before it starts the next one: {"reason": "review",
     # "task_ordinal", "tasks", "since"}; ``None`` otherwise.
     snapshot["hold"] = {key: value for key, value in hold.items() if key not in {"marker", "task_id"}} if hold else None
+    mission = snapshot.get("mission") or {}
+    current_task = snapshot.get("current_task")
+    context = snapshot.get("station_context") or {}
+    if (
+        mission.get("status") == "RUNNING"
+        and isinstance(current_task, dict)
+        and current_task.get("status") == "RUNNING"
+        and (mission.get("config") or {}).get("native_tui") is True
+        and context.get("executing_operation") is not None
+    ):
+        provider = str(context.get("last_launched_station") or "")
+        try:
+            from . import bridge, terminal
+
+            provider_wait = terminal.read_native_provider_wait(mission_id, provider, bridge._load_handle)
+        except Exception:  # Best-effort observation must not break status reads.
+            provider_wait = None
+        if provider_wait is not None:
+            snapshot["provider_wait"] = provider_wait
     snapshot["needs_you"] = needs_attention(cast("dict[str, Any]", snapshot))  # a TypedDict is a plain dict at run time
     return snapshot
 

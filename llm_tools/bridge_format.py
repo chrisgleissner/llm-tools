@@ -498,7 +498,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """What the operator has to do next, from a status snapshot, or ``None``.
 
     Returns ``{"kind", "message", "command", "tasks"}``. ``kind`` is one of
-    ``approval``, ``failed``, ``blocked``, ``proposal`` or ``capacity``;
+    ``approval``, ``failed``, ``blocked``, ``proposal``, ``capacity`` or ``provider``;
     ``command`` is the CLI line that resolves it and ``tasks`` the task
     numbers involved.
     """
@@ -551,6 +551,14 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(snapshot.get("waiting"), dict):
         command = f"llm-bridge rotation --mission {mid} --set LIST"
         return {"kind": "capacity", "tasks": [], "command": command, "message": "waiting for provider capacity · " + format_waiting(snapshot["waiting"], mid)}
+    provider_wait = snapshot.get("provider_wait")
+    if isinstance(provider_wait, dict):
+        provider = _clip(provider_wait.get("provider") or "Provider", 40)
+        command = f"llm-bridge attach --mission {mid}"
+        return {
+            "kind": "provider", "tasks": [], "command": command,
+            "message": f"{provider} is waiting for your input at its terminal prompt · attach with: {command}",
+        }
     return None
 
 

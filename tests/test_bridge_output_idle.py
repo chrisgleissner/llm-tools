@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_tui
+from llm_tools import bridge_tui, terminal
 from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend
 from tests.conftest import wait_for as _shared_wait_for
 
@@ -27,6 +27,29 @@ def _running_snapshot(idle: int | None = None, status: str = "RUNNING") -> dict[
     if idle is not None:
         snapshot["output_idle_seconds"] = idle
     return snapshot
+
+
+def test_native_provider_wait_requires_stable_prompt_and_returns_no_screen_content(monkeypatch) -> None:
+    screen = "sentinel private output\n? for shortcuts\n\n›\n"
+    readings = iter([(100, screen), (101, "provider is making progress\n? for shortcuts\n\n›\n"), (102, None), (103, None)])
+
+    class FakeBackend:
+        def pane_activity_screen(self, handle, *, pane, seen_epoch, start_line):
+            assert pane == "provider" and start_line == -24
+            return next(readings)
+
+    mission_id = "native-prompt-test"
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    load_handle = lambda _mission_id: object()
+
+    assert terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=100) is None
+    assert terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=120) is None
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=179)
+    assert waiting is None  # recent provider output restarted the quiet interval
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=181)
+    assert waiting == {"provider": "Codex", "idle_seconds": 61}
+    assert "sentinel" not in str(waiting)
 
 
 def test_idle_phrase_threshold_and_rounding() -> None:

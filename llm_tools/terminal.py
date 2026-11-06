@@ -21,6 +21,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from typing import Any, Literal
 
@@ -1445,6 +1446,7 @@ class TmuxTerminalBackend:
         *,
         pane: str = "provider",
         seen_epoch: int | None = None,
+        start_line: int | None = None,
     ) -> tuple[int, str | None] | None:
         """Read the pane's activity epoch and, only if it moved, its screen, in one tmux invocation.
 
@@ -1461,7 +1463,7 @@ class TmuxTerminalBackend:
                 handle.socket_path,
                 *self._chain([
                     ["display-message", "-p", "-t", target, "#{pane_dead} #{window_activity}"],
-                    ["if-shell", "-F", "-t", target, f"#{{!=:#{{window_activity}},{int(seen_epoch or 0)}}}", f"capture-pane -p -J -t {target}"],
+                    ["if-shell", "-F", "-t", target, f"#{{!=:#{{window_activity}},{int(seen_epoch or 0)}}}", f"capture-pane -p -J {f'-S {start_line} ' if start_line is not None else ''}-t {target}"],
                 ]),
                 check=False,
                 capture=True,
@@ -1622,6 +1624,77 @@ class TmuxTerminalBackend:
 # (``bridge_tui``) and the mission switcher call these; they hold no curses or projection code.
 
 ACTIVITY_SEEN: dict[str, tuple[int, str]] = {}  # mission id -> (epoch, digest) of the last screen capture
+_PROVIDER_PROMPT_IDLE_SECONDS = 60
+_PROVIDER_PROMPT_TAIL_LINES = 24
+_PROVIDER_PROMPT_TEXT_LIMIT = 4096
+_PROVIDER_PROMPT_CACHE_LIMIT = 128
+_PROVIDER_PROMPT_LOCK = threading.Lock()
+_PROVIDER_PROMPT_SEEN: OrderedDict[str, tuple[int, str, str, float]] = OrderedDict()
+
+
+def _native_input_prompt(provider: str, screen: str) -> bool:
+    """Recognize only the stable input-prompt chrome for supported native providers."""
+    normalized = provider.casefold().split("-", 1)[0]
+    if normalized == "codex":
+        return "? for shortcuts" in screen.casefold() and bool(re.search(r"(?m)^\s*›\s*$", screen))
+    if normalized == "claude":
+        return bool(re.search(r"(?m)^\s*❯\s*$", screen))
+    return False
+
+
+def read_native_provider_wait(
+    mission_id: str,
+    provider: str,
+    load_handle: Callable[[str], TerminalHandle],
+    *,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    """Return a bounded native-provider wait classification, never the pane text.
+
+    A prompt must remain visible with no provider-pane screen change for a minute.
+    The pane sample is limited to its last 24 lines; cached samples are bounded by
+    mission count and kept only in memory.
+    """
+    backend = TmuxTerminalBackend()
+    try:
+        handle = load_handle(mission_id)
+        with _PROVIDER_PROMPT_LOCK:
+            previous = _PROVIDER_PROMPT_SEEN.get(mission_id)
+        reading = backend.pane_activity_screen(
+            handle,
+            pane="provider",
+            seen_epoch=previous[0] if previous is not None else None,
+            start_line=-_PROVIDER_PROMPT_TAIL_LINES,
+        )
+    except Exception:  # Observation is best effort; never surface pane or socket errors.
+        reading = None
+    if reading is None:
+        with _PROVIDER_PROMPT_LOCK:
+            _PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+        return None
+    epoch, raw_screen = reading
+    moment = time.monotonic() if now is None else now
+    with _PROVIDER_PROMPT_LOCK:
+        previous = _PROVIDER_PROMPT_SEEN.get(mission_id)
+        if raw_screen is not None:
+            from .common import strip_ansi
+
+            screen = strip_ansi(raw_screen)[-_PROVIDER_PROMPT_TEXT_LIMIT:]
+            digest = hashlib.sha256(screen.encode("utf-8", "replace")).hexdigest()
+            changed_at = moment if previous is None or digest != previous[1] else previous[3]
+        elif previous is not None:
+            screen, digest, changed_at = previous[2], previous[1], previous[3]
+        else:
+            return None
+        _PROVIDER_PROMPT_SEEN[mission_id] = (epoch, digest, screen, changed_at)
+        _PROVIDER_PROMPT_SEEN.move_to_end(mission_id)
+        while len(_PROVIDER_PROMPT_SEEN) > _PROVIDER_PROMPT_CACHE_LIMIT:
+            _PROVIDER_PROMPT_SEEN.popitem(last=False)
+    idle_seconds = max(0, int(moment - changed_at))
+    if idle_seconds < _PROVIDER_PROMPT_IDLE_SECONDS or not _native_input_prompt(provider, screen):
+        return None
+    provider_name = "Codex" if provider.casefold().startswith("codex") else "Claude Code"
+    return {"provider": provider_name, "idle_seconds": idle_seconds}
 
 
 def read_provider_activity(mission_id: str, load_handle: Callable[[str], TerminalHandle]) -> tuple[int, str] | None:

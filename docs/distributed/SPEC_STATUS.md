@@ -288,7 +288,7 @@ negative tests remain incomplete unless explicitly recorded below.
 | DOG-004 | [x] | Stop guidance now names the working `llm-bridge stop --force --mission <id>` fallback and does not suggest `finish`; `tests/test_bridge_operator_cli.py::test_paused_native_stop_guidance_names_the_force_command` covers a paused mission with a live provider. |
 | DOG-005 | [x] | `worker status` reports connection, last-connected time and systemd service state in human-readable output; `tests/test_bridge_worker.py::test_worker_status_reports_connection_and_service_state_without_token` verifies fields, rendering and token omission. |
 | DOG-006 | [x] | Mission name links to detail (`web/e2e/worker.spec.ts` verifies the link target). |
-| DOG-007 | [ ] | Native provider idle-at-prompt `needs_you` detection and operator notification remain. |
+| DOG-007 | [x] | A bounded last-24-line native pane observer recognizes stable Codex/Claude input prompts after 60 seconds without screen change and emits only provider and idle duration; `tests/test_bridge_output_idle.py::test_native_provider_wait_requires_stable_prompt_and_returns_no_screen_content` and `tests/test_bridge_monitor.py::test_native_provider_idle_prompt_surfaces_bounded_needs_you_without_screen_text` cover detection, status and no raw screen text. The console overview lists the resulting provider wait under Needs attention. |
 | DOG-008 | [ ] | Take-control upgrade in place and Enter submission from the web terminal remain. |
 | DOG-009 | [ ] | Read-only native terminal snapshot or last-message status remains. |
 | DOG-010 | [ ] | Structured provider questions and answer flow through CLI and console remain. |
