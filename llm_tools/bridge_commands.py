@@ -219,6 +219,8 @@ def _mission_control(action: str) -> Handler:
         cli = _cli()
         mission_id = request.mission_id
         assert mission_id is not None
+        if action == "stop" and params["force"]:
+            return dict(cli._force_stop_mission(mission_id))
         if action == "stop":
             with cli.open_store() as probe:
                 current = str(probe.get_mission(mission_id)["status"])
@@ -453,7 +455,14 @@ OPERATIONS: dict[str, OperationSpec] = {
         ),
         OperationSpec("mission.pause", "Pause autonomous scheduling", True, True, _NO_PARAMS, _mission_control("pause")),
         OperationSpec("mission.resume", "Resume mission scheduling", True, True, _NO_PARAMS, _operator("resume")),
-        OperationSpec("mission.stop", "Stop a mission after the current step", True, True, _NO_PARAMS, _mission_control("stop")),
+        OperationSpec(
+            "mission.stop",
+            "Stop a mission after the current step, or terminate owned work when forced",
+            True,
+            True,
+            {"force": Param(bool, default=False)},
+            _mission_control("stop"),
+        ),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),
         OperationSpec(

@@ -1817,6 +1817,86 @@ def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
         lock.release()
 
 
+def _force_stop_mission(mission_id: str) -> dict[str, Any]:
+    """Terminate only the controller and provider processes owned by this mission."""
+    with open_store() as store:
+        saved_status = str(store.get_mission(mission_id)["status"])
+    if saved_status == "CREATED":
+        return {"mission_status": saved_status, "noop": True, "detail": fmt.nothing_to_stop(mission_id, saved_status)}
+    runtime = state_dir() / "runtime" / f"mission-{mission_id}"
+    with open_store() as store:
+        mission = store.get_mission(mission_id)
+        if mission["status"] in STARTED_MISSION_STATUSES:
+            store.set_mission_status(mission_id, "STOPPING")
+        operations = [
+            dict(row)
+            for row in store.db.execute(
+                "SELECT id,process_pid,process_start,pane_id,status FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
+                (mission_id,),
+            )
+        ]
+        store.reconcile_interrupted_operations(mission_id)
+    from .bridge_runtime import terminate_managed_processes
+
+    with open_store() as store:
+        terminate_managed_processes(store, mission_id)
+    try:
+        from .terminal import TmuxTerminalBackend
+
+        backend = TmuxTerminalBackend()
+        handle = _load_handle(mission_id)
+    except (OSError, RuntimeError):
+        backend = None
+        handle = None
+    if handle is not None and backend is not None:
+        backend.stop(handle)
+    elif operations:
+        from .bridge_runtime import _terminate_owned_process_group
+
+        for operation in operations:
+            process_pid = operation.get("process_pid")
+            process_start = operation.get("process_start")
+            if not process_pid or not process_start:
+                if operation.get("status") in {"INTENT", "PREPARED"}:
+                    continue
+                raise RuntimeError("no verifiable process identity; mission remains STOPPING")
+            _terminate_owned_process_group(int(process_pid), str(process_start))
+    ready = runtime / "controller-ready.json"
+    try:
+        controller = json.loads(ready.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        controller = {}
+    controller_pid = int(controller.get("pid", 0) or 0)
+    controller_start = str(controller.get("process_start", ""))
+    if controller_pid > 1 and controller_start:
+        from .bridge_runtime import _process_start_token, _terminate_owned_process_group
+
+        current_start = _process_start_token(controller_pid)
+        if current_start and current_start != controller_start:
+            raise RuntimeError("controller PID no longer matches its persisted identity; mission remains STOPPING")
+        if current_start:
+            _terminate_owned_process_group(controller_pid, controller_start)
+    deadline = time.monotonic() + 3.0
+    released = False
+    while time.monotonic() < deadline:
+        lock = MissionLock(state_dir() / "locks", mission_id)
+        try:
+            lock.acquire()
+        except BlockingIOError:
+            time.sleep(0.05)
+            continue
+        else:
+            lock.release()
+            released = True
+            break
+    if not released:
+        raise RuntimeError("controller still owns the mission lock; mission remains STOPPING")
+    with open_store() as store:
+        if store.get_mission(mission_id)["status"] == "STOPPING":
+            store.set_mission_status(mission_id, "STOPPED")
+        return {"mission": store.get_mission(mission_id)}
+
+
 def _task_text(args: argparse.Namespace) -> Callable[[Any], str]:
     action = args.task_action
     if action == "list":
@@ -2442,91 +2522,8 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("continue", value, args.mission))
             return 0
         if args.command in {"pause", "stop", "cancel"}:
-            with open_store() as store:
-                saved_status = str(store.get_mission(args.mission)["status"])
-            if args.command == "stop" and args.force and saved_status == "CREATED":
-                # A mission that never started has nothing to force; stop never cancels.
-                result = {"mission_status": saved_status, "noop": True, "detail": fmt.nothing_to_stop(args.mission, saved_status)}
-            elif args.command == "stop" and args.force:
-                runtime = state_dir() / "runtime" / f"mission-{args.mission}"
-                with open_store() as store:
-                    mission = store.get_mission(args.mission)
-                    if mission["status"] in STARTED_MISSION_STATUSES:
-                        store.set_mission_status(args.mission, "STOPPING")
-                    operations = [
-                        dict(row)
-                        for row in store.db.execute(
-                            "SELECT id,process_pid,process_start,pane_id,status FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
-                            (args.mission,),
-                        )
-                    ]
-                    store.reconcile_interrupted_operations(args.mission)
-                # Verifiers use their own process groups. Stop those validated
-                # identities before terminating the controller that owns them.
-                from .bridge_runtime import terminate_managed_processes
-
-                with open_store() as store:
-                    terminate_managed_processes(store, args.mission)
-                try:
-                    from .terminal import TmuxTerminalBackend
-
-                    backend = TmuxTerminalBackend()
-                    handle = _load_handle(args.mission)
-                except (OSError, RuntimeError):
-                    backend = None
-                    handle = None  # type: ignore[assignment]  # checked on the next line
-                if handle is not None and backend is not None:
-                    backend.stop(handle)
-                elif operations:
-                    from .bridge_runtime import _terminate_owned_process_group
-
-                    for operation in operations:
-                        process_pid = operation.get("process_pid")
-                        process_start = operation.get("process_start")
-                        if not process_pid or not process_start:
-                            if operation.get("status") in {"INTENT", "PREPARED"}:
-                                continue
-                            raise RuntimeError("no verifiable process identity; mission remains STOPPING")
-                        _terminate_owned_process_group(int(process_pid), str(process_start))
-                # Stopping provider work and the tmux station is not enough:
-                # the detached controller itself owns the mission lock and
-                # must be terminated before STOPPED is authoritative.
-                ready = runtime / "controller-ready.json"
-                try:
-                    controller = json.loads(ready.read_text(encoding="utf-8"))
-                except (OSError, ValueError, json.JSONDecodeError):
-                    controller = {}
-                controller_pid = int(controller.get("pid", 0) or 0)
-                controller_start = str(controller.get("process_start", ""))
-                if controller_pid > 1 and controller_start:
-                    from .bridge_runtime import _process_start_token, _terminate_owned_process_group
-
-                    current_start = _process_start_token(controller_pid)
-                    if current_start and current_start != controller_start:
-                        raise RuntimeError("controller PID no longer matches its persisted identity; mission remains STOPPING")
-                    if current_start:
-                        _terminate_owned_process_group(controller_pid, controller_start)
-                # The lock, not the ready file, is the controller-liveness
-                # authority. Do not claim STOPPED until ownership is released.
-                deadline = time.monotonic() + 3.0
-                released = False
-                while time.monotonic() < deadline:
-                    lock = MissionLock(state_dir() / "locks", args.mission)
-                    try:
-                        lock.acquire()
-                    except BlockingIOError:
-                        time.sleep(0.05)
-                        continue
-                    else:
-                        lock.release()
-                        released = True
-                        break
-                if not released:
-                    raise RuntimeError("controller still owns the mission lock; mission remains STOPPING")
-                with open_store() as store:
-                    if store.get_mission(args.mission)["status"] == "STOPPING":
-                        store.set_mission_status(args.mission, "STOPPED")
-                    result = {"mission": store.get_mission(args.mission)}
+            if args.command == "stop" and args.force:
+                result = commands.dispatch(commands.CommandRequest("mission.stop", {"force": True}, mission_id=args.mission))
             else:
                 result = commands.dispatch(commands.CommandRequest(f"mission.{args.command}", mission_id=args.mission))
                 if result.get("status") == "REJECTED" and not args.json:

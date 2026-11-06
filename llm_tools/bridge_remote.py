@@ -287,8 +287,9 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
     if command == "resume":
         request = make("mission.resume")
         return request, lambda value: fmt.format_command_receipt("resume", value, request.mission_id or "")
-    if command in {"pause", "cancel", "continue"} or (command == "stop" and not getattr(args, "force", False)):
-        request = make(f"mission.{command}")
+    if command in {"pause", "cancel", "continue", "stop"}:
+        params = {"force": bool(getattr(args, "force", False))} if command == "stop" else {}
+        request = make(f"mission.{command}", params)
         return request, lambda value: fmt.format_command_receipt(command, value, request.mission_id or "")
     if command == "proposal" and args.proposal_action == "list":
         return make("proposal.list", {"status": args.status, "limit": args.limit, "after": args.after}), lambda value: fmt.format_proposals(value["proposals"])

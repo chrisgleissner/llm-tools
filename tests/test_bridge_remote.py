@@ -96,7 +96,8 @@ def test_login_status_logout(state, tmp_path, capsys):
     [
         (["status", "--mission", "m1"], "mission.status", {}),
         (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100}),
-        (["stop", "--mission", "m1"], "mission.stop", {}),
+        (["stop", "--mission", "m1"], "mission.stop", {"force": False}),
+        (["stop", "--mission", "m1", "--force"], "mission.stop", {"force": True}),
         (["start", "--mission", "m1", "--headless", "--providers", "codex"], "mission.start", {"headless": True, "native_tui": None, "providers": "codex", "routes": None}),
         (["resume", "--mission", "m1"], "mission.resume", {}),
         (["task", "list", "--mission", "m1"], "task.list", {"limit": 200, "offset": 0}),
@@ -119,7 +120,6 @@ def test_request_mapping(argv, operation, params):
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
-        (["stop", "--mission", "m1", "--force"], "not available"),
         (["doctor"], "not available"),
         (["task", "list", "--mission", "m1", "--all"], "--limit"),
         (["task", "add", "--mission", "m1", "--prompt", "x", "--depends-on", "1"], "depends-on"),
@@ -171,6 +171,14 @@ def test_resource_submission_uses_resource_path_and_idempotency_key():
     viewer = client({("GET", "/api/v1/missions/m1/tasks/2"): (200, shown)})
     show_request = remote.commands.CommandRequest("task.show", {"task_number": 2}, mission_id="m1", target="ws", request_id="req-show")
     assert viewer.submit_resource("ws", show_request) == shown["result"]
+
+    stopped = client({("POST", "/api/v1/missions/m1/stop"): (200, done)})
+    stop_request = remote.commands.CommandRequest("mission.stop", {"force": True}, mission_id="m1", target="ws", request_id="req-stop")
+    assert stopped.submit_resource("ws", stop_request) == done["result"]
+    sent = stopped.opener.calls[0]
+    assert sent[0] == ("POST", "/api/v1/missions/m1/stop")
+    assert sent[1] == {"force": True, "wait_ms": 15000}
+    assert sent[2]["Idempotency-key"] == "req-stop"
 
 
 def test_target_all_aggregates_reads_and_reports_unavailable_workers(capsys):

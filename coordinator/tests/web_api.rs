@@ -234,6 +234,7 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         ),
         ("/api/v1/missions/mission-1/resume?worker=build-1", json!({}), "mission.resume"),
         ("/api/v1/missions/mission-1/pause?worker=build-1", json!({}), "mission.pause"),
+        ("/api/v1/missions/mission-1/stop?worker=build-1", json!({"force":true}), "mission.stop"),
         (
             "/api/v1/missions/mission-1/tasks?worker=build-1",
             json!({"title":"A task","prompt":"Do the work","priority":3,"depends_on":[],"acceptance":[]}),
@@ -260,6 +261,9 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         assert_eq!(command["operation"], expected_operation, "{path}: {command}");
         assert_eq!(command["target"], "build-1");
         assert_eq!(command["request"]["mission_id"], "mission-1");
+        if path.ends_with("/stop?worker=build-1") {
+            assert_eq!(command["request"]["params"], json!({"force":true}));
+        }
     }
     let (status, command) = api
         .send(

@@ -204,8 +204,18 @@ def test_cli_mission_controls_route_through_the_command_layer(mission, capsys, m
     assert main(["continue", "--mission", mission_id]) == 2
     assert main(["cancel", "--mission", mission_id, "--json"]) == 0
     assert main(["stop", "--mission", mission_id, "--json"]) == 0
+    assert main(["stop", "--mission", mission_id, "--force", "--json"]) == 0
     capsys.readouterr()
-    assert seen == ["mission.pause", "mission.continue", "mission.cancel", "mission.stop"]
+    assert seen == ["mission.pause", "mission.continue", "mission.cancel", "mission.stop", "mission.stop"]
+
+
+def test_force_stop_is_a_typed_mission_operation(mission, monkeypatch):
+    _, mission_id = mission
+    seen = []
+    monkeypatch.setattr(bridge, "_force_stop_mission", lambda requested: seen.append(requested) or {"mission_status": "STOPPED"})
+    result = commands.execute(CommandRequest("mission.stop", {"force": True}, mission_id=mission_id))
+    assert result.result == {"mission_status": "STOPPED"}
+    assert seen == [mission_id]
 
 
 def _first_task(state, mission_id):

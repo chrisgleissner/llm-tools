@@ -1300,6 +1300,8 @@ async fn mission_action(
     let m = parse_body(&body.bytes)?;
     let allowed = if action == "start" {
         &["headless", "native_tui", "providers", "routes", "wait_ms"][..]
+    } else if action == "stop" {
+        &["force", "wait_ms"][..]
     } else {
         &["wait_ms"][..]
     };
