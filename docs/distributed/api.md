@@ -213,7 +213,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `agents` | Typed `mission.agents`; mission-filtered reads use `GET /api/v1/missions/{id}/agents`, while all-mission reads use `GET /api/v1/workers/{name}/agents`. |
 | `suspend-until-credits` | Typed `mission.suspend_until_credits`; admin-scoped resource `POST /api/v1/missions/{id}/suspend-until-credits`; worker requires `--allow-power`. |
 | `task add` | Typed `task.add`; resource `POST /api/v1/missions/{id}/tasks`. `--depends-on` numbers are resolved against that worker mission. |
-| `task list` | Typed `task.list`; resource `GET /api/v1/missions/{id}/tasks`. |
+| `task list` | Typed `task.list`; resource `GET /api/v1/missions/{id}/tasks`. `--all` walks bounded pages and combines them client-side. |
 | `task show` | Typed `task.show`; resource `GET /api/v1/missions/{id}/tasks/{n}` (number selector only). |
 | `task amend` | Typed `task.amend`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
 | `task priority` | Typed `task.priority`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
@@ -295,7 +295,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--mission` | Mission selector populates `mission_id` in typed request or `worker`-qualified mission REST path. |
 | `--suspend-when-rate-limited` | `mission.settings.patch` field `suspend_when_rate_limited`. |
 | `--all-missions` | Local inspection filter; no remote typed operation. |
-| `--all` | Remote task-list `--all` is explicitly refused; use paged `--limit` and `--offset` on `GET .../tasks`. |
+| `--all` | Standard-library remote client follows bounded `GET .../tasks` pages until it has the worker's reported total, preserving the local all-items result. |
 | `--limit` | Maps to list-operation `limit` or resource query `limit` for tasks/events/proposals. |
 | `--offset` | Maps to typed `task.list` offset / resource query offset; coordinator mission index uses cursor pagination instead. |
 | `--task` | Task number maps to `task_number` and resource `{n}` selector. |

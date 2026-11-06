@@ -402,8 +402,9 @@ def _task_list(store: BridgeStore | None, request: CommandRequest, params: dict[
     limit, offset = params["limit"], params["offset"]
     if not 0 <= limit <= 1000 or offset < 0:
         raise CommandFailure("invalid-argument", "task.list: limit must be 0-1000 and offset non-negative")
+    tasks = store.list_tasks(request.mission_id, offset=offset) if params["all"] else store.list_tasks(request.mission_id, limit=limit, offset=offset)
     return {
-        "tasks": store.list_tasks(request.mission_id, limit=limit, offset=offset),
+        "tasks": tasks,
         "total": store.task_counters(request.mission_id)["total"],
         "offset": offset,
     }
@@ -695,7 +696,7 @@ OPERATIONS: dict[str, OperationSpec] = {
             "Page a mission's tasks in scheduling order",
             False,
             True,
-            {"limit": Param(int, default=50), "offset": Param(int, default=0)},
+            {"limit": Param(int, default=50), "offset": Param(int, default=0), "all": Param(bool, default=False)},
             _task_list,
         ),
         OperationSpec("task.show", "Show one task", False, True, _TASK_SELECTOR, _task_show),

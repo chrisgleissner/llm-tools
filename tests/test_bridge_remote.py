@@ -122,6 +122,7 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["restore", "--input", "/tmp/backup.db"], "worker.restore", {"input": "/tmp/backup.db"}),
         (["resume", "--mission", "m1"], "mission.resume", {}),
         (["task", "list", "--mission", "m1"], "task.list", {"limit": 200, "offset": 0}),
+        (["task", "list", "--mission", "m1", "--all"], "task.list", {"limit": 200, "offset": 0, "all": True}),
         (["task", "show", "--mission", "m1", "--task-id", "4"], "task.show", {"task_id": 4}),
         (["task", "verify", "--mission", "m1", "--task", "2", "--approve"], "task.verify", {"task_number": 2, "evidence": "", "approved": True}),
         (["task", "reject", "--mission", "m1", "--task", "2", "--reason", "no"], "task.reject", {"task_number": 2, "reason": "no"}),
@@ -239,10 +240,24 @@ def test_task_dependency_cli_options_use_task_resource_routes():
     assert api.opener.calls[1][1]["depends_on"] == 2
 
 
+def test_task_list_all_collects_bounded_resource_pages():
+    routes = {
+        ("GET", "/api/v1/missions/m1/tasks"): [
+            (200, {"state": "done", "result": {"tasks": [{"ordinal": 1}, {"ordinal": 2}], "total": 3, "offset": 0}}),
+            (200, {"state": "done", "result": {"tasks": [{"ordinal": 3}], "total": 3, "offset": 2}}),
+        ],
+    }
+    api = client(routes)
+    request, _ = remote.request_for(args("task", "list", "--mission", "m1", "--all"), "ws")
+    result = api.submit_resource("ws", request)
+    assert result == {"tasks": [{"ordinal": 1}, {"ordinal": 2}, {"ordinal": 3}], "total": 3, "offset": 0}
+    assert ["offset=0" in call[3] for call in api.opener.calls] == [True, False]
+    assert "offset=2" in api.opener.calls[1][3]
+
+
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
-        (["task", "list", "--mission", "m1", "--all"], "--limit"),
         (["task", "add", "--mission", "m1", "--prompt", "x", "--depends-on", "oops"], "comma-separated task numbers"),
     ],
 )

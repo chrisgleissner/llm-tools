@@ -217,8 +217,31 @@ class Client:
             action = "suspend-until-credits" if op == "mission.suspend_until_credits" else op.removeprefix("mission.")
             status, body = self.call("POST", f"{base}/{action}?{worker_query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op == "task.list":
-            query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 50), "offset": params.get("offset", 0), "wait_ms": wait_ms})
-            status, body = self.call("GET", f"{base}/tasks?{query}", timeout=wait + 15)
+            initial_offset = int(params.get("offset", 0))
+            if params.get("all"):
+                tasks: list[dict[str, Any]] = []
+                total: int | None = None
+                offset = initial_offset
+                while total is None or offset < total:
+                    query = urllib.parse.urlencode({"worker": target, "limit": 1000, "offset": offset, "wait_ms": wait_ms})
+                    page_status, page_body = self.call("GET", f"{base}/tasks?{query}", timeout=wait + 15)
+                    if page_status != 200 or not isinstance(page_body, dict) or page_body.get("state") != "done" or not isinstance(page_body.get("result"), dict):
+                        raise RemoteError(_api_error(page_status, page_body) if page_status not in {200, 202} else "worker did not complete a paginated task-list request")
+                    page = page_body["result"]
+                    rows = page.get("tasks")
+                    if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
+                        raise RemoteError("coordinator returned an unexpected task page")
+                    tasks.extend(rows)
+                    total = int(page.get("total", len(tasks)))
+                    next_offset = offset + len(rows)
+                    if not rows or next_offset <= offset:
+                        break
+                    offset = next_offset
+                body = {"state": "done", "result": {"tasks": tasks, "total": total or len(tasks), "offset": initial_offset}}
+                status = 200
+            else:
+                query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 50), "offset": initial_offset, "wait_ms": wait_ms})
+                status, body = self.call("GET", f"{base}/tasks?{query}", timeout=wait + 15)
         elif op == "mission.events":
             query = urllib.parse.urlencode({"worker": target, "after": params.get("after", 0), "limit": params.get("limit", 50), "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/events?{query}", timeout=wait + 15)
@@ -443,9 +466,10 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
     if command == "task":
         action = args.task_action
         if action == "list":
-            if getattr(args, "all", False):
-                raise ValueError("task list --all is not available remotely; page with --limit and --offset")
-            return make("task.list", {"limit": args.limit, "offset": args.offset}), lambda value: fmt.format_task_list(value["tasks"])
+            params = {"limit": args.limit, "offset": args.offset}
+            if args.all:
+                params["all"] = True
+            return make("task.list", params), lambda value: fmt.format_task_list(value["tasks"])
         if action == "show":
             return make("task.show", _task_selector(args)), fmt.format_task_detail
         if action == "add":
