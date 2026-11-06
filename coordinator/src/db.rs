@@ -33,7 +33,7 @@ const AUDIT_KEEP: i64 = 100_000;
 const SCHEMA: &str = "
 CREATE TABLE workers(
   name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, worker_id TEXT,
-  generation INTEGER NOT NULL DEFAULT 0, event_cursor INTEGER NOT NULL DEFAULT 0,
+  generation INTEGER NOT NULL DEFAULT 0, event_cursor INTEGER NOT NULL DEFAULT 0, mission_cursor INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL, last_seen INTEGER, hello_at INTEGER, last_event_at INTEGER,
   software_version TEXT, protocol_versions TEXT, platform TEXT, capabilities TEXT);
 CREATE TABLE missions(
@@ -70,6 +70,7 @@ pub struct WorkerRow {
     pub worker_id: Option<String>,
     pub generation: u64,
     pub event_cursor: u64,
+    pub mission_cursor: u64,
     pub last_seen: Option<i64>,
     pub hello_at: Option<i64>,
     pub last_event_at: Option<i64>,
@@ -142,7 +143,7 @@ fn json_col(s: Option<String>) -> Option<Value> {
 }
 
 const WCOLS: &str =
-    "name, worker_id, generation, event_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities";
+    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities";
 
 fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
     Ok(WorkerRow {
@@ -150,13 +151,14 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
         worker_id: r.get(1)?,
         generation: r.get::<_, i64>(2)? as u64,
         event_cursor: r.get::<_, i64>(3)? as u64,
-        last_seen: r.get(4)?,
-        hello_at: r.get(5)?,
-        last_event_at: r.get(6)?,
-        software_version: r.get(7)?,
-        protocol_versions: json_col(r.get(8)?),
-        platform: json_col(r.get(9)?),
-        capabilities: json_col(r.get(10)?),
+        mission_cursor: r.get::<_, i64>(4)? as u64,
+        last_seen: r.get(5)?,
+        hello_at: r.get(6)?,
+        last_event_at: r.get(7)?,
+        software_version: r.get(8)?,
+        protocol_versions: json_col(r.get(9)?),
+        platform: json_col(r.get(10)?),
+        capabilities: json_col(r.get(11)?),
     })
 }
 
@@ -177,7 +179,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -193,6 +195,7 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// idle and absolute lifetime). Sessions that exist at migration keep the original, longer policy.
 /// The statement list is built in code because a database may not have a `sessions` table yet.
 const MIGRATE_V3_COLUMN: &str = "ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 1;";
+const MIGRATE_V4_COLUMN: &str = "ALTER TABLE workers ADD COLUMN mission_cursor INTEGER NOT NULL DEFAULT 0;";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -232,6 +235,13 @@ impl Db {
             })? > 0;
             let alter = if has_column || !has_table { "" } else { MIGRATE_V3_COLUMN };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 3; COMMIT;"))?;
+        }
+        if version < 4 {
+            let has_column: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='mission_cursor'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let alter = if has_column { "" } else { MIGRATE_V4_COLUMN };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 4; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -486,8 +496,8 @@ impl Db {
             params![name, generation],
         )?;
         let text = |k: &str| hello.get(k).map(|v| v.to_string());
-        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, software_version=?, protocol_versions=?, platform=?, capabilities=? WHERE name=?",
-            params![worker_id, generation, now, now, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), name])?;
+        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=? WHERE name=?",
+            params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), name])?;
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             for m in missions {
@@ -514,7 +524,16 @@ impl Db {
     }
 
     // ---- events ----
-    pub fn events_store(&self, worker: &str, after: u64, through: u64, events: &[Value], max: u64) -> R<EventsOutcome> {
+    pub fn events_store(
+        &self,
+        worker: &str,
+        after: u64,
+        through: u64,
+        events: &[Value],
+        mission_cursor: Option<u64>,
+        missions: Option<&[Value]>,
+        max: u64,
+    ) -> R<EventsOutcome> {
         let mut c = self.c();
         let tx = c.transaction()?;
         let cursor: i64 = tx.query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))?;
@@ -528,10 +547,23 @@ impl Db {
                 params![worker, id, e.to_string()],
             )?;
         }
+        if let Some(missions) = missions {
+            for mission in missions {
+                if let Some(id) = mission.get("id").and_then(Value::as_str) {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO missions(worker, mission_id, info) VALUES(?,?,?)",
+                        params![worker, id, mission.to_string()],
+                    )?;
+                }
+            }
+        }
         tx.execute(
             "UPDATE workers SET event_cursor=?, last_event_at=? WHERE name=?",
             params![through as i64, crate::now(), worker],
         )?;
+        if let Some(mission_cursor) = mission_cursor {
+            tx.execute("UPDATE workers SET mission_cursor=?1 WHERE name=?2", params![mission_cursor as i64, worker])?;
+        }
         tx.execute(
             "DELETE FROM events WHERE worker=?1 AND id <= (SELECT id FROM events WHERE worker=?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
             params![worker, max as i64],

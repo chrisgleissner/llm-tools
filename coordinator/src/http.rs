@@ -611,8 +611,9 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
         .into_iter()
         .filter_map(|(worker, info)| {
             let w = workers.get(&worker)?;
-            let newer_event = matches!((w.hello_at, w.last_event_at), (Some(h), Some(e)) if h < e);
-            let stale = !st.hub.online(&worker) || newer_event;
+            // The worker advances mission_cursor atomically with its event batch and
+            // mission snapshot. Unrelated events no longer make a caught-up worker stale.
+            let stale = !st.hub.online(&worker) || w.event_cursor > w.mission_cursor;
             Some((worker, stale, info))
         })
         .filter(|(worker, _, info)| {

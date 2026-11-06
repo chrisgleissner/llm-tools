@@ -50,6 +50,54 @@ async fn worker_authentication() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn event_batch_updates_mission_inventory_and_caught_up_status() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+
+    fw.send(
+        "events",
+        json!({
+            "after": 0,
+            "through": 4,
+            "mission_cursor": 4,
+            "events": [
+                {"id": 1, "mission_id": "m1", "kind": "mission-status", "data": {"to": "PAUSED"}},
+                {"id": 2, "mission_id": "m2", "kind": "mission-created", "data": {}},
+                {"id": 3, "mission_id": "m3", "kind": "mission-status", "data": {"to": "RUNNING"}},
+                {"id": 4, "mission_id": "m4", "kind": "mission-status", "data": {"to": "STOPPED"}}
+            ],
+            "missions": [
+                {"id": "m1", "name": "mission", "status": "PAUSED", "folder": "proj", "updated_at": "2026-11-06T12:00:00+00:00"},
+                {"id": "m2", "name": "created while connected", "status": "CREATED", "folder": "new", "updated_at": "2026-11-06T12:00:00+00:00"},
+                {"id": "m3", "name": "started while connected", "status": "RUNNING", "folder": "active", "updated_at": "2026-11-06T12:00:00+00:00"},
+                {"id": "m4", "name": "stopped while connected", "status": "STOPPED", "folder": "done", "updated_at": "2026-11-06T12:00:00+00:00"}
+            ]
+        }),
+    )
+    .await;
+    fw.barrier().await;
+
+    let (_, list) = api.get("/api/v1/missions").await;
+    let missions = list["missions"].as_array().unwrap();
+    assert_eq!(missions.len(), 4, "{list}");
+    assert_eq!(missions[0]["mission"]["status"], "PAUSED");
+    assert_eq!(missions[1]["mission"]["id"], "m2");
+    assert_eq!(missions[2]["mission"]["status"], "RUNNING");
+    assert_eq!(missions[3]["mission"]["status"], "STOPPED");
+    assert!(missions.iter().all(|mission| mission["stale"] == false), "{list}");
+
+    // An event-only legacy batch advances the event cursor but cannot claim its mission
+    // inventory is current, so the coordinator accurately marks the copy stale.
+    fw.send("events", json!({"after": 4, "through": 5, "events": [{"id": 5}]})).await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    assert!(list["missions"].as_array().unwrap().iter().all(|mission| mission["stale"] == true), "{list}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn command_round_trip() {
     let env = boot().await;
     let api = env.admin().await;
@@ -289,6 +337,13 @@ async fn frame_limits_and_malformed_messages() {
     assert_eq!(fw.recv().await["payload"]["code"], "unsupported-message");
     fw.send("ping", json!({"extra": 1})).await;
     assert_eq!(fw.recv().await["payload"]["code"], "invalid-message", "unknown payload fields are rejected");
+    fw.send("events", json!({"after": 0, "through": 1, "mission_cursor": 2, "events": [{"id": 1}]}))
+        .await;
+    assert_eq!(
+        fw.recv().await["payload"]["code"],
+        "invalid-message",
+        "mission cursor cannot exceed the batch cursor"
+    );
     fw.send("hello", json!({})).await;
     assert_eq!(fw.recv().await["payload"]["code"], "invalid-message");
     fw.generation = 99;

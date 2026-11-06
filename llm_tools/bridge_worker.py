@@ -436,7 +436,22 @@ class WorkerSession:
             return None
         after = self.cursor
         self.cursor = int(events[-1]["id"])
-        return self.message("events", {"after": after, "through": self.cursor, "events": events})
+        # Send only summaries for missions present in this event batch, while advancing
+        # mission_cursor on every new-protocol batch. This keeps task and operation
+        # activity in sync without transferring the worker's whole mission list.
+        mission_ids = {
+            str(event["mission_id"]) for event in events
+            if isinstance(event.get("mission_id"), str) and event["mission_id"]
+        }
+        with self.open_store() as store:
+            missions = [
+                {"id": row["id"], "name": row.get("name") or "", "status": row["status"],
+                 "folder": Path(str(row["cwd"])).name, "updated_at": row.get("updated_at")}
+                for mission_id in sorted(mission_ids)
+                if (row := store.get_mission(mission_id))
+            ]
+        return self.message("events", {"after": after, "through": self.cursor, "events": events,
+                                        "mission_cursor": self.cursor, "missions": missions})
 
 
 Connector = Callable[[WorkerConfig], Any]

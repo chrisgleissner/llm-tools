@@ -136,6 +136,25 @@ def test_control_messages_and_event_replication(state):
     assert session.next_events().payload["through"] == through
 
 
+def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_path):
+    directory, first_id = state
+    session, _ = _session(directory)
+    hello = session.hello()
+    _welcome(session, cursor=hello.payload["event_cursor"])
+    assert hello.payload["missions"][0]["id"] == first_id
+
+    # The mission is created after hello while this same worker session stays online.
+    second_cwd = tmp_path / "second"
+    second_cwd.mkdir()
+    assert main(["mission", "create", "--prompt", "Second objective", "--cwd", str(second_cwd), "--providers", "codex", "--json"]) == 0
+    batch = session.next_events()
+    assert batch is not None
+    summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
+    assert first_id not in summaries and len(summaries) == 1
+    assert batch.payload["mission_cursor"] == batch.payload["through"]
+    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at"} for mission in summaries.values())
+
+
 class FakeConnection:
     def __init__(self, incoming, stop, *, fail_after=False):
         self.incoming = list(incoming)

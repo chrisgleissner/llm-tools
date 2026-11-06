@@ -60,6 +60,7 @@ test.describe("with a connected worker", () => {
       await navTo(page, "Missions");
       const link = page.getByRole("link", { name: "Browser E2E mission" });
       await expect(link).toBeVisible({ timeout: 20_000 });
+      await expect(link).toHaveAttribute("href", `/missions/e2e-worker/${fake.missionId}`);
       const row = page.locator("#missions-table tbody tr").first();
       await expect(row).toContainText("e2e-worker");
       await expect(row.locator(".badge.stale")).toHaveCount(0);

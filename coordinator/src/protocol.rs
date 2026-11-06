@@ -49,7 +49,7 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
         "command" => (&["schema_version", "operation", "params", "mission_id", "target", "request_id"], &[]),
         "command.ack" => (&["request_id", "status"], &[]),
         "command.result" => (&["schema_version", "request_id", "operation", "outcome", "result", "error"], &[]),
-        "events" => (&["after", "through", "events"], &[]),
+        "events" => (&["after", "through", "events"], &["mission_cursor", "missions"]),
         "events.nack" => (&["expected_after"], &[]),
         "ping" | "pong" => (&[], &[]),
         "terminal.open" => (&["session_id", "mission_id", "mode", "cols", "rows"], &[]),
@@ -150,6 +150,19 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
                     return perr("invalid-message", "event ids must ascend within (after, through]");
                 }
                 previous = id;
+            }
+            if let Some(missions) = p.get("missions") {
+                let Some(missions) = missions.as_array().filter(|m| m.len() <= 10_000) else {
+                    return perr("invalid-message", "missions must be a list of at most 10000 objects");
+                };
+                if missions.iter().any(|m| !m.is_object()) {
+                    return perr("invalid-message", "each mission snapshot must be an object");
+                }
+            }
+            if let Some(mission_cursor) = p.get("mission_cursor") {
+                if uint(Some(mission_cursor), "mission_cursor", 0)? > through {
+                    return perr("invalid-message", "mission_cursor must not be greater than through");
+                }
             }
             if through < after {
                 return perr("invalid-message", "through must not be below after");

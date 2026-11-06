@@ -345,7 +345,13 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             let p = &m.payload;
             let (after, through) = (p["after"].as_u64().unwrap_or(0), p["through"].as_u64().unwrap_or(0));
             let events = p["events"].as_array().cloned().unwrap_or_default();
-            match st.db.events_store(name, after, through, &events, st.cfg.max_events_per_worker).map_err(db)? {
+            let missions = p.get("missions").and_then(Value::as_array).cloned();
+            let mission_cursor = p.get("mission_cursor").and_then(Value::as_u64);
+            match st
+                .db
+                .events_store(name, after, through, &events, mission_cursor, missions.as_deref(), st.cfg.max_events_per_worker)
+                .map_err(db)?
+            {
                 EventsOutcome::Accepted { cursor, stored } => {
                     if stored > 0 {
                         st.hub.publish(json!({"type": "event", "worker": name, "cursor": cursor, "events": events}));

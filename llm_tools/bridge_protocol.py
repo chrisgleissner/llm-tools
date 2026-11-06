@@ -32,7 +32,7 @@ MESSAGE_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "command": (frozenset({"schema_version", "operation", "params", "mission_id", "target", "request_id"}), frozenset()),
     "command.ack": (frozenset({"request_id", "status"}), frozenset()),
     "command.result": (frozenset({"schema_version", "request_id", "operation", "outcome", "result", "error"}), frozenset()),
-    "events": (frozenset({"after", "through", "events"}), frozenset()),
+    "events": (frozenset({"after", "through", "events"}), frozenset({"mission_cursor", "missions"})),
     "events.nack": (frozenset({"expected_after"}), frozenset()),
     "terminal.open": (frozenset({"session_id", "mission_id", "mode", "cols", "rows"}), frozenset()),
     "terminal.close": (frozenset({"session_id"}), frozenset()),
@@ -100,6 +100,12 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
             if event_id <= previous or event_id > through:
                 raise ProtocolError("invalid-message", "event ids must ascend within (after, through]")
             previous = event_id
+        if "missions" in payload:
+            missions = payload["missions"]
+            if not isinstance(missions, list) or len(missions) > 10_000 or any(not isinstance(m, dict) for m in missions):
+                raise ProtocolError("invalid-message", "missions must be a list of at most 10000 objects")
+        if "mission_cursor" in payload and _int(payload["mission_cursor"], "mission_cursor") > through:
+            raise ProtocolError("invalid-message", "mission_cursor must not be greater than through")
         if through < after:
             raise ProtocolError("invalid-message", "through must not be below after")
     elif kind == "events.nack":
