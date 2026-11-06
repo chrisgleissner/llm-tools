@@ -1,6 +1,7 @@
 import * as api from "../api";
 import { debounce, emptyState, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
 import { icon } from "../icons";
+import { currentWorkSummary } from "../current-work";
 import { isStale, store, subscribe } from "../store";
 
 const PAGE = 25;
@@ -31,6 +32,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   let error = "";
   let seq = 0;
   let disposed = false;
+  const nowDoing = new Map<string, string>();
 
   const body = h("div", { id: "missions-body" });
   const rest = h("div", { class: "toolbar-rest" });
@@ -76,12 +78,30 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
       reply = r;
       error = "";
       live.textContent = `${r.total} mission${r.total === 1 ? "" : "s"} found.`;
+      void loadCurrentWork(r, mine);
     } catch (e) {
       if (disposed || mine !== seq) return;
       error = e instanceof api.ApiError ? e.message : "Cannot load missions.";
     }
     renderBody();
     renderControls();
+  }
+  async function loadCurrentWork(r: Reply, requestSeq: number): Promise<void> {
+    const active = r.missions.filter((m) => m.mission.status.toUpperCase() === "RUNNING" && !m.stale).slice(0, 12);
+    let next = 0;
+    const lane = async (): Promise<void> => {
+      while (next < active.length && !disposed && requestSeq === seq) {
+        const mission = active[next++];
+        if (!mission) continue;
+        try {
+          const status = await api.missionStatus(mission.worker, mission.mission.id);
+          if (disposed || requestSeq !== seq) return;
+          nowDoing.set(`${mission.worker}/${mission.mission.id}`, currentWorkSummary(status));
+        } catch { /* list remains useful if a worker status read is unavailable */ }
+      }
+    };
+    await Promise.all([lane(), lane(), lane()]);
+    if (!disposed && requestSeq === seq) renderBody();
   }
   const reload = debounce(() => void load(), 250);
   const changed = (resetPage = true): void => {
@@ -188,7 +208,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
               h(
                 "tr",
                 { "data-mission": m.mission.id },
-                h("th", { scope: "row", "data-label": "Mission" }, h("span", { class: "cell-stack" }, h("a", { class: "cell-link", href: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(m.mission.id)}` }, m.mission.name || m.mission.id), idChip(m.mission.id, "mission ID"))),
+                h("th", { scope: "row", "data-label": "Mission" }, h("span", { class: "cell-stack" }, h("a", { class: "cell-link", href: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(m.mission.id)}` }, m.mission.name || m.mission.id), idChip(m.mission.id, "mission ID"), nowDoing.has(`${m.worker}/${m.mission.id}`) ? h("span", { class: "now-doing" }, h("span", { class: "activity-dot", "aria-hidden": "true" }), nowDoing.get(`${m.worker}/${m.mission.id}`)!) : null)),
                 h("td", { "data-label": "Worker" }, m.worker),
                 h("td", { "data-label": "Status" }, h("span", {}, statusBadge(m.mission.status), isStale(m) ? h("span", { class: "badge stale", title: "Worker offline or data may be out of date" }, "stale") : null)),
                 h("td", { "data-label": "Folder" }, m.mission.folder),

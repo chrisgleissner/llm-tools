@@ -2,10 +2,11 @@ import * as api from "../api";
 import type { BridgeEvent } from "../api";
 import { button, debounce, emptyState, fill, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
 import { icon } from "../icons";
+import { currentWorkSummary } from "../current-work";
 import { isStale, onStream, store, subscribe, worker } from "../store";
 import type { TerminalPanel } from "../terminal";
 import { announce, confirmDialog } from "../ui";
-import { humanKind } from "./overview";
+import { humanKind, transitionSummary } from "./overview";
 
 const TASK_PAGE = 25;
 const TASK_FETCH = 500;
@@ -28,11 +29,13 @@ const STATUS_ORDER = ["RUNNING", "VERIFYING", "BLOCKED", "READY", "QUEUED", "PAU
 
 export function missionDetail(root: HTMLElement, workerName: string, missionId: string): () => void {
   const header = h("div", { class: "page-head" });
+  const workBox = h("section", { id: "mission-current-work", "aria-label": "Current work" });
+  const actionBox = h("div", { id: "mission-actions", class: "row-actions" });
   const statusBox = h("section", { "aria-labelledby": "ms-status", id: "mission-status" });
   const taskBox = h("section", { "aria-labelledby": "ms-tasks", id: "mission-tasks" });
   const eventBox = h("section", { "aria-labelledby": "ms-events", id: "mission-events" });
   const termBox = h("div", { id: "terminal-slot" });
-  root.append(header, statusBox, taskBox, eventBox, termBox);
+  root.append(header, workBox, termBox, actionBox, statusBox, taskBox, eventBox);
 
   let snapshot: Record<string, unknown> | null = null;
   let snapshotError = "";
@@ -54,6 +57,23 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
 
   const entry = () => store.missions.find((m) => m.worker === workerName && m.mission.id === missionId);
   const online = () => store.conn === "live" && worker(workerName)?.state === "online";
+  const isRunning = () => String((snapshot?.["mission"] as Record<string, unknown> | undefined)?.["status"] ?? entry()?.mission.status ?? "").toUpperCase() === "RUNNING";
+
+  function renderCurrentWork(): void {
+    const needs = snapshot?.["needs_you"] as { message?: string } | null | undefined;
+    fill(workBox,
+      h("h2", { class: "sr-only" }, "Current work"),
+      h("div", { class: `current-work${needs ? " needs-you" : ""}`, "data-current-work": "true" },
+        h("div", { class: "current-work-copy" },
+          h("p", { class: "eyebrow" }, needs ? "Needs your attention" : isRunning() ? "Working now" : "Mission status"),
+          h("strong", { class: "current-work-title" }, currentWorkSummary(snapshot ?? {})),
+          needs && needs.message ? h("p", { class: "attention-copy" }, needs.message) : null,
+        ),
+        h("a", { class: "btn small", href: "#terminal-region" }, "View live output (read only)"),
+      ),
+    );
+    if (termPanel && isRunning()) termPanel.openReadOnly();
+  }
 
   // The terminal code (xterm.js) is the bulk of the bundle: load it only on this page.
   void import("../terminal").then(({ terminalPanel }) => {
@@ -61,6 +81,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     termPanel = terminalPanel(workerName, missionId);
     termBox.append(termPanel.element);
     termPanel.setAvailable(online());
+    if (isRunning()) termPanel.openReadOnly();
   });
 
   // ---- actions
@@ -138,19 +159,19 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         m?.folder ? h("span", { class: "muted" }, ` - ${m.folder}`) : null,
       ),
       h("p", { class: "meta muted small" }, "Mission ID ", idChip(missionId, "mission ID")),
-      h(
-        "div",
-        { class: "row-actions" },
-        m && ["CREATED", "STOPPED"].includes(m.status) ? mb("Start mission", "mission.start", false, "primary") : null,
-        mb("Pause mission", "mission.pause"),
-        mb("Continue", "mission.continue"),
-        mb("Cancel mission", "mission.cancel", true),
-      ),
-      !online() ? h("p", { class: "notice", role: "status" }, "The worker is not connected. Actions are disabled and the data below may be out of date.") : null,
     );
+    const actions = [
+      m && ["CREATED", "STOPPED"].includes(m.status) ? mb("Start mission", "mission.start", false, "primary") : null,
+      mb("Pause mission", "mission.pause"),
+      mb("Continue", "mission.continue"),
+      mb("Cancel mission", "mission.cancel", true),
+      !online() ? h("p", { class: "notice", role: "status" }, "The worker is not connected. Actions are disabled and the data below may be out of date.") : null,
+    ].flatMap((node) => node ? [node] : []);
+    actionBox.replaceChildren(...actions);
   }
 
   function renderStatus(): void {
+    renderCurrentWork();
     const rows: Array<[string, Node | string]> = [];
     if (snapshot) {
       const mission = (snapshot["mission"] ?? {}) as Record<string, unknown>;
@@ -304,8 +325,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
                 {},
                 h("span", { class: "ev-kind" }, humanKind(e.kind)),
                 e.task_id != null ? h("span", { class: "muted small" }, ` task ${e.task_id}`) : null,
+                transitionSummary(e.data ?? {}) ? h("span", { class: "transition-summary" }, transitionSummary(e.data ?? {})!) : null,
                 h("div", {}, timeEl(e.created_at)),
-                Object.keys(e.data ?? {}).length ? h("code", { class: "ev-data" }, JSON.stringify(e.data).slice(0, 200)) : null,
               ),
             ),
           ),
@@ -406,6 +427,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     renderTasks();
     const now = online();
     termPanel?.setAvailable(now);
+    if (isRunning()) termPanel?.openReadOnly();
     if (now && !wasOnline) {
       void loadTasks();
       void loadSnapshot();

@@ -7,6 +7,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
 import { mockApp, MISSION_PATH, MISSION_START_PATH, type MockOptions } from "./mock";
+import { currentWorkSummary } from "../src/current-work";
 import type { Page } from "@playwright/test";
 
 interface Screen {
@@ -53,17 +54,19 @@ const SCREENS: Screen[] = [
   { name: "login-rate-limited", mock: { auth: "login", login: "limited" }, path: "/login", run: async (p) => { await signInAttempt(p); await expect(p.locator("#form-error")).toContainText("try again in 5 min 0 s (at 12:05:00)"); } },
   { name: "login-caps-lock", mock: { auth: "login" }, path: "/login", run: async (p) => { await p.getByLabel("Password", { exact: true }).focus(); await p.getByLabel("Password", { exact: true }).evaluate((el) => el.dispatchEvent(new KeyboardEvent("keydown", { key: "A", modifierCapsLock: true, bubbles: true }))); await expect(p.locator("#password-caps")).toBeVisible(); } },
   { name: "login-signed-out", mock: IN, path: "/", run: async (p) => { await live(p); await p.locator("#account-button").click(); await p.locator("#logout").click(); await expect(p.locator("#login-notice")).toContainText("You signed out"); } },
-  { name: "overview", mock: IN, path: "/", run: async (p) => { await live(p); await expect(p.locator('[data-attention="approval"]')).toBeVisible(); await expect(p.locator("#activity li").first()).toBeVisible(); } },
+  { name: "overview", mock: IN, path: "/", run: async (p) => { await live(p); await expect(p.locator('[data-attention="approval"]').first()).toBeVisible(); await expect(p.locator("#activity li").first()).toBeVisible(); await expect(p.locator(".running-list")).toContainText("Implement the new tokenizer"); await expect(p.locator(".transition-summary").first()).toContainText("RUNNING → VERIFYING"); } },
+  { name: "overview-no-missions", mock: { ...IN, missions: "none" }, path: "/", run: async (p) => { await expect(p.getByText("Next: create a mission on a worker.")).toBeVisible(); await expect(p.locator("#ov-health")).toBeVisible(); } },
   { name: "provider-question", mock: { ...IN, providerQuestion: true }, path: "/", run: async (p) => { const row = p.locator('[data-attention="provider-wait"]'); await expect(row).toHaveCount(1); await expect(row).toContainText("Codex has 1 queued question"); await expect(row).toContainText("take control of the terminal"); } },
   { name: "overview-no-workers", mock: { auth: "in", workers: "none" }, path: "/", run: async (p) => { await expect(p.getByRole("heading", { name: "No workers yet" })).toBeVisible(); } },
   { name: "workers", mock: IN, path: "/workers", run: async (p) => { await expect(p.locator("#workers-table tbody tr")).toHaveCount(3); const alpha = p.locator('tr[data-worker="alpha"]'); await expect(alpha.locator('[data-label="Host"]')).toHaveText("build-node"); await expect(alpha.locator('[data-label="Address"]')).toHaveText("203.0.113.10"); } },
   { name: "workers-none", mock: { auth: "in", workers: "none" }, path: "/workers", run: (p) => expect(p.getByRole("heading", { name: "No workers enrolled" })).toBeVisible() },
   { name: "workers-add-dialog", mock: IN, path: "/workers", run: async (p) => { await p.locator("#add-worker-button").click(); await p.getByLabel("Worker name").fill("Bad Name"); await p.locator("#add-worker").getByRole("button", { name: "Add worker" }).click(); await expect(p.locator("#worker-name-error")).toContainText("lowercase"); } },
-  { name: "missions", mock: IN, path: "/missions", run: async (p) => { await expect(p.locator("#missions-table tbody tr")).toHaveCount(8); } },
+  { name: "missions", mock: IN, path: "/missions", run: async (p) => { await expect(p.locator("#missions-table tbody tr")).toHaveCount(8); await expect(p.locator(".now-doing")).toContainText("Implement the new tokenizer"); } },
   { name: "missions-filtered", mock: IN, path: "/missions?status=RUNNING", run: async (p) => { await expect(p.locator("#missions-table tbody tr")).toHaveCount(2); } },
   { name: "missions-no-match", mock: IN, path: "/missions?q=zzz", run: (p) => expect(p.getByRole("heading", { name: "No missions match" })).toBeVisible() },
   { name: "missions-none", mock: { auth: "in", missions: "none" }, path: "/missions", run: (p) => expect(p.getByRole("heading", { name: "No missions yet" })).toBeVisible() },
-  { name: "mission-detail", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await expect(p.locator("#events-list li").first()).toBeVisible(); await expect(p.locator("#mission-status")).toContainText("healthy"); } },
+  { name: "mission-detail", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await expect(p.locator("#events-list li").first()).toBeVisible(); await expect(p.locator("#events-list .transition-summary")).toContainText("RUNNING → VERIFYING"); await expect(p.locator("#events-list")).not.toContainText("do-not-render-this"); await expect(p.locator("#mission-status")).toContainText("healthy"); await expect(p.locator("#mission-current-work")).toContainText("Implement the new tokenizer"); await expect(p.locator("#terminal-status")).toHaveAttribute("data-mode", "view"); } },
+  { name: "mission-live-output", mock: { ...IN, terminalScreen: true }, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#terminal-status")).toContainText("Live - view only"); await expect(p.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs"); } },
   { name: "mission-confirm-reject", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await p.getByRole("button", { name: "Reject task 2" }).click(); await expect(p.getByRole("dialog")).toBeVisible(); } },
   { name: "mission-toast-applied", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await p.getByRole("button", { name: "Pause task 5" }).click(); await expect(p.locator(".toast.applied")).toBeVisible(); } },
   { name: "sessions", mock: IN, path: "/sessions", run: (p) => expect(p.locator("#sessions-table tbody tr")).toHaveCount(2) },
@@ -106,6 +109,92 @@ test("Codex queued-question attention opens the mission's live terminal", async 
   await row.getByRole("link").click();
   await expect(page).toHaveURL(/\/missions\/alpha\//);
   await expect(page.locator("#terminal-control")).toBeEnabled();
+});
+
+test("running mission streams output read-only without a click or sending input", async ({ page }) => {
+  const mock = await mockApp(page, { ...IN, terminalScreen: true });
+  let statusReceivedAt = 0;
+  page.on("response", (response) => {
+    if (new URL(response.url()).pathname.endsWith(`/missions/${MISSION_PATH.split("/").at(-1)}`) && response.request().method() === "GET") statusReceivedAt = Date.now();
+  });
+  await page.goto(MISSION_PATH);
+  await expect(page.locator("#mission-current-work")).toContainText("Implement the new tokenizer");
+  const status = page.locator("#terminal-status");
+  await expect(status).toHaveAttribute("data-state", "live");
+  await expect(status).toHaveAttribute("data-mode", "view");
+  await expect(status).toContainText("view only");
+  await expect(page.locator("#terminal-host")).toBeVisible();
+  await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
+  await expect(page.locator("#terminal-host .xterm-rows")).toBeInViewport({ ratio: 0.25 });
+  const outputLatencyMs = Date.now() - statusReceivedAt;
+  console.log(`UX running mission: status response to visible output ${outputLatencyMs} ms; clicks 0`);
+  expect(outputLatencyMs).toBeLessThan(1000);
+  await page.locator("#terminal-host .xterm-helper-textarea").focus();
+  await page.keyboard.type("must-not-send");
+  await page.keyboard.press("Enter");
+  expect(mock.terminalInputCount()).toBe(0);
+  await page.getByRole("button", { name: "Take control" }).click();
+  await expect(status).toHaveAttribute("data-mode", "view");
+  expect(mock.terminalInputCount()).toBe(0);
+});
+
+test("current-work summary labels missing provider and model data", async () => {
+  expect(currentWorkSummary({ current_task: { ordinal: 7, title: "Investigate the timeout" }, station_observation: { station: "unknown", model: "unknown" }, station_context: { last_launched_station: "" } })).toBe("Task 7 · Investigate the timeout · Provider unknown · Model unknown");
+  expect(currentWorkSummary({ current_task: { ordinal: 3, title: "Run checks" }, station_context: { last_launched_station: "codex" }, station_observation: { station: "unknown", model: "unknown" }, station_config: { models: { codex: "gpt-5" } } })).toBe("Task 3 · Run checks · codex · gpt-5");
+});
+
+test("running indicator respects reduced motion and keeps its geometry", async ({ page }) => {
+  await mockApp(page, IN);
+  await page.goto("/");
+  const dot = page.locator(".activity-dot").first();
+  await expect(dot).toBeVisible();
+  const before = await dot.boundingBox();
+  await page.waitForTimeout(250);
+  const after = await dot.boundingBox();
+  expect(after?.x).toBe(before?.x);
+  expect(after?.y).toBe(before?.y);
+  expect(after?.width).toBe(before?.width);
+  expect(after?.height).toBe(before?.height);
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect.poll(() => dot.evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+});
+
+test("Pixel 4 mission journey records layout shift and interaction latency", async ({ page }, info) => {
+  test.skip(info.project.name !== "chromium-mobile", "INP and CLS capture uses Chromium Pixel 4 emulation");
+  test.setTimeout(180_000);
+  const context = page.context();
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+  await page.addInitScript(() => {
+    const metrics = { cls: 0, interactions: [] as number[] };
+    (window as Window & { __uxMetrics?: typeof metrics }).__uxMetrics = metrics;
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries() as Array<PerformanceEntry & { value?: number; hadRecentInput?: boolean }>) if (!entry.hadRecentInput) metrics.cls += entry.value ?? 0;
+    }).observe({ type: "layout-shift", buffered: true });
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries() as Array<PerformanceEntry & { duration: number }>) metrics.interactions.push(entry.duration);
+    }).observe({ type: "event", buffered: true, durationThreshold: 16 } as PerformanceObserverInit & { durationThreshold: number });
+  });
+  await mockApp(page, { ...IN, terminalScreen: true });
+  const runs: Array<{ cls: number; inpMs: number }> = [];
+  for (let i = 0; i < 5; i++) {
+    await page.goto("/");
+    await expect(page.locator('[data-attention="approval"]').first()).toBeVisible();
+    await page.locator('[data-attention="approval"] a').first().click();
+    await expect(page.locator("#terminal-status")).toHaveAttribute("data-mode", "view");
+    await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
+    await page.waitForTimeout(100);
+    runs.push(await page.evaluate(() => {
+      const collected = (window as Window & { __uxMetrics?: { cls: number; interactions: number[] } }).__uxMetrics;
+      return { cls: collected?.cls ?? 0, inpMs: Math.max(0, ...(collected?.interactions ?? [])) };
+    }));
+  }
+  const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
+  const clsMedian = median(runs.map((r) => r.cls));
+  const inpMedian = median(runs.map((r) => r.inpMs));
+  console.log(`UX Pixel 4 at 4x CPU, 5 runs: clicks 1, CLS ${runs.map((r) => r.cls.toFixed(3)).join(",")}, median ${clsMedian.toFixed(3)}; max observed interaction-event duration (INP lab proxy) ${runs.map((r) => r.inpMs.toFixed(0)).join(",")} ms, median ${inpMedian.toFixed(0)} ms`);
+  expect(Math.max(...runs.map((r) => r.cls))).toBeLessThan(0.1);
+  await cdp.detach();
 });
 
 test("mission task UI uses resource reads and idempotent resource mutations", async ({ page }) => {

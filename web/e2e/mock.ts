@@ -71,7 +71,7 @@ const TASKS = [
 
 const EVENTS = ["mission-started", "task-status", "provider-selection", "verification-requested", "task-status", "operation-finished"].map((kind, i) => ({
   id: 40 - i,
-  event: { mission_id: MISSIONS[0]!.mission.id, task_id: i % 2 ? 2 : null, kind, data: i === 1 ? { from: "RUNNING", to: "VERIFYING" } : {}, created_at: iso(120 + i * 600) },
+  event: { mission_id: MISSIONS[0]!.mission.id, task_id: i % 2 ? 2 : null, kind, data: i === 1 ? { from: "RUNNING", to: "VERIFYING", private_value: "do-not-render-this" } : {}, created_at: iso(120 + i * 600) },
 }));
 
 const SESSIONS = [
@@ -101,10 +101,12 @@ function json(route: Route, status: number, body: unknown, headers: Record<strin
 export interface Mock {
   /** Switch what /auth/state reports (used to simulate an expired session). */
   setAuth(mode: AuthMode): void;
+  terminalInputCount(): number;
 }
 
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
+  let terminalInputs = 0;
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
   const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS;
@@ -113,9 +115,12 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     /* connected, silent: the page shows "Live" */
   });
   await page.routeWebSocket(/\/api\/v1\/terminal/, (ws) => {
-    if (!opts.terminalScreen) return;
-    ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "write", reason: "" }));
-    ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
+    ws.onMessage((message) => {
+      if (typeof message !== "string") return;
+      try { if ((JSON.parse(message) as { t?: string }).t === "i") terminalInputs += 1; } catch { /* ignore malformed test frames */ }
+    });
+    ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "view", reason: "" }));
+    if (opts.terminalScreen) ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
   });
   await page.route("**/api/v1/**", async (route) => {
     const req = route.request();
@@ -170,7 +175,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (missionResource && method === "GET") {
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
       const providerQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
-      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, needs_you: providerQuestion ? { kind: "provider", tasks: [], message: "Codex has 1 queued question · take control of the terminal and press Shift+Left to answer" } : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: providerQuestion ? { kind: "provider", tasks: [], message: "Codex has 1 queued question · take control of the terminal and press Shift+Left to answer" } : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
     }
     if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {
@@ -222,5 +227,5 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     return json(route, 404, { error: { code: "not-found", message: `unmocked ${method} ${path}` } });
   });
-  return { setAuth: (m) => void (auth = m) };
+  return { setAuth: (m) => void (auth = m), terminalInputCount: () => terminalInputs };
 }

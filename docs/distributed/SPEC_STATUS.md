@@ -274,6 +274,10 @@ negative tests remain incomplete unless explicitly recorded below.
 | UX-004 | [ ] | Site hero and concise distributed section remain to be audited and improved. |
 | UX-005 | [ ] | After times/clicks, Lighthouse, bundle, Pixel INP/CLS and axe evidence remain. |
 | UX-006 | [ ] | Visual baseline and bundle-budget checks remain. |
+| UX-007 | [~] | `web/e2e/screenshots.spec.ts::running mission streams output read-only without a click or sending input` proves view-only WebSocket output, zero input frames, visible task context and <1 s output after status response (296 ms desktop, 377 ms Pixel 4); `overview` / `missions` scenarios assert current-work summary. Full API/client parity still remains. |
+| UX-008 | [~] | Running status dot and row indicator pulse without geometry animation; `prefers-reduced-motion` disables both. Existing text/icon/color states remain distinct. `Pixel 4 mission journey records layout shift and interaction latency` measures five runs under 4× CPU (CLS 0.000 median/max, interaction-event duration 48 ms median / 104 ms max); the full operation/worker state matrix remains. |
+| UX-009 | [~] | Needs-attention now precedes overview counters; no-worker and no-mission next steps are explicit; mission page prioritizes current work; event JSON is replaced by whitelisted state transitions. Remaining pages and first-run action hierarchy are catalogued in `ux-audit.md`. |
+| UX-010 | [~] | `docs/distributed/ux-audit.md` records the all-screen critique, findings, screenshot references, flow clicks, output latency, bundle, Pixel 4 CLS/INP proxy and remaining work. Persona task observation and Lighthouse site measures remain. |
 | REV-001 | [ ] | Fetched and checked `origin/main`, currently identical to the branch's recorded base; merge commit and review of later Pi changes await PI PR #32. |
 | REV-002 | [ ] | Adversarial evidence/revertability audit of every registered ID remains. |
 | REV-003 | [ ] | Correctness/race/replay/platform review remains. |
