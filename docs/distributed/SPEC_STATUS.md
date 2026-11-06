@@ -277,8 +277,8 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-021 | [ ] | Not started; waits for PR #31 to merge (phase B). Browser matrix (web). |
 | PRD-022 | [ ] | Not started; waits for PR #31 to merge (phase B). Internationalisation-ready (web). |
 | PRD-023 | [ ] | Not started. External-style penetration test. |
-| PRD-024 | [ ] | Not started. Security policy. |
-| PRD-025 | [ ] | Not started. Dependency hygiene. |
+| PRD-024 | [~] | `SECURITY.md` gives the private reporting link, response times, supported versions, the advisory and CVE process and the dependency response policy. Private vulnerability reporting is disabled on the repository (`gh api repos/chrisgleissner/llm-tools/private-vulnerability-reporting` returned `{"enabled":false}` on 2026-11-06); enabling it is the owner's action. |
+| PRD-025 | [~] | `.github/dependabot.yml` covers Cargo (`coordinator/`), npm (`web/`), GitHub Actions and pip weekly; `.github/workflows/audit.yml` runs `cargo audit`, `npm audit --audit-level=moderate` and `pip-audit` weekly, on demand and on lock-file changes; the response policy is in `SECURITY.md`. Local runs on 2026-11-06: npm audit 0 vulnerabilities, cargo audit 0 vulnerabilities in 185 crates. Waiting for the first green audit run ID. |
 | PRD-026 | [ ] | Not started. Safe defaults review. |
 | PRD-027 | [ ] | Not started; waits for PR #31 to merge (phase B). Abuse resistance at scale. |
 | PRD-028 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate checklist. |
