@@ -415,3 +415,63 @@ def test_int013_worker_session_reads_through_a_read_only_store(tmp_path, monkeyp
 
     with captured["open_store"]() as store:  # type: ignore[operator]
         assert store.readonly is True  # the 0.5 s event poll takes no write lock and chmods nothing
+
+
+def test_int018_cancel_ends_the_running_provider_process(tmp_path, monkeypatch) -> None:
+    import os
+    import signal
+
+    from llm_tools import bridge
+
+    store, mission_id, operation_id, process = _sleeper_operation(tmp_path, monkeypatch)
+    try:
+        result = bridge._apply_operator_command(store, mission_id, {"action": "cancel"})
+
+        process.wait(timeout=5)  # the old code returned with the provider still running
+        assert result["result"]["mission_status"] == "CANCELLED"
+        assert store.get_mission(mission_id)["status"] == "CANCELLED"
+        assert "stop --force" not in result["result"].get("detail", "")
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+
+
+def test_int018_cancel_names_stop_force_when_the_provider_cannot_be_ended(tmp_path, monkeypatch) -> None:
+    import os
+    import signal
+
+    from llm_tools import bridge
+
+    store, mission_id, _operation_id, process = _sleeper_operation(tmp_path, monkeypatch)
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("refusing to signal a process whose persisted identity does not match")
+
+    monkeypatch.setattr(runtime, "_terminate_owned_process_group", refuse)
+    try:
+        result = bridge._apply_operator_command(store, mission_id, {"action": "cancel"})
+
+        assert store.get_mission(mission_id)["status"] == "CANCELLED"  # the cancel itself still succeeds
+        assert f"llm-bridge stop --force --mission {mission_id[:8]}" in result["result"]["detail"]
+        assert process.poll() is None
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
+def test_int018_cancel_does_not_signal_a_reused_pid(tmp_path, monkeypatch) -> None:
+    import os
+    import signal
+
+    from llm_tools import bridge
+
+    store, mission_id, operation_id, process = _sleeper_operation(tmp_path, monkeypatch)
+    store.db.execute("UPDATE operations SET process_start='boot:from-an-earlier-process' WHERE id=?", (operation_id,))
+    try:
+        bridge._apply_operator_command(store, mission_id, {"action": "cancel"})
+
+        assert process.poll() is None  # the PID's current start token differs from the recorded one
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)

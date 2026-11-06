@@ -19,7 +19,7 @@ from .bridge_format import NATIVE_STOP_HINT
 from .bridge_store import BridgeStore, MissionLock, TaskNotFound, TransitionError, default_state_dir, derive_mission_name, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
 from .bridge_store import controller_running as _controller_running
 from .bridge_states import (
-    ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
+    ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
     STARTED_MISSION_STATUSES,
 )
 from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES, THEME_CHOICES
@@ -444,7 +444,7 @@ def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[s
             if current["status"] != "QUEUED":
                 return current
             result = _apply_operator_effect(store, mission_id, payload)
-            return store.finish_command(command["id"], status="APPLIED", result=result)
+            finished = store.finish_command(command["id"], status="APPLIED", result=result)
     except _RejectedOperatorCommand as exc:
         rejection = {"error": str(exc)}
         if exc.code:
@@ -454,6 +454,34 @@ def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[s
         _REJECTION_CAUSES[command["id"]] = exc.__cause__
         with store._transaction():
             return store.finish_command(command["id"], status="REJECTED", result=rejection)
+    if payload.get("action") == "cancel":
+        _end_cancelled_providers(store, mission_id, finished)
+    return finished
+
+
+def _end_cancelled_providers(store: BridgeStore, mission_id: str, finished: dict[str, Any]) -> None:
+    """After a mission cancel is durable, end the provider processes it left running (INT-018).
+
+    Uses the same identity-checked termination as ``stop --force``; a process whose identity was never
+    recorded, or that cannot be ended, is left alone and named in the receipt.
+    """
+    from .bridge_runtime import _process_start_token, _terminate_owned_process_group, provider_operations_to_check
+
+    remaining = 0
+    for operation in provider_operations_to_check(store, mission_id):
+        if operation["status"] not in ACTIVE_OPERATION_STATUSES:
+            continue
+        pid, start = operation.get("process_pid"), operation.get("process_start")
+        if not pid or not start:
+            remaining += 1
+        elif _process_start_token(int(pid)) == str(start):
+            try:
+                _terminate_owned_process_group(int(pid), str(start))
+            except (OSError, RuntimeError, TimeoutError):  # PermissionError is an OSError
+                remaining += 1
+    result = finished.get("result")
+    if remaining and isinstance(result, dict):
+        result["detail"] = f"cancel is durable; a provider run could not be ended automatically · end it with: llm-bridge stop --force --mission {fmt.short_id(mission_id)}"
 
 
 def _native_provider_running(store: BridgeStore, mission: dict[str, Any]) -> bool:
@@ -542,7 +570,7 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                     store.set_task_status(int(task["id"]), "CANCELLED")
             result = {"mission_status": "CANCELLED", "work_status": "DEFERRED" if active else "APPLIED"}
             if active:
-                result["detail"] = "cancel is durable; the active provider returns at its boundary"
+                result["detail"] = "cancel is durable; the active provider run is being ended"
         elif action == "task.verify":
             task_id = int(payload["task_id"])
             verified = _require_task(store, mission_id, task_id)

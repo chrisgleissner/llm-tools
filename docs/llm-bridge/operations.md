@@ -723,7 +723,9 @@ sleep independently.
 mission ID is saved (CREATED) · start it with: llm-bridge start` (`Already stopped
 · ...` when it is `STOPPED`). `pause` on a mission that is not running likewise says
 `Nothing to pause · mission is not running (CREATED)`, and on a paused one `Already
-paused · mission ID is PAUSED`. These no-ops exit 0. With a controller, `stop` asks it to stop at its next
+paused · mission ID is PAUSED`. These no-ops exit 0. A `RUNNING` mission whose controller has died is
+moved straight to `STOPPED`, because nobody is left to finish a `STOPPING`; if a provider run was
+still recorded as active, the receipt names `stop --force` to end it. With a controller, `stop` asks it to stop at its next
 boundary and closes the owned station after the controller stops; in native mode it waits for the provider
 invocation to return and says how to finish if that takes a while; a later resume creates or reconnects the
 station as needed. `stop --force` reconciles unresolved work and terminates
@@ -732,14 +734,26 @@ validated. When no provider process was running it prints `Stopped · no provide
 process was running` and exits 0; it fails only when a recorded provider process
 cannot be confirmed as the mission's, and then names its PID. The task that
 `stop --force` interrupted is recorded as `interrupted by stop --force`, and the
-next `start` runs it again.
+next `start` runs it again. Recovery at `start` and a repeated `stop --force` check the recorded
+provider identity again until termination has succeeded. A recorded process whose PID now has a
+different start token is treated as gone and is never signalled. When a `RUNNING` operation has no recorded
+process identity, `start` refuses on every attempt until you acknowledge with `stop --force`.
+
+A running controller with nothing it can run (every unfinished task is blocked, failed or paused, or the
+mission has no tasks) records one `mission-waiting-for-operator` event, shown in Activity as `Waiting for you`,
+and polls less often the longer nothing changes (0.5 s up to 4 s). `status` and the Overview's `Needs you`
+row say `waiting for you` and name the command to run (`task retry`, `task resume`, `task approve`). The
+controller continues by itself once you act. A task that was cancelled counts as finished: a mission whose
+other tasks are all completed completes, and a mission whose tasks are all cancelled stops.
 
 While a provider's capacity cannot be determined (not signed in, no usage data),
 the task stays READY and no operation is open: `status` shows `Waiting for
 capacity data · claude has no usage data, launches anyway in 14m (at 19:50)`.
 The deadline is fixed when the wait starts (`--max-unavailable-wait`, default
 900 s), so the countdown only goes down. After it passes, Bridge launches the
-provider anyway. `cancel` durably cancels the mission and its unfinished tasks.
+provider anyway. `cancel` durably cancels the mission and its unfinished tasks, then ends the provider process of an
+active run using the same identity check as `stop --force`; if that process cannot be ended
+automatically, the receipt names `stop --force`.
 It ends the mission for good (`resume` and `start` refuse a cancelled mission), so
 it asks `This cannot be undone` on a terminal and needs `--yes` when there is no
 terminal to ask on, for example `llm-bridge cancel --mission ID --yes`. The
