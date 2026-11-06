@@ -1556,7 +1556,7 @@ async fn security_headers(mut r: Response) -> Response {
     // The static handler sets its own Content-Security-Policy and cache policy.
     for (k, v) in [
         ("cache-control", "no-store"),
-        ("content-security-policy", "default-src 'self'; frame-ancestors 'none'"),
+        ("content-security-policy", "default-src 'none'; frame-ancestors 'none'"),
     ] {
         if !h.contains_key(k) {
             h.insert(k, v.parse().expect("static header"));
@@ -1566,7 +1566,14 @@ async fn security_headers(mut r: Response) -> Response {
         ("x-content-type-options", "nosniff"),
         ("x-frame-options", "DENY"),
         ("referrer-policy", "no-referrer"),
-        ("strict-transport-security", "max-age=31536000"),
+        ("strict-transport-security", "max-age=63072000"),
+        ("cross-origin-opener-policy", "same-origin"),
+        ("cross-origin-resource-policy", "same-origin"),
+        ("cross-origin-embedder-policy", "require-corp"),
+        (
+            "permissions-policy",
+            "accelerometer=(), autoplay=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=()",
+        ),
     ] {
         h.insert(k, v.parse().expect("static header"));
     }

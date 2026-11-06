@@ -42,7 +42,11 @@ async fn serves_index_and_assets_publicly_with_security_headers() {
     assert_eq!(h["x-content-type-options"], "nosniff");
     assert_eq!(h["referrer-policy"], "no-referrer");
     assert_eq!(h["x-frame-options"], "DENY");
-    assert!(h["strict-transport-security"].to_str().unwrap().starts_with("max-age="));
+    assert_eq!(h["strict-transport-security"], "max-age=63072000");
+    assert_eq!(h["cross-origin-opener-policy"], "same-origin");
+    assert_eq!(h["cross-origin-resource-policy"], "same-origin");
+    assert_eq!(h["cross-origin-embedder-policy"], "require-corp");
+    assert!(h["permissions-policy"].to_str().unwrap().contains("camera=()"));
     assert_eq!(h["cache-control"], "no-cache");
 
     let (st, h, body) = get(&env, "/app-ABCD1234.js").await;

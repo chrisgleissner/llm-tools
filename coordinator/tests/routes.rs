@@ -143,6 +143,29 @@ async fn unknown_api_paths_and_methods_return_problem_details() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn security_headers_cover_api_health_static_and_error_responses() {
+    let env = boot().await;
+    for (path, api_csp) in [
+        ("/api/v1/openapi.json", true),
+        ("/healthz", true),
+        ("/", false),
+        ("/api/v1/no-such-route", true),
+    ] {
+        let response = env.client.get(format!("{}{path}", env.base())).send().await.unwrap();
+        let headers = response.headers();
+        assert_eq!(headers["strict-transport-security"], "max-age=63072000", "{path}");
+        assert_eq!(headers["cross-origin-opener-policy"], "same-origin", "{path}");
+        assert_eq!(headers["cross-origin-resource-policy"], "same-origin", "{path}");
+        assert_eq!(headers["cross-origin-embedder-policy"], "require-corp", "{path}");
+        assert!(headers["permissions-policy"].to_str().unwrap().contains("camera=()"), "{path}");
+        let csp = headers["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
+        assert_eq!(csp.contains("default-src 'none'"), api_csp, "{path}: {csp}");
+    }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn every_authenticated_route_enforces_its_declared_token_scope() {
     let env = boot().await;
     let api = env.api();

@@ -218,3 +218,48 @@ checkbox means the full requirement and its CI evidence are not complete yet.
 | API-014 | [ ] | Coordinator guide, API examples, README and site link updated; full versioning, pagination and rate-limit contract remains. |
 | API-015 | [ ] | CLI/route parity table and argparse-tree test remain. |
 | API-016 | [ ] | Worker opt-ins and enforcement remain. |
+
+## Follow-up security hardening (2026-11-06)
+
+SEC2 rows map to `docs/distributed/security-requirements.md`; the implementation and
+negative tests remain incomplete unless explicitly recorded below.
+
+| ID | Status | Current evidence / remaining work |
+|---|---|---|
+| SEC2-001 | [ ] | TLS 1.3 default, opt-in TLS 1.2, ticket policy and testssl CI remain. |
+| SEC2-002 | [ ] | Global response headers now include two-year HSTS, COOP/CORP/COEP, Permissions-Policy and API `default-src 'none'`; `coordinator/tests/routes.rs::security_headers_cover_api_health_static_and_error_responses` and `coordinator/tests/web.rs::serves_index_and_assets_publicly_with_security_headers` pass. Table coverage and CI evidence remain. |
+| SEC2-003 | [ ] | Mutation content type is enforced with 415 (`coordinator/tests/web_api.rs::mutation_bodies_require_json_content_type`); unknown fields, bounded JSON depth/string/array sizes, identifier validation and explicit HEAD/OPTIONS behavior remain. |
+| SEC2-004 | [ ] | Fetch Metadata checks for cookie sessions remain. |
+| SEC2-005 | [ ] | No CORS baseline remains; explicit HTTPS origin allow-list and preflight tests remain. |
+| SEC2-006 | [ ] | Password first run exists; TOTP, recovery codes, origin-gated passkeys and Internet-mode MFA remain. |
+| SEC2-007 | [ ] | Current password policy and Argon2id exist; NIST length policy, offline breached-password blocklist and measured configurable cost remain. |
+| SEC2-008 | [ ] | Session rotation, per-session CSRF, active-session management and step-up remain. |
+| SEC2-009 | [ ] | Scoped hashed bearer tokens exist; prefixed format, token binding, max lifetime and one-time WebSocket tickets remain. |
+| SEC2-010 | [ ] | Login limits exist; address/token mutation limits, back-off, alerts and global cap remain. |
+| SEC2-011 | [ ] | Route scope and principal declarations exist; centralized object policy and cross-principal negative tests remain. |
+| SEC2-012 | [ ] | Problem details exist; schema-driven least-data responses, generic correlated 5xx and page caps remain. |
+| SEC2-013 | [ ] | Existing audit rows cover several mutations; append-only hash-chained security log and admin API remain. |
+| SEC2-014 | [ ] | New-device/failure/token notifications and optional outbound webhook remain. |
+| SEC2-015 | [ ] | CI dependency audits, action SHA pins, SBOM, image signature and provenance remain. |
+| SEC2-016 | [ ] | Schemathesis begins as part of API-012; ZAP API and console scans and SEC2 negative-test coverage remain. |
+| SEC2-017 | [ ] | Separated listeners, trusted proxy CIDRs and remote-access guidance remain. |
+| SEC2-018 | [ ] | `exposure` migration and Internet-mode startup precondition validation remain. |
+| SEC2-019 | [ ] | Certificate/authenticator interfaces, principal-keyed storage and sender-constrained token model remain. |
+| SEC2-020 | [ ] | Optional worker mTLS and token rotation remain; worker-side opt-ins from API-016 remain. |
+
+## Passkeys (2026-11-06)
+
+| ID | Status | Current evidence / remaining work |
+|---|---|---|
+| PK-001 | [ ] | Optional Tailscale profile and concise passkey setup documentation remain. |
+| PK-002 | [ ] | Canonical public origin and RP ID change/re-enrolment safeguards remain. |
+| PK-003 | [ ] | Maintained WebAuthn implementation and credential persistence remain. |
+| PK-004 | [ ] | Conditional and button passkey sign-in with password fallback remain. |
+| PK-005 | [ ] | Password and passkey first-run variants and mobile flow tests remain. |
+| PK-006 | [ ] | Passkey management, step-up and last-method safeguards remain. |
+| PK-007 | [ ] | Recovery codes and local passkey reset remain. |
+| PK-008 | [ ] | Fresh passkey assertions for sensitive actions remain. |
+| PK-009 | [ ] | Passkey step-up for token creation remains. |
+| PK-010 | [ ] | Browser capability detection and calm unavailable state remain. |
+| PK-011 | [ ] | WebAuthn vectors, Playwright virtual-authenticator flow and negative tests remain. |
+| PK-012 | [ ] | Physical Android validation belongs to the separate Pi verification prompt. |
