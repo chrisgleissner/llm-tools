@@ -181,7 +181,8 @@ test("Pixel 4 mission journey records layout shift and interaction latency", asy
   for (let i = 0; i < 5; i++) {
     await page.goto("/");
     await expect(page.locator('[data-attention="approval"]').first()).toBeVisible();
-    await page.locator('[data-attention="approval"] a').first().click();
+    const approval = page.locator('[data-attention="approval"]').first();
+    await approval.locator("xpath=ancestor::li").getByRole("link").click();
     await expect(page.locator("#terminal-status")).toHaveAttribute("data-mode", "view");
     await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
     await page.waitForTimeout(100);

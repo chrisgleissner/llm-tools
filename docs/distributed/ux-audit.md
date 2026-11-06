@@ -44,16 +44,16 @@ The event stream does not currently persist worker online/offline or terminal li
 | Sign in | One submit action; baseline time was not instrumented. | One submit action; DOG-012 copy/focus fix verified by `auth-ux.spec.ts`. No timing claim. |
 | Find a mission waiting for approval | Attention was present but followed the summary tiles; selecting the mission required one link click. | Attention is first after the page heading; one mission link click. No separate search or scroll is needed. |
 | Approve a task | Two actions: Approve, then confirm. | Two actions: Approve, then confirm; server outcome time not instrumented. |
-| Open provider output from mission detail | One “Open terminal” click after scrolling past status, tasks and events. | Zero clicks: the view-only terminal connects automatically for a running mission. Status-response to visible output measured at **218 ms desktop** and **179 ms Pixel 4** in the fixed WebSocket fixture. The regression test enforces under 1,000 ms and no input frames. |
+| Open provider output from mission detail | One “Open terminal” click after scrolling past status, tasks and events. | Zero clicks: the view-only terminal connects automatically for a running mission. Latest status-response to visible output measurements are **481 ms desktop** and **630 ms Pixel 4** in the fixed WebSocket fixture. The regression test enforces under 1,000 ms and no input frames. |
 | Check worker health | One Workers navigation click, then scan the table. | One Workers navigation click; host/address and state are visible in the table. No task timer instrumented. |
 
 The output latency is the interval from the mission-status HTTP response to visible provider output, not total navigation latency or a live-network measurement. The seeded output is on a WebSocket fixture; it does not include worker or LAN delays.
 
 ## Layout, interaction, bundle and accessibility
 
-- Pixel 4 journey (Chromium, emulated 353×745 CSS px, 4× CPU throttle, loopback): five runs measured **CLS 0.000 median / 0.000 max** and maximum observed interaction-event duration (**INP lab proxy**) **48 ms median / 104 ms max**, with one click from Overview to the waiting mission. A prior single exploratory run recorded 0.071 CLS and 216 ms; the five-run probe is the maintained result. The regression test requires every run below 0.1 CLS.
+- Pixel 4 journey (Chromium, emulated 353×745 CSS px, 4× CPU throttle, loopback): the latest five-run probe measured **CLS 0.000 median / 0.000 max** and maximum observed interaction-event duration (**INP lab proxy**) **64 ms median / 120 ms max**, with one click from Overview to the waiting mission. An earlier five-run sample recorded 0.000 CLS and 48/104 ms; the latest sample replaces it. The regression test requires every run below 0.1 CLS.
 - Current built bundle: initial JS **67,479 B raw / 22,940 B gzip**; initial CSS **30,517 B / 7,388 B**; total **97,996 B / 30,328 B**. Lazy chunks total **363,540 B / 95,691 B**. These remain under `web/budget.json` (100,000 B raw / 32,000 B gzip initial and 400,000 B / 100,000 B lazy). The budget has not been raised.
-- Live-output screenshots pass axe with zero violations after replacing xterm's low-contrast ANSI palette. The existing full screenshot suite checks all impact levels, including serious and critical; the focused updated desktop/mobile states pass.
+- Updated desktop and Pixel 4 screenshots pass with the current hierarchy in both themes. The screenshot run exercised axe for every captured state, including serious and critical impact levels; 146 tests passed and two viewport-specific states were skipped. The Pixel 4 journey and live-output tests pass independently.
 - Project-site Lighthouse scores are recorded below. Site INP/CLS and five-run metrics remain unmeasured; UX-004/005 stay partial.
 
 ## Project site first screen and distributed section
@@ -76,8 +76,8 @@ The distributed section now has a direct heading and a short description of the 
 | Best practices | 100 | 100 |
 | SEO | 100 | 100 |
 
-The two reports were collected from the pre-edit `HEAD` snapshot and the changed site using local assets and a local static server. These are single-run Lighthouse scores, not repeated performance or live-user measurements. The project-site scores are now measured; the requested persona sessions, task timings and Pixel 4 INP/CLS remain open under UX-001/005.
+The two reports were collected from the pre-edit `HEAD` snapshot and the changed site using local assets and a local static server. These are single-run Lighthouse scores, not repeated performance or live-user measurements. The project-site scores are now measured; persona sessions, broader task timings, and site INP/CLS remain open under UX-001/005.
 
 ## Remaining work
 
-This audit closes the live-output discovery gap, adds current-work summaries, records the site Lighthouse scores, and documents the site hero/distributed-section changes. The broader principal UX pass remains incomplete: capture repeatable timing for the other core tasks, complete the three persona walk-throughs, review/resolve every hesitation on every screen, collect five-run mobile performance summaries and Pixel 4 INP/CLS, and finish the console redesign. Do not mark UX-001–006 complete on the strength of this document alone.
+This audit closes the live-output discovery gap, adds current-work summaries, records the site Lighthouse scores and Pixel 4 mission-journey metrics, and documents the site hero/distributed-section changes. The broader principal UX pass remains incomplete: capture repeatable timing for the other core tasks, complete the three persona walk-throughs, review/resolve every hesitation on every screen, collect site INP/CLS, and finish the console redesign. Do not mark UX-001–006 complete on the strength of this document alone.
