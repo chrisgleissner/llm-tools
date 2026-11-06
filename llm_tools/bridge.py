@@ -1775,11 +1775,17 @@ def _print_result(result: Any, as_json: bool, human: Callable[[Any], str] | None
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+# A controller records the terminal mission status before it exits and releases the mission lock, so a
+# stop issued in that window finds a terminal mission whose lock is still held. Wait this long for the
+# controller to finish exiting before reporting it as still active.
+TERMINAL_STOP_LOCK_WAIT_SECONDS = 15.0
+
+
 def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
     """Close a retained station after a terminal mission has released control."""
     lock = MissionLock(state_dir() / "locks", mission_id)
     try:
-        lock.acquire()
+        lock.acquire(timeout=TERMINAL_STOP_LOCK_WAIT_SECONDS, poll=0.05)
     except BlockingIOError as exc:
         raise RuntimeError(f"mission {mission_id[:8]} still has an active controller; stop is pending") from exc
     try:

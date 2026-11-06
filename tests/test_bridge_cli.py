@@ -161,6 +161,7 @@ def test_stop_terminal_mission_refuses_station_cleanup_while_controller_lock_is_
         mission = store.create_mission("failed mission", "objective", cwd=tmp_path)
         store.set_mission_status(mission["id"], "RUNNING")
         store.set_mission_status(mission["id"], "FAILED")
+    monkeypatch.setattr(bridge, "TERMINAL_STOP_LOCK_WAIT_SECONDS", 0.2)
     controller_lock = MissionLock(state / "locks", mission["id"])
     controller_lock.acquire()
     try:
@@ -168,6 +169,31 @@ def test_stop_terminal_mission_refuses_station_cleanup_while_controller_lock_is_
             bridge._stop_terminal_mission_station(mission["id"])
     finally:
         controller_lock.release()
+
+
+def test_stop_terminal_mission_waits_for_an_exiting_controller_to_release_its_lock(tmp_path: Path, monkeypatch) -> None:
+    """A controller marks the mission terminal before it exits; a stop in that window waits, it does not fail."""
+    import threading
+
+    from llm_tools import bridge, bridge_runtime
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    monkeypatch.setattr(bridge_runtime, "mission_socket_path", lambda _mission_id: tmp_path / "no-station.sock")
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission = store.create_mission("stopped mission", "objective", cwd=tmp_path)
+        store.set_mission_status(mission["id"], "RUNNING")
+        store.set_mission_status(mission["id"], "FAILED")
+    controller_lock = MissionLock(state / "locks", mission["id"])
+    controller_lock.acquire()
+    exiting = threading.Timer(0.3, controller_lock.release)
+    exiting.start()
+    try:
+        result = bridge._stop_terminal_mission_station(mission["id"])
+    finally:
+        exiting.join()
+    assert result["mission"]["status"] == "FAILED"
+    assert result["station_status"] == "ABSENT"
 
 
 def test_mission_create_accepts_stdin_and_persists_verifier_argv(tmp_path: Path, monkeypatch, capsys) -> None:
