@@ -96,11 +96,12 @@ worker protocol is `protocol.md`.
   server certificate from the existing CA (names must be within the CA's name
   constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
   installs administrator-provided files.
-- `bridge-coordinator token create NAME [--expires-days N]` prints an API token for the
-  remote CLI; stored hashed, revocable with `token revoke NAME`. The token expires
-  after 90 days by default; `--expires-days 0` creates one that never expires. The
-  expiry is checked on every use. An API token has full administrator power (see
-  `threat-model.md`).
+- `bridge-coordinator token create NAME [--scope SCOPE]... [--expires-days N]` prints an API
+  token once; only its SHA-256 hash and grants are stored, and `token revoke NAME` revokes it.
+  New tokens default to `read`; repeat `--scope` for `operate`, `terminal:view`, `terminal:write`
+  or `admin`. `admin` grants every scope. Tokens expire after 90 days by default;
+  `--expires-days 0` creates one that never expires. Existing tokens are migrated to `admin`
+  so their previous permissions remain unchanged.
 
 ## HTTP API (all under `/api/v1`, JSON)
 

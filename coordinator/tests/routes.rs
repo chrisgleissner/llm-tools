@@ -29,7 +29,7 @@ fn refused_with(err: tokio_tungstenite::tungstenite::Error, status: u16) {
 
 #[test]
 fn route_table_matches_the_router_definition() {
-    let table: BTreeSet<String> = ROUTES.iter().map(|(p, _, _)| p.to_string()).collect();
+    let table: BTreeSet<String> = ROUTES.iter().map(|(p, _, _, _)| p.to_string()).collect();
     assert_eq!(table.len(), ROUTES.len(), "duplicate path in ROUTES");
     assert_eq!(
         routed_paths(),
@@ -43,7 +43,7 @@ async fn every_route_requires_credentials_except_the_public_ones() {
     let env = boot().await;
     let anon = env.api();
     let mut seen_public = Vec::new();
-    for (path, methods, access) in ROUTES {
+    for (path, methods, access, _) in ROUTES {
         let url = concrete(path);
         for m in *methods {
             let method: Method = m.parse().unwrap();
@@ -91,6 +91,72 @@ async fn every_route_requires_credentials_except_the_public_ones() {
     // Unknown API paths are not served by the SPA fallback; the application shell needs no credentials.
     assert_eq!(anon.send(anon.bare(Method::GET, "/api/v1/nope")).await.0, 404);
     assert_eq!(anon.send(anon.bare(Method::GET, "/")).await.0, 200);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_authenticated_route_enforces_its_declared_token_scope() {
+    let env = boot().await;
+    let api = env.api();
+    let token_scopes = [
+        ("scope-read", vec!["read".to_string()]),
+        ("scope-operate", vec!["operate".to_string()]),
+        ("scope-terminal-view", vec!["terminal:view".to_string()]),
+        ("scope-terminal-write", vec!["terminal:write".to_string()]),
+        ("scope-admin", vec!["admin".to_string()]),
+    ];
+    for (name, scopes) in &token_scopes {
+        let token = format!("secret-{name}");
+        env.srv
+            .state
+            .db
+            .token_create_scoped(name, &bridge_coordinator::auth::sha256_hex(&token), None, scopes)
+            .unwrap();
+    }
+    for (path, methods, access, declared_scope) in ROUTES {
+        if *access != Access::Authed {
+            assert!(!declared_scope.is_empty() || *access == Access::Public, "{path} has no policy");
+            continue;
+        }
+        assert!(!declared_scope.is_empty(), "{path} has no scope policy");
+        for method in *methods {
+            let method: Method = method.parse().unwrap();
+            for (name, granted) in &token_scopes {
+                let required = if *declared_scope == "terminal:conditional" {
+                    if *name == "scope-terminal-write" {
+                        "terminal:write"
+                    } else {
+                        "terminal:view"
+                    }
+                } else {
+                    declared_scope
+                };
+                let has_scope = bridge_coordinator::scopes::grants(granted, required);
+                let mut url = concrete(path);
+                if *path == "/api/v1/terminal" {
+                    url.push_str(if required == "terminal:write" {
+                        "?worker=w1&mission=m1&mode=write"
+                    } else {
+                        "?worker=w1&mission=m1"
+                    });
+                }
+                let token = format!("secret-{name}");
+                let request = api.bare(method.clone(), &url).header("authorization", format!("Bearer {token}"));
+                let request = if method == Method::POST {
+                    request.json(&serde_json::json!({"name": "scope-created"}))
+                } else {
+                    request
+                };
+                let (status, body) = api.send(request).await;
+                if has_scope {
+                    assert_ne!(status, 401, "{method} {url} token {name}: {body}");
+                    assert_ne!(status, 403, "{method} {url} token {name}: {body}");
+                } else {
+                    assert_eq!(status, 403, "{method} {url} token {name}: {body}");
+                }
+            }
+        }
+    }
     env.stop().await;
 }
 

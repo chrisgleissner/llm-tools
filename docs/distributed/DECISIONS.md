@@ -146,3 +146,12 @@ skips tests marked `tmux` or `pty` and the console tests in `MACOS_SKIPPED_TESTS
 console and station are not supported there. Nothing is skipped on Linux by that code. The evidence for each skip is the CI run listed in
 `SPEC_STATUS.md`.
 
+## D9 API token scopes (API-005)
+
+New coordinator API tokens default to `read`; the operator grants `operate`, `terminal:view`,
+`terminal:write` and `admin` explicitly with repeatable `--scope` flags. Tokens already in the
+database migrate to `admin`, preserving their former full access. Each authenticated route carries
+its scope policy in `http::ROUTES`, and the `Authed` extractor enforces the policy for bearer tokens;
+browser sessions retain their existing CSRF and Origin checks and full operator access. The route
+integration test exercises every authenticated route against each token scope.
+

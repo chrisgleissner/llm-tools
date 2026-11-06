@@ -64,7 +64,7 @@ docker compose cp coordinator:/data/ca.pem .                   # import into bro
 docker compose cp coordinator:/data/setup-token .              # create the administrator in the browser
 docker compose exec coordinator bridge-coordinator info
 docker compose exec coordinator bridge-coordinator worker add build-1     # prints the worker token once
-docker compose exec coordinator bridge-coordinator token create laptop    # API token for llm-bridge remote login (expires in 90 days; --expires-days N)
+docker compose exec coordinator bridge-coordinator token create laptop --scope read --scope operate    # API token for llm-bridge remote login (expires in 90 days; add terminal:view only if needed)
 docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
 docker compose exec coordinator bridge-coordinator cert renew             # new server certificate; names must be within the CA's name constraints (see "Trusting the certificate")
 docker compose exec coordinator bridge-coordinator backup --output /data/backup-2026-11-05.sqlite3

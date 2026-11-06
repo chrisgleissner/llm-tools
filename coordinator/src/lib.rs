@@ -11,6 +11,7 @@ pub mod init;
 pub mod netinfo;
 pub mod ops;
 pub mod protocol;
+pub mod scopes;
 pub mod server;
 pub mod terminal;
 pub mod web;

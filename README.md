@@ -210,7 +210,7 @@ docker compose -f container/compose.yaml up -d                       # listens o
 docker compose -f container/compose.yaml exec coordinator bridge-coordinator worker add build-1   # prints the worker token once; save it as token.txt
 llm-bridge worker enroll --name build-1 --coordinator wss://localhost:8443 --token-file token.txt --ca-file ca.pem
 llm-bridge worker install-service
-docker compose -f container/compose.yaml exec coordinator bridge-coordinator token create laptop   # prints an API token; save it as api-token.txt
+docker compose -f container/compose.yaml exec coordinator bridge-coordinator token create laptop --scope read --scope operate --scope terminal:view   # prints token once; save as api-token.txt
 llm-bridge remote login --coordinator https://localhost:8443 --token-file api-token.txt --ca-file ca.pem
 llm-bridge --target build-1 mission list
 ```

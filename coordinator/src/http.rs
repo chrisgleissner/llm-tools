@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::db::{Db, InsertOutcome};
 use crate::hub::{Hub, SendResult};
 use crate::protocol::{self, valid_id, valid_name};
+use crate::scopes;
 use axum::body::Bytes;
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequest, Path, Query, Request, State};
@@ -184,6 +185,7 @@ pub enum Principal {
     },
     Token {
         name: String,
+        scopes: Vec<String>,
     },
 }
 
@@ -203,7 +205,10 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
     if let Some(h) = headers.get(header::AUTHORIZATION) {
         let token = h.to_str().ok().and_then(|s| s.strip_prefix("Bearer ")).ok_or_else(unauthorized)?;
         return match st.db.token_lookup(&auth::sha256_hex(token))? {
-            Some(name) => Ok(Principal::Token { name }),
+            Some(token) => Ok(Principal::Token {
+                name: token.name,
+                scopes: token.scopes,
+            }),
             None => Err(unauthorized()),
         };
     }
@@ -241,7 +246,7 @@ impl Principal {
     pub fn actor(&self) -> String {
         match self {
             Principal::Session { .. } => "admin".into(),
-            Principal::Token { name } => format!("token:{name}"),
+            Principal::Token { name, .. } => format!("token:{name}"),
         }
     }
 }
@@ -263,6 +268,31 @@ impl FromRequestParts<St> for Authed {
                 if !auth::ct_eq(sent, csrf) {
                     return Err(err(StatusCode::FORBIDDEN, "bad-csrf", "missing or invalid X-CSRF-Token"));
                 }
+            }
+        }
+        if let Principal::Token { scopes: granted, .. } = &principal {
+            let path = parts.uri.path();
+            let route = ROUTES
+                .iter()
+                .find(|route| route_matches(route.0, path) && route.1.contains(&parts.method.as_str()));
+            let Some((_, _, _, required)) = route else {
+                return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "route has no authorization policy"));
+            };
+            let required = if *required == "terminal:conditional" {
+                let mode = parts.uri.query().unwrap_or_default().split('&').find_map(|pair| {
+                    let (key, value) = pair.split_once('=')?;
+                    (key == "mode").then_some(value)
+                });
+                if mode == Some("write") {
+                    scopes::TERMINAL_WRITE
+                } else {
+                    scopes::TERMINAL_VIEW
+                }
+            } else {
+                *required
+            };
+            if !scopes::grants(granted, required) {
+                return Err(err(StatusCode::FORBIDDEN, "insufficient-scope", format!("token requires scope {required}")));
             }
         }
         let remote = parts.extensions.get::<Peer>().map(|p| p.0.ip().to_string()).unwrap_or_default();
@@ -870,25 +900,38 @@ pub enum Access {
 /// Every route [`router`] serves with the methods it accepts and its access class.
 /// `tests/routes.rs` checks this table against the `.route(...)` lines of `router` and then
 /// requests each entry without credentials, so a route added to one but not the other fails.
-pub const ROUTES: &[(&str, &[&str], Access)] = &[
-    ("/healthz", &["GET"], Access::Public),
-    ("/api/v1/auth/state", &["GET"], Access::Public),
-    ("/api/v1/auth/setup", &["POST"], Access::Public),
-    ("/api/v1/auth/login", &["POST"], Access::Public),
-    ("/api/v1/auth/logout", &["POST"], Access::Authed),
-    ("/api/v1/auth/password", &["POST"], Access::Authed),
-    ("/api/v1/workers", &["GET", "POST"], Access::Authed),
-    ("/api/v1/workers/{name}", &["DELETE"], Access::Authed),
-    ("/api/v1/missions", &["GET"], Access::Authed),
-    ("/api/v1/commands", &["POST"], Access::Authed),
-    ("/api/v1/commands/{id}", &["GET"], Access::Authed),
-    ("/api/v1/events", &["GET"], Access::Authed),
-    ("/api/v1/stream", &["GET"], Access::Authed),
-    ("/api/v1/diagnostics", &["GET"], Access::Authed),
-    ("/api/v1/worker/connect", &["GET"], Access::WorkerToken),
-    ("/api/v1/terminal", &["GET"], Access::Authed),
-    ("/api/v1/worker/terminal/{session_id}", &["GET"], Access::WorkerToken),
+pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
+    ("/healthz", &["GET"], Access::Public, ""),
+    ("/api/v1/auth/state", &["GET"], Access::Public, ""),
+    ("/api/v1/auth/setup", &["POST"], Access::Public, ""),
+    ("/api/v1/auth/login", &["POST"], Access::Public, ""),
+    ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
+    ("/api/v1/auth/password", &["POST"], Access::Authed, "session"),
+    ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
+    ("/api/v1/workers/{name}", &["DELETE"], Access::Authed, "admin"),
+    ("/api/v1/missions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/commands", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/commands/{id}", &["GET"], Access::Authed, "read"),
+    ("/api/v1/events", &["GET"], Access::Authed, "read"),
+    ("/api/v1/stream", &["GET"], Access::Authed, "read"),
+    ("/api/v1/diagnostics", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/worker/connect", &["GET"], Access::WorkerToken, "worker"),
+    ("/api/v1/terminal", &["GET"], Access::Authed, "terminal:conditional"),
+    ("/api/v1/worker/terminal/{session_id}", &["GET"], Access::WorkerToken, "worker"),
 ];
+
+fn route_matches(template: &str, path: &str) -> bool {
+    let mut expected = template.split('/');
+    let mut actual = path.split('/');
+    loop {
+        match (expected.next(), actual.next()) {
+            (None, None) => return true,
+            (Some(want), Some(got)) if want.starts_with('{') && want.ends_with('}') && !got.is_empty() => {}
+            (Some(want), Some(got)) if want == got => {}
+            _ => return false,
+        }
+    }
+}
 
 pub fn router(st: St) -> Router {
     Router::new()

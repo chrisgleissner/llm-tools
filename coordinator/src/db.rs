@@ -53,7 +53,8 @@ CREATE TABLE sessions(
   token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL,
   expires_at INTEGER NOT NULL);
 CREATE TABLE api_tokens(
-  name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_used INTEGER);
+  name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_used INTEGER,
+  scopes TEXT NOT NULL DEFAULT '[\"admin\"]');
 CREATE TABLE audit(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   detail TEXT NOT NULL, remote TEXT NOT NULL);
@@ -138,6 +139,12 @@ pub struct Session {
     pub idle_secs: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApiToken {
+    pub name: String,
+    pub scopes: Vec<String>,
+}
+
 fn json_col(s: Option<String>) -> Option<Value> {
     s.and_then(|s| serde_json::from_str(&s).ok())
 }
@@ -179,7 +186,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -196,6 +203,7 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// The statement list is built in code because a database may not have a `sessions` table yet.
 const MIGRATE_V3_COLUMN: &str = "ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 1;";
 const MIGRATE_V4_COLUMN: &str = "ALTER TABLE workers ADD COLUMN mission_cursor INTEGER NOT NULL DEFAULT 0;";
+const MIGRATE_V5_COLUMN: &str = "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"admin\"]';";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -237,11 +245,26 @@ impl Db {
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 3; COMMIT;"))?;
         }
         if version < 4 {
-            let has_column: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='mission_cursor'", [], |r| {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'", [], |r| {
                 r.get::<_, i64>(0)
             })? > 0;
-            let alter = if has_column { "" } else { MIGRATE_V4_COLUMN };
+            let has_column = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='mission_cursor'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let alter = if has_column || !has_table { "" } else { MIGRATE_V4_COLUMN };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 4; COMMIT;"))?;
+        }
+        if version < 5 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='api_tokens'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_column = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('api_tokens') WHERE name='scopes'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let alter = if has_column || !has_table { "" } else { MIGRATE_V5_COLUMN };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 5; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -355,9 +378,19 @@ impl Db {
     // ---- api tokens ----
     /// `expires_at` is a Unix time; `None` never expires.
     pub fn token_create(&self, name: &str, hash: &str, expires_at: Option<i64>) -> R<bool> {
+        self.token_create_scoped(name, hash, expires_at, &["read".to_string()])
+    }
+    /// Create a token with the explicitly granted API scopes.
+    pub fn token_create_scoped(&self, name: &str, hash: &str, expires_at: Option<i64>, scopes: &[String]) -> R<bool> {
         Ok(self.c().execute(
-            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at) VALUES(?,?,?,?)",
-            params![name, hash, crate::now(), expires_at],
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes) VALUES(?,?,?,?,?)",
+            params![
+                name,
+                hash,
+                crate::now(),
+                expires_at,
+                serde_json::to_string(scopes).unwrap_or_else(|_| "[]".into())
+            ],
         )? == 1)
     }
     /// (name, expires_at) of every API token, by name.
@@ -371,14 +404,16 @@ impl Db {
         Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)
     }
     /// Name of the unexpired API token with this hash, touching `last_used` at most every `TOUCH_EVERY_SECS`.
-    pub fn token_lookup(&self, hash: &str) -> R<Option<String>> {
+    pub fn token_lookup(&self, hash: &str) -> R<Option<ApiToken>> {
         let c = self.c();
-        let row: Option<(String, Option<i64>, Option<i64>)> = c
-            .query_row("SELECT name, last_used, expires_at FROM api_tokens WHERE token_hash=?", params![hash], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
+        let row: Option<(String, Option<i64>, Option<i64>, String)> = c
+            .query_row(
+                "SELECT name, last_used, expires_at, scopes FROM api_tokens WHERE token_hash=?",
+                params![hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
             .optional()?;
-        let Some((name, last, expires_at)) = row else { return Ok(None) };
+        let Some((name, last, expires_at, scopes_json)) = row else { return Ok(None) };
         let now = crate::now();
         if expires_at.is_some_and(|e| now >= e) {
             return Ok(None);
@@ -386,7 +421,8 @@ impl Db {
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
-        Ok(Some(name))
+        let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
+        Ok(Some(ApiToken { name, scopes }))
     }
 
     // ---- known addresses ----

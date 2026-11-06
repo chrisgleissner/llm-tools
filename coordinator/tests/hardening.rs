@@ -468,7 +468,7 @@ async fn expired_api_tokens_are_refused() {
     let now = bridge_coordinator::now();
     for (name, expires) in [("expired", Some(now - 1)), ("future", Some(now + 3600)), ("forever", None)] {
         let hash = bridge_coordinator::auth::sha256_hex(name);
-        assert!(db.token_create(name, &hash, expires).unwrap());
+        assert!(db.token_create_scoped(name, &hash, expires, &["admin".into()]).unwrap());
     }
     assert_eq!(bearer(&env, "expired").get("/api/v1/workers").await.0, 401);
     assert_eq!(bearer(&env, "future").get("/api/v1/workers").await.0, 200);
@@ -481,7 +481,8 @@ async fn password_change_revokes_api_tokens_unless_kept() {
     let env = boot().await;
     let mut api = env.admin().await;
     let db = &env.srv.state.db;
-    db.token_create("ci", &bridge_coordinator::auth::sha256_hex("ci-secret"), None).unwrap();
+    db.token_create_scoped("ci", &bridge_coordinator::auth::sha256_hex("ci-secret"), None, &["admin".into()])
+        .unwrap();
     assert_eq!(bearer(&env, "ci-secret").get("/api/v1/workers").await.0, 200);
     let new1 = "another long password 1";
     let (st, body) = api
@@ -559,6 +560,7 @@ fn version_1_database_is_migrated_in_place() {
         vec![("old".to_string(), None)],
         "existing tokens keep working and do not expire"
     );
+    assert_eq!(db.token_lookup("h2").unwrap().unwrap().scopes, vec!["admin"]);
     let v: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
