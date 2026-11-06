@@ -7,6 +7,7 @@ import json
 import shutil
 import sys
 import threading
+import time
 
 import pytest
 
@@ -234,8 +235,15 @@ def test_worker_routes_terminal_open_and_close(enrolled):
         def receive_text(self, timeout=None):
             return None
 
+    class Endless(FakeSource):
+        # A pane that stays open until the session closes it. A finite list of empty reads ran out
+        # before the duplicate open on a fast runner, ending the session as "closed" (CI run 42176147126).
+        def read_output(self, timeout):
+            time.sleep(min(timeout, 0.01))
+            return b""
+
     def source_factory(mission):
-        return FakeSource([b""] * 100000)
+        return Endless()
 
     launcher = worker.TerminalLauncher(lambda cfg, sid: connections.append(Blocking()) or connections[-1], source_factory)
     session = _worker_session(tmp_path, config, launcher)

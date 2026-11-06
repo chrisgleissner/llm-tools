@@ -294,6 +294,16 @@ jobs:
           python-version: "3.12"
       - name: Install cargo-zigbuild and zig
         run: python -m pip install cargo-zigbuild ziglang
+      - name: Install the pinned Rust toolchain from a clean state
+        # Runner image ubuntu-24.04-arm 20261101.172 ships Rust 1.99.1 in a state rustup reports as
+        # "partially installed". Adding the musl targets then fails with "detected conflict:
+        # 'bin/cargo-clippy'" (run 42176147126). Removing the image's copy first makes rustup install
+        # the toolchain, components and targets from rust-toolchain.toml in one step.
+        run: |
+          rustup toolchain uninstall 1.99.1 || true
+          rustup toolchain install
+          rustc --version
+          rustup target list --installed
       - name: Build the linux/arm64 image (host architecture only)
         # container/build.sh builds both architectures' binaries from a git archive of HEAD and loads
         # the image for this host's architecture (--load, the default); the amd64 binary is only

@@ -158,8 +158,9 @@ not of the coordinator.
 
 ## GitHub-hosted ARM64 runner (not a Pi)
 
-Figures to be filled from the `arm64-container` job of the `test` workflow (artifact
-`bench-arm64`, file `bench-arm64.md`, and the job summary). Not yet recorded.
+Figures from the `arm64-container` job of CI run 42170022995 on b967d89 (pull request
+merge commit f24750b), artifact `bench-arm64`, file `bench-arm64.md`. Runner: aarch64,
+4 CPUs, 15.6 GiB RAM, Ubuntu 24.04.5 LTS, kernel 7.0.0-1017-azure.
 
 Method: the job runs natively on a GitHub-hosted `ubuntu-24.04-arm` runner (a
 cloud arm64 virtual machine, not a Raspberry Pi). It builds the linux/arm64 image with
@@ -176,9 +177,33 @@ artifact as the Pi image), then:
   container limited to 512 MB (swap equal) and one CPU, so the harness client and the
   coordinator share the limit.
 
+Measurement harness, 512 MB and 1 CPU:
+
 | Measurement | Result |
 |---|---|
-| (to be filled from the CI run) | - |
+| Startup to `/healthz` | 32 ms |
+| Idle RSS (2 s after healthy) | 5.0 MiB |
+| RSS after administrator setup and one login | 24.1 MiB |
+| RSS after 1000 events | 25.3 MiB |
+| Peak RSS (`VmHWM`) up to and including the 1000-event load | 25.3 MiB |
+| RSS after 10 000 events | 28.4 MiB |
+| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.17 / 0.19 ms |
+| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.93 / 1.24 ms |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 67 550 events/s |
+| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 1.3 / 2.8 ms |
+| Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
+| Container peak memory (`memory.peak`, includes page cache) | 21.7 MiB |
+| OOM killed | no |
+
+Container under memory limits (30 concurrent logins, 200 concurrent `GET /api/v1/missions`):
+
+| Limit | Logins (200 / 429) | GETs answered | `memory.peak` | Restarts | OOM killed |
+|---|---|---|---|---|---|
+| 96 MiB | 9 / 21 | 200 of 200 | 40.9 MiB | 0 | no |
+| 64 MiB | 9 / 21 | 200 of 200 | 41.0 MiB | 0 | no |
+| 48 MiB | 7 / 23 | 200 of 200 | 41.1 MiB | 0 | no |
+
+The 429 answers come from the per-address login limiter, as in the x86-64 run.
 
 Limits of this measurement: the runner's CPU cores are faster than the Cortex-A53 of
 a Pi Zero 2 W, and `--cpus 1` limits CPU time but not cache, memory bandwidth or

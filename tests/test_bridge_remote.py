@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
 import stat
 import urllib.error
@@ -77,7 +78,8 @@ def test_login_status_logout(state, tmp_path, capsys):
     (tmp_path / "token").write_text(TOKEN)
     (tmp_path / "ca.pem").write_text("-----BEGIN CERTIFICATE-----\n")
     assert main(["remote", "login", "--coordinator", "https://c:8443/", "--token-file", str(tmp_path / "token"), "--ca-file", str(tmp_path / "ca.pem")]) == 0
-    assert stat.S_IMODE((state / "remote" / remote.REMOTE_FILE).stat().st_mode) == 0o600
+    if os.name != "nt":  # Windows has no permission bits; the profile ACL protects the file (DECISIONS.md D8)
+        assert stat.S_IMODE((state / "remote" / remote.REMOTE_FILE).stat().st_mode) == 0o600
     capsys.readouterr()
     assert main(["remote", "status", "--json"]) == 0
     out = capsys.readouterr().out
