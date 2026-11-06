@@ -168,7 +168,7 @@ test.describe("with a seeded worker", () => {
       await expect(dlg).toBeVisible();
       await dlg.getByLabel("Reason").fill("needs another pass");
       await dlg.locator("#dialog-confirm").click();
-      const toast = page.locator(".toast").last();
+      const toast = page.locator(".toast").filter({ hasText: "Reject task 2" });
       await expect(toast).toHaveAttribute("data-kind", /applied|rejected|accepted/, { timeout: 20_000 });
       await expect(toast).toContainText(/Applied|Rejected|Accepted/);
       await expect(toast).toContainText("Reject task 2");
