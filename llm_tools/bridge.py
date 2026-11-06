@@ -567,6 +567,8 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
                 payload.update(action="task.amend", prompt=prompt)
             elif args.task_action == "verify":
                 payload.update(action="task.verify", evidence=args.evidence, approved=args.approve)
+            elif args.task_action == "approve":
+                payload.update(action="task.verify", evidence=args.evidence, approved=True)
             elif args.task_action == "reject":
                 payload.update(action="task.reject", reason=args.reason)
             elif args.task_action == "priority":
@@ -747,7 +749,7 @@ def expand_reject_alias(words: list[str], waiting: Callable[[], list[int]]) -> t
     else:
         ids = waiting()
         if len(ids) != 1:
-            hint = f"tasks awaiting approval: {', '.join(map(str, ids))}" if ids else "no task awaits approval"
+            hint = f"tasks awaiting review: {', '.join(map(str, ids))}" if ids else "no task awaits review"
             return None, f"error: reject needs a task number · {hint}"
         task_id = str(ids[0])
     reason = " ".join(rest).strip()
@@ -881,10 +883,10 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             else:
                 waiting = _verifying_task_ids(mission_id)
                 if len(waiting) != 1:
-                    hint = f"tasks awaiting approval: {', '.join(map(str, waiting))}" if waiting else "no task awaits approval"
+                    hint = f"tasks awaiting review: {', '.join(map(str, waiting))}" if waiting else "no task awaits review"
                     return f"error: approve needs a task number · {hint}"
                 approve_task = str(waiting[0])
-            words = ["task", "verify", "--task", approve_task, "--approve"]
+            words = ["task", "approve", "--task", approve_task]
         elif command == "reject":
             expanded, problem = expand_reject_alias(words, lambda: _verifying_task_ids(mission_id))
             if expanded is None:
@@ -1315,10 +1317,11 @@ def _build_parser(
         "resume": "make the task eligible again",
         "cancel": "cancel the task",
         "retry": "queue another attempt",
-        "verify": "record verification evidence",
+        "approve": "approve a task in REVIEW as complete",
+        "verify": "record verification evidence without approving",
         "reject": "send a task awaiting verification back for another attempt",
     }
-    for action in ("priority", "reorder", "dependencies", "pause", "resume", "cancel", "retry", "verify", "reject"):
+    for action in ("priority", "reorder", "dependencies", "pause", "resume", "cancel", "retry", "approve", "verify", "reject"):
         cmd = task_sub.add_parser(action, help=task_help[action])
         _add_mission_arg(cmd, default_mission)
         _add_task_selector(cmd)
@@ -1328,9 +1331,11 @@ def _build_parser(
             cmd.add_argument("--value", metavar="N", type=_db_int, required=True, help="new ordering value; lower runs first")
         elif action == "dependencies":
             cmd.add_argument("--add", metavar="N", type=_db_int, required=True, help="number of the task this task must wait for")
-        elif action == "verify":
+        elif action in {"approve", "verify"}:
             cmd.add_argument("--evidence", metavar="TEXT", default="", help="verification evidence, for example a test summary; shown by task show")
-            cmd.add_argument("--approve", action="store_true", help="approve the task as complete; without it, --evidence is only recorded and the task keeps awaiting approval")
+            if action == "verify":
+                # Deprecated spelling of `task approve`; kept working, hidden from help.
+                cmd.add_argument("--approve", action="store_true", help=argparse.SUPPRESS)
         elif action == "reject":
             cmd.add_argument("--reason", metavar="TEXT", required=True, help="why the result is not accepted (up to 2000 characters); the next attempt's prompt quotes it")
         _add_json_arg(cmd)
@@ -2029,7 +2034,7 @@ def _managed_allows(args: argparse.Namespace) -> bool:
     """Advisory guard: a provider Bridge launched may not run operator commands.
 
     The provider runs as the same user, so this keeps a prompt-injected agent
-    from invoking `proposal accept`, `task verify --approve`, `cancel` or `steer`
+    from invoking `proposal accept`, `task approve`, `cancel` or `steer`
     by habit; it is not a security boundary.
     """
     command = str(args.command)

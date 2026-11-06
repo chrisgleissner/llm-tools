@@ -53,6 +53,19 @@ class TaskStatus(StrEnum):
     CANCELLED = "CANCELLED"
 
 
+# The word a person sees for a stored task status.  The stored value stays ``VERIFYING`` (it is the
+# database, JSON and protocol value); the task is waiting for the operator, so the user-facing word is
+# ``REVIEW``.  A mission with such a task is shown as ``NEEDS YOU``.
+TASK_STATUS_LABELS: dict[str, str] = {"VERIFYING": "REVIEW"}
+MISSION_NEEDS_YOU_LABEL = "NEEDS YOU"
+
+
+def status_label(status: object) -> str:
+    """The user-facing word for a task status (``VERIFYING`` is shown as ``REVIEW``); other values pass through."""
+    text = str(status)
+    return TASK_STATUS_LABELS.get(text.strip().upper(), text)
+
+
 class OperationStatus(StrEnum):
     INTENT = "INTENT"
     PREPARED = "PREPARED"

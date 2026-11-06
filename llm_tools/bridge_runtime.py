@@ -887,6 +887,7 @@ class BridgeMissionHooks:
             self.store.record_runtime_event(self.mission_id, "provider-result-diagnosed", {
                 "operation_id": operation_id,
                 "task_id": int(task["id"]),
+                "task_status": str(task["status"]),
                 "provider": str(selection.get("provider") or scheduler_config.provider),
                 "route": str(selection.get("route") or ""),
                 "failure": failure,

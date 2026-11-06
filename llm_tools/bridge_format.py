@@ -15,6 +15,7 @@ from typing import Any
 
 from .bridge_states import FINISHED_MISSION_STATUSES, OPERATOR_DECLINED_EXIT_CODE, STARTED_MISSION_STATUSES
 from .bridge_vocab import mission_mode
+from .bridge_vocab import status_label
 
 # Internal rotation reasons (ralph_robin) and their plain-word display forms.
 # Only display text changes; event data and JSON keep the internal reason.
@@ -183,7 +184,7 @@ def format_mission_colour(result: dict[str, Any]) -> str:
 
 
 def format_task_line(task: dict[str, Any]) -> str:
-    return f"task {task_number(task)} \"{_clip(task.get('title', ''), _TITLE_LIMIT)}\" · {task.get('status', '?')}"
+    return f"task {task_number(task)} \"{_clip(task.get('title', ''), _TITLE_LIMIT)}\" · {status_label(task.get('status', '?'))}"
 
 
 class TaskPage(list):  # type: ignore[type-arg]
@@ -209,7 +210,7 @@ def format_task_list(tasks: list[dict[str, Any]]) -> str:
 def _format_task_rows(tasks: list[dict[str, Any]]) -> str:
     rows = [
         [
-            str(task_number(task)), str(task.get("status", "?")), str(task.get("priority", 0)),
+            str(task_number(task)), status_label(task.get("status", "?")), str(task.get("priority", 0)),
             ",".join(str(item) for item in task.get("depends_on_ordinals", task.get("depends_on")) or []), _clip(task.get("title", ""), _TITLE_LIMIT),
         ]
         for task in tasks
@@ -278,18 +279,18 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
         number = inner.get("task_ordinal", inner.get("task_id"))
         text = f"Amended · task {number} is now revision {inner.get('revision')}"
         return text if inner.get("applied", True) else text + " · applies after the current step"
-    if action == "verify":
+    if action in {"verify", "approve"}:
         if inner.get("status") == "VERIFYING":
             number = task_number(inner)
-            return f"Evidence recorded · task {number} still awaits approval · llm-bridge task verify{_mission_option(inner)} --task {number} --approve"
-        return f"Verified · {format_task_line(inner)}"
+            return f"Evidence recorded · task {number} still awaits your review · llm-bridge task approve{_mission_option(inner)} --task {number}"
+        return f"{'Approved' if action == 'approve' else 'Verified'} · {format_task_line(inner)}"
     if action == "reject":
         return f"Sent back · {format_task_line(inner)} · reason recorded"
     task_id = inner.get("ordinal", inner.get("task_ordinal", (result.get("payload") or {}).get("task_id", inner.get("task_id", inner.get("id", "?")))))
     verb = {"pause": "Paused", "resume": "Resumed", "cancel": "Cancelled", "retry": "Queued for retry", "priority": "Priority set for", "reorder": "Reordered", "dependencies": "Dependency added to"}.get(action, action.capitalize())
     text = f"{verb} task {task_id}"
     if inner.get("status"):
-        text += f" · {inner['status']}"
+        text += f" · {status_label(inner['status'])}"
     detail = inner.get("detail")
     return text + (f" · {detail}" if detail else "")
 
@@ -516,10 +517,10 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if awaiting:
         first = awaiting[0]
         if len(awaiting) == 1:
-            subject = f"task {first} awaits approval"
+            subject = f"task {first} awaits your review"
         else:
-            subject = f"tasks {', '.join(str(n) for n in awaiting)} await approval"
-        command = f"llm-bridge task verify --mission {mid} --task {first} --approve"
+            subject = f"tasks {', '.join(str(n) for n in awaiting)} await your review"
+        command = f"llm-bridge task approve --mission {mid} --task {first}"
         hold = snapshot.get("hold")
         if isinstance(hold, dict) and hold.get("reason") == "review":
             held = int(hold.get("task_ordinal") or first)
@@ -620,7 +621,7 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     lines.append(f"Next        {format_task_line(upcoming)}" if upcoming else "Next        none")
     counts = snapshot.get("task_counts") or {}
     total = sum(int(value) for value in counts.values())
-    lines.append(f"Tasks       {total} total" + (": " + ", ".join(f"{count} {name}" for name, count in sorted(counts.items())) if counts else ""))
+    lines.append(f"Tasks       {total} total" + (": " + ", ".join(f"{count} {name}" for name, count in sorted((status_label(key), value) for key, value in counts.items())) if counts else ""))
     attention = snapshot.get("needs_you") or needs_attention(snapshot)
     if attention and attention.get("kind") != "capacity":
         lines.append(f"Needs you   {attention['message']}")

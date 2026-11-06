@@ -28,6 +28,7 @@ from .bridge_format import printable
 from .bridge_input import cell_slice, cell_width, without_flow_control
 from .bridge_input import BracketedPaste
 from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
+from .bridge_vocab import MISSION_NEEDS_YOU_LABEL
 from .bridge_glyphs import (  # noqa: F401 - several names are re-exported
     FINISHED_STATES, GLYPHS, _locale_codeset, ascii_mode, glyph, localize, provider_role, state_look, state_text,
 )
@@ -1269,7 +1270,7 @@ def _mission_row(state: Launcher, mission: dict[str, Any], cols: ListColumns, co
     stale = controller == "stale"
     finished = status_group(status) == _GROUP_FINISHED
     reviewing = state.review_task(mission) is not None
-    shown_status = "REVIEW" if reviewing else status
+    shown_status = MISSION_NEEDS_YOU_LABEL if reviewing else status
     base = "selected" if selected else ("muted" if finished else "info")
     quiet = "selected" if selected else "muted"
     config = mission.get("config") if isinstance(mission.get("config"), dict) else {}

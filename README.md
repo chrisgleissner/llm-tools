@@ -72,7 +72,7 @@ Run this in a folder you are happy for an agent to edit, for example a new empty
 6. Press `Ctrl-]`, then `B`. Type `/approve`, press `Enter`, then press `y` to confirm. The controls show `✓ COMPLETED` and `mission completed · 1/1 tasks completed`.
 7. Press `Ctrl-]`, then `d`, to leave the station. Bridge opens the mission controls in your own terminal; press `Ctrl-D` to leave them. The terminal prints `Detached from mission … the mission is completed`, and `hello.txt` is in your folder.
 
-A task never completes on the provider's exit alone. It waits in `VERIFYING` until you approve it, or until a verifier you configured passes.
+A task never completes on the provider's exit alone. It waits in `REVIEW` until you approve it, or until a verifier you configured passes.
 
 The form has no model setting, so the provider uses its own default. To try a particular Claude model, start Bridge as `ANTHROPIC_MODEL=<model> llm-bridge`.
 
@@ -84,7 +84,7 @@ llm-bridge start                       # the mission is inferred from the folder
 llm-bridge status                      # after the provider exits, "Needs you" shows the approve command
 llm-bridge task output --task 1        # read what the provider did (pages on a terminal, --follow while it runs)
 llm-bridge task diff --task 1          # the files it changed since the run started
-llm-bridge task verify --task 1 --approve
+llm-bridge task approve --task 1
 ```
 
 ## The 60-second tour
@@ -154,7 +154,7 @@ navigation remain explicit. Monitoring starts no model calls. See the
 
 - **Missions outlive your session.** Tasks, evidence and history live in a local database.
 - **Providers keep their own UI.** Native mode runs the real CLI in a private tmux station.
-- **You approve, not the exit code.** Finished work waits in `VERIFYING` until you approve it, or a verifier you configured passes.
+- **You approve, not the exit code.** Finished work waits in `REVIEW` until you approve it, or a verifier you configured passes.
 - **Capacity stays visible:** `claude · 5h 77% left, resets 4h 43m · weekly 56% left, resets 6d 5h`.
 - **Capacity waits stay awake by default.** Opt a mission into RTC-backed sleep with `llm-bridge mission set --mission ID --suspend-when-rate-limited on`; Bridge sleeps only when no operation is active and a wake is armed.
 - **Sleep to a known credit reset.** Use `llm-bridge suspend-until-credits --mission ID` or **Suspend until credits recover** in Actions. With opt-in enabled and its controller running, Bridge also prearms a recovery wake for manual OS suspend while waiting for credits, including paused missions and detached UIs. See [power prerequisites and safety](./docs/llm-bridge/operations.md#suspend-until-credits-recover).

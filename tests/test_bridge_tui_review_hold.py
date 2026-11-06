@@ -42,7 +42,7 @@ def test_status_strip_shows_the_review_hold_and_degrades_to_fit() -> None:
     assert bridge_tui._status_strip(holding_snapshot(), 50)[0] == "task 1 awaits your review · /approve 1 · /continue"
     assert bridge_tui._status_strip(holding_snapshot(), 37)[0] == "task 1 awaits your review · /continue"
     plain = bridge_tui._status_strip(holding_snapshot(hold=None), 0)[0]
-    assert plain == "task 1 awaits approval · type /approve 1"
+    assert plain == "task 1 awaits your review · type /approve 1"
 
 
 def test_review_words_are_coloured_like_the_approval_phrase() -> None:

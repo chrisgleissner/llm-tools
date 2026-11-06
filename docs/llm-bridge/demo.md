@@ -79,7 +79,7 @@ To re-record after Bridge's wording changes, run the commands above again; the s
 | 1 | Claude is working | Claude's provider station, already streaming when the clip starts. One line appears every half second. | 4.0 |
 | 2 | 5-hour limit hit | The stand-in Claude prints `5-hour limit reached` and exits with status 1; the station shows `Provider exited (status 1)`. | 1.3 |
 | 3 | Bridge hands the task to Codex | `Ctrl-]` then `B`: Overview. The capacity block shows Claude `(not ready)` at 0% and Codex active. Under Recent, the highlight steps down the last four events: provider exited, task handed off, switched provider, started provider. The poster is the frame with the highlight on `Switched provider`. Then back to the station: Codex runs its checks line by line. | 8.5 |
-| 4 | Codex finishes · you approve | Codex prints `6 passed` and `Task complete`, exits, and `Ctrl-] B` shows the Overview with the task `VERIFYING` and `Needs you`. The highlight steps through Now, Tasks and Needs you; the last frame is held for 1.3 s. | 4.0 |
+| 4 | Codex finishes · you approve | Codex prints `6 passed` and `Task complete`, exits, and `Ctrl-] B` shows the Overview with the task in `REVIEW` and `Needs you`. The highlight steps through Now, Tasks and Needs you; the last frame is held for 1.3 s. | 4.0 |
 
 The loop restarts on the first frame with a plain cut.
 

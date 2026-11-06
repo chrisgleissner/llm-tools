@@ -211,7 +211,7 @@ def test_console_reject_alias_with_explicit_and_implicit_task(tmp_path, state, c
         second = _verifying_task(store, mid, "second")
 
     ambiguous = dispatch_console_command(mid, "/reject needs more tests")
-    assert ambiguous == f"error: reject needs a task number · tasks awaiting approval: {first}, {second}"
+    assert ambiguous == f"error: reject needs a task number · tasks awaiting review: {first}, {second}"
 
     explicit = json.loads(dispatch_console_command(mid, f"/reject {first} -vv output was missing"))
     assert explicit["status"] == "APPLIED" and explicit["result"]["status"] == "QUEUED"
@@ -223,7 +223,7 @@ def test_console_reject_alias_with_explicit_and_implicit_task(tmp_path, state, c
 
     assert dispatch_console_command(mid, "reject") == "error: usage: reject [TASK-NUMBER] REASON"
     assert dispatch_console_command(mid, f"reject {first}") == "error: usage: reject [TASK-NUMBER] REASON"
-    assert dispatch_console_command(mid, "reject because") == "error: reject needs a task number · no task awaits approval"
+    assert dispatch_console_command(mid, "reject because") == "error: reject needs a task number · no task awaits review"
     assert dispatch_console_command(mid, f"reject {first} again").startswith("error: ")
 
 
@@ -238,7 +238,7 @@ def test_tui_reject_alias_expands_and_asks_for_confirmation() -> None:
     explicit, _ = bridge_tui._expand_console_alias("reject 9 do it again", snapshot)
     assert shlex.split(explicit)[:4] == ["task", "reject", "--task", "9"]
     assert bridge_tui._expand_console_alias("reject", snapshot)[1] == "error: usage: reject [TASK-NUMBER] REASON"
-    assert "no task awaits approval" in bridge_tui._expand_console_alias("reject why", {"tasks": []})[1]
+    assert "no task awaits review" in bridge_tui._expand_console_alias("reject why", {"tasks": []})[1]
     literal, literal_problem = bridge_tui._expand_console_alias("reject 'unterminated", snapshot)
     assert literal_problem is None and shlex.split(literal)[-1] == "--reason='unterminated"  # prose is taken literally
     assert "reject" in bridge_tui._CONSOLE_ALIASES

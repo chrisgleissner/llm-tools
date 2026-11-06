@@ -26,9 +26,9 @@ or add --mission ID):
   llm-bridge mission create --file task.md --name demo --mode native
   llm-bridge start                        starts provider work; may consume paid capacity
   llm-bridge status                       after the provider exits, "Needs you" shows the approve command
-  llm-bridge task verify --task 1 --approve --evidence 'tests passed'
+  llm-bridge task approve --task 1 --evidence 'tests passed'
 
-A zero provider exit means awaiting verification, not completed work. Review the
+A zero provider exit means the task is in REVIEW, not completed work. Review the
 evidence before approving. Reopen a station with llm-bridge attach. Add more work
 with llm-bridge task add --file next-task.md. Ctrl-] B opens Bridge and Ctrl-] P
 returns to the same provider process.
@@ -54,7 +54,7 @@ missions without saved policy keep their original prompts. See help mission crea
 Typing in the Bridge command line: bare commands and Codex/Claude-style slash
 commands are the same: /start, /attach, /pause, /status and /approve [N] work
 like their bare forms (N is the task to approve; it may be omitted when exactly
-one task awaits approval). /help and ? show help.
+one task is in REVIEW). /help and ? show help.
 
 Detach your own terminal with Ctrl-] then d, which works the same locally and
 over SSH. Reattach with llm-bridge attach. The command llm-bridge detach is
@@ -137,7 +137,7 @@ Type at the bottom line. Slash commands work like Codex and Claude Code, and the
 mission is implied. Bare words do the same (start, pause, ...).
   /start /resume /pause /stop    start, continue or hold provider work
   /attach  /detach               open the provider terminal; Ctrl-] P returns
-  /approve [N]  /reject N WHY    decide on a task that awaits approval
+  /approve [N]  /reject N WHY    decide on a task in REVIEW
   /status  /proposals            print the current state
   /missions  /home               switch to another mission (the mission picker)
   /overview /tasks /providers /activity /health /actions /usage /agents   open a view
@@ -291,7 +291,7 @@ acceptance conditions; use the actual mission and task IDs:
   llm-bridge task output --mission ID --task 1        the provider's output of the last run
   llm-bridge task diff --mission ID --task 1          the files that run changed in the working tree
   llm-bridge task verify --mission ID --task 1 --evidence 'pytest: 12 passed'
-  llm-bridge task verify --mission ID --task 1 --approve --evidence 'reviewed'
+  llm-bridge task approve --mission ID --task 1 --evidence 'reviewed'
 Approval marks work complete only through authoritative transition rules. UI
 approval asks for target-aware confirmation; scripted CLI semantics are unchanged.
 In the console the approval dialog lists the changed files; o opens the output and
@@ -346,7 +346,7 @@ Slash: /start /pause /resume /attach /status""",
 Keys: Up/Down choose · Enter inspect · v read the full prompt · Ctrl-R amend
       Ctrl-E add a task · Ctrl-F find in task text (Esc clears the filter)
 Slash: /approve N · /reject N WHY · /task cancel --task N
-A task awaiting approval shows VERIFYING; approve it only after reading its evidence.""",
+A task waiting for your decision shows REVIEW; approve it only after reading its evidence.""",
     "Providers": """Providers: who works and how much capacity is left
 
 Each block is one provider or route: its live state, the 5h / week / month
@@ -435,7 +435,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "status": ("Inspect desired state, observed work and blockers", "status --mission ID"),
     "agents": ("Inspect current Bridge operations and provider-owned child agents; use --mission ID or --all-missions", "agents --all-missions --json"),
     "suspend-until-credits": ("Arm a wake timer and suspend after a fresh capacity and safety check", "suspend-until-credits --mission ID"),
-    "task": ("Add, inspect, amend and verify mission tasks", "task list --mission ID"),
+    "task": ("Add, inspect, amend, approve and reject mission tasks", "task list --mission ID"),
     "task add": ("Save a new task for the specified mission", "task add --mission ID --file prompt.md"),
     "task list": ("List tasks in the specified mission", "task list --mission ID --json"),
     "task show": ("Read the complete task text, recorded evidence and any pending amendment", "task show --mission ID --task 1 --json"),
@@ -449,8 +449,9 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "task resume": ("Make a held task eligible for the running controller", "task resume --mission ID --task 1"),
     "task cancel": ("Cancel the targeted task, preserving its durable record", "task cancel --mission ID --task 1"),
     "task retry": ("Queue another attempt after inspecting the failure", "task retry --mission ID --task 1"),
-    "task verify": ("Record evidence with --evidence; add --approve to approve the task as complete", "task verify --mission ID --task 1 --approve --evidence 'tests passed'"),
-    "task reject": ("Send a task awaiting verification back with a reason; it is queued for another attempt and the next prompt quotes the reason", "task reject --mission ID --task 1 --reason 'tests were not run'"),
+    "task approve": ("Approve a task in REVIEW as complete; --evidence records the reviewer's note first. Pairs with task reject", "task approve --mission ID --task 1 --evidence 'tests passed'"),
+    "task verify": ("Record verification evidence for a task in REVIEW without approving it (to approve, use task approve)", "task verify --mission ID --task 1 --evidence 'tests passed'"),
+    "task reject": ("Send a task in REVIEW back with a reason; it is queued for another attempt and the next prompt quotes the reason", "task reject --mission ID --task 1 --reason 'tests were not run'"),
     "rotation": ("Show or change the mission's saved provider rotation; a change applies from the next provider selection", "rotation --mission ID --set claude-sonnet,codex"),
     "proposal": ("Review task proposals before adding them to work", "proposal list --mission ID"),
     "proposal create": ("Record a proposal linked to an owned operation", "proposal create --mission ID --operation OP --file proposal.md"),
@@ -461,7 +462,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "start": ("Start the owned controller using saved mode unless overridden", "start --mission ID"),
     "pause": ("Hold after the current invocation; never suspend the host", "pause --mission ID"),
     "resume": ("Allow the controller to continue eligible work", "resume --mission ID"),
-    "continue": ("Start the next task now while a reviewed task keeps awaiting approval (native missions hold for review by default)", "continue --mission ID"),
+    "continue": ("Start the next task now while a reviewed task stays in REVIEW (native missions hold for review by default)", "continue --mission ID"),
     "stop": ("Stop the owned controller; --force targets owned running work", "stop --mission ID"),
     "cancel": ("Cancel this mission's work; unrelated sessions are unaffected", "cancel --mission ID"),
     "attach": ("Open the existing owned station; starts no provider", "attach --mission ID"),

@@ -107,7 +107,7 @@ def test_console_commands_use_the_mission_task_number_not_the_global_id(two_miss
 
     # Approve: `/approve 2` verifies the mission's task 2, not global task 2 (the first mission's task).
     state._confirm_or_dispatch("/approve 2")
-    assert state.confirm_command == "task verify --task 2 --approve"
+    assert state.confirm_command == "task approve --task 2"
     assert any("Task 2: second mission approve me" in line for line in state.output)
     state.handle_key("y")
     settle(state)
@@ -130,7 +130,7 @@ def test_tasks_without_ordinals_are_addressed_by_global_id() -> None:
     assert bridge_tui._task_ref(snapshot, "42") == ["--task-id", "42"]
     assert bridge_tui._task_ref({"tasks": [{"id": 42, "ordinal": 2}]}, "2") == ["--task", "2"]
     command, problem = bridge_tui._expand_console_alias("/approve", snapshot)
-    assert problem is None and command == "task verify --task-id 42 --approve"
+    assert problem is None and command == "task approve --task-id 42"
     command, _ = bridge_tui._expand_console_alias("/reject 42 not done", snapshot)
     assert command.startswith("task reject --task-id 42 ")
 

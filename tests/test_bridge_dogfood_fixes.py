@@ -370,7 +370,7 @@ def test_approve_alias_asks_for_confirmation_then_dispatches_the_public_command(
     monkeypatch.setattr(bridge_tui.curses, "doupdate", lambda: None)
     state, sent = _console([{"id": 3, "ordinal": 3, "status": "VERIFYING"}, {"id": 4, "ordinal": 4, "status": "QUEUED"}])
     assert state._confirm_or_dispatch("/approve")
-    assert state.confirm_command == "task verify --task 3 --approve"
+    assert state.confirm_command == "task approve --task 3"
     assert state.output[0] == "Approve verification and mark task 3 complete? · mission 01234567"
     assert "0123456789abcdef0123456789abcdef" not in "\n".join(state.output)
     screen = _Screen(8, 70)
@@ -382,10 +382,10 @@ def test_approve_alias_asks_for_confirmation_then_dispatches_the_public_command(
     assert state.confirm_command is not None and sent == []
     state.handle_key("y")
     _join_commands()
-    assert sent == ["task verify --task 3 --approve"]
+    assert sent == ["task approve --task 3"]
     state.confirm_command = None
     assert state._confirm_or_dispatch("approve 4")
-    assert state.confirm_command == "task verify --task 4 --approve"
+    assert state.confirm_command == "task approve --task 4"
     state.handle_key("n")
     assert state.confirm_command is None and state.output[-1] == "Confirmation cancelled."
 
@@ -394,14 +394,14 @@ def test_approve_alias_needs_a_single_candidate_or_a_number() -> None:
     state, _sent = _console([{"id": 1, "status": "VERIFYING"}, {"id": 2, "status": "VERIFYING"}])
     # A refused command is consumed (the caller clears the line) and kept in history for recall.
     assert state._confirm_or_dispatch("approve")
-    assert state.output[-1].startswith("error: approve needs a task number · tasks awaiting approval: 1, 2")
+    assert state.output[-1].startswith("error: approve needs a task number · tasks awaiting review: 1, 2")
     assert state._confirm_or_dispatch("approve x")
     assert state.output[-1].startswith("error: usage: approve [TASK-NUMBER]")
     assert list(state.history)[-2:] == ["approve", "approve x"] and state.confirm_command is None
     state, _sent = _console([])
     assert state._confirm_or_dispatch("approve")
     assert state.confirm_command is None
-    assert state.output[-1].startswith("error: approve needs a task number · no task awaits approval")
+    assert state.output[-1].startswith("error: approve needs a task number · no task awaits review")
     assert bridge_tui._expand_console_alias("pause", {}) == ("pause", None)
     assert bridge_tui._expand_console_alias("approve 'unterminated", {}) == ("approve 'unterminated", None)
 
@@ -409,25 +409,25 @@ def test_approve_alias_needs_a_single_candidate_or_a_number() -> None:
 def test_approve_is_completed_as_a_slash_command() -> None:
     assert bridge_tui._command_completions("/app") == ["/approve"]
     assert "approve" in bridge_tui._command_completions("")
-    assert "approve" not in bridge_tui._command_completions("task ")
+    assert "task approve" in bridge_tui._command_completions("task ")  # `task approve` is a real subcommand
 
 
-def test_console_dispatch_approve_expands_to_task_verify(monkeypatch, tmp_path: Path) -> None:
+def test_console_dispatch_approve_expands_to_task_approve(monkeypatch, tmp_path: Path) -> None:
     seen = []
-    monkeypatch.setattr(bridge, "_task_result", lambda args, preserve_receipt=False: seen.append((args.task_action, args.task, args.approve)) or {"status": "APPLIED"})
+    monkeypatch.setattr(bridge, "_task_result", lambda args, preserve_receipt=False: seen.append((args.task_action, args.task, True)) or {"status": "APPLIED"})
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
     with bridge.open_store() as store:
         mission = store.create_mission("Approve", "Objective", cwd=tmp_path)
     mid = mission["id"]
     assert bridge.dispatch_console_command(mid, "/approve 7").startswith("{")
-    assert seen == [("verify", 7, True)]
-    assert bridge.dispatch_console_command(mid, "approve").endswith("no task awaits approval")
+    assert seen == [("approve", 7, True)]
+    assert bridge.dispatch_console_command(mid, "approve").endswith("no task awaits review")
     assert bridge.dispatch_console_command(mid, "approve 1 2") == "error: usage: approve [TASK-NUMBER]"
     monkeypatch.setattr(bridge, "_verifying_task_ids", lambda _mission: [5])
     bridge.dispatch_console_command(mid, "approve")
-    assert seen[-1] == ("verify", 5, True)
+    assert seen[-1] == ("approve", 5, True)
     monkeypatch.setattr(bridge, "_verifying_task_ids", lambda _mission: [5, 6])
-    assert bridge.dispatch_console_command(mid, "approve").endswith("tasks awaiting approval: 5, 6")
+    assert bridge.dispatch_console_command(mid, "approve").endswith("tasks awaiting review: 5, 6")
 
 
 def test_unknown_commands_suggest_close_names_instead_of_dumping_choices(monkeypatch, tmp_path: Path) -> None:

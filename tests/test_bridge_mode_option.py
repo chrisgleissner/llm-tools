@@ -219,7 +219,7 @@ def test_task_add_reopens_a_completed_mission_the_same_way_with_or_without_missi
     assert main(["task", "add", "--mission", mid, "--prompt", "one"]) == 0
     with_flag = capsys.readouterr().out
     with BridgeStore(state / "bridge.sqlite3") as store:
-        assert store.get_mission(mid)["status"] == "STOPPED"
+        assert store.get_mission(mid)["status"] == "CREATED"
     mid2, _ = _completed_mission(tmp_path, state, capsys, name="done2")
     monkeypatch.chdir(tmp_path / "done2")
     assert main(["task", "add", "--prompt", "two"]) == 0
@@ -228,7 +228,7 @@ def test_task_add_reopens_a_completed_mission_the_same_way_with_or_without_missi
     assert f"Mission {short} reopened" in without_flag and "start it with: llm-bridge start" in without_flag
     assert f"Mission {mid[:8]} reopened" in with_flag
     with BridgeStore(state / "bridge.sqlite3") as store:
-        assert store.get_mission(mid2)["status"] == "STOPPED"
+        assert store.get_mission(mid2)["status"] == "CREATED"
 
 
 def test_help_states_says_a_completed_mission_is_reopened_by_a_new_task() -> None:

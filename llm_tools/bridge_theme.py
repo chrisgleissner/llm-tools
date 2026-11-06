@@ -28,7 +28,7 @@ Severity and diff:
 Task and mission state:
     ``state_running``  actively working
     ``state_waiting``  queued or ready, nothing needed from you
-    ``state_review``   verifying, or needs your decision
+    ``state_review``   a task or mission waiting for your review or decision
     ``state_done``     completed
     ``state_failed``   failed, blocked or cancelled with an error
     ``state_paused``   paused or stopped by the operator
@@ -139,7 +139,7 @@ ROLE_DESCRIPTIONS: dict[str, str] = {
     "selected": "selection bar (the only filled background)",
     "state_running": "actively working",
     "state_waiting": "queued or ready; nothing needed from you",
-    "state_review": "verifying, or needs your decision",
+    "state_review": "a task or mission waiting for your review or decision",
     "state_done": "completed",
     "state_failed": "failed or blocked",
     "state_paused": "paused or stopped by the operator",

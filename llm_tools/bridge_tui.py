@@ -36,7 +36,7 @@ from .bridge_documents import DocumentViewer, heading_label
 from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, STARTED_MISSION_STATUSES
 from . import bridge_events, bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
 from .bridge_projection import ProjectionParams
-from .bridge_vocab import EventKind
+from .bridge_vocab import EventKind, MISSION_NEEDS_YOU_LABEL, status_label
 from .bridge_format import plain_reason
 from .bridge_glyphs import FINISHED_STATES, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
 from .common import fmt_duration
@@ -569,7 +569,7 @@ def _text(value: object, limit: int = 1000) -> str:
 _TASK_VERB_PHRASES = {
     "add": "added", "amend": "amended", "priority": "priority changed", "reorder": "reordered",
     "dependencies": "dependencies updated", "pause": "paused", "resume": "resumed", "cancel": "cancelled",
-    "retry": "queued for another attempt", "verify": "verified", "reject": "sent back",
+    "retry": "queued for another attempt", "verify": "verified", "approve": "approved", "reject": "sent back",
 }
 _TASK_ACK = re.compile(r"^task(?: \S+)? (?:" + "|".join(re.escape(item) for item in _TASK_VERB_PHRASES.values()) + r")")
 # Options whose value is a private path or an id the operator never typed.
@@ -732,11 +732,16 @@ def _confirmation_reason(command: str) -> str | None:
     if words[:2] == ["task", "reject"] and "--task" in words:
         reason = next((word[len("--reason="):] for word in words if word.startswith("--reason=")), "")
         return f"Send task {words[words.index('--task')+1]} back for another attempt? Reason: {reason[:120]}"
-    if words[:2] == ["task", "verify"] and "--approve" in words:
+    if _is_approval_command(words):
         kind, value = _approval_target(words)
         label = f"task {value}" if kind == "task" else f"task with id {value}" if kind == "id" else "(select a task)"
         return f"Approve verification and mark {label} complete?"
     return None
+
+
+def _is_approval_command(words: list[str]) -> bool:
+    """`task approve …`, or the deprecated spelling `task verify … --approve`."""
+    return words[:2] == ["task", "approve"] or (words[:2] == ["task", "verify"] and "--approve" in words)
 
 
 def _approval_target(words: list[str]) -> tuple[str, str]:
@@ -748,12 +753,12 @@ def _approval_target(words: list[str]) -> tuple[str, str]:
 
 
 def _approval_task(command: str) -> tuple[str, str] | None:
-    """(kind, value) of the task an approval command (`task verify … --approve`) names, else None."""
+    """(kind, value) of the task an approval command (`task approve …`) names, else None."""
     try:
         words = console_words(_strip_slash(command))
     except ValueError:
         return None
-    if words[:2] == ["task", "verify"] and "--approve" in words:
+    if _is_approval_command(words):
         target = _approval_target(words)
         return target if target[0] else None
     return None
@@ -847,7 +852,7 @@ _CONSOLE_ALIASES = ("approve", "reject", "overview", "providers", "activity", "h
 
 
 def _expand_console_alias(command: str, snapshot: dict[str, object]) -> tuple[str, str | None]:
-    """Expand `approve [N]` to `task verify --task N --approve`.
+    """Expand `approve [N]` to `task approve --task N`.
 
     Returns the command to run and an error message. Without N the single
     task that awaits verification is used.
@@ -875,10 +880,10 @@ def _expand_console_alias(command: str, snapshot: dict[str, object]) -> tuple[st
     else:
         waiting = [str(task_number(task)) for task in _items(snapshot.get("tasks")) if str(task.get("status", "")).upper() == "VERIFYING"]
         if len(waiting) != 1:
-            hint = f"tasks awaiting approval: {', '.join(waiting)}" if waiting else "no task awaits approval"
+            hint = f"tasks awaiting review: {', '.join(waiting)}" if waiting else "no task awaits review"
             return command, f"error: approve needs a task number · {hint}"
         task_id = waiting[0]
-    return shlex.join(["task", "verify", *_task_ref(snapshot, task_id), "--approve"]), None
+    return shlex.join(["task", "approve", *_task_ref(snapshot, task_id)]), None
 
 
 def _command_completions(command: str) -> list[str]:
@@ -1247,6 +1252,20 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
 def _mission(snapshot: dict[str, object]) -> dict[str, object]:
     nested = _dict(snapshot.get("mission"))
     return nested or snapshot
+
+
+def _review_pending(snapshot: dict[str, object]) -> bool:
+    """True when a task of this mission awaits the operator (stored status VERIFYING), whatever page of tasks is loaded."""
+    counts = _dict(snapshot.get("task_counts"))
+    if any(str(name).upper() == "VERIFYING" and isinstance(count, int) and count > 0 for name, count in counts.items()):
+        return True
+    shown = [*_items(snapshot.get("tasks")), _dict(snapshot.get("current_task"))]
+    return any(str(task.get("status") or "").upper() == "VERIFYING" for task in shown)
+
+
+def _mission_state_word(snapshot: dict[str, object], status: str) -> str:
+    """The mission's state word: ``NEEDS YOU`` replaces RUNNING while a task awaits review."""
+    return MISSION_NEEDS_YOU_LABEL if status.upper() == "RUNNING" and _review_pending(snapshot) else status
 
 
 def _mission_role_of(snapshot: dict[str, object], mission_id: str = "") -> str:
@@ -1693,6 +1712,19 @@ def _station_idle_phrase(snapshot: dict[str, object]) -> str:
     return _idle_phrase(snapshot)
 
 
+def _station_status_is_implied(mission_status: str, task: dict[str, object]) -> bool:
+    """True when the task text already says what the mission state would add.
+
+    An ordinary RUNNING mission with a current task needs no mission word, and neither does
+    ``NEEDS YOU`` when the current task is the one that awaits review (its own ``REVIEW`` says so).
+    """
+    if mission_status == "UNKNOWN":
+        return True
+    if not task:
+        return False
+    return mission_status == "RUNNING" or (mission_status == MISSION_NEEDS_YOU_LABEL and str(task.get("status") or "").upper() == "VERIFYING")
+
+
 def _station_status_parts(snapshot: dict[str, object]) -> tuple[str, str]:
     """`(mission label, task/state text)` for the tmux status line.
 
@@ -1700,14 +1732,14 @@ def _station_status_parts(snapshot: dict[str, object]) -> tuple[str, str]:
     a task is running in an ordinary RUNNING mission. The label (repository
     folder or mission name, at most 14 cells) says which mission this station is.
     """
-    mission_status = _text(_mission(snapshot).get("status") or "unknown", 16).upper()
+    mission_status = _mission_state_word(snapshot, _text(_mission(snapshot).get("status") or "unknown", 16).upper())
     task = _dict(snapshot.get("current_task"))
     if task:
         idle = _station_idle_phrase(snapshot) if str(task.get("status") or "").upper() == "RUNNING" else ""
-        label = f"Task {_text(task_number(task) or '?', 8)} " + (idle or _text(task.get('status') or 'unknown', 12).upper())
+        label = f"Task {_text(task_number(task) or '?', 8)} " + (idle or status_label(_text(task.get('status') or 'unknown', 12).upper()))
     else:
         label = "No task"
-    if not (mission_status == "UNKNOWN" or (task and mission_status == "RUNNING")):
+    if not _station_status_is_implied(mission_status, task):
         label = f"{label}{_SEP}{mission_status}"
     from .bridge_switcher import mission_label
 
@@ -1721,7 +1753,7 @@ def _station_status_segments(snapshot: dict[str, object]) -> list[Segment]:
     Same content as `_station_status_parts` plus the state glyph: `Task 6 ● RUNNING`.
     A silent provider shows its idle phrase (`muted`, `warn` after ten minutes) instead.
     """
-    mission_status = _text(_mission(snapshot).get("status") or "unknown", 16).upper()
+    mission_status = _mission_state_word(snapshot, _text(_mission(snapshot).get("status") or "unknown", 16).upper())
     task = _dict(snapshot.get("current_task"))
     out: list[Segment] = []
     if task:
@@ -1731,7 +1763,7 @@ def _station_status_segments(snapshot: dict[str, object]) -> list[Segment]:
         out.append((idle, _idle_role(idle)) if idle else _state_segment(_text(status, 12)))
     else:
         out.append(("No task", "muted"))
-    if not (mission_status == "UNKNOWN" or (task and mission_status == "RUNNING")):
+    if not _station_status_is_implied(mission_status, task):
         out += [(_SEP, "dim"), _state_segment(mission_status)]
     return out
 
@@ -1849,7 +1881,7 @@ def _event_summary(event: dict[str, object]) -> str:
         return _SEP.join(part for part in (f"{op} running", task, " ".join(item for item in (who, model) if item), f"pid {_text(data['process_pid'], 12)}" if _known(data.get("process_pid")) else "") if part)
     if kind == "operation-exited":
         state = f"{op} exited {_text(data.get('exit_code', '?'), 8)}"
-        return _SEP.join(part for part in (state, task, f"task now {_text(data['task_status'], 20)}" if _known(data.get("task_status")) else "") if part)
+        return _SEP.join(part for part in (state, task, f"task now {status_label(_text(data['task_status'], 20))}" if _known(data.get("task_status")) else "") if part)
     if kind in {"provider-selection", "capacity-refresh"}:
         owner = _text(data.get("route") or data.get("provider") or "", 40)
         model = _text(data.get("selected_model") if _known(data.get("selected_model")) else "", 40)
@@ -1904,7 +1936,7 @@ _COLLAPSED_EVENTS = bridge_events.collapsed_kinds()
 _PLUMBING_EVENTS = bridge_events.plumbing_kinds()
 
 _TASK_STATE_WORDS = {
-    "READY": "ready", "QUEUED": "waiting", "RUNNING": "running", "VERIFYING": "awaiting approval",
+    "READY": "ready", "QUEUED": "waiting", "RUNNING": "running", "VERIFYING": "awaiting review",
     "COMPLETED": "completed", "FAILED": "failed", "BLOCKED": "blocked", "PAUSED": "paused",
     "CANCELLED": "cancelled",
 }
@@ -2040,7 +2072,7 @@ def _h_task_status(ctx: _EventContext) -> tuple[str, bool]:
 
 @_humanizer(EventKind.TASK_STATUS_TRANSITION)
 def _h_task_status_transition(ctx: _EventContext) -> str:
-    return f"{ctx.task} {ctx.old_state.lower()} → {ctx.new_state.lower()}" + ctx.reason
+    return f"{ctx.task} {status_label(ctx.old_state).lower()} → {status_label(ctx.new_state).lower()}" + ctx.reason
 
 
 @_humanizer(EventKind.OPERATION_RUNNING)
@@ -2077,6 +2109,10 @@ def _h_provider_selection(ctx: _EventContext) -> str:
 def _h_provider_result_diagnosed(ctx: _EventContext) -> str:
     failure = ctx.data.get("failure")
     cause = failure.get("cause") if isinstance(failure, dict) else None
+    if isinstance(failure, dict) and failure.get("class") == "success" and cause == "completed":
+        # The provider process exited 0.  That is not the task's result: say whether the task now awaits the operator.
+        waiting = str(ctx.data.get("task_status") or "").upper() == "VERIFYING"
+        return "Provider result recorded · exited 0" + (" · awaiting review" if waiting else "")
     return "Provider result recorded" + (f" · {_text(cause, 60)}" if _known(cause) else "")
 
 
@@ -2503,7 +2539,7 @@ def _status_strip(snapshot: dict[str, object], width: int = 0) -> tuple[str, str
                 [f"task {held} awaits your review", f"/approve {held}", "/continue"],
                 [f"task {held} awaits your review", "/continue"],
             ], width), "warn"
-        return _fit_strip([f"task {number} awaits approval{more}", f"type /approve {number}"], width), "warn"
+        return _fit_strip([f"task {number} awaits your review{more}", f"type /approve {number}"], width), "warn"
     following = _next_task(snapshot)
     upcoming = f"next: task {_text(task_number(following) if task_number(following) is not None else '?', 12)}" if following else "no task waiting · Ctrl-E adds one"
     if status == "STOPPING":
@@ -3066,7 +3102,7 @@ def _activity_role(text: str) -> str:
         return "error"
     if lowered.startswith("provider exited (") and not lowered.startswith("provider exited (0)"):
         return "error"
-    if any(word in lowered for word in ("awaiting approval", "waiting for capacity", "paused", "blocked")):
+    if any(word in lowered for word in ("awaiting approval", "awaiting review", "waiting for capacity", "paused", "blocked")):
         return "warn"
     return "info"
 
@@ -4760,7 +4796,7 @@ class _ConsoleState:
             lifecycle_age = item.get("lifecycle_age_seconds")
             lifecycle_age_text = f"{int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else "unknown"
             return [
-                f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status'), 30)}",
+                f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status_label') or item.get('status'), 30)}",
                 f"role: {_text(role, 80)} ({_text(item.get('role_source') or 'unknown', 20)})",
                 f"mission: {_text(item.get('mission_name') or item.get('mission_id'), 100)}",
                 f"age: {_span(item.get('age_seconds'), 2) if item.get('age_seconds') is not None else 'unknown'}",
@@ -4994,7 +5030,7 @@ def _percent_role(percent: float) -> str:
 
 _IDLE_WARN_SECONDS = 600
 _DURATION = r"\d+[dhms](?: \d+[dhms])*"
-_STATE_WORDS = "RUNNING|READY|QUEUED|VERIFYING|COMPLETED|FAILED|BLOCKED|CANCELLED|PAUSED|PAUSING|STOPPED|STOPPING|CREATED|ACTIVE"
+_STATE_WORDS = "NEEDS YOU|RUNNING|READY|QUEUED|VERIFYING|REVIEW|COMPLETED|FAILED|BLOCKED|CANCELLED|PAUSED|PAUSING|STOPPED|STOPPING|CREATED|ACTIVE"
 
 
 @functools.lru_cache(maxsize=4)
@@ -5091,7 +5127,7 @@ def _inline_segments(text: str, base: str = "info", *, context: str = "generic")
         elif kind == "limited":
             out.append((token, "capacity_empty"))
         else:  # state word, optionally behind its glyph
-            look = _state_look(token.split()[-1])
+            look = _state_look(MISSION_NEEDS_YOU_LABEL if token.endswith(MISSION_NEEDS_YOU_LABEL) else token.split()[-1])
             role = look[1] if look else base
             if context == "needs" and role in {"state_review", "state_failed"}:
                 role += QUIET
@@ -5145,6 +5181,7 @@ def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
     context = _dict(state.snapshot.get("station_context"))
     if status == "PAUSED" and context.get("executing_operation") and str(context.get("operation_status", "")).upper() in ACTIVE_OPERATION_STATUSES:
         status = "PAUSING"
+    status = _mission_state_word(state.snapshot, status)
     shown = _state_text(status)
     room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
     name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room))

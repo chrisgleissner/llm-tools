@@ -188,11 +188,11 @@ def test_console_aliases_take_mission_task_numbers(tmp_path, state, capsys) -> N
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
     listing = dispatch_console_command(mid, "/task list")
-    assert listing.splitlines()[0].split()[0] == "TASK" and "VERIFYING" in listing
+    assert listing.splitlines()[0].split()[0] == "TASK" and "REVIEW" in listing and "VERIFYING" not in listing
     reply = json.loads(dispatch_console_command(mid, "/approve 1"))
     assert reply["status"] == "APPLIED" and reply["result"]["status"] == "COMPLETED" and reply["result"]["ordinal"] == 1
     bare = dispatch_console_command(mid, "/approve")
-    assert bare == "error: approve needs a task number · no task awaits approval"
+    assert bare == "error: approve needs a task number · no task awaits review"
     assert dispatch_console_command(mid, "/reject 7 because").startswith(f"error: mission {mid[:8]} has task 1; there is no task 7")
 
 
@@ -249,7 +249,7 @@ def test_verify_without_approve_only_records_evidence(tmp_path, state, capsys) -
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
     out = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--evidence", "tests passed")
-    assert out.strip() == f"Evidence recorded · task 1 still awaits approval · llm-bridge task verify --mission {mid[:8]} --task 1 --approve"
+    assert out.strip() == f"Evidence recorded · task 1 still awaits your review · llm-bridge task approve --mission {mid[:8]} --task 1"
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(created["task"]["id"])["status"] == "VERIFYING"
     shown = _run(capsys, "task", "show", "--mission", mid, "--task", "1")
@@ -470,9 +470,9 @@ def test_task_add_reopens_a_completed_mission(tmp_path, state, capsys) -> None:
     out = _run(capsys, "task", "add", "--mission", mid, "--prompt", "follow-up work", "--title", "Follow-up")
     assert out.splitlines() == ['Added task 2 "Follow-up" · QUEUED · priority 0', f"Mission {mid[:8]} reopened · start it with: llm-bridge start --mission {mid[:8]}"]
     with BridgeStore(state / "bridge.sqlite3") as store:
-        assert store.get_mission(mid)["status"] == "STOPPED"
+        assert store.get_mission(mid)["status"] == "CREATED"
         reopened = [e for e in store.events(mid) if e["kind"] == "mission-reopened"]
-        assert reopened and reopened[0]["data"] == {"from": "COMPLETED", "reason": "task-added", "to": "STOPPED"}
+        assert reopened and reopened[0]["data"] == {"from": "COMPLETED", "reason": "task-added", "to": "CREATED"}
         assert reopened[0]["task_ordinal"] == 2
         store.set_mission_status(mid, "RUNNING")  # start can continue it
     assert "reopened" not in _run(capsys, "task", "add", "--mission", mid, "--prompt", "third")
@@ -525,10 +525,10 @@ def test_status_says_what_needs_the_operator(tmp_path, state, capsys) -> None:
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
     text = _run(capsys, "status", "--mission", mid)
-    assert f"Needs you   task 1 awaits approval · llm-bridge task verify --mission {mid[:8]} --task 1 --approve (or reject: llm-bridge task reject --mission {mid[:8]} --task 1 --reason …)" in text
+    assert f"Needs you   task 1 awaits your review · llm-bridge task approve --mission {mid[:8]} --task 1 (or reject: llm-bridge task reject --mission {mid[:8]} --task 1 --reason …)" in text
     snapshot = _status_snapshot(state, mid)
     assert snapshot["needs_you"]["kind"] == "approval" and snapshot["needs_you"]["tasks"] == [1]
-    assert snapshot["needs_you"]["command"] == f"llm-bridge task verify --mission {mid[:8]} --task 1 --approve"
+    assert snapshot["needs_you"]["command"] == f"llm-bridge task approve --mission {mid[:8]} --task 1"
     _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--approve")
     assert "Needs you" not in _run(capsys, "status", "--mission", mid)
     assert _status_snapshot(state, mid)["needs_you"] is None
@@ -543,7 +543,7 @@ def test_status_lists_several_tasks_awaiting_approval(tmp_path, state, capsys) -
         for task in (created["task"]["id"], second):
             op = store.begin_operation(task, iteration=1, station="codex")
             store.finish_operation(op, exit_code=0)
-    assert "Needs you   tasks 1, 2 await approval" in _run(capsys, "status", "--mission", mid)
+    assert "Needs you   tasks 1, 2 await your review" in _run(capsys, "status", "--mission", mid)
 
 
 def test_needs_attention_covers_failures_blocks_proposals_and_capacity() -> None:
@@ -698,8 +698,8 @@ def test_help_with_an_unknown_topic_fails_and_lists_topics(capsys) -> None:
     err = capsys.readouterr().err
     assert err.startswith("llm-bridge: Unknown help topic 'nonsense' · topics: ")
     assert "quickstart" in err and "keys" in err
-    assert main(["help", "task", "verify"]) == 0
-    assert "--approve" in capsys.readouterr().out
+    assert main(["help", "task", "approve"]) == 0
+    assert "--evidence" in capsys.readouterr().out
     assert main(["help", "keys"]) == 0
     capsys.readouterr()
 

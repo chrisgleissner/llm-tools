@@ -202,6 +202,12 @@ The task lifecycle uses `QUEUED`, `READY`, `RUNNING`, `VERIFYING`, `COMPLETED`,
 dependencies. Provider exit code zero moves work to `VERIFYING`; completion
 requires explicit operator approval or a passing configured verifier.
 
+`VERIFYING` is the stored value (database, JSON `status`, remote protocol). Every
+screen and table shows the same state as `REVIEW`, because the task is waiting for
+you, and task JSON also carries `"status_label": "REVIEW"`. A mission with a task in
+`REVIEW` shows `NEEDS YOU` instead of `RUNNING` in the console header, the station
+strip, the home list and the picker.
+
 Tasks are numbered within their mission: the first task of every mission is
 `task 1`, numbers are assigned at creation and never reused. `--task N`,
 `--depends-on`, `--add` and the console aliases (`/approve 2`, `/reject 2 REASON`)
@@ -244,18 +250,18 @@ revision.
 
 `task add` on a completed mission reopens it, with or without `--mission` (the
 folder's one completed mission is used when no unfinished one exists): the
-mission becomes `STOPPED`, a `mission-reopened` event is recorded and the
-receipt says `Mission ID reopened · start it with: llm-bridge start`. A
-cancelled mission takes no tasks.
+mission becomes `CREATED` (not started yet), a `mission-reopened` event is
+recorded and the receipt says `Mission ID reopened · start it with: llm-bridge
+start --mission ID`. A cancelled mission takes no tasks.
 
-A provider's successful exit moves its task to `VERIFYING`; success alone does
+A provider's successful exit moves its task to `REVIEW` (stored as `VERIFYING`); success alone does
 not complete the task. `task verify --evidence TEXT` alone only records the
-note, which `task show` lists with its source and age; the task keeps awaiting
-approval. Approve it explicitly, with optional evidence:
+note, which `task show` lists with its source and age; the task stays in
+`REVIEW`. Approve it explicitly, with optional evidence:
 
 ```bash
-llm-bridge task verify --mission MISSION_ID --task N \
-  --approve --evidence "Reviewed implementation and test output"
+llm-bridge task approve --mission MISSION_ID --task N \
+  --evidence "Reviewed implementation and test output"
 ```
 
 To send a task back instead, give a reason. The task is queued for another
@@ -288,7 +294,7 @@ script it interprets (for example `check.py` in `python check.py`) when they are
 inside `--cwd`, plus any file named with `--verifier-file PATH` (repeatable,
 relative to `--cwd`). If one of them has changed, been deleted or (for a
 symlink) been repointed by the time a task is verified, Bridge does not run the
-verifier and does not complete the task. The task stays in `VERIFYING` with a
+verifier and does not complete the task. The task stays in `REVIEW` with a
 `verification-failed` event whose reason is `verifier-modified` and which lists
 the changed paths, and you approve it explicitly. Programs outside `--cwd`
 (such as `/usr/bin/python3`) are not tracked. Missions created before this
@@ -298,7 +304,7 @@ check have no recorded hashes and behave as before.
 
 A native mission is interactive, so its controller does not start the next
 task while a finished task awaits your decision. After a provider run ends with
-task 1 in `VERIFYING`, the controller waits (it records a `review-hold` event)
+task 1 in `REVIEW`, the controller waits (it records a `review-hold` event)
 until you approve task 1 (`/approve 1`), reject it (`/reject 1 REASON`, which
 queues it again), or release the hold with `/continue`. Only then does the next
 task start. Background and headless missions are unattended and keep starting
@@ -306,7 +312,7 @@ the next task straight away.
 
 * `continue` (`/continue` in the console, `llm-bridge continue [--mission ID]`)
   releases the hold once: the next ready task starts while the reviewed task
-  stays in `VERIFYING`. If that task later returns for review, or the reviewed
+  stays in `REVIEW`. If that task later returns for review, or the reviewed
   task is rejected and comes back, the mission holds again. With no hold it
   reports `Nothing to continue` and changes nothing.
 * `--auto-continue` on `mission create`, or `llm-bridge mission set
@@ -376,7 +382,7 @@ native run (it is omitted when a verifier is configured or auto-continue is
 on). A provider pane that is still an empty placeholder shows the same
 sentence as its placeholder text.
 
-If no verifier is configured, the task remains in `VERIFYING` for operator
+If no verifier is configured, the task remains in `REVIEW` for operator
 review. A failing verifier or timeout also leaves it uncompleted. See
 `llm-bridge task verify --help` and `llm-bridge mission create --help` for the
 full flag list.
@@ -389,7 +395,7 @@ and press Enter; `help` lists the console commands. The `›` command line
 accepts slash commands as well as bare commands: `/help [TOPIC]`, `/start`
 (opens the provider station in native mode), `/attach` (also works from inside
 your own tmux), `/approve [N]` (approve task N; N may be omitted when exactly
-one task awaits approval), `/continue` (start the next task while a reviewed one still awaits approval), `/pause`, `/resume`, `/stop`, `/cancel`, `/status`,
+one task is in `REVIEW`), `/continue` (start the next task while a reviewed one stays in `REVIEW`), `/pause`, `/resume`, `/stop`, `/cancel`, `/status`,
 `/tasks` and `/events`. Tab completes command names, and an unknown command is
 answered with close matches. `cancel`, `stop --force`, task cancellation and
 approval ask for a compact confirmation: **Y** confirms, **N** or **Esc**
@@ -787,7 +793,7 @@ to the automatic one. `[bridge.theme.roles] mission_1 = "#5f87ff"` in the
 llm-tools config changes a hue. `llm-bridge theme` previews the palette.
 
 Colour never stands alone. Every state also has a glyph and a word:
-`● RUNNING`, `○ QUEUED`, `◆ VERIFYING`, `✓ COMPLETED`, `✕ FAILED`,
+`● RUNNING`, `○ QUEUED`, `◆ REVIEW`, `✓ COMPLETED`, `✕ FAILED`,
 `‖ PAUSED`. A locale that is not UTF-8 (for example `LANG=C` over SSH) gets
 ASCII forms (`*`, `o`, `#`, `v`, `x`, `=`), and the home screen draws `|`
 instead of `·`, `Up/Down` instead of `↑↓` and `...` instead of `…`. See the
@@ -797,8 +803,8 @@ The home list orders live missions first, then waiting ones (created, stopped,
 failed), then finished ones (dimmed), and re-reads the database every two
 seconds. At narrow widths the folder, then the provider, are dropped first.
 `/` (or Ctrl-F) filters by name, folder or ID prefix; Enter opens the match and
-Esc clears the filter. A mission with a task awaiting your review (`VERIFYING`)
-shows `◆ REVIEW` instead of `● RUNNING`, in the home list and in the picker, and
+Esc clears the filter. A mission with a task awaiting your review (`REVIEW`)
+shows `◆ NEEDS YOU` instead of `● RUNNING`, in the home list and in the picker, and
 its detail line says `task N awaits your review · Enter to open`.
 
 The mission picker (`llm-bridge missions --pick`, or Ctrl-] then M in a station)
@@ -876,8 +882,8 @@ minute in total, not once per mission. The next task selection of a mission
 still reads the provider live.
 
 `pause` does not sleep the machine, and Bridge adds no network listener. A
-zero provider exit leaves a task in `VERIFYING` until an operator approves it
-(`/approve`, `task verify --approve`) or a configured verifier passes. A
+zero provider exit leaves a task in `REVIEW` until an operator approves it
+(`/approve`, `task approve`) or a configured verifier passes. A
 bounded live probe verified Codex native reply, controller stop, exact-ID
 restoration and context recall. Claude and Copilot live restoration is
 unverified.
@@ -898,7 +904,7 @@ provider can do by habit or by prompt injection; it does not sandbox it.
   `LLM_BRIDGE_MANAGED=1` in every provider it launches. While that variable is
   set, `llm-bridge` runs only `status`, `events`, `task list`, `task show`,
   `proposal create`, `proposal list`, `mission list`, `missions` and `help`.
-  Anything else (`proposal accept`, `task verify --approve`, `cancel`, `stop`,
+  Anything else (`proposal accept`, `task approve`, `cancel`, `stop`,
   `steer`, `start`, `mission create`) exits with status 2 and
   `This command needs the operator; it is not available to the managed provider`.
   This is an advisory guard, not a security boundary: the provider has the same

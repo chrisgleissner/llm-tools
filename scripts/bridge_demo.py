@@ -1745,10 +1745,10 @@ def seed_missions(world: DemoWorld, missions: Sequence[SeedMission] = HIGHLIGHT_
         subprocess.run(["tmux", "-S", str(sock), "send-keys", "Enter"], check=True, timeout=10)
         wait_station(sock, "Provider exited", timeout=30)
         deadline = time.monotonic() + 30
-        while "VERIFYING" not in world.run_bridge("status", "--mission", mission_id, cwd=repo) and time.monotonic() < deadline:
+        while "1 REVIEW" not in world.run_bridge("status", "--mission", mission_id, cwd=repo) and time.monotonic() < deadline:
             time.sleep(0.3)
         if seed.state == "completed":
-            world.run_bridge("task", "verify", "--mission", mission_id, "--task", "1", "--approve", "--evidence", "26 passed", cwd=repo)
+            world.run_bridge("task", "approve", "--mission", mission_id, "--task", "1", "--evidence", "26 passed", cwd=repo)
     world.extra_env["DEMO_PROVIDER_SPEED"] = LIVE_SPEED
 
 
