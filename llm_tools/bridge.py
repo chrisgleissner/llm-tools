@@ -13,6 +13,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any, Callable, NoReturn, TYPE_CHECKING, cast
 
+from . import bridge_commands as commands
 from . import bridge_format as fmt
 from .bridge_format import NATIVE_STOP_HINT
 from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_title, prune_old_drafts, rotation_label, store_path
@@ -258,18 +259,30 @@ def _add_task_selector(parser: argparse.ArgumentParser, *, required: bool = True
     group.add_argument("--task-id", metavar="ID", dest="task_by_id", type=_db_int, help=f"advanced: the {noun}'s global ID, unique across all missions (task JSON field id)")
 
 
-def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """Apply one validated command and persist its idempotent result."""
-    command = store.enqueue_command(mission_id, payload)
+def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[str, Any], *, command_id: str | None = None) -> dict[str, Any]:
+    """Apply one validated command and persist its idempotent result.
+
+    ``command_id`` is the caller's durable request ID; a repeated delivery of
+    the same ID returns the stored outcome without repeating the effect.
+    """
+    command = store.enqueue_command(mission_id, payload, command_id=command_id)
     if command["status"] != "QUEUED":
-        return command.get("result") or command
+        return command  # duplicate delivery: the stored outcome, same shape as the first reply
     try:
         with store._transaction():
+            # Another delivery of the same ID may have applied it since enqueue;
+            # the write lock is held now, so this check cannot race.
+            current = store.get_command(command["id"])
+            if current["status"] != "QUEUED":
+                return current
             result = _apply_operator_effect(store, mission_id, payload)
             return store.finish_command(command["id"], status="APPLIED", result=result)
     except _RejectedOperatorCommand as exc:
+        rejection = {"error": str(exc)}
+        if exc.code:
+            rejection["code"] = exc.code
         with store._transaction():
-            return store.finish_command(command["id"], status="REJECTED", result={"error": str(exc)})
+            return store.finish_command(command["id"], status="REJECTED", result=rejection)
 
 
 def _native_provider_running(store: BridgeStore, mission: dict[str, Any]) -> bool:
@@ -286,10 +299,29 @@ def _native_provider_running(store: BridgeStore, mission: dict[str, Any]) -> boo
 class _RejectedOperatorCommand(Exception):
     """A validation failure that must be acknowledged after rolling back effects."""
 
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class _StaleRevision(TransitionError):
+    """The caller's expected task revision no longer matches (PROTO-006)."""
+
+
+def _check_expected_revision(store: BridgeStore, mission_id: str, payload: dict[str, Any]) -> None:
+    """Reject a task mutation made against an outdated revision; runs under the write lock."""
+    expected = payload.get("expected_revision")
+    if expected is None:
+        return
+    current = int(_require_task(store, mission_id, int(payload["task_id"]))["revision"])
+    if int(expected) != current:
+        raise _StaleRevision(f"task revision is {current}, not the expected {int(expected)}; reload and retry")
+
 
 def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     action = str(payload.get("action", ""))
     try:
+        _check_expected_revision(store, mission_id, payload)
         result: dict[str, Any]
         if action == "pause":
             current = str(store.get_mission(mission_id)["status"])
@@ -496,6 +528,8 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
             if row is not None:
                 result["task_ordinal"] = int(row[0])
         return result
+    except _StaleRevision as exc:
+        raise _RejectedOperatorCommand(str(exc), code="conflict") from exc
     except (ValueError, KeyError, OSError, TransitionError) as exc:
         raise _RejectedOperatorCommand(str(exc)) from exc
 
@@ -506,7 +540,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
         if args.task_action == "add":
             prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
             dep_ids = _dependency_ids(store, args.mission, args.depends_on)
-            command_result = _apply_operator_command(store, args.mission, {"action": "task.add", "prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": args.acceptance})
+            command_result = commands.dispatch(commands.CommandRequest("task.add", {"prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": list(args.acceptance)}, mission_id=args.mission))
             result = command_result if preserve_receipt or command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
         elif args.task_action == "list":
             if getattr(args, "all", False):
@@ -516,7 +550,8 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
             result.total = store.task_counters(args.mission)["total"]
             result.offset = max(0, args.offset)
         elif args.task_action == "show":
-            result = _resolve_task(store, args.mission, args.task, args.task_by_id)
+            task_id = int(_resolve_task(store, args.mission, args.task, args.task_by_id)["id"])
+            result = commands.dispatch(commands.CommandRequest("task.show", {"task_id": task_id}, mission_id=args.mission))
         else:
             task = _resolve_task(store, args.mission, args.task, args.task_by_id)
             payload: dict[str, Any] = {"task_id": int(task["id"])}
@@ -535,7 +570,8 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
                 payload.update(action="task.dependency", depends_on=int(store.task_by_ordinal(args.mission, args.add)["id"]))
             else:
                 payload["action"] = "task." + args.task_action
-            result = _apply_operator_command(store, args.mission, payload)
+            params = {name: value for name, value in payload.items() if name != "action"}
+            result = commands.dispatch(commands.CommandRequest(str(payload["action"]), params, mission_id=args.mission))
     return result
 
 
@@ -1249,6 +1285,45 @@ def _build_parser(
     gc = sub.add_parser("gc", help="close the idle tmux stations of finished missions (stations with a live provider or an attached terminal are kept)")
     _add_json_arg(gc)
 
+    backup = sub.add_parser("backup", help="write a consistent copy of the Bridge database (missions, tasks, events)")
+    backup.add_argument("--output", metavar="FILE", required=True, help="new file to write; an existing file is never overwritten")
+    _add_json_arg(backup)
+    restore = sub.add_parser("restore", help="replace the Bridge database with a backup; the current one is kept beside it")
+    restore.add_argument("--input", metavar="FILE", required=True, help="backup written by llm-bridge backup")
+    _add_json_arg(restore)
+    worker = sub.add_parser("worker", help="optional: connect this host to a Bridge coordinator (off unless enrolled and run)")
+    worker_sub = worker.add_subparsers(dest="worker_action", required=True)
+    worker_enroll = worker_sub.add_parser("enroll", help="store the coordinator URL, CA and worker token for this host")
+    worker_enroll.add_argument("--name", required=True, help="worker name used as the remote target, for example workstation")
+    worker_enroll.add_argument("--coordinator", required=True, metavar="URL", help="coordinator base URL, for example wss://bridge.home.arpa:8443")
+    worker_enroll.add_argument("--token-file", required=True, metavar="PATH", help="file holding the worker token printed by the coordinator ('-' reads stdin)")
+    worker_enroll.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
+    worker_enroll.add_argument("--allow-control", action="store_true", help="accept mutating remote commands and terminal input; without it the worker is read-only remotely")
+    worker_enroll.add_argument("--allow-terminal-view", action="store_true", help="let a read-only worker stream its mission terminals for viewing (implied by --allow-control)")
+    _add_json_arg(worker_enroll)
+    worker_status = worker_sub.add_parser("status", help="show this host's enrolment without the token")
+    _add_json_arg(worker_status)
+    worker_sub.add_parser("run", help="run the worker in the foreground until interrupted")
+    worker_audit = worker_sub.add_parser("audit", help="show this worker's security audit log (no tokens or terminal content)")
+    worker_audit.add_argument("--limit", metavar="N", type=_db_int, default=50, help="newest entries shown (default: 50)")
+    _add_json_arg(worker_audit)
+    worker_install = worker_sub.add_parser("install-service", help="install and start a systemd user unit that runs the worker")
+    worker_install.add_argument("--print", action="store_true", help="print the unit instead of installing it")
+    worker_sub.add_parser("uninstall-service", help="stop and remove the worker's systemd user unit")
+    worker_sub.add_parser("unenroll", help="delete this host's enrolment, token and coordinator CA")
+    worker_list = worker_sub.add_parser("list", help="list the workers registered with the configured coordinator")
+    _add_json_arg(worker_list)
+
+    remote = sub.add_parser("remote", help="configure this CLI to reach other workers through a coordinator (used by --target)")
+    remote_sub = remote.add_subparsers(dest="remote_action", required=True)
+    remote_login = remote_sub.add_parser("login", help="store the coordinator URL, CA and API token")
+    remote_login.add_argument("--coordinator", required=True, metavar="URL", help="coordinator URL, for example https://bridge.home.arpa:8443")
+    remote_login.add_argument("--token-file", required=True, metavar="PATH", help="file holding an API token from bridge-coordinator token create ('-' reads stdin)")
+    remote_login.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
+    remote_status = remote_sub.add_parser("status", help="show the configured coordinator without the token")
+    _add_json_arg(remote_status)
+    remote_sub.add_parser("logout", help="delete the stored coordinator URL, CA and API token")
+
     finish = sub.add_parser("finish", help="ask the native provider to exit so its task moves to verification")
     _add_mission_arg(finish, default_mission)
     _add_json_arg(finish)
@@ -1700,11 +1775,17 @@ def _print_result(result: Any, as_json: bool, human: Callable[[Any], str] | None
         print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+# A controller records the terminal mission status before it exits and releases the mission lock, so a
+# stop issued in that window finds a terminal mission whose lock is still held. Wait this long for the
+# controller to finish exiting before reporting it as still active.
+TERMINAL_STOP_LOCK_WAIT_SECONDS = 15.0
+
+
 def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
     """Close a retained station after a terminal mission has released control."""
     lock = MissionLock(state_dir() / "locks", mission_id)
     try:
-        lock.acquire()
+        lock.acquire(timeout=TERMINAL_STOP_LOCK_WAIT_SECONDS, poll=0.05)
     except BlockingIOError as exc:
         raise RuntimeError(f"mission {mission_id[:8]} still has an active controller; stop is pending") from exc
     try:
@@ -1876,10 +1957,132 @@ def main(argv: list[str] | None = None) -> int:
         raise
 
 
+def _worker_command(args: argparse.Namespace) -> int:
+    """``llm-bridge worker``: enrolment and the foreground worker loop (WORK-001, WORK-010)."""
+    from . import bridge_worker as worker
+
+    if args.worker_action == "enroll":
+        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
+        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        config = worker.enroll(args.name, args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
+                               allow_terminal_view=bool(args.allow_terminal_view))
+        _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
+                      f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
+        return 0
+    if args.worker_action == "status":
+        _print_result(worker.load_config().public(), args.json, lambda value: "\n".join(f"{key}: {value[key]}" for key in sorted(value)))
+        return 0
+    if args.worker_action == "audit":
+        entries = worker.read_audit(args.limit)
+        _print_result({"entries": entries}, args.json, lambda value: "\n".join(
+            " ".join([str(entry.get("ts", "?")), str(entry.get("action", "?"))] + [f"{key}={entry[key]}" for key in sorted(entry) if key not in {"ts", "action"} and entry[key] is not None])
+            for entry in value["entries"]) or "No worker audit entries.")
+        return 0
+    if args.worker_action == "install-service":
+        if args.print:
+            print(worker.service_unit_text(), end="")
+            return 0
+        unit, steps = worker.install_service()
+        print(f"Wrote {unit}.")
+        for step in steps:
+            print(step[:1].upper() + step[1:] + ".")
+        return 0
+    if args.worker_action == "uninstall-service":
+        print("Worker service removed." if worker.uninstall_service() else "No worker service is installed.")
+        return 0
+    if args.worker_action == "unenroll":
+        removed = worker.unenroll()
+        print("Worker enrolment removed." if removed else "This host is not enrolled as a worker.")
+        return 0
+    import signal
+    import threading
+
+    stop = threading.Event()
+    session = worker.default_session(package_version())
+    previous = {signum: signal.signal(signum, lambda *_: stop.set()) for signum in (signal.SIGINT, signal.SIGTERM)}
+    print(f"Worker {session.config.name} connecting to {session.config.coordinator_url}; Ctrl-C stops it.", flush=True)
+    try:
+        worker.run(session, worker.websocket_connector(), stop=stop, log=lambda text: print(text, file=sys.stderr, flush=True))
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+    return 0
+
+
+def _remote_command(args: argparse.Namespace) -> int:
+    """``llm-bridge remote``: where ``--target`` requests are sent."""
+    from . import bridge_remote as remote
+
+    if args.remote_action == "login":
+        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
+        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        config = remote.login(args.coordinator, token, ca_pem=ca_pem)
+        print(f"Remote targets now go through {config.coordinator_url}. List them with: llm-bridge worker list")
+        return 0
+    if args.remote_action == "status":
+        try:
+            config = remote.load()
+        except remote.RemoteError as exc:
+            print(f"llm-bridge: {exc}", file=sys.stderr)
+            return 2
+        _print_result(config.public(), args.json, lambda value: f"coordinator_url: {value['coordinator_url']}")
+        return 0
+    print("Remote configuration removed." if remote.logout() else "No coordinator is configured.")
+    return 0
+
+
+def _split_target(arguments: list[str]) -> tuple[str | None, list[str]]:
+    """Remove a leading ``--target NAME`` and validate the name."""
+    if arguments[0] == "--target":
+        if len(arguments) < 2 or arguments[1].startswith("-"):
+            print("llm-bridge: --target needs a name: local, all, or a worker name", file=sys.stderr)
+            return None, arguments
+        raw, rest = arguments[1], arguments[2:]
+    else:
+        raw, rest = arguments[0].split("=", 1)[1], arguments[1:]
+    try:
+        return commands.validate_target(raw), rest
+    except commands.CommandFailure as exc:
+        print(f"llm-bridge: {exc}", file=sys.stderr)
+        return None, arguments
+
+
+# Windows supports the remote client only (docs/distributed/DECISIONS.md D8): the coordinator,
+# `remote login|status|logout`, `worker list` and any command sent with `--target NAME`. Everything
+# else needs tmux, a POSIX terminal or POSIX file locks.
+WINDOWS_SUPPORTED_USAGE = "llm-bridge --target NAME COMMAND, llm-bridge remote login|status|logout, llm-bridge worker list"
+
+
+def unsupported_on_windows(arguments: list[str]) -> dict[str, Any] | None:
+    """The structured refusal for a local command on Windows, or None when the command is supported."""
+    if sys.platform != "win32":
+        return None
+    if any(word in {"-h", "--help", "--version"} for word in arguments):
+        return None
+    if arguments[:1] in (["remote"], ["help"]) or arguments[:2] == ["worker", "list"]:
+        return None
+    command = " ".join(word for word in arguments[:2] if not word.startswith("-")) or "(none)"
+    message = (f"'{command}' is not supported on Windows. Windows supports the remote client only: "
+               f"{WINDOWS_SUPPORTED_USAGE}. Run local commands on Linux or macOS.")
+    return {"schema_version": 1, "outcome": "failed",
+            "error": commands.CommandError("unsupported-platform", message, {"platform": "windows", "command": command}).to_json()}
+
+
+def _refuse_on_windows(arguments: list[str]) -> int | None:
+    refusal = unsupported_on_windows(arguments)
+    if refusal is None:
+        return None
+    if "--json" in arguments:
+        print(json.dumps(refusal, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(f"llm-bridge: {refusal['error']['message']}", file=sys.stderr)
+    return 2
+
+
 def _main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
-        if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"} and not _managed_session():
+        if sys.platform != "win32" and sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"} and not _managed_session():
             from .bridge_launcher import run_launcher
 
             from . import bridge_theme
@@ -1903,9 +2106,22 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
         print(topic_text(topic))
         return 0
+    target: str = commands.LOCAL_TARGET
+    if arguments and (arguments[0] == "--target" or arguments[0].startswith("--target=")):
+        parsed_target, arguments = _split_target(arguments)
+        if parsed_target is None:
+            return 2
+        target = parsed_target
+        if not arguments:
+            print("llm-bridge: --target needs a command, for example: llm-bridge --target local status", file=sys.stderr)
+            return 2
     if arguments == ["--version"]:
         print(f"llm-bridge {package_version()}")
         return 0
+    if target == commands.LOCAL_TARGET:
+        refused = _refuse_on_windows(arguments)
+        if refused is not None:
+            return refused
     if arguments and arguments[0] in {"--prompt-file", "--file", "--prompt"}:
         if _managed_session():
             print(f"llm-bridge: {MANAGED_REFUSAL}", file=sys.stderr)
@@ -1919,6 +2135,15 @@ def _main(argv: list[str] | None = None) -> int:
     if _managed_session() and not _managed_allows(args):
         print(f"llm-bridge: {MANAGED_REFUSAL}", file=sys.stderr)
         return 2
+    if target != commands.LOCAL_TARGET:
+        # Never fall back to local execution for a named target (CLI-005).
+        from .bridge_remote import run_cli
+
+        return run_cli(target, args)
+    if args.command == "worker" and args.worker_action == "list":
+        from .bridge_remote import run_cli as run_remote
+
+        return run_remote(commands.ALL_TARGET, args)
     if _managed_session() and hasattr(args, "mission") and args.mission is None and os.environ.get(MANAGED_MISSION_ENV):
         args.mission = os.environ[MANAGED_MISSION_ENV].strip()  # never infer another mission from the folder
     if args.command in {"control", "usage", "console", "start", "resume", "attach", "view"}:
@@ -2133,17 +2358,14 @@ def _main(argv: list[str] | None = None) -> int:
                     _print_result(result, bool(getattr(args, "json", False)), fmt.format_mission_colour)
                     return 0
                 else:
-                    missions = order_missions(store.list_missions())
-                    for item in missions:
-                        item["controller_running"] = controller_running(str(item["id"]))
-                    result = {"missions": missions}
+                    result = commands.dispatch(commands.CommandRequest("mission.list", {"include_config": bool(args.include_config)}))
             human = fmt.format_mission_created if args.mission_action == "create" else (lambda value: fmt.format_mission_list(value["missions"]))
             if not args.include_config:
                 result = strip_frozen_config(result)
             _print_result(result, bool(getattr(args, "json", False)), human)
             return 0
         if args.command == "status":
-            result = status_snapshot(args.mission)
+            result = commands.dispatch(commands.CommandRequest("mission.status", mission_id=args.mission))
             _print_result(result, args.json, fmt.format_status)
             return 0
         if args.command == "agents":
@@ -2173,39 +2395,28 @@ def _main(argv: list[str] | None = None) -> int:
                 print(result.get("message") or result.get("reason") or result.get("status"))
             return 0 if result.get("ok") is True else 2
         if args.command == "events":
-            with open_store(readonly=True) as store:
-                result = {"schema_version": 1, "events": store.events(args.mission, after=args.after, limit=args.limit)}
+            result = commands.dispatch(commands.CommandRequest("mission.events", {"after": args.after, "limit": args.limit}, mission_id=args.mission))
             _print_result(result, args.json, lambda value: fmt.format_events(value["events"]))
             return 0
         if args.command == "proposal":
             with open_store() as store:
                 if args.proposal_action == "list":
-                    # Task numbers rise with creation, so "above number N" is "above the highest ID numbered N or less".
-                    after_id = int(store.db.execute("SELECT COALESCE(MAX(id),0) FROM tasks WHERE mission_id=? AND ordinal<=?", (args.mission, max(0, args.after))).fetchone()[0])
-                    result = {
-                        "proposals": store.list_proposals(
-                            args.mission, status=args.status, limit=args.limit, after_task_id=after_id,
-                        ),
-                    }
+                    result = commands.dispatch(commands.CommandRequest("proposal.list", {"status": args.status, "limit": args.limit, "after": args.after}, mission_id=args.mission))
+                elif args.proposal_action in {"accept", "reject"}:
+                    result = commands.dispatch(commands.CommandRequest("proposal.decide", {
+                        "task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or ""),
+                    }, mission_id=args.mission))
                 else:
-                    if args.proposal_action == "create":
-                        prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-                        payload = {
-                            "action": "task.propose",
-                            "source_operation_id": args.source_operation_id,
-                            "prompt": prompt,
-                            "title": args.title,
-                            "priority": args.priority,
-                            "depends_on": _dependency_ids(store, args.mission, args.depends_on),
-                            "acceptance": args.acceptance,
-                        }
-                    else:
-                        payload = {
-                            "action": "task.proposal-decision",
-                            "task_id": int(store.task_by_ordinal(args.mission, args.task)["id"]),
-                            "accept": args.proposal_action == "accept",
-                            "reason": getattr(args, "reason", ""),
-                        }
+                    prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+                    payload = {
+                        "action": "task.propose",
+                        "source_operation_id": args.source_operation_id,
+                        "prompt": prompt,
+                        "title": args.title,
+                        "priority": args.priority,
+                        "depends_on": _dependency_ids(store, args.mission, args.depends_on),
+                        "acceptance": args.acceptance,
+                    }
                     result = _apply_operator_command(store, args.mission, payload)
             if isinstance(result, dict) and result.get("status") == "REJECTED":
                 detail = result.get("result") or {}
@@ -2224,8 +2435,7 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, bool(getattr(args, "json", False)), _task_text(args))
             return 0
         if args.command == "continue":
-            with open_store() as store:
-                result = _apply_operator_command(store, args.mission, {"action": "continue"})
+            result = commands.dispatch(commands.CommandRequest("mission.continue", mission_id=args.mission))
             if result.get("status") == "REJECTED" and not args.json:
                 print(f"llm-bridge: {(result.get('result') or {}).get('error', 'continue rejected')}", file=sys.stderr)
                 return 2
@@ -2318,18 +2528,27 @@ def _main(argv: list[str] | None = None) -> int:
                         store.set_mission_status(args.mission, "STOPPED")
                     result = {"mission": store.get_mission(args.mission)}
             else:
-                with open_store() as store:
-                    current_status = store.get_mission(args.mission)["status"]
-                if args.command == "stop" and current_status in {"COMPLETED", "FAILED", "CANCELLED", "STOPPED"}:
-                    result = _stop_terminal_mission_station(args.mission)
-                else:
-                    with open_store() as store:
-                        result = _apply_operator_command(store, args.mission, {"action": args.command})
-                        if result.get("status") == "REJECTED" and not args.json:
-                            print(f"llm-bridge: {(result.get('result') or {}).get('error', args.command + ' rejected')}", file=sys.stderr)
-                            return 2
+                result = commands.dispatch(commands.CommandRequest(f"mission.{args.command}", mission_id=args.mission))
+                if result.get("status") == "REJECTED" and not args.json:
+                    print(f"llm-bridge: {(result.get('result') or {}).get('error', args.command + ' rejected')}", file=sys.stderr)
+                    return 2
             _print_result(result, args.json, lambda value: fmt.format_command_receipt(args.command, value, args.mission))
             return 0
+        if args.command in {"backup", "restore"}:
+            from . import bridge_backup
+
+            if args.command == "backup":
+                facts = bridge_backup.backup(Path(args.output), store_path=store_path())
+                _print_result(facts, args.json, lambda value: f"Backed up {value['missions']} missions to {value['path']} ({value['bytes']} bytes, sha256 {value['sha256'][:16]}).")
+            else:
+                facts = bridge_backup.restore(Path(args.input), store_path=store_path())
+                _print_result(facts, args.json, lambda value: f"Restored {value['missions']} missions from {value['restored_from']}."
+                              + (f" The replaced database is kept at {value['previous_database']}." if value["previous_database"] else ""))
+            return 0
+        if args.command == "worker":
+            return _worker_command(args)
+        if args.command == "remote":
+            return _remote_command(args)
         if args.command == "theme":
             _print_theme(args)
             return 0
@@ -2388,7 +2607,7 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("steer", value, args.mission))
             return 0
         _build_parser().error(f"unsupported command {args.command}")
-    except (ValueError, KeyError, OSError, RuntimeError, TransitionError) as exc:
+    except (ValueError, KeyError, OSError, RuntimeError, TransitionError, commands.CommandFailure) as exc:  # WorkerConfigError is a ValueError
         print(f"llm-bridge: {exc}", file=sys.stderr)
         return 2
     return 0

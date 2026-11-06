@@ -74,3 +74,17 @@ def test_quickstart_help_matches_default_rotation_slash_commands_and_detach() ->
     detach = " ".join(topic_text("detach").split())
     assert "normally another terminal's" in detach and "--client /dev/pts/N" in detach
     assert "Ctrl-] then d" in detach
+
+
+def test_distributed_help_examples_parse_and_root_help_names_target() -> None:
+    import shlex
+    parser = _build_parser()
+    examples = [line.strip().split("  ")[0] for line in topic_text("distributed").splitlines() if line.strip().startswith("llm-bridge ")]
+    assert len(examples) >= 6
+    for example in examples:
+        argv = shlex.split(example)[1:]
+        if argv[0] == "--target":
+            argv = argv[2:]
+        parser.parse_args(argv)
+    root = parser.format_help()
+    assert "--target WORKER" in root and "help distributed" in root and "worker" in root and "remote" in root

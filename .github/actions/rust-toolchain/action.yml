@@ -1,0 +1,39 @@
+name: Pinned Rust toolchain
+description: >-
+  Install the toolchain named in rust-toolchain.toml, with its components and targets, from a
+  clean state. Every job that runs cargo uses this action before Swatinem/rust-cache, which keys
+  its cache on the installed rustc.
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Rust toolchain from a clean state
+      shell: bash
+      run: |
+        cd "$GITHUB_WORKSPACE"  # job defaults such as working-directory do not apply here
+        # Windows ARM64 images have no rustup.
+        if ! command -v rustup >/dev/null 2>&1; then
+          case "$RUNNER_OS" in
+            Windows)
+              arch=x86_64; [ "$RUNNER_ARCH" = ARM64 ] && arch=aarch64
+              curl -sSfL "https://static.rust-lang.org/rustup/dist/$arch-pc-windows-msvc/rustup-init.exe" -o "$RUNNER_TEMP/rustup-init.exe"
+              "$RUNNER_TEMP/rustup-init.exe" -y --default-toolchain none --profile minimal
+              cargo_bin="$USERPROFILE/.cargo/bin" ;;
+            *)
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+              cargo_bin="$HOME/.cargo/bin" ;;
+          esac
+          echo "$cargo_bin" >> "$GITHUB_PATH"
+          export PATH="$cargo_bin:$PATH"
+        fi
+        # Some runner images ship the pinned release in a state rustup reports as "partially
+        # installed". Adding a component or target to it then fails with "detected conflict:
+        # 'bin/cargo-clippy'" (ubuntu-24.04-arm 20261101.172 in run 42176147126, ubuntu-latest in
+        # run 42178711175). Removing the image's copy makes rustup install the toolchain,
+        # components and targets from rust-toolchain.toml in one step.
+        channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+        test -n "$channel"
+        rustup toolchain uninstall "$channel" >/dev/null 2>&1 || true
+        rustup toolchain install
+        rustc --version
+        rustup component list --installed
+        rustup target list --installed

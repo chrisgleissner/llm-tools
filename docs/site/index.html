@@ -29,10 +29,10 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "llm-tools",
-  "description": "Command-line tools that show the remaining limits of Claude Code, Codex and Copilot CLI, move a prompt to the next provider when one runs dry, and supervise longer missions with explicit approval.",
+  "description": "Command-line tools that show the remaining limits of Claude Code, Codex and Copilot CLI, move a prompt to the next provider when one runs dry, and supervise longer missions with explicit approval, optionally from a self-hosted web console.",
   "url": "https://chrisgleissner.github.io/llm-tools/",
   "applicationCategory": "DeveloperApplication",
-  "operatingSystem": "Linux, macOS",
+  "operatingSystem": "Linux, macOS; Windows for the coordinator and remote client",
   "softwareRequirements": "Python 3.11 or newer; tmux for llm-bridge; a signed-in provider CLI",
   "license": "https://www.apache.org/licenses/LICENSE-2.0",
   "codeRepository": "https://github.com/chrisgleissner/llm-tools",
@@ -66,6 +66,7 @@
         <a href="#limits">Limits</a>
         <a href="#handoff">Hand-off</a>
         <a href="#bridge">Bridge</a>
+        <a href="#console">Console</a>
         <a href="#control">Control</a>
         <a href="#first-run">Install</a>
       </span>
@@ -104,7 +105,7 @@
         <div class="cmd"><code id="cmd-hero-src" class="multi"><span class="ln"><span class="prompt">$ </span>git clone --branch 1.3.0 https://github.com/<wbr>chrisgleissner/<wbr><span class="nb">llm-tools.git</span></span><span class="ln"><span class="prompt">$ </span>cd llm-tools</span><span class="ln"><span class="prompt">$ </span>pipx install .</span></code><button type="button" class="copy" data-copy="cmd-hero-src" aria-label="Copy command"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg><span class="copy-label">Copy</span></button></div>
       </div>
     </div>
-    <p class="hero-note">Python 3.11+ &middot; Linux (full) &middot; macOS best effort &middot; <code>tmux</code> for Bridge<br>Local, no telemetry, works over SSH &middot; Apache-2.0</p>
+    <p class="hero-note">Python 3.11+ &middot; Linux and macOS &middot; <code>tmux</code> for Bridge<br>Local, no telemetry, works over SSH &middot; Apache-2.0</p>
     <p class="hero-cta"><a class="btn" href="#first-run">Your first run in four steps</a></p>
 
     <figure class="hero-visual">
@@ -352,8 +353,89 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
   </div>
 </section>
 
+<!-- ============ Web console ============ -->
+<section id="console" class="band" aria-labelledby="console-title">
+  <div class="wrap">
+    <div class="section-head">
+      <p class="kicker">Web console, optional</p>
+      <h2 id="console-title">Many machines, one console, any browser.</h2>
+      <p>Workers run missions on your own machines, and a small coordinator you host lets you watch and approve them from any browser, a phone or the CLI. Standalone Bridge still needs no server.</p>
+    </div>
+
+    <div class="arch" aria-label="Architecture">
+      <div class="arch-row two">
+        <div class="arch-box"><b>Browser</b><span>desktop or phone</span></div>
+        <div class="arch-box"><b>llm-bridge CLI</b><span><code>--target NAME</code></span></div>
+      </div>
+      <p class="arch-link"><svg viewBox="0 0 12 16" aria-hidden="true"><path d="M6 1v12M2 9l4 5 4-5"/></svg>HTTPS and login</p>
+      <div class="arch-row"><div class="arch-box main"><b>Coordinator</b><span>one small self-hosted binary, loopback until you enable the LAN</span></div></div>
+      <p class="arch-link"><svg viewBox="0 0 12 16" aria-hidden="true"><path d="M6 1v12M2 9l4 5 4-5"/></svg>Workers connect out, with their own token</p>
+      <div class="arch-row two">
+        <div class="arch-box keep"><b>Worker</b><span>your laptop or server</span></div>
+        <div class="arch-box keep"><b>Worker</b><span>your Raspberry Pi or another host</span></div>
+      </div>
+      <p class="arch-note">Provider CLIs and their sign-ins stay on the workers. The coordinator never holds them.</p>
+    </div>
+
+    <div class="console-shots">
+      <div class="tabs" data-tabs>
+        <div class="tabbar">
+          <div class="tablist" role="tablist" aria-label="Web console views">
+            <button type="button" role="tab" id="tab-con-overview" aria-controls="panel-con-overview" aria-selected="true">Overview</button>
+            <button type="button" role="tab" id="tab-con-approval" aria-controls="panel-con-approval" aria-selected="false" tabindex="-1">Approve</button>
+            <button type="button" role="tab" id="tab-con-terminal" aria-controls="panel-con-terminal" aria-selected="false" tabindex="-1">Terminal</button>
+          </div>
+        </div>
+      <figure class="win-fig" role="tabpanel" id="panel-con-overview" aria-labelledby="tab-con-overview">
+          <div class="win only-dark">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">LLM Bridge web console</span></div>
+            <div class="win-body"><picture><source type="image/webp" srcset="assets/web-overview-dark-1x.webp 1000w, assets/web-overview-dark-2x.webp 2000w" sizes="(min-width: 861px) 720px, 100vw"><img src="assets/web-overview-dark-1x.png" srcset="assets/web-overview-dark-1x.png 1000w, assets/web-overview-dark-2x.png 2000w" sizes="(min-width: 861px) 720px, 100vw" width="1000" height="618" loading="lazy" decoding="async" alt="Web console overview in the dark theme: four counters for workers online, missions running, tasks awaiting approval and failed tasks, a list of items that need attention, and recent activity. Sample data."></picture></div>
+          </div>
+          <div class="win only-light">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">LLM Bridge web console</span></div>
+            <div class="win-body"><picture><source type="image/webp" srcset="assets/web-overview-light-1x.webp 1000w, assets/web-overview-light-2x.webp 2000w" sizes="(min-width: 861px) 720px, 100vw"><img src="assets/web-overview-light-1x.png" srcset="assets/web-overview-light-1x.png 1000w, assets/web-overview-light-2x.png 2000w" sizes="(min-width: 861px) 720px, 100vw" width="1000" height="618" loading="lazy" decoding="async" alt="Web console overview in the light theme: four counters for workers online, missions running, tasks awaiting approval and failed tasks, a list of items that need attention, and recent activity. Sample data."></picture></div>
+          </div>
+      </figure>
+      <figure class="win-fig" role="tabpanel" id="panel-con-approval" aria-labelledby="tab-con-approval">
+          <div class="win only-dark">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">LLM Bridge web console</span></div>
+            <div class="win-body"><picture><source type="image/webp" srcset="assets/web-approval-dark-1x.webp 1000w, assets/web-approval-dark-2x.webp 2000w" sizes="(min-width: 861px) 720px, 100vw"><img src="assets/web-approval-dark-1x.png" srcset="assets/web-approval-dark-1x.png 1000w, assets/web-approval-dark-2x.png 2000w" sizes="(min-width: 861px) 720px, 100vw" width="1000" height="618" loading="lazy" decoding="async" alt="Web console mission page in the dark theme: a task list in which one task is verifying and has Approve, Reject and Cancel buttons, with search, status filters and sorting. Sample data."></picture></div>
+          </div>
+          <div class="win only-light">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">LLM Bridge web console</span></div>
+            <div class="win-body"><picture><source type="image/webp" srcset="assets/web-approval-light-1x.webp 1000w, assets/web-approval-light-2x.webp 2000w" sizes="(min-width: 861px) 720px, 100vw"><img src="assets/web-approval-light-1x.png" srcset="assets/web-approval-light-1x.png 1000w, assets/web-approval-light-2x.png 2000w" sizes="(min-width: 861px) 720px, 100vw" width="1000" height="618" loading="lazy" decoding="async" alt="Web console mission page in the light theme: a task list in which one task is verifying and has Approve, Reject and Cancel buttons, with search, status filters and sorting. Sample data."></picture></div>
+          </div>
+      </figure>
+      <figure class="win-fig" role="tabpanel" id="panel-con-terminal" aria-labelledby="tab-con-terminal">
+          <div class="win only-dark">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">LLM Bridge web console</span></div>
+            <div class="win-body"><picture><source type="image/webp" srcset="assets/web-terminal-dark-1x.webp 1000w, assets/web-terminal-dark-2x.webp 2000w" sizes="(min-width: 861px) 720px, 100vw"><img src="assets/web-terminal-dark-1x.png" srcset="assets/web-terminal-dark-1x.png 1000w, assets/web-terminal-dark-2x.png 2000w" sizes="(min-width: 861px) 720px, 100vw" width="1000" height="618" loading="lazy" decoding="async" alt="Web console terminal in the dark theme: a live provider session on a worker, view of a task that is ready for review. Sample data."></picture></div>
+          </div>
+          <div class="win only-light">
+            <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">LLM Bridge web console</span></div>
+            <div class="win-body"><picture><source type="image/webp" srcset="assets/web-terminal-light-1x.webp 1000w, assets/web-terminal-light-2x.webp 2000w" sizes="(min-width: 861px) 720px, 100vw"><img src="assets/web-terminal-light-1x.png" srcset="assets/web-terminal-light-1x.png 1000w, assets/web-terminal-light-2x.png 2000w" sizes="(min-width: 861px) 720px, 100vw" width="1000" height="618" loading="lazy" decoding="async" alt="Web console terminal in the light theme: a live provider session on a worker, view of a task that is ready for review. Sample data."></picture></div>
+          </div>
+      </figure>
+      </div>
+      <figure class="phone-fig">
+          <div class="phone only-dark"><picture><source type="image/webp" srcset="assets/web-phone-dark-1x.webp 353w, assets/web-phone-dark-2x.webp 706w" sizes="240px"><img src="assets/web-phone-dark-1x.png" srcset="assets/web-phone-dark-1x.png 353w, assets/web-phone-dark-2x.png 706w" sizes="240px" width="353" height="745" loading="lazy" decoding="async" alt="The web console on a Pixel 4 phone in the dark theme: the overview with counters and the attention list, and a bottom navigation bar. Sample data."></picture></div>
+          <div class="phone only-light"><picture><source type="image/webp" srcset="assets/web-phone-light-1x.webp 353w, assets/web-phone-light-2x.webp 706w" sizes="240px"><img src="assets/web-phone-light-1x.png" srcset="assets/web-phone-light-1x.png 353w, assets/web-phone-light-2x.png 706w" sizes="240px" width="353" height="745" loading="lazy" decoding="async" alt="The web console on a Pixel 4 phone in the light theme: the overview with counters and the attention list, and a bottom navigation bar. Sample data."></picture></div>
+        <figcaption class="fine">The same console on a phone. Screenshots show sample data.</figcaption>
+      </figure>
+    </div>
+
+    <ul class="feats four" aria-label="Web console">
+      <li><b>Secure by default.</b> HTTPS, a login, and loopback only until you opt in.</li>
+      <li><b>Offline on your LAN.</b> The console loads nothing from the internet.</li>
+      <li><b>One command set.</b> <code>llm-bridge --target NAME</code> runs a command on a worker.</li>
+      <li><b>Light.</b> Under 25 MiB of memory at peak on an emulated Pi Zero 2 W; see the <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/benchmarks.md">benchmarks</a>.</li>
+    </ul>
+    <p class="fine"><a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md">Install the coordinator and add a worker</a></p>
+  </div>
+</section>
+
 <!-- ============ Control ============ -->
-<section id="control" class="band" aria-labelledby="control-title">
+<section id="control" aria-labelledby="control-title">
   <div class="wrap">
     <div class="section-head">
       <p class="kicker">Built to be left alone</p>
@@ -374,8 +456,8 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
         <p>The table forecasts when a limit will run out. <code>ralph-robin</code> spreads use across providers by remaining headroom, you choose the rotation, and when every provider is empty it sleeps until the earliest reset, never without a wake alarm.</p>
       </article>
       <article class="card">
-        <h3>No server, no account, no telemetry.</h3>
-        <p>Plain Python and tmux in your terminal, over SSH as well as locally. It uses the sign-ins your provider CLIs already hold and opens no network listener. Apache-2.0. Each person runs their own copy; there is no shared server or dashboard.</p>
+        <h3>No server needed, no account, no telemetry.</h3>
+        <p>Plain Python and tmux in your terminal, over SSH as well as locally. It uses the sign-ins your provider CLIs already hold and, standalone, opens no network listener. The web console is optional: a coordinator you host yourself, with no telemetry. Apache-2.0. There is no hosted service.</p>
       </article>
     </div>
     <p class="fine"><a href="#privacy">What it reads, calls and writes</a> &middot; <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/operations.md#native-missions-hold-for-review">How the review hold works</a></p>
@@ -388,7 +470,7 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
     <div class="install-box">
       <p class="kicker">Install</p>
       <h2 id="first-title">From install to your first approved task.</h2>
-      <p class="req"><b>You need:</b> Python 3.11+ and <code>pipx</code>; at least one provider CLI that is installed and signed in (<code>claude</code>, <code>codex</code> or <code>copilot</code>); <code>tmux</code> for Bridge. Linux is fully supported, macOS is best effort. Prefer scripts? The same flow runs without a terminal: see the <a href="https://github.com/chrisgleissner/llm-tools#your-first-bridge-mission">README</a>.</p>
+      <p class="req"><b>You need:</b> Python 3.11+ and <code>pipx</code>; at least one provider CLI that is installed and signed in (<code>claude</code>, <code>codex</code> or <code>copilot</code>); <code>tmux</code> for Bridge. Bridge missions need Linux; macOS runs the usage tools and the remote client. Prefer scripts? The same flow runs without a terminal: see the <a href="https://github.com/chrisgleissner/llm-tools#your-first-bridge-mission">README</a>.</p>
 
       <ol class="run-steps">
         <li>
@@ -428,6 +510,7 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
       </ol>
       <p class="timing"><b>How long it takes.</b> In the recorded walk-through with Claude Code, <code>pipx install</code> took 13 seconds and <code>llm-bridge doctor</code> 0.1 seconds. From Start to a completed task took 31 seconds, about half of it spent typing and choosing. Your provider's own speed will differ.</p>
       <p class="optional"><b>Optional: see all your limits.</b> Run <code>llm-usage</code>. It reads every installed provider at once. On the machine we measured, the first table appeared after about 3 seconds and slower providers filled in by 9 seconds. An installed background sampler makes later runs quick.</p>
+      <p class="optional"><b>Optional: add the web console.</b> Initialise a coordinator with <code>bridge-coordinator init</code>, create the administrator in your browser with the setup token, then enrol a worker with <code>llm-bridge worker enroll</code>. Docker, Raspberry Pi and Windows steps are in <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md">the install guide</a>.</p>
       <p class="req">Other install routes are in the <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/reference.md#install-paths">reference</a>, settings in <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/configuration.md">configuration</a>, and details in the <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/operations.md">Bridge operations guide</a>.</p>
     </div>
   </div>
@@ -476,8 +559,8 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
         <p>It is not a provider and not a proxy. It uses the sign-ins your provider CLIs already hold. Bridge starts each provider without the other providers' credential variables, but it does not sandbox a provider: providers run as you, in your project folder.</p>
       </div>
       <div class="edge">
-        <h3>Linux first, macOS best effort.</h3>
-        <p>Suspend and wake use systemd, so they are Linux only. Elsewhere the tools wait with the machine awake. Continuous integration runs on Linux.</p>
+        <h3>Bridge on Linux; the web console everywhere.</h3>
+        <p>Continuous integration runs on Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows. Bridge and its workers run on Linux; macOS runs the usage tools, the coordinator and the remote client. Suspend and wake use systemd, so they are Linux only. On Windows only the coordinator and the remote client are supported (<a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/DECISIONS.md">decision D8</a>).</p>
       </div>
       <div class="edge">
         <h3>Resume is exact for Codex only.</h3>
@@ -495,7 +578,7 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
         <div><dt>Reads from disk</dt><dd>Claude Code's <code>~/.claude/.credentials.json</code> (to call the usage endpoint) and its project files under <code>~/.claude/projects</code> as a fallback. Codex's <code>~/.codex/auth.json</code> (checked for sign-in) and session files under <code>~/.codex/sessions</code>. For Copilot, a GitHub token from <code>COPILOT_GITHUB_TOKEN</code>, <code>GH_TOKEN</code>, <code>GITHUB_TOKEN</code> or <code>gh auth token</code>. If you configure z.ai, its key from Kilo's or OpenCode's auth file.</dd></div>
         <div><dt>Calls</dt><dd><code>api.anthropic.com</code> for Claude usage and token refresh. <code>api.github.com</code> for Copilot quota and billing. Codex is queried through the Codex CLI itself (<code>codex app-server</code>). The z.ai quota endpoint, only if you use z.ai. Nothing is sent to any server of ours: there is none.</dd></div>
         <div><dt>Writes</dt><dd>Caches and logs under <code>~/.cache/llm-tools</code> and Bridge's database under <code>~/.local/state/llm-tools</code>. One change outside them: before reading Copilot's footer it enables two status-line items in <code>~/.copilot/settings.json</code>. Set <code>LLM_USAGE_COPILOT_NO_SETTINGS_WRITE=1</code> to prevent that.</dd></div>
-        <div><dt>Never</dt><dd>No telemetry and no network listener. The optional usage sampler listens on a Unix socket owned by you; Bridge uses a local SQLite file and a private tmux socket. This page loads no scripts, fonts or analytics from other hosts; the badges at the bottom are images from GitHub and shields.io.</dd></div>
+        <div><dt>Never</dt><dd>No telemetry. Standalone Bridge opens no network listener; the optional coordinator listens only where you configure it, on loopback by default. The optional usage sampler listens on a Unix socket owned by you; Bridge uses a local SQLite file and a private tmux socket. This page loads no scripts, fonts or analytics from other hosts; the badges at the bottom are images from GitHub and shields.io.</dd></div>
       </dl>
     </div>
   </div>
@@ -553,9 +636,21 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
         </div>
       </details>
       <details>
+        <summary>Do I need the coordinator?</summary>
+        <div class="answer">
+          <p>No. Standalone <code>llm-bridge</code> needs no server. Add the coordinator when you want missions on several machines, or to watch and approve them from a browser or phone.</p>
+        </div>
+      </details>
+      <details>
+        <summary>Is the web console safe on my LAN?</summary>
+        <div class="answer">
+          <p>It serves HTTPS with a certificate authority it creates, requires a login, checks CSRF tokens and request origin, and listens on loopback until you set <code>lan_enabled</code>. A LAN address is not authentication: restrict the port, and trust the CA on each browser. The <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/threat-model.md">threat model</a> lists what is and is not covered.</p>
+        </div>
+      </details>
+      <details>
         <summary>Is it for teams?</summary>
         <div class="answer">
-          <p>It is a per-user tool. Missions, caches and sign-ins belong to your account, and there is no shared server or dashboard. It runs on a remote machine over SSH, and Apache-2.0 allows internal use. Each person needs their own provider sign-ins.</p>
+          <p>It is a per-user tool. Missions, caches and sign-ins belong to your account, and there is no hosted service. It runs on a remote machine over SSH, and an optional self-hosted coordinator shows several machines in one browser console, and Apache-2.0 allows internal use. Each person needs their own provider sign-ins.</p>
         </div>
       </details>
       <details>

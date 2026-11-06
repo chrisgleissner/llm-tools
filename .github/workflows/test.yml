@@ -1,8 +1,16 @@
 name: test
 
 on:
+  # Branches run through their pull request only; a push to a branch with an open pull request
+  # would otherwise start a second, identical run that competes for the same (scarce) macOS runners.
   push:
+    branches: [main]
   pull_request:
+
+# One run per pull request (or per ref on main); a newer commit cancels the run it supersedes.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -11,6 +19,7 @@ jobs:
   test:
     name: test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +35,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install tmux for native terminal integration tests
         run: |
@@ -49,7 +60,18 @@ jobs:
           llm-bridge mission create --help >/dev/null
           llm-bridge </dev/null >/dev/null
 
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux
+          save-if: ${{ matrix.python-version == '3.11' }}
+      - name: Build the Rust coordinator for cross-component tests
+        run: cargo build --locked --manifest-path coordinator/Cargo.toml
+
       - name: Run tests with coverage
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
         run: |
           python -m coverage run -m pytest
           python -m coverage combine
@@ -65,11 +87,100 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  coordinator:
+    name: coordinator (Rust)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: coordinator
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux
+      - name: Format, lint and test
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+
+  web:
+    name: web UI (TypeScript, Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install the Python worker for the end-to-end worker test
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e .
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux-release
+      - name: Build the coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('web/package-lock.json') }}
+      - name: Type-check, build and run browser tests
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npx playwright install --with-deps chromium firefox
+          # Behaviour, layout, accessibility and mobile tests on all four projects. The screenshot comparison is
+          # skipped here because font rendering differs between machines; it runs in the pinned image below.
+          BRIDGE_SKIP_VISUAL=1 npm run test:e2e
+      - name: Visual regression (official Playwright image, Chromium desktop and Pixel 4)
+        working-directory: web
+        run: |
+          version=$(node -p "require('@playwright/test/package.json').version")
+          docker run --rm --ipc=host -e CI=1 -e CARGO_TARGET_DIR=/work/coordinator/target \
+            -v "$GITHUB_WORKSPACE":/work -w /work/web "mcr.microsoft.com/playwright:v${version}-noble" \
+            node node_modules/@playwright/test/cli.js test e2e/screenshots.spec.ts --project=chromium-desktop --project=chromium-mobile
+      - name: Keep the Playwright report and the load measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-playwright
+          path: |
+            web/playwright-report
+            web/test-results/load-metrics.json
+            web/test-results/**/*-actual.png
+            web/test-results/**/*-diff.png
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Static type check of the Bridge modules (llm_tools/bridge*.py and terminal.py; see [tool.mypy] in
   # pyproject.toml). mypy is a development tool and is not a runtime dependency.
   typecheck:
     name: mypy (Bridge modules)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -97,6 +208,7 @@ jobs:
     needs: test
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
@@ -116,3 +228,287 @@ jobs:
           use_oidc: true
           files: ./coverage-reports/coverage-3.11/coverage.xml,./coverage-reports/coverage-3.15/coverage.xml
           fail_ci_if_error: true
+
+  # Native ARM64 (GitHub-hosted ubuntu-24.04-arm, Cobalt 100). This is not a Raspberry Pi: the
+  # figures show behaviour on the arm64 architecture and under Pi-like limits, not Pi speed.
+  arm64-coordinator:
+    name: ARM64 coordinator (lint, tests, Python integration)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: arm64-linux
+      - name: Show the platform
+        run: |
+          uname -m
+          rustc --version --verbose
+      - name: Format, lint and test the coordinator
+        working-directory: coordinator
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Build the release coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Install tmux and Python dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tmux
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+      - name: Python suite (including the distributed integration tests) against the ARM64 binary
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
+          BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator
+        run: |
+          file "$BRIDGE_COORDINATOR_BIN"
+          python -m pytest -q
+
+  arm64-container:
+    name: ARM64 container (build, smoke, limits)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      BRIDGE_PORT: "18443"
+      COMPOSE_PROJECT_NAME: bridgeci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cargo-zigbuild and zig
+        run: python -m pip install cargo-zigbuild ziglang
+      - uses: ./.github/actions/rust-toolchain
+      - name: Build the linux/arm64 image (host architecture only)
+        # container/build.sh builds both architectures' binaries from a git archive of HEAD and loads
+        # the image for this host's architecture (--load, the default); the amd64 binary is only
+        # cross-compiled here, not run. rust-toolchain.toml installs both musl targets.
+        run: container/build.sh --load --tag llm-bridge-coordinator:latest
+      - name: Image architecture and size
+        run: |
+          docker image inspect llm-bridge-coordinator:latest -f '{{.Architecture}} {{.Size}} bytes'
+          test "$(docker image inspect llm-bridge-coordinator:latest -f '{{.Architecture}}')" = arm64
+      - name: Container smoke test
+        run: |
+          {
+            echo "## ARM64 container smoke test (GitHub-hosted runner)"
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+          } >>"$GITHUB_STEP_SUMMARY"
+          SUMMARY_FILE="$GITHUB_STEP_SUMMARY" deploy/ci/container-check.sh smoke
+      - name: Container under a 96 MiB limit (login burst)
+        run: |
+          mkdir -p out
+          {
+            echo "## ARM64 container under memory limits (login burst, 200 concurrent GETs)"
+            echo
+            echo "| Limit | Result |"
+            echo "|---|---|"
+          } | tee -a "$GITHUB_STEP_SUMMARY" out/container-limits.md
+          for limit in 96m 64m 48m; do
+            BRIDGE_MEMORY_LIMIT=$limit SUMMARY_FILE="$PWD/out/limit-$limit.md" deploy/ci/container-check.sh pressure
+            tee -a "$GITHUB_STEP_SUMMARY" out/container-limits.md <"out/limit-$limit.md"
+          done
+      - name: Measurement harness within 512 MB and one CPU
+        run: |
+          sudo apt-get install --no-install-recommends -y jq
+          deploy/ci/bench-limited.sh out/bench-limited.md
+      - name: Assemble bench-arm64.md
+        if: always()
+        run: |
+          {
+            echo "# GitHub-hosted ARM64 runner (not a Pi)"
+            echo
+            echo "Runner: $(uname -m), $(nproc) CPUs, $(awk '/MemTotal/ { printf "%.1f GiB", $2 / 1048576 }' /proc/meminfo) RAM, $(. /etc/os-release; echo "$PRETTY_NAME"), kernel $(uname -r)."
+            echo "Commit: $GITHUB_SHA"
+            echo
+            echo "## Measurement harness, 512 MB and 1 CPU"
+            echo
+            cat out/bench-limited.md 2>/dev/null || echo "not produced"
+            echo
+            echo "## Container limits"
+            echo
+            cat out/container-limits.md 2>/dev/null || echo "not produced"
+          } >bench-arm64.md
+          cat bench-arm64.md
+          { echo; cat bench-arm64.md; } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-arm64
+          path: bench-arm64.md
+          if-no-files-found: warn
+          retention-days: 30
+
+  # macOS (ARM64 and Intel) and Windows (x86-64 and ARM64) on GitHub-hosted runners. Each job builds
+  # the coordinator natively (clippy with warnings denied, unit and integration tests, release build)
+  # and runs the Python suite against that binary. Labels: macos-latest is Apple silicon;
+  # macos-15-intel is the Intel image GitHub still offers; windows-11-arm is available to public
+  # repositories. Windows supports only the coordinator and the remote client
+  # (docs/distributed/DECISIONS.md D8, install.md "Windows"), so the Windows jobs run the allowlist in
+  # WINDOWS_TESTS below instead of the whole suite.
+  cross-platform:
+    name: ${{ matrix.name }} (coordinator, Python)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS ARM64, os: macos-latest, exe: "", tmpdir: /tmp }
+          - { name: macOS Intel, os: macos-15-intel, exe: "", tmpdir: /tmp }
+          - { name: Windows x86-64, os: windows-latest, exe: ".exe", tmpdir: "" }
+          - { name: Windows ARM64, os: windows-11-arm, exe: ".exe", tmpdir: "" }
+    defaults:
+      run:
+        shell: bash
+    env:
+      # macOS temp directories are long (/private/var/folders/...) and exceed the 104-byte AF_UNIX
+      # path limit that tmux and the sampler sockets hit; a short TMPDIR keeps pytest paths below it.
+      TMPDIR: ${{ matrix.tmpdir }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Show the platform
+        run: |
+          uname -sm
+          python -c "import platform, sys; print(platform.platform(), platform.machine(), sys.version)"
+          command -v rustup cargo clang || true
+      - name: Install LLVM (ring needs clang on Windows ARM64)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        run: |
+          if ! command -v clang >/dev/null 2>&1; then
+            choco install llvm -y --no-progress
+          fi
+          echo "C:/Program Files/LLVM/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: ${{ matrix.os }}
+      - name: Lint, test and build the coordinator
+        working-directory: coordinator
+        run: |
+          rustc --version --verbose
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --locked --release
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tmux
+          tmux -V
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+      - name: Python suite against the native coordinator
+        if: runner.os != 'Windows'
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
+          BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator${{ matrix.exe }}
+        run: python -m pytest -q
+      # The tests for the components Windows supports: Windows policy, remote CLI, worker protocol,
+      # WebSocket client, the store-independent part of the command layer, and coordinator integration.
+      # The step fails when an entry names a file that does not exist.
+      - name: Python tests for the Windows components against the native coordinator
+        if: runner.os == 'Windows'
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
+          BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator${{ matrix.exe }}
+          WINDOWS_TESTS: >-
+            tests/test_windows_policy.py
+            tests/test_bridge_remote.py
+            tests/test_bridge_protocol.py
+            tests/test_bridge_ws.py
+            tests/test_bridge_commands.py::test_catalog_lists_every_operation_with_typed_parameters
+            tests/test_bridge_commands.py::test_request_json_round_trip_and_strict_decoding
+            tests/test_bridge_commands.py::test_error_mapping_is_stable
+            tests/test_distributed_integration.py
+        run: |
+          missing=0
+          for entry in $WINDOWS_TESTS; do
+            file="${entry%%::*}"
+            if [ ! -f "$file" ]; then echo "::error::WINDOWS_TESTS names a missing file: $file"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          python -m pytest -q $WINDOWS_TESTS
+
+  # The browser suite on the other desktop platforms, against the coordinator built there. Chromium and
+  # Firefox only (WebKit is optional). Visual baselines are Linux-only (web/playwright.config.ts).
+  web-cross:
+    name: web UI ${{ matrix.name }} (Playwright)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS ARM64, os: macos-latest, exe: "" }
+          - { name: Windows x86-64, os: windows-latest, exe: ".exe" }
+    defaults:
+      run:
+        shell: bash
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+      BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator${{ matrix.exe }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: ${{ matrix.os }}
+      - name: Build the coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: .playwright-browsers
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('web/package-lock.json') }}
+      - name: Type-check, build and run browser tests
+        working-directory: web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+          npx playwright install chromium firefox
+          npx playwright test --project=chromium-desktop --project=chromium-mobile --project=firefox-desktop --project=firefox-mobile

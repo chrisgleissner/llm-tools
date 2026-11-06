@@ -724,3 +724,29 @@ dialog.demo-dialog video { width: 100%; aspect-ratio: 1128 / 648; background: va
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Web console section */
+.arch { max-width: 720px; margin: var(--s4) auto; display: grid; justify-items: center; gap: var(--s1); }
+.arch-row { display: grid; grid-template-columns: 1fr; gap: var(--s2); width: 100%; }
+.arch-row.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.arch-box { padding: var(--s2); border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); text-align: center; }
+.arch-box b { display: block; font-weight: 700; }
+.arch-box span { display: block; margin-top: 2px; color: var(--muted); font-size: .9rem; line-height: 1.4; }
+.arch-box.main { border-color: var(--brand); background: var(--brand-soft); }
+.arch-box.keep { border-style: dashed; }
+.arch-link { display: flex; align-items: center; gap: var(--s1); margin: 0; color: var(--muted); font-size: .9rem; }
+.arch-link svg { width: 12px; height: 16px; fill: none; stroke: var(--brand); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.arch-note { margin: var(--s1) 0 0; color: var(--text); font-weight: 600; text-align: center; }
+.console-shots { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: var(--s3); align-items: start; margin-top: var(--s4); }
+.console-shots .win-body img { width: 100%; height: auto; display: block; }
+.phone-fig { margin: 0; }
+.phone { border: 1px solid var(--win-border); border-radius: 28px; overflow: hidden; box-shadow: var(--shadow); background: var(--term-bg); }
+.phone img { width: 100%; height: auto; display: block; }
+.phone-fig figcaption { margin-top: var(--s1); }
+.feats.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 960px) { .feats.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 860px) {
+  .console-shots { grid-template-columns: minmax(0, 1fr); }
+  .phone-fig { max-width: 240px; margin-inline: auto; }
+}
+@media (max-width: 480px) { .feats.four { grid-template-columns: minmax(0, 1fr); } .arch-row.two { gap: var(--s1); } .arch-box { padding: var(--s1) 12px; } }

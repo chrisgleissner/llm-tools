@@ -1,0 +1,226 @@
+//! Password hashing, opaque tokens and the login rate limiter.
+
+use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::Engine;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+pub const MIN_PASSWORD_LEN: usize = 12;
+pub const MAX_PASSWORD_LEN: usize = 256;
+
+fn argon() -> Argon2<'static> {
+    // 19 MiB, t=2, p=1 (coordinator.md "Storage").
+    Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(19 * 1024, 2, 1, None).expect("valid argon2 parameters"),
+    )
+}
+
+pub fn hash_password(password: &str) -> String {
+    let salt = SaltString::generate(&mut OsRng);
+    argon().hash_password(password.as_bytes(), &salt).expect("argon2 hashing").to_string()
+}
+
+pub fn verify_password(password: &str, phc: &str) -> bool {
+    PasswordHash::new(phc).is_ok_and(|h| argon().verify_password(password.as_bytes(), &h).is_ok())
+}
+
+/// 32 random bytes, URL-safe base64 without padding (43 characters).
+pub fn random_token() -> String {
+    let mut b = [0u8; 32];
+    OsRng.fill_bytes(&mut b);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
+pub fn sha256_hex(s: &str) -> String {
+    hex::encode(Sha256::digest(s.as_bytes()))
+}
+
+/// Constant-time equality: compares fixed-length digests without early exit.
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (x, y) = (Sha256::digest(a.as_bytes()), Sha256::digest(b.as_bytes()));
+    x.iter().zip(y.iter()).fold(0u8, |acc, (p, q)| acc | (p ^ q)) == 0
+}
+
+pub fn valid_username(u: &str) -> bool {
+    (1..=64).contains(&u.len()) && u.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'@'))
+}
+
+pub fn valid_password(p: &str) -> Result<(), String> {
+    if p.len() < MIN_PASSWORD_LEN {
+        return Err(format!("password must be at least {MIN_PASSWORD_LEN} characters"));
+    }
+    if p.len() > MAX_PASSWORD_LEN {
+        return Err(format!("password must be at most {MAX_PASSWORD_LEN} bytes"));
+    }
+    Ok(())
+}
+
+/// Rate-limit key for a client address. IPv6 clients are keyed by their /64 (a single subscriber
+/// normally controls a whole /64, so per-address keys would be free to rotate); IPv4-mapped IPv6
+/// addresses are keyed as the IPv4 address.
+pub fn addr_key(ip: &std::net::IpAddr) -> String {
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(a) => a.to_string(),
+        std::net::IpAddr::V6(a) => {
+            let s = a.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    }
+}
+
+#[derive(Default)]
+struct Entry {
+    failures: VecDeque<Instant>,
+    in_flight: usize,
+}
+
+/// Sliding-window limiter: at most `limit` failures per `window` per key. An attempt reserves a
+/// slot under the lock before the expensive check starts, and attempts still in progress count
+/// against the limit, so concurrent requests cannot all pass the check before any failure is
+/// recorded. When the key table is full of live keys, new keys are refused (fail closed).
+pub struct RateLimiter {
+    limit: usize,
+    window: Duration,
+    max_keys: usize,
+    /// Extra table entries only usable by privileged callers (addresses with a recent successful login).
+    reserve_keys: usize,
+    entries: Mutex<HashMap<String, Entry>>,
+}
+
+/// An admitted attempt. Dropping it without calling [`Attempt::succeed`] or [`Attempt::release`]
+/// records a failure, so an abandoned request (client gone mid-verification) still counts.
+pub struct Attempt<'a> {
+    limiter: &'a RateLimiter,
+    keys: Vec<String>,
+}
+
+impl RateLimiter {
+    pub fn new(limit: usize, window: Duration, max_keys: usize) -> RateLimiter {
+        RateLimiter {
+            limit,
+            window,
+            max_keys,
+            reserve_keys: 256,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn expire(e: &mut Entry, now: Instant, window: Duration) {
+        while e.failures.front().is_some_and(|t| now.duration_since(*t) >= window) {
+            e.failures.pop_front();
+        }
+    }
+
+    fn prune(map: &mut HashMap<String, Entry>, now: Instant, window: Duration) {
+        map.retain(|_, e| {
+            Self::expire(e, now, window);
+            !e.failures.is_empty() || e.in_flight > 0
+        });
+    }
+
+    /// Reserve one attempt on every key, or return the seconds to wait. `privileged` callers may
+    /// use the table reserve when it is otherwise full.
+    pub fn acquire(&self, keys: &[String], privileged: bool) -> Result<Attempt<'_>, u64> {
+        let now = Instant::now();
+        let mut m = self.lock();
+        let mut new_keys = 0;
+        for k in keys {
+            match m.get_mut(k) {
+                Some(e) => {
+                    Self::expire(e, now, self.window);
+                    if e.failures.len() + e.in_flight >= self.limit {
+                        return Err(match e.failures.front() {
+                            Some(oldest) => self.window.saturating_sub(now.duration_since(*oldest)).as_secs() + 1,
+                            None => 1, // only in-flight attempts: they finish within seconds
+                        });
+                    }
+                }
+                None => new_keys += 1,
+            }
+        }
+        let cap = self.max_keys + if privileged { self.reserve_keys } else { 0 };
+        if new_keys > 0 && m.len() + new_keys > cap {
+            Self::prune(&mut m, now, self.window);
+            if m.len() + new_keys > cap {
+                return Err(self.window.as_secs()); // fail closed
+            }
+        }
+        for k in keys {
+            m.entry(k.clone()).or_default().in_flight += 1;
+        }
+        Ok(Attempt {
+            limiter: self,
+            keys: keys.to_vec(),
+        })
+    }
+
+    /// Number of table entries (for tests and diagnostics).
+    pub fn key_count(&self) -> usize {
+        self.lock().len()
+    }
+
+    fn finish(&self, keys: &[String], failed: bool) {
+        let now = Instant::now();
+        let mut m = self.lock();
+        for k in keys {
+            if let Some(e) = m.get_mut(k) {
+                e.in_flight = e.in_flight.saturating_sub(1);
+                if failed {
+                    e.failures.push_back(now);
+                    while e.failures.len() > self.limit {
+                        e.failures.pop_front();
+                    }
+                }
+                if e.failures.is_empty() && e.in_flight == 0 {
+                    m.remove(k);
+                }
+            }
+        }
+    }
+}
+
+impl Attempt<'_> {
+    /// Add keys to a running attempt (the user name is only known after the body is parsed).
+    /// On refusal the attempt is unchanged and the seconds to wait are returned.
+    pub fn add_keys(&mut self, keys: &[String], privileged: bool) -> Result<(), u64> {
+        let mut extra = self.limiter.acquire(keys, privileged)?;
+        // The reservations now belong to this attempt; `extra` drops with no keys.
+        self.keys.append(&mut extra.keys);
+        Ok(())
+    }
+
+    pub fn fail(mut self) {
+        let keys = std::mem::take(&mut self.keys);
+        self.limiter.finish(&keys, true);
+    }
+
+    /// Success: the reservation is released without recording a failure.
+    pub fn succeed(mut self) {
+        let keys = std::mem::take(&mut self.keys);
+        self.limiter.finish(&keys, false);
+    }
+
+    /// The request was refused before any credential was checked (malformed, too large): no penalty.
+    pub fn release(self) {
+        self.succeed();
+    }
+}
+
+impl Drop for Attempt<'_> {
+    fn drop(&mut self) {
+        if !self.keys.is_empty() {
+            let keys = std::mem::take(&mut self.keys);
+            self.limiter.finish(&keys, true);
+        }
+    }
+}

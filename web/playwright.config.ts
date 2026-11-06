@@ -1,0 +1,33 @@
+import { defineConfig, devices } from "@playwright/test";
+
+// Every test starts its own real coordinator (see e2e/fixtures.ts). The coordinator uses a self-signed
+// local CA, so the E2E browsers run with ignoreHTTPSErrors (E2E only; the product never disables TLS checks).
+//
+// Projects: desktop Chromium and Firefox at 1440x900, Chromium on the built-in Pixel 4 profile, and a Firefox
+// phone profile (Firefox has no mobile emulation: viewport, device scale factor and touch only).
+// Visual baselines (e2e/screenshots.spec.ts) exist for the two Chromium projects only and are generated in the
+// official Playwright Docker image (see web/README.md); the file name carries no platform suffix for that reason.
+export default defineConfig({
+  testDir: "e2e",
+  // Visual baselines are Linux-only (fonts and anti-aliasing differ on macOS and Windows).
+  testIgnore: process.platform === "linux" ? [] : [/screenshots\.spec\.ts$/],
+  timeout: 90_000,
+  expect: {
+    timeout: 10_000,
+    toHaveScreenshot: { maxDiffPixelRatio: 0.002, animations: "disabled", caret: "hide" },
+  },
+  snapshotPathTemplate: "{testDir}/__screenshots__/{projectName}/{arg}{ext}",
+  fullyParallel: true,
+  workers: process.env["CI"] ? 2 : 3,
+  retries: 0,
+  reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
+  outputDir: "test-results",
+  use: { ignoreHTTPSErrors: true, trace: "retain-on-failure", screenshot: "only-on-failure", locale: "en-US", timezoneId: "UTC" },
+  projects: [
+    { name: "chromium-desktop", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
+    { name: "chromium-mobile", use: { ...devices["Pixel 4"] } },
+    { name: "firefox-desktop", use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
+    // 393x851 CSS px at device scale factor 2.75 (the size the operator asked for); touch enabled.
+    { name: "firefox-mobile", use: { ...devices["Desktop Firefox"], viewport: { width: 393, height: 851 }, deviceScaleFactor: 2.75, hasTouch: true } },
+  ],
+});

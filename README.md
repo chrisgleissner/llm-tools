@@ -36,7 +36,7 @@ Project site: <https://chrisgleissner.github.io/llm-tools/>
 You need:
 
 - Linux or macOS, and Python 3.11 or newer.
-- For Bridge: `tmux`, and at least one provider CLI that is installed and signed in (Claude Code, Codex, Copilot, Kilo or OpenCode).
+- For Bridge: Linux, `tmux`, and at least one provider CLI that is installed and signed in (Claude Code, Codex, Copilot, Kilo or OpenCode).
 
 ```bash
 pipx install git+https://github.com/chrisgleissner/llm-tools.git
@@ -188,6 +188,59 @@ covers the three preferences, provider fallback, and repeated-invocation prompt 
 
 [Go deeper →](./docs/llm-bridge/operations.md)
 
+### Distributed use (optional)
+
+Standalone Bridge needs none of this and opens no network connection. Distributed
+use lets you list and control missions on other machines from a terminal or a
+browser. It has three roles:
+
+- **Coordinator**: a separate service (`bridge-coordinator`, container or systemd
+  unit) that holds the worker index, relays commands and serves the web interface.
+  It runs no providers.
+- **Worker**: a machine with the provider CLIs. `llm-bridge worker run` connects
+  outbound to the coordinator, so the worker opens no listening port.
+- **Client**: the web interface, or `llm-bridge --target WORKER COMMAND` on any
+  machine after `llm-bridge remote login`.
+
+Quick start (details in [install](./docs/distributed/install.md)):
+
+```bash
+docker compose -f container/compose.yaml run --rm coordinator init   # build or load the image first
+docker compose -f container/compose.yaml up -d                       # listens on 127.0.0.1:8443 only
+docker compose -f container/compose.yaml exec coordinator bridge-coordinator worker add build-1   # prints the worker token once; save it as token.txt
+llm-bridge worker enroll --name build-1 --coordinator wss://localhost:8443 --token-file token.txt --ca-file ca.pem
+llm-bridge worker install-service
+docker compose -f container/compose.yaml exec coordinator bridge-coordinator token create laptop   # prints an API token; save it as api-token.txt
+llm-bridge remote login --coordinator https://localhost:8443 --token-file api-token.txt --ca-file ca.pem
+llm-bridge --target build-1 mission list
+```
+
+A worker is read-only for remote clients by default. `--allow-terminal-view` at
+enrolment also shares mission terminals for viewing, and `--allow-control` allows
+changes and terminal input. `--target local` (the default) runs on this host; an
+unknown or offline target fails and never falls back to local execution. Copy
+`ca.pem` and `setup-token` out of the coordinator as described in the install guide.
+The same command line is shown by `llm-bridge help distributed`.
+
+Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64
+support every role. macOS ARM64 and Intel support the coordinator, the web interface,
+the remote client and the usage tools (`llm-usage`, `llm-scheduler`, `ralph-robin`),
+but not the Bridge console, tmux station, mission controller or `worker run`; the
+controller and worker identify processes through Linux `/proc`. Windows
+x86-64 and ARM64 support the coordinator, the web interface and the remote client
+(`llm-bridge --target`, `remote`, `worker list`) only; the tmux station, console,
+controller and worker need tmux and a POSIX terminal. Other commands on Windows exit with status 2 and a one-line message, or
+with `--json` an error envelope with code `unsupported-platform`. See decision D8 in
+[DECISIONS](./docs/distributed/DECISIONS.md).
+
+Documentation: [install](./docs/distributed/install.md) (container and native
+install, certificate trust, backup, recovery, Raspberry Pi Zero 2 W target profile),
+[operations](./docs/distributed/operations.md) (worker service, audit log, backup,
+troubleshooting), [coordinator](./docs/distributed/coordinator.md) (configuration,
+HTTP API, limits), [protocol](./docs/distributed/protocol.md),
+[threat model](./docs/distributed/threat-model.md) and
+[benchmarks](./docs/distributed/benchmarks.md).
+
 ## llm-usage
 
 Know before you start: one row per limit, plus a forecast.
@@ -257,6 +310,6 @@ No telemetry and no network listener. Quota reads use your existing provider cre
 ## More
 
 - Docs: [Bridge](./docs/llm-bridge/operations.md) · [llm-usage](./docs/llm-usage.md) · [llm-scheduler](./docs/llm-scheduler.md) · [ralph-robin](./docs/ralph-robin.md) · [Configuration](./docs/configuration.md) · [Reference](./docs/reference.md)
-- Needs Linux or macOS, Python 3.11+, your provider CLIs, and `tmux` for Bridge.
+- Needs Python 3.11+ and your provider CLIs; Bridge needs Linux and `tmux` (macOS runs the usage tools and the remote client).
 - Contributing: [small, focused PRs](./docs/reference.md#contributing).
 - License: Apache 2.0.

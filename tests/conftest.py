@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import os
+import re
 import shutil
 import socket
 import stat
@@ -127,6 +129,8 @@ def _measure_terminal_children(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _no_launcher_burst_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process launcher tests feed keys instantly; real-time guard tests opt back in."""
+    if importlib.util.find_spec("_curses") is None:
+        return  # Windows: no curses, and the launcher is not supported there (DECISIONS.md D8).
     from llm_tools import bridge_launcher
 
     monkeypatch.setattr(bridge_launcher, "_BURST_SECONDS", 0.0)
@@ -157,6 +161,7 @@ def _no_live_provider_launch(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: 
     isolated_home = guard / "home"
     isolated_home.mkdir()
     monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("USERPROFILE", str(isolated_home))  # Path.home() on Windows
     for name in ("codex", "claude", "copilot", "kilo", "mmx", "opencode"):
         path = guard / name
         path.write_text("#!/bin/sh\necho 'Unexpected live provider launch blocked by test harness' >&2\nexit 123\n")
@@ -244,9 +249,87 @@ def _load_markers() -> dict[str, list[str]]:
     return {f"{path}::{name}": list(kinds) for path, names in raw.items() for name, kinds in names.items()}
 
 
+# --- Windows ------------------------------------------------------------------
+#
+# Windows CI runs only the tests named in WINDOWS_TESTS in .github/workflows/test.yml: the components
+# Windows supports (docs/distributed/DECISIONS.md D8). The hooks below skip, with a reason, the parts of
+# those files that need a POSIX facility. Nothing is skipped on Linux by this code.
+
+_MISSING_POSIX_MODULE = re.compile(r"No module named '(_?curses|termios|fcntl|pty|tty|pwd|grp|resource)'")
+WINDOWS_NO_TMUX = "tmux and POSIX pseudo-terminals do not exist on Windows (docs/distributed/DECISIONS.md D8)"
+
+
+# --- macOS --------------------------------------------------------------------
+#
+# macOS runs the usage tools, the coordinator, the web interface and the remote client. The Bridge
+# console, tmux station, controller and worker are Linux-only (docs/distributed/DECISIONS.md D8): the
+# controller and worker need procfs, and the console and station were never made to work on macOS's
+# terminal and tmux behaviour (CI run 42159627299: 41 real-PTY and tmux tests timed out or rendered
+# differently there). Tests marked tmux or pty, and the console tests listed here, are skipped on macOS.
+_MACOS = sys.platform == "darwin"
+MACOS_CONSOLE_REASON = "the Bridge console and tmux station are supported on Linux only (docs/distributed/DECISIONS.md D8)"
+MACOS_SKIPPED_TESTS: dict[str, str] = {
+    "tests/test_bridge_fuzz_regressions.py::test_markdown_with_a_very_long_line_renders_in_the_background": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_idle_redraw.py::test_socket_listening_gives_up_on_a_server_that_never_answers": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_launcher_overview.py::test_rows_show_progress_active_provider_age_and_folder": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_terminal_stream.py::test_real_station_streams_output_and_types_exact_bytes": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_ws.py::test_wss_verifies_the_server_against_the_given_ca": (
+        "the python.org build on macOS does not find the issuer of a CA made with the openssl command line tool; "
+        "TLS verification on macOS is covered by tests/test_distributed_integration.py against the coordinator's CA"
+    ),
+}
+
+
+# The controller, verifier supervision, force-stop, native-session detection and the test harness's own
+# leak detector identify processes through Linux procfs (/proc/<pid>/stat, /proc/sys/kernel/random/boot_id,
+# /proc/<pid>/fd). macOS and Windows have no procfs, so the Bridge controller and worker are Linux-only
+# (docs/distributed/DECISIONS.md D8). Detected by feature, not by platform name.
+NO_PROCFS = not os.path.exists("/proc/self/stat")
+NO_PROCFS_REASON = "needs Linux procfs (/proc/<pid>/stat, boot_id) for process identity, which this platform lacks (docs/distributed/DECISIONS.md D8)"
+PROCFS_ONLY_MODULES = frozenset({
+    "test_bridge_force_stop", "test_bridge_process_scans", "test_bridge_runtime", "test_bridge_verifier",
+    "test_bridge_verifier_guard", "test_bridge_review_hold", "test_bridge_steering", "test_bridge_sessions",
+    "test_bridge_end_to_end", "test_bridge_completed_stop", "test_bridge_first_run_start", "test_bridge_native_e2e",
+    "test_process_hygiene", "test_distributed_offline",
+})
+# Single tests in otherwise portable modules that read a process start token or /proc/self/cmdline.
+PROCFS_ONLY_TESTS = frozenset({
+    "tests/test_bridge_refresh.py::test_refresh_worker_records_heartbeat_then_delays_quota_refresh",
+    "tests/test_bridge_review_regressions.py::test_complete_stop_terminates_owned_descendant_in_a_new_session",
+    "tests/test_bridge_review_regressions.py::test_owned_group_termination_kills_descendant_after_leader_exits",
+    "tests/test_bridge_security_prompt_delivery.py::test_headless_run_delivers_the_prompt_on_stdin",
+})
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector: Any):
+    """On Windows, a test module that imports a POSIX-only standard-library module is skipped with that reason."""
+    outcome = yield
+    if not _WINDOWS or not isinstance(collector, pytest.Module):
+        return
+    report = outcome.get_result()
+    if report.failed:
+        found = _MISSING_POSIX_MODULE.search(str(report.longrepr))
+        if found:
+            report.outcome = "skipped"
+            report.longrepr = (str(collector.path), 0, f"Skipped: needs the POSIX module '{found.group(1)}', which Windows does not provide (docs/distributed/DECISIONS.md D8)")
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     manifest = _load_markers()
     for item in items:
+        key = _marker_key(item.nodeid)
+        if NO_PROCFS and (Path(str(item.fspath)).stem in PROCFS_ONLY_MODULES or key in PROCFS_ONLY_TESTS):
+            item.add_marker(pytest.mark.skip(reason=NO_PROCFS_REASON))
+        if _MACOS:
+            reason = MACOS_SKIPPED_TESTS.get(key)
+            if reason:
+                item.add_marker(pytest.mark.skip(reason=reason))
+            elif {"tmux", "pty"} & set(manifest.get(key, ())):
+                item.add_marker(pytest.mark.skip(reason=MACOS_CONSOLE_REASON))
+        if _WINDOWS:
+            if {"tmux", "pty"} & set(manifest.get(_marker_key(item.nodeid), ())):
+                item.add_marker(pytest.mark.skip(reason=WINDOWS_NO_TMUX))
         for kind in manifest.get(_marker_key(item.nodeid), ()):
             if kind in RESOURCE_MARKERS:
                 item.add_marker(getattr(pytest.mark, kind))
@@ -333,8 +416,9 @@ def _write_markers() -> None:
 
 # Resolved once at import: tests replace PATH, and teardown must still find them.
 _RM = shutil.which("rm") or "/bin/rm"
+_WINDOWS = sys.platform == "win32"
 _TMUX = shutil.which("tmux")
-_POSIX_SPAWN = os.posix_spawn
+_POSIX_SPAWN = getattr(os, "posix_spawn", None)
 _WAITPID = os.waitpid
 _REAL_RUNTIME_ENV = os.environ.get("XDG_RUNTIME_DIR", "")
 _SESSION_RUNTIME_DIRS: set[str] = set()
@@ -344,7 +428,7 @@ _ESCAPED_SOCKETS: dict[str, str] = {}  # socket path -> test id that asked for i
 
 
 def _real_bridge_dirs() -> list[Path]:
-    dirs = [Path("/tmp") / f"lb-{os.getuid()}"]
+    dirs = [] if _WINDOWS else [Path("/tmp") / f"lb-{os.getuid()}"]
     if _REAL_RUNTIME_ENV:
         dirs.insert(0, Path(_REAL_RUNTIME_ENV) / "llm-bridge")
     return dirs
@@ -378,7 +462,11 @@ def _controller_pids() -> dict[int, str]:
     Identified from /proc cmdline only; never by pattern-killing.
     """
     found: dict[int, str] = {}
-    for entry in os.listdir("/proc"):
+    try:
+        entries = os.listdir("/proc")
+    except OSError:  # no procfs (macOS): nothing can be identified, so nothing is reported
+        return found
+    for entry in entries:
         if not entry.isdigit():
             continue
         try:
@@ -418,6 +506,15 @@ def _quiet_run(argv: list[str]) -> None:
     blocking ``waitpid`` (both captured at import) avoids all of them; ``rm``
     and ``tmux kill-server`` do not block.
     """
+    if _POSIX_SPAWN is None:  # Windows: no posix_spawn; nothing patches subprocess for these short commands
+        try:
+            if argv[0] == _RM:
+                shutil.rmtree(argv[-1], ignore_errors=True)
+            else:
+                subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except OSError:
+            pass
+        return
     actions = [(os.POSIX_SPAWN_OPEN, fd, os.devnull, os.O_RDWR, 0) for fd in (0, 1, 2)]
     try:
         pid = _POSIX_SPAWN(argv[0], argv, os.environ.copy(), file_actions=actions)
@@ -471,7 +568,7 @@ def _private_runtime_dir(tmp_path: Path):
     are still active, so it avoids Python-level directory walking and uses
     ``rm -rf`` and ``os.listdir`` only.
     """
-    runtime = Path(tempfile.mkdtemp(prefix="lbt-", dir="/tmp"))
+    runtime = Path(tempfile.mkdtemp(prefix="lbt-", dir=None if _WINDOWS else "/tmp"))
     runtime.chmod(0o700)
     process_hygiene.write_owner(str(runtime))
     _SESSION_RUNTIME_DIRS.add(str(runtime))
@@ -513,7 +610,7 @@ def env(tmp_path: Path, _private_runtime_dir: Path) -> dict[str, str]:
         "HOME": str(home),
         "XDG_CACHE_HOME": str(home / ".cache"),
         "XDG_RUNTIME_DIR": os.environ["XDG_RUNTIME_DIR"],
-        "PATH": f"{fake_bin}:{Path(sys.executable).parent}:{ROOT}:{out.get('PATH', '')}",
+        "PATH": os.pathsep.join([str(fake_bin), str(Path(sys.executable).parent), str(ROOT), out.get("PATH", "")]),
         # Most tests assert direct reader/CLI behaviour. Service behaviour is
         # covered explicitly and opts back in so the suite does not spawn a
         # background sampler for every llm-usage subprocess.
@@ -561,7 +658,7 @@ def env(tmp_path: Path, _private_runtime_dir: Path) -> dict[str, str]:
 
 @pytest.fixture()
 def fake_bin(env: dict[str, str]) -> Path:
-    return Path(env["PATH"].split(":", 1)[0])
+    return Path(env["PATH"].split(os.pathsep, 1)[0])
 
 
 def write_exe(path: Path, text: str) -> Path:

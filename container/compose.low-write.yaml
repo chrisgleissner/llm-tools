@@ -1,0 +1,13 @@
+# Overrides for hosts on flash storage (SD card, eMMC, USB stick). Use together with compose.yaml:
+#   docker compose -f compose.yaml -f compose.low-write.yaml up -d
+# Variables (set in .env next to these files):
+#   BRIDGE_LOG_DRIVER            log driver without size options: journald (default), syslog, none
+#   BRIDGE_HEALTHCHECK_INTERVAL  health-check interval; default here 5m (30s in compose.yaml)
+# With journald, logs go where journald stores them; a volatile journal (Storage=volatile in
+# journald.conf) keeps them in RAM. See docs/distributed/install.md (Low-write host).
+services:
+  coordinator:
+    logging: !override
+      driver: ${BRIDGE_LOG_DRIVER:-journald}
+    healthcheck:
+      interval: ${BRIDGE_HEALTHCHECK_INTERVAL:-5m}

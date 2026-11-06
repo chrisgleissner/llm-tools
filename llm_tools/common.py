@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import errno
-import fcntl
+try:  # POSIX-only; Windows runs only the remote client (docs/distributed/DECISIONS.md)
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    fcntl = None  # type: ignore[assignment]
 import json
 import math
 import os
-import pty
+try:  # POSIX-only; Windows runs only the remote client (docs/distributed/DECISIONS.md)
+    import pty
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    pty = None  # type: ignore[assignment]
 import re
 import select
 import shlex
@@ -15,7 +21,10 @@ import stat
 import struct
 import subprocess
 import sys
-import termios
+try:  # POSIX-only; Windows runs only the remote client (docs/distributed/DECISIONS.md)
+    import termios
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    termios = None  # type: ignore[assignment]
 import threading
 import time
 from contextlib import contextmanager

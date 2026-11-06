@@ -72,7 +72,9 @@ def test_the_job_that_runs_repository_tests_has_no_oidc_token() -> None:
     text = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
     test_job = text[text.index("\n  test:"):text.index("\n  coverage-upload:")]
     assert "id-token" not in test_job and "coverage run -m pytest" in test_job
-    upload_job = text[text.index("\n  coverage-upload:"):]
+    start = text.index("\n  coverage-upload:")
+    following = re.search(r"\n  [a-z0-9-]+:\n", text[start + 1:])
+    upload_job = text[start:start + 1 + following.start()] if following else text[start:]
     assert "coverage run" not in upload_job and "pip install" not in upload_job
 
 
@@ -82,3 +84,75 @@ def test_pages_artifact_excludes_repository_tooling() -> None:
     for excluded in ("check_site.py", "README.md", "assets/src/"):
         assert f"--exclude '{excluded}'" in text
     assert "path: _site" in text
+
+
+def _jobs(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    parts = re.split(r"\n  ([A-Za-z0-9_-]+):\n", text[text.index("\njobs:\n") + 6:])
+    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)} | ({parts[-2]: parts[-1]} if len(parts) > 2 else {})
+
+
+def test_every_test_job_has_a_timeout_and_matrices_do_not_fail_fast() -> None:
+    for name, body in _jobs(WORKFLOWS / "test.yml").items():
+        assert re.search(r"^    timeout-minutes: \d+$", body, re.M), f"job {name} needs timeout-minutes"
+        if "matrix:" in body:
+            assert "fail-fast: false" in body, f"job {name} must set fail-fast: false"
+
+
+def test_the_platform_matrix_covers_six_hosted_platforms() -> None:
+    text = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    for label in ("ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "macos-15-intel", "windows-latest", "windows-11-arm"):
+        assert label in text, label
+    jobs = _jobs(WORKFLOWS / "test.yml")
+    assert "cargo clippy --locked --all-targets -- -D warnings" in jobs["cross-platform"]
+    assert "BRIDGE_COORDINATOR_BIN" in jobs["cross-platform"] and "BRIDGE_REQUIRE_COORDINATOR" in jobs["cross-platform"]
+    assert "chromium" in jobs["web-cross"] and "firefox" in jobs["web-cross"]
+
+
+def test_test_workflow_runs_branches_through_pull_requests_with_one_run_per_ref() -> None:
+    text = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    header = text[:text.index("\njobs:")]
+    assert "  push:\n    branches: [main]\n  pull_request:\n" in header
+    assert "group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}" in header
+    assert "cancel-in-progress: true" in header
+
+
+def _windows_tests() -> list[str]:
+    job = _jobs(WORKFLOWS / "test.yml")["cross-platform"]
+    block = job[job.index("WINDOWS_TESTS: >-") :].splitlines()[1:]
+    entries: list[str] = []
+    for line in block:
+        if not line.startswith("            ") or not line.strip().startswith("tests/"):
+            break
+        entries.append(line.strip())
+    return entries
+
+
+def test_windows_jobs_run_an_allowlist_whose_entries_all_exist() -> None:
+    """The Windows step runs WINDOWS_TESTS only; every entry must name an existing file and test."""
+    entries = _windows_tests()
+    assert "tests/test_windows_policy.py" in entries and "tests/test_distributed_integration.py" in entries
+    root = WORKFLOWS.parents[1]
+    for entry in entries:
+        file, _, name = entry.partition("::")
+        assert (root / file).is_file(), entry
+        if name:
+            assert re.search(rf"^def {re.escape(name)}\(", (root / file).read_text(encoding="utf-8"), re.M), entry
+    job = _jobs(WORKFLOWS / "test.yml")["cross-platform"]
+    assert "python -m pytest -q $WINDOWS_TESTS" in job and "if: runner.os == 'Windows'" in job
+
+
+def test_every_job_that_runs_cargo_installs_the_toolchain_through_the_shared_action() -> None:
+    """One shared action installs rust-toolchain.toml; no job carries its own rustup commands."""
+    action = (WORKFLOWS.parent / "actions" / "rust-toolchain" / "action.yml").read_text(encoding="utf-8")
+    assert "rustup toolchain uninstall" in action and "rustup toolchain install\n" in action
+    for path in FILES:
+        for name, job in _jobs(path).items():
+            uses_rust = re.search(r"\bcargo |container/build\.sh|rust-cache@", job)
+            if uses_rust:
+                assert "uses: ./.github/actions/rust-toolchain" in job, f"{path.name}: {name}"
+            assert "rustup toolchain" not in job and "rustup-init" not in job, f"{path.name}: {name}"
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"- uses: Swatinem/rust-cache@", text):
+            previous = text[: match.start()].rstrip().splitlines()[-1]
+            assert previous.strip() == "- uses: ./.github/actions/rust-toolchain", f"{path.name}: toolchain must come before rust-cache"

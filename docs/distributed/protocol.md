@@ -1,0 +1,151 @@
+# Worker–coordinator protocol, version 1
+
+Normative for PROTO-001..010, WORK-002/003/006/008 and SEC-002/003. The command
+payloads are the typed command layer in `llm_tools/bridge_commands.py`
+(`CommandRequest`, `CommandResult`); this document defines only the transport
+around them.
+
+## Transport
+
+- The worker opens an outbound WebSocket over TLS to
+  `wss://<coordinator>/api/v1/worker/connect`. The coordinator never connects
+  to a worker, so workers need no listening port.
+- The worker authenticates with `Authorization: Bearer <worker token>` on the
+  upgrade request. The token is issued once at enrolment, stored only as a
+  hash on the coordinator, and revoked by deleting the worker record. The
+  worker verifies the coordinator certificate against the CA it trusted at
+  enrolment.
+- Each WebSocket text frame carries exactly one JSON message of at most 1 MiB.
+  A larger frame closes the connection with code 1009.
+- Terminal byte streams use a separate WebSocket per terminal session
+  (`/api/v1/worker/terminal/<session>`), so a slow terminal cannot delay
+  control messages (PROTO-009).
+
+## Envelope
+
+```json
+{"v": 1, "type": "command", "id": "<message id>", "worker_id": "<worker id>",
+ "generation": 7, "payload": {}}
+```
+
+| Field | Meaning |
+|---|---|
+| `v` | Protocol version. A peer that does not support it answers `error` with code `unsupported-version` and closes. |
+| `type` | One of the message types below. Unknown types are answered with `error` code `unsupported-message`. |
+| `id` | Unique message ID chosen by the sender (1–128 of `[A-Za-z0-9_.-]`). |
+| `worker_id` | Stable worker identity (WORK-003). |
+| `generation` | Connection generation issued by the coordinator in `welcome` (PROTO-010). `0` in `hello`. |
+| `payload` | Typed body for `type`; unknown payload fields are rejected. |
+
+Version negotiation: the worker lists the versions it speaks in `hello`
+(`protocol_versions`) and the coordinator answers with the selected version in
+`welcome`. When there is no common version, the coordinator closes the connection
+with WebSocket code 1002 and reason `unsupported version`. Only version 1 exists.
+
+## Message types
+
+| Type | Direction | Payload |
+|---|---|---|
+| `hello` | worker → coordinator | `worker_id`, `name`, `software_version`, `protocol_versions`, `platform`, `capabilities` (the `operation_catalog()` output), `missions` (id, name, status, cwd basename, updated_at), `event_cursor` (highest local event id). |
+| `welcome` | coordinator → worker | `generation`, `protocol_version`, `event_cursor` (highest event id the coordinator has stored for this worker). |
+| `command` | coordinator → worker | A `CommandRequest` object. |
+| `command.ack` | worker → coordinator | `request_id`, `status`: `received` or `duplicate`. Acknowledges delivery only. |
+| `command.result` | worker → coordinator | A `CommandResult` object. |
+| `events` | worker → coordinator | `after`, `through`, `events` (ascending by id). |
+| `events.nack` | coordinator → worker | `expected_after`: the coordinator's stored cursor; the worker resends from there. |
+| `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
+| `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
+
+## Command delivery (PROTO-003, PROTO-004, WORK-006, WORK-007)
+
+1. The coordinator stores the command in its journal with state `pending`
+   before sending it, and sends it again after every reconnect until it has a
+   `command.result`.
+2. The worker answers `command.ack` immediately. An ack never implies
+   execution.
+3. The worker executes the request through `bridge_commands.execute`. A
+   mutating request's `request_id` is the durable `commands.id` in the worker
+   database, so a redelivered request returns the stored outcome and does not
+   repeat the effect. Results of read operations are not stored; a repeated
+   read is simply executed again.
+4. The worker sends `command.result`. The coordinator stores it and marks the
+   journal entry `done`. A result for an unknown or already completed request
+   is ignored.
+
+Outcomes are `ok`, `accepted`, `applied`, `rejected`, `failed` and `uncertain`.
+`uncertain` means an unexpected failure happened during a mutation; the
+coordinator shows it as such and never retries it under a new request ID.
+
+## Event replication (PROTO-005, WORK-008)
+
+Worker event ids are the `events.id` values of the worker database: strictly
+increasing across all missions. Pruned plumbing events leave legitimate holes,
+so contiguity of ids is not required. The coordinator keeps one cursor per
+worker. A batch is accepted only when its `after` equals the stored cursor;
+otherwise the coordinator answers `events.nack` and the worker resends from
+`expected_after`. On `welcome` the worker resumes from the returned cursor.
+
+## Generation fencing (PROTO-010)
+
+The coordinator increments and persists a per-worker generation for every
+accepted connection and closes any older connection of that worker. The
+worker persists the highest generation it has seen and rejects a `command`
+whose `generation` is lower, with `error` code `stale-generation`. A `welcome`
+whose generation is not higher than that value is answered with
+`stale-generation` and the worker closes the connection and reconnects. Enrolling
+with a new worker token resets the stored value, because the coordinator starts a
+new registration's generations again.
+
+## Concurrency (PROTO-006)
+
+Task mutations accept an optional `expected_revision`. The worker compares it
+with the task's current revision inside the same SQLite write transaction as
+the effect and rejects a mismatch with error code `conflict`.
+
+## Capabilities (PROTO-007)
+
+`hello.capabilities` lists the operations the worker supports. The coordinator
+refuses a request for an operation the target worker did not advertise with
+`unsupported-operation`, without sending it. Workers on different software versions
+can therefore be connected at the same time.
+
+## Terminal sessions (PROTO-009, SEC-006, WEB-007, WEB-008)
+
+Terminal bytes never travel on the control connection. The control connection
+only opens and closes sessions:
+
+| Type | Direction | Payload |
+|---|---|---|
+| `terminal.open` | coordinator → worker | `session_id` (1–128 of `[A-Za-z0-9_.-]`), `mission_id`, `mode` (`view` or `write`), `cols`, `rows` (1–1000). |
+| `terminal.close` | coordinator → worker | `session_id`. |
+| `terminal.status` | worker → coordinator | `session_id`, `state` (`opened`, `refused`, `closed`), `mode` (the highest mode the worker allows this session; the live role is reported in `s` frames), `reason` (text, may be empty). |
+
+A worker shares terminals only when enrolled with `--allow-control` (view and
+write) or `--allow-terminal-view` (view only); otherwise it refuses
+`terminal.open`. On `terminal.open` the worker validates the mission, decides the granted mode
+and opens a second WebSocket to
+`wss://<coordinator>/api/v1/worker/terminal/<session_id>` with the same worker
+token. The coordinator accepts that connection only for a session it opened for
+that worker and that has not been attached yet. Frames on it are JSON text:
+
+| Frame | Direction | Meaning |
+|---|---|---|
+| `{"t":"o","d":"<base64>"}` | worker → coordinator | Output bytes of the provider pane. The first `o` frame is a full screen snapshot: a clear-screen sequence, the pane rows joined by CRLF without a trailing newline, then `CSI row;col H` placing the cursor where the pane's cursor is. |
+| `{"t":"s","cols":N,"rows":N,"mode":"view"\|"write","reason":"..."}` | worker → coordinator | Pane size and granted mode; sent first and whenever they change. |
+| `{"t":"x","reason":"..."}` | worker → coordinator | Session ended; the worker closes the socket. |
+| `{"t":"i","d":"<base64>"}` | coordinator → worker | Keyboard or paste input, at most 64 KiB decoded. Dropped by the worker unless the session holds the writer role. |
+| `{"t":"r","cols":N,"rows":N}` | coordinator → worker | Resize request from the writer (1–1000 columns and rows; the coordinator rejects other values); applied only when no local tmux client is attached to the station. |
+
+Single writer: the worker grants `write` to at most one session per mission,
+and only while no local tmux client is attached to that station. Any other
+request is granted `view` with a reason. Losing the writer role (a local
+client attached) is reported with an `s` frame; the worker also checks for a
+local client before typing each input frame. Viewers are unlimited.
+
+Bounds: the worker reads at most 64 KiB per frame and its sends block, so a
+slow coordinator slows reading. The tmux control client runs with
+`pause-after=5`: when it falls 5 s behind, tmux pauses the pane's output and
+the worker resumes it and sends a fresh snapshot instead of the backlog.
+The coordinator keeps at most 256 KiB per browser viewer and closes a viewer
+that falls further behind (close code 1013); the browser reconnects and
+receives a fresh snapshot.

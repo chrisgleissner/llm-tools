@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
+try:  # POSIX-only; Windows runs only the remote client (docs/distributed/DECISIONS.md)
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    fcntl = None  # type: ignore[assignment]
 import json
 import os
 import re
@@ -986,7 +989,7 @@ class BridgeStore:
             if prior is not None:
                 if prior["mission_id"] != mission_id or prior["payload_json"] != self._json(payload):
                     raise TransitionError("command id was already used for a different request")
-                return dict(prior)
+                return self.get_command(cid)
             self.db.execute("INSERT INTO commands(id,mission_id,payload_json,status,created_at,updated_at) VALUES(?,?,?,'QUEUED',?,?)", (cid, mission_id, self._json(payload), now, now))
             self._event(mission_id, "command-queued", {"command_id": cid, "command": payload.get("action", "unknown")})
         return self.get_command(cid)
@@ -1562,6 +1565,20 @@ class BridgeStore:
             {**dict(row), "data": json.loads(row["data_json"])}
             for row in self.db.execute(query, params)
         ]
+
+    def last_event_id(self) -> int:
+        """Highest event ID in this database: the worker's replication cursor."""
+        return int(self.db.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0])
+
+    def events_since(self, after: int, *, limit: int) -> list[dict[str, Any]]:
+        """Events of every mission after ``after``, ascending; IDs may have pruning gaps."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("event page limit must be between 1 and 1000")
+        rows = self.db.execute("SELECT * FROM events WHERE id>? ORDER BY id LIMIT ?", (after, limit))
+        return [{**{key: row[key] for key in row.keys() if key != "data_json"}, "data": json.loads(row["data_json"])} for row in rows]
+
+    def command_exists(self, command_id: str) -> bool:
+        return self.db.execute("SELECT 1 FROM commands WHERE id=?", (command_id,)).fetchone() is not None
 
     def prune_plumbing_events(
         self,

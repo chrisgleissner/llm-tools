@@ -24,10 +24,10 @@ from typing import Any
 
 _listdir = os.listdir
 _kill = os.kill
-_killpg = os.killpg
-_getpgid = os.getpgid
+_killpg = getattr(os, "killpg", None)  # POSIX process groups; Windows has none
+_getpgid = getattr(os, "getpgid", None)
 _waitpid = os.waitpid
-_readlink = os.readlink
+_readlink = getattr(os, "readlink")
 _sleep = time.sleep
 _monotonic = time.monotonic
 _open = open

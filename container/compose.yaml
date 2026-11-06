@@ -1,0 +1,52 @@
+# LLM Bridge coordinator. Defaults publish only on 127.0.0.1.
+# LAN access is an explicit opt-in: in .env next to this file set
+#   BRIDGE_PUBLISH_ADDRESS=<host LAN address>   (or 0.0.0.0 for every interface)
+#   BRIDGE_PUBLIC_NAMES=bridge.home.arpa,<host LAN address>
+# BRIDGE_PUBLIC_NAMES are the names browsers and workers use; they go into the
+# certificate (with localhost) and into the URLs `info` prints.
+# First run:  docker compose run --rm coordinator init
+# Then:       docker compose up -d
+# Admin:      docker compose exec coordinator bridge-coordinator info
+#             docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
+# Flash storage (SD cards, eMMC): add compose.low-write.yaml, see
+#   docs/distributed/install.md (Low-write host).
+# See docs/distributed/install.md (Container deployment).
+services:
+  coordinator:
+    image: ${BRIDGE_IMAGE:-llm-bridge-coordinator:latest}
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "${BRIDGE_PUBLISH_ADDRESS:-127.0.0.1}:${BRIDGE_PORT:-8443}:8443"
+    environment:
+      BRIDGE_COORDINATOR_PUBLIC_NAMES: ${BRIDGE_PUBLIC_NAMES:-localhost}
+      BRIDGE_COORDINATOR_PUBLIC_PORT: ${BRIDGE_PORT:-8443}
+    volumes:
+      - bridge-data:/data
+    # About twice the measured peak RSS (48 MiB; docs/distributed/benchmarks.md).
+    mem_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
+    memswap_limit: ${BRIDGE_MEMORY_LIMIT:-96m}
+    pids_limit: 64
+    cpus: ${BRIDGE_CPUS:-1.0}
+    stop_grace_period: 15s
+    # Same check as the image's HEALTHCHECK. Docker writes every result to its state directory,
+    # so a flash-storage host can check less often with BRIDGE_HEALTHCHECK_INTERVAL (for example 5m).
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bridge-coordinator", "health"]
+      interval: ${BRIDGE_HEALTHCHECK_INTERVAL:-30s}
+      timeout: 5s
+      start_period: 20s
+      start_interval: 5s
+      retries: 3
+    # json-file with rotation is the default. compose.low-write.yaml replaces this block with
+    # BRIDGE_LOG_DRIVER (default journald); the json-file size options are not valid for other drivers.
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+volumes:
+  bridge-data:

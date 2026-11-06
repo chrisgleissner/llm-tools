@@ -1,0 +1,6 @@
+# Pinned so local builds and CI run the same compiler and clippy.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+profile = "minimal"

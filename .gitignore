@@ -24,3 +24,12 @@ llm-usage.log
 
 # Personal strings for docs/site/check_site.py (see its docstring); never commit
 .site-private-patterns
+
+# Rust coordinator build output
+coordinator/target/
+
+# Web UI
+web/node_modules/
+web/dist/
+web/test-results/
+web/playwright-report/

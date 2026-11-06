@@ -790,6 +790,45 @@ class TmuxTerminalBackend:
         else:
             self._run(handle.socket_path, "send-keys", "-l", "-t", self._target(handle, pane), keys)
 
+    def send_bytes(self, handle: TerminalHandle, *, pane: str, data: bytes) -> None:
+        """Type exact bytes into an owned pane (``send-keys -H``); used by remote terminal writers."""
+        self._require_owned(handle)
+        for start in range(0, len(data), 512):
+            chunk = data[start:start + 512]
+            self._run(handle.socket_path, "send-keys", "-H", "-t", self._target(handle, pane), *(f"{byte:02x}" for byte in chunk))
+
+    def pane_size(self, handle: TerminalHandle, *, pane: str) -> tuple[int, int]:
+        """The pane's (columns, rows)."""
+        self._require_owned(handle)
+        result = self._run(handle.socket_path, "display-message", "-p", "-t", self._target(handle, pane), "#{pane_width} #{pane_height}", capture=True)
+        columns, rows = result.stdout.split()
+        return int(columns), int(rows)
+
+    def pane_cursor(self, handle: TerminalHandle, *, pane: str) -> tuple[int, int]:
+        """The pane's cursor as zero-based (column, row)."""
+        self._require_owned(handle)
+        result = self._run(handle.socket_path, "display-message", "-p", "-t", self._target(handle, pane), "#{cursor_x} #{cursor_y}", capture=True)
+        column, row = result.stdout.split()
+        return int(column), int(row)
+
+    def resize_station(self, handle: TerminalHandle, *, columns: int, rows: int) -> None:
+        """Resize the station window; callers apply this only when no local client is attached."""
+        self._require_owned(handle)
+        if not (1 <= columns <= 1000 and 1 <= rows <= 1000):
+            raise ValueError("terminal size must be 1-1000 columns and rows")
+        self._run(handle.socket_path, "resize-window", "-t", handle.session_name, "-x", str(columns), "-y", str(rows))
+
+    def restore_station_sizing(self, handle: TerminalHandle) -> None:
+        """Let attached clients size the window again after ``resize_station`` (which sets it manual)."""
+        self._require_owned(handle)
+        self._run(handle.socket_path, "set-option", "-w", "-t", handle.session_name, "window-size", "latest", check=False)
+
+    def control_client_argv(self, handle: TerminalHandle) -> list[str]:
+        """argv of a read-only tmux control-mode client that does not affect the window size."""
+        self._require_owned(handle)
+        return [resolve_executable("tmux"), "-S", str(handle.socket_path), "-f", "/dev/null", "-C",
+                "attach-session", "-t", handle.session_name, "-f", "ignore-size,read-only,pause-after=5"]
+
     def focus(self, handle: TerminalHandle, *, pane: str, expand: bool = False) -> None:
         """Select an owned pane; optionally give its existing UI the full window.
 
