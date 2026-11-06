@@ -31,6 +31,12 @@ Severity: P1 blocks understanding or an important task; P2 creates avoidable hun
 
 All screen states are rendered in both themes at desktop and Pixel 4 and scanned by axe in all four browser/device projects. Visual baselines are authoritative in Chromium desktop and Pixel 4 only. Screenshots provide reproducible evidence; this is not a substitute for the three requested live-user persona sessions. The first-run-on-phone, five-missions/three-workers, and notification-link personas still need a real task-time observation before the full UX-001..006 claim can close.
 
+## Activity language and filters (UX-011)
+
+Overview and mission detail now share a browser phrase table generated from the production TUI humanizers. Task, command and provider activity is visible by default; bookkeeping events can be expanded as system activity. Mission detail offers both category and event-kind filters. Event payload rendering uses an explicit field allowlist, and a command-details link appears only when an event includes a valid request ID. `web/test_event_phrases.py` checks the generated artifact against every TUI kind; `web/e2e/ui-features.spec.ts` exercises humanized events, filters, collapsed system activity, command links, and rejection of an unlisted private payload field on desktop and Pixel 4.
+
+The event stream does not currently persist worker online/offline or terminal lifecycle history, and mission command events store a local command ID rather than the coordinator request ID. The interface does not invent those history rows; command detail links are shown only when the actual request ID is present.
+
 ## Before / after task measures
 
 | Task | Before | After |
@@ -48,7 +54,7 @@ The output latency is the interval from the mission-status HTTP response to visi
 - Pixel 4 journey (Chromium, emulated 353×745 CSS px, 4× CPU throttle, loopback): five runs measured **CLS 0.000 median / 0.000 max** and maximum observed interaction-event duration (**INP lab proxy**) **48 ms median / 104 ms max**, with one click from Overview to the waiting mission. A prior single exploratory run recorded 0.071 CLS and 216 ms; the five-run probe is the maintained result. The regression test requires every run below 0.1 CLS.
 - Current built bundle: initial JS **67,479 B raw / 22,940 B gzip**; initial CSS **30,517 B / 7,388 B**; total **97,996 B / 30,328 B**. Lazy chunks total **363,540 B / 95,691 B**. These remain under `web/budget.json` (100,000 B raw / 32,000 B gzip initial and 400,000 B / 100,000 B lazy). The budget has not been raised.
 - Live-output screenshots pass axe with zero violations after replacing xterm's low-contrast ANSI palette. The existing full screenshot suite checks all impact levels, including serious and critical; the focused updated desktop/mobile states pass.
-- Lighthouse scores and INP/CLS for the project site are not measured here. The full site UX-004/005 work remains open.
+- Project-site Lighthouse scores are recorded below. Site INP/CLS and five-run metrics remain unmeasured; UX-004/005 stay partial.
 
 ## Project site first screen and distributed section
 
