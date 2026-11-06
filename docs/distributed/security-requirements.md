@@ -33,7 +33,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 
 | ID | Relevant clauses | Status and register evidence / remaining work |
 |---|---|---|
-| SEC2-001 | ASVS 12.01, 12.02; API8:2023 | `[ ]` TLS 1.3 default, opt-in TLS 1.2, ticket policy and testssl CI remain. |
+| SEC2-001 | ASVS 12.01, 12.02; API8:2023 | `[~]` `min_tls` defaults to `1.3`; configuration accepts only `1.3` or explicit `1.2`. `coordinator/tests/certs.rs::tls13_is_the_default_and_tls12_requires_explicit_opt_in` proves the TLS 1.2-only client fails by default and succeeds after opt-in, and checks tickets/resumption and 0-RTT are disabled. The provider restricts suites to AEAD; the pinned testssl.sh scan rejects medium-or-higher findings. CI evidence remains. |
 | SEC2-002 | ASVS 03.04, 03.05, 03.07; API8:2023 | `[~]` Global security headers have named route/static tests in register. Table coverage and CI evidence remain. |
 | SEC2-003 | ASVS 02.02, 04.02; API4:2023, API8:2023 | `[~]` JSON media type, bounded parser, schema limits, OPTIONS/HEAD behavior have named tests. Unknown-field and identifier audits remain. |
 | SEC2-004 | ASVS 03.05, 03.07; API8:2023 | `[~]` `fetch_metadata_guard` rejects cross-site cookie API/fetch and WebSocket requests; only top-level console document navigation is exempt. Unit and coordinator route regressions cover the policy. Exact-Origin and CSRF checks remain independent. |
@@ -48,7 +48,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | SEC2-013 | ASVS 16.02, 16.03, 16.04; API8:2023 | `[~]` Existing audit rows cover several mutations. Append-only hash-chained security log and admin API remain. |
 | SEC2-014 | ASVS 06.04, 16.02, 16.03; NIST 4.1, 4.2; API2:2023 | `[ ]` New-device/failure/token notifications and optional outbound webhook remain. |
 | SEC2-015 | ASVS 15.02; API8:2023, API9:2023 | `[~]` `.github/workflows/supply-chain.yml` audits Rust, production npm and Python development dependencies; `tests/test_supply_chain_config.py` checks full-SHA pins, audit wiring, Dependabot, image signature, provenance and CycloneDX publication. Local cargo audit/deny, npm audit, Python `pip-audit` and config tests pass; release artifact execution awaits CI. |
-| SEC2-016 | ASVS 15.01, 04.01, 04.02; API1:2023–API10:2023 | `[ ]` Schemathesis is tracked under API-012; ZAP API/console scans and SEC2 negative-test coverage remain. |
+| SEC2-016 | ASVS 15.01, 04.01, 04.02; API1:2023–API10:2023 | `[~]` `.github/workflows/security-dynamic.yml` runs Schemathesis against the committed OpenAPI snapshot and ZAP API/baseline scans against an isolated coordinator; reports are retained, and a JSON gate rejects medium-or-higher ZAP alerts. `tests/test_supply_chain_config.py::test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts` checks pins, scan targets and severity gating. CI has not run these scans yet; the full SEC2 negative-test matrix remains. |
 | SEC2-017 | ASVS 12.01, 12.02, 12.03, 04.01; API8:2023, API9:2023 | `[ ]` Separated listeners, trusted proxy CIDRs and remote-access guidance remain. |
 | SEC2-018 | ASVS 13.01, 13.02, 13.04; API8:2023 | `[ ]` `exposure` migration and Internet-mode startup precondition validation remain. |
 | SEC2-019 | ASVS 06.07, 08.02, 09.01, 10.03, 11.06; NIST 3.2.5, 3.2.7, 4.1; API2:2023 | `[ ]` Certificate/authenticator interfaces, principal-keyed storage and sender-constrained token model remain. |
@@ -60,7 +60,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 |---|---|---|
 | PK-001 | ASVS 06.07, 12.01; NIST 3.2.5, 4.1 | `[~]` `container/compose.yaml` adds an opt-in Tailscale sidecar and certificate renewal service; `coordinator/tests/certs.rs::configured_certificate_files_reload_for_new_tls_handshakes` verifies reload and internal-CA fallback; compose/install tests check persistence and concise setup. Live tailnet and Android checks remain. Tailscale configuration has no direct clause match. |
 | PK-002 | ASVS 06.07, 06.04, 08.02; NIST 3.2.5, 4.1.2 | `[ ]` Canonical public origin and RP ID change/re-enrolment safeguards remain. |
-| PK-003 | ASVS 06.07, 06.04, 11.04, 11.06; NIST 3.1.7, 4.1 | `[ ]` Maintained WebAuthn implementation and credential persistence remain. |
+| PK-003 | ASVS 06.07, 06.04, 11.04, 11.06; NIST 3.1.7, 4.1 | `[~]` `webauthn-rs` 0.6.2 typed ceremony/credential state and SQLite migration v8; single-use session-bound challenges are capped at 300 seconds. `coordinator/tests/passkeys.rs` covers replay, binding and lifetime; `coordinator/src/passkeys.rs` covers 256-bit challenge entropy and IP-origin rejection. Fixed-vector ceremony verification, route integration, discoverable registration settings and algorithm-policy verification are outstanding. |
 | PK-004 | ASVS 06.03, 06.05, 06.07; NIST 2, 3.1.7, 3.2.5 | `[ ]` Conditional and button passkey sign-in with password fallback remain. |
 | PK-005 | ASVS 06.04, 06.07; NIST 4.1, 4.1.2 | `[ ]` Password and passkey first-run variants and mobile flow tests remain. |
 | PK-006 | ASVS 06.04, 06.05, 07.04; NIST 4.1, 4.2 | `[ ]` Passkey management, step-up and last-method safeguards remain. |

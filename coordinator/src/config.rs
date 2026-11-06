@@ -10,6 +10,8 @@ pub struct Config {
     /// Listen address. Non-loopback needs `lan_enabled = true` (NET-003).
     pub bind: String,
     pub lan_enabled: bool,
+    /// Minimum TLS version. TLS 1.2 is an explicit compatibility opt-in.
+    pub min_tls: String,
     pub max_events_per_worker: u64,
     /// Extra exact Origin values accepted for cookie-authenticated writes
     /// (the default is `https://<Host header>`).
@@ -46,6 +48,7 @@ impl Default for Config {
         Config {
             bind: "127.0.0.1:8443".into(),
             lan_enabled: false,
+            min_tls: "1.3".into(),
             max_events_per_worker: 50_000,
             allowed_origins: vec![],
             web_dir: None,
@@ -85,31 +88,34 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
     let d = Config::default();
     format!(
         "# bridge-coordinator configuration. Every key has a built-in default; the environment\n\
-# variables BRIDGE_COORDINATOR_BIND and BRIDGE_COORDINATOR_LAN_ENABLED override bind and\n\
-# lan_enabled at start-up.\n\
-# Listen address. A non-loopback address is refused unless lan_enabled = true.\n\
-bind = \"{bind}\"\n\
-lan_enabled = {lan_enabled}\n\
-# Stored events per worker; oldest are deleted first.\n\
-max_events_per_worker = {}\n\
-# Extra exact Origin values accepted for cookie-authenticated writes.\n\
-allowed_origins = []\n\
-# Directory with the built web interface; default: web next to the executable, then\n\
-# /usr/share/bridge-coordinator/web.\n\
-# web_dir = \"/path/to/web\"\n\
-# Total concurrent TCP connections; excess connections are closed immediately.\n\
-max_connections = {}\n\
-# Concurrent connections from one client address (IPv6 clients by /64).\n\
-max_connections_per_ip = {}\n\
-# Connection slots kept for workers with a valid token when the others are full.\n\
-worker_reserve_connections = {}\n\
-# Seconds to receive a complete request body (slow-body limit).\n\
-request_body_timeout_secs = {}\n\
-# Seconds to wait for the next request header on an idle HTTP connection.\n\
-http_idle_timeout_secs = {}\n\
-# Browser WebSockets (/stream, /terminal): server ping interval and inactivity close.\n\
-ws_ping_interval_secs = {}\n\
-ws_idle_timeout_secs = {}\n",
+    # variables BRIDGE_COORDINATOR_BIND and BRIDGE_COORDINATOR_LAN_ENABLED override bind and\n\
+    # lan_enabled at start-up.\n\
+    # Listen address. A non-loopback address is refused unless lan_enabled = true.\n\
+    bind = \"{bind}\"\n\
+    lan_enabled = {lan_enabled}\n\
+    # Minimum TLS version. Keep 1.3 unless an older client requires TLS 1.2.\n\
+    min_tls = \"{}\"\n\
+    # Stored events per worker; oldest are deleted first.\n\
+    max_events_per_worker = {}\n\
+    # Extra exact Origin values accepted for cookie-authenticated writes.\n\
+    allowed_origins = []\n\
+    # Directory with the built web interface; default: web next to the executable, then\n\
+    # /usr/share/bridge-coordinator/web.\n\
+    # web_dir = \"/path/to/web\"\n\
+    # Total concurrent TCP connections; excess connections are closed immediately.\n\
+    max_connections = {}\n\
+    # Concurrent connections from one client address (IPv6 clients by /64).\n\
+    max_connections_per_ip = {}\n\
+    # Connection slots kept for workers with a valid token when the others are full.\n\
+    worker_reserve_connections = {}\n\
+    # Seconds to receive a complete request body (slow-body limit).\n\
+    request_body_timeout_secs = {}\n\
+    # Seconds to wait for the next request header on an idle HTTP connection.\n\
+    http_idle_timeout_secs = {}\n\
+    # Browser WebSockets (/stream, /terminal): server ping interval and inactivity close.\n\
+    ws_ping_interval_secs = {}\n\
+    ws_idle_timeout_secs = {}\n",
+        d.min_tls,
         d.max_events_per_worker,
         d.max_connections,
         d.max_connections_per_ip,
@@ -141,6 +147,9 @@ impl Config {
         }
         if let Some(v) = std::env::var_os(ENV_LAN_ENABLED) {
             cfg.lan_enabled = parse_bool(ENV_LAN_ENABLED, &v.to_string_lossy())?;
+        }
+        if cfg.min_tls != "1.3" && cfg.min_tls != "1.2" {
+            return Err("min_tls must be \"1.3\" or \"1.2\"".into());
         }
         if let Some(v) = std::env::var("BRIDGE_COORDINATOR_TLS_CERT_FILE").ok().filter(|v| !v.trim().is_empty()) {
             cfg.tls_cert_file = Some(v);

@@ -43,8 +43,10 @@ worker protocol is `protocol.md`.
     `config.toml`; a non-loopback bind also writes `lan_enabled = true`
     (or the value of `BRIDGE_COORDINATOR_LAN_ENABLED` when set). The default bind is
     `127.0.0.1:8443`.
-- `bridge-coordinator serve --data-dir DIR` serves HTTPS (rustls; TLS 1.3 and
-  1.2 with AEAD suites only). It refuses to start when the bind address is not
+- `bridge-coordinator serve --data-dir DIR` serves HTTPS (rustls; TLS 1.3 by
+  default, with TLS 1.2 and AEAD suites only when `min_tls = "1.2"` is explicitly
+  set for an older client). Session resumption tickets and 0-RTT are disabled. It
+  refuses to start when the bind address is not
   loopback and `lan_enabled = true` is not set (NET-003). It holds an exclusive
   lock on `DIR/coordinator.lock` while running (released by the kernel on any
   exit). Logs go to stderr only; nothing is written outside the data directory
@@ -78,6 +80,11 @@ worker protocol is `protocol.md`.
   - `BRIDGE_COORDINATOR_PUBLIC_PORT`: port in the printed URLs when it differs from
     the bind port (a published container port). `compose.yaml` sets it from
     `BRIDGE_PORT`.
+  - `BRIDGE_COORDINATOR_TLS_CERT_FILE`, `BRIDGE_COORDINATOR_TLS_KEY_FILE` and
+    `BRIDGE_COORDINATOR_TLS_CERT_NAME`: optional operator-file certificate, private key
+    and exact SNI hostname. The file identity is served only for that hostname; other
+    names continue using the internal CA. Valid replacement pairs are picked up for
+    new TLS handshakes without restarting the server.
   - `BRIDGE_COORDINATOR_CONTAINER`: set by the container image. Network exposure is
     then decided by the published port, not by `lan_enabled`.
 

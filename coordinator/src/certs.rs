@@ -277,6 +277,10 @@ pub fn provider() -> Arc<CryptoProvider> {
 }
 
 pub fn build_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig, String> {
+    build_config_with_min_tls(cert_pem, key_pem, "1.3")
+}
+
+pub fn build_config_with_min_tls(cert_pem: &[u8], key_pem: &[u8], min_tls: &str) -> Result<ServerConfig, String> {
     let certs = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -284,20 +288,36 @@ pub fn build_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig, Str
         return Err("no certificate found in PEM".into());
     }
     let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| format!("no private key found in PEM: {e}"))?;
+    let versions = tls_versions(min_tls)?;
     let mut cfg = ServerConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .with_protocol_versions(&versions)
         .map_err(|e| e.to_string())?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| e.to_string())?;
+    disable_resumption_and_early_data(&mut cfg);
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(cfg)
 }
 
-pub fn load_server_config(dir: &Path) -> Result<Arc<ServerConfig>, String> {
+fn tls_versions(min_tls: &str) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, String> {
+    match min_tls {
+        "1.3" => Ok(vec![&rustls::version::TLS13]),
+        "1.2" => Ok(vec![&rustls::version::TLS13, &rustls::version::TLS12]),
+        _ => Err(format!("unsupported min_tls {min_tls:?}; choose \"1.3\" or \"1.2\"")),
+    }
+}
+
+fn disable_resumption_and_early_data(config: &mut ServerConfig) {
+    config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
+    config.max_early_data_size = 0;
+}
+
+pub fn load_server_config(dir: &Path, min_tls: &str) -> Result<Arc<ServerConfig>, String> {
     let cert = std::fs::read(dir.join("server.pem")).map_err(|e| format!("cannot read server.pem: {e}"))?;
     let key = std::fs::read(dir.join("server.key")).map_err(|e| format!("cannot read server.key: {e}"))?;
-    Ok(Arc::new(build_config(&cert, &key)?))
+    Ok(Arc::new(build_config_with_min_tls(&cert, &key, min_tls)?))
 }
 
 /// TLS certificate resolver for operator-managed files. Only a complete,
@@ -398,13 +418,15 @@ pub fn load_reloading_file_server_config(
     key_path: PathBuf,
     external_name: String,
     fallback_dir: &Path,
+    min_tls: &str,
 ) -> Result<(Arc<ServerConfig>, Arc<ReloadingFileCertResolver>), String> {
     let resolver = ReloadingFileCertResolver::load(cert_path, key_path, external_name, fallback_dir)?;
     let mut cfg = ServerConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .with_protocol_versions(&tls_versions(min_tls)?)
         .map_err(|e| e.to_string())?
         .with_no_client_auth()
         .with_cert_resolver(resolver.clone());
+    disable_resumption_and_early_data(&mut cfg);
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok((Arc::new(cfg), resolver))
 }

@@ -53,3 +53,19 @@ def test_dependabot_covers_workflow_and_dependency_manifests() -> None:
     for ecosystem, directory in (("github-actions", "/"), ("cargo", "/coordinator"), ("npm", "/web"), ("pip", "/")):
         assert f"package-ecosystem: {ecosystem}" in config
         assert f"directory: {directory}" in config
+
+
+def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "security-dynamic.yml").read_text()
+    assert "schemathesis==4.33.1" in workflow
+    assert "zaproxy/zap-stable:2.17.0" in workflow
+    assert "st run docs/distributed/openapi.json" in workflow
+    assert "--header \"Authorization: Bearer $SCAN_TOKEN\"" in workflow
+    assert "--max-examples 10" in workflow
+    assert "zap-api-scan.py" in workflow and "-f openapi" in workflow
+    assert "zap-baseline.py" in workflow
+    assert "if risk >= 2:" in workflow
+    assert "dynamic-security-reports" in workflow
+    assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow
+    assert "--severity CRITICAL" in workflow
+    assert 'severity in {"MEDIUM", "HIGH", "CRITICAL"}' in workflow

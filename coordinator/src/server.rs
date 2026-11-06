@@ -50,10 +50,10 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     let web_dir = crate::web::resolve_web_dir(web_dir.map(Path::to_path_buf).or(configured).as_deref())?;
     let (tls_config, file_cert_resolver) = match (&cfg.tls_cert_file, &cfg.tls_key_file, &cfg.tls_cert_name) {
         (Some(cert), Some(key), Some(name)) => {
-            let (server_config, resolver) = crate::certs::load_reloading_file_server_config(cert.into(), key.into(), name.clone(), data_dir)?;
+            let (server_config, resolver) = crate::certs::load_reloading_file_server_config(cert.into(), key.into(), name.clone(), data_dir, &cfg.min_tls)?;
             (server_config, Some(resolver))
         }
-        _ => (crate::certs::load_server_config(data_dir)?, None),
+        _ => (crate::certs::load_server_config(data_dir, &cfg.min_tls)?, None),
     };
     let tls = TlsAcceptor::from(tls_config);
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
