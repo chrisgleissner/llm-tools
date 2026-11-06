@@ -168,6 +168,22 @@ exits 0 when `GET /healthz` over HTTPS answers `{"status":"ok"}` (verified again
 the local CA, at most 3 s) and 1 otherwise. Use it from monitoring or a timer;
 `/healthz` itself needs no authentication and returns nothing else.
 
+Configuration check: after editing `config.toml` or the `BRIDGE_COORDINATOR_*`
+variables, run `bridge-coordinator check-config --data-dir /var/lib/bridge-coordinator`
+(in the container: `docker compose run --rm coordinator check-config`). It lists every
+problem at once, one line per problem with the key, the value and the fix, for example
+
+```text
+config error: max_connection = 3: unknown key; did you mean "max_connections"?; fix: rename it to max_connections, or remove it
+config error: BRIDGE_COORDINATOR_LAN_ENABLED = "perhaps": not a boolean; fix: set it to true or false (1, 0, yes, no, on and off are also accepted)
+```
+
+and exits 1. For a valid configuration it prints `config ok: ...` and exits 0. It does
+not bind a port or touch the database, so it is safe to run while the coordinator is
+running. `serve` runs the same check before it binds, so a bad configuration also
+stops the service with all errors in its log. Unknown keys are errors; the check
+details are in `coordinator.md`.
+
 ## Network placement
 
 `bind` in `config.toml` (or `BRIDGE_COORDINATOR_BIND`) selects the listen address:
