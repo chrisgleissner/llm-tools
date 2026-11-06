@@ -88,8 +88,30 @@
 <section class="hero" aria-labelledby="hero-title">
   <div class="wrap">
     <p class="eyebrow" aria-label="Works with"><span><i class="sq claude" aria-hidden="true"></i>Claude Code</span><span><i class="sq codex" aria-hidden="true"></i>Codex</span><span><i class="sq copilot" aria-hidden="true"></i>Copilot CLI</span></p>
-    <h1 id="hero-title">Run out of tokens, <span class="grad">not momentum.</span></h1>
-    <p class="lede">See every Claude Code, Codex and Copilot limit in one table. When one runs dry, the work moves to the next provider. Longer jobs run as missions you approve.</p>
+    <h1 id="hero-title">Track AI usage. <span class="grad">Keep agents moving.</span></h1>
+    <p class="lede">See provider limits, switch when one runs dry, and review longer coding missions in Bridge.</p>
+
+    <figure class="hero-visual">
+      <div class="win">
+        <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">terminal</span></div>
+        <div class="win-body">
+<pre class="only-wide" role="img" aria-label="Terminal. llm-usage shows Claude's 5-hour limit empty for 51 minutes and Codex with 63 percent left."><span class="c-dim">$</span> llm-usage
+Provider   Ready   Scope     Remaining         Guidance              Resets in
+────────   ─────   ───────   ───────────────   ───────────────────   ──────────
+Claude     <span class="c-bad">no</span>      5h        <span class="c-bad">  0% ░░░░░░░░░░</span>   <span class="c-bad">× empty</span>               51m
+Codex      yes     5h        <span class="c-ok"> 63% ██████░░░░</span>   <span class="c-info">✓ lasts until reset</span>   4h 30m</pre>
+<pre class="only-narrow" role="img" aria-label="Terminal. Claude's 5-hour limit is empty for 51 minutes; Codex has 63 percent left."><span class="c-dim">$</span> llm-usage
+Provider   Scope     Remaining         Resets in
+────────   ───────   ───────────────   ─────────
+Claude     5h        <span class="c-bad">  0% ░░░░░░░░░░</span>   51m
+Codex      5h        <span class="c-ok"> 63% ██████░░░░</span>   4h 30m</pre>
+<pre class="flow" role="img" aria-label="ralph-robin sees Claude is rate-limited, selects Codex and continues the task with the scripted provider."><span class="c-dim">$</span> ralph-robin --prompt-file task.md
+<span class="c-dim">[06:56:13] </span><span class="c-brand">◆ ralph-robin</span>: <span class="c-codex">✓</span> selected codex (advanced-to-usable)
+[06:56:14 codex] scripted codex: editing src/server.py</pre>
+        </div>
+      </div>
+      <figcaption class="hero-caption"><span>Real output from <code>llm-usage</code> and <code>ralph-robin</code>, on sample numbers and with a scripted provider.</span> <a href="#handoff">How the hand-off works</a></figcaption>
+    </figure>
 
     <div class="install hero-install" data-tabs>
       <div class="tablist" role="tablist" aria-label="Install method">
@@ -107,38 +129,6 @@
     </div>
     <p class="hero-note">Python 3.11+ &middot; Linux and macOS &middot; <code>tmux</code> for Bridge<br>Local, no telemetry, works over SSH &middot; Apache-2.0</p>
     <p class="hero-cta"><a class="btn" href="#first-run">Your first run in four steps</a></p>
-
-    <figure class="hero-visual">
-      <div class="win">
-        <div class="win-bar" aria-hidden="true"><i></i><i></i><i></i><span class="win-title">terminal</span></div>
-        <div class="win-body">
-<pre class="only-wide" role="img" aria-label="Terminal. llm-usage shows Claude's 5-hour window at 0%, empty for 51 more minutes, and Codex's at 63%."><span class="c-dim">$</span> llm-usage
-Provider   Ready   Scope     Remaining         Guidance              Resets in 
-────────   ─────   ───────   ───────────────   ───────────────────   ──────────
-Claude     <span class="c-bad">no</span>      5h        <span class="c-bad">  0% ░░░░░░░░░░</span>   <span class="c-bad">× empty</span>               51m       
-                   weekly    <span class="c-ok"> 59% ██████░░░░</span>   <span class="c-warn">↓ conserve</span>            5d        
-
-Codex      yes     5h        <span class="c-ok"> 63% ██████░░░░</span>   <span class="c-info">✓ lasts until reset</span>   4h 30m    
-                   weekly    <span class="c-ok"> 34% ███░░░░░░░</span>   <span class="c-warn">↓ conserve</span>            4d 2h     </pre>
-<pre class="only-narrow" role="img" aria-label="Terminal. llm-usage shows Claude's 5-hour window at 0%, resetting in 51 minutes, and Codex's at 63%."><span class="c-dim">$</span> llm-usage
-Provider   Scope     Remaining         Resets in
-────────   ───────   ───────────────   ─────────
-Claude     5h        <span class="c-bad">  0% ░░░░░░░░░░</span>   51m      
-           weekly    <span class="c-ok"> 59% ██████░░░░</span>   5d       
-
-Codex      5h        <span class="c-ok"> 63% ██████░░░░</span>   4h 30m   
-           weekly    <span class="c-ok"> 34% ███░░░░░░░</span>   4d 2h    </pre>
-<pre class="flow" role="img" aria-label="Then ralph-robin reports claude rate-limited and codex usable, selects codex and relays three scripted lines from it."><span class="c-dim">$</span> ralph-robin --prompt-file task.md
-<span class="c-dim">[06:56:13] </span><span class="c-brand">◆ ralph-robin</span>: <span class="c-dim">·</span> usage <span class="c-claude">claude</span>: rate-limited (5h 0% left, weekly 59% left, until 2026-10-30 07:47:13 GMT) | <span class="c-codex">codex</span>: usable (5h 63% left, weekly 34% left)
-<span class="c-dim">[06:56:13] </span><span class="c-brand">◆ ralph-robin</span>: <span class="c-codex">✓</span> selected codex (advanced-to-usable)
-[06:56:13 codex] scripted codex: read task.md
-[06:56:14 codex] scripted codex: editing src/server.py
-[06:56:14 codex] scripted codex: tests pass, increment done
-<span class="c-dim">[06:56:14] </span><span class="c-brand">◆ ralph-robin</span>: <span class="c-codex">✓</span> completed 1 iteration(s); stopping (--max-iterations)</pre>
-        </div>
-      </div>
-      <figcaption class="hero-caption"><span>Real output from <code>llm-usage</code> and <code>ralph-robin</code>, on sample numbers and with a scripted provider.</span> <a href="#handoff">How the hand-off works</a></figcaption>
-    </figure>
   </div>
 </section>
 
@@ -358,8 +348,8 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
   <div class="wrap">
     <div class="section-head">
       <p class="kicker">Web console, optional</p>
-      <h2 id="console-title">Many machines, one console, any browser.</h2>
-      <p>Workers run missions on your own machines, and a small coordinator you host lets you watch and approve them from any browser, a phone or the CLI. Standalone Bridge still needs no server.</p>
+      <h2 id="console-title">Run agents on your machines. Review anywhere.</h2>
+      <p>Provider CLIs and credentials stay on your workers; they connect out to the coordinator. Use its browser console or remote CLI to watch and approve missions. Standalone Bridge needs no server.</p>
     </div>
 
     <div class="arch" aria-label="Architecture">
@@ -374,7 +364,6 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
         <div class="arch-box keep"><b>Worker</b><span>your laptop or server</span></div>
         <div class="arch-box keep"><b>Worker</b><span>your Raspberry Pi or another host</span></div>
       </div>
-      <p class="arch-note">Provider CLIs and their sign-ins stay on the workers. The coordinator never holds them.</p>
     </div>
 
     <div class="console-shots">
@@ -424,11 +413,10 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
       </figure>
     </div>
 
-    <ul class="feats four" aria-label="Web console">
-      <li><b>Secure by default.</b> HTTPS, a login, and loopback only until you opt in.</li>
-      <li><b>Offline on your LAN.</b> The console loads nothing from the internet.</li>
-      <li><b>One command set.</b> <code>llm-bridge --target NAME</code> runs a command on a worker.</li>
-      <li><b>Light.</b> Under 25 MiB of memory at peak on an emulated Pi Zero 2 W; see the <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/benchmarks.md">benchmarks</a>.</li>
+    <ul class="feats" aria-label="Web console">
+      <li><b>Private by default.</b> HTTPS, login and loopback; LAN access is opt-in. Assets are served locally.</li>
+      <li><b>One control surface.</b> Use the browser or <code>llm-bridge --target NAME</code> through the coordinator.</li>
+      <li><b>Small footprint.</b> Under 25 MiB peak memory on an emulated Pi Zero 2 W; see the <a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/benchmarks.md">benchmark</a>.</li>
     </ul>
     <p class="fine"><a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md">Install the coordinator and add a worker</a></p>
   </div>

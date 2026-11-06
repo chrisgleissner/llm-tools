@@ -23,11 +23,11 @@ The page works without storage or JavaScript.
 
 | Section | Purpose |
 | --- | --- |
-| Hero | Headline, two-sentence lede, install tabs (pipx at a release tag, or from source), requirements, a link to the first-run steps, and a terminal with real `llm-usage` and `ralph-robin` output |
+| Hero | A direct product headline, one-sentence lede, a compact `llm-usage` and `ralph-robin` demonstration, then install tabs (pipx at a release tag, or from source), requirements and a link to the first-run steps |
 | See every limit (`#limits`) | The `llm-usage` table as text (wide and narrow variants), three points |
 | When one runs dry (`#handoff`) | An example night as a timeline (HTML and CSS, no image), four short points |
 | LLM Bridge (`#bridge`) | The limit hand-off clip, Plan, Run and Review as tabs with a screenshot each, the full-demo link, and six smaller features (mission picker, `/finish`, rotation, themes, wheel, JSON and `doctor`) |
-| Web console (`#console`) | Optional distributed mode in one screen: a headline, a two-sentence lede, an architecture diagram in HTML and CSS (browser and CLI over HTTPS to the coordinator, workers connect out, provider sign-ins stay on the workers), three web console screenshots in the existing tab pattern (Overview, Approve, Terminal) with one Pixel 4 screenshot, and four one-line points |
+| Web console (`#console`) | Optional distributed mode: a headline, short deployment lede, architecture diagram in HTML and CSS (browser and CLI over HTTPS to the coordinator, workers connect out, provider sign-ins stay on workers), three web console screenshots (Overview, Approve, Terminal) with one Pixel 4 screenshot, and three short points |
 | Control (`#control`) | Four cards for reliability, approval and review hold, cost awareness, and fit (no server, SSH, Apache-2.0) |
 | Install (`#first-run`) | Requirements, then four steps that match `docs/llm-bridge/first-run.md`: install, `llm-bridge doctor`, start a mission, finish and approve. Measured timings and an optional `llm-usage` step |
 | Built with itself | Counts taken from the author's Bridge database, and three dated facts |

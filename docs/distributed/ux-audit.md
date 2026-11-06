@@ -50,6 +50,28 @@ The output latency is the interval from the mission-status HTTP response to visi
 - Live-output screenshots pass axe with zero violations after replacing xterm's low-contrast ANSI palette. The existing full screenshot suite checks all impact levels, including serious and critical; the focused updated desktop/mobile states pass.
 - Lighthouse scores and INP/CLS for the project site are not measured here. The full site UX-004/005 work remains open.
 
+## Project site first screen and distributed section
+
+The site was audited from its rendered first viewport before editing, using the same local static server and Chromium viewport sizes before and after. These are layout measurements, not user-study, Lighthouse, INP or CLS scores.
+
+| Viewport | Before: hero demo position | After: hero demo position |
+|---|---|---|
+| 1440×900 | Terminal begins at y=716 and its frame ends at y=1140; only 184 px of the 424 px demo frame is visible. | The direct headline is one line; the complete demo and caption end at y=627. |
+| 393×851 | Terminal begins at y=679 and its frame ends at y=1210; the demo is cut off after 172 px. | The complete demo and caption end at y=699. The install tabs start at y=731. |
+
+The old headline (“Run out of tokens, not momentum”) expressed a benefit but did not name the product's job. It now says “Track AI usage. Keep agents moving.” The short lede explains provider switching and Bridge mission review, and the terminal demonstration now appears before installation details. The install tabs, pinned 1.3.0 command, Python/platform requirements, Apache-2.0 statement and first-run link remain in the hero.
+
+The distributed section now has a direct heading and a short description of the deployment boundary: provider CLIs and credentials stay on workers, workers connect out, and the browser console or remote CLI uses the coordinator. Its summary is three points instead of four; loopback/LAN opt-in, local assets, shared control surface, the measured Pi memory figure and install/benchmark links remain. The architecture diagram and sample console screens are preserved.
+
+| Lighthouse 13.6.0, mobile emulation | Before | After |
+|---|---:|---:|
+| Performance | 97 | 97 |
+| Accessibility | 100 | 100 |
+| Best practices | 100 | 100 |
+| SEO | 100 | 100 |
+
+The two reports were collected from the pre-edit `HEAD` snapshot and the changed site using local assets and a local static server. These are single-run Lighthouse scores, not repeated performance or live-user measurements. The project-site scores are now measured; the requested persona sessions, task timings and Pixel 4 INP/CLS remain open under UX-001/005.
+
 ## Remaining work
 
-This audit closes the specific live-output discovery gap and adds current-work summaries. The broader principal UX pass remains incomplete: capture repeatable timing for the other core tasks, complete the three persona walk-throughs, review/resolve every hesitation on every screen, measure the site with Lighthouse, collect five-run mobile performance summaries, and finish the site redesign. Do not mark UX-001–006 complete on the strength of this document alone.
+This audit closes the live-output discovery gap, adds current-work summaries, records the site Lighthouse scores, and documents the site hero/distributed-section changes. The broader principal UX pass remains incomplete: capture repeatable timing for the other core tasks, complete the three persona walk-throughs, review/resolve every hesitation on every screen, collect five-run mobile performance summaries and Pixel 4 INP/CLS, and finish the console redesign. Do not mark UX-001–006 complete on the strength of this document alone.

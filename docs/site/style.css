@@ -392,8 +392,8 @@ section { position: relative; padding-block: clamp(36px, 5vw, 56px); }
 .eyebrow .sq.claude { background: var(--claude); }
 .eyebrow .sq.copilot { background: var(--copilot); }
 .hero h1 {
-  margin: var(--s2) auto 0; max-width: 15ch;
-  font-size: clamp(2.375rem, 7vw, 4.5rem); line-height: 1.03; font-weight: 800; letter-spacing: -0.045em;
+  margin: var(--s2) auto 0; max-width: 36ch;
+  font-size: clamp(2.25rem, 4vw, 3.5rem); line-height: 1.05; font-weight: 800; letter-spacing: -0.045em;
 }
 .hero h1 .grad {
   background: linear-gradient(95deg, var(--brand), var(--brand-2));
@@ -408,7 +408,7 @@ section { position: relative; padding-block: clamp(36px, 5vw, 56px); }
 .hero-note code { font-size: .9em; }
 .hero-cta { margin-top: var(--s2); }
 
-.hero-visual { margin: var(--s4) auto 0; max-width: 1000px; text-align: left; }
+.hero-visual { margin: var(--s3) auto 0; max-width: 1000px; text-align: left; }
 .hero-visual .win { box-shadow: var(--shadow), 0 0 80px var(--glow); }
 .hero-video-wrap { position: relative; aspect-ratio: 1128 / 648; background: var(--term-bg); }
 .hero-video-wrap video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -736,17 +736,14 @@ dialog.demo-dialog video { width: 100%; aspect-ratio: 1128 / 648; background: va
 .arch-box.keep { border-style: dashed; }
 .arch-link { display: flex; align-items: center; gap: var(--s1); margin: 0; color: var(--muted); font-size: .9rem; }
 .arch-link svg { width: 12px; height: 16px; fill: none; stroke: var(--brand); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.arch-note { margin: var(--s1) 0 0; color: var(--text); font-weight: 600; text-align: center; }
 .console-shots { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: var(--s3); align-items: start; margin-top: var(--s4); }
 .console-shots .win-body img { width: 100%; height: auto; display: block; }
 .phone-fig { margin: 0; }
 .phone { border: 1px solid var(--win-border); border-radius: 28px; overflow: hidden; box-shadow: var(--shadow); background: var(--term-bg); }
 .phone img { width: 100%; height: auto; display: block; }
 .phone-fig figcaption { margin-top: var(--s1); }
-.feats.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-@media (max-width: 960px) { .feats.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 860px) {
   .console-shots { grid-template-columns: minmax(0, 1fr); }
   .phone-fig { max-width: 240px; margin-inline: auto; }
 }
-@media (max-width: 480px) { .feats.four { grid-template-columns: minmax(0, 1fr); } .arch-row.two { gap: var(--s1); } .arch-box { padding: var(--s1) 12px; } }
+@media (max-width: 480px) { .arch-row.two { gap: var(--s1); } .arch-box { padding: var(--s1) 12px; } }
