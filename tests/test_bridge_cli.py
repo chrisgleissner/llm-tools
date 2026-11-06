@@ -612,6 +612,7 @@ def test_main_routes_console_views_and_controller_through_injected_entrypoints(t
     calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(bridge_tui, "run_console", lambda mid, **kwargs: calls.append(("console", mid)) or 31)
     monkeypatch.setattr(bridge_tui, "run_control", lambda mid, **kwargs: calls.append((kwargs["initial_view"], mid)) or 32)
+    monkeypatch.setattr("llm_tools.bridge._interactive_terminal", lambda: True)
     assert main(["console", "--mission", mission_id]) == 31
     assert main(["control", "--mission", mission_id]) == 32
     assert main(["usage", "--mission", mission_id]) == 32

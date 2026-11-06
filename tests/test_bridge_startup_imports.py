@@ -153,7 +153,7 @@ def test_usage_errors_come_from_the_full_parser(capsys: pytest.CaptureFixture[st
     with pytest.raises(SystemExit) as raised:
         bridge._parse_arguments(["task", "bogus"])
     assert raised.value.code == 2
-    assert "invalid choice: 'bogus'" in capsys.readouterr().err
+    assert "unknown task command 'bogus'" in capsys.readouterr().err
     with pytest.raises(SystemExit) as raised:
         bridge._parse_arguments(["nonsense"])
     assert raised.value.code == 2

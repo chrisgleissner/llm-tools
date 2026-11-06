@@ -399,6 +399,16 @@ page controls make tasks past the first page reachable without loading the
 whole queue into the terminal process. Activity and Sessions views show recent
 bounded histories.
 
+`control` needs a terminal on both stdin and stdout. Without one (a pipe, a
+script, `ssh` without `-t`) it prints `llm-bridge: control needs an interactive
+terminal; use llm-bridge status` and exits 2. `llm-bridge usage` prints the
+`llm-usage` table once instead, so a script can read it.
+
+A mistyped command or option gets one line and exit status 2, for example
+`llm-bridge: unknown command 'stauts' · did you mean status? · llm-bridge --help
+lists commands`. Internal commands (`console`, `_controller`, `_station-gc`) are
+not listed or suggested.
+
 The Agents view shows roots across missions and exact parent-bound Codex children.
 Use `llm-bridge agents --mission ID` for one mission or `--all-missions` for the
 combined CLI map. Managed providers can inspect only their own mission. Root age
