@@ -275,7 +275,7 @@ def test_verify_needs_evidence_or_approval(tmp_path, state, capsys) -> None:
     created = _create(tmp_path, capsys)
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
-    message = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", code=4)
+    message = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", code=2)  # missing flags are a usage error (CLIUX-016: 2), not a wrong state
     assert f"task 1 needs evidence or approval · to complete it: llm-bridge task approve --mission {mid[:8]} --task 1" in message  # CLIUX-075
     assert f'llm-bridge task verify --mission {mid[:8]} --task 1 --evidence "TEXT"' in message
 
@@ -340,7 +340,10 @@ def test_console_read_only_commands_print_text_not_json(tmp_path, state, capsys,
 
 def test_console_status_matches_the_cli_and_json_is_opt_in(tmp_path, state, capsys) -> None:
     mid = _create(tmp_path, capsys)["mission"]["id"]
-    assert dispatch_console_command(mid, "/status") == _run(capsys, "status", "--mission", mid).strip()
+    # CLIUX-046: the sentences are the same facts worded per surface, so the console says "type /start"
+    # where the CLI says "run: llm-bridge start --mission ID". Everything else must match line for line.
+    cli = _run(capsys, "status", "--mission", mid).strip().replace(f"run: llm-bridge start --mission {mid[:8]}", "type /start")
+    assert dispatch_console_command(mid, "/status") == cli
     data = json.loads(dispatch_console_command(mid, "/status --json"))
     assert data["mission"]["id"] == mid and "frozen_tool_config" not in data["mission"]["config"]
     listing = json.loads(dispatch_console_command(mid, "/mission list --json"))

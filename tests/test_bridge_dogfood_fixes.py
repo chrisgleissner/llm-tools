@@ -244,7 +244,7 @@ def test_status_and_list_show_missing_controller(monkeypatch, tmp_path: Path, ca
     assert bridge.main(["status", "--mission", mid]) == 0
     assert f"Controller  not running (stopped unexpectedly) — run: llm-bridge start --mission {mid[:8]}" in capsys.readouterr().out
     assert bridge.main(["mission", "list"]) == 0
-    assert "INTERRUPTED (was RUNNING)" in capsys.readouterr().out
+    assert "INTERRUPTED" in capsys.readouterr().out  # CLIUX-033 table: STATE column
     assert bridge.main(["mission", "list", "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)["missions"][0]
     assert listed["status"] == "RUNNING" and listed["controller_running"] is False

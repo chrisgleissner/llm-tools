@@ -190,6 +190,7 @@ class EventKind(StrEnum):
     REPOSITORY_CHECKPOINT = "repository-checkpoint"
     PROMPT_ASSEMBLED = "prompt-assembled"
     MISSION_POLICY_CHANGED = "mission-policy-changed"
+    MISSION_WAITING_FOR_OPERATOR = "mission-waiting-for-operator"
     REVIEW_HOLD = "review-hold"
     REVIEW_HOLD_RELEASED = "review-hold-released"
     ROTATION_APPLIED = "rotation-applied"

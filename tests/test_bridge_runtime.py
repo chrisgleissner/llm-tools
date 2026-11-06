@@ -1205,11 +1205,15 @@ def test_headless_restart_refuses_running_operation_without_identity(tmp_path, m
     with pytest.raises(RuntimeError, match="cannot prove identity"):
         run_controller(mission["id"], headless=True)
 
-    assert store.get_operation(operation_id)["status"] == "UNCERTAIN"
-    assert store.get_task(task_id)["status"] == "BLOCKED"
+    # The refusal is durable: nothing was marked UNCERTAIN, so a second start refuses again (INT-003).
+    assert store.get_operation(operation_id)["status"] == "RUNNING"
+    assert store.get_task(task_id)["status"] == "RUNNING"
+    with pytest.raises(RuntimeError, match="stop --force"):
+        run_controller(mission["id"], headless=True)
+    assert store.get_operation(operation_id)["status"] == "RUNNING"
 
 
-def test_headless_restart_refuses_reused_provider_pid_without_signalling(tmp_path, monkeypatch) -> None:
+def test_headless_restart_skips_reused_provider_pid_without_signalling(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.delenv("LLM_BRIDGE_STATE_DIR", raising=False)
     store = BridgeStore(tmp_path / "llm-tools" / "llm-bridge" / "bridge.sqlite3")
@@ -1226,10 +1230,11 @@ def test_headless_restart_refuses_reused_provider_pid_without_signalling(tmp_pat
             "llm_tools.bridge_runtime._process_start_token",
             lambda pid: actual_token if int(pid) == process.pid else "",
         )
-        monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", lambda *_args, **_kwargs: pytest.fail("must not schedule around ambiguous provider"))
+        monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", lambda *_args, **_kwargs: 0)
 
-        with pytest.raises(PermissionError, match="belongs to a different process"):
-            run_controller(mission["id"], headless=True)
+        # A start token that differs from the recorded one proves the recorded provider is gone and the PID
+        # now belongs to an unrelated process: recovery does not refuse (INT-003), and does not signal it.
+        run_controller(mission["id"], headless=True)
 
         assert process.poll() is None
         assert store.get_operation(operation_id)["status"] == "UNCERTAIN"

@@ -18,7 +18,8 @@ from tests.test_bridge_recovery_tmux import call, controller_released, wait_for
 
 def _statuses(database: Path, mission_id: str) -> list[str]:
     with BridgeStore(database) as store:
-        return [str(task["status"]) for task in store.list_tasks(mission_id)]
+        # list_tasks returns the scheduler order with finished tasks last (CLIUX-056); this test reads task 1 first.
+        return [str(task["status"]) for task in sorted(store.list_tasks(mission_id), key=lambda task: int(task["ordinal"]))]
 
 
 def _runs(directory: Path) -> list[str]:

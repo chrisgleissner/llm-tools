@@ -339,7 +339,9 @@ llm-bridge task approve --mission MISSION_ID --task N \
 To send a task back instead, give a reason. The task is queued for another
 attempt and its next prompt quotes the reason. The retry starts at once when a
 controller is running and uses paid capacity, and the receipt says so. Add
-`--hold` to keep the task paused instead (resume it with `task resume`):
+`--hold` to keep the task paused instead (resume it with `task resume`). In the
+console, `/reject N REASON` asks for confirmation with two choices: `Y` rejects
+and retries, `H` rejects and holds (the same as `--hold`):
 
 ```bash
 llm-bridge task reject --mission MISSION_ID --task N --reason "tests were not run"
@@ -658,7 +660,14 @@ CLI form: `llm-bridge steer --mission ID --kind KIND`, with `--task N`
 `--to PROVIDER` (older name `--route`), and `--file PATH` or `--prompt TEXT` as
 required by that kind. `llm-bridge steer --help` lists only `handoff` and
 `review`. The other kinds still work for older scripts, but have their own
-commands: `task amend` (replace), `task verify` (verify) and `pause`.
+commands: `task amend` (replace), `task verify` (verify), `pause`, and
+`pause --after-task` and `stop --after-task [N]` for the two boundary kinds.
+`pause --after-task` stores the same intent as `steer --kind pause-after-iteration`
+(the mission pauses when the provider's current invocation ends, also during a
+wait for capacity). `stop --after-task [N]` stores the same intent as
+`steer --kind stop-after-task --task N`; without N it waits for the task that
+is running now. It cannot be combined with `--force`. The steer spellings remain
+hidden aliases.
 See `llm-bridge steer --help` and `steer help` in the console for the live
 syntax.
 
@@ -734,7 +743,9 @@ shows `Waiting for capacity` with the reset time.
 mission ID is saved (CREATED) · start it with: llm-bridge start` (`Already stopped
 · ...` when it is `STOPPED`). `pause` on a mission that is not running likewise says
 `Nothing to pause · mission is not running (CREATED)`, and on a paused one `Already
-paused · mission ID is PAUSED`. These no-ops exit 0. With a controller, `stop` asks it to stop at its next
+paused · mission ID is PAUSED`. These no-ops exit 0. A `RUNNING` mission whose controller has died is
+moved straight to `STOPPED`, because nobody is left to finish a `STOPPING`; if a provider run was
+still recorded as active, the receipt names `stop --force` to end it. With a controller, `stop` asks it to stop at its next
 boundary and closes the owned station after the controller stops; in native mode it waits for the provider
 invocation to return and says how to finish if that takes a while; a later resume creates or reconnects the
 station as needed. `stop --force` reconciles unresolved work and terminates
@@ -743,14 +754,26 @@ validated. When no provider process was running it prints `Stopped · no provide
 process was running` and exits 0; it fails only when a recorded provider process
 cannot be confirmed as the mission's, and then names its PID. The task that
 `stop --force` interrupted is recorded as `interrupted by stop --force`, and the
-next `start` runs it again.
+next `start` runs it again. Recovery at `start` and a repeated `stop --force` check the recorded
+provider identity again until termination has succeeded. A recorded process whose PID now has a
+different start token is treated as gone and is never signalled. When a `RUNNING` operation has no recorded
+process identity, `start` refuses on every attempt until you acknowledge with `stop --force`.
+
+A running controller with nothing it can run (every unfinished task is blocked, failed or paused, or the
+mission has no tasks) records one `mission-waiting-for-operator` event, shown in Activity as `Waiting for you`,
+and polls less often the longer nothing changes (0.5 s up to 4 s). `status` and the Overview's `Needs you`
+row say `waiting for you` and name the command to run (`task retry`, `task resume`, `task approve`). The
+controller continues by itself once you act. A task that was cancelled counts as finished: a mission whose
+other tasks are all completed completes, and a mission whose tasks are all cancelled stops.
 
 While a provider's capacity cannot be determined (not signed in, no usage data),
 the task stays READY and no operation is open: `status` shows `Waiting for
 capacity data · claude has no usage data, launches anyway in 14m (at 19:50)`.
 The deadline is fixed when the wait starts (`--max-unavailable-wait`, default
 900 s), so the countdown only goes down. After it passes, Bridge launches the
-provider anyway. `cancel` durably cancels the mission and its unfinished tasks.
+provider anyway. `cancel` durably cancels the mission and its unfinished tasks, then ends the provider process of an
+active run using the same identity check as `stop --force`; if that process cannot be ended
+automatically, the receipt names `stop --force`.
 It ends the mission for good (`resume` and `start` refuse a cancelled mission), so
 it asks `This cannot be undone` on a terminal and needs `--yes` when there is no
 terminal to ask on, for example `llm-bridge cancel --mission ID --yes`. The
@@ -921,7 +944,10 @@ preserve its process identity.
 Each mission has an identity colour, one of eight hues (teal, azure, blue, indigo, violet,
 magenta, pink, slate) chosen from its ID. It appears as a `▌`
 chip before the mission name in the console header, the home list and the
-mission picker, and as the filled label in the tmux station's status row.
+mission picker, and as the filled label in the tmux station's status row. The
+console header also shows the mission's short ID after the name, `(9a3c51e0)`,
+so two missions with the same name stay distinguishable without the colour (the
+ID is left out only on a very narrow terminal).
 `llm-bridge mission colour [--mission ID] N|auto` pins a hue (1-8) or returns
 to the automatic one. `[bridge.theme.roles] mission_1 = "#5f87ff"` in the
 llm-tools config changes a hue. `llm-bridge theme` previews the palette.

@@ -54,7 +54,7 @@ def test_header_wordmark_chip_name_and_state(roles) -> None:
     state = make_state(full_snapshot())
     parts = elements(draw(state, roles), roles, 0)
     assert parts == [
-        ("LLM BRIDGE", "brand"), (" · ", "dim"), ("▌", theme.mission_role("M1")), (" Fix the typo", "info"),
+        ("LLM BRIDGE", "brand"), (" · ", "dim"), ("▌", theme.mission_role("M1")), (" Fix the typo", "info"), (" (M1)", "dim"),
         (" · ", "dim"), ("◆ NEEDS YOU", "state_review"),
     ]
 

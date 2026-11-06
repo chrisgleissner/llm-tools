@@ -45,7 +45,7 @@ def test_projection_includes_only_bounded_recent_amendment_history(tmp_path) -> 
 
         task = project_snapshot(store, mission["id"], task_limit=1)["tasks"][0]
         assert [entry["revision"] for entry in task["amendments"]] == [9, 8, 7, 6, 5]
-        assert task["amendments"][0]["changes"] == {"prompt": "revision 9"}
+        assert task["amendments"][0]["changes"] == {"prompt": "revision 9", "title": "revision 9"}  # a title derived from the prompt follows the amended prompt
 
 
 def test_pending_proposals_are_counted_separately_from_runnable_tasks(tmp_path) -> None:

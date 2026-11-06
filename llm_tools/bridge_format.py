@@ -518,6 +518,11 @@ def format_command_receipt(command: str, result: dict[str, Any], mission_id: str
         number = inner.get("task_ordinal", inner.get("task_id"))
         target = f" task {number}" if number is not None else ""
         return f"Steering {inner.get('kind', '')}{target} · {inner.get('status', 'APPLIED')}"
+    if command == "pause-after-task":
+        return f"Pause scheduled · mission {mid} pauses when the provider finishes its current invocation; nothing is interrupted"
+    if command == "stop-after-task":
+        number = inner.get("task_ordinal", inner.get("task_id"))
+        return f"Stop scheduled · mission {mid} stops once task {number} is completed (approved, when it needs review); nothing is interrupted"
     if command == "continue" and inner.get("detail"):
         return str(inner["detail"])
     verb = {"pause": "Pause", "resume": "Resume", "stop": "Stop", "cancel": "Cancel"}.get(command, command.capitalize())
@@ -674,11 +679,31 @@ def declined_message(provider: str) -> str:
     return f"{provider} was not allowed to trust this folder · trust it and run /start again, or choose another provider with /rotation"
 
 
+def _operator_wait(snapshot: dict[str, Any], mission: dict[str, Any], mid: str, tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """A RUNNING mission whose controller idles because every unfinished task is blocked, failed or paused."""
+    counts = snapshot.get("task_counts") or {}
+    if mission.get("status") != "RUNNING" or any(counts.get(status) for status in ("RUNNING", "READY", "QUEUED", "VERIFYING")):
+        return None
+    held = [task for task in tasks if task.get("status") in {"BLOCKED", "FAILED", "PAUSED"}]
+    total = sum(int(counts.get(status, 0)) for status in ("BLOCKED", "FAILED", "PAUSED"))
+    if not total or not held:
+        return None
+    first = held[0]
+    number = task_number(first)
+    verb = "resume" if first["status"] == "PAUSED" else "retry"
+    command = f"llm-bridge task {verb} --mission {mid} --task {number}"
+    states = ", ".join(f"{int(counts[status])} {status.lower()}" for status in ("BLOCKED", "FAILED", "PAUSED") if counts.get(status))
+    return {
+        "kind": "operator", "tasks": [int(n) for n in (task_number(task) for task in held) if isinstance(n, int)], "command": command,
+        "message": f"waiting for you · no task can run ({states}) · {command} (inspect first: llm-bridge events --mission {mid})",
+    }
+
+
 def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """What the operator has to do next, from a status snapshot, or ``None``.
 
     Returns ``{"kind", "message", "command", "tasks"}``. ``kind`` is one of
-    ``approval``, ``failed``, ``blocked``, ``proposal`` or ``capacity``;
+    ``approval``, ``failed``, ``blocked``, ``operator``, ``proposal`` or ``capacity``;
     ``command`` is the CLI line that resolves it and ``tasks`` the task
     numbers involved.
     """
@@ -724,6 +749,9 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if pending:
         command = f"llm-bridge proposal list --mission {mid}"
         return {"kind": "proposal", "tasks": [], "command": command, "message": proposals_row(current_surface(), pending, mid)}
+    stuck = _operator_wait(snapshot, mission, mid, tasks)
+    if stuck is not None:
+        return stuck
     if isinstance(snapshot.get("waiting"), dict):
         command = f"llm-bridge rotation --mission {mid} --set LIST"
         return {"kind": "capacity", "tasks": [], "command": command, "message": "waiting for provider capacity · " + format_waiting(snapshot["waiting"], mid)}

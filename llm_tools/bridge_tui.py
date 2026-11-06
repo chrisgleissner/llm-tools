@@ -791,6 +791,15 @@ def _confirmation_reason(command: str) -> str | None:
     return None
 
 
+def _is_reject_command(command: str) -> bool:
+    """Whether ``command`` is the expanded ``task reject --task N …`` the console confirms."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    return words[:2] == ["task", "reject"] and "--task" in words and "--hold" not in words
+
+
 def _is_approval_command(words: list[str]) -> bool:
     """`task approve …`, or the deprecated spelling `task verify … --approve`."""
     return words[:2] == ["task", "approve"] or (words[:2] == ["task", "verify"] and "--approve" in words)
@@ -3266,6 +3275,8 @@ class _ConsoleState:
                 lines += _approval_summary(self.snapshot, approving)
             if approving is not None:
                 footer = "Y approve · N or Esc cancel · o output · d diff"
+            elif _is_reject_command(command):
+                footer = "Y Reject and retry (uses capacity) · H Reject and hold · N or Esc cancel"
             elif reason.startswith("Cancel this mission"):
                 footer = "Y Cancel mission · N or Esc Keep mission"  # "cancel" must not be both the question and the way out
             else:
@@ -3443,6 +3454,11 @@ class _ConsoleState:
             if self.confirm_command is not None:
                 if isinstance(key, str) and key.lower() == "y":
                     command, self.confirm_command = self.confirm_command, None
+                    self.response_overlay = False
+                    self._dispatch(command)
+                elif isinstance(key, str) and key.lower() == "h" and _is_reject_command(self.confirm_command):
+                    # Reject and hold: the same rejection, with the task paused in the same step (CLIUX-025).
+                    command, self.confirm_command = self.confirm_command + " --hold", None
                     self.response_overlay = False
                     self._dispatch(command)
                 elif isinstance(key, str) and key.lower() in {"o", "d"} and (number := self._approval_task_number()) is not None:
@@ -4766,7 +4782,7 @@ def _mission_status_role(status: str) -> str:
 
 
 def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
-    """`LLM BRIDGE · ▌ name · ● STATE`: wordmark, mission chip and name, state glyph and word."""
+    """`LLM BRIDGE · ▌ name (ID) · ● STATE`: wordmark, mission chip, name and short ID, state glyph and word."""
     mission = _mission(state.snapshot)
     if state.snapshot:
         status = _text(mission.get("status", "unknown"), 20).upper()
@@ -4784,13 +4800,17 @@ def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
     if badge and room < 12:  # no space for the mission name next to the badge: the name wins
         badge = ""
         room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
-    name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room))
+    # The short ID tells two missions with the same name apart without relying on the identity colour (CLIUX-038).
+    id_text = f" ({_short_id(state.mission_id)})"
+    if room - len(id_text) < 12:
+        id_text = ""
+    name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room - len(id_text)))
     chip_role = _mission_role_of(state.snapshot, state.mission_id)
     # The identity bar carries colour only.  Its ASCII form is the same character as the ASCII
     # separator (`| |`), so ASCII mode leaves it out of the header.
     mark: list[Segment] = [] if ascii_mode() else [(glyph("chip"), chip_role)]
     return [
-        ("LLM BRIDGE", "brand"), (_SEP, "dim"), *mark, ((" " if mark else "") + name, "info"), (_SEP, "dim"),
+        ("LLM BRIDGE", "brand"), (_SEP, "dim"), *mark, ((" " if mark else "") + name, "info"), *([(id_text, "dim")] if id_text else []), (_SEP, "dim"),
         (shown, _mission_status_role(status)),
         *([(_SEP, "dim"), (badge, "warn")] if badge else []),
     ]

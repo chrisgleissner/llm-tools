@@ -19,7 +19,7 @@ from .bridge_format import NATIVE_STOP_HINT
 from .bridge_store import BridgeStore, MissionLock, TaskNotFound, TransitionError, default_state_dir, derive_mission_name, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
 from .bridge_store import controller_running as _controller_running
 from .bridge_states import (
-    ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
+    ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
     STARTED_MISSION_STATUSES,
 )
 from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES, THEME_CHOICES
@@ -363,6 +363,20 @@ def _resolve_task(store: BridgeStore, mission_id: str, number: int | None, by_id
     return store.task_by_ordinal(mission_id, int(number))
 
 
+def _after_task_target(store: BridgeStore, mission_id: str, number: int) -> dict[str, Any]:
+    """The task ``stop --after-task [N]`` waits for: task N, or the task that is running now."""
+    if number:
+        task = store.task_by_ordinal(mission_id, number)
+    else:
+        running = store.db.execute("SELECT id FROM tasks WHERE mission_id=? AND status='RUNNING' ORDER BY ordering,id LIMIT 1", (mission_id,)).fetchone()
+        if running is None:
+            raise ValueError("no task is running now; name the task to wait for, e.g. llm-bridge stop --after-task 1")
+        task = store.get_task(int(running[0]))
+    if task["status"] in {"COMPLETED", "CANCELLED"}:
+        raise ValueError(f"task {task['ordinal']} is already {str(task['status']).lower()}; there is nothing to wait for (use llm-bridge stop)")
+    return dict(task)
+
+
 def _dependency_ids(store: BridgeStore, mission_id: str, raw: str) -> list[int]:
     """Global IDs for a comma-separated list of the mission's task numbers."""
     ids: list[int] = []
@@ -444,7 +458,7 @@ def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[s
             if current["status"] != "QUEUED":
                 return current
             result = _apply_operator_effect(store, mission_id, payload)
-            return store.finish_command(command["id"], status="APPLIED", result=result)
+            finished = store.finish_command(command["id"], status="APPLIED", result=result)
     except _RejectedOperatorCommand as exc:
         rejection = {"error": str(exc)}
         if exc.code:
@@ -454,6 +468,34 @@ def _apply_operator_command(store: BridgeStore, mission_id: str, payload: dict[s
         _REJECTION_CAUSES[command["id"]] = exc.__cause__
         with store._transaction():
             return store.finish_command(command["id"], status="REJECTED", result=rejection)
+    if payload.get("action") == "cancel":
+        _end_cancelled_providers(store, mission_id, finished)
+    return finished
+
+
+def _end_cancelled_providers(store: BridgeStore, mission_id: str, finished: dict[str, Any]) -> None:
+    """After a mission cancel is durable, end the provider processes it left running (INT-018).
+
+    Uses the same identity-checked termination as ``stop --force``; a process whose identity was never
+    recorded, or that cannot be ended, is left alone and named in the receipt.
+    """
+    from .bridge_runtime import _process_start_token, _terminate_owned_process_group, provider_operations_to_check
+
+    remaining = 0
+    for operation in provider_operations_to_check(store, mission_id):
+        if operation["status"] not in ACTIVE_OPERATION_STATUSES:
+            continue
+        pid, start = operation.get("process_pid"), operation.get("process_start")
+        if not pid or not start:
+            remaining += 1
+        elif _process_start_token(int(pid)) == str(start):
+            try:
+                _terminate_owned_process_group(int(pid), str(start))
+            except (OSError, RuntimeError, TimeoutError):  # PermissionError is an OSError
+                remaining += 1
+    result = finished.get("result")
+    if remaining and isinstance(result, dict):
+        result["detail"] = f"cancel is durable; a provider run could not be ended automatically · end it with: llm-bridge stop --force --mission {fmt.short_id(mission_id)}"
 
 
 def _native_provider_running(store: BridgeStore, mission: dict[str, Any]) -> bool:
@@ -514,10 +556,19 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 # Stop never cancels. With no controller there is nothing to stop;
                 # only `cancel` ends a mission for good.
                 return {"mission_status": mission["status"], "noop": True, "detail": fmt.nothing_to_stop(mission_id, mission["status"])}
-            if mission["status"] in STARTED_MISSION_STATUSES:
+            orphaned = mission["status"] in STARTED_MISSION_STATUSES and not controller_running(mission_id)
+            if orphaned:
+                # Nobody is left to turn STOPPING into STOPPED, so the stop is final here. A provider run
+                # the dead controller left behind is only ended by `stop --force`; say so.
+                store.set_mission_status(mission_id, "STOPPED")
+            elif mission["status"] in STARTED_MISSION_STATUSES:
                 store.set_mission_status(mission_id, "STOPPING")
             mission = store.get_mission(mission_id)
             result = {"mission_status": mission["status"]}
+            if orphaned and store.db.execute(
+                "SELECT 1 FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING') LIMIT 1", (mission_id,)
+            ).fetchone():
+                result["detail"] = f"the controller is gone and a provider run may still be active · end it with: llm-bridge stop --force --mission {fmt.short_id(mission_id)}"
             if mission["status"] == "STOPPING" and _native_provider_running(store, mission):
                 # A native provider waits for operator input and never exits on
                 # its own, so a plain stop would otherwise look hung.
@@ -533,7 +584,7 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                     store.set_task_status(int(task["id"]), "CANCELLED")
             result = {"mission_status": "CANCELLED", "work_status": "DEFERRED" if active else "APPLIED"}
             if active:
-                result["detail"] = "cancel is durable; the active provider returns at its boundary"
+                result["detail"] = "cancel is durable; the active provider run is being ended"
         elif action == "task.verify":
             task_id = int(payload["task_id"])
             verified = _require_task(store, mission_id, task_id)
@@ -1644,8 +1695,11 @@ def _build_parser(
             cmd.add_argument("--native", dest="native_tui", action="store_true", default=None, help=argparse.SUPPRESS)
             cmd.add_argument("--providers", metavar="LIST", help="comma-separated providers to rotate through; changes the mission's saved rotation for this and later starts, and the receipt says so (default: the saved rotation)")
             cmd.add_argument("--routes", metavar="LIST", help="comma-separated route IDs to rotate through; changes the mission's saved rotation for this and later starts, and the receipt says so (default: the saved rotation)")
+        if action == "pause":
+            cmd.add_argument("--after-task", dest="after_task", action="store_true", help="do not pause now: let the provider finish its current invocation, then pause (the same intent as the older steer --kind pause-after-iteration; also applies while the mission waits for capacity)")
         if action == "stop":
             cmd.add_argument("--force", action="store_true", help="terminate owned provider work and the controller now instead of waiting for the provider to exit")
+            cmd.add_argument("--after-task", dest="after_task", nargs="?", type=int, const=0, default=None, metavar="TASK", help="do not stop now: stop once task TASK is completed (default: the task that is running now); the same intent as the older steer --kind stop-after-task")
         if action == "cancel":
             cmd.add_argument("--yes", action="store_true", help="confirm without asking; required when there is no terminal to ask on (scripts). Cancelling ends the mission for good and cannot be undone")
         _add_json_arg(cmd)
@@ -2824,11 +2878,15 @@ def _main(argv: list[str] | None = None) -> int:
             return run_control(args.mission, dispatch=dispatch_console_command, snapshot=console_snapshot,
                                initial_view="Usage" if args.command == "usage" else "Bridge")
         if args.command == "resume":
+            from .bridge_runtime import _LOCK_STARTUP_WAIT_SECONDS
+
             with open_store() as store:
                 mission = store.get_mission(args.mission)
                 probe = MissionLock(state_dir() / "locks", args.mission)
                 try:
-                    probe.acquire()
+                    # A liveness probe (console, `mission list`) holds the lock for a moment; wait it out
+                    # instead of taking a probe for a controller.
+                    probe.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
                 except BlockingIOError:
                     pass  # a controller already owns the mission; its rotation was checked when it started
                 else:
@@ -2841,7 +2899,7 @@ def _main(argv: list[str] | None = None) -> int:
                 return _fail_rejected(result, "resume rejected", args.json)
             lock = MissionLock(state_dir() / "locks", args.mission)
             try:
-                lock.acquire()
+                lock.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
             except BlockingIOError:
                 if not config.get("headless") and config.get("native_tui") and sys.stdin.isatty() and sys.stdout.isatty():
                     from .bridge_runtime import mission_socket_path
@@ -3063,6 +3121,22 @@ def _main(argv: list[str] | None = None) -> int:
                 return _fail_rejected(result, "continue rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("continue", value, args.mission))
             return 0
+        after_task = getattr(args, "after_task", None)  # pause: a flag; stop: None, or a task number (0 = the running task)
+        if args.command in {"pause", "stop"} and after_task is not None and after_task is not False:
+            if args.command == "stop" and args.force:
+                raise ValueError("--after-task and --force cannot be combined: --force ends the work now")
+            with open_store() as store:
+                steer_payload: dict[str, Any] = {"action": "steer", "kind": "pause-after-iteration" if args.command == "pause" else "stop-after-task"}
+                if args.command == "stop":
+                    task = _after_task_target(store, args.mission, int(after_task))
+                    steer_payload["task_id"] = int(task["id"])
+                result = _apply_operator_command(store, args.mission, steer_payload)
+                if args.command == "stop" and isinstance(result.get("result"), dict):
+                    result["result"]["task_ordinal"] = task["ordinal"]
+            if result.get("status") == "REJECTED":
+                return _fail_rejected(result, f"{args.command} --after-task rejected", args.json)
+            _print_result(result, args.json, lambda value: fmt.format_command_receipt(f"{args.command}-after-task", value, args.mission))
+            return 0
         if args.command in {"pause", "stop", "cancel"}:
             with open_store() as store:
                 saved = store.get_mission(args.mission)
@@ -3079,13 +3153,11 @@ def _main(argv: list[str] | None = None) -> int:
                     mission = store.get_mission(args.mission)
                     if mission["status"] in STARTED_MISSION_STATUSES:
                         store.set_mission_status(args.mission, "STOPPING")
-                    operations = [
-                        dict(row)
-                        for row in store.db.execute(
-                            "SELECT id,process_pid,process_start,pane_id,status FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
-                            (args.mission,),
-                        )
-                    ]
+                    from .bridge_runtime import provider_operations_to_check
+
+                    # Includes UNCERTAIN operations that kept a process identity, so a second `stop --force`
+                    # retries a termination that failed the first time.
+                    operations = provider_operations_to_check(store, args.mission)
                     store.reconcile_interrupted_operations(args.mission, cause="stop-force")
                 # Verifiers use their own process groups. Stop those validated
                 # identities before terminating the controller that owns them.
@@ -3102,14 +3174,17 @@ def _main(argv: list[str] | None = None) -> int:
                     backend = None
                     handle = None  # type: ignore[assignment]  # checked on the next line
                 if handle is not None and backend is not None:
-                    provider_stopped = bool(operations)
+                    provider_stopped = any(operation["status"] != "UNCERTAIN" for operation in operations)
                     backend.stop(handle)
                 elif operations:
-                    from .bridge_runtime import _terminate_owned_process_group
+                    from .bridge_runtime import _process_start_token, _terminate_owned_process_group
 
                     for operation in operations:
                         process_pid = operation.get("process_pid")
                         process_start = operation.get("process_start")
+                        current_token = _process_start_token(int(process_pid)) if process_pid else ""
+                        if process_pid and process_start and current_token and current_token != str(process_start):
+                            continue  # the recorded provider is gone and its PID was reused: nothing to signal
                         if not process_pid:
                             # No provider process was ever recorded (the operation is still
                             # waiting to launch); the controller is stopped below.
@@ -3135,9 +3210,11 @@ def _main(argv: list[str] | None = None) -> int:
                     from .bridge_runtime import _process_start_token, _terminate_owned_process_group
 
                     current_start = _process_start_token(controller_pid)
-                    if current_start and current_start != controller_start:
+                    reused = bool(current_start) and current_start != controller_start
+                    if reused and MissionLock.is_held(state_dir() / "locks", args.mission):
+                        # The PID is someone else's, yet a process still owns the mission: its identity is unknown.
                         raise RuntimeError("controller PID no longer matches its persisted identity; mission remains STOPPING")
-                    if current_start:
+                    if current_start and not reused:
                         _terminate_owned_process_group(controller_pid, controller_start)
                 # The lock, not the ready file, is the controller-liveness
                 # authority. Do not claim STOPPED until ownership is released.
