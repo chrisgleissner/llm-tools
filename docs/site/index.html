@@ -470,7 +470,7 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
     <div class="install-box">
       <p class="kicker">Install</p>
       <h2 id="first-title">From install to your first approved task.</h2>
-      <p class="req"><b>You need:</b> Python 3.11+ and <code>pipx</code>; at least one provider CLI that is installed and signed in (<code>claude</code>, <code>codex</code> or <code>copilot</code>); <code>tmux</code> for Bridge. Linux is fully supported, macOS is best effort. Prefer scripts? The same flow runs without a terminal: see the <a href="https://github.com/chrisgleissner/llm-tools#your-first-bridge-mission">README</a>.</p>
+      <p class="req"><b>You need:</b> Python 3.11+ and <code>pipx</code>; at least one provider CLI that is installed and signed in (<code>claude</code>, <code>codex</code> or <code>copilot</code>); <code>tmux</code> for Bridge. Bridge missions need Linux; macOS runs the usage tools and the remote client. Prefer scripts? The same flow runs without a terminal: see the <a href="https://github.com/chrisgleissner/llm-tools#your-first-bridge-mission">README</a>.</p>
 
       <ol class="run-steps">
         <li>
@@ -559,8 +559,8 @@ Copilot    monthly   <span class="c-ok"> 62% ██████░░░░</spa
         <p>It is not a provider and not a proxy. It uses the sign-ins your provider CLIs already hold. Bridge starts each provider without the other providers' credential variables, but it does not sandbox a provider: providers run as you, in your project folder.</p>
       </div>
       <div class="edge">
-        <h3>Linux and macOS; Windows for the console.</h3>
-        <p>Continuous integration runs on Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows. Suspend and wake use systemd, so they are Linux only; elsewhere the tools wait with the machine awake. On Windows only the coordinator and the remote client are supported (<a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/DECISIONS.md">decision D8</a>).</p>
+        <h3>Bridge on Linux; the web console everywhere.</h3>
+        <p>Continuous integration runs on Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows. Bridge and its workers run on Linux; macOS runs the usage tools, the coordinator and the remote client. Suspend and wake use systemd, so they are Linux only. On Windows only the coordinator and the remote client are supported (<a href="https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/DECISIONS.md">decision D8</a>).</p>
       </div>
       <div class="edge">
         <h3>Resume is exact for Codex only.</h3>

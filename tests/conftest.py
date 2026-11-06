@@ -251,13 +251,43 @@ def _load_markers() -> dict[str, list[str]]:
 # Windows runs the remote client, the typed command layer, the protocol and the integration tests
 # against a coordinator built for Windows (docs/distributed/DECISIONS.md D8). Everything else needs a
 # facility Windows does not have, and is skipped there with the reason below. Nothing is skipped on
-# Linux or macOS by this code.
+# Linux by this code.
 
 _MISSING_POSIX_MODULE = re.compile(r"No module named '(_?curses|termios|fcntl|pty|tty|pwd|grp|resource)'")
 WINDOWS_NO_TMUX = "tmux and POSIX pseudo-terminals do not exist on Windows (docs/distributed/DECISIONS.md D8)"
 # Test module (file stem) -> reason. Windows has no tmux, curses, termios, fcntl locks, POSIX signals,
 # or shebang executables, so these modules cannot run there. Keep entries narrow and justified.
-WINDOWS_SKIPPED_MODULES: dict[str, str] = {}
+_NO_UNIX_SERVICE = (
+    "imports the llm-usage sampler service, which serves a Unix-domain socket (socketserver.UnixStreamServer); "
+    "Windows supports only the coordinator and the remote client (docs/distributed/DECISIONS.md D8)"
+)
+WINDOWS_SKIPPED_MODULES: dict[str, str] = {
+    "test_additional_paths": _NO_UNIX_SERVICE,
+    "test_no_process_umask": _NO_UNIX_SERVICE,
+    "test_security_module_launch": _NO_UNIX_SERVICE,
+    "test_usage_service_security": _NO_UNIX_SERVICE,
+}
+
+
+# --- macOS --------------------------------------------------------------------
+#
+# macOS runs the usage tools, the coordinator, the web interface and the remote client. The Bridge
+# console, tmux station, controller and worker are Linux-only (docs/distributed/DECISIONS.md D8): the
+# controller and worker need procfs, and the console and station were never made to work on macOS's
+# terminal and tmux behaviour (CI run 42159627299: 41 real-PTY and tmux tests timed out or rendered
+# differently there). Tests marked tmux or pty, and the console tests listed here, are skipped on macOS.
+_MACOS = sys.platform == "darwin"
+MACOS_CONSOLE_REASON = "the Bridge console and tmux station are supported on Linux only (docs/distributed/DECISIONS.md D8)"
+MACOS_SKIPPED_TESTS: dict[str, str] = {
+    "tests/test_bridge_fuzz_regressions.py::test_markdown_with_a_very_long_line_renders_in_the_background": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_idle_redraw.py::test_socket_listening_gives_up_on_a_server_that_never_answers": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_launcher_overview.py::test_rows_show_progress_active_provider_age_and_folder": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_terminal_stream.py::test_real_station_streams_output_and_types_exact_bytes": MACOS_CONSOLE_REASON,
+    "tests/test_bridge_ws.py::test_wss_verifies_the_server_against_the_given_ca": (
+        "the python.org build on macOS does not find the issuer of a CA made with the openssl command line tool; "
+        "TLS verification on macOS is covered by tests/test_distributed_integration.py against the coordinator's CA"
+    ),
+}
 
 
 # The controller, verifier supervision, force-stop, native-session detection and the test harness's own
@@ -271,6 +301,13 @@ PROCFS_ONLY_MODULES = frozenset({
     "test_bridge_verifier_guard", "test_bridge_review_hold", "test_bridge_steering", "test_bridge_sessions",
     "test_bridge_end_to_end", "test_bridge_completed_stop", "test_bridge_first_run_start", "test_bridge_native_e2e",
     "test_process_hygiene", "test_distributed_offline",
+})
+# Single tests in otherwise portable modules that read a process start token or /proc/self/cmdline.
+PROCFS_ONLY_TESTS = frozenset({
+    "tests/test_bridge_refresh.py::test_refresh_worker_records_heartbeat_then_delays_quota_refresh",
+    "tests/test_bridge_review_regressions.py::test_complete_stop_terminates_owned_descendant_in_a_new_session",
+    "tests/test_bridge_review_regressions.py::test_owned_group_termination_kills_descendant_after_leader_exits",
+    "tests/test_bridge_security_prompt_delivery.py::test_headless_run_delivers_the_prompt_on_stdin",
 })
 
 
@@ -291,8 +328,15 @@ def pytest_make_collect_report(collector: Any):
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     manifest = _load_markers()
     for item in items:
-        if NO_PROCFS and Path(str(item.fspath)).stem in PROCFS_ONLY_MODULES:
+        key = _marker_key(item.nodeid)
+        if NO_PROCFS and (Path(str(item.fspath)).stem in PROCFS_ONLY_MODULES or key in PROCFS_ONLY_TESTS):
             item.add_marker(pytest.mark.skip(reason=NO_PROCFS_REASON))
+        if _MACOS:
+            reason = MACOS_SKIPPED_TESTS.get(key)
+            if reason:
+                item.add_marker(pytest.mark.skip(reason=reason))
+            elif {"tmux", "pty"} & set(manifest.get(key, ())):
+                item.add_marker(pytest.mark.skip(reason=MACOS_CONSOLE_REASON))
         if _WINDOWS:
             reason = WINDOWS_SKIPPED_MODULES.get(Path(str(item.fspath)).stem)
             if reason:

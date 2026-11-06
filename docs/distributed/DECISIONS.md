@@ -113,7 +113,8 @@ Decision, from the facilities each component needs:
 |---|---|---|---|
 | Coordinator (`bridge-coordinator`), web interface | supported | supported | supported |
 | Remote client: `llm-bridge --target NAME COMMAND`, `remote login\|status\|logout`, `worker list` | supported | supported | supported |
-| Standalone Bridge, tmux station, console, `ralph-robin` suspend paths, `llm-sleep-soak` | supported | console and tmux station supported; no systemd suspend or RTC wake | not supported |
+| Standalone Bridge: tmux station, console | supported | not supported (CI run 42159627299: 41 real-terminal and tmux tests time out or render differently on macOS; not ported) | not supported |
+| `llm-usage`, `llm-scheduler`, `ralph-robin` | supported | supported; no systemd suspend or RTC wake (the tools wait awake) | not supported |
 | Mission controller, verifier supervision, force-stop, `worker run` | supported | not supported: process identity uses Linux procfs | not supported |
 
 Windows lacks tmux, POSIX pseudo-terminals, `curses`, `termios`, `fcntl` file locks and POSIX
@@ -135,7 +136,8 @@ location only the service account can read.
 
 The Python test suite skips on Windows only what needs a missing facility, centrally in
 `tests/conftest.py`: modules that import `curses`, `termios`, `fcntl` or `pty`, tests marked
-`tmux` or `pty`, the modules in `WINDOWS_SKIPPED_MODULES`, and (on any platform without `/proc`, so macOS as well) the modules in `PROCFS_ONLY_MODULES`, each with its reason. Nothing is
-skipped on Linux or macOS by that code. The evidence for each skip is the CI run listed in
+`tmux` or `pty`, the modules in `WINDOWS_SKIPPED_MODULES`, and (on any platform without `/proc`, so macOS as well) the modules in `PROCFS_ONLY_MODULES` and `PROCFS_ONLY_TESTS`, each with its reason. On macOS it also
+skips tests marked `tmux` or `pty` and the console tests in `MACOS_SKIPPED_TESTS`, because the
+console and station are not supported there. Nothing is skipped on Linux by that code. The evidence for each skip is the CI run listed in
 `SPEC_STATUS.md`.
 

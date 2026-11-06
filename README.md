@@ -36,7 +36,7 @@ Project site: <https://chrisgleissner.github.io/llm-tools/>
 You need:
 
 - Linux or macOS, and Python 3.11 or newer.
-- For Bridge: `tmux`, and at least one provider CLI that is installed and signed in (Claude Code, Codex, Copilot, Kilo or OpenCode).
+- For Bridge: Linux, `tmux`, and at least one provider CLI that is installed and signed in (Claude Code, Codex, Copilot, Kilo or OpenCode).
 
 ```bash
 pipx install git+https://github.com/chrisgleissner/llm-tools.git
@@ -222,11 +222,14 @@ unknown or offline target fails and never falls back to local execution. Copy
 `ca.pem` and `setup-token` out of the coordinator as described in the install guide.
 The same command line is shown by `llm-bridge help distributed`.
 
-Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64 and
-macOS ARM64 and Intel support every role. Windows x86-64 and ARM64 support the
-coordinator, the web interface and the remote client (`llm-bridge --target`, `remote`,
-`worker list`) only; the tmux station, console, controller and worker need tmux and a
-POSIX terminal. Other commands on Windows exit with status 2 and a one-line message, or
+Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64
+support every role. macOS ARM64 and Intel support the coordinator, the web interface,
+the remote client and the usage tools (`llm-usage`, `llm-scheduler`, `ralph-robin`),
+but not the Bridge console, tmux station, mission controller or `worker run`; the
+controller and worker identify processes through Linux `/proc`. Windows
+x86-64 and ARM64 support the coordinator, the web interface and the remote client
+(`llm-bridge --target`, `remote`, `worker list`) only; the tmux station, console,
+controller and worker need tmux and a POSIX terminal. Other commands on Windows exit with status 2 and a one-line message, or
 with `--json` an error envelope with code `unsupported-platform`. See decision D8 in
 [DECISIONS](./docs/distributed/DECISIONS.md).
 
@@ -307,6 +310,6 @@ No telemetry and no network listener. Quota reads use your existing provider cre
 ## More
 
 - Docs: [Bridge](./docs/llm-bridge/operations.md) · [llm-usage](./docs/llm-usage.md) · [llm-scheduler](./docs/llm-scheduler.md) · [ralph-robin](./docs/ralph-robin.md) · [Configuration](./docs/configuration.md) · [Reference](./docs/reference.md)
-- Needs Linux or macOS, Python 3.11+, your provider CLIs, and `tmux` for Bridge.
+- Needs Python 3.11+ and your provider CLIs; Bridge needs Linux and `tmux` (macOS runs the usage tools and the remote client).
 - Contributing: [small, focused PRs](./docs/reference.md#contributing).
 - License: Apache 2.0.
