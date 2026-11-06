@@ -67,8 +67,8 @@ from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 225 |
-| Incomplete `[~]` | 15 |
+| Verified `[x]` | 229 |
+| Incomplete `[~]` | 11 |
 | Blocked `[!]` | 6 |
 | Not started `[ ]` | 1 |
 | **Total** | **247** |

@@ -188,7 +188,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-FLASH-006 | [x] | Headless GPU memory split set to the documented minimum for the image. |
 | PI-FLASH-007 | [ ] | Optional USB gadget fallback was not enabled; Wi-Fi succeeded after physical first boot. |
 | PI-FLASH-010 | [x] | SanDisk Extreme 128 GB card was identified and explicitly approved before erasing. |
-| PI-FLASH-011 | [x] | Reader model, serial, capacity, and partition state were inspected immediately before writing; card-specific serial was not exposed by the reader. |
+| PI-FLASH-011 | [~] | The reader's model and serial, card capacity, and partition state were inspected before writing, but it did not expose a card-specific serial. The user identified and explicitly approved the SanDisk card and target device; the missing card serial means the full identity check is not evidenced. |
 | PI-FLASH-012 | [x] | User's approved flash command exited 0, wrote 1,131,413,504 bytes, and completed `sync`. |
 | PI-FLASH-013 | [x] | Byte comparison returned identical; partition table showed FAT32 boot and ext4 root. |
 | PI-BOOT-001 | [x] | Card was installed in the board and its USB data port connected for power. |
@@ -248,12 +248,12 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-VERIFY-011 | [~] | `vcgencmd get_throttled` was `0x0`; no targeted storage errors, OOM, Wi-Fi failures, undervoltage, or throttling were found. Unrelated Bluetooth firmware warnings remain in the boot kernel log. |
 | PI-VERIFY-012 | [x] | Setup and administration were performed headlessly from the desktop; no monitor or keyboard was used. |
 | PI-VERIFY-013 | [!] | Optional passkey/Tailscale path was not run because the user asked to treat it as declined; password login remains the tested path. |
-| PI-REPO-001 | [~] | Physical benchmark section is drafted with measured data and method; commit and updated-revision CI remain. |
-| PI-REPO-002 | [~] | Generic Pi target profile is updated with physical measurements and memory recommendation; commit and updated-revision CI remain. |
-| PI-REPO-003 | [~] | Affected specification evidence and final report are being updated from this register; final counts and updated-revision CI remain. |
+| PI-REPO-001 | [x] | `benchmarks.md` records dated physical Pi measurements, units, and benchmark method beside the emulated and runner results; CI run 42250189901 passed all jobs. |
+| PI-REPO-002 | [x] | `install.md` replaces derived target figures with the physical host and coordinator measurements while retaining generic example addresses; CI run 42250189901 passed all jobs. |
+| PI-REPO-003 | [x] | Physical evidence is recorded for the affected IDs; `FINAL_REPORT.md` totals are generated from the 247-row register; CI run 42250189901 passed all jobs. |
 | PI-REPO-004 | [x] | Container web-asset directory permissions were fixed at the Dockerfile source; a regression test fails on the prior mode and the built image was smoke-tested as UID 65532 (PR #32). |
-| PI-REPO-005 | [~] | Dedicated pull request is draft; local full gates, final updated-revision CI and merge remain. |
-| PI-REPO-006 | [~] | Private rehearsal notes are being reconciled with the physical results and blocked items. |
+| PI-REPO-005 | [x] | PR #32 contains the Pi measurements and unified IDs, is merged after all required checks passed, and its main CI run is green. The final PR revision's CI run is recorded in the worklog. |
+| PI-REPO-006 | [x] | The private research notes now label physical, emulated, assumed, and blocked results and replace former pending entries with physical evidence or exact blockers. |
 
 ## Operator addendum (2026-11-05, task revision 4)
 
