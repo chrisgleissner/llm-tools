@@ -1,6 +1,6 @@
 //! HTTP API under `/api/v1`, authentication extractor and WebSocket `/stream`.
 
-use crate::auth::{self, RateLimiter};
+use crate::auth::{self, MutationLimiter, RateLimiter};
 use crate::config::Config;
 use crate::db::{Db, InsertOutcome};
 use crate::hub::{Hub, SendResult};
@@ -48,6 +48,7 @@ pub struct AppState {
     pub cfg: Config,
     pub data_dir: PathBuf,
     pub limiter: RateLimiter,
+    pub mutation_limiter: MutationLimiter,
     pub started: Instant,
     pub dummy_hash: String,
     pub cursor_key: String,
@@ -389,6 +390,39 @@ impl FromRequestParts<St> for Authed {
             }
         }
         let remote = parts.extensions.get::<Peer>().map(|p| p.0.ip().to_string()).unwrap_or_default();
+        if let Principal::Token { name, scopes: granted } = &principal {
+            let request_id = parts
+                .headers
+                .get("idempotency-key")
+                .or_else(|| parts.headers.get("x-request-id"))
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-");
+            let detail = format!(
+                "method={} path={} scopes={} request_id={}",
+                parts.method,
+                parts.uri.path(),
+                granted.join(","),
+                clean(request_id)
+            );
+            st.db.audit_checked(&format!("token:{name}"), "token.use", &detail, &remote)?;
+            if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+                let address_key = parts
+                    .extensions
+                    .get::<Peer>()
+                    .map(|peer| auth::addr_key(&peer.0.ip()))
+                    .unwrap_or_else(|| "unknown".to_string());
+                let keys = [(format!("token:{name}"), 30), (format!("address:{address_key}"), 120)];
+                if let Some(retry_after) = st.mutation_limiter.check(&keys) {
+                    let mut error = err(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "mutation-rate-limit",
+                        "mutation rate limit exceeded; retry after the indicated delay",
+                    );
+                    error.retry_after = Some(retry_after);
+                    return Err(error);
+                }
+            }
+        }
         Ok(Authed(principal, remote))
     }
 }

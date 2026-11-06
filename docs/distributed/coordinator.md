@@ -175,6 +175,12 @@ response; unsupported methods return 405 with an `Allow` header.
 | Stored events per worker | 50 000, oldest deleted first (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | 7 days | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
+| Bearer mutations | 30 per token and 120 per client address in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | fixed |
+
+Every bearer-authenticated API request also writes an audit row with the token name,
+granted scopes, method, path, client address and supplied request ID. The bearer
+secret is never recorded. Mutation counters are in memory and reset on coordinator
+restart.
 
 Login rate limiting. Before the body is read and before Argon2 runs, a login reserves
 one attempt for the client address under the limiter lock. Attempts still in progress

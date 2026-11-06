@@ -1,7 +1,7 @@
 //! Security hardening: login rate limiting, slow and oversized bodies, connection caps,
 //! worker pre-hello limits, generation handling and API token lifetime.
 mod common;
-use bridge_coordinator::auth::{addr_key, RateLimiter};
+use bridge_coordinator::auth::{addr_key, MutationLimiter, RateLimiter};
 use common::*;
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -92,6 +92,20 @@ fn ipv6_clients_are_keyed_by_their_64() {
     assert_ne!(addr_key(&a), addr_key(&c));
     let mapped: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
     assert_eq!(addr_key(&mapped), "192.0.2.1");
+}
+
+#[test]
+fn mutation_limiter_enforces_token_and_address_budgets_with_retry_delay() {
+    let limiter = MutationLimiter::new(Duration::from_secs(60), 8);
+    let token = ("token:automation".to_string(), 2);
+    let address = ("address:192.0.2.1".to_string(), 3);
+    let keys = [token.clone(), address.clone()];
+    assert_eq!(limiter.check(&keys), None);
+    assert_eq!(limiter.check(&keys), None);
+    assert_eq!(limiter.check(&keys), Some(60));
+    // A rejected combined request must not consume budget on the still-available address key.
+    assert_eq!(limiter.check(&[("address:192.0.2.1".to_string(), 3)]), None);
+    assert_eq!(limiter.check(&[("address:192.0.2.1".to_string(), 3)]), Some(60));
 }
 
 #[test]

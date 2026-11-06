@@ -1,0 +1,89 @@
+"""API-015 contract: every Bridge CLI leaf, option and coordinator route is accounted for."""
+from __future__ import annotations
+
+import argparse
+import re
+from pathlib import Path
+
+from llm_tools.bridge import _build_parser
+
+ROOT = Path(__file__).resolve().parents[1]
+API_DOC = ROOT / "docs/distributed/api.md"
+HTTP_RS = ROOT / "coordinator/src/http.rs"
+
+# Intentional local-only commands are named explicitly in the docs. The remaining
+# entries are likewise present so a new CLI leaf cannot silently escape review.
+COMMANDS = {
+    "help", "view", "mission create", "mission list", "mission set", "mission colour", "mission color",
+    "status", "screen", "agents", "suspend-until-credits", "task add", "task list", "task show",
+    "task amend", "task priority", "task reorder", "task dependencies", "task pause", "task resume",
+    "task cancel", "task retry", "task verify", "task reject", "proposal create", "proposal list",
+    "proposal accept", "proposal reject", "events", "start", "pause", "resume", "continue", "stop",
+    "cancel", "attach", "detach", "missions", "gc", "backup", "restore", "worker enroll",
+    "worker status", "worker run", "worker audit", "worker install-service", "worker uninstall-service",
+    "worker unenroll", "worker list", "remote login", "remote status", "remote logout", "finish", "doctor",
+    "theme", "console", "control", "usage", "station", "rotation", "steer", "_station-gc", "_controller",
+}
+
+
+def _leaves(parser: argparse.ArgumentParser, prefix: tuple[str, ...] = ()) -> list[str]:
+    choices = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    if not choices:
+        return [" ".join(prefix)]
+    return [leaf for action in choices for name, child in action.choices.items() for leaf in _leaves(child, (*prefix, name))]
+
+
+def _options(parser: argparse.ArgumentParser) -> set[str]:
+    found: set[str] = set()
+    for action in parser._actions:
+        found.update(action.option_strings)
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                found.update(_options(child))
+    return found
+
+
+def _rust_routes() -> set[tuple[str, str]]:
+    source = HTTP_RS.read_text()
+    block = source.split("pub const ROUTES:", 1)[1].split("];", 1)[0]
+    routes: set[tuple[str, str]] = set()
+    for path, methods in re.findall(r'\("([^\"]+)"\s*,\s*&\[([^\]]+)\]', block):
+        routes.update((method, path) for method in re.findall(r'"([A-Z]+)"', methods))
+    return routes
+
+
+def test_cli_commands_and_options_are_listed_in_parity_table() -> None:
+    doc = API_DOC.read_text()
+    section = doc.split("## API-015 parity table", 1)[1].split("Coordinator router declarations", 1)[0]
+    actual_commands = set(_leaves(_build_parser()))
+    assert actual_commands == COMMANDS, f"update API-015 command inventory; missing={actual_commands-COMMANDS}, stale={COMMANDS-actual_commands}"
+    command_table = section.split("| CLI option |", 1)[0]
+    command_rows = re.findall(r"^\| `([^`]+)` \| ([^|]+) \|$", command_table, re.MULTILINE)
+    documented_commands = {name for name, _decision in command_rows}
+    assert len(documented_commands) == len(command_rows), "each CLI leaf must have exactly one parity decision"
+    assert documented_commands == actual_commands, (
+        f"update API-015 command decisions; missing={actual_commands-documented_commands}, "
+        f"stale={documented_commands-actual_commands}"
+    )
+    assert all(decision.strip() for _name, decision in command_rows), "every CLI leaf needs a parity decision"
+
+    option_table = section.split("| CLI option |", 1)[1]
+    option_rows = re.findall(r"^\| `([^`]+)` \| ([^|]+) \|$", option_table, re.MULTILINE)
+    actual_options = _options(_build_parser())
+    documented_options = {name for name, _decision in option_rows}
+    assert len(documented_options) == len(option_rows), "each CLI option must have exactly one parity decision"
+    assert documented_options == actual_options, (
+        f"update API-015 option decisions; missing={actual_options-documented_options}, "
+        f"stale={documented_options-actual_options}"
+    )
+    assert all(decision.strip() for _name, decision in option_rows), "every CLI option needs a mapping or exclusion"
+
+
+def test_coordinator_routes_are_listed_in_parity_table() -> None:
+    doc = API_DOC.read_text()
+    route_table = doc.split("Coordinator router declarations", 1)[1].split("The regression test", 1)[0]
+    documented = set(re.findall(r"`((?:GET|POST|PATCH|DELETE) /[^`]+)`", route_table))
+    actual = _rust_routes()
+    documented_routes = {(item.split(" ", 1)[0], item.split(" ", 1)[1]) for item in documented}
+    assert len(documented_routes) == len(documented), "each coordinator route must be documented once"
+    assert documented_routes == actual, f"update API-015 route table; missing={actual-documented_routes}, stale={documented_routes-actual}"

@@ -149,6 +149,36 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secret() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    let (status, created) = admin
+        .post("/api/v1/tokens", json!({"name":"mutator","scopes":["admin"],"expires_days":30}))
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let secret = created["secret"].as_str().unwrap().to_string();
+    let mut token_api = env.api();
+    token_api.bearer = Some(secret.clone());
+
+    for _ in 0..30 {
+        let (status, _) = token_api.post("/api/v1/commands", json!({})).await;
+        assert_eq!(status, 400, "malformed request should reach command validation");
+    }
+    let response = token_api.rb(Method::POST, "/api/v1/commands").json(&json!({})).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 429);
+    assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["type"], "https://llm-tools.dev/problems/mutation-rate-limit");
+
+    let audit = env.srv.state.db.audit_list(100).unwrap();
+    let token_uses: Vec<_> = audit.iter().filter(|row| row["action"] == "token.use").collect();
+    assert_eq!(token_uses.len(), 31);
+    assert!(token_uses.iter().all(|row| row["actor"] == "token:mutator"));
+    assert!(!serde_json::to_string(&token_uses).unwrap().contains(&secret));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mission_task_resource_adapts_to_the_typed_worker_command() {
     let env = boot().await;
     let api = env.admin().await;

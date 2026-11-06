@@ -169,4 +169,192 @@ bytes). These bounds are described by the generated OpenAPI request schema.
 The API does not enable CORS. `OPTIONS` preflight requests receive `405` and no
 `Access-Control-Allow-Origin`; `HEAD` follows the corresponding GET route.
 
+Bearer-authenticated mutations are limited to 30 requests per token and 120 per
+client address in a rolling 60-second window. The limit applies after authentication
+and scope checks; rejected requests return `429` with `Retry-After`. Each bearer
+request is audited with token name, granted scopes, method, path, client address
+and request ID when supplied. The bearer secret is never written to the audit log.
+The in-memory counters reset when the coordinator restarts.
+
 See the full route and scope table in the [coordinator guide](coordinator.md#http-api).
+
+## API-015 parity table
+
+Each parser leaf and option has its own decision. “Typed command” means the worker executes the existing `bridge_commands` operation; REST resource paths are adapters to those operations. An exclusion names why the CLI surface has no remote parity and the available replacement.
+
+| CLI leaf | REST resource or typed command mapping / exclusion |
+|---|---|
+| `help` | Exclusion: offline help has no state/API operation; replacement is `llm-bridge help` locally. |
+| `view` | Exclusion: opens a local filesystem artifact; replacement is local `llm-bridge view --file`. |
+| `mission create` | Exclusion: creates local mission/store and starts local controller; no coordinator create adapter; create on the worker. |
+| `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
+| `mission set` | Exclusion: local mission configuration mutation has no typed operation; run on the worker. |
+| `mission colour` | Exclusion: local UI identity setting; no REST operation; use local mission console. |
+| `mission color` | Alias of `mission colour`; same local-only exclusion. |
+| `status` | Typed `mission.status`; resource `GET /api/v1/missions/{id}`. |
+| `screen` | Exclusion: raw pane snapshot is intentionally not exposed; replacement is scoped `GET /api/v1/terminal` WebSocket. |
+| `agents` | Exclusion: process/child-agent inspection is local; replacement is `GET /api/v1/missions/{id}/operations` for bounded operation metadata. |
+| `suspend-until-credits` | Exclusion: suspends this host; no remote power action is exposed; run locally. |
+| `task add` | Typed `task.add`; resource `POST /api/v1/missions/{id}/tasks`. |
+| `task list` | Typed `task.list`; resource `GET /api/v1/missions/{id}/tasks`. |
+| `task show` | Typed `task.show`; resource `GET /api/v1/missions/{id}/tasks/{n}` (number selector only). |
+| `task amend` | Typed `task.amend`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
+| `task priority` | Typed `task.priority`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
+| `task reorder` | Typed `task.reorder`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
+| `task dependencies` | Exclusion: dependency-add operation has no REST resource adapter and remote typed mapping is not implemented; run locally. |
+| `task pause` | Typed `task.pause`; resource `POST /api/v1/missions/{id}/tasks/{n}/pause`. |
+| `task resume` | Typed `task.resume`; resource `POST /api/v1/missions/{id}/tasks/{n}/resume`. |
+| `task cancel` | Typed `task.cancel`; resource `POST /api/v1/missions/{id}/tasks/{n}/cancel`. |
+| `task retry` | Typed `task.retry`; resource `POST /api/v1/missions/{id}/tasks/{n}/retry`. |
+| `task verify` | Typed `task.verify`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify`. |
+| `task reject` | Typed `task.reject`; resource `POST /api/v1/missions/{id}/tasks/{n}/verify` with `approved:false`. |
+| `proposal create` | Exclusion: provider-originated proposal creation is worker-local; no coordinator operation permits remote authorship. |
+| `proposal list` | Typed `proposal.list` via `POST /api/v1/commands`; no dedicated REST resource. |
+| `proposal accept` | Typed `proposal.decide` via `POST /api/v1/commands`; no dedicated REST resource. |
+| `proposal reject` | Typed `proposal.decide` via `POST /api/v1/commands`; no dedicated REST resource. |
+| `events` | Typed `mission.events`; resource `GET /api/v1/missions/{id}/events`. |
+| `start` | Typed `mission.start`; resource `POST /api/v1/missions/{id}/start`. |
+| `pause` | Typed `mission.pause`; resource `POST /api/v1/missions/{id}/pause`. |
+| `resume` | Typed `mission.resume`; resource `POST /api/v1/missions/{id}/resume`. |
+| `continue` | Typed `mission.continue`; resource `POST /api/v1/missions/{id}/continue`. |
+| `stop` | Typed `mission.stop`; resource `POST /api/v1/missions/{id}/stop`. |
+| `cancel` | Typed `mission.cancel`; resource `POST /api/v1/missions/{id}/cancel`. |
+| `attach` | Exclusion: attaches a local tmux station; replacement is local attach or remote terminal WebSocket for viewing. |
+| `detach` | Exclusion: detaches a local tmux client; no remote station-control API; run locally. |
+| `missions` | Exclusion: interactive picker/station switching is local; use `GET /api/v1/missions` to list remotely. |
+| `gc` | Exclusion: garbage-collects local tmux stations; no REST route; run on worker. |
+| `backup` | Exclusion: copies local Bridge SQLite state; no remote database export route; run on worker. |
+| `restore` | Exclusion: replaces local Bridge SQLite state; no remote restore route; run on worker. |
+| `worker enroll` | Exclusion: writes local worker credentials; coordinator-side worker creation is `POST /api/v1/workers` by an admin. |
+| `worker status` | Exclusion: reads this host enrolment; no remote equivalent; run locally. |
+| `worker run` | Exclusion: starts the outbound worker service; run locally on enrolled host. |
+| `worker audit` | Exclusion: reads local security audit log; no REST route; run locally. |
+| `worker install-service` | Exclusion: installs local systemd unit; run locally. |
+| `worker uninstall-service` | Exclusion: removes local systemd unit; run locally. |
+| `worker unenroll` | Exclusion: deletes local worker credentials; no remote route; run locally. |
+| `worker list` | REST `GET /api/v1/workers` (configured coordinator; remote CLI helper). |
+| `remote login` | Exclusion: stores local API credentials; no API operation; configure this client locally. |
+| `remote status` | Exclusion: reads local remote-client configuration; run locally. |
+| `remote logout` | Exclusion: deletes local remote-client configuration; run locally. |
+| `finish` | Exclusion: sends provider-native exit input to local terminal; replacement is local `finish` while controlling the worker station. |
+| `doctor` | Exclusion: inspects local provider installs/config; run on worker. |
+| `theme` | Exclusion: previews local terminal colors; no REST operation. |
+| `console` | Exclusion: opens local curses control station; remote web UI is the replacement. |
+| `control` | Exclusion: opens local curses control station; remote web UI is the replacement. |
+| `usage` | Exclusion: embeds local `llm-usage` data; no coordinator usage route. |
+| `station` | Exclusion: selects local station; remote terminal view is `GET /api/v1/terminal` WebSocket. |
+| `rotation` | Exclusion: changes mission rotation locally; no typed operation/resource adapter yet; edit on worker. |
+| `steer` | Exclusion: typed steering is not in the distributed operation catalog; use local CLI. |
+| `_station-gc` | Exclusion: private internal tmux cleanup command; never remote. |
+| `_controller` | Exclusion: private internal controller launch command; worker runtime owns it. |
+
+| CLI option | REST field/transport mapping or exclusion |
+|---|---|
+| `--file` | Local prompt/artifact input; for remote `task add`/`amend`, prompt text is sent as typed operation `prompt` (file is read client-side). |
+| `--follow` | Local file-follow behavior; no API equivalent. |
+| `--acceptance` | `task.add` resource body `acceptance`; mission creation is local-only. |
+| `--auto-continue` | Local mission configuration/start option; not a distributed operation. |
+| `--capacity-refresh-seconds` | Local controller setting; no API field. |
+| `--command-template` | Local test/custom launch override; never sent remotely. |
+| `--cwd` | Local working directory for mission creation; no coordinator field. |
+| `--headless` | `mission.start` params and `/start` body field `headless`. |
+| `--include-config` | Local JSON projection option; no remote config export. |
+| `--json` | Client-side output format; applies to typed command/resource responses, not a request field. |
+| `--log-max-bytes` | Local provider log retention setting; no API field. |
+| `--log-retained-runs` | Local provider log retention setting; no API field. |
+| `--log-rotations` | Local provider log retention setting; no API field. |
+| `--name` | Local mission/worker naming or remote worker admin body; not a remote mission command field. |
+| `--native` | `mission.start` params and `/start` body field `native_tui`. |
+| `--prompt` | `task.add`/`task.amend` typed `prompt` field; local file read if `--prompt-file`. |
+| `--prompt-file` | Read client-side then map text to typed `prompt`; file path is never sent. |
+| `--providers` | `mission.start` params/body `providers`; rotation edit itself has no API operation. |
+| `--routes` | `mission.start` params/body `routes`; rotation edit itself has no API operation. |
+| `--teams` | Local mission configuration; no typed API operation. |
+| `--token-spend` | Local mission configuration; no typed API operation. |
+| `--trust-folder` | Local provider trust behavior; no API field. |
+| `--verifier-arg` | Local verifier configuration; no API field. |
+| `--verifier-file` | Local verifier tracking; no API field. |
+| `--verifier-timeout` | Local verifier execution setting; no API field. |
+| `--mission` | Mission selector populates `mission_id` in typed request or `worker`-qualified mission REST path. |
+| `--suspend-when-rate-limited` | Local host power policy; no API field. |
+| `--all-missions` | Local inspection filter; no remote typed operation. |
+| `--all` | Remote task-list `--all` is explicitly refused; use paged `--limit` and `--offset` on `GET .../tasks`. |
+| `--limit` | Maps to list-operation `limit` or resource query `limit` for tasks/events/proposals. |
+| `--offset` | Maps to typed `task.list` offset / resource query offset; coordinator mission index uses cursor pagination instead. |
+| `--task` | Task number maps to `task_number` and resource `{n}` selector. |
+| `--task-id` | Exclusion: resource adapters currently require numeric `{n}`; use `--task N`. |
+| `--title` | `task.add` operation/resource body `title`. |
+| `--priority` | `task.add` body or `task.priority` typed operation/resource patch field `priority`. |
+| `--order` | `task.add` body or `task.reorder` typed operation/resource patch field `order`. |
+| `--depends-on` | Exclusion remotely: task-add dependency field is refused; `task dependencies` is local-only. Add dependencies locally. |
+| `--value` | Maps to `task.priority` (`priority`) or `task.reorder` (`order`) typed operation and PATCH resource. |
+| `--add` | Exclusion: `task dependencies` has no remote operation; run locally. |
+| `--evidence` | `task.verify` typed operation/resource body `evidence`. |
+| `--approve` | `task.verify` typed operation/resource body `approved`. |
+| `--reason` | `task.reject` maps `reason`; proposal rejection maps typed `proposal.decide` params. |
+| `--operation` | Proposal source operation ID; proposal creation is worker-local and not exposed remotely. |
+| `--status` | Proposal list filter maps typed `proposal.list` status. |
+| `--after` | Maps typed `mission.events.after`/event cursor or `proposal.list.after` as applicable. |
+| `--client` | Local tmux client selection; no REST parameter. |
+| `--force` | `mission.stop` typed param/resource body `force`. |
+| `--pick` | Interactive local picker; remote replacement is `GET /api/v1/missions`. |
+| `--from` | Local station-picker origin; no API parameter. |
+| `--output` | Local backup destination; no REST route. |
+| `--input` | Local restore source; no REST route. |
+| `--allow-control` | Local worker enrollment control policy; coordinator accepts worker token separately. |
+| `--allow-terminal-view` | Local worker enrollment terminal-view policy; terminal authorization remains scoped WebSocket. |
+| `--ca-file` | Local TLS trust configuration for worker/remote clients; not sent in API requests. |
+| `--coordinator` | Local connection configuration; API base URL is client config, not request field. |
+| `--token-file` | Local credential input; token is stored privately and sent only as Authorization header. |
+| `--print` | Local service-unit preview; no API. |
+| `--color` | Local terminal rendering preference; no API. |
+| `--colors` | Local terminal capability preview; no API. |
+| `--theme` | Local theme preview; no API. |
+| `--set` | Rotation mutation has no distributed operation; run locally. |
+| `--kind` | Steering kind has no distributed operation; run locally. |
+| `--route` | Steering destination has no distributed operation; run locally. |
+| `--exclude-client` | Internal local tmux cleanup selector; never remote. |
+| `--startup-token` | Internal controller startup handoff; never remote. |
+| `--help` | Local argparse help; no API call. |
+| `-h` | Alias for `--help`; local argparse help, no API call. |
+
+Coordinator router declarations (`http::ROUTES`), including supporting auth, worker, token, stream, terminal and documentation routes:
+
+| Method and route |
+|---|
+| `GET /healthz` |
+| `GET /api/v1/auth/state` |
+| `POST /api/v1/auth/setup` |
+| `POST /api/v1/auth/login` |
+| `POST /api/v1/auth/logout` |
+| `POST /api/v1/auth/password` |
+| `GET /api/v1/workers` |
+| `POST /api/v1/workers` |
+| `GET /api/v1/workers/{name}` |
+| `DELETE /api/v1/workers/{name}` |
+| `GET /api/v1/tokens` |
+| `POST /api/v1/tokens` |
+| `DELETE /api/v1/tokens/{name}` |
+| `GET /api/v1/missions` |
+| `GET /api/v1/missions/{id}` |
+| `GET /api/v1/missions/{id}/events` |
+| `GET /api/v1/missions/{id}/operations` |
+| `POST /api/v1/missions/{id}/{action}` |
+| `GET /api/v1/missions/{id}/tasks` |
+| `POST /api/v1/missions/{id}/tasks` |
+| `GET /api/v1/missions/{id}/tasks/{n}` |
+| `PATCH /api/v1/missions/{id}/tasks/{n}` |
+| `POST /api/v1/missions/{id}/tasks/{n}/verify` |
+| `POST /api/v1/missions/{id}/tasks/{n}/{action}` |
+| `POST /api/v1/commands` |
+| `GET /api/v1/commands/{id}` |
+| `GET /api/v1/events` |
+| `GET /api/v1/stream` |
+| `GET /api/v1/diagnostics` |
+| `GET /api/v1/openapi.json` |
+| `GET /api/docs` |
+| `GET /api/v1/worker/connect` |
+| `GET /api/v1/terminal` |
+| `GET /api/v1/worker/terminal/{session_id}` |
+
+The regression test enumerates the argparse tree and Rust route policy table. Adding a command, option, or route requires updating this inventory; route method/path pairs are checked for exact coverage.

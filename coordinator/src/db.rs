@@ -781,10 +781,15 @@ impl Db {
 
     // ---- audit and maintenance ----
     pub fn audit(&self, actor: &str, action: &str, detail: &str, remote: &str) {
-        let _ = self.c().execute(
+        let _ = self.audit_checked(actor, action, detail, remote);
+    }
+
+    pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
+        self.c().execute(
             "INSERT INTO audit(ts, actor, action, detail, remote) VALUES(?,?,?,?,?)",
             params![crate::now(), actor, action, detail, remote],
-        );
+        )?;
+        Ok(())
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
         let c = self.c();

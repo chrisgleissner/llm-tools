@@ -63,6 +63,7 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         cfg,
         data_dir: data_dir.to_path_buf(),
         limiter: RateLimiter::new(5, Duration::from_secs(60), 4096),
+        mutation_limiter: crate::auth::MutationLimiter::new(Duration::from_secs(60), 4096),
         started: Instant::now(),
         dummy_hash,
         cursor_key,
