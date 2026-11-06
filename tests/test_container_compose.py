@@ -23,6 +23,12 @@ def test_default_compose_keeps_rotated_json_logs_and_a_30_second_health_check() 
     assert "timeout: 5s" in text and "start_period: 20s" in text and "retries: 3" in text
 
 
+def test_web_asset_copy_preserves_directory_traversal_permissions() -> None:
+    dockerfile = (CONTAINER / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY web/ /usr/share/bridge-coordinator/web/" in dockerfile
+    assert "COPY --chmod=0444 web/ /usr/share/bridge-coordinator/web/" not in dockerfile
+
+
 def test_low_write_override_replaces_the_whole_logging_block_and_slows_health_checks() -> None:
     text = (CONTAINER / "compose.low-write.yaml").read_text(encoding="utf-8")
     # !override drops the json-file size options, which journald, syslog and none reject.
