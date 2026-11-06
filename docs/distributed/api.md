@@ -38,6 +38,10 @@ retries reuse the same durable command request ID.
 Mission start accepts the worker's `headless`, `native_tui`, `providers` and
 `routes` choices and validates the rotation on that worker before launching its
 controller.
+`GET /api/v1/missions/{id}/tasks/{n}` returns the task through `task.show` and,
+when the worker answers synchronously, includes a strong `ETag` containing its
+revision. Send that value as `If-Match` on a task mutation; it becomes
+`expected_revision`, and a stale value returns `412`.
 The mission detail page and `llm-bridge --target` use these resource routes for
 status, events, task lists and supported task/mission actions; commands without a
 resource mapping continue through the low-level command endpoint while their

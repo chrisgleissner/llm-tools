@@ -12,7 +12,7 @@ use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -957,6 +957,60 @@ async fn mission_operations(
     .await
 }
 
+async fn mission_task_show(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path((id, task_number)): Path<(String, u64)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| !matches!(key.as_str(), "worker" | "wait_ms")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let wait_ms = q.get("wait_ms").map_or(Ok(0), |value| {
+        value
+            .parse::<u64>()
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer"))
+    })?;
+    if wait_ms > MAX_WAIT_MS {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be at most 30000"));
+    }
+    let mut params = Map::new();
+    params.insert("task_number".into(), json!(task_number));
+    let response = resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: id,
+            operation: "task.show".into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await?;
+    if response.status() != StatusCode::OK {
+        return Ok(response);
+    }
+    let (mut parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error"))?;
+    if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        if let Some(revision) = value.pointer("/result/result/revision").and_then(Value::as_u64) {
+            parts
+                .headers
+                .insert(header::ETAG, format!("\"{revision}\"").parse().expect("numeric entity tag"));
+        }
+    }
+    Ok(Response::from_parts(parts, axum::body::Body::from(bytes)))
+}
+
 async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
     let num = |k: &str, default: u64| -> Result<u64, ApiError> {
         q.get(k).map_or(Ok(default), |v| {
@@ -1065,6 +1119,19 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
             }
         }
     }
+    if row.state == "done"
+        && request
+            .get("params")
+            .and_then(Value::as_object)
+            .is_some_and(|params| params.contains_key("expected_revision"))
+        && row.result.as_ref().and_then(|result| result.pointer("/error/code")).and_then(Value::as_str) == Some("conflict")
+    {
+        return Err(err(
+            StatusCode::PRECONDITION_FAILED,
+            "stale-revision",
+            "the task changed since the supplied revision; fetch it again and retry",
+        ));
+    }
     let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
     let mut response = json_ok(status, row.to_json());
     if status == StatusCode::ACCEPTED {
@@ -1118,6 +1185,24 @@ fn resource_wait_ms(m: &Map<String, Value>) -> Result<u64, ApiError> {
             .filter(|wait| *wait <= MAX_WAIT_MS)
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer of at most 30000")),
     }
+}
+
+fn apply_if_match(headers: &HeaderMap, params: &mut Map<String, Value>) -> Result<(), ApiError> {
+    let Some(value) = headers.get(header::IF_MATCH) else { return Ok(()) };
+    let raw = value
+        .to_str()
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "If-Match must be an entity tag"))?;
+    let revision = raw
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value <= i64::MAX as u64)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "If-Match must be a quoted task revision"))?;
+    if params.get("expected_revision").is_some_and(|value| value.as_u64() != Some(revision)) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "If-Match and expected_revision disagree"));
+    }
+    params.insert("expected_revision".into(), json!(revision));
+    Ok(())
 }
 
 async fn mission_action(
@@ -1220,6 +1305,7 @@ async fn amend_mission_task(
     no_extra(&m, &["prompt", "priority", "order", "depends_on", "expected_revision", "wait_ms"])?;
     let wait_ms = resource_wait_ms(&m)?;
     m.remove("wait_ms");
+    apply_if_match(&headers, &mut m)?;
     let changes = ["prompt", "priority", "order", "depends_on"]
         .into_iter()
         .filter(|key| m.contains_key(*key))
@@ -1275,6 +1361,7 @@ async fn verify_mission_task(
     no_extra(&m, &["approved", "evidence", "reason", "expected_revision", "wait_ms"])?;
     let wait_ms = resource_wait_ms(&m)?;
     m.remove("wait_ms");
+    apply_if_match(&headers, &mut m)?;
     let approved = match m.remove("approved") {
         Some(Value::Bool(approved)) => approved,
         _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "approved must be true or false")),
@@ -1330,6 +1417,7 @@ async fn task_action(
     no_extra(&m, &["expected_revision", "wait_ms"])?;
     let wait_ms = resource_wait_ms(&m)?;
     m.remove("wait_ms");
+    apply_if_match(&headers, &mut m)?;
     let operation = match action.as_str() {
         "pause" => "task.pause",
         "resume" => "task.resume",
@@ -1494,6 +1582,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions/{id}/{action}", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/tasks", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/tasks", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/tasks/{n}", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/tasks/{n}", &["PATCH"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/tasks/{n}/verify", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/tasks/{n}/{action}", &["POST"], Access::Authed, "operate"),
@@ -1557,7 +1646,7 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
         .route("/api/v1/missions/{id}/{action}", post(mission_action))
         .route("/api/v1/missions/{id}/tasks", get(mission_tasks).post(add_mission_task))
-        .route("/api/v1/missions/{id}/tasks/{n}", patch(amend_mission_task))
+        .route("/api/v1/missions/{id}/tasks/{n}", get(mission_task_show).patch(amend_mission_task))
         .route("/api/v1/missions/{id}/tasks/{n}/verify", post(verify_mission_task))
         .route("/api/v1/missions/{id}/tasks/{n}/{action}", post(task_action))
         .route("/api/v1/commands", post(post_command))

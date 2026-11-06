@@ -289,6 +289,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -404,6 +414,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -518,6 +538,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -644,6 +674,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -769,6 +809,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -872,6 +922,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -1019,6 +1079,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1142,6 +1212,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1255,6 +1335,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -1370,6 +1460,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1484,6 +1584,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1560,16 +1670,6 @@
               "minimum": 0,
               "type": "integer"
             }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "maximum": 1000,
-              "minimum": 1,
-              "type": "integer"
-            }
           }
         ],
         "responses": {
@@ -1640,6 +1740,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -1807,6 +1917,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1963,6 +2083,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -2130,6 +2260,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -2275,6 +2415,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -2318,6 +2468,178 @@
       }
     },
     "/api/v1/missions/{id}/tasks/{n}": {
+      "get": {
+        "operationId": "get_missions_by_id_tasks_by_n",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "n",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Worker that owns this mission ID.",
+            "in": "query",
+            "name": "worker",
+            "required": true,
+            "schema": {
+              "maxLength": 63,
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the worker response for up to 30 seconds; otherwise return its durable pending command.",
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful response",
+            "headers": {
+              "ETag": {
+                "description": "Strong task revision tag, when the worker answered synchronously.",
+                "schema": {
+                  "pattern": "^\\\"[0-9]+\\\"$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Invalid request"
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Authentication required"
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Insufficient scope or forbidden request"
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "405": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Method not allowed",
+            "headers": {
+              "Allow": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
+          "429": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Rate limited",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Internal server error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "cookieSession": []
+          }
+        ],
+        "summary": "GET /api/v1/missions/{id}/tasks/{n}",
+        "x-required-scope": [
+          "read"
+        ]
+      },
       "patch": {
         "operationId": "patch_missions_by_id_tasks_by_n",
         "parameters": [
@@ -2346,6 +2668,16 @@
               "maxLength": 63,
               "minLength": 1,
               "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Task revision ETag returned by GET /missions/{id}/tasks/{n}; maps to expected_revision.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
           }
@@ -2419,6 +2751,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -2490,6 +2832,16 @@
               "maxLength": 63,
               "minLength": 1,
               "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Task revision ETag returned by GET /missions/{id}/tasks/{n}; maps to expected_revision.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
           }
@@ -2573,6 +2925,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -2655,6 +3017,16 @@
               "pattern": "^[a-z0-9][a-z0-9-]*$",
               "type": "string"
             }
+          },
+          {
+            "description": "Task revision ETag returned by GET /missions/{id}/tasks/{n}; maps to expected_revision.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "pattern": "^\\\"[0-9]+\\\"$",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2736,6 +3108,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -2810,6 +3192,16 @@
               "pattern": "^[a-z0-9][a-z0-9-]*$",
               "type": "string"
             }
+          },
+          {
+            "description": "Task revision ETag returned by GET /missions/{id}/tasks/{n}; maps to expected_revision.",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "pattern": "^\\\"[0-9]+\\\"$",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2891,6 +3283,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -3006,6 +3408,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3109,6 +3521,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -3224,6 +3646,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3337,6 +3769,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -3468,6 +3910,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -3604,6 +4056,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3717,6 +4179,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -3836,6 +4308,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3943,6 +4425,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -4066,6 +4558,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {
@@ -4202,6 +4704,16 @@
               }
             }
           },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -4315,6 +4827,16 @@
                 }
               }
             }
+          },
+          "412": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The supplied task revision is stale"
           },
           "429": {
             "content": {

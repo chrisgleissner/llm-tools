@@ -179,6 +179,12 @@ class Client:
         elif op == "session.list":
             query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 100), "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/operations?{query}", timeout=wait + 15)
+        elif op == "task.show":
+            task_number = params.get("task_number")
+            if task_number is None or "task_id" in params:
+                return None
+            query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
+            status, body = self.call("GET", f"{base}/tasks/{int(task_number)}?{query}", timeout=wait + 15)
         elif op == "task.add":
             status, body = self.call("POST", f"{base}/tasks?{worker}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op.startswith("task."):

@@ -248,12 +248,84 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
     let (status, command) = api
         .send(
             api.rb(Method::PATCH, "/api/v1/missions/mission-1/tasks/7?worker=build-1")
+                .header("if-match", "\"2\"")
                 .json(&json!({"prompt":"Revised work","expected_revision":2})),
         )
         .await;
     assert_eq!(status, 202, "{command}");
     assert_eq!(command["operation"], "task.amend");
     assert_eq!(command["request"]["params"]["task_number"], 7);
+    assert_eq!(command["request"]["params"]["expected_revision"], 2);
+    let (status, mismatch) = api
+        .send(
+            api.rb(Method::PATCH, "/api/v1/missions/mission-1/tasks/7?worker=build-1")
+                .header("if-match", "\"3\"")
+                .json(&json!({"prompt":"Revised work","expected_revision":2})),
+        )
+        .await;
+    assert_eq!(status, 400, "{mismatch}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn task_revision_etag_and_if_match_enforce_preconditions() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect(&env, &token, "etag-worker", 0).await;
+    let read_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let get = tokio::spawn(async move {
+        read_api
+            .rb(Method::GET, "/api/v1/missions/m1/tasks/2?worker=w1&wait_ms=5000")
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    let request_id = command["payload"]["request_id"].as_str().unwrap();
+    assert_eq!(command["payload"]["operation"], "task.show");
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":request_id,"operation":"task.show","outcome":"ok","result":{"id":12,"ordinal":2,"revision":7},"error":null}),
+        )
+        .await;
+    let response = get.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.headers().get("etag").unwrap(), "\"7\"");
+    let patch_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let patch = tokio::spawn(async move {
+        patch_api
+            .rb(Method::PATCH, "/api/v1/missions/m1/tasks/2?worker=w1")
+            .header("if-match", "\"6\"")
+            .json(&json!({"prompt":"new prompt","wait_ms":5000}))
+            .send()
+            .await
+            .unwrap()
+    });
+    let pending = worker.recv().await;
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":pending["payload"]["request_id"],"operation":"task.amend","outcome":"rejected","result":null,"error":{"code":"conflict","message":"stale revision"}}),
+        )
+        .await;
+    let response = patch.await.unwrap();
+    assert_eq!(response.status().as_u16(), 412);
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/stale-revision");
     env.stop().await;
 }
 

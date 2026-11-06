@@ -205,6 +205,9 @@ impl Api {
 pub fn caps() -> Value {
     json!([
         {"operation": "mission.list", "summary": "list", "mutating": false, "needs_mission": false, "params": {}},
+        {"operation": "mission.status", "summary": "status", "mutating": false, "needs_mission": true, "params": {}},
+        {"operation": "task.show", "summary": "show", "mutating": false, "needs_mission": true, "params": {"task_number": {"type": "int", "required": false}}},
+        {"operation": "task.amend", "summary": "amend", "mutating": true, "needs_mission": true, "params": {"task_number": {"type": "int", "required": false}, "prompt": {"type": "str", "required": true}}},
         {"operation": "task.add", "summary": "add", "mutating": true, "needs_mission": true, "params": {"title": {"type": "str", "required": true}}}
     ])
 }

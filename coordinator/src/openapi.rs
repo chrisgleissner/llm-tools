@@ -109,6 +109,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "401": {"description":"Authentication required","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "403": {"description":"Insufficient scope or forbidden request","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "404": {"description":"Resource not found","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "405": {"description":"Method not allowed","headers":{"Allow":{"schema":{"type":"string"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "500": {"description":"Internal server error","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "429": {"description":"Rate limited","headers":{"Retry-After":{"schema":{"type":"integer"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}
@@ -182,7 +183,24 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "schema":{"type":"integer","minimum":0,"maximum":30000}
             }));
         }
-        if method == "GET" {
+        if method == "PATCH" || path.ends_with("/verify") || path.ends_with("/{action}") {
+            params.push(json!({
+                "name":"If-Match","in":"header","required":false,
+                "description":"Task revision ETag returned by GET /missions/{id}/tasks/{n}; maps to expected_revision.",
+                "schema":{"type":"string","pattern":"^\\\"[0-9]+\\\"$"}
+            }));
+        }
+        if path == "/api/v1/missions/{id}/tasks/{n}" && method == "GET" {
+            op["responses"]["200"]["headers"] = json!({
+                "ETag":{"description":"Strong task revision tag, when the worker answered synchronously.","schema":{"type":"string","pattern":"^\\\"[0-9]+\\\"$"}}
+            });
+        }
+        if method == "GET"
+            && matches!(
+                path,
+                "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
+            )
+        {
             let page_key = match path {
                 "/api/v1/missions/{id}/events" => "after",
                 "/api/v1/missions/{id}/tasks" => "offset",
