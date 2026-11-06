@@ -71,7 +71,9 @@ class Coordinator:
         self.address = match.group(1)
         self.port = int(self.address.rsplit(":", 1)[1])
         self.context = strict_context(data / "ca.pem")
-        self.api_token = self.run("token", "create", "cli")
+        # The helper reads workers and submits mutations through the coordinator API.
+        # Tokens now default to read-only, so the fixture must opt into admin.
+        self.api_token = self.run("token", "create", "cli", "--scope", "admin")
 
     def run(self, *args: str) -> str:
         return subprocess.run([str(BINARY), *args, "--data-dir", str(self.data)], check=True, capture_output=True, text=True, timeout=scaled(30)).stdout.strip()
