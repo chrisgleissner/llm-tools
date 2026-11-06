@@ -193,6 +193,10 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         "task.dependency",
         "task.verify",
         "task.reject",
+        "task.pause",
+        "task.resume",
+        "task.cancel",
+        "task.retry",
     ];
     let capabilities: Vec<Value> = operations.iter().map(|operation| json!({"operation":operation,"mutating":true})).collect();
     let mut hello = serde_json::Map::new();
@@ -225,6 +229,11 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
             "/api/v1/missions/mission-1/tasks/8/verify?worker=build-1",
             json!({"approved":false,"reason":"Missing evidence","expected_revision":1}),
             "task.reject",
+        ),
+        (
+            "/api/v1/missions/mission-1/tasks/9/retry?worker=build-1",
+            json!({"expected_revision":2}),
+            "task.retry",
         ),
     ] {
         let (status, command) = api.post(path, body).await;

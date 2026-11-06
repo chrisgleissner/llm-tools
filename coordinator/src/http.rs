@@ -1277,6 +1277,48 @@ async fn verify_mission_task(
     .await
 }
 
+async fn task_action(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path((id, task_number, action)): Path<(String, u64, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut m = parse_body(&body.bytes)?;
+    no_extra(&m, &["expected_revision", "wait_ms"])?;
+    let wait_ms = resource_wait_ms(&m)?;
+    m.remove("wait_ms");
+    let operation = match action.as_str() {
+        "pause" => "task.pause",
+        "resume" => "task.resume",
+        "cancel" => "task.cancel",
+        "retry" => "task.retry",
+        _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown task action")),
+    };
+    m.insert("task_number".into(), json!(task_number));
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: id,
+            operation: operation.to_string(),
+            params: m,
+            wait_ms,
+        },
+    )
+    .await
+}
+
 // ---------------------------------------------------------------- diagnostics
 
 fn rss_kib() -> Option<u64> {
@@ -1418,6 +1460,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions/{id}/tasks", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/tasks/{n}", &["PATCH"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/tasks/{n}/verify", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/tasks/{n}/{action}", &["POST"], Access::Authed, "operate"),
     ("/api/v1/commands", &["POST"], Access::Authed, "operate"),
     ("/api/v1/commands/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/events", &["GET"], Access::Authed, "read"),
@@ -1479,6 +1522,7 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/missions/{id}/tasks", get(mission_tasks).post(add_mission_task))
         .route("/api/v1/missions/{id}/tasks/{n}", patch(amend_mission_task))
         .route("/api/v1/missions/{id}/tasks/{n}/verify", post(verify_mission_task))
+        .route("/api/v1/missions/{id}/tasks/{n}/{action}", post(task_action))
         .route("/api/v1/commands", post(post_command))
         .route("/api/v1/commands/{id}", get(get_command))
         .route("/api/v1/events", get(list_events))
