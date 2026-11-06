@@ -61,6 +61,10 @@ class TransitionError(ValueError):
     """A requested mission/task transition violates the durable state model."""
 
 
+class TaskNotFound(TransitionError):
+    """The mission has no task with the number or ID that was named (the command line exits 3)."""
+
+
 def mission_transition_message(mission_id: str, old: str, new: str, *, verb: str = "") -> str:
     """Operator-facing wording for a refused mission state change; ``verb`` names the refused action (default: resumed)."""
     short = str(mission_id)[:8]
@@ -645,10 +649,10 @@ class BridgeStore:
         count = int(self.db.execute("SELECT COUNT(*) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0])
         short = str(mission_id)[:8]
         if count == 0:
-            raise TransitionError(f"mission {short} has no tasks; there is no task {ordinal}")
+            raise TaskNotFound(f"mission {short} has no tasks; there is no task {ordinal}")
         highest = int(self.db.execute("SELECT MAX(ordinal) FROM tasks WHERE mission_id=?", (mission_id,)).fetchone()[0])
         span = "task 1" if highest == 1 else f"tasks 1\u2013{highest}"
-        raise TransitionError(f"mission {short} has {span}; there is no task {ordinal}")
+        raise TaskNotFound(f"mission {short} has {span}; there is no task {ordinal}")
 
     def create_mission(
         self,

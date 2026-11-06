@@ -152,6 +152,8 @@ class MissionEntry:
     rotation: str = ""
     colour: object = None  # the pinned identity colour (1-8), else the ID's hash decides
     review_ordinal: int | None = None  # number of the lowest-numbered task awaiting the operator's review
+    tasks_done: int = 0
+    tasks_total: int = 0
 
     @property
     def config(self) -> dict[str, object]:
@@ -235,6 +237,7 @@ class MissionEntry:
             "station_idle": self.station_idle,
             "stale": self.stale,
             "review_task": self.review_ordinal if self.in_review else None,
+            "tasks": {"done": self.tasks_done, "total": self.tasks_total},
             "controller_running": self.controller,
             "rotation": self.rotation,
             "colour": mission_role(self.mission_id, self.config),
@@ -324,6 +327,12 @@ def collect_entries(
         owner = str(row["mission_id"])
         if owner not in current or key < current[owner][0]:
             current[owner] = (key, dict(row))
+    task_counts: dict[str, tuple[int, int]] = {}
+    for row in store.db.execute(
+        "SELECT mission_id, SUM(n) AS total, SUM(CASE WHEN key='COMPLETED' THEN n ELSE 0 END) AS done "
+        "FROM mission_task_counts WHERE scope='status' GROUP BY mission_id"
+    ):
+        task_counts[str(row["mission_id"])] = (int(row["done"] or 0), int(row["total"] or 0))
     review: dict[str, int] = {}
     for row in store.db.execute(
         "SELECT mission_id,MIN(ordinal) AS ordinal FROM tasks WHERE status IN ('RUNNING','VERIFYING','READY') AND status='VERIFYING' "
@@ -351,6 +360,8 @@ def collect_entries(
             rotation=_rotation(config),
             colour=config.get("colour"),
             review_ordinal=review.get(mission_id),
+            tasks_done=task_counts.get(mission_id, (0, 0))[0],
+            tasks_total=task_counts.get(mission_id, (0, 0))[1],
         ))
     return order_entries(entries)
 
@@ -937,18 +948,35 @@ def run_pick_cli(
     return run_control(chosen.mission_id, dispatch_console_command, console_snapshot)
 
 
-def format_missions(entries: list[MissionEntry], *, width: int = 100) -> str:
-    """Human listing for ``llm-bridge missions``."""
+def format_missions(entries: list[MissionEntry], *, total: int | None = None, now: float | None = None) -> str:
+    """Human listing for ``llm-bridge missions`` and ``llm-bridge mission list``.
+
+    ``total`` is the number of missions that exist when ``entries`` is only the first page of them.
+    """
+    from .bridge_format import age, home_relative, table
+
     if not entries:
+        if total:
+            return f"showing 0 of {total} missions · --limit N shows more"
         return "No missions yet · create one with: llm-bridge mission create --prompt \"...\""
-    picker = MissionPicker(entries, unicode=unicode_ok(), home=None)
-    sep = picker._glyphs()[3]
-    header = f"{len(entries)} mission{'s' if len(entries) != 1 else ''}{sep}{sum(1 for e in entries if e.live)} live"
-    return header + "\n" + picker.plain_text(width)
+    live = sum(1 for e in entries if e.live)
+    count = total if total is not None else len(entries)
+    header = f"{count} mission{'s' if count != 1 else ''} · {live} live"
+    rows = [
+        [e.short_id, MISSION_INTERRUPTED_LABEL if e.stale else e.status,
+         f"review task {e.review_ordinal}" if e.in_review else "",
+         f"{e.tasks_done}/{e.tasks_total}" if e.tasks_total else "-",
+         e.name, home_relative(e.cwd), age(e.updated_at, now)]
+        for e in entries
+    ]
+    text = header + "\n" + table(["ID", "STATE", "NEEDS YOU", "TASKS", "NAME", "FOLDER", "UPDATED"], rows)
+    if total is not None and total > len(entries):
+        text += f"\nshowing {len(entries)} of {total} missions · --limit N shows more"
+    return text
 
 
-def missions_json(entries: list[MissionEntry]) -> dict[str, Any]:
-    return {"schema_version": 1, "missions": [entry.as_json() for entry in entries]}
+def missions_json(entries: list[MissionEntry], total: int | None = None) -> dict[str, Any]:
+    return {"schema_version": 1, "total": len(entries) if total is None else total, "missions": [entry.as_json() for entry in entries]}
 
 
 __all__ = [

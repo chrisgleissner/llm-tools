@@ -267,7 +267,7 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
     try:
         client = client or Client(load())
         if args.command == "worker" and getattr(args, "worker_action", "") == "list":
-            return _print(client.workers(), as_json, _format_workers)
+            return _print({"workers": client.workers()}, as_json, lambda value: _format_workers(value["workers"]))  # --json lists are objects
         request, human = request_for(args, target)
         spec = commands.lookup(request.operation)
         if target != commands.ALL_TARGET:

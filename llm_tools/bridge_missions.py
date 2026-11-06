@@ -22,11 +22,19 @@ if TYPE_CHECKING:
     from .bridge_store import BridgeStore
 
 
-MIN_MISSION_PREFIX = 4
+MIN_MISSION_PREFIX = 3
 
 
 class MissionNotFound(ValueError):
     """No saved mission matches the given ID or prefix."""
+
+
+class NoMissionInFolder(ValueError):
+    """The current folder has no mission the command can use (none, or only finished ones)."""
+
+
+class MissionAmbiguous(ValueError):
+    """An ID prefix or a folder matches several missions."""
 
 
 def station_live(mission_id: str) -> bool:
@@ -119,7 +127,7 @@ def resolve_mission_ref(
         if not rows:
             raise MissionNotFound(f"no mission matches {ref!r}; run llm-bridge mission list")
         if len(rows) > 1:
-            raise ValueError(f"mission ID prefix {ref!r} is ambiguous; matches:\n{mission_choices(rows)}")
+            raise MissionAmbiguous(f"mission ID prefix {ref!r} is ambiguous; matches:\n{mission_choices(rows)}")
         return str(rows[0]["id"])
     here = Path(cwd if cwd is not None else Path.cwd()).expanduser().resolve()
     in_folder = missions_in_folder(store, here)
@@ -136,12 +144,12 @@ def resolve_mission_ref(
         if read_only and len(finished) == 1:
             return str(finished[0]["id"])
         if read_only and finished:
-            raise ValueError(f"several finished missions match folder {here}; pass --mission ID:\n{mission_choices(finished)}")
+            raise MissionAmbiguous(f"several finished missions match folder {here}; pass --mission ID:\n{mission_choices(finished)}")
         completed = [row for row in finished if row["status"] == "COMPLETED"]
         if reopen_completed and len(completed) == 1:
             return str(completed[0]["id"])
         if reopen_completed and len(completed) > 1:
-            raise ValueError(f"several completed missions match folder {here}; pass --mission ID:\n{mission_choices(completed)}")
+            raise MissionAmbiguous(f"several completed missions match folder {here}; pass --mission ID:\n{mission_choices(completed)}")
         if finished:
             newest = order_missions(finished)[0]
             short = str(newest["id"])[:8]
@@ -149,6 +157,6 @@ def resolve_mission_ref(
                 follow_up = f"add follow-up work, which reopens it, with: llm-bridge task add --mission {short} --prompt \"...\" or create a new mission with: llm-bridge mission create --prompt \"...\""
             else:
                 follow_up = "create a new mission with: llm-bridge mission create --prompt \"...\""
-            raise ValueError(f"mission {short} in folder {here} is finished ({str(newest['status']).lower()}); {follow_up}")
-        raise ValueError(f"no unfinished mission for folder {here}; pass --mission ID (see llm-bridge mission list) or create one with: llm-bridge mission create --prompt \"...\"")
-    raise ValueError(f"several missions match folder {here}; pass --mission ID:\n{mission_choices(pool)}")
+            raise NoMissionInFolder(f"mission {short} in folder {here} is finished ({str(newest['status']).lower()}); {follow_up}")
+        raise NoMissionInFolder(f"no unfinished mission for folder {here}; pass --mission ID (see llm-bridge mission list) or create one with: llm-bridge mission create --prompt \"...\"")
+    raise MissionAmbiguous(f"several missions match folder {here}; pass --mission ID:\n{mission_choices(pool)}")

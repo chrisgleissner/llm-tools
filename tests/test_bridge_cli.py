@@ -52,7 +52,7 @@ def test_mission_cli_create_status_tasks_events_and_evidence(tmp_path: Path, mon
     assert status["tasks"][0]["id"] == task_id
     assert status["tasks"][0]["status"] == "QUEUED"
 
-    assert main(["task", "verify", "--mission", mission_id, "--task", str(task_id), "--approve"]) == 2
+    assert main(["task", "verify", "--mission", mission_id, "--task", str(task_id), "--approve"]) == 4
     assert "not awaiting verification" in capsys.readouterr().err
 
     store = BridgeStore(state / "bridge.sqlite3")
@@ -319,8 +319,8 @@ def test_proposal_cli_rejects_foreign_operation_provenance(tmp_path: Path, monke
     assert main([
         "proposal", "create", "--mission", second["id"], "--operation", operation,
         "--prompt", "must not cross mission", "--json",
-    ]) == 2
-    assert "same mission" in capsys.readouterr().err
+    ]) == 4
+    assert "same mission" in json.loads(capsys.readouterr().out)["error"]["message"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.list_proposals(second["id"]) == []
 
@@ -436,8 +436,8 @@ def test_finished_mission_reports_proposal_rejection_and_takes_follow_up_tasks(t
         proposal = store.propose_task(mission["id"], "future work", source_operation_id=operation)
         store.set_mission_status(mission["id"], "COMPLETED")
 
-    assert main(["proposal", "accept", "--mission", mission["id"], "--task", str(proposal), "--json"]) == 2
-    assert "takes no new proposals" in capsys.readouterr().err
+    assert main(["proposal", "accept", "--mission", mission["id"], "--task", str(proposal), "--json"]) == 4
+    assert "takes no new proposals" in json.loads(capsys.readouterr().out)["error"]["message"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(proposal)["proposal_status"] == "PENDING"
         assert len(store.list_tasks(mission["id"])) == 2
@@ -500,9 +500,9 @@ def test_cli_station_view_and_invalid_steering_report_rejection(tmp_path: Path, 
     assert main(["station", "--mission", mission["id"], "codex", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["config"]["viewed_station"] == "codex"
     assert main(["station", "--mission", mission["id"], "claude", "--json"]) == 2
-    assert "not configured" in capsys.readouterr().err
+    assert "not configured" in json.loads(capsys.readouterr().out)["error"]["message"]  # --json: an error object on stdout
     assert main(["steer", "--mission", mission["id"], "--kind", "handoff", "--route", "missing", "--json"]) == 2
-    assert "not in this mission's rotation" in capsys.readouterr().err
+    assert "not in this mission's rotation" in json.loads(capsys.readouterr().out)["error"]["message"]
 
 
 @pytest.mark.parametrize(

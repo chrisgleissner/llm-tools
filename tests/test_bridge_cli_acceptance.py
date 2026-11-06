@@ -21,7 +21,7 @@ def test_cross_mission_writes_fail_without_partial_effect(tmp_path, monkeypatch,
     other.mkdir()
     assert main(["mission", "create", "--prompt", "other", "--cwd", str(other), "--json"]) == 0
     foreign = json.loads(capsys.readouterr().out)["task"]["id"]
-    assert main(["task", "cancel", "--mission", mission, "--task", str(foreign), "--json"]) == 2
+    assert main(["task", "cancel", "--mission", mission, "--task", str(foreign), "--json"]) == 3
     capsys.readouterr()
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(foreign)["status"] == "QUEUED"
@@ -32,7 +32,7 @@ def test_cycle_rejection_is_reported_as_failure(tmp_path, monkeypatch, capsys):
     with BridgeStore(state / "bridge.sqlite3") as store:
         second = store.add_task(mission, "dependent", depends_on=[first])
     assert main(["task", "dependencies", "--mission", mission, "--task", str(first),
-                 "--add", str(second), "--json"]) == 2
+                 "--add", str(second), "--json"]) == 4
     capsys.readouterr()
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(first)["depends_on"] == []

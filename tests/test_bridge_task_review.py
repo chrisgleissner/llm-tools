@@ -107,7 +107,7 @@ def test_task_output_follow_needs_a_terminal(tmp_path, state, capsys) -> None:
 
 def test_task_output_says_when_the_task_has_not_run(tmp_path, state, capsys) -> None:
     mission_id, _ = _mission(state, tmp_path)
-    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=2)
+    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=3)
     assert "task 1 has not run" in err
 
 
@@ -119,7 +119,7 @@ def test_task_output_says_when_the_log_was_pruned_and_keeps_the_audit_digest(tmp
     _finish(state, operation, log=log)
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.record_pruned_operation_log(mission_id, str(log), size_bytes=10, sha256="ab" * 32)
-    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=2)
+    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=3)
     assert "pruned" in err and "10 bytes" in err and "abababab" in err and "--log-retained-runs" in err
 
 
@@ -127,13 +127,13 @@ def test_task_output_reports_a_log_file_that_vanished(tmp_path, state, capsys) -
     mission_id, task_id = _mission(state, tmp_path)
     log = tmp_path / "attempt-1.out"
     _finish(state, _run_task(state, mission_id, task_id, tmp_path, log=log, checkpoint=False), log=log)
-    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=2)
+    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=3)
     assert "no longer on disk" in err
 
 
 def test_task_output_json_describes_an_unavailable_log(tmp_path, state, capsys) -> None:
     mission_id, _ = _mission(state, tmp_path)
-    out, _ = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, "--json", code=2)
+    out, _ = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, "--json", code=3)
     data = json.loads(out)
     assert data["available"] is False and "has not run" in data["message"]
 
@@ -192,17 +192,17 @@ def test_task_diff_names_a_folder_that_is_not_a_git_repository(tmp_path, state, 
     folder.mkdir()
     mission_id, task_id = _mission(state, folder)
     _finish(state, _run_task(state, mission_id, task_id, folder, log=None), log=None)
-    _, err = _cli(capsys, "task", "diff", "--task", "1", "--mission", mission_id, code=2)
+    _, err = _cli(capsys, "task", "diff", "--task", "1", "--mission", mission_id, code=3)
     assert "not a git repository" in err and str(folder) in err
 
 
 def test_task_diff_without_a_checkpoint_explains_why(tmp_path, state, capsys) -> None:
     folder = _repo(tmp_path)
     mission_id, task_id = _mission(state, folder)
-    _, err = _cli(capsys, "task", "diff", "--task", "1", "--mission", mission_id, code=2)
+    _, err = _cli(capsys, "task", "diff", "--task", "1", "--mission", mission_id, code=3)
     assert "no repository checkpoint" in err
     _finish(state, _run_task(state, mission_id, task_id, folder, log=None, checkpoint=False), log=None)
-    _, err = _cli(capsys, "task", "diff", "--task", "1", "--mission", mission_id, code=2)
+    _, err = _cli(capsys, "task", "diff", "--task", "1", "--mission", mission_id, code=3)
     assert "no repository checkpoint" in err
 
 
@@ -361,7 +361,7 @@ def test_recorded_change_names_the_files_for_the_approval_dialog(tmp_path) -> No
 def test_a_running_operation_exposes_its_log_for_follow(tmp_path, state, capsys) -> None:
     mission_id, task_id = _mission(state, tmp_path)
     operation = _run_task(state, mission_id, task_id, tmp_path, log=None, checkpoint=False)
-    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=2)
+    _, err = _cli(capsys, "task", "output", "--task", "1", "--mission", mission_id, code=3)
     assert "still running" in err
     log = tmp_path / "attempt-1.out"
     log.write_text("partial\n")

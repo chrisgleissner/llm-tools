@@ -101,7 +101,7 @@ def test_no_cli_error_contains_python_values_errno_text_or_braces(tmp_path, miss
         arguments += ["--mission", mission]
     code = main(arguments)
     err = capsys.readouterr().err
-    assert code == 2 and err.startswith("llm-bridge: ")
+    assert code in {2, 3, 4} and err.startswith("llm-bridge: ")
     assert not re.search(r"\bNone\b|Errno|[{}]|Traceback", err), err
 
 

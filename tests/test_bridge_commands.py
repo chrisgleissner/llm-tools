@@ -73,10 +73,19 @@ def test_request_json_round_trip_and_strict_decoding():
         assert caught.value.code == code
 
 
+def _without_cli_additions(value):
+    """The CLI adds ``number`` (an alias of a task's ``ordinal``) and a list ``total``; the wire has neither."""
+    if isinstance(value, dict):
+        return {key: _without_cli_additions(item) for key, item in value.items() if key != "number" and not (key == "total" and "missions" in value)}
+    if isinstance(value, list):
+        return [_without_cli_additions(item) for item in value]
+    return value
+
+
 def test_read_operations_match_cli_json_output(mission, capsys):
     state, mission_id = mission
     assert main(["mission", "list", "--json"]) == 0
-    assert commands.execute(CommandRequest("mission.list")).to_json()["result"] == json.loads(capsys.readouterr().out)
+    assert commands.execute(CommandRequest("mission.list")).to_json()["result"] == _without_cli_additions(json.loads(capsys.readouterr().out))
     assert main(["events", "--mission", mission_id, "--json", "--limit", "5"]) == 0
     cli_events = json.loads(capsys.readouterr().out)
     envelope = commands.execute(CommandRequest("mission.events", {"limit": 5}, mission_id=mission_id))
@@ -180,7 +189,7 @@ def test_cli_mission_controls_route_through_the_command_layer(mission, capsys, m
     real = commands.dispatch
     monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
     assert main(["pause", "--mission", mission_id, "--json"]) == 0
-    assert main(["continue", "--mission", mission_id]) == 2
+    assert main(["continue", "--mission", mission_id]) == 4
     assert main(["cancel", "--mission", mission_id, "--json"]) == 0
     assert main(["stop", "--mission", mission_id, "--json"]) == 0
     capsys.readouterr()
@@ -197,10 +206,10 @@ def test_task_reads_match_cli_and_report_missing_tasks(mission, capsys):
     task = _first_task(state, mission_id)
     assert main(["task", "show", "--mission", mission_id, "--task", "1", "--json"]) == 0
     shown = commands.execute(CommandRequest("task.show", {"task_id": task["id"]}, mission_id=mission_id))
-    assert shown.result == json.loads(capsys.readouterr().out)
+    assert shown.result == _without_cli_additions(json.loads(capsys.readouterr().out))
     assert main(["task", "list", "--mission", mission_id, "--json"]) == 0
     listed = commands.execute(CommandRequest("task.list", mission_id=mission_id))
-    assert listed.result["tasks"] == json.loads(capsys.readouterr().out)
+    assert listed.result == _without_cli_additions(json.loads(capsys.readouterr().out))
     assert (listed.result["total"], listed.result["offset"]) == (1, 0)
     assert commands.execute(CommandRequest("task.show", {"task_id": 999}, mission_id=mission_id)).error.code == "not-found"
     assert commands.execute(CommandRequest("task.list", {"limit": 5000}, mission_id=mission_id)).error.code == "invalid-argument"

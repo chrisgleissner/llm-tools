@@ -69,7 +69,7 @@ wake. Stop and cancel are separate explicit operations.
 
 More: help keys, remote, distributed, prompts, markdown, providers, states, verification, recovery.
 Every public command also has --help. ID and task numbers are placeholders.
---mission accepts a unique ID prefix (4+ characters) and may be omitted when you
+--mission accepts a unique ID prefix (3+ characters) and may be omitted when you
 run the command inside the mission's folder.""",
     "keys": """Keys and terminal ownership
 
@@ -175,8 +175,10 @@ shows what remote clients did on this worker.
 On the machine you type on (once):
   llm-bridge remote login --coordinator https://HOST:8443 --token-file T --ca-file ca.pem
   llm-bridge worker list                 workers, connection state and last seen
+Either https:// or wss:// names the same coordinator in both commands; Bridge
+stores the scheme each one needs.
 
-Then put --target WORKER before a command, for example:
+Then put --target WORKER before the command (after it, Bridge says where it goes):
   llm-bridge --target build-1 mission list
   llm-bridge --target build-1 task add --mission ID --file prompt.md
 The worker applies the same checks as a local command. A refused or offline
@@ -235,7 +237,7 @@ Use viewer export to choose an explicit destination. When a supported local
 clipboard helper is available, Copy source copies the complete source. Export
 is the reliable fallback; the viewer itself never sends clipboard escape sequences.
 Retained provider logs are bounded; pruned content cannot be recovered by paging.
-Open an artifact with llm-bridge view --file notes.md. Add --follow only to
+Open an artifact with llm-bridge view notes.md. Add --follow only to
 follow changes: scrolling up pauses, End resumes, and rotation/truncation is
 labelled. Without a TTY, view prints complete source; --follow requires a TTY.""",
     "providers": """Providers, routes and native stations
@@ -449,7 +451,7 @@ def topic_text(topic: str = "quickstart") -> str:
 COMMANDS: dict[str, tuple[str, str]] = {
     "mission": ("Save and inspect durable missions", "mission list"),
     "mission create": ("Save an objective and its first task; no provider starts", "mission create --name demo --mode native --file prompt.md --cwd ."),
-    "mission list": ("List saved missions; no state changes or provider work", "mission list --json"),
+    "mission list": ("List every mission, live ones first (the same listing as missions); no state changes or provider work", "mission list --json"),
     "status": ("Inspect desired state, observed work and blockers", "status --mission ID"),
     "agents": ("Inspect current Bridge operations and provider-owned child agents; use --mission ID or --all-missions", "agents --all-missions --json"),
     "suspend-until-credits": ("Arm a wake timer and suspend after a fresh capacity and safety check", "suspend-until-credits --mission ID"),
@@ -494,7 +496,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "station": ("Select the viewed station; does not reroute a running task", "station --mission ID codex"),
     "steer": ("Queue typed intent for a task or safe execution boundary", "steer --mission ID --kind pause-after-iteration"),
     "help": ("Read offline workflow topics or a command help page", "help quickstart"),
-    "view": ("Read a UTF-8 artifact; following is opt-in and starts no work", "view --file notes.md"),
+    "view": ("Read a UTF-8 artifact; following is opt-in and starts no work", "view notes.md"),
 }
 
 
@@ -505,6 +507,11 @@ def _mission_create_defaults() -> str:
     providers, routes = resolved_default_rotation()
     rotation = f"routes {routes}" if routes else f"providers {providers}"
     return f"\nDefaults: cwd is the current directory; {rotation} (from your llm-tools config when set);\nmode is Background unless --mode says otherwise."
+
+
+EXIT_STATUS_TEXT = """Exit status
+  0 success or nothing to do · 1 runtime failure · 2 usage error · 3 not found or ambiguous · 4 wrong state
+  With --json an error is {"error": {"code", "message", "hint"}} on standard output, same status."""
 
 
 def decorate_parser(parser: object) -> None:
@@ -552,7 +559,7 @@ def decorate_parser(parser: object) -> None:
             if "--mission ID" in example:
                 shorthand = (
                     "\n  llm-bridge " + example.replace("--mission ID", "--mission 3f9a1c2b")
-                    + "\n\n--mission takes a unique ID prefix (4+ characters) and may be omitted inside the mission's folder."
+                    + "\n\n--mission takes a unique ID prefix (3+ characters) and may be omitted inside the mission's folder."
                 )
             current.epilog = "Example:\n  llm-bridge " + example + shorthand + "\n\nMore: llm-bridge help keys · llm-bridge help recovery"
         for action in current._actions:
@@ -609,4 +616,6 @@ Common commands
 Also: missions, finish, mission list, mission colour, rotation, theme, resume, cancel,
 detach, proposal, events, doctor, control, usage, station, steer, view, backup, restore,
 remote, worker, help.
-More: llm-bridge COMMAND --help · help keys · help distributed (--target WORKER COMMAND)"""
+More: llm-bridge COMMAND --help · help keys · help distributed (--target WORKER COMMAND)
+
+""" + EXIT_STATUS_TEXT

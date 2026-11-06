@@ -181,7 +181,7 @@ def test_plain_listing_and_json_shape() -> None:
     payload = sw.missions_json(rows)
     assert payload["schema_version"] == 1 and len(payload["missions"]) == 4
     first = payload["missions"][0]
-    assert set(first) == {"id", "short_id", "name", "status", "cwd", "provider", "current_task", "live", "station", "station_idle", "stale", "review_task", "controller_running", "rotation", "colour"}
+    assert set(first) == {"id", "short_id", "name", "status", "cwd", "provider", "current_task", "live", "station", "station_idle", "stale", "review_task", "tasks", "controller_running", "rotation", "colour"}
     assert first["colour"].startswith("mission_")
     assert payload["missions"][1]["current_task"] == {"id": 2, "ordinal": 2, "status": "RUNNING", "title": "Write docs"}
     assert first["provider"] == "codex" and payload["missions"][2]["provider"] is None
@@ -397,7 +397,7 @@ def test_cli_finish_reports_json_and_errors(state: Path, tmp_path: Path, monkeyp
         raise FinishError(bridge_finish.NOT_EXITED_MESSAGE)
 
     monkeypatch.setattr(bridge_finish, "finish_mission", refuse)
-    assert bridge.main(["finish", "--mission", mission_id]) == 2
+    assert bridge.main(["finish", "--mission", mission_id]) == 4
     assert "Provider did not exit" in capsys.readouterr().err
     assert bridge.dispatch_console_command(mission_id, "finish") == "error: Provider did not exit · switch to it with Ctrl-] then P"
 
