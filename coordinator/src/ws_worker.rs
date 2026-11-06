@@ -164,7 +164,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
     };
     drop(pending);
     let worker_id = hello.worker_id.clone();
-    let (generation, cursor) = match st.db.worker_hello(&name, &worker_id, &hello.payload, &caps) {
+    let (generation, cursor) = match st.db.worker_hello(&name, &worker_id, &hello.payload, &caps, &remote) {
         Ok(HelloOutcome::Ok { generation, cursor }) => (generation, cursor),
         Ok(HelloOutcome::WorkerIdMismatch) => {
             let _ = send(
@@ -295,7 +295,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         let _ = socket.send(close_frame(code, reason)).await;
     }
     if st.hub.unregister(&name, conn_id) {
-        let _ = st.db.worker_seen(&name, 0);
+        let _ = st.db.worker_disconnected(&name);
         st.hub
             .publish(json!({"type": "worker", "worker": name, "state": "offline", "generation": generation}));
     }

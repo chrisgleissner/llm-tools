@@ -6,6 +6,10 @@ small local reference at `/api/docs`. API tokens are sent only in the
 for mission and task changes; worker administration and diagnostics require
 `admin`. Token secrets are shown once by `bridge-coordinator token create`.
 
+`GET /api/v1/workers` and `GET /api/v1/workers/{name}` include the hostname
+reported at enrolment and the peer address of the active worker connection. The
+address is null while the worker is offline; forwarded headers do not affect it.
+
 The current version uses the durable `POST /api/v1/commands` adapter. A command
 request has a caller-chosen `request_id`; retrying the same request ID returns
 the journal entry rather than applying the operation again. `Idempotency-Key`

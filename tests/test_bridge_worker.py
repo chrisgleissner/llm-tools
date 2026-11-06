@@ -87,15 +87,23 @@ def test_enrolment_is_private_validated_and_hides_the_token(state, capsys):
     assert worker.unenroll() is True and worker.unenroll() is False
 
 
-def test_hello_reports_inventory_and_only_permitted_operations(state):
+def test_hello_reports_inventory_and_only_permitted_operations(state, monkeypatch):
     directory, mission_id = state
     session, _ = _session(directory, allow_control=False)
+    monkeypatch.setattr(worker.platform, "node", lambda: "test-host.example")
     hello = decode(session.hello().encode())
     assert hello.payload["missions"][0]["id"] == mission_id
+    assert hello.payload["host_name"] == "test-host.example"
     assert hello.payload["event_cursor"] > 0
     operations = {spec["operation"] for spec in hello.payload["capabilities"]}
     assert "mission.status" in operations and not any(spec["mutating"] for spec in hello.payload["capabilities"])
     assert "token" not in session.hello().encode()
+
+
+@pytest.mark.parametrize(("hostname", "expected"), [("Pi-Lab.Example", "pi-lab"), ("host_name", "host-name"), ("!!!", "worker")])
+def test_default_worker_name_uses_short_safe_hostname(monkeypatch, hostname, expected):
+    monkeypatch.setattr(worker.platform, "node", lambda: hostname)
+    assert worker.default_worker_name() == expected
 
 
 def test_generation_fencing(state):
@@ -253,17 +261,19 @@ def test_run_drops_a_silent_coordinator(state, monkeypatch):
 def test_worker_cli(state, tmp_path, capsys, monkeypatch):
     token_file = tmp_path / "token"
     token_file.write_text(TOKEN + "\n")
+    monkeypatch.setattr(worker.platform, "node", lambda: "Test-Host.Example")
     assert main(["worker", "status"]) == 2
     assert "not enrolled" in capsys.readouterr().err
-    assert main(["worker", "enroll", "--name", "ws", "--coordinator", "wss://c:8443", "--token-file", str(token_file)]) == 0
-    assert "remote control read-only" in capsys.readouterr().out
+    assert main(["worker", "enroll", "--coordinator", "wss://c:8443", "--token-file", str(token_file)]) == 0
+    enrolled = capsys.readouterr().out
+    assert "Enrolled worker test-host" in enrolled and "remote control read-only" in enrolled
     assert main(["worker", "status", "--json"]) == 0
     out = capsys.readouterr().out
-    assert json.loads(out)["name"] == "ws" and TOKEN not in out
-    assert main(["worker", "status"]) == 0 and "allow_control: False" in capsys.readouterr().out
+    assert json.loads(out)["name"] == "test-host" and TOKEN not in out
+    assert main(["worker", "status"]) == 0 and "Remote access: read-only" in capsys.readouterr().out
     started = []
     monkeypatch.setattr(worker, "run", lambda session, connect, stop, log: started.append(session.config.name))
-    assert main(["worker", "run"]) == 0 and started == ["ws"]
+    assert main(["worker", "run"]) == 0 and started == ["test-host"]
     capsys.readouterr()
     assert main(["worker", "unenroll"]) == 0 and "removed" in capsys.readouterr().out
     assert main(["worker", "unenroll"]) == 0 and "not enrolled" in capsys.readouterr().out

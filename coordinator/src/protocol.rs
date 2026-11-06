@@ -43,7 +43,7 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
                 "missions",
                 "event_cursor",
             ],
-            &[],
+            &["host_name"],
         ),
         "welcome" => (&["generation", "protocol_version", "event_cursor"], &[]),
         "command" => (&["schema_version", "operation", "params", "mission_id", "target", "request_id"], &[]),
@@ -298,6 +298,14 @@ pub fn check_hello(msg: &Message) -> Result<Value, ProtocolError> {
             return perr("invalid-message", format!("hello: {k} must be a string"));
         }
     }
+    if let Some(host) = p.get("host_name") {
+        if !host
+            .as_str()
+            .is_some_and(|value| !value.is_empty() && value.len() <= 255 && !value.chars().any(char::is_control))
+        {
+            return perr("invalid-message", "hello: host_name must be 1-255 bytes without control characters");
+        }
+    }
     if !p["platform"].is_object() {
         return perr("invalid-message", "hello: platform must be an object");
     }
@@ -315,4 +323,35 @@ pub fn check_hello(msg: &Message) -> Result<Value, ProtocolError> {
         return perr("invalid-message", "hello: too many missions");
     }
     Ok(Value::Array(caps.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hello_payload(host_name: Option<&str>) -> Value {
+        let mut payload = json!({
+            "worker_id": "worker-1",
+            "name": "worker-1",
+            "software_version": "1.0",
+            "protocol_versions": [PROTOCOL_VERSION],
+            "platform": {},
+            "capabilities": [],
+            "missions": [],
+            "event_cursor": 0
+        });
+        if let Some(host) = host_name {
+            payload["host_name"] = json!(host);
+        }
+        payload
+    }
+
+    #[test]
+    fn hello_accepts_optional_host_name_and_older_workers() {
+        for host_name in [None, Some("build-host")] {
+            let raw = encode("hello", "worker-1", 0, hello_payload(host_name));
+            let decoded = decode(raw.as_bytes()).expect("compatible hello");
+            assert_eq!(decoded.payload.get("host_name").and_then(Value::as_str), host_name);
+        }
+    }
 }

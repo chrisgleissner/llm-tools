@@ -38,6 +38,12 @@ def test_valid_messages_round_trip(message):
     assert decode(message.encode().encode()) == message
 
 
+def test_hello_without_optional_host_name_remains_compatible():
+    hello = next(message for message in VALID if message.type == "hello")
+    decoded = decode(hello.encode())
+    assert "host_name" not in decoded.payload
+
+
 @pytest.mark.parametrize(
     ("raw", "code"),
     [
@@ -65,6 +71,7 @@ def test_valid_messages_round_trip(message):
         (json.dumps(_message("command.ack", {"request_id": "r", "status": "done"})), "invalid-message"),
         (json.dumps(_message("command", {**CommandRequest("x").to_json(), "schema_version": 9})), "unsupported-version"),
         (json.dumps(_message("hello", {**VALID[0].payload, "missions": {}})), "invalid-message"),
+        (json.dumps(_message("hello", {**VALID[0].payload, "host_name": "bad\nhost"})), "invalid-message"),
         (json.dumps(_message("error", {"code": 1, "message": "m"})), "invalid-message"),
         ("x" * (proto.MAX_MESSAGE_BYTES + 1), "message-too-large"),
     ],

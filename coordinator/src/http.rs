@@ -758,6 +758,7 @@ fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
     let online = st.hub.online(&w.name);
     let last_seen = if online { Some(crate::now()) } else { w.last_seen };
     json!({"name": w.name, "id": w.worker_id, "state": if online { "online" } else { "offline" },
+           "host_name": w.host_name, "remote_address": if online { w.remote_address.clone() } else { None },
            "last_seen": last_seen, "generation": w.generation, "event_cursor": w.event_cursor,
            "versions": {"software": w.software_version, "protocol": w.protocol_versions},
            "platform": w.platform, "capabilities": w.capabilities})
@@ -766,6 +767,13 @@ fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
 async fn list_workers(State(st): State<St>, _a: Authed) -> ApiResult {
     let workers: Vec<Value> = st.db.workers_list()?.iter().map(|w| worker_json(&st, w)).collect();
     Ok(json_ok(StatusCode::OK, json!({"workers": workers})))
+}
+
+async fn get_worker(State(st): State<St>, Path(name): Path<String>, _a: Authed) -> ApiResult {
+    let Some(worker) = st.db.worker_get(&name)? else {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "worker was not found"));
+    };
+    Ok(json_ok(StatusCode::OK, worker_json(&st, &worker)))
 }
 
 async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
@@ -1659,7 +1667,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
     ("/api/v1/auth/password", &["POST"], Access::Authed, "session"),
     ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
-    ("/api/v1/workers/{name}", &["DELETE"], Access::Authed, "admin"),
+    ("/api/v1/workers/{name}", &["GET", "DELETE"], Access::Authed, "admin"),
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
@@ -1746,7 +1754,7 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/auth/logout", post(logout).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/password", post(change_password).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/workers", get(list_workers).post(add_worker))
-        .route("/api/v1/workers/{name}", delete(revoke_worker))
+        .route("/api/v1/workers/{name}", get(get_worker).delete(revoke_worker))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/missions", get(list_missions))

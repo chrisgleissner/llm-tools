@@ -160,6 +160,7 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
         .unwrap();
     let mut hello = serde_json::Map::new();
     hello.insert("missions".into(), json!([{"id":"mission-1","name":"Example"}]));
+    hello.insert("host_name".into(), json!("api-test-host"));
     env.srv
         .state
         .db
@@ -168,6 +169,7 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
             "worker-id-resource-test",
             &hello,
             &json!([{"operation":"task.list","mutating":false},{"operation":"mission.status","mutating":false}]),
+            "203.0.113.7",
         )
         .unwrap();
 
@@ -223,7 +225,7 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
     env.srv
         .state
         .db
-        .worker_hello("build-1", "worker-id-mutation-test", &hello, &json!(capabilities))
+        .worker_hello("build-1", "worker-id-mutation-test", &hello, &json!(capabilities), "203.0.113.7")
         .unwrap();
 
     for (path, body, expected_operation) in [

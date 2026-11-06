@@ -194,6 +194,13 @@ def status_public(env: dict[str, str] | None = None, *, service_state: str | Non
     }
 
 
+def default_worker_name() -> str:
+    """A short, command-safe default derived from this machine's host name."""
+    short = platform.node().split(".", 1)[0].casefold()
+    name = re.sub(r"[^a-z0-9]+", "-", short).strip("-")[:63].strip("-")
+    return name if _NAME.fullmatch(name) else "worker"
+
+
 def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None,
            allow_terminal_view: bool = False) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""
@@ -374,7 +381,7 @@ class WorkerSession:
             ]
             cursor = store.last_event_id()
         allowed = {spec["operation"] for spec in commands.operation_catalog() if self.config.allow_control or not spec["mutating"]}
-        return Message("hello", self.config.worker_id, 0, {
+        payload: dict[str, Any] = {
             "worker_id": self.config.worker_id,
             "name": self.config.name,
             "software_version": self.software_version,
@@ -383,7 +390,11 @@ class WorkerSession:
             "capabilities": [spec for spec in commands.operation_catalog() if spec["operation"] in allowed],
             "missions": missions,
             "event_cursor": cursor,
-        })
+        }
+        host_name = platform.node().strip()
+        if host_name and len(host_name.encode("utf-8")) <= 255 and not any(ord(char) < 32 or ord(char) == 127 for char in host_name):
+            payload["host_name"] = host_name
+        return Message("hello", self.config.worker_id, 0, payload)
 
     def error(self, code: str, text: str, in_reply_to: str | None = None) -> Message:
         payload: dict[str, Any] = {"code": code, "message": text}

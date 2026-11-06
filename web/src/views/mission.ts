@@ -134,6 +134,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         stale ? h("span", { class: "badge stale", title: "Worker offline or data may be out of date" }, "stale") : null,
         h("span", { class: "muted" }, ` worker `),
         h("a", { href: "/workers" }, workerName),
+        worker(workerName)?.host_name ? h("span", { class: "muted small" }, ` · ${worker(workerName)?.host_name}${worker(workerName)?.remote_address ? ` · ${worker(workerName)?.remote_address}` : ""}`) : null,
         m?.folder ? h("span", { class: "muted" }, ` - ${m.folder}`) : null,
       ),
       h("p", { class: "meta muted small" }, "Mission ID ", idChip(missionId, "mission ID")),

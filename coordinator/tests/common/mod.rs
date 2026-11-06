@@ -241,7 +241,7 @@ impl Fw {
         };
         fw.send(
             "hello",
-            json!({"worker_id": worker_id, "name": "w1", "software_version": "test", "protocol_versions": [1],
+            json!({"worker_id": worker_id, "name": "w1", "host_name": "test-host", "software_version": "test", "protocol_versions": [1],
             "platform": {"system": "Linux"}, "capabilities": caps(),
             "missions": [{"id": "m1", "name": "mission", "status": "running", "folder": "proj", "updated_at": null}], "event_cursor": cursor}),
         )

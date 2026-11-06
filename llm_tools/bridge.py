@@ -1298,7 +1298,7 @@ def _build_parser(
     worker = sub.add_parser("worker", help="optional: connect this host to a Bridge coordinator (off unless enrolled and run)")
     worker_sub = worker.add_subparsers(dest="worker_action", required=True)
     worker_enroll = worker_sub.add_parser("enroll", help="store the coordinator URL, CA and worker token for this host")
-    worker_enroll.add_argument("--name", required=True, help="worker name used as the remote target, for example workstation")
+    worker_enroll.add_argument("--name", help="worker name used as the remote target (default: short host name)")
     worker_enroll.add_argument("--coordinator", required=True, metavar="URL", help="coordinator base URL, for example wss://bridge.home.arpa:8443")
     worker_enroll.add_argument("--token-file", required=True, metavar="PATH", help="file holding the worker token printed by the coordinator ('-' reads stdin)")
     worker_enroll.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
@@ -2048,7 +2048,7 @@ def _worker_command(args: argparse.Namespace) -> int:
     if args.worker_action == "enroll":
         token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
         ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
-        config = worker.enroll(args.name, args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
+        config = worker.enroll(args.name or worker.default_worker_name(), args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
                                allow_terminal_view=bool(args.allow_terminal_view))
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
                       f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")

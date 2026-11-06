@@ -551,7 +551,7 @@ fn version_1_database_is_migrated_in_place() {
     }
     let db = bridge_coordinator::db::Db::open(&path).unwrap();
     let hello = serde_json::Map::new();
-    match db.worker_hello("w1", "wid", &hello, &json!([])).unwrap() {
+    match db.worker_hello("w1", "wid", &hello, &json!([]), "192.0.2.10").unwrap() {
         bridge_coordinator::db::HelloOutcome::Ok { generation, .. } => assert_eq!(generation, 8),
         _ => panic!("hello refused"),
     }

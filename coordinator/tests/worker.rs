@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
 use rustls::pki_types::pem::PemObject;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 fn submit(id: &str) -> Value {
@@ -27,6 +28,12 @@ async fn worker_authentication() {
     let (_, list) = api.get("/api/v1/workers").await;
     assert_eq!(list["workers"][0]["state"], "online");
     assert_eq!(list["workers"][0]["id"], "wid1");
+    assert_eq!(list["workers"][0]["host_name"], "test-host");
+    assert_eq!(list["workers"][0]["remote_address"], "127.0.0.1");
+    let (detail_status, detail) = api.get("/api/v1/workers/w1").await;
+    assert_eq!(detail_status, 200, "{detail}");
+    assert_eq!(detail["host_name"], "test-host");
+    assert_eq!(detail["remote_address"], "127.0.0.1");
     // The stored last_seen is written only every ten minutes; a connected worker still reads as seen now.
     env.srv.state.db.worker_age("w1", 1).unwrap();
     let (_, list) = api.get("/api/v1/workers").await;
@@ -40,12 +47,39 @@ async fn worker_authentication() {
     let (st, _) = api.send(api.rb(Method::DELETE, "/api/v1/workers/w1")).await;
     assert_eq!(st, 200);
     assert_eq!(fw.expect_close().await, Some(1008));
+    let (_, offline_detail) = api.get("/api/v1/workers/w1").await;
+    assert!(offline_detail["remote_address"].is_null());
     let err = Fw::raw(&env, &token).await.expect_err("revoked");
     assert!(format!("{err:?}").contains("401"));
     assert_eq!(api.get("/api/v1/workers").await.1["workers"].as_array().unwrap().len(), 0);
     let audit = env.srv.state.db.audit_list(50).unwrap();
     assert!(audit.iter().any(|r| r["action"] == "worker.add") && audit.iter().any(|r| r["action"] == "worker.revoke"));
     assert!(!audit.iter().any(|r| r.to_string().contains(&token)));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_disconnect_clears_active_peer_address_but_keeps_enrolment() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    assert_eq!(api.get("/api/v1/workers/w1").await.1["remote_address"], "127.0.0.1");
+
+    fw.ws.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let worker = api.get("/api/v1/workers/w1").await.1;
+            if worker["state"] == "offline" {
+                assert!(worker["remote_address"].is_null(), "{worker}");
+                assert_eq!(worker["host_name"], "test-host");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker disconnect is reflected");
     env.stop().await;
 }
 

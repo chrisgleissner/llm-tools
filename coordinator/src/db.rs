@@ -35,7 +35,8 @@ CREATE TABLE workers(
   name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, worker_id TEXT,
   generation INTEGER NOT NULL DEFAULT 0, event_cursor INTEGER NOT NULL DEFAULT 0, mission_cursor INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL, last_seen INTEGER, hello_at INTEGER, last_event_at INTEGER,
-  software_version TEXT, protocol_versions TEXT, platform TEXT, capabilities TEXT);
+  software_version TEXT, protocol_versions TEXT, platform TEXT, capabilities TEXT,
+  host_name TEXT, remote_address TEXT);
 CREATE TABLE missions(
   worker TEXT NOT NULL REFERENCES workers(name) ON DELETE CASCADE, mission_id TEXT NOT NULL, info TEXT NOT NULL,
   PRIMARY KEY(worker, mission_id)) WITHOUT ROWID;
@@ -79,6 +80,8 @@ pub struct WorkerRow {
     pub protocol_versions: Option<Value>,
     pub platform: Option<Value>,
     pub capabilities: Option<Value>,
+    pub host_name: Option<String>,
+    pub remote_address: Option<String>,
 }
 
 impl WorkerRow {
@@ -169,7 +172,7 @@ fn json_col(s: Option<String>) -> Option<Value> {
 }
 
 const WCOLS: &str =
-    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities";
+    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities, host_name, remote_address";
 
 fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
     Ok(WorkerRow {
@@ -185,6 +188,8 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
         protocol_versions: json_col(r.get(9)?),
         platform: json_col(r.get(10)?),
         capabilities: json_col(r.get(11)?),
+        host_name: r.get(12)?,
+        remote_address: r.get(13)?,
     })
 }
 
@@ -205,7 +210,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -284,6 +289,27 @@ impl Db {
                 })? > 0;
             let alter = if has_column || !has_table { "" } else { MIGRATE_V5_COLUMN };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 5; COMMIT;"))?;
+        }
+        if version < 6 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_host = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='host_name'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let has_address = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='remote_address'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let mut alter = String::new();
+            if has_table && !has_host {
+                alter.push_str("ALTER TABLE workers ADD COLUMN host_name TEXT;");
+            }
+            if has_table && !has_address {
+                alter.push_str("ALTER TABLE workers ADD COLUMN remote_address TEXT;");
+            }
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 6; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -539,8 +565,22 @@ impl Db {
         Ok(())
     }
 
+    /// Record the final disconnect time and clear the address of the closed socket.
+    pub fn worker_disconnected(&self, name: &str) -> R<()> {
+        self.c()
+            .execute("UPDATE workers SET last_seen=?, remote_address=NULL WHERE name=?", params![crate::now(), name])?;
+        Ok(())
+    }
+
     /// Record a validated hello: bind the stable worker id, bump the persisted generation, replace the mission index.
-    pub fn worker_hello(&self, name: &str, worker_id: &str, hello: &serde_json::Map<String, Value>, capabilities: &Value) -> R<HelloOutcome> {
+    pub fn worker_hello(
+        &self,
+        name: &str,
+        worker_id: &str,
+        hello: &serde_json::Map<String, Value>,
+        capabilities: &Value,
+        remote_address: &str,
+    ) -> R<HelloOutcome> {
         let mut c = self.c();
         let tx = c.transaction()?;
         let row: Option<(Option<String>, i64, i64)> = tx
@@ -566,8 +606,8 @@ impl Db {
             params![name, generation],
         )?;
         let text = |k: &str| hello.get(k).map(|v| v.to_string());
-        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=? WHERE name=?",
-            params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), name])?;
+        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=?, host_name=?, remote_address=? WHERE name=?",
+            params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), hello.get("host_name").and_then(Value::as_str), remote_address, name])?;
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             for m in missions {

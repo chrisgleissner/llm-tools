@@ -127,7 +127,8 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
 | POST | `/auth/password` | `{current, new}`; deletes every session. |
-| GET | `/workers` | name, id, state (`online`/`offline`), last_seen, versions, platform, capabilities. |
+| GET | `/workers` | name, stable id, state (`online`/`offline`), last_seen, versions, platform, capabilities, enrolled host name, and the active connection's peer address. The address is null while offline. |
+| GET | `/workers/{name}` | The same safe worker summary fields as the list route. |
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
 | GET | `/tokens` | Token name, scopes, creation, last-use and expiry metadata. Requires an administrator session or an `admin` token. |

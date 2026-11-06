@@ -1,6 +1,8 @@
 export interface WorkerInfo {
   name: string;
   id: string;
+  host_name: string | null;
+  remote_address: string | null;
   state: "online" | "offline";
   last_seen: number | null;
   generation: number;

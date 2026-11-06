@@ -215,6 +215,10 @@ llm-bridge remote login --coordinator https://localhost:8443 --token-file api-to
 llm-bridge --target build-1 mission list
 ```
 
+`--name` is optional; without it, enrolment uses the machine's short host name.
+The coordinator's Workers page and `llm-bridge worker list` show the host name
+and the current connection address.
+
 A worker is read-only for remote clients by default. `--allow-terminal-view` at
 enrolment also shares mission terminals for viewing, and `--allow-control` allows
 changes and terminal input. `--target local` (the default) runs on this host; an

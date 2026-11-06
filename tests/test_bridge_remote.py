@@ -212,10 +212,11 @@ def test_main_routes_targets_and_worker_list_to_the_remote_client(capsys):
 
 
 def test_worker_list_shows_age_not_epoch():
-    workers = [{"name": "ws", "state": "online", "last_seen": 1000}, {"name": "old", "state": "offline", "last_seen": None},
+    workers = [{"name": "ws", "host_name": "builder", "remote_address": "203.0.113.7", "state": "online", "last_seen": 1000}, {"name": "old", "state": "offline", "last_seen": None},
                {"name": "x", "state": "offline", "last_seen": "garbage"}]
     text = remote._format_workers(workers, now=1000 + 30)
     assert "last seen just now" in text and "last seen never" in text and "1000" not in text
+    assert "builder (203.0.113.7)" in text and "unknown host (offline)" in text
     assert "last seen 1h 2m ago" in remote._format_workers(workers[:1], now=1000 + 3720)
 
 

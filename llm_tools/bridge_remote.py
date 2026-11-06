@@ -402,7 +402,9 @@ def _format_workers(workers: list[dict[str, Any]], now: float | None = None) -> 
         return "No workers are registered with the coordinator."
     lines = []
     for worker in workers:
-        lines.append(f"{worker.get('name', '?'):<20} {worker.get('state', '?'):<8} last seen {_last_seen(worker.get('last_seen'), now)}")
+        location = str(worker.get("host_name") or "unknown host")
+        address = str(worker.get("remote_address") or "offline")
+        lines.append(f"{worker.get('name', '?'):<20} {location} ({address}) · {worker.get('state', '?')}, last seen {_last_seen(worker.get('last_seen'), now)}")
     return "\n".join(lines)
 
 

@@ -35,9 +35,9 @@ const platform = { system: "Linux", machine: "x86_64", python: "3.12.3" };
 const caps = [{ operation: "mission.status", mutating: false }, { operation: "task.pause", mutating: true }];
 
 export const WORKERS = [
-  { name: "alpha", id: "5f2c9d1e-7a41-4c6b-9a7e-0d3b1f6a2c11", state: "online", last_seen: nowS - 20, generation: 3, event_cursor: 40, versions: { software: "0.9.2", protocol: [1] }, platform, capabilities: caps },
-  { name: "beta", id: "b81e44a0-2f5d-4e0c-8f1a-6c7d90e5a3d2", state: "offline", last_seen: nowS - 7200, generation: 1, event_cursor: 12, versions: { software: "0.9.1", protocol: [1] }, platform, capabilities: caps },
-  { name: "gamma", id: "c0de1234-aaaa-4bbb-8ccc-1234567890ab", state: "online", last_seen: nowS - 5, generation: 2, event_cursor: 7, versions: { software: "0.9.2", protocol: [1] }, platform: { ...platform, system: "Darwin", machine: "arm64" }, capabilities: caps },
+  { name: "alpha", id: "5f2c9d1e-7a41-4c6b-9a7e-0d3b1f6a2c11", host_name: "build-node", remote_address: "203.0.113.10", state: "online", last_seen: nowS - 20, generation: 3, event_cursor: 40, versions: { software: "0.9.2", protocol: [1] }, platform, capabilities: caps },
+  { name: "beta", id: "b81e44a0-2f5d-4e0c-8f1a-6c7d90e5a3d2", host_name: "docs-node", remote_address: null, state: "offline", last_seen: nowS - 7200, generation: 1, event_cursor: 12, versions: { software: "0.9.1", protocol: [1] }, platform, capabilities: caps },
+  { name: "gamma", id: "c0de1234-aaaa-4bbb-8ccc-1234567890ab", host_name: "mac-builder", remote_address: "203.0.113.12", state: "online", last_seen: nowS - 5, generation: 2, event_cursor: 7, versions: { software: "0.9.2", protocol: [1] }, platform: { ...platform, system: "Darwin", machine: "arm64" }, capabilities: caps },
 ];
 
 const mk = (n: number, worker: string, name: string, status: string, folder: string, ago: number) => ({

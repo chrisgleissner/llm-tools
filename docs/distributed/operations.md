@@ -29,6 +29,11 @@ time, `UMask=0077` and `NoNewPrivileges=yes`. It restarts only on failure;
 cleanly. Missions keep running while the worker is stopped or disconnected;
 only replication and remote commands wait.
 
+`worker enroll --name` is optional. When omitted, Bridge uses the short host
+name from the machine; pass `--name` to choose a stable target label. The
+coordinator shows that label with the host name and the peer address of the
+current worker connection.
+
 `llm-bridge worker uninstall-service` stops and removes the unit.
 `llm-bridge worker unenroll` deletes the token and coordinator CA.
 
