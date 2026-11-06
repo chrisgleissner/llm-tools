@@ -1529,8 +1529,8 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-005 | high | fixed | fc9c5fa. Root cause: under `LLM_SCHEDULER_USAGE_JSON(_FILE)` the controller used the injected capacity while F8 read the providers itself. F8 now uses the same snapshots, labels its source, warns on a difference from the controller, lists the rotation by default (`a` all), and reads `× empty` at 0%. `tests/test_bridge_usage_agreement.py::test_embedded_read_uses_the_capacity_the_controller_observes` and `test_an_exhausted_monthly_window_reads_empty_not_conserve` failed before the fix. |
 | CLIUX-006 | high | open | |
 | CLIUX-007 | high | fixed | 0bde2f6. Did-you-mean for unknown commands, subcommands and options; internal commands hidden. `tests/test_bridge_cli_errors.py::test_unknown_command_suggests_the_closest_public_command` and eight more; failed before the fix on the argparse choice list. |
-| CLIUX-008 | high | open | |
-| CLIUX-009 | high | open | |
+| CLIUX-008 | high | fixed | b137f3e. `--mode native|background|headless` on `mission create` and `start` (old flags hidden aliases); Background stays the scripted default, with the reason stated in help; the home form offers all three; JSON `config.mode`. `tests/test_bridge_mode_option.py::test_create_mode_option_sets_the_flags_and_json_mode` and six more; failed before the fix. |
+| CLIUX-009 | high | fixed | b137f3e. Help defaults come from the resolving function; completed missions reopen the same way with or without `--mission`; `help keys` names all nine views; a refused command clears the line. `tests/test_bridge_mode_option.py::test_help_default_rotation_drops_providers_the_config_disables` and six more; failed before the fix. |
 | CLIUX-010 | high | fixed | 82a36cf. `mission create` warns about an unfinished mission in the same folder (`--new` silences it); suggested commands include `--mission`; the ambiguity list shows when each mission was updated. `tests/test_bridge_cli_start_create_ux.py`::test_create_warns_when_the_folder_already_has_an_unfinished_mission and four more; failed before the fix. |
 | CLIUX-011 | medium | open | |
 | CLIUX-012 | medium | open | |

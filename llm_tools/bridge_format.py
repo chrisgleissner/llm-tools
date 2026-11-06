@@ -272,8 +272,7 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
     if action == "add":
         text = f"Added {format_task_line(inner)} · priority {inner.get('priority', 0)}"
         if inner.get("mission_reopened"):
-            text += f"
-Mission {short_id(inner.get('mission_id'))} reopened · start it with: llm-bridge start{_mission_option(inner)}"
+            text += f"\nMission {short_id(inner.get('mission_id'))} reopened · start it with: llm-bridge start{_mission_option(inner)}"
         return text
     if action == "amend":
         number = inner.get("task_ordinal", inner.get("task_id"))
