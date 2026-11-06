@@ -49,6 +49,13 @@ status, events, task lists and supported task/mission actions; commands without 
 resource mapping continue through the low-level command endpoint while their
 parity decision is tracked below.
 
+## CLI parity exclusions
+
+`llm-bridge screen --mission ID` is a local read-only snapshot of the provider
+pane. It has no REST resource because returning raw terminal content through the
+API is prohibited; remote operators can use the scoped `/api/v1/terminal`
+WebSocket to watch the pane.
+
 ```sh
 export COORDINATOR=https://localhost:8443
 export TOKEN='lbr_pat_…'              # read scope

@@ -1162,6 +1162,10 @@ def _build_parser(
     _add_mission_arg(status, default_mission)
     _add_json_arg(status)
 
+    screen = sub.add_parser("screen", help="read a bounded snapshot of a native provider's current screen")
+    _add_mission_arg(screen, default_mission)
+    _add_json_arg(screen)
+
     agents = sub.add_parser("agents", help="inspect live Bridge provider operations and native Codex child agents")
     agent_scope = agents.add_mutually_exclusive_group()
     agent_scope.add_argument("--mission", dest="agent_mission", help="limit the map to one Bridge mission")
@@ -2269,6 +2273,20 @@ def _main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(source)
                 return 0
             return run_document(source, title=f"Artifact · {path.name}", path=path, follow=args.follow)
+        if args.command == "screen":
+            from .terminal import TmuxTerminalBackend
+
+            handle = _load_handle(args.mission)
+            content = TmuxTerminalBackend().capture(handle, pane="provider")
+            all_lines = content.splitlines()
+            lines = all_lines[-200:]
+            clipped = [line[:1000] for line in lines]
+            captured = "\n".join(clipped)
+            if args.json:
+                print(json.dumps({"schema_version": 1, "mission_id": args.mission, "screen": captured, "truncated": len(all_lines) > 200 or any(len(line) > 1000 for line in lines)}, ensure_ascii=False))
+            else:
+                print(captured)
+            return 0
         if args.command == "_controller":
             from .bridge_runtime import run_controller
             from .bridge_logs import capture_process_output
