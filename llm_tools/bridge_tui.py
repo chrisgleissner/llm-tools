@@ -764,7 +764,8 @@ def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], widt
 
     Only facts the projection holds are shown. The workspace line comes from the
     repository fingerprints recorded before and after the task's last provider
-    run; no list of changed files is recorded, so none is shown.
+    run, with the changed file names the controller recorded when the run
+    ended (none for a folder that is not a repository).
     """
     kind, value = target
     task = next((item for item in _items(snapshot.get("tasks"))
@@ -795,8 +796,50 @@ def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], widt
     ]
     known = [data for data in progress if data.get("before") and data.get("after")]
     if known:
-        lines.append("Workspace: " + ("changed during the run" if known[-1]["before"] != known[-1]["after"] else "unchanged by the run"))
+        lines.append(_cut_text(_workspace_line(known[-1]), width))
     return lines
+
+
+_WORKSPACE_FILES_SHOWN = 5
+
+
+def _workspace_line(progress: dict[str, object]) -> str:
+    """`Workspace: 1 file changed: hello.txt`, or the plain change/no-change verdict when no names were recorded."""
+    if progress["before"] == progress["after"]:
+        return "Workspace: unchanged by the run"
+    names = progress.get("changed_files")
+    total = _int_or_none(progress.get("changed_total"))
+    if not isinstance(names, list) or not total:
+        return "Workspace: changed during the run"
+    shown = [_text(name, 80) for name in names[:_WORKSPACE_FILES_SHOWN]]
+    more = total - len(shown)
+    line = f"Workspace: {total} file{'s' if total != 1 else ''} changed: {', '.join(shown)}" + (f" and {more} more" if more > 0 else "")
+    earlier = _int_or_none(progress.get("already_modified"))
+    return line + (f" ({earlier} already modified before the run)" if earlier else "")
+
+
+def _last_run(snapshot: dict[str, object], task: dict[str, object]) -> dict[str, object] | None:
+    """The newest operation the projection holds for ``task``."""
+    task_id = str(task.get("id"))
+    runs = [op for op in _items(snapshot.get("operations")) if str(op.get("task_id")) == task_id]
+    return max(runs, key=lambda op: str(op.get("created_at") or "")) if runs else None
+
+
+def _last_run_line(snapshot: dict[str, object], task: dict[str, object]) -> str | None:
+    """`Last run: claude · exit 0 · 12s · o output · d diff` for the Tasks inspect pane, or None before any run."""
+    from . import common
+
+    last = _last_run(snapshot, task)
+    if last is None:
+        return None
+    parts = [_text(last.get("route_id") or last.get("station") or last.get("provider") or "provider", 40)]
+    if last.get("exit_code") is not None:
+        parts.append(f"exit {_text(last['exit_code'], 8)}")
+    started = common.parse_epoch(last.get("created_at"), use_date=False)
+    ended = common.parse_epoch(last.get("updated_at"), use_date=False)
+    if started is not None and ended is not None and ended >= started and str(last.get("status")) not in {"RUNNING", "PREPARED", "INTENT"}:
+        parts.append(_age(int(ended - started), note=False))
+    return "Last run: " + _SEP.join([*parts, "o output", "d diff"])
 
 
 # Console-only shortcuts that expand to public commands.
@@ -1088,7 +1131,7 @@ def _bounded_snapshot(data: dict[str, object]) -> dict[str, object]:
     result["operations"] = _projected_rows(
         data.get("operations"),
         20,
-        ("id", "operation_id", "task_id", "task_ordinal", "provider", "station", "route_id", "model", "native_session_id", "restoration_state", "phase", "status", "exit_code", "created_at"),
+        ("id", "operation_id", "task_id", "task_ordinal", "provider", "station", "route_id", "model", "native_session_id", "restoration_state", "phase", "status", "exit_code", "created_at", "updated_at"),
     )
     pending = data.get("pending_commands")
     result["pending_command_count"] = len(pending) if isinstance(pending, list) else 0
@@ -3187,6 +3230,8 @@ class _ConsoleState:
     document_heading_selected: int = 0
     document_pending: bool = False
     document_task_id: str | None = None
+    document_kind: str = "prompt"  # what the pending read returns: prompt, output or diff
+    _confirm_overlay_hidden: bool = field(default=False, repr=False)  # the approval dialog sits behind a pager
     edit_document_requested: bool = False
     document_edit_pending: bool = False
     edit_initial_text: str = ""
@@ -3358,7 +3403,7 @@ class _ConsoleState:
             self.document_notice = ""
             task_id, revision, prompt, error = document_result
             self.document_pending = False
-            self.document_task_id = None if task_id == "objective" else task_id
+            self.document_task_id = None if task_id == "objective" or self.document_kind != "prompt" else task_id
             if prompt is None:
                 self.document_edit_pending = False
                 self.output.append(error or "Full source unavailable; edit cancelled. Retry the full read.")
@@ -3370,6 +3415,11 @@ class _ConsoleState:
                 if self.document_viewer is not None:
                     self.document_viewer.release()
                 title = f"{self.mission_id[:12]} · objective" if task_id == "objective" else f"{self.mission_id[:12]} · task {task_id} · r{revision} · prompt"
+                if self.document_kind != "prompt":
+                    title = f"{self.mission_id[:12]} · task {task_id} · {self.document_kind}"
+                    if self.confirm_command is not None and self.response_overlay:
+                        self.response_overlay = False  # the pager draws below the response overlay
+                        self._confirm_overlay_hidden = True
                 self.document_viewer = DocumentViewer(title, prompt)
         if snapshot_result is not None:
             data, error = snapshot_result
@@ -3620,7 +3670,7 @@ class _ConsoleState:
             lines = [f"{reason} · mission {_short_id(self.mission_id)}"]
             if approving is not None:
                 lines += _approval_summary(self.snapshot, approving)
-            self.output.extend([*lines, "Y approve · N or Esc cancel" if approving is not None else "Y confirm · N or Esc cancel"])
+            self.output.extend([*lines, "Y approve · N or Esc cancel · o output · d diff" if approving is not None else "Y confirm · N or Esc cancel"])
             self.response_overlay = True
             return True
         return self._dispatch(command)
@@ -3793,6 +3843,8 @@ class _ConsoleState:
                     command, self.confirm_command = self.confirm_command, None
                     self.response_overlay = False
                     self._dispatch(command)
+                elif isinstance(key, str) and key.lower() in {"o", "d"} and (number := self._approval_task_number()) is not None:
+                    self.request_task_evidence(number, "output" if key.lower() == "o" else "diff")
                 elif isinstance(key, str) and key.lower() == "n" or key in {"\x1b", "KEY_ESCAPE"}:
                     self.confirm_command = None
                     self.response_overlay = False
@@ -3887,11 +3939,17 @@ class _ConsoleState:
             if task is not None:
                 self.request_task_document(str(task_number(task) or ""))
             return True
+        if key in {"o", "d"} and self.view == "Tasks" and not self.input_focused:
+            task = self.selected_task()
+            if task is not None and task_number(task) is not None:
+                self.request_task_evidence(str(task_number(task)), "output" if key == "o" else "diff")
+            return True
         if key == "o" and self.view == "Overview" and not self.input_focused:
             if not self.document_pending:
                 self._invalidate_document_read()
                 generation = self._document_generation
                 self.document_pending = True
+                self.document_kind = "prompt"
                 def read_objective() -> None:
                     try:
                         from .bridge import open_store
@@ -4252,6 +4310,9 @@ class _ConsoleState:
         self.document_search_editing = False
         self.document_export_editing = False
         self.document_heading_list = False
+        if self._confirm_overlay_hidden:
+            self._confirm_overlay_hidden = False
+            self.response_overlay = self.confirm_command is not None  # back to the approval dialog
 
     def _invalidate_document_read(self) -> None:
         with self._result_lock:
@@ -4268,6 +4329,7 @@ class _ConsoleState:
         self._invalidate_document_read()
         generation = self._document_generation
         self.document_pending = True
+        self.document_kind = "prompt"
         self.document_edit_pending = for_edit
 
         def read_document() -> None:
@@ -4287,6 +4349,40 @@ class _ConsoleState:
                     self._document_result = result
 
         threading.Thread(target=read_document, name="llm-bridge-document", daemon=True).start()
+
+    def _approval_task_number(self) -> str | None:
+        """The number of the task the open approval dialog names."""
+        target = _approval_task(self.confirm_command or "")
+        if target is None:
+            return None
+        kind, value = target
+        for task in _items(self.snapshot.get("tasks")):
+            if (str(task.get("id")) if kind == "id" else str(task_number(task))) == value:
+                number = task_number(task)
+                return None if number is None else str(number)
+        return None
+
+    def request_task_evidence(self, number: str, kind: str) -> None:
+        """Read `task output` or `task diff` of task ``number`` off the input thread and open it in the pager."""
+        if self.document_pending:
+            self.output.append("A full task read is already in progress.")
+            return
+        self._invalidate_document_read()
+        generation = self._document_generation
+        self.document_pending = True
+        self.document_kind = kind
+
+        def read_evidence() -> None:
+            try:
+                text = str(self.dispatch(self.mission_id, shlex.join(["task", kind, *_task_ref(self.snapshot, number)])))
+                result = (number, "", None, text) if text.startswith("error:") else (number, "", text or f"(task {number} has no {kind})\n", "")
+            except Exception as exc:
+                result = (number, "", None, f"Could not read task {kind}: {_text(exc, 160)}")  # type: ignore[assignment]  # None stands for a missing value in this row
+            with self._result_lock:
+                if generation == self._document_generation:
+                    self._document_result = result
+
+        threading.Thread(target=read_evidence, name="llm-bridge-task-evidence", daemon=True).start()
 
     def selected_station_name(self) -> str | None:
         stations = _items(self.snapshot.get("stations"))
@@ -4499,6 +4595,7 @@ class _ConsoleState:
             f"Task {_text(task_number(task) if task_number(task) is not None else '?', 32)}: {_cut_text(task.get('title') or 'Untitled', 100)}",
             f"Status {_text(task.get('status', 'unknown'), 24)} | priority {_text(task.get('priority', '?'), 16)} | revision {_text(task.get('revision', '?'), 16)}",
             f"Origin {_text(task.get('origin') or 'operator', 24)} | proposal {_text(task.get('proposal_status') or 'not a proposal', 32)} | proposed by {_text(task.get('proposed_by_operation') or 'unknown', 32)}",
+            *([line] if (line := _last_run_line(self.snapshot, task)) else []),
             "Dependencies: " + (", ".join(_text(item, 32) for item in dependencies) if isinstance(dependencies, list) and dependencies else "none"),
             "Acceptance criteria:",
             *([f"  {index + 1}. {_cut_text(item, 240)}" for index, item in enumerate(acceptance[:_MAX_DETAIL_ITEMS])] if isinstance(acceptance, list) and acceptance else ["  none recorded"]),

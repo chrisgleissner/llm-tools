@@ -408,7 +408,7 @@ def test_approve_confirmation_shows_title_evidence_exit_status_and_workspace() -
     assert "Evidence (latest 3 of 4):" in text and "extra: latest line" in text and "pytest: 12 passed" not in text
     assert "Last run: codex, exit 0, exited" in text
     assert "Workspace: changed during the run" in text
-    assert state.output[-1] == "Y approve · N or Esc cancel"
+    assert state.output[-1] == "Y approve · N or Esc cancel · o output · d diff"
     screen = Screen(20, 100)
     bridge_tui._draw_response_overlay(screen, state)  # type: ignore[arg-type]
     assert "Y approve" in "".join(screen.lines) and "Fix the typo" in "".join(screen.lines)

@@ -281,10 +281,17 @@ Read submitting/accepted/deferred/applied/rejected feedback and current status."
 A successful invocation is not successful work. Inspect task source, evidence and
 acceptance conditions; use the actual mission and task IDs:
   llm-bridge task show --mission ID --task 1 --json
+  llm-bridge task output --mission ID --task 1        the provider's output of the last run
+  llm-bridge task diff --mission ID --task 1          the files that run changed in the working tree
   llm-bridge task verify --mission ID --task 1 --evidence 'pytest: 12 passed'
   llm-bridge task verify --mission ID --task 1 --approve --evidence 'reviewed'
 Approval marks work complete only through authoritative transition rules. UI
 approval asks for target-aware confirmation; scripted CLI semantics are unchanged.
+In the console the approval dialog lists the changed files; o opens the output and
+d the diff in the pager. task output pages the log on a terminal (--follow keeps
+following a growing log) and prints it plainly when piped; a log pruned for age
+is reported with its recorded size and digest. task diff compares the working
+tree with the commit and modified files recorded when the run started.
 
 Configure a verifier when creating the mission; each repeated argument is one
 argv item, not a shell command. Use equals for arguments beginning with '-':
@@ -419,6 +426,8 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "task add": ("Save a new task for the specified mission", "task add --mission ID --file prompt.md"),
     "task list": ("List tasks in the specified mission", "task list --mission ID --json"),
     "task show": ("Read the complete task text, recorded evidence and any pending amendment", "task show --mission ID --task 1 --json"),
+    "task output": ("Read the provider's output of the task's last run; pages it on a terminal, prints it when piped", "task output --mission ID --task 1"),
+    "task diff": ("Show what the task's last run changed in the working tree since the checkpoint recorded at its start", "task diff --mission ID --task 1"),
     "task amend": ("Replace the task text: applies at once, or after the current step when a provider is working on the task", "task amend --mission ID --task 1 --file revised.md"),
     "task priority": ("Change task scheduling priority; default priority is zero", "task priority --mission ID --task 1 --value 5"),
     "task reorder": ("Change a task's ordering value", "task reorder --mission ID --task 1 --value 10"),

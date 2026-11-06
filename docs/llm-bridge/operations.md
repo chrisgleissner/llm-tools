@@ -194,6 +194,8 @@ llm-bridge task add --mission MISSION_ID --file follow-up.md \
   --priority 5 --depends-on 1 --acceptance "tests pass"
 llm-bridge task list --mission MISSION_ID        # first 200 tasks; --all, or --limit N --offset N
 llm-bridge task show --mission MISSION_ID --task N
+llm-bridge task output --mission MISSION_ID --task N   # provider log of the last run; --follow while it runs
+llm-bridge task diff --mission MISSION_ID --task N     # working-tree change since that run started
 llm-bridge task priority --mission MISSION_ID --task N --value 10
 llm-bridge task reorder --mission MISSION_ID --task N --value 20
 llm-bridge task dependencies --mission MISSION_ID --task N --add PREREQUISITE_N

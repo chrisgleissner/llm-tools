@@ -27,6 +27,7 @@ from .bridge_states import (
 )
 from .bridge_refresh import CapacityRefreshWorker
 from .bridge_progress import repository_checkpoint
+from .bridge_review import recorded_change
 from .bridge_sessions import (
     NativeSessionIdentity,
     boot_id,
@@ -538,6 +539,7 @@ class BridgeMissionHooks:
             self._session_cwds[operation_id] = str(getattr(scheduler_config, "cwd", mission["cwd"]))
         checkpoint = repository_checkpoint(self._session_cwds[operation_id])
         context["repository_before"] = checkpoint.get("fingerprint")
+        context["repository_base"] = checkpoint
         self.store.record_runtime_event(self.mission_id, "repository-checkpoint", {
             "operation_id": operation_id,
             "task_id": task_id,
@@ -547,7 +549,7 @@ class BridgeMissionHooks:
         log_config = self.store.get_mission(self.mission_id)["config"]
         scheduler_config.max_output_bytes = int(log_config.get("log_max_bytes", 4 * 1024 * 1024))
         scheduler_config.max_output_rotations = int(log_config.get("log_rotations", 3))
-        scheduler_config.process_started = lambda process_pid: self._record_process(operation_id, process_pid)
+        scheduler_config.process_started = lambda process_pid: self._process_started(operation_id, process_pid, scheduler_config)
         scheduler_config.process_observer = lambda: self._observe_owned_codex_session(operation_id)
         scheduler_config.should_interrupt_wait = lambda: self._should_interrupt_wait(int(context["task_id"]))
         scheduler_config.command_argv_transform = self._native_session_argv_transform(operation_id, provider, scheduler_config)
@@ -800,6 +802,16 @@ class BridgeMissionHooks:
             return None
         return planned, arm
 
+    def _process_started(self, operation_id: str, process_pid: int, scheduler_config: Any) -> None:
+        self._record_process(operation_id, process_pid)
+        try:  # best effort: the provider is already running, so this must never fail the launch
+            run_dir = getattr(scheduler_config, "run_dir", None)
+            logs = sorted(run_dir.glob("attempt-*.out")) if run_dir else []
+            if logs:
+                self.store.record_operation_log_path(operation_id, str(logs[-1]))
+        except Exception:  # noqa: BLE001
+            pass
+
     def _record_process(self, operation_id: str, process_pid: int) -> None:
         token = _process_start_token(process_pid)
         if not token:
@@ -890,7 +902,10 @@ class BridgeMissionHooks:
                     "failure_class": failure["class"],
                     **common.diagnostic_clock_fields(),
                 })
-            checkpoint = repository_checkpoint(getattr(scheduler_config, "cwd", self.store.get_mission(self.mission_id)["cwd"]))
+            run_cwd = getattr(scheduler_config, "cwd", self.store.get_mission(self.mission_id)["cwd"])
+            checkpoint = repository_checkpoint(run_cwd)
+            base = context.get("repository_base")
+            changed = recorded_change(run_cwd, base) if isinstance(base, dict) and base.get("head") else {}
             self.store.record_runtime_event(self.mission_id, "operation-progress", {
                 "operation_id": operation_id,
                 "task_id": int(task["id"]),
@@ -901,6 +916,7 @@ class BridgeMissionHooks:
                 "station": str(selection.get("route") or selection.get("provider") or scheduler_config.provider),
                 "exit_code": int(status),
                 "output_sha256": _bounded_output_digest(output_files[-1]) if output_files else None,
+                **changed,
             })
             if status == OPERATOR_DECLINED_EXIT_CODE:
                 provider_name = str(selection.get("provider") or scheduler_config.provider)

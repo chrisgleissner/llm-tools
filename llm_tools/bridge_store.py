@@ -1123,6 +1123,14 @@ class BridgeStore:
             )
             self._event(op["mission_id"], "operation-process", {"process_pid": int(process_pid), "process_start": process_start}, task_id=op["task_id"], operation_id=operation_id)
 
+    def record_operation_log_path(self, operation_id: str, logs_path: str) -> None:
+        """Note where a running operation's log is, so `task output --follow` can read it before the run ends."""
+        with self._transaction():
+            self.db.execute(
+                "UPDATE operations SET logs_path=? WHERE id=? AND status='RUNNING' AND logs_path IS NULL",
+                (logs_path, operation_id),
+            )
+
     def record_operation_session(
         self,
         operation_id: str,

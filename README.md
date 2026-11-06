@@ -82,6 +82,8 @@ The same flow from a script, with no terminal attached:
 llm-bridge mission create --file task.md --name demo --native
 llm-bridge start                       # the mission is inferred from the folder; on a terminal it opens the station
 llm-bridge status                      # after the provider exits, "Needs you" shows the approve command
+llm-bridge task output --task 1        # read what the provider did (pages on a terminal, --follow while it runs)
+llm-bridge task diff --task 1          # the files it changed since the run started
 llm-bridge task verify --task 1 --approve
 ```
 

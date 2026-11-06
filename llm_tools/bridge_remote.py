@@ -183,6 +183,13 @@ def _read_text(args: argparse.Namespace) -> str:
     return read_verbatim(args.prompt_file) if getattr(args, "prompt_file", None) else str(getattr(args, "prompt", "") or "")
 
 
+def _evidence_text(value: Any) -> str:
+    """`task output` or `task diff` of a worker: the text, or the reason there is none."""
+    if isinstance(value, dict) and value.get("available"):
+        return str(value.get("text", ""))
+    return f"unavailable: {value.get('message') if isinstance(value, dict) else value}"
+
+
 def request_for(args: argparse.Namespace, target: str) -> tuple[commands.CommandRequest, Callable[[Any], str]]:
     """Map a parsed command line to a typed request and its human formatter."""
     command = args.command
@@ -218,6 +225,10 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
             return make("task.list", {"limit": args.limit, "offset": args.offset}), lambda value: fmt.format_task_list(value["tasks"])
         if action == "show":
             return make("task.show", _task_selector(args)), fmt.format_task_detail
+        if action in {"output", "diff"}:
+            if getattr(args, "follow", False):
+                raise ValueError("task output --follow is not available remotely; the worker returns the end of the log")
+            return make(f"task.{action}", _task_selector(args)), _evidence_text
         if action == "add":
             if args.depends_on:
                 raise ValueError("task add --depends-on is not available remotely yet; add the dependency with task dependencies --task-id")
