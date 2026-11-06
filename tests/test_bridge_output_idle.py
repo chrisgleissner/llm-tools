@@ -62,14 +62,12 @@ def test_idle_phrase_threshold_and_rounding() -> None:
 
 
 def test_codex_queued_question_count_surfaces_terminal_answer_steps_without_question_text(monkeypatch) -> None:
-    screen = (
-        "• Queued follow-up inputs\n"
-        "  ? 1 question\n"
-        "    shift+← to answer\n"
-        "SENTINEL_PRIVATE_QUESTION\n"
-        "› Ask Codex to do anything\n"
-        "? for shortcuts\n"
-    )
+    capture = Path(__file__).parent / "fixtures" / "codex-question-tui-capture.txt"
+    text = capture.read_text(encoding="utf-8")
+    screen = text.split("State 1: question collapsed under the composer (provider idle, waiting):\n", 1)[1].split(
+        "State 2:", 1
+    )[0]
+    assert "? 1 question" in screen and "shift+← to answer" in screen
     readings = iter([(200, screen), (201, screen)])
 
     class FakeBackend:
@@ -83,7 +81,7 @@ def test_codex_queued_question_count_surfaces_terminal_answer_steps_without_ques
     assert waiting is None
     waiting = terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=161)
     assert waiting == {"provider": "Codex", "idle_seconds": 61, "question_count": 1}
-    assert "SENTINEL_PRIVATE_QUESTION" not in str(waiting)
+    assert "Please unplug the Pi's data/power USB cable" not in str(waiting)
     assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 33 questions") == 0
     assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 1 question\n• Working (turn 4)") == 0
     assert terminal._codex_queued_question_count("Queued follow-up inputs\n1 of 2\nQuestion text") == 2
