@@ -1,8 +1,16 @@
 name: test
 
 on:
+  # Branches run through their pull request only; a push to a branch with an open pull request
+  # would otherwise start a second, identical run that competes for the same (scarce) macOS runners.
   push:
+    branches: [main]
   pull_request:
+
+# One run per pull request (or per ref on main); a newer commit cancels the run it supersedes.
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read

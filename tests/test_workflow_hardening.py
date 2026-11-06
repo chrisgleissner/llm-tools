@@ -107,3 +107,11 @@ def test_the_platform_matrix_covers_six_hosted_platforms() -> None:
     assert "cargo clippy --locked --all-targets -- -D warnings" in jobs["cross-platform"]
     assert "BRIDGE_COORDINATOR_BIN" in jobs["cross-platform"] and "BRIDGE_REQUIRE_COORDINATOR" in jobs["cross-platform"]
     assert "chromium" in jobs["web-cross"] and "firefox" in jobs["web-cross"]
+
+
+def test_test_workflow_runs_branches_through_pull_requests_with_one_run_per_ref() -> None:
+    text = (WORKFLOWS / "test.yml").read_text(encoding="utf-8")
+    header = text[:text.index("\njobs:")]
+    assert "  push:\n    branches: [main]\n  pull_request:\n" in header
+    assert "group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}" in header
+    assert "cancel-in-progress: true" in header
