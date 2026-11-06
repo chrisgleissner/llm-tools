@@ -177,7 +177,10 @@ def console_snapshot(
 
 def _json_print(value: Any, *, compact: bool = False) -> None:
     """Print ``value`` as sorted JSON; ``compact`` is one line, for streams such as ``events --follow``."""
-    print(json.dumps(value, ensure_ascii=False, sort_keys=True, **({"separators": (",", ":")} if compact else {"indent": 2})))
+    if compact:
+        print(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    else:
+        print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 def strip_frozen_config(value: Any) -> Any:
