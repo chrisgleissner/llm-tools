@@ -110,6 +110,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "403": {"description":"Insufficient scope or forbidden request","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "404": {"description":"Resource not found","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "405": {"description":"Method not allowed","headers":{"Allow":{"schema":{"type":"string"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "500": {"description":"Internal server error","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "429": {"description":"Rate limited","headers":{"Retry-After":{"schema":{"type":"integer"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}
@@ -139,7 +140,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/CommandOutcome"}}}
         });
     }
-    if method == "POST" || method == "DELETE" {
+    if method == "POST" || method == "PATCH" || method == "DELETE" {
         op["requestBody"] = json!({
             "required": method == "POST",
             "content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}
@@ -313,6 +314,9 @@ mod tests {
                     assert!(operation["security"][0]["bearerAuth"].as_array().unwrap().is_empty());
                 } else if *access == Access::WorkerToken {
                     assert!(operation["security"][0]["workerBearer"].is_array());
+                }
+                if matches!(*method, "POST" | "PATCH") {
+                    assert!(operation["responses"]["415"]["content"]["application/problem+json"].is_object());
                 }
             }
         }

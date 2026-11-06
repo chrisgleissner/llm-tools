@@ -128,6 +128,29 @@ pub struct Buffered {
 /// A body above [`BIG_BODY_BYTES`] (declared, or chunked with unknown length) first takes one of
 /// the [`BIG_BODY_SLOTS`] permits, so total buffered body memory stays bounded.
 pub async fn read_body(st: &St, req: Request) -> Result<Buffered, ApiError> {
+    if matches!(req.method(), &Method::POST | &Method::PUT | &Method::PATCH) {
+        let is_json = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                let mut parts = value.split(';');
+                parts
+                    .next()
+                    .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+                    && parts.all(|parameter| {
+                        let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+                        name.trim().eq_ignore_ascii_case("charset") && value.trim().trim_matches('"').eq_ignore_ascii_case("utf-8")
+                    })
+            });
+        if !is_json {
+            return Err(err(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported-media-type",
+                "mutations require Content-Type: application/json",
+            ));
+        }
+    }
     let declared = req
         .headers()
         .get(header::CONTENT_LENGTH)

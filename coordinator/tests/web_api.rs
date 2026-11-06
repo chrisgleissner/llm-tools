@@ -20,6 +20,22 @@ async fn login_with(env: &Env, remember: Option<Value>) -> (Api, String) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn mutation_bodies_require_json_content_type() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let (status, body) = api
+        .send(
+            api.rb(Method::POST, "/api/v1/tokens")
+                .header("content-type", "text/plain")
+                .body(r#"{"name":"automation","scopes":["read"]}"#),
+        )
+        .await;
+    assert_eq!(status, 415, "{body}");
+    assert_eq!(body["type"], "https://llm-tools.dev/problems/unsupported-media-type");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn auth_state_publishes_the_password_policy_and_session_details() {
     let env = boot().await;
     let anon = env.api();

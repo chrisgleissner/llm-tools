@@ -299,6 +299,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -424,6 +434,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -548,6 +568,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -684,6 +714,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -819,6 +859,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -932,6 +982,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -1089,6 +1149,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1222,6 +1292,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1345,6 +1425,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -1470,6 +1560,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -1593,6 +1693,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -1750,6 +1860,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -1927,6 +2047,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -2093,6 +2223,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -2270,6 +2410,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -2424,6 +2574,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -2599,6 +2759,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -2682,6 +2852,17 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -2760,6 +2941,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -2935,6 +3126,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -3119,6 +3320,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3294,6 +3505,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3418,6 +3639,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3531,6 +3762,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -3656,6 +3897,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -3779,6 +4030,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -3920,6 +4181,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -4066,6 +4337,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -4189,6 +4470,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -4318,6 +4609,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -4435,6 +4736,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -4568,6 +4879,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {
@@ -4714,6 +5035,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
+          },
           "429": {
             "content": {
               "application/problem+json": {
@@ -4837,6 +5168,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "415": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "Mutation body is not application/json"
           },
           "429": {
             "content": {

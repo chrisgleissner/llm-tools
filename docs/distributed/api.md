@@ -120,4 +120,7 @@ their operation. `v1` changes are intended to be additive; breaking changes requ
 new version. A deprecated operation will carry a `Deprecation` header and a
 documented removal date before removal.
 
+Mutation requests with a body must use `Content-Type: application/json` (UTF-8
+is accepted); other media types receive `415 unsupported-media-type`.
+
 See the full route and scope table in the [coordinator guide](coordinator.md#http-api).
