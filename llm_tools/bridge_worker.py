@@ -211,6 +211,8 @@ def default_worker_name() -> str:
 
 def _canonical_roots(roots: tuple[str, ...] | list[str]) -> tuple[str, ...]:
     """Resolve allowed roots once and require real, existing directories."""
+    if len(roots) > 32:
+        raise WorkerConfigError("at most 32 --allow-root paths may be enrolled")
     result: list[str] = []
     for root in roots:
         try:
@@ -220,6 +222,8 @@ def _canonical_roots(roots: tuple[str, ...] | list[str]) -> tuple[str, ...]:
         if not canonical.is_dir():
             raise WorkerConfigError(f"allowed root is not a directory: {canonical}")
         value = str(canonical)
+        if len(value.encode("utf-8")) > 4096:
+            raise WorkerConfigError("allowed root path exceeds 4096 UTF-8 bytes")
         if value not in result:
             result.append(value)
     return tuple(result)
@@ -271,6 +275,8 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
     roots = _canonical_roots(allow_roots)
     if allow_create and not roots:
         raise WorkerConfigError("--allow-create requires at least one --allow-root")
+    if allow_restore and not roots:
+        raise WorkerConfigError("--allow-restore requires at least one --allow-root")
     directory = worker_dir(env)
     try:
         previous = load_config(env)
@@ -445,7 +451,16 @@ class WorkerSession:
         with self.open_store() as store:
             missions = [self._mission_summary(store, row) for row in store.list_missions()]
             cursor = store.last_event_id()
-        allowed = {spec["operation"] for spec in commands.operation_catalog() if self.config.allow_control or not spec["mutating"]}
+        allowed = {
+            spec["operation"] for spec in commands.operation_catalog()
+            if (not spec["mutating"] or self.config.allow_control
+                or (spec["operation"] == "mission.create" and self.config.allow_create)
+                or (spec["operation"] == "mission.suspend_until_credits" and self.config.allow_power)
+                or (spec["operation"] == "worker.restore" and self.config.allow_restore))
+            and (spec["operation"] != "mission.create" or self.config.allow_create)
+            and (spec["operation"] != "mission.suspend_until_credits" or self.config.allow_power)
+            and (spec["operation"] != "worker.restore" or self.config.allow_restore)
+        }
         payload: dict[str, Any] = {
             "worker_id": self.config.worker_id,
             "name": self.config.name,
@@ -453,6 +468,9 @@ class WorkerSession:
             "protocol_versions": list(SUPPORTED_VERSIONS),
             "platform": {"system": platform.system(), "machine": platform.machine(), "python": platform.python_version()},
             "capabilities": [spec for spec in commands.operation_catalog() if spec["operation"] in allowed],
+            "worker_policy": {"allow_control": self.config.allow_control, "allow_terminal_view": self.config.terminal_view,
+                              "allow_create": self.config.allow_create, "allow_root": list(self.config.allow_roots),
+                              "allow_power": self.config.allow_power, "allow_restore": self.config.allow_restore},
             "missions": missions,
             "event_cursor": cursor,
         }
@@ -593,7 +611,7 @@ class WorkerSession:
         policy_error = self._policy_error(request, spec)
         if policy_error is not None:
             result = commands.CommandResult(request.request_id, request.operation, "rejected", error=policy_error)
-        elif spec is not None and spec.mutating and not self.config.allow_control:
+        elif spec is not None and spec.mutating and not self.config.allow_control and not self._specific_mutation_opted_in(request.operation):
             result = commands.CommandResult(request.request_id, request.operation, "rejected",
                                             error=commands.CommandError("forbidden", "this worker accepts read-only remote operations"))
         else:
@@ -612,10 +630,13 @@ class WorkerSession:
             cwd = request.params.get("cwd")
             if not isinstance(cwd, str) or not _path_allowed(cwd, self.config.allow_roots):
                 return commands.CommandError("forbidden", "mission creation must use a path inside an enrolled allowed root")
-        if operation.endswith("restore") or operation == "restore":
+        if operation in {"worker.restore", "restore"}:
             if not self.config.allow_restore:
                 return commands.CommandError("forbidden", "this worker has not opted in to remote restore")
-        if operation == "power" or re.search(r"(?:^|[._-])(?:power|poweroff|poweron|suspend|shutdown|reboot)(?:[._-]|$)", operation):
+            source = request.params.get("input")
+            if not isinstance(source, str) or not _path_allowed(source, self.config.allow_roots):
+                return commands.CommandError("forbidden", "restore input must be inside an enrolled allowed root")
+        if operation in {"mission.suspend_until_credits", "power"} or re.search(r"(?:^|[._-])(?:power|poweroff|poweron|suspend|shutdown|reboot)(?:[._-]|$)", operation):
             if not self.config.allow_power:
                 return commands.CommandError("forbidden", "this worker has not opted in to remote power operations")
         # Starting an existing mission can execute provider work in its local
@@ -627,6 +648,12 @@ class WorkerSession:
             if not isinstance(cwd, str) or not _path_allowed(cwd, self.config.allow_roots):
                 return commands.CommandError("forbidden", "mission is outside this worker's enrolled allowed roots")
         return None
+
+    def _specific_mutation_opted_in(self, operation: str) -> bool:
+        """The three explicit API-016 opt-ins authorize their own mutation families."""
+        return ((operation == "mission.create" and self.config.allow_create)
+                or (operation == "mission.suspend_until_credits" and self.config.allow_power)
+                or (operation == "worker.restore" and self.config.allow_restore))
 
     def next_events(self) -> Message | None:
         """The next event batch after the coordinator's cursor, or ``None`` when up to date."""

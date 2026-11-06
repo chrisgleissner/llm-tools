@@ -173,6 +173,15 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreate"}}}
         });
     }
+    if path == "/api/v1/missions" && method == "POST" {
+        op["description"] = json!("JSON body includes worker and mission.create parameters. The worker's local allow-create and real-path policy remain authoritative; local-only mission options return unsupported-remote-option.");
+        op["requestBody"]["content"]["application/json"]["schema"] = json!({
+            "allOf": [
+                {"$ref":"#/components/schemas/BoundedRequestObject"},
+                {"type":"object","required":["worker"],"properties":{"worker":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}}}
+            ]
+        });
+    }
     if let Some(params) = op.get_mut("parameters").and_then(Value::as_array_mut) {
         for segment in path.split('/') {
             if segment.starts_with('{') && segment.ends_with('}') {
@@ -438,6 +447,10 @@ mod tests {
             doc["components"]["schemas"]["MissionListPage"]["properties"]["next_cursor"]["type"],
             json!(["string", "null"])
         );
+        let create = &doc["paths"]["/api/v1/missions"]["post"];
+        let body_schema = &create["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(body_schema["allOf"][1]["required"], json!(["worker"]));
+        assert_eq!(body_schema["allOf"][1]["properties"]["worker"]["type"], "string");
     }
 
     #[test]

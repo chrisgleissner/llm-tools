@@ -221,6 +221,72 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn api016_create_suspend_restore_resources_and_worker_policy_are_exposed() {
+    let env = boot().await;
+    let api = env.admin().await;
+    env.srv
+        .state
+        .db
+        .worker_add("build-1", &bridge_coordinator::auth::sha256_hex("worker-secret-api016"))
+        .unwrap();
+    let policy = json!({"allow_control":true,"allow_terminal_view":true,"allow_create":true,
+        "allow_root":["/srv/work"],"allow_power":false,"allow_restore":true});
+    let mut hello = serde_json::Map::new();
+    hello.insert("missions".into(), json!([{"id":"mission-1","name":"Example"}]));
+    hello.insert("worker_policy".into(), policy.clone());
+    let capabilities = json!([
+        {"operation":"mission.create","mutating":true},
+        {"operation":"mission.suspend_until_credits","mutating":true},
+        {"operation":"worker.restore","mutating":true}
+    ]);
+    env.srv
+        .state
+        .db
+        .worker_hello("build-1", "worker-id-api016", &hello, &capabilities, "203.0.113.8")
+        .unwrap();
+
+    let (status, workers) = api.get("/api/v1/workers").await;
+    assert_eq!(status, 200);
+    assert_eq!(workers["workers"][0]["policy"]["allow_root_count"], 1);
+    assert_eq!(workers["workers"][0]["policy"]["allow_create"], true);
+    assert!(!serde_json::to_string(&workers).unwrap().contains("/srv/work"));
+    let (status, worker) = api.get("/api/v1/workers/build-1").await;
+    assert_eq!(status, 200);
+    assert_eq!(worker["policy"]["allow_root_count"], 1);
+    assert_eq!(worker["policy"]["allow_create"], true);
+    assert_eq!(worker["policy"]["allow_restore"], true);
+    assert!(!serde_json::to_string(&worker).unwrap().contains("/srv/work"));
+
+    let (status, created) = api
+        .post("/api/v1/missions", json!({"worker":"build-1","prompt":"new","cwd":"/srv/work","wait_ms":0}))
+        .await;
+    assert_eq!(status, 202, "{created}");
+    assert_eq!(created["operation"], "mission.create");
+    assert_eq!(created["request"]["mission_id"], Value::Null);
+
+    for option in ["include_config", "command_template", "verifier_argv", "verifier_file"] {
+        let mut body = json!({"worker":"build-1","prompt":"new","cwd":"/srv/work"});
+        body[option] = json!([]);
+        let (status, problem) = api.post("/api/v1/missions", body).await;
+        assert_eq!(status, 422, "{option}: {problem}");
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/unsupported-remote-option");
+    }
+
+    let (status, suspended) = api
+        .post("/api/v1/missions/mission-1/suspend-until-credits?worker=build-1", json!({"wait_ms":0}))
+        .await;
+    assert_eq!(status, 202, "{suspended}");
+    assert_eq!(suspended["operation"], "mission.suspend_until_credits");
+
+    let (status, restored) = api
+        .post("/api/v1/workers/build-1/restore", json!({"input":"/srv/work/backup.db","wait_ms":0}))
+        .await;
+    assert_eq!(status, 202, "{restored}");
+    assert_eq!(restored["operation"], "worker.restore");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
     let env = boot().await;
     let api = env.admin().await;

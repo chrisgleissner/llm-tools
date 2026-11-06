@@ -187,10 +187,10 @@ def test_admin_commands_cannot_bypass_worker_opt_ins(state, tmp_path):
     requests = [
         CommandRequest("mission.create", {"cwd": str(outside)}),
         CommandRequest("machine.poweroff"),
-        CommandRequest("bridge.restore"),
+        CommandRequest("worker.restore", {"input": str(allowed / "backup.db")}),
     ]
     if symlink_escape is not None:
-        requests.append(CommandRequest("mission.create", {"cwd": str(symlink_escape)}))
+        requests.append(CommandRequest("mission.create", {"cwd": str(symlink_escape), "trust_folder": True}))
     for request in requests:
         _, result = _command(session, request)
         assert result.payload["outcome"] == "rejected"
@@ -201,7 +201,7 @@ def test_allowed_root_recheck_and_worker_status_expose_opt_ins(state, tmp_path, 
     directory, _ = state
     root = tmp_path / "root"
     root.mkdir()
-    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=False,
                            allow_create=True, allow_roots=[str(root)], allow_power=True, allow_restore=True)
     session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
     request = CommandRequest("mission.create", {"cwd": str(root)})
@@ -227,6 +227,62 @@ def test_allowed_root_recheck_and_worker_status_expose_opt_ins(state, tmp_path, 
     status = worker.status_public(service_state="inactive")
     assert status["allow_create"] and status["allow_power"] and status["allow_restore"]
     assert status["allow_root"] == [str(root)]
+
+
+def test_worker_typed_create_power_and_restore_require_local_opt_ins(state, tmp_path, monkeypatch):
+    directory, _ = state
+    root = tmp_path / "approved"
+    root.mkdir()
+    (root / "backup.db").write_bytes(b"placeholder")
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True, allow_roots=[str(root)])
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    hello = session.hello()
+    operations = {item["operation"] for item in hello.payload["capabilities"]}
+    assert "mission.create" not in operations and "mission.suspend_until_credits" not in operations and "worker.restore" not in operations
+    _welcome(session)
+    _, denied = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root)}))
+    assert denied.payload["error"]["code"] == "forbidden"
+    _, denied = _command(session, CommandRequest("mission.suspend_until_credits", mission_id="x"))
+    assert denied.payload["error"]["code"] == "forbidden"
+    _, denied = _command(session, CommandRequest("worker.restore", {"input": str(root / "backup.db")}))
+    assert denied.payload["error"]["code"] == "forbidden"
+
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=False,
+                           allow_create=True, allow_roots=[str(root)], allow_power=True, allow_restore=True)
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    operations = {item["operation"] for item in session.hello().payload["capabilities"]}
+    assert {"mission.create", "mission.suspend_until_credits", "worker.restore"} <= operations
+    _welcome(session, generation=2)
+    _, created = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root), "providers": "codex", "trust_folder": True}))
+    assert created.payload["outcome"] == "applied"
+    assert created.payload["result"]["mission"]["cwd"] == str(root)
+    assert created.payload["result"]["mission"]["config"]["trust_folder"] is True
+
+    _, unsupported = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root), "verifier_argv": ["true"]}))
+    assert unsupported.payload["error"]["code"] == "unsupported-remote-option"
+
+    power_calls = []
+    monkeypatch.setattr("llm_tools.bridge_power.suspend_until_credits", lambda mission_id: power_calls.append(mission_id) or {"ok": True})
+    _, suspended = _command(session, CommandRequest("mission.suspend_until_credits", mission_id=created.payload["result"]["mission"]["id"]))
+    assert suspended.payload["outcome"] == "applied" and power_calls
+
+    restore_calls = []
+    restore_details = {
+        "restored_from": str(root / "backup.db"),
+        "previous_database": str(directory / "bridge.sqlite3.before-restore-secret"),
+        "missions": 1,
+        "schema_version": 10,
+        "last_event_id": 42,
+        "event_sequence": 43,
+    }
+    monkeypatch.setattr("llm_tools.bridge_backup.restore", lambda source, **kwargs: restore_calls.append(str(source)) or restore_details)
+    _, restored = _command(session, CommandRequest("worker.restore", {"input": str(root / "backup.db")}))
+    assert restored.payload["outcome"] == "applied" and restore_calls == [str(root / "backup.db")]
+    assert restored.payload["result"] == {"missions": 1, "schema_version": 10, "last_event_id": 42, "event_sequence": 43}
+    serialized_result = json.dumps(restored.payload["result"])
+    assert str(root) not in serialized_result and str(directory) not in serialized_result
+    _, escaped = _command(session, CommandRequest("worker.restore", {"input": str(tmp_path / "outside.db")}))
+    assert escaped.payload["error"]["code"] == "forbidden"
 
 
 def test_control_messages_and_event_replication(state):

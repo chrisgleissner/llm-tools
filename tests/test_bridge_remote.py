@@ -94,11 +94,16 @@ def test_login_status_logout(state, tmp_path, capsys):
 @pytest.mark.parametrize(
     ("argv", "operation", "params"),
     [
+        (["mission", "create", "--prompt", "new", "--cwd", ".", "--providers", "codex"], "mission.create",
+         {"prompt": "new", "cwd": ".", "name": "", "acceptance": [], "providers": "codex", "routes": None,
+          "headless": False, "native_tui": False, "teams": None, "token_spend": None, "trust_folder": False, "unsupported_options": []}),
         (["status", "--mission", "m1"], "mission.status", {}),
         (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100}),
         (["stop", "--mission", "m1"], "mission.stop", {"force": False}),
         (["stop", "--mission", "m1", "--force"], "mission.stop", {"force": True}),
         (["start", "--mission", "m1", "--headless", "--providers", "codex"], "mission.start", {"headless": True, "native_tui": None, "providers": "codex", "routes": None}),
+        (["suspend-until-credits", "--mission", "m1"], "mission.suspend_until_credits", {}),
+        (["restore", "--input", "/tmp/backup.db"], "worker.restore", {"input": "/tmp/backup.db"}),
         (["resume", "--mission", "m1"], "mission.resume", {}),
         (["task", "list", "--mission", "m1"], "task.list", {"limit": 200, "offset": 0}),
         (["task", "show", "--mission", "m1", "--task-id", "4"], "task.show", {"task_id": 4}),
@@ -115,6 +120,37 @@ def test_login_status_logout(state, tmp_path, capsys):
 def test_request_mapping(argv, operation, params):
     request, _ = remote.request_for(args(*argv), "ws")
     assert (request.operation, dict(request.params), request.target) == (operation, params, "ws")
+
+
+def test_create_maps_trust_folder_and_names_unsupported_local_options():
+    request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--trust-folder", "--include-config", "--verifier-arg", "true"), "ws")
+    assert request.params["trust_folder"] is True
+    assert request.params["unsupported_options"] == ["--include-config", "--verifier-arg"]
+
+
+def test_create_suspend_and_restore_use_resource_endpoints():
+    routes = {
+        ("POST", "/api/v1/missions"): (200, {"state": "done", "result": {"mission": {}, "task": {}}}),
+        ("POST", "/api/v1/missions/m1/suspend-until-credits"): (200, {"state": "done", "result": {"ok": True}}),
+        ("POST", "/api/v1/workers/ws/restore"): (200, {"state": "done", "result": {
+            "missions": 1, "schema_version": 10, "last_event_id": 42, "event_sequence": 43,
+        }}),
+    }
+    api = client(routes)
+    create, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", "."), "ws")
+    suspend, _ = remote.request_for(args("suspend-until-credits", "--mission", "m1"), "ws")
+    restore, restore_human = remote.request_for(args("restore", "--input", "/root/backup.db"), "ws")
+    assert api.submit_resource("ws", create)["mission"] == {}
+    assert api.submit_resource("ws", suspend)["ok"] is True
+    restore_result = api.submit_resource("ws", restore)
+    assert restore_result["missions"] == 1
+    restore_text = restore_human(restore_result)
+    assert restore_text == "Restored 1 missions (schema 10, last event 42)."
+    assert "/root/backup.db" not in restore_text
+    assert api.opener.calls[0][1]["worker"] == "ws"
+    assert [call[0][1] for call in api.opener.calls] == [
+        "/api/v1/missions", "/api/v1/missions/m1/suspend-until-credits", "/api/v1/workers/ws/restore",
+    ]
 
 
 @pytest.mark.parametrize(

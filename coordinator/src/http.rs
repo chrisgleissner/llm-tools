@@ -808,11 +808,21 @@ fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
     // persisted only every few minutes (ws_worker.rs LAST_SEEN_EVERY_SECS) to spare storage.
     let online = st.hub.online(&w.name);
     let last_seen = if online { Some(crate::now()) } else { w.last_seen };
+    let policy = w.worker_policy.as_ref().and_then(Value::as_object).map(|value| {
+        json!({
+            "allow_control": value.get("allow_control").and_then(Value::as_bool).unwrap_or(false),
+            "allow_terminal_view": value.get("allow_terminal_view").and_then(Value::as_bool).unwrap_or(false),
+            "allow_create": value.get("allow_create").and_then(Value::as_bool).unwrap_or(false),
+            "allow_root_count": value.get("allow_root").and_then(Value::as_array).map_or(0, Vec::len),
+            "allow_power": value.get("allow_power").and_then(Value::as_bool).unwrap_or(false),
+            "allow_restore": value.get("allow_restore").and_then(Value::as_bool).unwrap_or(false),
+        })
+    });
     json!({"name": w.name, "id": w.worker_id, "state": if online { "online" } else { "offline" },
            "host_name": w.host_name, "remote_address": if online { w.remote_address.clone() } else { None },
            "last_seen": last_seen, "generation": w.generation, "event_cursor": w.event_cursor,
            "versions": {"software": w.software_version, "protocol": w.protocol_versions},
-           "platform": w.platform, "capabilities": w.capabilities})
+           "platform": w.platform, "capabilities": w.capabilities, "policy": policy})
 }
 
 async fn list_workers(State(st): State<St>, _a: Authed) -> ApiResult {
@@ -1119,6 +1129,90 @@ async fn mission_status_resource(
     .await
 }
 
+async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let mut params = parse_body(&body.bytes)?;
+    let worker = str_field(&params, "worker")?.to_string();
+    let local_only = [
+        "auto_continue",
+        "command_template",
+        "verifier_arg",
+        "verifier_argv",
+        "verifier_file",
+        "verifier_files",
+        "verifier_timeout",
+        "include_config",
+        "log_max_bytes",
+        "log_rotations",
+        "log_retained_runs",
+        "capacity_refresh_seconds",
+    ];
+    let unsupported: Vec<&str> = local_only.iter().copied().filter(|name| params.contains_key(*name)).collect();
+    if !unsupported.is_empty() {
+        return Err(err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported-remote-option",
+            format!("mission.create does not support remote option(s): {}", unsupported.join(", ")),
+        ));
+    }
+    no_extra(
+        &params,
+        &[
+            "worker",
+            "prompt",
+            "cwd",
+            "name",
+            "acceptance",
+            "providers",
+            "routes",
+            "headless",
+            "native_tui",
+            "teams",
+            "token_spend",
+            "trust_folder",
+            "unsupported_options",
+            "wait_ms",
+        ],
+    )?;
+    let wait_ms = resource_wait_ms(&params)?;
+    params.remove("worker");
+    params.remove("wait_ms");
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: None,
+            operation: "mission.create".into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn worker_restore_resource(State(st): State<St>, Authed(p, ip): Authed, Path(worker): Path<String>, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let mut params = parse_body(&body.bytes)?;
+    no_extra(&params, &["input", "wait_ms"])?;
+    let wait_ms = resource_wait_ms(&params)?;
+    params.remove("wait_ms");
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: None,
+            operation: "worker.restore".into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
 async fn mission_events(
     State(st): State<St>,
     Authed(p, ip): Authed,
@@ -1193,7 +1287,7 @@ async fn mission_task_show(
         ResourceCommand {
             headers,
             worker: worker.clone(),
-            mission_id: id,
+            mission_id: Some(id),
             operation: "task.show".into(),
             params,
             wait_ms,
@@ -1410,7 +1504,7 @@ async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -
 struct ResourceCommand {
     headers: HeaderMap,
     worker: String,
-    mission_id: String,
+    mission_id: Option<String>,
     operation: String,
     params: Map<String, Value>,
     wait_ms: u64,
@@ -1481,6 +1575,8 @@ async fn mission_action(
         &["headless", "native_tui", "providers", "routes", "wait_ms"][..]
     } else if action == "stop" {
         &["force", "wait_ms"][..]
+    } else if action == "suspend-until-credits" {
+        &["wait_ms"][..]
     } else {
         &["wait_ms"][..]
     };
@@ -1494,6 +1590,7 @@ async fn mission_action(
         "stop" => "mission.stop",
         "cancel" => "mission.cancel",
         "continue" => "mission.continue",
+        "suspend-until-credits" => "mission.suspend_until_credits",
         _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown mission action")),
     };
     resource_command(
@@ -1503,10 +1600,42 @@ async fn mission_action(
         ResourceCommand {
             headers,
             worker: worker.clone(),
-            mission_id: id,
+            mission_id: Some(id),
             operation: operation.to_string(),
             params,
             wait_ms: resource_wait_ms(&m)?,
+        },
+    )
+    .await
+}
+
+async fn suspend_until_credits_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let params = parse_body(&body.bytes)?;
+    no_extra(&params, &["wait_ms"])?;
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: Some(id),
+            operation: "mission.suspend_until_credits".into(),
+            params: Map::new(),
+            wait_ms: resource_wait_ms(&params)?,
         },
     )
     .await
@@ -1537,7 +1666,7 @@ async fn add_mission_task(
         ResourceCommand {
             headers,
             worker: worker.clone(),
-            mission_id: id,
+            mission_id: Some(id),
             operation: "task.add".to_string(),
             params: m,
             wait_ms,
@@ -1593,7 +1722,7 @@ async fn amend_mission_task(
         ResourceCommand {
             headers,
             worker: worker.clone(),
-            mission_id: id,
+            mission_id: Some(id),
             operation: operation.to_string(),
             params,
             wait_ms,
@@ -1649,7 +1778,7 @@ async fn verify_mission_task(
         ResourceCommand {
             headers,
             worker: worker.clone(),
-            mission_id: id,
+            mission_id: Some(id),
             operation: operation.to_string(),
             params,
             wait_ms,
@@ -1692,7 +1821,7 @@ async fn task_action(
         ResourceCommand {
             headers,
             worker: worker.clone(),
-            mission_id: id,
+            mission_id: Some(id),
             operation: operation.to_string(),
             params: m,
             wait_ms,
@@ -1839,12 +1968,15 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/password", &["POST"], Access::Authed, "session"),
     ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}", &["GET", "DELETE"], Access::Authed, "admin"),
+    ("/api/v1/workers/{name}/restore", &["POST"], Access::Authed, "admin"),
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/suspend-until-credits", &["POST"], Access::Authed, "admin"),
     ("/api/v1/missions/{id}/{action}", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/tasks", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/tasks", &["POST"], Access::Authed, "operate"),
@@ -1966,12 +2098,14 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/auth/password", post(change_password).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/workers", get(list_workers).post(add_worker))
         .route("/api/v1/workers/{name}", get(get_worker).delete(revoke_worker))
+        .route("/api/v1/workers/{name}/restore", post(worker_restore_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
-        .route("/api/v1/missions", get(list_missions))
+        .route("/api/v1/missions", get(list_missions).post(create_mission_resource))
         .route("/api/v1/missions/{id}", get(mission_status_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
+        .route("/api/v1/missions/{id}/suspend-until-credits", post(suspend_until_credits_resource))
         .route("/api/v1/missions/{id}/{action}", post(mission_action))
         .route("/api/v1/missions/{id}/tasks", get(mission_tasks).post(add_mission_task))
         .route("/api/v1/missions/{id}/tasks/{n}", get(mission_task_show).patch(amend_mission_task))

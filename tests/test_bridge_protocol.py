@@ -44,6 +44,17 @@ def test_hello_without_optional_host_name_remains_compatible():
     assert "host_name" not in decoded.payload
 
 
+def test_hello_worker_policy_is_validated_and_backward_compatible():
+    base = dict(VALID[0].payload)
+    base["worker_policy"] = {"allow_control": True, "allow_terminal_view": True, "allow_create": False,
+                             "allow_root": ["/srv/work"], "allow_power": False, "allow_restore": False}
+    decoded = decode(Message("hello", "w-1", 0, base).encode())
+    assert decoded.payload["worker_policy"] == base["worker_policy"]
+    base["worker_policy"] = {"allow_create": "yes", "allow_root": []}
+    with pytest.raises(ProtocolError, match="worker_policy"):
+        decode(Message("hello", "w-1", 0, base).encode())
+
+
 @pytest.mark.parametrize(
     ("raw", "code"),
     [

@@ -156,19 +156,23 @@ class Client:
     def submit_resource(self, target: str, request: commands.CommandRequest, *, wait: float = WAIT_SECONDS) -> dict[str, Any] | None:
         """Use the resource route when one exists; return ``None`` for legacy-only operations."""
         mission = request.mission_id
-        if mission is None:
-            return None
-        base = f"/api/v1/missions/{urllib.parse.quote(mission, safe='')}"
         op = request.operation
+        if mission is None and op not in {"mission.create", "worker.restore"}:
+            return None
+        base = f"/api/v1/missions/{urllib.parse.quote(mission, safe='')}" if mission is not None else ""
         params = dict(request.params)
         worker = urllib.parse.urlencode({"worker": target})
         headers = {"Idempotency-Key": request.request_id}
         wait_ms = int(wait * 1000)
-        if op == "mission.status":
+        if op == "mission.create":
+            status, body = self.call("POST", "/api/v1/missions", {**params, "worker": target, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op == "worker.restore":
+            status, body = self.call("POST", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/restore", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op == "mission.status":
             query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}?{query}", timeout=wait + 15)
-        elif op in {"mission.start", "mission.resume", "mission.pause", "mission.stop", "mission.cancel", "mission.continue"}:
-            action = op.removeprefix("mission.")
+        elif op in {"mission.start", "mission.resume", "mission.pause", "mission.stop", "mission.cancel", "mission.continue", "mission.suspend_until_credits"}:
+            action = "suspend-until-credits" if op == "mission.suspend_until_credits" else op.removeprefix("mission.")
             status, body = self.call("POST", f"{base}/{action}?{worker}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op == "task.list":
             query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 50), "offset": params.get("offset", 0), "wait_ms": wait_ms})
@@ -275,6 +279,36 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         return make("mission.events", {"after": args.after, "limit": args.limit}), lambda value: fmt.format_events(value["events"])
     if command == "mission" and args.mission_action == "list":
         return make("mission.list", {"include_config": bool(args.include_config)}, with_mission=False), lambda value: fmt.format_mission_list(value["missions"])
+    if command == "mission" and args.mission_action == "create":
+        unsupported_options: list[str] = []
+        if bool(args.auto_continue):
+            unsupported_options.append("--auto-continue")
+        if args.command_template:
+            unsupported_options.append("--command-template")
+        if args.include_config:
+            unsupported_options.append("--include-config")
+        if args.verifier_argv:
+            unsupported_options.append("--verifier-arg")
+        if args.verifier_files:
+            unsupported_options.append("--verifier-file")
+        if args.verifier_timeout != 300:
+            unsupported_options.append("--verifier-timeout")
+        if args.log_max_bytes != 4 * 1024 * 1024:
+            unsupported_options.append("--log-max-bytes")
+        if args.log_rotations != 3:
+            unsupported_options.append("--log-rotations")
+        if args.log_retained_runs != 20:
+            unsupported_options.append("--log-retained-runs")
+        if args.capacity_refresh_seconds != 60:
+            unsupported_options.append("--capacity-refresh-seconds")
+        params = {
+            "prompt": _read_text(args), "cwd": args.cwd, "name": args.name or "",
+            "acceptance": list(args.acceptance), "providers": args.providers, "routes": args.routes,
+            "headless": bool(args.headless), "native_tui": bool(args.native_tui),
+            "teams": args.teams, "token_spend": args.token_spend, "trust_folder": bool(args.trust_folder),
+            "unsupported_options": unsupported_options,
+        }
+        return make("mission.create", params, with_mission=False), fmt.format_mission_created
     if command == "start":
         params = {
             "headless": getattr(args, "headless", None),
@@ -284,6 +318,14 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         }
         request = make("mission.start", params)
         return request, lambda value: fmt.format_command_receipt("start", value, request.mission_id or "")
+    if command == "suspend-until-credits":
+        request = make("mission.suspend_until_credits")
+        return request, lambda value: str(value.get("message") or value.get("status") or "Suspend request completed")
+    if command == "restore":
+        request = make("worker.restore", {"input": str(args.input)}, with_mission=False)
+        return request, lambda value: (f"Restored {value.get('missions', 0)} missions "
+                                       f"(schema {value.get('schema_version', 'unknown')}, "
+                                       f"last event {value.get('last_event_id', 0)}).")
     if command == "resume":
         request = make("mission.resume")
         return request, lambda value: fmt.format_command_receipt("resume", value, request.mission_id or "")
@@ -321,7 +363,7 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         operation = f"task.{action}"
         commands.lookup(operation)
         return make(operation, {**_task_selector(args), **extra}), lambda value: fmt.format_task_result(action, value)
-    raise ValueError(f"{command} is not available with --target {target}; remote commands: status, events, mission list, start, resume, pause, stop, cancel, continue, task, proposal list|accept|reject")
+    raise ValueError(f"{command} is not available with --target {target}; remote commands: mission create|list, restore, suspend-until-credits, status, events, start, resume, pause, stop, cancel, continue, task, proposal list|accept|reject")
 
 
 def _envelope_exit(envelope: dict[str, Any]) -> tuple[int, str | None]:

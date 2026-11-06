@@ -27,7 +27,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | API-013 | ASVS 04.01, 08.02, 08.03; API1:2023, API5:2023 | `[~]` Remote CLI maps listed operations to resource routes (named Python test in register). Remaining operations use `/commands` or return explicit unmappable errors. |
 | API-014 | ASVS 04.01, 04.02; API9:2023 | `[~]` Coordinator guide, API examples, README and site link updated. Full versioning, pagination and rate-limit contract remains. |
 | API-015 | ASVS 04.01; API9:2023 | `[ ]` CLI/route parity table and argparse-tree test remain. |
-| API-016 | ASVS 06.07, 12.03; API2:2023, API8:2023 | `[~]` Worker-side opt-in enforcement and root resolution are covered by focused tests; coordinator policy exposure and typed remote operations remain. |
+| API-016 | ASVS 06.07, 12.03; API2:2023, API8:2023 | `[~]` Worker-side opt-ins and resolved-root enforcement cover typed mission creation, power suspend, and restore; coordinator advertises stored policy and resource routes dispatch typed operations. CI evidence remains. |
 
 ## Security hardening
 

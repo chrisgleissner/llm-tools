@@ -36,7 +36,7 @@ CREATE TABLE workers(
   generation INTEGER NOT NULL DEFAULT 0, event_cursor INTEGER NOT NULL DEFAULT 0, mission_cursor INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL, last_seen INTEGER, hello_at INTEGER, last_event_at INTEGER,
   software_version TEXT, protocol_versions TEXT, platform TEXT, capabilities TEXT,
-  host_name TEXT, remote_address TEXT);
+  host_name TEXT, remote_address TEXT, worker_policy TEXT);
 CREATE TABLE missions(
   worker TEXT NOT NULL REFERENCES workers(name) ON DELETE CASCADE, mission_id TEXT NOT NULL, info TEXT NOT NULL,
   PRIMARY KEY(worker, mission_id)) WITHOUT ROWID;
@@ -82,6 +82,7 @@ pub struct WorkerRow {
     pub capabilities: Option<Value>,
     pub host_name: Option<String>,
     pub remote_address: Option<String>,
+    pub worker_policy: Option<Value>,
 }
 
 impl WorkerRow {
@@ -172,7 +173,7 @@ fn json_col(s: Option<String>) -> Option<Value> {
 }
 
 const WCOLS: &str =
-    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities, host_name, remote_address";
+    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities, host_name, remote_address, worker_policy";
 
 fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
     Ok(WorkerRow {
@@ -190,6 +191,7 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
         capabilities: json_col(r.get(11)?),
         host_name: r.get(12)?,
         remote_address: r.get(13)?,
+        worker_policy: json_col(r.get(14)?),
     })
 }
 
@@ -210,7 +212,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -228,6 +230,7 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 const MIGRATE_V3_COLUMN: &str = "ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 1;";
 const MIGRATE_V4_COLUMN: &str = "ALTER TABLE workers ADD COLUMN mission_cursor INTEGER NOT NULL DEFAULT 0;";
 const MIGRATE_V5_COLUMN: &str = "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"admin\"]';";
+const MIGRATE_V7_COLUMN: &str = "ALTER TABLE workers ADD COLUMN worker_policy TEXT;";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -310,6 +313,17 @@ impl Db {
                 alter.push_str("ALTER TABLE workers ADD COLUMN remote_address TEXT;");
             }
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 6; COMMIT;"))?;
+        }
+        if version < 7 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_column = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='worker_policy'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let alter = if has_table && !has_column { MIGRATE_V7_COLUMN } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 7; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -615,8 +629,8 @@ impl Db {
             params![name, generation],
         )?;
         let text = |k: &str| hello.get(k).map(|v| v.to_string());
-        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=?, host_name=?, remote_address=? WHERE name=?",
-            params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), hello.get("host_name").and_then(Value::as_str), remote_address, name])?;
+        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=?, host_name=?, remote_address=?, worker_policy=? WHERE name=?",
+            params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), hello.get("host_name").and_then(Value::as_str), remote_address, text("worker_policy"), name])?;
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             for m in missions {

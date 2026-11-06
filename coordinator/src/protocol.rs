@@ -43,7 +43,7 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
                 "missions",
                 "event_cursor",
             ],
-            &["host_name"],
+            &["host_name", "worker_policy"],
         ),
         "welcome" => (&["generation", "protocol_version", "event_cursor"], &[]),
         "command" => (&["schema_version", "operation", "params", "mission_id", "target", "request_id"], &[]),
@@ -306,6 +306,30 @@ pub fn check_hello(msg: &Message) -> Result<Value, ProtocolError> {
             return perr("invalid-message", "hello: host_name must be 1-255 bytes without control characters");
         }
     }
+    if let Some(policy) = p.get("worker_policy") {
+        let Some(policy) = policy.as_object() else {
+            return perr("invalid-message", "hello: worker_policy must be an object");
+        };
+        for key in ["allow_control", "allow_terminal_view", "allow_create", "allow_power", "allow_restore"] {
+            if !policy.get(key).is_some_and(Value::is_boolean) {
+                return perr("invalid-message", format!("hello: worker_policy.{key} must be boolean"));
+            }
+        }
+        let roots = policy.get("allow_root").and_then(Value::as_array).ok_or_else(|| ProtocolError {
+            code: "invalid-message",
+            message: "hello: worker_policy.allow_root must be a list".into(),
+        })?;
+        if roots.len() > 32
+            || roots
+                .iter()
+                .any(|root| !root.as_str().is_some_and(|text| !text.is_empty() && text.len() <= 4096))
+        {
+            return perr(
+                "invalid-message",
+                "hello: worker_policy.allow_root must contain at most 32 paths of 1-4096 bytes",
+            );
+        }
+    }
     if !p["platform"].is_object() {
         return perr("invalid-message", "hello: platform must be an object");
     }
@@ -353,5 +377,22 @@ mod tests {
             let decoded = decode(raw.as_bytes()).expect("compatible hello");
             assert_eq!(decoded.payload.get("host_name").and_then(Value::as_str), host_name);
         }
+    }
+
+    #[test]
+    fn hello_validates_and_preserves_optional_worker_policy() {
+        let mut payload = hello_payload(None);
+        let policy = json!({"allow_control":true,"allow_terminal_view":true,"allow_create":false,
+            "allow_root":["/srv/work"],"allow_power":false,"allow_restore":false});
+        payload["worker_policy"] = policy.clone();
+        let decoded = decode(encode("hello", "worker-1", 0, payload).as_bytes()).expect("valid policy");
+        assert_eq!(check_hello(&decoded).unwrap(), json!([]));
+        assert_eq!(decoded.payload["worker_policy"], policy);
+
+        let mut malformed = hello_payload(None);
+        malformed["worker_policy"] = json!({"allow_create":"yes","allow_root":[]});
+        let decoded = decode(encode("hello", "worker-1", 0, malformed).as_bytes()).expect("envelope parse");
+        let error = check_hello(&decoded).unwrap_err();
+        assert_eq!(error.code, "invalid-message");
     }
 }

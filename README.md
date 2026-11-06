@@ -232,10 +232,10 @@ The same command line is shown by `llm-bridge help distributed`.
 
 Remote mission creation, machine power operations and restore each require the
 separate `--allow-create`, `--allow-power` and `--allow-restore` enrolment flags.
-Creation also requires repeatable `--allow-root DIR` entries. Each root must be
-an existing directory; enrolment stores its resolved real path, and the worker
-checks requested paths after resolving symlinks. All four opt-ins default off,
-and the worker enforces them even for coordinator administrators.
+Creation and restore also require repeatable `--allow-root DIR` entries. Each
+root must be an existing directory; enrolment stores its resolved real path,
+and the worker checks requested paths after resolving symlinks. All four opt-ins
+default off, and the worker enforces them even for coordinator administrators.
 
 Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64
 support every role. macOS ARM64 and Intel support the coordinator, the web interface,

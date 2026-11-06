@@ -199,7 +199,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 |---|---|
 | `help` | Exclusion: offline help has no state/API operation; replacement is `llm-bridge help` locally. |
 | `view` | Exclusion: opens a local filesystem artifact; replacement is local `llm-bridge view --file`. |
-| `mission create` | Exclusion: creates local mission/store and starts local controller; no coordinator create adapter; create on the worker. |
+| `mission create` | Typed `mission.create`; resource `POST /api/v1/missions` with `worker` in the JSON body; worker requires `--allow-create` and a cwd inside an enrolled `--allow-root`. Local-only creation options return `unsupported-remote-option`. |
 | `mission list` | Typed `mission.list` via `POST /api/v1/commands`; coordinator resource equivalent is `GET /api/v1/missions`. |
 | `mission set` | Exclusion: local mission configuration mutation has no typed operation; run on the worker. |
 | `mission colour` | Exclusion: local UI identity setting; no REST operation; use local mission console. |
@@ -207,7 +207,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `status` | Typed `mission.status`; resource `GET /api/v1/missions/{id}`. |
 | `screen` | Exclusion: raw pane snapshot is intentionally not exposed; replacement is scoped `GET /api/v1/terminal` WebSocket. |
 | `agents` | Exclusion: process/child-agent inspection is local; replacement is `GET /api/v1/missions/{id}/operations` for bounded operation metadata. |
-| `suspend-until-credits` | Exclusion: suspends this host; no remote power action is exposed; run locally. |
+| `suspend-until-credits` | Typed `mission.suspend_until_credits`; admin-scoped resource `POST /api/v1/missions/{id}/suspend-until-credits`; worker requires `--allow-power`. |
 | `task add` | Typed `task.add`; resource `POST /api/v1/missions/{id}/tasks`. |
 | `task list` | Typed `task.list`; resource `GET /api/v1/missions/{id}/tasks`. |
 | `task show` | Typed `task.show`; resource `GET /api/v1/missions/{id}/tasks/{n}` (number selector only). |
@@ -237,7 +237,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `missions` | Exclusion: interactive picker/station switching is local; use `GET /api/v1/missions` to list remotely. |
 | `gc` | Exclusion: garbage-collects local tmux stations; no REST route; run on worker. |
 | `backup` | Exclusion: copies local Bridge SQLite state; no remote database export route; run on worker. |
-| `restore` | Exclusion: replaces local Bridge SQLite state; no remote restore route; run on worker. |
+| `restore` | Typed `worker.restore`; admin-scoped resource `POST /api/v1/workers/{name}/restore`; worker requires `--allow-restore` and an input file inside an enrolled `--allow-root`. Restore refuses while controllers run and keeps a pre-restore backup. |
 | `worker enroll` | Exclusion: writes local worker credentials; coordinator-side worker creation is `POST /api/v1/workers` by an admin. |
 | `worker status` | Exclusion: reads this host enrolment; no remote equivalent; run locally. |
 | `worker run` | Exclusion: starts the outbound worker service; run locally on enrolled host. |
@@ -265,29 +265,29 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 |---|---|
 | `--file` | Local prompt/artifact input; for remote `task add`/`amend`, prompt text is sent as typed operation `prompt` (file is read client-side). |
 | `--follow` | Local file-follow behavior; no API equivalent. |
-| `--acceptance` | `task.add` resource body `acceptance`; mission creation is local-only. |
-| `--auto-continue` | Local mission configuration/start option; not a distributed operation. |
-| `--capacity-refresh-seconds` | Local controller setting; no API field. |
-| `--command-template` | Local test/custom launch override; never sent remotely. |
-| `--cwd` | Local working directory for mission creation; no coordinator field. |
+| `--acceptance` | `task.add` or `mission.create` resource body `acceptance`. |
+| `--auto-continue` | Local mission configuration; `mission create --target` returns the typed `unsupported-remote-option` result. |
+| `--capacity-refresh-seconds` | Local controller setting; remote mission creation returns `unsupported-remote-option`. |
+| `--command-template` | Local test/custom launch override; remote mission creation returns `unsupported-remote-option`. |
+| `--cwd` | `mission.create` resource body `cwd`; worker resolves it and enforces enrolled allowed roots. |
 | `--headless` | `mission.start` params and `/start` body field `headless`. |
-| `--include-config` | Local JSON projection option; no remote config export. |
+| `--include-config` | Exclusion: local-only mission creation response option; remote create returns `unsupported-remote-option`. |
 | `--json` | Client-side output format; applies to typed command/resource responses, not a request field. |
-| `--log-max-bytes` | Local provider log retention setting; no API field. |
-| `--log-retained-runs` | Local provider log retention setting; no API field. |
-| `--log-rotations` | Local provider log retention setting; no API field. |
-| `--name` | Local mission/worker naming or remote worker admin body; not a remote mission command field. |
-| `--native` | `mission.start` params and `/start` body field `native_tui`. |
-| `--prompt` | `task.add`/`task.amend` typed `prompt` field; local file read if `--prompt-file`. |
+| `--log-max-bytes` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
+| `--log-retained-runs` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
+| `--log-rotations` | Local provider log retention setting; remote mission creation returns `unsupported-remote-option`. |
+| `--name` | Local mission/worker naming or remote `mission.create`/worker admin body. |
+| `--native` | `mission.start` params or `mission.create` body `native_tui`. |
+| `--prompt` | `task.add`/`task.amend` or `mission.create` typed `prompt` field; local file read if `--prompt-file`. |
 | `--prompt-file` | Read client-side then map text to typed `prompt`; file path is never sent. |
-| `--providers` | `mission.start` params/body `providers`; rotation edit itself has no API operation. |
-| `--routes` | `mission.start` params/body `routes`; rotation edit itself has no API operation. |
-| `--teams` | Local mission configuration; no typed API operation. |
-| `--token-spend` | Local mission configuration; no typed API operation. |
-| `--trust-folder` | Local provider trust behavior; no API field. |
-| `--verifier-arg` | Local verifier configuration; no API field. |
-| `--verifier-file` | Local verifier tracking; no API field. |
-| `--verifier-timeout` | Local verifier execution setting; no API field. |
+| `--providers` | `mission.start` params/body or `mission.create` body `providers`. |
+| `--routes` | `mission.start` params/body or `mission.create` body `routes`. |
+| `--teams` | `mission.create` body `teams`; mission edit remains local-only. |
+| `--token-spend` | `mission.create` body `token_spend`; mission edit remains local-only. |
+| `--trust-folder` | `mission.create` body `trust_folder`; worker only accepts a cwd inside its enrolled real-path roots. |
+| `--verifier-arg` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
+| `--verifier-file` | Local verifier tracking; remote mission creation returns `unsupported-remote-option`. |
+| `--verifier-timeout` | Local verifier execution setting; remote mission creation returns `unsupported-remote-option`. |
 | `--mission` | Mission selector populates `mission_id` in typed request or `worker`-qualified mission REST path. |
 | `--suspend-when-rate-limited` | Local host power policy; no API field. |
 | `--all-missions` | Local inspection filter; no remote typed operation. |
@@ -313,10 +313,10 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--pick` | Interactive local picker; remote replacement is `GET /api/v1/missions`. |
 | `--from` | Local station-picker origin; no API parameter. |
 | `--output` | Local backup destination; no REST route. |
-| `--input` | Local restore source; no REST route. |
+| `--input` | `worker.restore` resource body `input`; the path is checked against enrolled real-path roots by the worker. |
 | `--allow-control` | Local worker enrollment control policy; coordinator accepts worker token separately. |
 | `--allow-create` | Local worker opt-in required for remote mission creation; no request can override the worker setting. |
-| `--allow-root` | Local repeatable real-path boundary for remote mission creation; paths are resolved on the worker and never supplied as coordinator policy. |
+| `--allow-root` | Local repeatable real-path boundary for remote creation and restore input; paths are resolved and enforced by the worker. |
 | `--allow-power` | Local worker opt-in required for remote power operations; no request can override the worker setting. |
 | `--allow-restore` | Local worker opt-in required for remote restore; no request can override the worker setting. |
 | `--allow-terminal-view` | Local worker enrollment terminal-view policy; terminal authorization remains scoped WebSocket. |
@@ -349,14 +349,17 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/workers` |
 | `GET /api/v1/workers/{name}` |
 | `DELETE /api/v1/workers/{name}` |
+| `POST /api/v1/workers/{name}/restore` |
 | `GET /api/v1/tokens` |
 | `POST /api/v1/tokens` |
 | `DELETE /api/v1/tokens/{name}` |
 | `GET /api/v1/missions` |
+| `POST /api/v1/missions` |
 | `GET /api/v1/missions/{id}` |
 | `GET /api/v1/missions/{id}/events` |
 | `GET /api/v1/missions/{id}/operations` |
 | `POST /api/v1/missions/{id}/{action}` |
+| `POST /api/v1/missions/{id}/suspend-until-credits` |
 | `GET /api/v1/missions/{id}/tasks` |
 | `POST /api/v1/missions/{id}/tasks` |
 | `GET /api/v1/missions/{id}/tasks/{n}` |

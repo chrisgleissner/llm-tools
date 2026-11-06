@@ -26,7 +26,7 @@ _ENVELOPE_FIELDS = {"v", "type", "id", "worker_id", "generation", "payload"}
 MESSAGE_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "hello": (
         frozenset({"worker_id", "name", "software_version", "protocol_versions", "platform", "capabilities", "missions", "event_cursor"}),
-        frozenset({"host_name"}),
+        frozenset({"host_name", "worker_policy"}),
     ),
     "welcome": (frozenset({"generation", "protocol_version", "event_cursor"}), frozenset()),
     "command": (frozenset({"schema_version", "operation", "params", "mission_id", "target", "request_id"}), frozenset()),
@@ -122,6 +122,14 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         host_name = payload.get("host_name")
         if host_name is not None and (not isinstance(host_name, str) or not host_name or len(host_name.encode("utf-8")) > 255 or any(ord(char) < 32 or ord(char) == 127 for char in host_name)):
             raise ProtocolError("invalid-message", "hello: host_name must be 1-255 bytes without control characters")
+        policy = payload.get("worker_policy")
+        if policy is not None:
+            flags = ("allow_control", "allow_terminal_view", "allow_create", "allow_power", "allow_restore")
+            if not isinstance(policy, dict) or any(not isinstance(policy.get(key), bool) for key in flags):
+                raise ProtocolError("invalid-message", "hello: worker_policy must contain boolean opt-in fields")
+            roots = policy.get("allow_root")
+            if not isinstance(roots, list) or len(roots) > 32 or any(not isinstance(root, str) or not root or len(root.encode("utf-8")) > 4096 for root in roots):
+                raise ProtocolError("invalid-message", "hello: worker_policy.allow_root must contain at most 32 paths of 1-4096 bytes")
     elif kind.startswith("terminal."):
         if not isinstance(payload["session_id"], str) or not _ID.fullmatch(payload["session_id"]):
             raise ProtocolError("invalid-message", "session_id must be 1-128 characters of [A-Za-z0-9_.-]")

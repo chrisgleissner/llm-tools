@@ -26,6 +26,7 @@ import dataclasses
 import re
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .bridge_missions import MissionNotFound, resolve_mission_ref
@@ -160,6 +161,10 @@ def _is_kind(value: Any, kind: type) -> bool:
 def _validated_params(spec: OperationSpec, raw: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(raw) - set(spec.params)
     if unknown:
+        if spec.operation == "mission.create":
+            options = sorted(unknown)
+            raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): " + ", ".join(options),
+                                 details={"options": options})
         raise CommandFailure("invalid-argument", f"{spec.operation}: unknown parameters: {', '.join(sorted(unknown))}")
     values: dict[str, Any] = {}
     for name, param in spec.params.items():
@@ -251,6 +256,45 @@ def _mission_start(store: BridgeStore | None, request: CommandRequest, params: d
         routes=routes,
     )
     return {"exit_code": exit_code, "mission_id": request.mission_id}
+
+
+def _mission_create(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Create a mission and its first task on this worker without starting it."""
+    import argparse
+
+    unsupported = params["unsupported_options"]
+    if unsupported:
+        raise CommandFailure("unsupported-remote-option", "mission.create does not support remote option(s): " + ", ".join(unsupported),
+                             details={"options": unsupported})
+    cli = _cli()
+    args = argparse.Namespace(
+        name=params["name"], cwd=params["cwd"], prompt=params["prompt"], prompt_file=None,
+        acceptance=params["acceptance"], providers=params["providers"], routes=params["routes"],
+        headless=params["headless"], native_tui=params["native_tui"], teams=params["teams"],
+        token_spend=params["token_spend"], command_template=None, trust_folder=params["trust_folder"],
+        verifier_argv=[], verifier_files=[], log_max_bytes=4 * 1024 * 1024, log_rotations=3,
+        log_retained_runs=20, capacity_refresh_seconds=60,
+    )
+    prompt, config = cli._mission_creation_inputs(args, auto_continue=False)
+    with cli.open_store() as writer:
+        return cli._create_mission_with_task(writer, args, prompt, config)
+
+
+def _mission_suspend_until_credits(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert request.mission_id is not None
+    from .bridge_power import suspend_until_credits
+
+    return dict(suspend_until_credits(request.mission_id))
+
+
+def _worker_restore(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from . import bridge_backup
+    from .bridge_store import store_path
+
+    facts = bridge_backup.restore(Path(params["input"]), store_path=store_path())
+    # Local restore reports the source and retained database paths for the
+    # operator. Those host paths must not cross the worker/coordinator boundary.
+    return {key: facts[key] for key in ("missions", "schema_version", "last_event_id", "event_sequence")}
 
 
 def _task_show(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -437,6 +481,12 @@ OPERATIONS: dict[str, OperationSpec] = {
     spec.operation: spec
     for spec in (
         OperationSpec("mission.list", "List missions on this worker", False, False, {"include_config": Param(bool, default=False)}, _mission_list),
+        OperationSpec("mission.create", "Create a mission and its first task on this worker", True, False,
+                      {"prompt": Param(str, required=True), "cwd": Param(str, required=True), "name": Param(str, default=""),
+                       "acceptance": Param(list, default=[], item=str), "providers": Param(str), "routes": Param(str),
+                       "headless": Param(bool, default=False), "native_tui": Param(bool, default=False),
+                       "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
+                       "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
         OperationSpec("mission.status", "Show one mission's status projection", False, True, _NO_PARAMS, _mission_status),
         OperationSpec(
             "mission.events",
@@ -454,6 +504,10 @@ OPERATIONS: dict[str, OperationSpec] = {
             {"headless": Param(bool), "native_tui": Param(bool), "providers": Param(str), "routes": Param(str)},
             _mission_start,
         ),
+        OperationSpec("mission.suspend_until_credits", "Suspend this worker until the mission's selected capacity resets", True, True,
+                      _NO_PARAMS, _mission_suspend_until_credits),
+        OperationSpec("worker.restore", "Restore this worker's Bridge database from a backup", True, False,
+                      {"input": Param(str, required=True)}, _worker_restore),
         OperationSpec("mission.pause", "Pause autonomous scheduling", True, True, _NO_PARAMS, _mission_control("pause")),
         OperationSpec("mission.resume", "Resume mission scheduling", True, True, _NO_PARAMS, _operator("resume")),
         OperationSpec(
@@ -595,6 +649,8 @@ def outcome_of(spec: OperationSpec, result: Mapping[str, Any]) -> str:
         return "accepted"
     if status in {"REJECTED", "FAILED"}:
         return status.lower()
+    if status == "REFUSED":
+        return "rejected"
     return "applied"
 
 
@@ -629,6 +685,7 @@ def execute(request: CommandRequest) -> CommandResult:
     outcome = outcome_of(spec, result)
     error = None
     if outcome == "rejected":
-        detail = result.get("result") or {}
-        error = CommandError(str(detail.get("code", "rejected")), str(detail.get("error", "rejected")))
+        detail = result.get("result") or result
+        error = CommandError(str(detail.get("code", detail.get("reason", "rejected"))),
+                             str(detail.get("error", detail.get("message", "rejected"))))
     return CommandResult(request.request_id, request.operation, outcome, result=result, error=error)

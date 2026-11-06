@@ -132,7 +132,7 @@ async fn unknown_api_paths_and_methods_return_problem_details() {
     let (status, body) = api.get("/api/v1/unknown").await;
     assert_eq!(status, 404);
     assert_eq!(body["type"], "https://llm-tools.dev/problems/not-found");
-    let request = api.bare(Method::POST, "/api/v1/missions").json(&serde_json::json!({}));
+    let request = api.bare(Method::POST, "/api/v1/missions/mission-1/events").json(&serde_json::json!({}));
     let response = request.send().await.unwrap();
     assert_eq!(response.status().as_u16(), 405);
     assert_eq!(response.headers()["content-type"], "application/problem+json");
