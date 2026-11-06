@@ -242,7 +242,9 @@ install, certificate trust, backup, recovery, Raspberry Pi Zero 2 W target profi
 [operations](./docs/distributed/operations.md) (worker service, audit log, backup,
 troubleshooting), [coordinator](./docs/distributed/coordinator.md) (configuration,
 HTTP API, limits), [protocol](./docs/distributed/protocol.md),
-[threat model](./docs/distributed/threat-model.md) and
+[threat model](./docs/distributed/threat-model.md),
+[safe defaults](./docs/distributed/safe-defaults.md),
+[uninstall and moving to another host](./docs/llm-bridge/uninstall.md) and
 [benchmarks](./docs/distributed/benchmarks.md).
 
 ## llm-usage
