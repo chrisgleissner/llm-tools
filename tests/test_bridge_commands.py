@@ -320,6 +320,32 @@ def test_remote_style_references_resolve_on_the_worker(mission):
     assert commands.execute(CommandRequest("mission.status", mission_id="zz")).error.code == "invalid-argument"
 
 
+def test_task_dependency_options_resolve_mission_local_numbers(mission, tmp_path, capsys):
+    state, mission_id = mission
+    # Advance the global task IDs so ordinal 1 is not also database task ID 1.
+    assert main(["mission", "create", "--prompt", "Other mission", "--cwd", str(tmp_path), "--providers", "codex", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "add", "--mission", mission_id, "--prompt", "Second task", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "add", "--mission", mission_id, "--prompt", "Third task", "--depends-on", "1", "--json"]) == 0
+    capsys.readouterr()
+    with BridgeStore(state / "bridge.sqlite3", readonly=True) as store:
+        third = store.task_by_ordinal(mission_id, 3)
+        assert third["depends_on_ordinals"] == [1]
+
+    added = commands.execute(CommandRequest("task.dependency", {
+        "task_number": 2, "depends_on_number": 1,
+    }, mission_id=mission_id))
+    assert added.outcome == "applied", added.to_json()
+    with BridgeStore(state / "bridge.sqlite3", readonly=True) as store:
+        second = store.task_by_ordinal(mission_id, 2)
+        assert second["depends_on_ordinals"] == [1]
+    missing = commands.execute(CommandRequest("task.dependency", {
+        "task_number": 2, "depends_on_number": 99,
+    }, mission_id=mission_id))
+    assert missing.outcome == "rejected" and missing.error.code == "not-found"
+
+
 def test_proposal_operations_list_and_decide_by_task_number(mission, capsys, monkeypatch):
     state, mission_id = mission
     with BridgeStore(state / "bridge.sqlite3") as store:

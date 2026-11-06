@@ -128,6 +128,10 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["task", "reorder", "--mission", "m1", "--task", "2", "--value", "5"], "task.reorder", {"task_number": 2, "order": 5}),
         (["task", "retry", "--mission", "m1", "--task", "2"], "task.retry", {"task_number": 2}),
         (["task", "add", "--mission", "m1", "--prompt", "x"], "task.add", {"prompt": "x", "title": "", "priority": 0, "order": None, "acceptance": []}),
+        (["task", "add", "--mission", "m1", "--prompt", "x", "--depends-on", "1,3"], "task.add",
+         {"prompt": "x", "title": "", "priority": 0, "order": None, "depends_on_numbers": [1, 3], "acceptance": []}),
+        (["task", "dependencies", "--mission", "m1", "--task", "4", "--add", "2"], "task.dependency",
+         {"task_number": 4, "depends_on_number": 2}),
         (["proposal", "list", "--mission", "m1"], "proposal.list", {"status": "PENDING", "limit": 100, "after": 0}),
         (["proposal", "accept", "--mission", "m1", "--task", "3"], "proposal.accept", {"task_number": 3, "reason": ""}),
         (["proposal", "reject", "--mission", "m1", "--task", "3", "--reason", "no"], "proposal.reject", {"task_number": 3, "reason": "no"}),
@@ -218,12 +222,28 @@ def test_api016_surface_operations_use_resource_routes():
     assert api.opener.calls[-1][0][1] == "/api/v1/workers/ws/agents"
 
 
+def test_task_dependency_cli_options_use_task_resource_routes():
+    routes = {
+        ("POST", "/api/v1/missions/m1/tasks"): (200, {"state": "done", "result": {"id": "task-5"}}),
+        ("PATCH", "/api/v1/missions/m1/tasks/4"): (200, {"state": "done", "result": {"id": "task-4"}}),
+    }
+    api = client(routes)
+    add, _ = remote.request_for(args("task", "add", "--mission", "m1", "--prompt", "new", "--depends-on", "1,3"), "ws")
+    dependency, _ = remote.request_for(args("task", "dependencies", "--mission", "m1", "--task", "4", "--add", "2"), "ws")
+    assert api.submit_resource("ws", add)["id"] == "task-5"
+    assert api.submit_resource("ws", dependency)["id"] == "task-4"
+    assert [call[0] for call in api.opener.calls] == [
+        ("POST", "/api/v1/missions/m1/tasks"), ("PATCH", "/api/v1/missions/m1/tasks/4"),
+    ]
+    assert api.opener.calls[0][1]["depends_on"] == [1, 3]
+    assert api.opener.calls[1][1]["depends_on"] == 2
+
+
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
         (["task", "list", "--mission", "m1", "--all"], "--limit"),
-        (["task", "add", "--mission", "m1", "--prompt", "x", "--depends-on", "1"], "depends-on"),
-        (["task", "dependencies", "--mission", "m1", "--task", "1", "--add", "2"], "dependencies"),
+        (["task", "add", "--mission", "m1", "--prompt", "x", "--depends-on", "oops"], "comma-separated task numbers"),
     ],
 )
 def test_unmappable_commands_fail_explicitly(argv, message):

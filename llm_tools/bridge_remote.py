@@ -232,7 +232,10 @@ class Client:
             query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/tasks/{int(task_number)}?{query}", timeout=wait + 15)
         elif op == "task.add":
-            status, body = self.call("POST", f"{base}/tasks?{worker_query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+            body_params = dict(params)
+            if "depends_on_numbers" in body_params:
+                body_params["depends_on"] = body_params.pop("depends_on_numbers")
+            status, body = self.call("POST", f"{base}/tasks?{worker_query}", {**body_params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op.startswith("task."):
             task_selector = params.get("task_number")
             if task_selector is None or "task_id" in params:
@@ -245,6 +248,8 @@ class Client:
                     body_params["approved"] = False
                 status, body = self.call("POST", f"{task_base}/verify?{worker_query}", body_params, timeout=wait + 15, headers=headers)
             elif op in {"task.amend", "task.priority", "task.reorder", "task.dependency"}:
+                if op == "task.dependency" and "depends_on_number" in body_params:
+                    body_params["depends_on"] = body_params.pop("depends_on_number")
                 status, body = self.call("PATCH", f"{task_base}?{worker_query}", body_params, timeout=wait + 15, headers=headers)
             elif op in {"task.pause", "task.resume", "task.cancel", "task.retry"}:
                 status, body = self.call("POST", f"{task_base}/{op.removeprefix('task.')}?{worker_query}", body_params, timeout=wait + 15, headers=headers)
@@ -444,9 +449,13 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         if action == "show":
             return make("task.show", _task_selector(args)), fmt.format_task_detail
         if action == "add":
-            if args.depends_on:
-                raise ValueError("task add --depends-on is not available remotely yet; add the dependency with task dependencies --task-id")
+            try:
+                depends_on = [int(value.strip()) for value in args.depends_on.split(",") if value.strip()]
+            except ValueError:
+                raise ValueError("task add --depends-on must be comma-separated task numbers") from None
             params = {"prompt": _read_text(args), "title": args.title, "priority": args.priority, "order": args.order, "acceptance": list(args.acceptance)}
+            if depends_on:
+                params["depends_on_numbers"] = depends_on
             return make("task.add", params), lambda value: fmt.format_task_result("add", value.get("result") or value)
         extra: dict[str, Any] = {
             "amend": lambda: {"prompt": _read_text(args)},
@@ -456,8 +465,8 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
             "reorder": lambda: {"order": args.value},
         }.get(action, lambda: {})()
         if action == "dependencies":
-            raise ValueError("task dependencies is not available remotely yet")
-        operation = f"task.{action}"
+            extra["depends_on_number"] = args.add
+        operation = "task.dependency" if action == "dependencies" else f"task.{action}"
         commands.lookup(operation)
         return make(operation, {**_task_selector(args), **extra}), lambda value: fmt.format_task_result(action, value)
     raise ValueError(f"{command} is not available with --target {target}; remote commands: mission create|list, restore, suspend-until-credits, status, events, start, resume, pause, stop, cancel, continue, task, proposal list|accept|reject")

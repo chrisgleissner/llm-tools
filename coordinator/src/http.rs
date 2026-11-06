@@ -2133,6 +2133,9 @@ async fn add_mission_task(
     no_extra(&m, &["title", "prompt", "priority", "order", "depends_on", "acceptance", "wait_ms"])?;
     let wait_ms = resource_wait_ms(&m)?;
     m.remove("wait_ms");
+    if let Some(numbers) = m.remove("depends_on") {
+        m.insert("depends_on_numbers".into(), numbers);
+    }
     resource_command(
         st,
         p,
@@ -2188,6 +2191,11 @@ async fn amend_mission_task(
     };
     let mut params = Map::new();
     params.insert("task_number".into(), json!(task_number));
+    if field == "depends_on" {
+        if let Some(number) = m.remove("depends_on") {
+            m.insert("depends_on_number".into(), number);
+        }
+    }
     params.append(&mut m);
     resource_command(
         st,

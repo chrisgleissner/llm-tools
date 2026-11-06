@@ -594,6 +594,30 @@ def _operator(action: str) -> Handler:
         assert request.mission_id is not None
         payload: dict[str, Any] = {"action": action}
         payload.update((name, value) for name, value in params.items() if not (name == "expected_revision" and value is None))
+        if action in {"task.add", "task.dependency"}:
+            # CLI/resource adapters may send mission-local task numbers. Resolve
+            # those on the worker, where the mission database is authoritative;
+            # preserve the original ID-based command fields for existing clients.
+            with cli.open_store(readonly=True) as reader:
+                number_field = "depends_on_numbers" if action == "task.add" else "depends_on_number"
+                if action == "task.add":
+                    numbers = payload.pop(number_field, [])
+                else:
+                    dependency_id = payload.get("depends_on")
+                    dependency_number = payload.pop(number_field, None)
+                    if (dependency_id is not None) == (dependency_number is not None):
+                        raise CommandFailure("invalid-argument", "task.dependency requires exactly one dependency ID or task number")
+                    numbers = [] if dependency_number is None else [dependency_number]
+                dependency_ids = []
+                for number in numbers:
+                    try:
+                        dependency_ids.append(int(reader.task_by_ordinal(request.mission_id, int(number))["id"]))
+                    except (KeyError, ValueError, TransitionError) as exc:
+                        raise CommandFailure("not-found", f"dependency task number {number} was not found") from exc
+            if action == "task.add":
+                payload["depends_on"] = [*payload.get("depends_on", []), *dependency_ids]
+            elif dependency_ids:
+                payload["depends_on"] = dependency_ids[0]
         with cli.open_store() as writer:
             return dict(cli._apply_operator_command(writer, request.mission_id, payload, command_id=request.request_id))
 
@@ -686,6 +710,7 @@ OPERATIONS: dict[str, OperationSpec] = {
                 "priority": Param(int, default=0),
                 "order": Param(int),
                 "depends_on": Param(list, default=[], item=int),
+                "depends_on_numbers": Param(list, default=[], item=int),
                 "acceptance": Param(list, default=[], item=str),
             },
             _operator("task.add"),
@@ -696,7 +721,7 @@ OPERATIONS: dict[str, OperationSpec] = {
         _task_op("task.reject", "Reject a task result", {"reason": Param(str, required=True)}),
         _task_op("task.priority", "Set task priority", {"priority": Param(int, required=True)}),
         _task_op("task.reorder", "Set task order among equal priorities", {"order": Param(int, required=True)}),
-        _task_op("task.dependency", "Add a prerequisite task", {"depends_on": Param(int, required=True)}),
+        _task_op("task.dependency", "Add a prerequisite task", {"depends_on": Param(int), "depends_on_number": Param(int)}),
         OperationSpec(
             "proposal.list",
             "List agent proposals",

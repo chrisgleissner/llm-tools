@@ -209,13 +209,13 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `screen` | Exclusion: raw pane snapshot is intentionally not exposed; replacement is scoped `GET /api/v1/terminal` WebSocket. |
 | `agents` | Typed `mission.agents`; mission-filtered reads use `GET /api/v1/missions/{id}/agents`, while all-mission reads use `GET /api/v1/workers/{name}/agents`. |
 | `suspend-until-credits` | Typed `mission.suspend_until_credits`; admin-scoped resource `POST /api/v1/missions/{id}/suspend-until-credits`; worker requires `--allow-power`. |
-| `task add` | Typed `task.add`; resource `POST /api/v1/missions/{id}/tasks`. |
+| `task add` | Typed `task.add`; resource `POST /api/v1/missions/{id}/tasks`. `--depends-on` numbers are resolved against that worker mission. |
 | `task list` | Typed `task.list`; resource `GET /api/v1/missions/{id}/tasks`. |
 | `task show` | Typed `task.show`; resource `GET /api/v1/missions/{id}/tasks/{n}` (number selector only). |
 | `task amend` | Typed `task.amend`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
 | `task priority` | Typed `task.priority`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
 | `task reorder` | Typed `task.reorder`; resource `PATCH /api/v1/missions/{id}/tasks/{n}`. |
-| `task dependencies` | Exclusion: dependency-add operation has no REST resource adapter and remote typed mapping is not implemented; run locally. |
+| `task dependencies` | Typed `task.dependency`; resource `PATCH /api/v1/missions/{id}/tasks/{n}` with the prerequisite's mission-local task number. |
 | `task pause` | Typed `task.pause`; resource `POST /api/v1/missions/{id}/tasks/{n}/pause`. |
 | `task resume` | Typed `task.resume`; resource `POST /api/v1/missions/{id}/tasks/{n}/resume`. |
 | `task cancel` | Typed `task.cancel`; resource `POST /api/v1/missions/{id}/tasks/{n}/cancel`. |
@@ -300,9 +300,9 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--title` | `task.add` operation/resource body `title`. |
 | `--priority` | `task.add` body or `task.priority` typed operation/resource patch field `priority`. |
 | `--order` | `task.add` body or `task.reorder` typed operation/resource patch field `order`. |
-| `--depends-on` | Exclusion remotely: task-add dependency field is refused; `task dependencies` is local-only. Add dependencies locally. |
+| `--depends-on` | Typed `task.add` accepts comma-separated mission-local task numbers; the worker resolves them inside the mission database before adding the task. |
 | `--value` | Maps to `task.priority` (`priority`) or `task.reorder` (`order`) typed operation and PATCH resource. |
-| `--add` | Exclusion: `task dependencies` has no remote operation; run locally. |
+| `--add` | Typed `task.dependency` accepts a mission-local prerequisite task number; the resource PATCH passes it to the worker for resolution. |
 | `--evidence` | `task.verify` typed operation/resource body `evidence`. |
 | `--approve` | `task.verify` typed operation/resource body `approved`. |
 | `--reason` | `task.reject` and `proposal.reject` typed field `reason`. |

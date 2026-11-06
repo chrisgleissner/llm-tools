@@ -539,8 +539,8 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
     with open_store(readonly=args.task_action in {"list", "show"}) as store:
         if args.task_action == "add":
             prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-            dep_ids = _dependency_ids(store, args.mission, args.depends_on)
-            command_result = commands.dispatch(commands.CommandRequest("task.add", {"prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": list(args.acceptance)}, mission_id=args.mission))
+            depends_on = [int(value.strip()) for value in args.depends_on.split(",") if value.strip()]
+            command_result = commands.dispatch(commands.CommandRequest("task.add", {"prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on_numbers": depends_on, "acceptance": list(args.acceptance)}, mission_id=args.mission))
             result = command_result if preserve_receipt or command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
         elif args.task_action == "list":
             if getattr(args, "all", False):
@@ -567,7 +567,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
             elif args.task_action == "reorder":
                 payload.update(action="task.reorder", order=args.value)
             elif args.task_action == "dependencies":
-                payload.update(action="task.dependency", depends_on=int(store.task_by_ordinal(args.mission, args.add)["id"]))
+                payload.update(action="task.dependency", depends_on_number=args.add)
             else:
                 payload["action"] = "task." + args.task_action
             params = {name: value for name, value in payload.items() if name != "action"}

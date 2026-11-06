@@ -443,9 +443,10 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         ("/api/v1/missions/mission-1/stop?worker=build-1", json!({"force":true}), "mission.stop"),
         (
             "/api/v1/missions/mission-1/tasks?worker=build-1",
-            json!({"title":"A task","prompt":"Do the work","priority":3,"depends_on":[],"acceptance":[]}),
+            json!({"title":"A task","prompt":"Do the work","priority":3,"depends_on":[1,3],"acceptance":[]}),
             "task.add",
         ),
+        ("/api/v1/missions/mission-1/tasks/10?worker=build-1", json!({"depends_on":2}), "task.dependency"),
         (
             "/api/v1/missions/mission-1/tasks/7/verify?worker=build-1",
             json!({"approved":true,"evidence":"Reviewed output","expected_revision":3}),
@@ -469,6 +470,12 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         assert_eq!(command["request"]["mission_id"], "mission-1");
         if path.ends_with("/stop?worker=build-1") {
             assert_eq!(command["request"]["params"], json!({"force":true}));
+        }
+        if path == "/api/v1/missions/mission-1/tasks?worker=build-1" {
+            assert_eq!(command["request"]["params"]["depends_on_numbers"], json!([1, 3]));
+        }
+        if path == "/api/v1/missions/mission-1/tasks/10?worker=build-1" {
+            assert_eq!(command["request"]["params"]["depends_on_number"], 2);
         }
     }
     let (status, command) = api
