@@ -319,6 +319,11 @@ def pytest_make_collect_report(collector: Any):
         return
     report = outcome.get_result()
     if report.failed:
+        listed = WINDOWS_SKIPPED_MODULES.get(collector.path.stem)
+        if listed:  # these fail at import (for example socketserver.UnixStreamServer), before items exist
+            report.outcome = "skipped"
+            report.longrepr = (str(collector.path), 0, f"Skipped: {listed}")
+            return
         found = _MISSING_POSIX_MODULE.search(str(report.longrepr))
         if found:
             report.outcome = "skipped"

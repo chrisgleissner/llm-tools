@@ -599,6 +599,9 @@ def test_reject_reruns_the_task_with_the_reason_and_a_changed_rotation(tmp_path,
         assert len(received()) == 2
     finally:
         with BridgeStore(database) as store:
-            if store.get_mission(mid)["status"] not in {"COMPLETED", "STOPPED", "CANCELLED", "FAILED"}:
-                _call(env, "stop", "--mission", mid)
+            active = store.get_mission(mid)["status"] not in {"COMPLETED", "STOPPED", "CANCELLED", "FAILED"}
+        if active:
+            # The controller may already be finishing the mission; "stop is pending" then means the same thing.
+            result = subprocess.run([sys.executable, "-m", "llm_tools.bridge", "stop", "--mission", mid], env=env, text=True, capture_output=True, timeout=scaled(30))
+            assert result.returncode == 0 or "stop is pending" in result.stderr, result.stderr + result.stdout
         _wait(lambda: _released(state, mid))

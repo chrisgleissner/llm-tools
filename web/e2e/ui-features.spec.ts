@@ -57,6 +57,8 @@ test.describe("keyboard shortcuts", () => {
     await page.locator("body").press("g");
     await page.locator("body").press("m");
     await expect(page).toHaveURL(/\/missions$/);
+    // The missions view builds its search box after navigation; on a slow runner "/" can arrive first.
+    await expect(page.getByLabel("Search missions")).toBeVisible();
     await page.locator("body").press("/");
     await expect(page.getByLabel("Search missions")).toBeFocused();
     // Typing in a field never triggers a shortcut.
