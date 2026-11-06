@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import llm_tools.bridge_runtime as runtime
 from llm_tools.bridge_runtime import BridgeMissionHooks
 from llm_tools.bridge_store import BridgeStore
@@ -114,3 +116,32 @@ def test_int001_status_says_the_mission_needs_the_operator(tmp_path) -> None:
 
     assert needs is not None and needs["kind"] == "operator"
     assert "waiting for you" in needs["message"]
+
+
+def _task_with_unresolved_operation(tmp_path, final_status):
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    store.begin_operation(task_id, iteration=1, station="codex")
+    store.set_task_status(task_id, final_status)
+    return store, mission["id"], task_id
+
+
+@pytest.mark.parametrize("operator_status", ["CANCELLED", "PAUSED"])
+def test_int005_crash_reconciliation_keeps_operator_cancelled_and_paused_tasks(tmp_path, operator_status) -> None:
+    store, mission_id, task_id = _task_with_unresolved_operation(tmp_path, operator_status)
+
+    assert store.reconcile_interrupted_operations(mission_id) == 1
+
+    assert store.get_task(task_id)["status"] == operator_status
+    operation = store.db.execute("SELECT status FROM operations WHERE task_id=?", (task_id,)).fetchone()
+    assert operation["status"] == "UNCERTAIN"  # the operation is still recorded as uncertain
+
+
+def test_int005_crash_reconciliation_still_blocks_a_running_task(tmp_path) -> None:
+    store, mission_id, task_id = _task_with_unresolved_operation(tmp_path, "RUNNING")
+
+    store.reconcile_interrupted_operations(mission_id)
+
+    assert store.get_task(task_id)["status"] == "BLOCKED"

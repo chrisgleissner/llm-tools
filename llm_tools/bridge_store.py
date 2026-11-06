@@ -1318,7 +1318,7 @@ class BridgeStore:
         return self.get_task(int(op["task_id"]))
 
     def reconcile_interrupted_operations(self, mission_id: str, *, cause: str = "") -> int:
-        """Mark unresolved operations UNCERTAIN and block their tasks.
+        """Mark unresolved operations UNCERTAIN and block their tasks that are still queued, ready or running.
 
         ``cause`` names an operator action that interrupted them (``stop-force``).
         The event then says so, and ``release_interrupted_tasks`` can resume the
@@ -1335,7 +1335,8 @@ class BridgeStore:
                 task = self._task_row(int(op["task_id"]))
                 now = utc_now()
                 self.db.execute("UPDATE operations SET status='UNCERTAIN',updated_at=? WHERE id=?", (now, op["id"]))
-                self.db.execute("UPDATE tasks SET status='BLOCKED',updated_at=? WHERE id=?", (now, task["id"]))
+                # An operator's CANCELLED or PAUSED task (or one already past the run, VERIFYING or finished) keeps its status.
+                self.db.execute("UPDATE tasks SET status='BLOCKED',updated_at=? WHERE id=? AND status IN ('QUEUED','READY','RUNNING')", (now, task["id"]))
                 self._event(mission_id, "operation-uncertain", data, task_id=task["id"], operation_id=op["id"])
                 count += 1
         return count
