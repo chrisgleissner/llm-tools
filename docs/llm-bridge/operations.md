@@ -881,13 +881,30 @@ mission creation flags above.
 
 The controller records a heartbeat every few seconds and a capacity observation
 every minute. To keep the database bounded, it deletes heartbeats older than
-one hour, thins capacity observations older than one hour to one per 10 minutes,
-and records an `events-pruned` event for each pass that removed rows. The newest
-heartbeat and observation are always kept. Task, operation, verification and
-operator events are never pruned. An observation identical to the previous one
-updates that row instead of adding another. The database file does not shrink
+one hour, thins capacity observations and the `provider-wait` and
+`provider-selection` events written on every pass of a capacity wait older than
+one hour to one per 10 minutes, deletes finished commands (applied, rejected or
+failed) older than 30 days, and records an `events-pruned` event for each pass
+that removed rows. The newest event of each thinned kind is always kept. Task,
+operation, verification, command and operator events are never pruned. A
+`command-applied` or `command-rejected` event carries a short summary of a
+result larger than 4 KiB (for example the full prompt returned by `task.add`);
+the command record keeps the whole result. An observation identical to the
+previous one updates that row instead of adding another. The database file does not shrink
 after pruning; the freed space is reused (run `VACUUM` while no mission is
 running to return it).
+
+A provider run that Bridge's own watchdog stopped (status 75: no output for the
+idle timeout, a question that stayed unanswered, or a blocked prompt) is handed
+once to the next rotation entry. A second stop of the same task leaves it
+BLOCKED and records `provider-handoff-exhausted`. The question watchdog arms
+only while the last line of the provider's standard output is a question; later
+output, including a tool call, clears it, and standard error never arms it. If
+the controller fails, it stops the provider process groups of unresolved
+operations before the mission becomes FAILED; a group that cannot be stopped is
+recorded as a `provider-orphaned` event with its pid. Two `start` commands for one
+mission are serialized, and the controller records its pid and start token in its
+lock file, which `stop --force` uses when `controller-ready.json` is missing.
 
 See `llm-bridge --help` and the command-specific `--help` output for all
 available CLI operations.

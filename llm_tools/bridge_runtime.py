@@ -725,6 +725,19 @@ class BridgeMissionHooks:
         self._codex_owned_operations.discard(operation_id)
         self._codex_observe_schedule.pop(operation_id, None)
 
+    def _record_session_outcome_best_effort(self, operation_id: str, provider: str, cwd: Any) -> None:
+        """``_record_session_outcome`` after the exit was recorded; a failure becomes an UNAVAILABLE session event."""
+        try:
+            self._record_session_outcome(operation_id, provider, str(Path(cwd).expanduser().resolve(strict=True)))
+        except Exception:  # noqa: BLE001 - provider session files and the folder can disappear
+            for pending in (self._session_restore_expectations, self._session_candidates, self._session_baselines, self._session_started_ns, self._session_providers, self._session_cwds, self._codex_observe_schedule):
+                pending.pop(operation_id, None)
+            self._codex_owned_operations.discard(operation_id)
+            try:
+                self.store.record_operation_session(operation_id, provider=provider, restoration_state="UNAVAILABLE")
+            except Exception:  # noqa: BLE001
+                pass
+
     # Seconds between looks for a Codex session while none has been found: the
     # session file is opened within the first moments of a run, so the search
     # starts fast and slows to a rarely-repeated check.
@@ -905,13 +918,13 @@ class BridgeMissionHooks:
         output_files = sorted(run_dir.glob("attempt-*.out")) if run_dir else []
         logs_path = str(output_files[-1]) if output_files else None
         try:
-            self._record_session_outcome(
-                operation_id,
-                str(selection.get("provider") or scheduler_config.provider),
-                str(Path(scheduler_config.cwd).expanduser().resolve(strict=True)),
-            )
             task_before = self.store.get_task(int(operation["task_id"]))
+            # The exit is recorded first: the session bookkeeping below is best
+            # effort and must not turn a finished run into an uncertain one.
             task = self.store.finish_operation(operation_id, exit_code=int(status), logs_path=logs_path)
+            self._record_session_outcome_best_effort(
+                operation_id, str(selection.get("provider") or scheduler_config.provider), scheduler_config.cwd,
+            )
             provider_output = ""
             if logs_path:
                 try:
@@ -997,9 +1010,12 @@ class BridgeMissionHooks:
                     # Apply pending text before deciding whether this known
                     # provider failure can be handed to another route.
                     task = self.store.begin_iteration(int(task["id"]))
-                continued = None if status == common.AUTONOMY_ABORT_STATUS else self.store.continue_task_after_provider_failure(
+                # A run stopped by the scheduler watchdog (75) is handed to the next
+                # rotation entry once per task; a second stop leaves the task BLOCKED.
+                continued = self.store.continue_task_after_provider_failure(
                     operation_id,
                     max_failures=self.max_provider_failures,
+                    max_autonomy_aborts=1,
                 )
                 if continued is not None:
                     self.store.record_runtime_event(self.mission_id, "task-status-transition", {
@@ -1668,6 +1684,51 @@ def terminate_managed_processes(store: BridgeStore, mission_id: str) -> None:
                 raise
 
 
+def terminate_active_provider_groups(store: BridgeStore, mission_id: str) -> bool:
+    """Stop the provider process groups of this mission's unresolved operations.
+
+    Called when the controller leaves through an exception, before the
+    operations are reconciled and the mission is marked FAILED. Never raises:
+    a group that cannot be stopped is recorded as a ``provider-orphaned`` event
+    (pid and start token) so the next controller start and the operator can find
+    it. Returns True when every recorded group is gone.
+    """
+    clean = True
+    try:
+        operations = [
+            dict(row)
+            for row in store.db.execute(
+                "SELECT * FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
+                (mission_id,),
+            )
+        ]
+    except Exception:  # noqa: BLE001 - the database may be the reason the controller failed
+        return False
+    for operation in operations:
+        process_pid = operation.get("process_pid")
+        process_start = operation.get("process_start")
+        if not process_pid or not process_start:
+            continue
+        try:
+            _terminate_owned_process_group(int(process_pid), str(process_start))
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            clean = False
+            try:
+                store.record_runtime_event(mission_id, "provider-orphaned", {
+                    "operation_id": operation["id"],
+                    "process_pid": int(process_pid),
+                    "process_start": str(process_start),
+                    "reason": f"{type(exc).__name__}: {exc}"[:500],
+                })
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        terminate_managed_processes(store, mission_id)
+    except Exception:  # noqa: BLE001
+        clean = False
+    return clean
+
+
 def _process_alive_but_unverifiable(process_pid: int) -> bool:
     """Distinguish a vanished process from one whose /proc identity is unreadable."""
     try:
@@ -2016,6 +2077,13 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         lock.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
     except BlockingIOError:
         return 2
+    # The lock file is the durable record of who owns the mission: it is written
+    # while the lock is held, so it cannot go missing or stale the way
+    # controller-ready.json can.
+    try:
+        lock.write_owner({"pid": os.getpid(), "process_start": _process_start_token(os.getpid()), "startup_token": startup_token})
+    except OSError:
+        pass  # best effort: controller-ready.json still carries the identity
     runtime = _runtime_directory(mission_id)
     ready = _ready_file(runtime)
     try:
@@ -2176,6 +2244,10 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
 
             return ralph_robin.main(argv, bridge_hooks=hooks)
         except BaseException as exc:
+            if not native_tui:
+                # The headless provider runs in its own process group and would
+                # otherwise keep editing the worktree after the mission is FAILED.
+                terminate_active_provider_groups(store, mission_id)
             store.reconcile_interrupted_operations(mission_id)
             current = store.get_mission(mission_id)
             if current["status"] in CONTROLLED_MISSION_STATUSES:
@@ -2227,6 +2299,11 @@ def _recorded_failure(mission_id: str) -> tuple[str, str]:
     return str(data.get("reason") or ""), str(data.get("fix") or "")
 
 
+# Longest a second `start` waits for the first one to finish launching its controller
+# (the launcher waits up to 15 s for readiness while it holds the start lock).
+_START_LOCK_WAIT_SECONDS = 20.0
+
+
 def launch_controller(
     mission_id: str,
     *,
@@ -2235,7 +2312,36 @@ def launch_controller(
     routes: str | None = None,
     native_tui: bool | None = None,
 ) -> int:
-    """Start a detached mission owner, then attach the terminal if interactive."""
+    """Start a detached mission owner, then attach the terminal if interactive.
+
+    Launches for one mission are serialized by a short-lived start lock that is
+    held from the controller-lock probe until the new controller reports ready.
+    Without it, two concurrent launchers both see the controller lock free
+    (each releases it right after the probe) and both spawn a controller.
+    """
+    start_lock = MissionLock(default_state_dir() / "locks", mission_id, kind="start")
+    try:
+        start_lock.acquire(timeout=_START_LOCK_WAIT_SECONDS)
+    except BlockingIOError:
+        short = mission_id[:8]
+        raise RuntimeError(f"another start of mission {short} is still in progress; wait for it, then check: llm-bridge status --mission {short}") from None
+    try:
+        return _launch_controller_locked(
+            mission_id, start_lock, headless=headless, providers=providers, routes=routes, native_tui=native_tui,
+        )
+    finally:
+        start_lock.release()
+
+
+def _launch_controller_locked(
+    mission_id: str,
+    start_lock: MissionLock,
+    *,
+    headless: bool | None,
+    providers: str | None,
+    routes: str | None,
+    native_tui: bool | None,
+) -> int:
     if native_tui is True and headless is True:
         raise ValueError("--headless and --native cannot be combined")
     with BridgeStore(store_path()) as store:
@@ -2258,6 +2364,7 @@ def launch_controller(
     try:
         lock.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
     except BlockingIOError:
+        start_lock.release()  # nothing is being launched; the attach below can block for long
         # A controller that is already running is holding a task after the operator
         # declined the provider's trust prompt: starting again releases it.
         with BridgeStore(store_path()) as store:
@@ -2335,6 +2442,7 @@ def launch_controller(
     if ready_status != "RUNNING":
         # The controller found nothing to run (a finished or stopping mission); never report that as running.
         raise RuntimeError(f"mission {short} is {ready_status.lower()}, so no provider was started · details: llm-bridge status --mission {short}")
+    start_lock.release()  # the controller is up; attaching a terminal can block for long
 
     if headless or not (sys.stdin.isatty() and sys.stdout.isatty()):
         if headless:

@@ -30,6 +30,10 @@ OPERATION_STATES = _names(*O)
 # (llm_tools.common.OPERATOR_DECLINED_STATUS; this module imports nothing, so it is repeated).
 OPERATOR_DECLINED_EXIT_CODE = 76
 
+# Exit status of a run that llm-scheduler's own watchdog stopped: no output progress, a question
+# that stayed unanswered, or a blocked prompt (llm_tools.common.AUTONOMY_ABORT_STATUS).
+AUTONOMY_ABORT_EXIT_CODE = 75
+
 # An operation that has been recorded but has not yet exited or been marked uncertain.
 ACTIVE_OPERATION_STATUSES = _names(O.INTENT, O.PREPARED, O.RUNNING)
 

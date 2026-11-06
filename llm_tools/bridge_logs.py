@@ -9,6 +9,10 @@ import threading
 from typing import Iterator
 
 
+# Seconds to wait at exit for the sink thread to see end-of-file on its pipe.
+_DRAIN_TIMEOUT_SECONDS = 5.0
+
+
 def _rotate(path: Path, rotations: int) -> None:
     for index in range(max(0, rotations), 0, -1):
         source = path.with_name(f"{path.name}.{index - 1}") if index > 1 else path
@@ -68,25 +72,51 @@ def sink_stdin(path: str | Path, *, max_bytes: int, rotations: int) -> int:
         _append_rotating(target, data, max_bytes=max_bytes, rotations=rotations)
 
 
+def _notice(fd: int, message: str) -> None:
+    try:
+        os.write(fd, f"llm-bridge: {message}\n".encode("utf-8", "replace"))
+    except OSError:
+        pass
+
+
 @contextmanager
 def capture_process_output(path: str | Path, *, max_bytes: int, rotations: int) -> Iterator[None]:
-    """Redirect this process and descendants through a bounded rotating sink."""
+    """Redirect this process and descendants through a bounded rotating sink.
+
+    A failing log file never breaks the caller: the sink reports the first
+    failure on the original stderr, then keeps draining the pipe (and discards
+    the data) so the process can still write to descriptors 1 and 2. A sink that
+    does not drain at exit is reported and abandoned; it is a daemon thread and
+    never replaces the caller's return value.
+    """
     target = Path(path)
     read_fd, write_fd = os.pipe()
     saved_stdout = os.dup(1)
     saved_stderr = os.dup(2)
+    notice_fd = os.dup(2)
     finished = threading.Event()
 
     def consume() -> None:
+        failed = False
         try:
             while True:
-                data = os.read(read_fd, 65536)
+                try:
+                    data = os.read(read_fd, 65536)
+                except OSError:
+                    return
                 if not data:
                     return
-                _append_rotating(target, data, max_bytes=max_bytes, rotations=rotations)
+                if failed:
+                    continue
+                try:
+                    _append_rotating(target, data, max_bytes=max_bytes, rotations=rotations)
+                except OSError as exc:
+                    failed = True
+                    _notice(notice_fd, f"controller log {target} is not writable ({exc}); further output is discarded")
         finally:
             finished.set()
             os.close(read_fd)
+            os.close(notice_fd)
 
     reader = threading.Thread(target=consume, name="llm-bridge-log-sink", daemon=True)
     reader.start()
@@ -100,9 +130,9 @@ def capture_process_output(path: str | Path, *, max_bytes: int, rotations: int) 
         os.dup2(saved_stderr, 2)
         os.close(saved_stdout)
         os.close(saved_stderr)
-        reader.join(timeout=5)
+        reader.join(timeout=_DRAIN_TIMEOUT_SECONDS)
         if not finished.is_set():
-            raise TimeoutError("Bridge log sink did not drain its output pipe")
+            _notice(2, "the controller log sink did not drain its output pipe before exit; some output may be missing")
 
 
 __all__ = ["capture_process_output", "sink_stdin"]

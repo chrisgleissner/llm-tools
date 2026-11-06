@@ -222,6 +222,10 @@ def _event_summary(event: dict[str, object]) -> str:
         ) if part)
     if kind == "provider-handoff-selected":
         return f"handoff to {_text(data.get('station') or '?', 40)}"
+    if kind == "provider-orphaned":
+        return _SEP.join(part for part in (f"provider process {_text(data.get('process_pid', '?'), 12)} could not be stopped", _text(data.get("reason") or "", 100)) if part)
+    if kind == "provider-handoff-exhausted" and "autonomy_aborts" in data:
+        return f"{task or 'task'} stopped by Bridge {_text(data['autonomy_aborts'], 6)} times · waiting for operator"
     if kind == "provider-handoff-exhausted":
         return f"{task or 'task'} out of handoffs · {_text(data.get('failures', '?'), 6)} failures, limit {_text(data.get('max_failures', '?'), 6)}"
     if kind == "provider-wait":
@@ -531,8 +535,15 @@ def _h_provider_handoff_selected(ctx: _EventContext) -> str:
     return f"Handing off to {_text(ctx.data.get('station') or '?', 40)}"
 
 
+@_humanizer(EventKind.PROVIDER_ORPHANED)
+def _h_provider_orphaned(ctx: _EventContext) -> str:
+    return f"Provider process {_text(ctx.data.get('process_pid', '?'), 12)} could not be stopped" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
+
+
 @_humanizer(EventKind.PROVIDER_HANDOFF_EXHAUSTED)
 def _h_provider_handoff_exhausted(ctx: _EventContext) -> str:
+    if "autonomy_aborts" in ctx.data:
+        return f"{ctx.task} stopped by Bridge again ({_text(ctx.data['autonomy_aborts'], 6)} times), waiting for you"
     return f"{ctx.task} out of handoffs ({_text(ctx.data.get('failures', '?'), 6)} failures, limit {_text(ctx.data.get('max_failures', '?'), 6)})"
 
 

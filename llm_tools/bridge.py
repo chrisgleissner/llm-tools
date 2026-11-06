@@ -3129,6 +3129,9 @@ def _main(argv: list[str] | None = None) -> int:
                     controller = json.loads(ready.read_text(encoding="utf-8"))
                 except (OSError, ValueError, json.JSONDecodeError):
                     controller = {}
+                # The identity the controller wrote into its lock file while
+                # holding it wins: the ready file can be missing or stale.
+                controller = MissionLock.read_owner(state_dir() / "locks", args.mission) or controller
                 controller_pid = int(controller.get("pid", 0) or 0)
                 controller_start = str(controller.get("process_start", ""))
                 if controller_pid > 1 and controller_start:

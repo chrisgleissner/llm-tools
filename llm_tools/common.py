@@ -4036,6 +4036,16 @@ def blocking_tail(text: str) -> str:
     return tail_lines(text, BLOCKING_PROMPT_TAIL_LINES)
 
 
+def ends_with_question(text: str) -> bool:
+    """Whether the last non-empty line of ``text`` reads like a question put to the user.
+
+    A question earlier in the output, followed by anything else (more model
+    text, a tool call), does not count: the run has moved on.
+    """
+    last = tail_lines(text[-4000:], 1)
+    return bool(last) and QUESTION_LINE_RE.match(last) is not None
+
+
 def prompt_abort_reason(text: str, default: str = "interactive prompt detected", *, auto_confirm: bool = False) -> str:
     """Why a run is aborted at a prompt; a folder-trust prompt says how to proceed."""
     if not auto_confirm and trust_prompt_at_tail(text):
@@ -4063,23 +4073,31 @@ def run_pty_capture(
 ) -> tuple[int, str]:
     safe_prompts = SAFE_TRUST_PROMPTS
     blocking_patterns = BLOCKING_PROMPT_PATTERNS
-    question_line = QUESTION_LINE_RE
     pid, fd = pty.fork()
     if pid == 0:
+        # This is the forked child. It must never return into the caller: if
+        # exec fails it would continue as a clone of the parent process.
         try:
-            os.chdir(cwd)
-        except OSError:
-            pass
-        if stdin_path is not None:
             try:
-                prompt_fd = os.open(stdin_path, os.O_RDONLY)
-                os.dup2(prompt_fd, 0)
-                os.close(prompt_fd)
+                os.chdir(cwd)
             except OSError:
-                os._exit(126)
-        if env is None:
-            os.execvp(argv[0], list(argv))
-        os.execvpe(argv[0], list(argv), env)
+                pass
+            if stdin_path is not None:
+                try:
+                    prompt_fd = os.open(stdin_path, os.O_RDONLY)
+                    os.dup2(prompt_fd, 0)
+                    os.close(prompt_fd)
+                except OSError:
+                    os._exit(126)
+            if env is None:
+                os.execvp(argv[0], list(argv))
+            os.execvpe(argv[0], list(argv), env)
+        except BaseException as exc:  # noqa: BLE001 - nothing may escape the child
+            try:
+                os.write(2, f"llm-scheduler: cannot start {argv[0]}: {exc}\n".encode("utf-8", "replace"))
+            except OSError:
+                pass
+        os._exit(127)
     if on_process_started is not None:
         try:
             on_process_started(pid)
@@ -4128,7 +4146,7 @@ def run_pty_capture(
     pending_prompt: str | None = None
     combined = ""
     exit_code = 124
-    start = time.time()
+    start = time.monotonic()
     last_progress = start
     question_seen_at: float | None = None
     abort_reason = ""
@@ -4152,7 +4170,7 @@ def run_pty_capture(
     eof = False
     try:
         while True:
-            now = time.time()
+            now = time.monotonic()
             if now - start > timeout:
                 break
             if idle_timeout > 0 and now - last_progress > idle_timeout:
@@ -4175,7 +4193,7 @@ def run_pty_capture(
                     break
                 text = raw.decode("utf-8", "replace")
                 append_output(text)
-                last_progress = time.time()
+                last_progress = time.monotonic()
                 if stream:
                     try:
                         os.write(sys.stdout.fileno(), raw)
@@ -4187,9 +4205,11 @@ def run_pty_capture(
                     pending_prompt = "trust"
                 elif detect_prompts and any(pattern.search(blocking_tail(combined)) for pattern in blocking_patterns):
                     pending_prompt = "blocking"
-                if pending_prompt is None and detect_prompts and question_line.search(combined[-4000:]):
-                    question_seen_at = time.time()
-            if pending_prompt is not None and time.time() - last_progress >= PROMPT_QUIET_SECONDS:
+                if pending_prompt is None and detect_prompts:
+                    # Armed only while the output still ends in a question;
+                    # any later output clears it.
+                    question_seen_at = time.monotonic() if ends_with_question(combined) else None
+            if pending_prompt is not None and time.monotonic() - last_progress >= PROMPT_QUIET_SECONDS:
                 if pending_prompt == "trust":
                     os.write(fd, b"\r")
                     trust_sent = True
@@ -4222,7 +4242,7 @@ def run_pty_capture(
             if done == pid:
                 break
     if exit_code == 124:
-        deadline = time.time() + (5.0 if eof else 0.0)
+        deadline = time.monotonic() + (5.0 if eof else 0.0)
         while True:
             try:
                 done, status = os.waitpid(pid, os.WNOHANG)
@@ -4233,7 +4253,7 @@ def run_pty_capture(
                 if code is not None:
                     exit_code = code
                 break
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 break
             time.sleep(0.01)
     if exit_code in (124, AUTONOMY_ABORT_STATUS):

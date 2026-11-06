@@ -45,7 +45,8 @@ def test_pause_command_reports_active_provider_work_is_deferred(tmp_path, monkey
     [
         (42, "READY", "APPLIED"),
         (common.AUTONOMY_ABORT_STATUS, "BLOCKED", "PENDING"),
-        (common.AUTONOMY_ABORT_STATUS, "BLOCKED", None),
+        # A first watchdog stop with nothing pending is handed to the next rotation entry.
+        (common.AUTONOMY_ABORT_STATUS, "READY", None),
     ],
 )
 def test_native_provider_failure_applies_pending_amendment_before_retry(
