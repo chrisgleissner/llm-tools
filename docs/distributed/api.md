@@ -168,6 +168,12 @@ items per array, and 128 fields per object (field names are limited to 128
 bytes). These bounds are described by the generated OpenAPI request schema.
 The API does not enable CORS. `OPTIONS` preflight requests receive `405` and no
 `Access-Control-Allow-Origin`; `HEAD` follows the corresponding GET route.
+Cookie-authenticated browser requests also pass a Fetch Metadata check: only
+`Sec-Fetch-Site: same-origin` requests are accepted, except a top-level GET
+navigation (`navigate` / `document`) to a console HTML page. Cross-site API,
+asset and WebSocket requests receive a problem response. This supplements exact
+Origin and CSRF checks; it does not replace them. Requests without Fetch Metadata
+remain available to non-browser clients and still need normal authentication.
 
 Bearer-authenticated mutations are limited to 30 requests per token and 120 per
 client address in a rolling 60-second window. The limit applies after authentication
@@ -302,6 +308,10 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--output` | Local backup destination; no REST route. |
 | `--input` | Local restore source; no REST route. |
 | `--allow-control` | Local worker enrollment control policy; coordinator accepts worker token separately. |
+| `--allow-create` | Local worker opt-in required for remote mission creation; no request can override the worker setting. |
+| `--allow-root` | Local repeatable real-path boundary for remote mission creation; paths are resolved on the worker and never supplied as coordinator policy. |
+| `--allow-power` | Local worker opt-in required for remote power operations; no request can override the worker setting. |
+| `--allow-restore` | Local worker opt-in required for remote restore; no request can override the worker setting. |
 | `--allow-terminal-view` | Local worker enrollment terminal-view policy; terminal authorization remains scoped WebSocket. |
 | `--ca-file` | Local TLS trust configuration for worker/remote clients; not sent in API requests. |
 | `--coordinator` | Local connection configuration; API base URL is client config, not request field. |

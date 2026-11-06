@@ -1304,6 +1304,10 @@ def _build_parser(
     worker_enroll.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
     worker_enroll.add_argument("--allow-control", action="store_true", help="accept mutating remote commands and terminal input; without it the worker is read-only remotely")
     worker_enroll.add_argument("--allow-terminal-view", action="store_true", help="let a read-only worker stream its mission terminals for viewing (implied by --allow-control)")
+    worker_enroll.add_argument("--allow-create", action="store_true", help="allow remote mission creation (requires a path inside an enrolled --allow-root)")
+    worker_enroll.add_argument("--allow-root", action="append", default=[], metavar="DIR", help="canonical directory allowed for remote mission creation; repeat as needed")
+    worker_enroll.add_argument("--allow-power", action="store_true", help="allow remote machine power operations")
+    worker_enroll.add_argument("--allow-restore", action="store_true", help="allow remote restore operations")
     _add_json_arg(worker_enroll)
     worker_status = worker_sub.add_parser("status", help="show this host's enrolment without the token")
     _add_json_arg(worker_status)
@@ -2049,7 +2053,8 @@ def _worker_command(args: argparse.Namespace) -> int:
         token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
         ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
         config = worker.enroll(args.name or worker.default_worker_name(), args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
-                               allow_terminal_view=bool(args.allow_terminal_view))
+                               allow_terminal_view=bool(args.allow_terminal_view), allow_create=bool(args.allow_create),
+                               allow_roots=tuple(args.allow_root), allow_power=bool(args.allow_power), allow_restore=bool(args.allow_restore))
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
                       f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
         return 0
@@ -2106,6 +2111,11 @@ def _format_worker_status(value: dict[str, Any]) -> str:
         lines.append(f"Last connected: {last_connected}")
     lines.append(f"Worker service: {value.get('service_state', 'unknown')}")
     lines.append(f"Remote access: {'control and terminal' if value.get('allow_control') else 'read-only'}")
+    lines.append(f"Remote creation: {'allowed' if value.get('allow_create') else 'disabled'}")
+    roots = value.get("allow_root", [])
+    lines.append("Allowed roots: " + (", ".join(str(root) for root in roots) if roots else "none"))
+    lines.append(f"Remote power: {'allowed' if value.get('allow_power') else 'disabled'}")
+    lines.append(f"Remote restore: {'allowed' if value.get('allow_restore') else 'disabled'}")
     lines.append(f"Worker ID: {str(value.get('worker_id', ''))[:8]}")
     return "\n".join(lines)
 

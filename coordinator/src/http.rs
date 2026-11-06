@@ -364,7 +364,7 @@ impl FromRequestParts<St> for Authed {
                 }
             }
         }
-        if let Principal::Token { scopes: granted, .. } = &principal {
+        if let Principal::Token { name, scopes: granted } = &principal {
             let path = parts.uri.path();
             let route = ROUTES
                 .iter()
@@ -386,6 +386,22 @@ impl FromRequestParts<St> for Authed {
                 *required
             };
             if !scopes::grants(granted, required) {
+                let remote = parts.extensions.get::<Peer>().map(|peer| peer.0.ip().to_string()).unwrap_or_default();
+                let request_id = parts
+                    .headers
+                    .get("idempotency-key")
+                    .or_else(|| parts.headers.get("x-request-id"))
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("-");
+                let detail = format!(
+                    "method={} path={} granted={} required={} request_id={}",
+                    parts.method,
+                    parts.uri.path(),
+                    granted.join(","),
+                    required,
+                    clean(request_id)
+                );
+                st.db.audit_checked(&format!("token:{name}"), "authorization.denied", &detail, &remote)?;
                 return Err(err(StatusCode::FORBIDDEN, "insufficient-scope", format!("token requires scope {required}")));
             }
         }
@@ -1780,6 +1796,46 @@ mod problem_tests {
         assert_eq!(check_json_limits(&too_many_fields, 0).unwrap_err().status, StatusCode::BAD_REQUEST);
     }
 
+    #[test]
+    fn fetch_metadata_allows_only_same_origin_requests_and_console_document_navigation() {
+        let api_fetch = HeaderMap::from_iter([
+            ("sec-fetch-site".parse().unwrap(), "cross-site".parse().unwrap()),
+            ("sec-fetch-mode".parse().unwrap(), "cors".parse().unwrap()),
+            ("sec-fetch-dest".parse().unwrap(), "empty".parse().unwrap()),
+        ]);
+        assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &api_fetch));
+
+        let cross_site_document = HeaderMap::from_iter([
+            ("sec-fetch-site".parse().unwrap(), "cross-site".parse().unwrap()),
+            ("sec-fetch-mode".parse().unwrap(), "navigate".parse().unwrap()),
+            ("sec-fetch-dest".parse().unwrap(), "document".parse().unwrap()),
+        ]);
+        assert!(fetch_metadata_allowed(&Method::GET, "/missions/w1/m1", &cross_site_document));
+        assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &cross_site_document));
+        assert!(!fetch_metadata_allowed(&Method::GET, "/healthz", &cross_site_document));
+        assert!(!fetch_metadata_allowed(&Method::POST, "/", &cross_site_document));
+
+        let same_origin = HeaderMap::from_iter([
+            ("sec-fetch-site".parse().unwrap(), "same-origin".parse().unwrap()),
+            ("sec-fetch-mode".parse().unwrap(), "cors".parse().unwrap()),
+            ("sec-fetch-dest".parse().unwrap(), "empty".parse().unwrap()),
+        ]);
+        assert!(fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &same_origin));
+        assert!(fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &HeaderMap::new()));
+        let malformed_same_origin = HeaderMap::from_iter([
+            ("sec-fetch-site".parse().unwrap(), "same-origin".parse().unwrap()),
+            ("sec-fetch-mode".parse().unwrap(), "cors".parse().unwrap()),
+            ("sec-fetch-dest".parse().unwrap(), "document".parse().unwrap()),
+        ]);
+        assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &malformed_same_origin));
+        let same_site = HeaderMap::from_iter([
+            ("sec-fetch-site".parse().unwrap(), "same-site".parse().unwrap()),
+            ("sec-fetch-mode".parse().unwrap(), "cors".parse().unwrap()),
+            ("sec-fetch-dest".parse().unwrap(), "empty".parse().unwrap()),
+        ]);
+        assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &same_site));
+    }
+
     #[tokio::test]
     async fn api_errors_use_stable_rfc9457_problem_details() {
         let response = err(StatusCode::CONFLICT, "request-id-conflict", "request id was reused").into_response();
@@ -1840,6 +1896,7 @@ pub fn router(st: St) -> Router {
         .fallback(static_files)
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::from_fn_with_state(st.clone(), reserve_gate))
+        .layer(axum::middleware::from_fn(fetch_metadata_guard))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(st)
 }
@@ -1880,6 +1937,52 @@ async fn reserve_gate(State(st): State<St>, req: Request, next: axum::middleware
             )
             .into_response();
         }
+    }
+    next.run(req).await
+}
+
+fn is_console_document(path: &str) -> bool {
+    !path.starts_with("/api") && path != "/healthz" && !path.rsplit('/').next().unwrap_or_default().contains('.')
+}
+
+fn fetch_metadata_allowed(method: &Method, path: &str, headers: &HeaderMap) -> bool {
+    let Some(site) = headers.get("sec-fetch-site").and_then(|value| value.to_str().ok()) else {
+        // Non-browser clients do not send Fetch Metadata; cookie mutations remain protected by
+        // the independent exact-Origin and per-session CSRF checks.
+        return true;
+    };
+    let mode = headers.get("sec-fetch-mode").and_then(|value| value.to_str().ok());
+    let dest = headers.get("sec-fetch-dest").and_then(|value| value.to_str().ok());
+    let top_level_console_navigation = *method == Method::GET && mode == Some("navigate") && dest == Some("document") && is_console_document(path);
+    if top_level_console_navigation {
+        return true;
+    }
+    if site != "same-origin" {
+        return false;
+    }
+    match (mode, dest) {
+        (Some("cors" | "same-origin"), Some("empty")) => true,
+        (Some("websocket"), Some("empty")) => true,
+        (Some("no-cors"), Some("image" | "script" | "style" | "font")) => true,
+        (Some("navigate"), Some("document")) => top_level_console_navigation,
+        _ => false,
+    }
+}
+
+async fn fetch_metadata_guard(req: Request, next: axum::middleware::Next) -> Response {
+    let is_bearer_request = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("Bearer "));
+    let has_session_cookie = !is_bearer_request && cookie_value(req.headers()).is_some();
+    if has_session_cookie && !fetch_metadata_allowed(req.method(), req.uri().path(), req.headers()) {
+        return err(
+            StatusCode::FORBIDDEN,
+            "cross-site-request",
+            "cookie-authenticated requests must be same-origin; only console document navigation is exempt",
+        )
+        .into_response();
     }
     next.run(req).await
 }

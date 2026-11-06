@@ -68,9 +68,9 @@ from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
 | Status | Count |
 |---|---:|
 | Verified `[x]` | 241 |
-| Incomplete `[~]` | 47 |
+| Incomplete `[~]` | 49 |
 | Blocked `[!]` | 6 |
-| Not started `[ ]` | 48 |
+| Not started `[ ]` | 46 |
 | **Total** | **342** |
 
 The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete.

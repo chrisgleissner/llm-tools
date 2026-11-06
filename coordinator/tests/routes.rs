@@ -156,6 +156,72 @@ async fn unknown_api_paths_and_methods_return_problem_details() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fetch_metadata_blocks_cross_site_cookie_requests_except_console_navigation() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    let cookie = admin.cookie.clone().unwrap();
+    let cross_site = |method: Method, path: &str| {
+        admin
+            .bare(method, path)
+            .header("cookie", format!("__Host-bridge_session={cookie}"))
+            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-dest", "empty")
+    };
+
+    let (status, problem) = admin.send(cross_site(Method::GET, "/api/v1/tokens")).await;
+    assert_eq!(status, 403);
+    assert_eq!(problem["code"], "cross-site-request");
+
+    let (status, _) = admin
+        .send(
+            admin
+                .bare(Method::GET, "/missions/w1/m1")
+                .header("cookie", format!("__Host-bridge_session={cookie}"))
+                .header("sec-fetch-site", "cross-site")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document"),
+        )
+        .await;
+    assert_eq!(status, 200, "top-level console navigation remains available");
+
+    let websocket = env
+        .ws(
+            "/api/v1/stream",
+            &[
+                ("cookie", &format!("__Host-bridge_session={cookie}")),
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "websocket"),
+                ("sec-fetch-dest", "empty"),
+            ],
+        )
+        .await;
+    refused_with(websocket.expect_err("cross-site WebSocket request must be rejected"), 403);
+
+    let (status, created) = admin
+        .post(
+            "/api/v1/tokens",
+            serde_json::json!({"name":"metadata-check","scopes":["admin"],"expires_days":1}),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let mut bearer = env.api();
+    bearer.bearer = created["secret"].as_str().map(str::to_string);
+    let (status, _) = bearer
+        .send(
+            bearer
+                .rb(Method::GET, "/api/v1/tokens")
+                .header("cookie", format!("__Host-bridge_session={cookie}"))
+                .header("sec-fetch-site", "cross-site")
+                .header("sec-fetch-mode", "cors")
+                .header("sec-fetch-dest", "empty"),
+        )
+        .await;
+    assert_eq!(status, 200, "bearer requests are exempt from cookie Fetch Metadata policy");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn security_headers_cover_api_health_static_and_error_responses() {
     let env = boot().await;
     for (path, api_csp) in [
@@ -241,6 +307,11 @@ async fn every_authenticated_route_enforces_its_declared_token_scope() {
             }
         }
     }
+    let audit = env.srv.state.db.audit_list(1000).unwrap();
+    assert!(audit
+        .iter()
+        .any(|row| row["action"] == "authorization.denied" && row["actor"] == "token:scope-read"));
+    assert!(audit.iter().all(|row| !row["detail"].as_str().unwrap_or_default().contains("secret-scope-")));
     env.stop().await;
 }
 

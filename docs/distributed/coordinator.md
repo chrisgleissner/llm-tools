@@ -146,6 +146,11 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 Every state-changing request authenticated by cookie needs header
 `X-CSRF-Token` equal to the session's token and an `Origin` equal to the
 coordinator's own origin; WebSocket upgrades check `Origin` too (AUTH-007).
+Cookie requests carrying Fetch Metadata must be `same-origin`, with the single
+exception of a top-level `GET` navigation to a console HTML page; cross-site API,
+asset and WebSocket requests are rejected. Requests with no Fetch Metadata remain
+usable by non-browser clients and are still subject to authentication, exact
+Origin and CSRF rules where applicable.
 Bearer API tokens are not subject to CSRF checks because browsers never send
 them automatically.
 

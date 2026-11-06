@@ -58,6 +58,10 @@ class WorkerConfig:
     allow_control: bool
     max_generation: int = 0
     allow_terminal_view: bool = False  # read-only workers stream terminals only with this opt-in
+    allow_create: bool = False
+    allow_roots: tuple[str, ...] = ()
+    allow_power: bool = False
+    allow_restore: bool = False
 
     @property
     def terminal_view(self) -> bool:
@@ -67,7 +71,9 @@ class WorkerConfig:
     def public(self) -> dict[str, Any]:
         """Configuration without the token, for status output and logs (AUTH-010)."""
         return {"worker_id": self.worker_id, "name": self.name, "coordinator_url": self.coordinator_url,
-                "allow_control": self.allow_control, "allow_terminal_view": self.terminal_view, "max_generation": self.max_generation}
+                "allow_control": self.allow_control, "allow_terminal_view": self.terminal_view, "max_generation": self.max_generation,
+                "allow_create": self.allow_create, "allow_root": list(self.allow_roots), "allow_power": self.allow_power,
+                "allow_restore": self.allow_restore}
 
 
 def worker_dir(env: dict[str, str] | None = None) -> Path:
@@ -203,8 +209,58 @@ def default_worker_name() -> str:
     return name if _NAME.fullmatch(name) else "worker"
 
 
+def _canonical_roots(roots: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Resolve allowed roots once and require real, existing directories."""
+    result: list[str] = []
+    for root in roots:
+        try:
+            canonical = Path(root).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise WorkerConfigError(f"allowed root cannot be resolved: {root!r}") from exc
+        if not canonical.is_dir():
+            raise WorkerConfigError(f"allowed root is not a directory: {canonical}")
+        value = str(canonical)
+        if value not in result:
+            result.append(value)
+    return tuple(result)
+
+
+def _stored_roots(value: Any) -> tuple[str, ...]:
+    """Validate the serialized shape; path identity is rechecked at authorization time."""
+    if not isinstance(value, list) or not all(isinstance(root, str) for root in value):
+        if value in (None, ()):
+            return ()
+        raise WorkerConfigError("worker allowed roots must be a list of paths")
+    result: list[str] = []
+    for root in value:
+        path = Path(root)
+        if not path.is_absolute() or str(path) != root:
+            raise WorkerConfigError(f"enrolled allowed root is not an absolute canonical path: {root!r}")
+        if root not in result:
+            result.append(root)
+    return tuple(result)
+
+
+def _path_allowed(path: str, roots: tuple[str, ...]) -> bool:
+    """Check a path against canonical roots after resolving existing symlinks."""
+    if not roots:
+        return False
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+        for root in roots:
+            canonical_root = Path(root).resolve(strict=True)
+            if canonical_root != Path(root):
+                continue  # the enrolled root has since become a symlink or moved
+            candidate.relative_to(canonical_root)
+            return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return False
+
+
 def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None,
-           allow_terminal_view: bool = False) -> WorkerConfig:
+           allow_terminal_view: bool = False, allow_create: bool = False, allow_roots: tuple[str, ...] | list[str] = (),
+           allow_power: bool = False, allow_restore: bool = False) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""
     if not _NAME.fullmatch(name):
         raise WorkerConfigError("worker name must be lowercase letters, digits and '-' (at most 63)")
@@ -212,6 +268,9 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         raise WorkerConfigError("coordinator URL must start with wss:// (workers never connect without TLS)")
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise WorkerConfigError("worker token must be 32-256 URL-safe characters, as printed by the coordinator")
+    roots = _canonical_roots(allow_roots)
+    if allow_create and not roots:
+        raise WorkerConfigError("--allow-create requires at least one --allow-root")
     directory = worker_dir(env)
     try:
         previous = load_config(env)
@@ -223,10 +282,12 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         if "-----BEGIN CERTIFICATE-----" not in ca_pem:
             raise WorkerConfigError("CA file is not a PEM certificate")
         _atomic_private_write(directory / CA_FILE, ca_pem)
-    config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation, allow_terminal_view)
+    config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation, allow_terminal_view,
+                          allow_create, roots, allow_power, allow_restore)
     _save(config, env)
     audit("enroll", env, worker_id=worker_id, name=name, coordinator_url=coordinator_url, allow_control=allow_control,
-          allow_terminal_view=allow_terminal_view, ca_file=ca_pem is not None)
+          allow_terminal_view=allow_terminal_view, allow_create=allow_create, allow_root_count=len(roots),
+          allow_power=allow_power, allow_restore=allow_restore, ca_file=ca_pem is not None)
     return config
 
 
@@ -242,6 +303,9 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
             worker_id=str(value["worker_id"]), name=str(value["name"]), coordinator_url=str(value["coordinator_url"]),
             token=str(value["token"]), allow_control=bool(value["allow_control"]), max_generation=int(value.get("max_generation", 0)),
             allow_terminal_view=bool(value.get("allow_terminal_view", False)),
+            allow_create=bool(value.get("allow_create", False)),
+            allow_roots=_stored_roots(value.get("allow_roots", [])),
+            allow_power=bool(value.get("allow_power", False)), allow_restore=bool(value.get("allow_restore", False)),
         )
     except FileNotFoundError:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
@@ -526,7 +590,10 @@ class WorkerSession:
             with self.open_store() as store:
                 duplicate = store.command_exists(request.request_id)
         ack = self.message("command.ack", {"request_id": request.request_id, "status": "duplicate" if duplicate else "received"})
-        if spec is not None and spec.mutating and not self.config.allow_control:
+        policy_error = self._policy_error(request, spec)
+        if policy_error is not None:
+            result = commands.CommandResult(request.request_id, request.operation, "rejected", error=policy_error)
+        elif spec is not None and spec.mutating and not self.config.allow_control:
             result = commands.CommandResult(request.request_id, request.operation, "rejected",
                                             error=commands.CommandError("forbidden", "this worker accepts read-only remote operations"))
         else:
@@ -535,6 +602,31 @@ class WorkerSession:
             self.audit("command", operation=request.operation, request_id=request.request_id, mission_id=request.mission_id,
                        outcome=result.outcome, error=result.error.code if result.error else None, duplicate=duplicate)
         return [ack, self.message("command.result", result.to_json())]
+
+    def _policy_error(self, request: commands.CommandRequest, spec: commands.OperationSpec | None) -> commands.CommandError | None:
+        """Enforce local worker opt-ins even when the coordinator advertises a command."""
+        operation = request.operation.casefold()
+        if operation in {"mission.create", "create"}:
+            if not self.config.allow_create:
+                return commands.CommandError("forbidden", "this worker has not opted in to remote mission creation")
+            cwd = request.params.get("cwd")
+            if not isinstance(cwd, str) or not _path_allowed(cwd, self.config.allow_roots):
+                return commands.CommandError("forbidden", "mission creation must use a path inside an enrolled allowed root")
+        if operation.endswith("restore") or operation == "restore":
+            if not self.config.allow_restore:
+                return commands.CommandError("forbidden", "this worker has not opted in to remote restore")
+        if operation == "power" or re.search(r"(?:^|[._-])(?:power|poweroff|poweron|suspend|shutdown|reboot)(?:[._-]|$)", operation):
+            if not self.config.allow_power:
+                return commands.CommandError("forbidden", "this worker has not opted in to remote power operations")
+        # Starting an existing mission can execute provider work in its local
+        # checkout. If roots were enrolled, keep that execution inside them.
+        if operation == "mission.start" and self.config.allow_roots and request.mission_id:
+            with self.open_store() as store:
+                mission = store.get_mission(request.mission_id)
+            cwd = mission.get("cwd") if mission else None
+            if not isinstance(cwd, str) or not _path_allowed(cwd, self.config.allow_roots):
+                return commands.CommandError("forbidden", "mission is outside this worker's enrolled allowed roots")
+        return None
 
     def next_events(self) -> Message | None:
         """The next event batch after the coordinator's cursor, or ``None`` when up to date."""

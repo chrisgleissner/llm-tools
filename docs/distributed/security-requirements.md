@@ -27,7 +27,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | API-013 | ASVS 04.01, 08.02, 08.03; API1:2023, API5:2023 | `[~]` Remote CLI maps listed operations to resource routes (named Python test in register). Remaining operations use `/commands` or return explicit unmappable errors. |
 | API-014 | ASVS 04.01, 04.02; API9:2023 | `[~]` Coordinator guide, API examples, README and site link updated. Full versioning, pagination and rate-limit contract remains. |
 | API-015 | ASVS 04.01; API9:2023 | `[ ]` CLI/route parity table and argparse-tree test remain. |
-| API-016 | ASVS 06.07, 12.03; API2:2023, API8:2023 | `[ ]` Worker opt-ins and enforcement remain. |
+| API-016 | ASVS 06.07, 12.03; API2:2023, API8:2023 | `[~]` Worker-side opt-in enforcement and root resolution are covered by focused tests; coordinator policy exposure and typed remote operations remain. |
 
 ## Security hardening
 
@@ -36,7 +36,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | SEC2-001 | ASVS 12.01, 12.02; API8:2023 | `[ ]` TLS 1.3 default, opt-in TLS 1.2, ticket policy and testssl CI remain. |
 | SEC2-002 | ASVS 03.04, 03.05, 03.07; API8:2023 | `[~]` Global security headers have named route/static tests in register. Table coverage and CI evidence remain. |
 | SEC2-003 | ASVS 02.02, 04.02; API4:2023, API8:2023 | `[~]` JSON media type, bounded parser, schema limits, OPTIONS/HEAD behavior have named tests. Unknown-field and identifier audits remain. |
-| SEC2-004 | ASVS 03.05, 03.07; API8:2023 | `[ ]` Fetch Metadata checks for cookie sessions remain. |
+| SEC2-004 | ASVS 03.05, 03.07; API8:2023 | `[~]` `fetch_metadata_guard` rejects cross-site cookie API/fetch and WebSocket requests; only top-level console document navigation is exempt. Unit and coordinator route regressions cover the policy. Exact-Origin and CSRF checks remain independent. |
 | SEC2-005 | ASVS 03.05, 04.01, 04.02; API8:2023 | `[~]` No-CORS baseline and preflight rejection have a named test. Explicit HTTPS origin allow-list is deferred unless CORS is introduced. |
 | SEC2-006 | ASVS 06.04, 06.05, 06.07; NIST 3.2.5, 4.1, 4.2; API2:2023 | `[~]` Password first run exists. TOTP, recovery codes, origin-gated passkeys and Internet-mode MFA remain. |
 | SEC2-007 | ASVS 06.02, 06.03; NIST 3.1.1.2; API2:2023 | `[~]` Current password policy and Argon2id exist. NIST length policy, offline breached-password blocklist and measured configurable cost remain. |

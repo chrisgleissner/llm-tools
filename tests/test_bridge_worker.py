@@ -87,6 +87,23 @@ def test_enrolment_is_private_validated_and_hides_the_token(state, capsys):
     assert worker.unenroll() is True and worker.unenroll() is False
 
 
+def test_worker_opt_ins_default_off_and_roots_are_canonical(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    root = tmp_path / "workspace"
+    root.mkdir()
+    alias = tmp_path / "workspace-alias"
+    alias.symlink_to(root, target_is_directory=True)
+    config = worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True, allow_roots=[str(alias), str(root)])
+    assert config.allow_create is False and config.allow_power is False and config.allow_restore is False
+    assert config.allow_roots == (str(root.resolve()),)
+    assert worker.load_config().allow_roots == (str(root.resolve()),)
+    assert config.public()["allow_root"] == [str(root.resolve())]
+    with pytest.raises(worker.WorkerConfigError, match="cannot be resolved"):
+        worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True, allow_roots=[str(tmp_path / "missing")])
+    with pytest.raises(worker.WorkerConfigError, match="requires at least one"):
+        worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True, allow_create=True)
+
+
 def test_hello_reports_inventory_and_only_permitted_operations(state, monkeypatch):
     directory, mission_id = state
     session, _ = _session(directory, allow_control=False)
@@ -142,6 +159,74 @@ def test_read_only_worker_refuses_mutations(state):
     assert (result.payload["outcome"], result.payload["error"]["code"]) == ("rejected", "forbidden")
     with BridgeStore(directory / "bridge.sqlite3") as store:
         assert store.get_mission(mission_id)["status"] == "CREATED"
+
+
+def test_admin_commands_cannot_bypass_worker_opt_ins(state, tmp_path):
+    directory, _ = state
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlink_escape = allowed / "escape"
+    try:
+        symlink_escape.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        symlink_escape = None
+    disabled = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                             allow_roots=[str(allowed)])
+    disabled_session = worker.WorkerSession(disabled, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    _welcome(disabled_session)
+    _, denied_create = _command(disabled_session, CommandRequest("mission.create", {"cwd": str(allowed)}))
+    assert denied_create.payload["outcome"] == "rejected"
+    assert denied_create.payload["error"]["code"] == "forbidden"
+
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                           allow_create=True, allow_roots=[str(allowed)])
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    _welcome(session, generation=2)
+    requests = [
+        CommandRequest("mission.create", {"cwd": str(outside)}),
+        CommandRequest("machine.poweroff"),
+        CommandRequest("bridge.restore"),
+    ]
+    if symlink_escape is not None:
+        requests.append(CommandRequest("mission.create", {"cwd": str(symlink_escape)}))
+    for request in requests:
+        _, result = _command(session, request)
+        assert result.payload["outcome"] == "rejected"
+        assert result.payload["error"]["code"] == "forbidden"
+
+
+def test_allowed_root_recheck_and_worker_status_expose_opt_ins(state, tmp_path, monkeypatch):
+    directory, _ = state
+    root = tmp_path / "root"
+    root.mkdir()
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                           allow_create=True, allow_roots=[str(root)], allow_power=True, allow_restore=True)
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    request = CommandRequest("mission.create", {"cwd": str(root)})
+    assert session._policy_error(request, None) is None
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escape = root / "escape"
+    try:
+        escape.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        escape = None
+    if escape is not None:
+        assert session._policy_error(CommandRequest("mission.create", {"cwd": str(escape)}), None) is not None
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    root.rename(tmp_path / "old-root")
+    try:
+        root.symlink_to(moved, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pass
+    else:
+        assert session._policy_error(request, None) is not None
+    status = worker.status_public(service_state="inactive")
+    assert status["allow_create"] and status["allow_power"] and status["allow_restore"]
+    assert status["allow_root"] == [str(root)]
 
 
 def test_control_messages_and_event_replication(state):
@@ -322,6 +407,22 @@ def test_worker_cli(state, tmp_path, capsys, monkeypatch):
     capsys.readouterr()
     assert main(["worker", "unenroll"]) == 0 and "removed" in capsys.readouterr().out
     assert main(["worker", "unenroll"]) == 0 and "not enrolled" in capsys.readouterr().out
+
+
+def test_worker_cli_enrollment_opt_in_flags_and_status(state, tmp_path, capsys):
+    token_file = tmp_path / "token"
+    token_file.write_text(TOKEN)
+    root1, root2 = tmp_path / "one", tmp_path / "two"
+    root1.mkdir()
+    root2.mkdir()
+    assert main(["worker", "enroll", "--name", "ws", "--coordinator", "wss://c:1", "--token-file", str(token_file),
+                 "--allow-create", "--allow-root", str(root1), "--allow-root", str(root2), "--allow-power", "--allow-restore", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["allow_create"] and output["allow_power"] and output["allow_restore"]
+    assert output["allow_root"] == [str(root1.resolve()), str(root2.resolve())]
+    assert main(["worker", "status"]) == 0
+    rendered = capsys.readouterr().out
+    assert "Remote creation: allowed" in rendered and str(root1.resolve()) in rendered and "Remote power: allowed" in rendered
 
 
 def test_audit_records_security_actions_without_secrets(state, capsys, monkeypatch):
