@@ -85,6 +85,18 @@ _LOGIN_CHECKS = {
 }
 
 
+def signin_state(cli: str, env: Mapping[str, str] | None = None) -> tuple[bool | None, str]:
+    """Whether ``cli`` looks signed in, from the same files ``provider_check`` reads; ``None`` when it cannot be told.
+
+    The second item is the command that signs in (``codex login``), or empty. It does not look at PATH.
+    """
+    check = _LOGIN_CHECKS.get(cli)
+    if check is None:
+        return None, ""
+    logged_in, detail = check(os.environ if env is None else env)
+    return logged_in, detail.removeprefix("run: ")
+
+
 def provider_check(name: str, launch_cli: str | None = None, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Whether the command behind ``name`` is installed and appears signed in."""
     environment = os.environ if env is None else env
@@ -165,12 +177,42 @@ def claude_folder_trusted(folder: str | Path, env: Mapping[str, str] | None = No
 TRUST_NOTE = "Claude Code asks once to trust a new folder: choose \"Yes, I trust this folder\"."
 
 
+PREFERRED_ORDER = ("claude", "codex", "opencode", "copilot", "kilo")
+
+
 def preferred_first_provider(installed: Sequence[str], env: Mapping[str, str] | None = None) -> str | None:
     """The first installed provider that is also signed in, in Bridge's built-in order, or ``None``."""
-    for name in ("claude", "codex", "opencode", "copilot", "kilo"):
+    for name in PREFERRED_ORDER:
         if name in installed and provider_check(name, env=env).get("logged_in") is True:
             return name
     return None
+
+
+def _offered_names() -> str:
+    """The provider CLIs the new-mission form can offer, from the launcher's registry."""
+    from .bridge_launcher import PROVIDER_ORDER
+
+    return ", ".join(PROVIDER_ORDER)
+
+
+def readiness(providers: Sequence[Mapping[str, Any]], *, integrity: object = "ok") -> dict[str, Any]:
+    """The overall verdict of ``doctor``: whether a mission could start a provider at all.
+
+    ``blocking`` lists what stops it. A missing tmux is not blocking, because
+    headless missions do not need it.
+    """
+    blocking: list[str] = []
+    if str(integrity) != "ok":
+        blocking.append(f"database integrity check reported {integrity}")
+    if not any(check.get("installed") and check.get("logged_in") is True for check in providers):
+        problems = []
+        for check in providers:
+            if check.get("installed") is False:
+                problems.append(f"{check.get('name')}: not on PATH")
+            elif check.get("installed") and check.get("logged_in") is False:
+                problems.append(f"{check.get('name')}: not signed in")
+        blocking += problems or ["no provider CLI is installed and signed in"]
+    return {"ready": not blocking, "blocking": blocking}
 
 
 def next_steps(*, tmux_available: bool, providers: Sequence[Mapping[str, Any]], folder: str | Path,
@@ -185,7 +227,7 @@ def next_steps(*, tmux_available: bool, providers: Sequence[Mapping[str, Any]], 
         if waiting:
             steps.append(f"Sign in to a provider first: {waiting[0].get('name')} · {waiting[0].get('detail') or 'sign in with its own CLI'}")
         else:
-            steps.append("Install and sign in to a provider CLI (Claude Code or Codex), then run llm-bridge doctor again.")
+            steps.append(f"Install and sign in to one provider CLI (install one of: {_offered_names()}), then run llm-bridge doctor again.")
         return steps
     steps.append("Ready. In your project folder run llm-bridge, press N, type the task, then choose Start.")
     first = ready[0]

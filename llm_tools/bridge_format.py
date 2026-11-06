@@ -413,10 +413,15 @@ def format_events(events: list[dict[str, Any]]) -> str:
     return table(["ID", "TIME", "KIND", "DETAIL"], rows)
 
 
-def provider_check_text(check: dict[str, Any]) -> str:
-    """``codex: installed, logged in`` / ``claude: not on PATH``."""
+def provider_check_text(check: dict[str, Any], *, mission: bool = True) -> str:
+    """``codex: installed, logged in`` / ``claude: not on PATH``.
+
+    Removing a provider from the rotation needs a mission, so the advice names ``rotation`` only then.
+    """
     name = str(check.get("name"))
     if check.get("installed") is False:
+        if not mission:
+            return f"{name}: not on PATH · install its CLI to use it"
         return f"{name}: not on PATH · install it, or remove it from the rotation with: llm-bridge rotation --set LIST"
     if check.get("installed") is None:
         return f"{name}: {check.get('detail') or 'not checked'}"
@@ -436,7 +441,7 @@ def format_doctor(report: dict[str, Any]) -> str:
         f"tmux             {'available' if report.get('tmux_available') else 'NOT FOUND · native stations need tmux'}",
     ]
     for index, check in enumerate(report.get("providers") or []):
-        lines.append(f"{'Providers' if index == 0 else '':<17}{provider_check_text(check)}")
+        lines.append(f"{'Providers' if index == 0 else '':<17}{provider_check_text(check, mission=isinstance(report.get('mission'), dict))}")
     mission = report.get("mission")
     if isinstance(mission, dict):
         lines.append(f"Mission          {short_id(mission['id'])} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · {mission.get('status')} · {home_relative(mission.get('cwd', ''))}")

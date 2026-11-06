@@ -169,15 +169,15 @@ def test_clicking_a_provider_toggles_it():
 
 def test_hint_is_specific_to_the_focused_field():
     state = Launcher("/w", creating=True, objective="line one\nline two")
-    assert field(state, 0) == "Type the task · Tab moves on to Start · Ctrl-E full editor · paste supported · 17 bytes · 2 lines"
-    assert field(state, 1) == "←/→ choose · Space toggle · numbers show rotation order"
+    assert field(state, 0) == "Type or paste the task · F5 start now · Tab more options · Ctrl-E full editor · 17 bytes · 2 lines"
+    assert field(state, 1) == "←/→ choose · Space adds to the rotation; [1] runs first"
     assert field(state, 2) == "Path to work in · Tab next"
     assert field(state, 3) == "Space/←/→ switch: Native shows the provider terminal; Background, an activity log in a station; Headless, no station"
     assert "bytes" not in field(state, 3, width=70) and field(state, 3, width=70).endswith("Headless: no station")
     assert field(state, 4) == "Enter to save · no provider is started"
     assert field(state, 5) == "Starts codex now · uses provider capacity"
     state.objective = ""
-    assert field(state, 0) == "Type the task · Tab moves on to Start · Ctrl-E full editor · paste supported"
+    assert field(state, 0) == "Type or paste the task · F5 start now · Tab more options · Ctrl-E full editor"
 
 
 def field(state, focus, width=200):
@@ -187,13 +187,14 @@ def field(state, focus, width=200):
 
 def test_form_footer_and_hint_rendering(tmp_path):
     state = Launcher(str(tmp_path), creating=True, objective="abc", installed=("codex", "claude"), providers="codex")
-    for focus, expected in [(0, "3 bytes"), (1, "Space toggle"), (2, "Path to work in"), (3, "Native shows the provider terminal"), (4, "Enter to save"),
+    for focus, expected in [(0, "3 bytes"), (1, "Space adds to the rotation"), (2, "Path to work in"), (3, "Native shows the provider terminal"), (4, "Enter to save"),
                             (5, "Starts codex now")]:
         state.focus = focus
         grid = Grid(size=(34, 120))
         launcher._draw(grid, state)
         assert expected in grid.row(31)
-        assert grid.row(33) == f"Tab/↑↓ fields · Enter {'next' if focus < 4 else 'save' if focus == 4 else 'start'} · Esc back"
+        expected_footer = {4: "Tab/↑↓ fields · Enter save · F5 start · Esc back", 5: "Tab/↑↓ fields · Enter start · Esc back"}
+        assert grid.row(33) == expected_footer.get(focus, "Tab/↑↓ fields · Enter next · F5 start · Esc back")
         assert "Space mode" not in grid.text()
     state.focus = 0
     state.error = "boom"
@@ -345,8 +346,7 @@ def test_empty_list_new_entry_and_draft_notice(tmp_path):
     state = Launcher(str(tmp_path), objective="half written", installed=("codex",))
     grid = Grid()
     launcher._draw(grid, state)
-    assert grid.row(7) == ("A mission is a goal plus ordered tasks run by Codex/Claude in this folder"
-                           " · N to create one")
+    assert grid.row(7) == "A mission is a goal plus ordered tasks run by Codex in this folder · N to create one"
     assert "Draft kept · N to continue" in grid.row(3)
     assert grid.row(31).startswith("Creates a mission in")
 

@@ -597,7 +597,7 @@ def test_ascii_mode_creation_form_uses_plain_markers(tmp_path, monkeypatch):
     state.cursors[0] = 7
     grid = draw(state, size=(34, 120))
     assert "one \\n two" in grid.row(5) and "Mode: Native - provider terminal in a station" in grid.text()
-    assert "Tab/Up/Down fields | Enter next | Esc back" == grid.row(33)
+    assert "Tab/Up/Down fields | Enter next | F5 start | Esc back" == grid.row(33)
     assert ">[1] codex" not in grid.text()  # the cursor marker only appears on the focused picker row
     state.focus = 1
     assert ">[1] codex" in draw(state, size=(34, 120)).row(7)
@@ -607,12 +607,12 @@ def test_ascii_mode_creation_form_uses_plain_markers(tmp_path, monkeypatch):
 
 def test_form_footer_matches_the_keys_that_work(tmp_path):
     state = Launcher(str(tmp_path), creating=True, installed=("codex", "claude"), providers="codex")
-    assert launcher.form_footer(state) == "Tab/↑↓ fields · Enter next · Esc back"
+    assert launcher.form_footer(state) == "Tab/↑↓ fields · Enter next · F5 start · Esc back"
     assert state.key("\t") is None and state.focus == 1
     assert state.key(curses.KEY_DOWN) is None and state.focus == 2  # horizontal picker: up/down leave the field
     state.routes = (launcher.RouteChoice("r1", "codex"),)
     state.focus, state.vertical = 1, True
-    assert launcher.form_footer(state) == "Tab next field · Enter next · Esc back"
+    assert launcher.form_footer(state) == "Tab next field · Enter next · F5 start · Esc back"
     assert state.key("\t") is None and state.focus == 2
     assert state.key("\x1b") is None and not state.creating
 

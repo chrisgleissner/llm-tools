@@ -1533,21 +1533,15 @@ def _doctor_provider_checks(mission: dict[str, Any] | None) -> list[dict[str, An
     """Install and sign-in checks for the providers a mission, or a new mission, would launch."""
     from . import bridge_doctor
 
-    if mission is not None:
-        config = mission["config"]
-        names = fmt.rotation_names(config)
-        conf = _mission_tool_config(config)
-        routes_mode = bool(fmt.rotation_names({"routes": config.get("routes")}))
-    else:
-        providers, routes = default_rotation()
-        names = fmt.rotation_names({"routes": routes, "providers": providers})
-        routes_mode = bool(routes)
-        try:
-            from . import config as toolconfig
+    if mission is None:
+        # Without a mission, check what the home form offers: every enabled provider, and every declared route.
+        from . import bridge_launcher
 
-            conf = toolconfig.load_config() if routes_mode else {}
-        except (OSError, ValueError):
-            conf = {}
+        return bridge_doctor.provider_checks(bridge_launcher.offered_entries())
+    config = mission["config"]
+    names = fmt.rotation_names(config)
+    conf = _mission_tool_config(config)
+    routes_mode = bool(fmt.rotation_names({"routes": config.get("routes")}))
     entries: list[tuple[str, str | None]] = []
     for position, name in enumerate(names, 1):
         entry = _rotation_entry(conf, name, position, routes_mode=routes_mode)
@@ -2769,14 +2763,17 @@ def _main(argv: list[str] | None = None) -> int:
                 tmux_available = bool(shutil.which("tmux"))
                 from . import bridge_doctor
 
+                integrity = store.db.execute("PRAGMA integrity_check").fetchone()[0]
+                verdict = bridge_doctor.readiness(providers, integrity=integrity)
                 report = {
                     "schema_version": 1,
                     "state_dir": str(state_dir()),
                     "database": str(store.path),
-                    "sqlite_integrity": store.db.execute("PRAGMA integrity_check").fetchone()[0],
+                    "sqlite_integrity": integrity,
                     "tmux_available": tmux_available,
                     "mission": mission,
                     "providers": providers,
+                    **verdict,
                     "next_steps": bridge_doctor.next_steps(
                         tmux_available=tmux_available, providers=providers,
                         folder=(mission or {}).get("cwd") or Path.cwd()),
@@ -2784,7 +2781,7 @@ def _main(argv: list[str] | None = None) -> int:
             if not args.include_config:
                 report = strip_frozen_config(report)
             _print_result(report, args.json, fmt.format_doctor)
-            return 0
+            return 0 if verdict["ready"] else 1
         if args.command == "station":
             with open_store() as store:
                 result = _apply_operator_command(store, args.mission, {"action": "station.view", "station": args.name})

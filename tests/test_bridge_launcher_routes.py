@@ -91,7 +91,7 @@ def test_routes_render_as_a_vertical_checklist_with_fields_below(tmp_path):
     assert grid.row(11).split() == ["[", "]", "codex-fast", "codex"]
     assert grid.row(10).index("claude ·") == grid.row(11).rindex("codex")  # details share one column
     assert grid.row(13).startswith("  Folder:") and grid.row(15).startswith("  Mode:")
-    assert grid.row(31) == "↑/↓ choose · Space toggle · Tab next field · numbers show rotation order"
+    assert grid.row(31) == "↑/↓ choose · Space adds to the rotation; [1] runs first · Tab next field"
     assert state.vertical is True
 
 

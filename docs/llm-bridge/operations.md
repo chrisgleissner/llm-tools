@@ -189,7 +189,7 @@ llm-bridge doctor --mission MISSION_ID
 `status` reports the mission, tasks and their states, recent operations,
 pending commands, and recent events. `--json` selects machine-readable output;
 it does not create, start, or otherwise change a mission. `doctor` reports the
-state directory, SQLite integrity, and tmux availability. The monitor reports
+state directory, SQLite integrity, and tmux availability, then checks every provider the home form offers (or the mission's own rotation with `--mission`). It exits 0 when at least one provider is installed and signed in, and 1 otherwise; `--json` adds `ready` (boolean) and `blocking` (list of reasons). The monitor reports
 configured mode separately from actual controller mode. Actual mode is shown
 only after a verified controller-mode event; provider liveness and observed
 model remain `unknown` when no provider observation proves them. An operation's

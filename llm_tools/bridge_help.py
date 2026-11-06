@@ -11,8 +11,8 @@ First mission, from your project folder. Opening Bridge starts no provider.
 
 1. Run llm-bridge, then press N.
 2. Type the task. The form selects the first provider that is installed and signed in.
-3. Press Tab five times to reach "Start and open provider", then Enter. This uses
-   paid capacity. Claude Code may first ask whether to trust the folder: choose
+3. Press F5 (start from any field), or Tab five times to reach "Start and open provider"
+   and press Enter. This uses paid capacity. Claude Code may first ask whether to trust the folder: choose
    "Yes, I trust this folder" (the first option is No, exit; if you pick it, Bridge holds
    the task until you run /start again).
 4. When the provider says it is done, exit it with /exit. The station then says the
@@ -470,7 +470,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "gc": ("Close the idle tmux stations of finished missions; a station with a live provider process or an attached terminal is kept", "gc --json"),
     "finish": ("Ask the native provider to exit (its own /exit or /quit) so the task moves to verification", "finish --mission ID"),
     "detach": ("Detach a station client from outside; your own terminal uses Ctrl-] d", "detach --mission ID"),
-    "doctor": ("Inspect local prerequisites and persistence; mission is optional", "doctor --json"),
+    "doctor": ("Inspect local prerequisites and persistence; exits 1 when no provider can run; mission is optional", "doctor --json"),
     "control": ("Inspect and steer the mission in Bridge controls; no autostart", "control --mission ID"),
     "usage": ("Inspect background capacity observations for this mission", "usage --mission ID"),
     "station": ("Select the viewed station; does not reroute a running task", "station --mission ID codex"),
