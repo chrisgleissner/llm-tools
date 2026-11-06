@@ -445,7 +445,8 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 raise ValueError("steering kind must be replace, review, verify, pause-after-iteration, stop-after-task, or handoff")
             task_id = int(payload["task_id"]) if payload.get("task_id") is not None else None  # type: ignore[assignment]  # name reused across the branches of this handler
             if kind in {"replace", "review", "verify", "stop-after-task"} and task_id is None:
-                raise ValueError(f"{kind} steering requires --task")
+                prompt_example = ' --prompt "check error paths"' if kind in {"replace", "review"} else ""
+                raise ValueError(f"--kind {kind} needs --task N, e.g. llm-bridge steer --kind {kind} --task 1{prompt_example}")
             task = _require_task(store, mission_id, task_id) if task_id is not None else None
             if kind == "replace":
                 prompt = str(payload.get("prompt", ""))
@@ -488,9 +489,10 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 configured_names = [item.strip() for key in ("providers", "routes") for item in str(mission["config"].get(key) or "").split(",") if item.strip()]
                 choices = f" (one of: {', '.join(dict.fromkeys(configured_names))})" if configured_names else ""
                 if not station:
-                    raise ValueError(f"--kind handoff needs --route NAME{choices}")
+                    example = configured_names[0] if configured_names else "codex"
+                    raise ValueError(f"--kind handoff needs --to PROVIDER{choices}, e.g. llm-bridge steer --kind handoff --to {example}")
                 if configured_names and station not in configured_names:
-                    raise ValueError(f"--route {station} is not in this mission's rotation{choices}")
+                    raise ValueError(f"--to {station} is not in this mission's rotation{choices}")
                 store.set_mission_config_value(mission_id, "handoff_preference", station, event_kind="steering-handoff-requested")
                 result = {"kind": kind, "route": station, "status": "QUEUED_FOR_SELECTION"}
         elif action == "task.add":
@@ -771,7 +773,7 @@ def console_words(command_line: str) -> list[str]:
         rest = command_line.split(None, 2)[2] if len(tokens) > 2 else ""
         if kind == "handoff":
             if rest:
-                words += ["--route", rest.split(None, 1)[0]]
+                words += ["--to", rest.split(None, 1)[0]]
         elif kind in _STEER_TASK_KINDS and rest.split(None, 1)[:1] and rest.split(None, 1)[0].isdecimal():
             first, *remainder = rest.split(None, 1)
             words += ["--task", first]
@@ -870,7 +872,7 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
                         pass
                     return output.getvalue() or topic_text(" ".join(words[1:]))
                 return topic_text(" ".join(words[1:]))
-            return topic_text("quickstart") + "\n\n" + _build_parser().format_help()
+            return topic_text("console")
 
         if command == "missions" and len(words) == 1:
             return TerminalAction(mission_id, None, "pick")
@@ -1140,6 +1142,19 @@ def _add_json_arg(parser: argparse.ArgumentParser) -> None:
 
 def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
     argv = list(getattr(args, "verifier_argv", []) or [])
+    command = getattr(args, "verifier_command", None)
+    after_dashes = list(getattr(args, "verifier_after_dashes", []) or [])
+    if sum(bool(form) for form in (argv, command is not None, after_dashes)) > 1:
+        raise ValueError("give one verifier form: --verifier COMMAND, -- COMMAND ARGS, or --verifier-arg once per argument")
+    if command is not None:
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            raise ValueError(f"--verifier has an unclosed quote: {command}") from None
+        if not argv:
+            raise ValueError("--verifier is empty; give the command that checks a finished task, for example --verifier 'python -m pytest -q'")
+    elif after_dashes:
+        argv = after_dashes
     if not argv:
         return None
     timeout = float(getattr(args, "verifier_timeout", 300))
@@ -1224,7 +1239,8 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     # Older spellings of --mode native / --mode headless; still accepted, no longer advertised.
     create.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
     create.add_argument("--native", dest="native_tui", action="store_true", help=argparse.SUPPRESS)
-    create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the command that checks a finished task; repeat per argument; supports {context}, {cwd}, {mission_id}, {task_id}, {revision}")
+    create.add_argument("--verifier", dest="verifier_command", metavar="COMMAND", default=None, help="command that checks a finished task, split into words like a shell would (not run through a shell), for example 'python -m pytest -q'; or write the command last after --, as in -- python -m pytest -q; supports {context}, {cwd}, {mission_id}, {task_id}, {revision}")
+    create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the verifier command, for exact control of quoting; repeat per argument (--verifier-arg=-m for one that starts with a dash)")
     create.add_argument("--verifier-file", dest="verifier_files", metavar="PATH", action="append", default=[], help="a file the verifier depends on, relative to --cwd; repeat per file; if it changes after the mission is created a passing verifier no longer completes a task without your approval (the verifier program and the script it interprets are tracked automatically)")
     create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=300, help="seconds before a verifier run is treated as failed (default: 300)")
     create.add_argument("--log-max-bytes", metavar="BYTES", type=_db_int, default=4 * 1024 * 1024, help="size at which one provider log file rotates (default: 4194304, 4 MiB)")
@@ -1283,7 +1299,7 @@ def _build_parser(
     if only is not None:
         sub = _OnlyCommand(sub, only)
     help_parser = sub.add_parser("help", help="show offline Bridge workflow and recovery guidance")
-    help_parser.add_argument("topic", nargs="*", help="quickstart, keys, remote, prompts, markdown, providers, states, verification, recovery, or a command path")
+    help_parser.add_argument("topic", nargs="*", help="a help topic or a command such as: task verify")
     view = sub.add_parser("view", help="read a local text artifact without starting work")
     view.add_argument("--file", required=True, metavar="PATH", help="UTF-8 text artifact to open; the source stays unchanged")
     view.add_argument("--follow", action="store_true", help="follow changes explicitly; Up pauses, End resumes")
@@ -1503,8 +1519,10 @@ def _build_parser(
     theme = sub.add_parser("theme", help="show the detected terminal background, the active colour theme and a swatch per role")
     theme.add_argument("--theme", dest="theme_name", choices=THEME_CHOICES, default="auto",
                        help="preview another theme instead of the active one")
-    theme.add_argument("--colors", type=int, choices=(8, 16, 256), help="preview a terminal with this many colours")
-    theme.add_argument("--color", choices=("auto", "always", "never"), default="auto", help="render swatches with colour (default: when stdout is a terminal)")
+    theme.add_argument("--palette-size", dest="colors", type=int, choices=(8, 16, 256), help="preview a terminal that shows this many colours")
+    theme.add_argument("--colors", dest="colors", type=int, choices=(8, 16, 256), help=argparse.SUPPRESS)  # older name of --palette-size
+    theme.add_argument("--colour", dest="color", choices=("auto", "always", "never"), default="auto", help="render swatches with colour (default: when stdout is a terminal)")
+    theme.add_argument("--color", dest="color", choices=("auto", "always", "never"), default=argparse.SUPPRESS, help=argparse.SUPPRESS)  # US spelling of --colour
     _add_json_arg(theme)
 
     console = sub.add_parser("console", help=argparse.SUPPRESS)
@@ -1522,18 +1540,19 @@ def _build_parser(
     rotation = sub.add_parser("rotation", help="show or change the mission's saved provider rotation")
     _add_mission_arg(rotation, default_mission)
     rotation_change = rotation.add_mutually_exclusive_group()
-    rotation_change.add_argument("--set", dest="set_list", metavar="LIST", help="comma-separated provider or route names, tried in this order; provider names alone replace the saved rotation, any route name selects route mode")
-    rotation_change.add_argument("--routes", metavar="LIST", help="comma-separated route IDs from the frozen tool config (or provider names) to rotate through")
-    rotation_change.add_argument("--providers", metavar="LIST", help="comma-separated providers to rotate through; clears saved routes")
+    rotation_change.add_argument("--set", dest="set_list", metavar="LIST", help="comma-separated provider or route names, tried in this order, for example claude,codex; provider names replace the saved rotation, and a route name from the config saved with the mission switches the mission to routes")
+    rotation_change.add_argument("--routes", metavar="LIST", help=argparse.SUPPRESS)  # older form of --set with route names
+    rotation_change.add_argument("--providers", metavar="LIST", help=argparse.SUPPRESS)  # older form of --set with provider names; clears saved routes
     _add_json_arg(rotation)
 
     steer = sub.add_parser("steer", help="queue typed steering for a task or safe boundary")
     _add_mission_arg(steer, default_mission)
-    steer.add_argument("--kind", required=True, choices=("replace", "review", "verify", "pause-after-iteration", "stop-after-task", "handoff"), help="steering to queue")
-    _add_task_selector(steer, required=False, note="; required for replace, review, verify and stop-after-task")
-    steer.add_argument("--route", metavar="NAME", help="station to hand over to (required for handoff)")
-    steer.add_argument("--file", "--prompt-file", dest="prompt_file", metavar="PATH", help="read the replacement or review prompt from PATH")
-    steer.add_argument("--prompt", help="the replacement or review prompt as literal text")
+    steer.add_argument("--kind", required=True, choices=("replace", "review", "verify", "pause-after-iteration", "stop-after-task", "handoff"), metavar="{handoff,review}", help="handoff: switch to another provider at the next safe point; review: add a task that reviews TASK after it finishes")
+    _add_task_selector(steer, required=False, note="; required for review")
+    steer.add_argument("--to", dest="route", metavar="PROVIDER", help="provider (or route) from the mission's rotation to hand over to; required for handoff")
+    steer.add_argument("--route", dest="route", metavar="NAME", help=argparse.SUPPRESS)  # older name of --to
+    steer.add_argument("--file", "--prompt-file", dest="prompt_file", metavar="PATH", help="read the review prompt from PATH")
+    steer.add_argument("--prompt", help="the review prompt as literal text (default: a standard review of the task)")
     _add_json_arg(steer)
 
     station_gc = sub.add_parser("_station-gc", help=argparse.SUPPRESS)
@@ -1559,6 +1578,16 @@ class _FastParseFailed(Exception):
 
 
 def _parse_arguments(arguments: list[str]) -> argparse.Namespace:
+    """Parse a command line; for ``mission create`` the words after ``--`` are the verifier command."""
+    if arguments[:2] == ["mission", "create"] and "--" in arguments:
+        cut = arguments.index("--")
+        parsed = _parse_arguments_core(arguments[:cut])
+        parsed.verifier_after_dashes = arguments[cut + 1:]
+        return parsed
+    return _parse_arguments_core(arguments)
+
+
+def _parse_arguments_core(arguments: list[str]) -> argparse.Namespace:
     """Parse a command line, building only the requested command's parser when that is enough.
 
     Anything the single-command parser cannot accept (an unknown command, a request for help, a
@@ -2382,9 +2411,12 @@ def _main(argv: list[str] | None = None) -> int:
         _build_parser().print_help()
         return 0
     if arguments[0] == "help" and not any(arg in {"--help", "-h"} for arg in arguments[1:]):
-        from .bridge_help import is_known_topic, topic_text
+        from .bridge_help import is_known_topic, topic_index, topic_text
 
-        topic = " ".join(arguments[1:]) or "quickstart"
+        if len(arguments) == 1:
+            print(topic_text("quickstart") + "\n\n" + topic_index())
+            return 0
+        topic = " ".join(arguments[1:])
         if not is_known_topic(topic):
             print(f"llm-bridge: {topic_text(topic)}", file=sys.stderr)
             return 2

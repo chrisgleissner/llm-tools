@@ -387,7 +387,7 @@ def test_rotation_console_command_and_help(tmp_path, state, capsys) -> None:
 
     with pytest.raises(SystemExit):
         main(["rotation", "--help"])
-    assert "applies from the next provider selection" in capsys.readouterr().out
+    assert "applies from the next provider selection" in " ".join(capsys.readouterr().out.split())
     with pytest.raises(SystemExit):
         main(["start", "--help"])
     help_text = " ".join(capsys.readouterr().out.split())

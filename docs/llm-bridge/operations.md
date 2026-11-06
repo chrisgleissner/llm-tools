@@ -169,7 +169,7 @@ stopped or failed ones. With no match, or several, the error lists candidates.
 CLI commands print human-readable text; add `--json` for the stable
 machine-readable form.
 
-Mission creation accepts `--verifier-arg` (repeat once per argv element),
+Mission creation accepts `--verifier 'COMMAND'` (split like a shell, not run through one) or the command last after `--`, `--verifier-arg` (repeat once per argv element),
 `--verifier-timeout` (default 300 seconds), `--log-max-bytes` (default 4 MiB),
 `--log-rotations` (default 3), `--log-retained-runs` (default 20), and
 `--capacity-refresh-seconds` (default 60). The verifier timeout range is
@@ -282,9 +282,12 @@ attempt and its next prompt quotes the reason:
 llm-bridge task reject --mission MISSION_ID --task N --reason "tests were not run"
 ```
 
-For deterministic checks, configure a verifier at mission creation. Each
-`--verifier-arg` is one argv item; Bridge does not invoke a shell. Repeat the
-flag to form the command. The `{context}` placeholder names a private JSON file
+For deterministic checks, configure a verifier at mission creation. Write the
+command as `--verifier 'python -m pytest -q'`, or after `--` at the end of the
+command line (`-- python -m pytest -q`). Bridge splits it into words as a shell
+would, does not invoke a shell, and prints the result as an argument list in the
+creation receipt. For exact quoting, `--verifier-arg` is one argv item; repeat the
+flag to form the command. Give only one of the three forms. The `{context}` placeholder names a private JSON file
 with the objective, task prompt, revision, and acceptance criteria. Other
 placeholders are `{cwd}`, `{mission_id}`, `{task_id}`, and `{revision}`. The
 verifier succeeds when it exits zero. JSON output is optional: when present,
@@ -295,8 +298,7 @@ must be greater than zero and no more than 3600 seconds.
 
 ```bash
 llm-bridge mission create --file objective.md --cwd "$PWD" \
-  --verifier-arg ./verify-task --verifier-arg '{context}' \
-  --verifier-timeout 120 --json
+  --verifier './verify-task {context}' --verifier-timeout 120 --json
 ```
 
 The provider works in the same folder as the verifier and can edit it. When the
@@ -546,9 +548,20 @@ wrapping, Left/Right scroll long source lines when wrapping is off, and `s`
 exports the complete original source to a new path. Source export never copies a
 rendered or abbreviated preview.
 
-Built-in help works offline: `llm-bridge help TOPIC` supports quickstart, keys,
-remote, prompts, markdown, providers, states, verification, and recovery. Type `help` in
-the console for the same topic guidance. A rendered document uses Rich when
+Built-in help works offline: `llm-bridge help` lists every topic with a one-line
+description (quickstart, terms, keys, console, prompts, markdown, providers,
+states, verification, recovery, remote and distributed; the list lives in
+`bridge_help.TOPIC_SUMMARIES` and feeds every other list of topics). The top-level
+`llm-bridge --help` groups the commands (Start here, Missions, Tasks, Run control,
+Station, Capacity and power, Data, Distributed, Appearance) and lists the global
+options `--version` and `--target WORKER`. Each command page has one example and,
+for commands that change something, an `Effects:` line, for example `start` uses
+paid capacity and `suspend-until-credits` suspends this computer. Type `/help` in
+the console for the slash commands generated from the same groups, with the shell
+command each shortcut stands for. `llm-bridge theme` ends with how to set the
+theme (`--palette-size` and `--colour` replace the older `--colors` and `--color`).
+`llm-bridge rotation --set LIST` is the one documented way to change a rotation;
+`--routes` and `--providers` still work. A rendered document uses Rich when
 available; source viewing and CLI help still work if Rich is unavailable.
 
 Providers distinguishes the station selected for viewing from the last station
@@ -576,7 +589,10 @@ in either UI and on the CLI:
 
 CLI form: `llm-bridge steer --mission ID --kind KIND`, with `--task N`
 (the per-mission task number; `--task-id ID` takes the global ID),
-`--route NAME`, and `--file PATH` or `--prompt TEXT` as required by that kind.
+`--to PROVIDER` (older name `--route`), and `--file PATH` or `--prompt TEXT` as
+required by that kind. `llm-bridge steer --help` lists only `handoff` and
+`review`. The other kinds still work for older scripts, but have their own
+commands: `task amend` (replace), `task verify` (verify) and `pause`.
 See `llm-bridge steer --help` and `steer help` in the console for the live
 syntax.
 

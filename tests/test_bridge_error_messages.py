@@ -71,11 +71,11 @@ def test_task_add_and_amend_report_an_empty_prompt_the_same_way(tmp_path, missio
 
 
 def test_handoff_without_a_route_lists_the_routes_to_choose_from(mission, capsys) -> None:
-    assert _error(capsys, "steer", "--mission", mission, "--kind", "handoff") == "llm-bridge: --kind handoff needs --route NAME (one of: claude)"
+    assert _error(capsys, "steer", "--mission", mission, "--kind", "handoff") == "llm-bridge: --kind handoff needs --to PROVIDER (one of: claude), e.g. llm-bridge steer --kind handoff --to claude"
 
 
 def test_handoff_to_a_route_outside_the_rotation_says_so(mission, capsys) -> None:
-    assert _error(capsys, "steer", "--mission", mission, "--kind", "handoff", "--route", "nosuch") == "llm-bridge: --route nosuch is not in this mission's rotation (one of: claude)"
+    assert _error(capsys, "steer", "--mission", mission, "--kind", "handoff", "--to", "nosuch") == "llm-bridge: --to nosuch is not in this mission's rotation (one of: claude)"
 
 
 def test_unreadable_token_and_ca_files_are_named(tmp_path, state, capsys, monkeypatch) -> None:

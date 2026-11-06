@@ -7,6 +7,7 @@ bulky fields such as the frozen tool configuration and full prompts.
 
 from __future__ import annotations
 
+import json
 import time
 import unicodedata
 from datetime import datetime
@@ -209,7 +210,10 @@ def format_mission_created(result: dict[str, Any]) -> str:
     policy = config.get("team_policy_enabled")
     token_spend = config.get("token_spend")
     suffix = f" · teams {'on' if policy else 'off'} · token spend {token_spend}" if isinstance(policy, bool) and isinstance(token_spend, str) else ""
-    return f"Created mission {mid} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · task {task_number(task) or 1}{suffix} · start with: llm-bridge start --mission {mid}"
+    verifier = config.get("verifier")
+    argv = verifier.get("argv") if isinstance(verifier, dict) else None
+    checks = f" · verifier {json.dumps([str(item) for item in argv])}" if argv else ""
+    return f"Created mission {mid} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · task {task_number(task) or 1}{suffix}{checks} · start with: llm-bridge start --mission {mid}"
 
 
 def format_mission_colour(result: dict[str, Any]) -> str:
