@@ -64,7 +64,8 @@ def test_stop_on_a_saved_mission_changes_nothing(tmp_path, state, capsys, status
             store.set_mission_status(mid, "RUNNING")
             store.set_mission_status(mid, "PAUSED" if status == "PAUSED" else "STOPPED")
     out = _run(capsys, "stop", "--mission", mid)
-    assert out.startswith(f"Nothing to stop · mission {mid[:8]} is saved ({status}) · ")
+    lead = "Already stopped" if status == "STOPPED" else "Nothing to stop"  # a repeated stop says so (CLIUX-024)
+    assert out.startswith(f"{lead} · mission {mid[:8]} is saved ({status}) · ")
     assert "Stop requested" not in out and "CANCELLED" not in out
     assert ("start it with: llm-bridge start" in out) if status != "PAUSED" else ("resume it with: llm-bridge resume" in out)
     with BridgeStore(state / "bridge.sqlite3") as store:
@@ -90,7 +91,7 @@ def test_stop_force_and_console_stop_never_cancel_a_created_mission(tmp_path, st
 
 def test_only_cancel_cancels_a_mission(tmp_path, state, capsys) -> None:
     mid = _create(tmp_path, capsys)["mission"]["id"]
-    assert "Cancel requested" in _run(capsys, "cancel", "--mission", mid)
+    assert "Cancel requested" in _run(capsys, "cancel", "--mission", mid, "--yes")
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_mission(mid)["status"] == "CANCELLED"
 
@@ -118,7 +119,7 @@ def test_task_numbers_restart_at_one_in_every_mission(tmp_path, state, capsys) -
     shown = _run(capsys, "task", "show", "--mission", mid, "--task", "1")
     assert shown.splitlines()[0].startswith('task 1 "second objective"')
     listing = _run(capsys, "task", "list", "--mission", mid).splitlines()
-    assert listing[0].split()[0] == "TASK" and [line.split()[0] for line in listing[1:]] == ["1", "2"]
+    assert listing[0].split()[0] == "TASK" and [line.split()[0] for line in listing[1:3]] == ["1", "2"]
     created_line = _run(capsys, "mission", "create", "--prompt", "third", "--cwd", str(_folder(tmp_path, "third")), "--providers", "codex")
     assert "· task 1 ·" in created_line
 
@@ -274,7 +275,9 @@ def test_verify_needs_evidence_or_approval(tmp_path, state, capsys) -> None:
     created = _create(tmp_path, capsys)
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
-    assert "requires verification evidence or explicit operator approval" in _run(capsys, "task", "verify", "--mission", mid, "--task", "1", code=2)
+    message = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", code=2)
+    assert f"task 1 needs evidence or approval · to complete it: llm-bridge task approve --mission {mid[:8]} --task 1" in message  # CLIUX-075
+    assert f'llm-bridge task verify --mission {mid[:8]} --task 1 --evidence "TEXT"' in message
 
 
 def test_console_verify_alias_takes_evidence_literally(tmp_path, state, capsys) -> None:
@@ -480,7 +483,7 @@ def test_task_add_reopens_a_completed_mission(tmp_path, state, capsys) -> None:
 
 def test_task_add_to_a_cancelled_mission_says_so(tmp_path, state, capsys) -> None:
     mid = _create(tmp_path, capsys)["mission"]["id"]
-    _run(capsys, "cancel", "--mission", mid)
+    _run(capsys, "cancel", "--mission", mid, "--yes")
     err = _run(capsys, "task", "add", "--mission", mid, "--prompt", "x", code=2)
     assert err.strip() == f"llm-bridge: mission {mid[:8]} was cancelled; create a new mission instead of adding a task"
     assert "terminal mission" not in err
@@ -507,7 +510,7 @@ def test_several_finished_missions_in_a_folder_are_listed(tmp_path, state, capsy
     folder = _folder(tmp_path, "shared")
     for index in range(2):
         out = json.loads(_run(capsys, "mission", "create", "--prompt", f"p{index}", "--cwd", str(folder), "--providers", "codex", "--json"))
-        _run(capsys, "cancel", "--mission", out["mission"]["id"])
+        _run(capsys, "cancel", "--mission", out["mission"]["id"], "--yes")
     monkeypatch.chdir(folder)
     err = _run(capsys, "status", code=2)
     assert "several finished missions match folder" in err
@@ -684,7 +687,8 @@ def test_amend_of_a_verifying_task_keeps_its_requeue_behaviour(tmp_path, state, 
     created = _create(tmp_path, capsys)
     mid = created["mission"]["id"]
     _finish_first_task(state, mid, created["task"]["id"])
-    _run(capsys, "task", "amend", "--mission", mid, "--task", "1", "--prompt", "redo it")
+    # A task that awaits review is only amended on request (CLIUX-026): see test_bridge_cliux_lifecycle.
+    _run(capsys, "task", "amend", "--mission", mid, "--task", "1", "--prompt", "redo it", "--requeue")
     with BridgeStore(state / "bridge.sqlite3") as store:
         task = store.get_task(created["task"]["id"])
         assert task["status"] == "READY" and task["prompt"] == "redo it" and task["pending"] == {}
@@ -719,7 +723,7 @@ def test_pause_of_an_unstarted_mission_is_not_a_raw_transition_error(tmp_path, s
     assert reply["status"] == "APPLIED" and reply["result"]["detail"] == "Nothing to pause · mission is not running (CREATED)"
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_mission(mid)["status"] == "CREATED"
-    _run(capsys, "cancel", "--mission", mid)
+    _run(capsys, "cancel", "--mission", mid, "--yes")
     assert "Nothing to pause · mission is not running (CANCELLED)" in _run(capsys, "pause", "--mission", mid)
 
 

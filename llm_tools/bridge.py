@@ -16,7 +16,7 @@ from typing import Any, Callable, NoReturn, Sequence, TYPE_CHECKING, cast
 from . import bridge_commands as commands
 from . import bridge_format as fmt
 from .bridge_format import NATIVE_STOP_HINT
-from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
+from .bridge_store import BridgeStore, MissionLock, TransitionError, default_state_dir, derive_mission_name, mission_transition_message, prune_old_drafts, rotation_label, store_path
 from .bridge_store import controller_running as _controller_running
 from .bridge_states import (
     ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
@@ -236,6 +236,7 @@ def _resolve_parsed_mission(args: argparse.Namespace, *, optional: bool = False,
                 read_only=_is_read_only(args),
                 prefer_station=getattr(args, "command", "") in {"attach", "detach"},
                 reopen_completed=getattr(args, "command", "") == "task" and getattr(args, "task_action", "") == "add",
+                station_command=getattr(args, "command", "") in {"attach", "detach", "finish", "station"},
             )
             setattr(args, attribute, resolved)
     except MissionNotFound:
@@ -376,7 +377,7 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
         result: dict[str, Any]
         if action == "pause":
             current = str(store.get_mission(mission_id)["status"])
-            if current not in STARTED_MISSION_STATUSES:
+            if current == "PAUSED" or current not in STARTED_MISSION_STATUSES:
                 return {"mission_status": current, "noop": True, "detail": fmt.nothing_to_pause(current)}
             store.set_mission_status(mission_id, "PAUSED")
             active = store.db.execute("SELECT COUNT(*) FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')", (mission_id,)).fetchone()[0]
@@ -416,8 +417,10 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 result["detail"] = "cancel is durable; the active provider returns at its boundary"
         elif action == "task.verify":
             task_id = int(payload["task_id"])
-            _require_task(store, mission_id, task_id)
+            verified = _require_task(store, mission_id, task_id)
             approved = bool(payload.get("approved", False))
+            if not approved and not str(payload.get("evidence", "")).strip():
+                raise ValueError(fmt.verify_needs_message(verified.get("ordinal", task_id), mission_id))
             # Without --approve, evidence is recorded and the task keeps awaiting approval.
             result = store.verify_task(task_id, evidence=str(payload.get("evidence", "")), approved=approved, record_only=not approved)
         elif action == "task.reject":
@@ -425,6 +428,11 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
             _require_task(store, mission_id, task_id)
             reason = str(payload.get("reason", ""))
             result = {**store.reject_task(task_id, reason), "rejection_reason": reason.strip()}
+            if payload.get("hold"):
+                # Same transaction: the controller never sees the task as runnable.
+                result = {**store.set_task_status(task_id, "PAUSED"), "rejection_reason": reason.strip(), "held": True}
+            else:
+                result["controller_running"] = controller_running(mission_id)
         elif action == "station.view":
             station = str(payload.get("station", "")).strip()
             if not station or len(station) > 100:
@@ -529,9 +537,16 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
             )
         elif action == "task.amend":
             task_id = int(payload["task_id"])
-            _require_task(store, mission_id, task_id)
+            awaiting = _require_task(store, mission_id, task_id)
+            requeue = bool(payload.get("requeue", False))
+            if awaiting["status"] == "VERIFYING" and not requeue:
+                # Approving afterwards would mark a revision complete that no provider ever worked on.
+                raise ValueError(fmt.amend_in_review_message(awaiting.get("ordinal", task_id), mission_id))
             revision = store.amend_task(task_id, prompt=str(payload["prompt"]))
             result = {"task_id": task_id, "revision": revision, "applied": not store.get_task(task_id)["pending"]}
+            if awaiting["status"] == "VERIFYING":
+                result["requeued"] = True
+                result["controller_running"] = controller_running(mission_id)
         elif action in {"task.pause", "task.resume", "task.cancel", "task.retry", "task.priority", "task.reorder", "task.dependency"}:
             task_id = int(payload["task_id"])
             _require_task(store, mission_id, task_id)
@@ -563,10 +578,10 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 result = store.get_task(task_id)
             elif action == "task.priority":
                 store.set_task_priority(task_id, int(payload["priority"]))
-                result = store.get_task(task_id)
+                result = {**store.get_task(task_id), "runs_after": store.runs_after(task_id)}
             elif action == "task.reorder":
                 store.reorder_task(task_id, int(payload["order"]))
-                result = store.get_task(task_id)
+                result = {**store.get_task(task_id), "runs_after": store.runs_after(task_id)}
             else:
                 dependency_id = int(payload["depends_on"])
                 _require_task(store, mission_id, dependency_id)
@@ -611,13 +626,13 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
             task = _resolve_task(store, args.mission, args.task, args.task_by_id)
             payload: dict[str, Any] = {"task_id": int(task["id"])}
             if args.task_action == "amend":
-                payload.update(action="task.amend", prompt=prompt_from(args))
+                payload.update(action="task.amend", prompt=prompt_from(args), requeue=bool(args.requeue))
             elif args.task_action == "verify":
                 payload.update(action="task.verify", evidence=args.evidence, approved=args.approve)
             elif args.task_action == "approve":
                 payload.update(action="task.verify", evidence=args.evidence, approved=True)
             elif args.task_action == "reject":
-                payload.update(action="task.reject", reason=args.reason)
+                payload.update(action="task.reject", reason=args.reason, hold=bool(args.hold))
             elif args.task_action == "priority":
                 payload.update(action="task.priority", priority=args.value)
             elif args.task_action == "reorder":
@@ -960,6 +975,8 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
         # the operator asked for --json; commands that change state keep the
         # JSON receipt the control pane turns into a one-line acknowledgement.
         human = not typed_json and _console_human(words)
+        if words[0] == "cancel" and "--help" not in words and "-h" not in words and "--yes" not in words:
+            words.append("--yes")  # the console asked first (its confirmation dialog); the subprocess has no terminal to ask on
         if "--help" not in words and "-h" not in words and words[0] not in {"control", "console", "_controller"} and "--json" not in words and not human:
             words.append("--json")
         args = None  # type: ignore[assignment]  # stays None when only help was asked for; later branches read args
@@ -1201,7 +1218,7 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     """Options shared by ``mission create`` and the legacy bare ``--prompt`` form."""
     import argparse
 
-    create.add_argument("--name", metavar="NAME", help="mission name shown in lists (default: first line of the prompt)")
+    create.add_argument("--name", metavar="NAME", help="mission name shown in lists (default: the first line of the prompt, cut at a word boundary under 40 characters)")
     create.add_argument("--cwd", metavar="DIR", default=str(Path.cwd()), help="folder the providers work in (default: the current folder)")
     # argparse validates a help string when the option is added, so the lazy placeholders are set afterwards.
     providers_help = "comma-separated providers to rotate through, in order; an explicit list without --routes disables configured routes"
@@ -1329,7 +1346,7 @@ def _build_parser(
     _add_mission_arg(add, default_mission)
     _read_prompt_args(add)
     add.add_argument("--title", metavar="TEXT", default="", help="short task title shown in lists (default: first line of the prompt)")
-    add.add_argument("--priority", metavar="N", type=_db_int, default=0, help="scheduling priority; higher runs first (default: 0)")
+    add.add_argument("--priority", metavar="N", type=_db_int, default=0, help="scheduling priority; a HIGHER number runs first (default: 0)")
     add.add_argument("--order", metavar="N", type=_db_int, help="ordering value among equal priorities; lower runs first (default: appended last)")
     add.add_argument("--depends-on", metavar="IDS", default="", help="comma-separated task numbers that must complete first")
     add.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the task; repeat for several")
@@ -1357,6 +1374,7 @@ def _build_parser(
     _add_mission_arg(amend, default_mission)
     _add_task_selector(amend)
     _read_prompt_args(amend, "replacement task")
+    amend.add_argument("--requeue", action="store_true", help="needed for a task that awaits review: send the old result back and run the amended task again (uses capacity)")
     _add_json_arg(amend)
     task_help = {
         "priority": "change scheduling priority",
@@ -1375,9 +1393,9 @@ def _build_parser(
         _add_mission_arg(cmd, default_mission)
         _add_task_selector(cmd)
         if action == "priority":
-            cmd.add_argument("--value", metavar="N", type=_db_int, required=True, help="new priority; higher runs first")
+            cmd.add_argument("--value", metavar="N", type=_db_int, required=True, help="new priority; a HIGHER number runs first, the default is 0 and negative numbers run last (P-numbers are not urgency levels)")
         elif action == "reorder":
-            cmd.add_argument("--value", metavar="N", type=_db_int, required=True, help="new ordering value; lower runs first")
+            cmd.add_argument("--value", metavar="N", type=_db_int, required=True, help="new ordering value among tasks of equal priority; a LOWER number runs first (the opposite of priority)")
         elif action == "dependencies":
             cmd.add_argument("--add", metavar="N", type=_db_int, required=True, help="number of the task this task must wait for")
         elif action in {"approve", "verify"}:
@@ -1387,6 +1405,7 @@ def _build_parser(
                 cmd.add_argument("--approve", action="store_true", help=argparse.SUPPRESS)
         elif action == "reject":
             cmd.add_argument("--reason", metavar="TEXT", required=True, help="why the result is not accepted (up to 2000 characters); the next attempt's prompt quotes it")
+            cmd.add_argument("--hold", action="store_true", help="keep the task paused instead of running it again at once (the retry uses capacity); resume it with task resume")
         _add_json_arg(cmd)
 
     proposals = sub.add_parser("proposal", help="review agent-originated task proposals")
@@ -1441,6 +1460,8 @@ def _build_parser(
             cmd.add_argument("--routes", metavar="LIST", help="comma-separated route IDs to rotate through; changes the mission's saved rotation for this and later starts, and the receipt says so (default: the saved rotation)")
         if action == "stop":
             cmd.add_argument("--force", action="store_true", help="terminate owned provider work and the controller now instead of waiting for the provider to exit")
+        if action == "cancel":
+            cmd.add_argument("--yes", action="store_true", help="confirm without asking; required when there is no terminal to ask on (scripts). Cancelling ends the mission for good and cannot be undone")
         _add_json_arg(cmd)
 
     missions = sub.add_parser("missions", help="list every mission, live ones first, or pick one to switch to")
@@ -1601,6 +1622,17 @@ def _doctor_provider_checks(mission: dict[str, Any] | None) -> list[dict[str, An
     return bridge_doctor.provider_checks(entries)
 
 
+def _mission_needs_you(mission: dict[str, Any] | None) -> str | None:
+    """The mission's own next step, as `status` shows it under "Needs you"; None without a mission or a waiting action."""
+    if not mission:
+        return None
+    snapshot = status_snapshot(str(mission["id"]))
+    attention = snapshot.get("needs_you") or fmt.needs_attention(snapshot)
+    if attention and attention.get("kind") != "capacity":
+        return str(attention["message"])
+    return None
+
+
 def _validated_cwd(raw: str) -> str:
     """The folder a mission works in, or a plain error naming it."""
     path = Path(raw).expanduser()
@@ -1634,6 +1666,32 @@ def _resolve_mode_args(args: argparse.Namespace) -> None:
     args.mode = chosen
     if chosen is not None:
         args.headless, args.native_tui = chosen == "headless", chosen == "native"
+
+
+CANCEL_UNDONE = "This cannot be undone"
+
+
+def _confirm_cancel(args: argparse.Namespace, reference: str, name: str = "") -> bool:
+    """Ask before `cancel` ends a mission for good; scripts without a terminal must pass ``--yes``.
+
+    Returns False when nothing should be cancelled; the reason is already printed.
+    """
+    if getattr(args, "yes", False):
+        return True
+    label = f"{reference} \"{name}\"" if name else reference
+    question = f"Cancel mission {label} and its unfinished tasks? {CANCEL_UNDONE}; the mission cannot be resumed."
+    if sys.stdin.isatty() and sys.stderr.isatty():
+        print(f"{question} Type y to cancel it, anything else keeps it: ", end="", file=sys.stderr, flush=True)
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = ""
+        if answer in {"y", "yes"}:
+            return True
+        print(f"Kept mission {label}; nothing was cancelled", file=sys.stderr)
+        return False
+    print(f"llm-bridge: {question} Pass --yes to confirm when there is no terminal to ask on, for example: llm-bridge cancel --mission {reference} --yes", file=sys.stderr)
+    return False
 
 
 def _warn_not_signed_in(providers: Any, routes: Any, conf: dict[str, Any] | None = None) -> None:
@@ -1702,7 +1760,7 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
 def _create_mission_with_task(store: BridgeStore, args: argparse.Namespace, prompt: str, config: dict[str, Any]) -> dict[str, Any]:
     """Create the mission and its first task; returns ``{"mission": ..., "task": ...}``."""
     mission = store.create_mission(
-        args.name or (derive_title(prompt, "LLM Bridge mission")),
+        args.name or derive_mission_name(prompt, "LLM Bridge mission"),
         prompt,
         cwd=args.cwd,
         initial_prompt=prompt,
@@ -1750,7 +1808,8 @@ def no_station_message(mission_id: str) -> str:
         state = ""
     if state in ENDED_MISSION_STATUSES:
         return f"Mission {short} is {state.lower()} and its station was closed · see what happened with: llm-bridge status --mission {short}"
-    return f"No provider station is running for mission {short} · start it with: llm-bridge start --mission {short}"
+    return (f"No provider station is running for mission {short} · look at it without using capacity: llm-bridge control --mission {short}"
+            f" · or start work: llm-bridge start --mission {short} (uses capacity)")
 
 
 def _load_handle(mission_id: str):
@@ -2358,6 +2417,24 @@ def _refuse_on_windows(arguments: list[str]) -> int | None:
     return 2
 
 
+def _home_screen_blocker() -> tuple[str, int] | None:
+    """Why bare ``llm-bridge`` cannot open the home screen (reason, exit status), or None when it can.
+
+    A missing or unusable terminal is an error (2), as for ``missions --pick``; a managed session or
+    Windows never had a home screen, so showing help there is not a failure (0).
+    """
+    if sys.platform == "win32":
+        return "a platform with curses (it is not available on Windows)", 0
+    if _managed_session():
+        return "your own terminal, not a Bridge-managed session (use llm-bridge status or llm-bridge help here)", 0
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        which = "stdin and stdout are" if not sys.stdin.isatty() and not sys.stdout.isatty() else ("stdin is" if not sys.stdin.isatty() else "stdout is")
+        return f"an interactive terminal ({which} not a TTY; over ssh use ssh -t)", 2
+    if os.environ.get("TERM", "") in {"", "dumb"}:
+        return f"a terminal that can draw a screen (TERM is {os.environ.get('TERM') or 'empty'!r}, not a real terminal type)", 2
+    return None
+
+
 def _interactive_terminal() -> bool:
     """Whether stdin and stdout are both terminals, which every full-screen view needs."""
     return sys.stdin.isatty() and sys.stdout.isatty()
@@ -2366,7 +2443,8 @@ def _interactive_terminal() -> bool:
 def _main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
-        if sys.platform != "win32" and sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") not in {"", "dumb"} and not _managed_session():
+        blocker = _home_screen_blocker()
+        if blocker is None:
             from .bridge_launcher import run_launcher
 
             from . import bridge_theme
@@ -2379,8 +2457,11 @@ def _main(argv: list[str] | None = None) -> int:
             except (OSError, RuntimeError, ValueError) as exc:
                 print(f"llm-bridge: {exc}", file=sys.stderr)
                 return 2
+        # Say why before the help, so that a missing terminal is not mistaken for a broken home screen.
+        reason, status = blocker
+        print(f"llm-bridge: the home screen needs {reason}; showing help instead", file=sys.stderr)
         _build_parser().print_help()
-        return 0
+        return status
     if arguments[0] == "help" and not any(arg in {"--help", "-h"} for arg in arguments[1:]):
         from .bridge_help import is_known_topic, topic_text
 
@@ -2420,6 +2501,8 @@ def _main(argv: list[str] | None = None) -> int:
         print(f"llm-bridge: {MANAGED_REFUSAL}", file=sys.stderr)
         return 2
     if target != commands.LOCAL_TARGET:
+        if args.command == "cancel" and target != commands.ALL_TARGET and not _confirm_cancel(args, str(args.mission or "in this folder")):
+            return 2
         # Never fall back to local execution for a named target (CLI-005).
         from .bridge_remote import run_cli
 
@@ -2748,7 +2831,10 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         if args.command in {"pause", "stop", "cancel"}:
             with open_store() as store:
-                saved_status = str(store.get_mission(args.mission)["status"])
+                saved = store.get_mission(args.mission)
+                saved_status = str(saved["status"])
+            if args.command == "cancel" and saved_status not in FINISHED_MISSION_STATUSES and not _confirm_cancel(args, fmt.short_id(args.mission), fmt.clipped_name(saved.get("name", ""))):
+                return 2
             if args.command == "stop" and args.force and saved_status == "CREATED":
                 # A mission that never started has nothing to force; stop never cancels.
                 result = {"mission_status": saved_status, "noop": True, "detail": fmt.nothing_to_stop(args.mission, saved_status)}
@@ -2887,7 +2973,8 @@ def _main(argv: list[str] | None = None) -> int:
                     **verdict,
                     "next_steps": bridge_doctor.next_steps(
                         tmux_available=tmux_available, providers=providers,
-                        folder=(mission or {}).get("cwd") or Path.cwd()),
+                        folder=(mission or {}).get("cwd") or Path.cwd(),
+                        needs_you=_mission_needs_you(mission)),
                 }
             if not args.include_config:
                 report = strip_frozen_config(report)

@@ -412,8 +412,10 @@ def test_approve_confirmation_shows_title_evidence_exit_status_and_workspace() -
     screen = Screen(20, 100)
     bridge_tui._draw_response_overlay(screen, state)  # type: ignore[arg-type]
     assert "Y approve" in "".join(screen.lines) and "Fix the typo" in "".join(screen.lines)
-    # Other confirmations keep their wording.
+    # Cancelling a mission names both ways out; other confirmations keep their wording.
     state._confirm_or_dispatch("/cancel")
+    assert state.output[-1] == "Y Cancel mission · N or Esc Keep mission"
+    state._confirm_or_dispatch("/stop --force")
     assert state.output[-1] == "Y confirm · N or Esc cancel"
 
 

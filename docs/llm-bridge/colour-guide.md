@@ -101,9 +101,13 @@ glimpse.
      secondary text stays dim; see Deviations.
    - 8/16 colours: the nearest safe ANSI colour, as decided by
      `fit_role_color`.
-   - Non-UTF-8 locale: the state glyphs fall back to ASCII (`*` running, `o`
-     queued, `#` verifying, `v` completed, `x` failed, `=` paused), and `|`
-     replaces the `·` separator.
+   - ASCII mode (`LANG`, `LC_CTYPE` or `LC_ALL` is `C`/`POSIX`, a non-UTF-8
+     codeset, or `LLM_BRIDGE_ASCII=1`): the state glyphs fall back to distinct
+     ASCII marks (`*` running, `o` queued, `?` review, `+` completed, `!`
+     failed, `-` cancelled, `=` paused, `@` provider swatch), and `|` replaces
+     the `·` separator. A cancelled task keeps the muted `state_paused` style,
+     not the failure colour. The console header leaves out the identity bar in
+     ASCII mode, so it cannot read as a second `|`.
 
 ## 5. Where each role is applied (implementation checklist)
 

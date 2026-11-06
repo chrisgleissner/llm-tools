@@ -11,9 +11,11 @@ from __future__ import annotations
 import curses
 import locale
 import os
+import shutil
 import socket
 import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -70,8 +72,13 @@ def _ascii(text: str) -> str:
     return text.encode("ascii", "replace").decode("ascii")
 
 
+def ellipsis_mark(unicode: bool) -> str:
+    """The cut marker: ``…``, or ``...`` in ASCII (``~`` would read as the home folder)."""
+    return "…" if unicode else "..."
+
+
 def clip(text: object, width: int, *, unicode: bool = True) -> str:
-    """Clip to ``width`` cells with an ellipsis (``~`` when ASCII-only)."""
+    """Clip to ``width`` cells and mark the cut with an ellipsis (``...`` when ASCII-only)."""
     value = _flat(text)
     if not unicode:
         value = _ascii(value)
@@ -79,8 +86,9 @@ def clip(text: object, width: int, *, unicode: bool = True) -> str:
         return ""
     if cell_width(value) <= width:
         return value
-    mark = "…" if unicode else "~"
-    return cell_slice(value, 0, width - 1) + mark if width > 1 else mark
+    mark = ellipsis_mark(unicode)
+    room = width - len(mark)
+    return cell_slice(value, 0, room) + mark if room > 0 else cell_slice(mark, 0, width)
 
 
 def pad(text: str, width: int) -> str:
@@ -103,11 +111,11 @@ def middle_clip(text: str, width: int, *, unicode: bool = True) -> str:
     value = text if unicode else _ascii(text)
     if cell_width(value) <= width:
         return value
-    mark = "…" if unicode else "~"
-    if width <= 1:
-        return mark[:width]
-    head = (width - 1) * 2 // 5
-    tail_room = width - 1 - head
+    mark = ellipsis_mark(unicode)
+    if width <= len(mark):
+        return cell_slice(mark, 0, width)
+    head = (width - len(mark)) * 2 // 5
+    tail_room = width - len(mark) - head
     kept: list[str] = []
     used = 0
     for char in reversed(value):
@@ -117,6 +125,28 @@ def middle_clip(text: str, width: int, *, unicode: bool = True) -> str:
         kept.append(char)
         used += amount
     return cell_slice(value, 0, head) + mark + "".join(reversed(kept))
+
+
+def left_clip(path: str, width: int, *, unicode: bool = True) -> str:
+    """Cut a folder from the left, as ``…/llm-tools/repo2``; the last path segment stays whole when it fits."""
+    value = path if unicode else _ascii(path)
+    if cell_width(value) <= width:
+        return value
+    mark = ellipsis_mark(unicode)
+    segments = [part for part in value.split("/") if part]
+    kept: list[str] = []
+    used = len(mark)
+    for part in reversed(segments):
+        if used + 1 + cell_width(part) > width:
+            break
+        kept.append(part)
+        used += 1 + cell_width(part)
+    if kept:
+        return mark + "".join("/" + part for part in reversed(kept))
+    # Not even the last segment fits: show the end of the folder name.
+    last = segments[-1] if segments else value
+    room = width - len(mark)
+    return mark + cell_slice(last, max(0, cell_width(last) - room), room) if room > 0 else cell_slice(mark, 0, width)
 
 
 def mission_label(name: object, cwd: object, limit: int = LABEL_CELLS) -> str:
@@ -469,6 +499,7 @@ class MissionPicker:
     notice: str = ""  # outcome of the last station close, shown until the next key
     state_cells: int = field(default=11, repr=False)
     notice_ok: bool = False
+    untruncated: bool = False  # piped output: every column gets its full width, nothing is cut
 
     def visible(self) -> list[MissionEntry]:
         terms = self.query.lower().split()
@@ -578,10 +609,11 @@ class MissionPicker:
         repos = [cell_width(short_home(e.cwd, self.home)) for e in rows] or [4]
         provs = [len(e.provider) for e in rows] or [4]
         tasks = [len(self._task_text(e)) for e in rows] or [4]
-        desired = [min(max(names + [4]), 40), min(max(repos + [6]), 40), min(max(tasks + [4]), 40)]
+        cap = 10**6 if self.untruncated else 40
+        desired = [min(max(names + [4]), cap), min(max(repos + [6]), cap), min(max(tasks + [4]), cap)]
         gaps = 2 * (4 if show_provider else 3)
-        prov_width = min(max(provs + [8]), 10) + 2 if show_provider else 0  # + provider square and space
-        available = width - self.FIXED_CELLS - (self.state_cells - 11) - gaps - prov_width
+        prov_width = min(max(provs + [8]), 10 if not self.untruncated else cap) + 2 if show_provider else 0  # + provider square and space
+        available = (10**7 if self.untruncated else width) - self.FIXED_CELLS - (self.state_cells - 11) - gaps - prov_width
         widths = fit_columns(desired, available, 8)
         if show_provider:
             widths.append(prov_width)
@@ -608,7 +640,7 @@ class MissionPicker:
         state_role = "state_review" if entry.in_review else "warn" if entry.stale else look[1] if look else "info"
         text_role = "muted" if finished else "info"
         mark, mark_role = (here, "accent") if entry.mission_id == self.current else (live, "state_running") if entry.live else (" ", "info")
-        folder = clip(middle_clip(short_home(entry.cwd, self.home), widths[1], unicode=self.unicode), widths[1], unicode=self.unicode)
+        folder = left_clip(short_home(entry.cwd, self.home), widths[1], unicode=self.unicode)
         row: list[tuple[str, str]] = [
             (arrow if cursor else " ", "accent"), (mark, mark_role), (self._g("chip"), mission_role(entry.mission_id, entry.config)), (" ", "info"),
             (pad(entry.short_id, 8), "muted"), ("  ", "info"),
@@ -680,7 +712,7 @@ class MissionPicker:
         for _ in range(list_height - list_rows):
             out.append(([("", "info")], "normal"))
         entry = self.selected_entry()  # type: ignore[assignment]  # may be None; the next lines test it
-        folder = middle_clip(short_home(entry.cwd, self.home), max(10, width // 2), unicode=self.unicode) if entry is not None else ""
+        folder = left_clip(short_home(entry.cwd, self.home), max(10, width // 2), unicode=self.unicode) if entry is not None else ""
         if self.confirming is not None:
             detail = [(f"Close the idle station of {self.confirming.name or self.confirming.short_id}? Y close{sep}N keep", "warn")]
         elif self.notice:
@@ -714,7 +746,7 @@ class MissionPicker:
         out: list[tuple[str, str]] = []
         used = 0
         total = sum(cell_width(text if self.unicode else _ascii(text)) for text, _ in segments)
-        room = width if total <= width or not mark else max(0, width - 1)
+        room = width if total <= width or not mark else max(0, width - len(ellipsis_mark(self.unicode)))
         for text, role in segments:
             text = _flat_keep(text) if self.unicode else _ascii(_flat_keep(text))
             piece = cell_slice(text, 0, max(0, room - used))
@@ -723,7 +755,7 @@ class MissionPicker:
             if used >= room:
                 break
         if mark and total > width:
-            out.append(("…" if self.unicode else "~", out[-1][1] if out else "info"))
+            out.append((ellipsis_mark(self.unicode), out[-1][1] if out else "info"))
         return out
 
     def lines(self, height: int, width: int) -> list[tuple[str, str]]:
@@ -937,11 +969,20 @@ def run_pick_cli(
     return run_control(chosen.mission_id, dispatch_console_command, console_snapshot)
 
 
-def format_missions(entries: list[MissionEntry], *, width: int = 100) -> str:
-    """Human listing for ``llm-bridge missions``."""
+def format_missions(entries: list[MissionEntry], *, width: int | None = None) -> str:
+    """Human listing for ``llm-bridge missions``.
+
+    On a terminal the table fits its width (cut folders keep their last segment); piped
+    output is never cut, so a script reads whole names and paths.
+    """
     if not entries:
         return "No missions yet · create one with: llm-bridge mission create --prompt \"...\""
     picker = MissionPicker(entries, unicode=unicode_ok(), home=None)
+    if width is None:
+        if sys.stdout.isatty():
+            width = max(40, shutil.get_terminal_size((100, 24)).columns)
+        else:
+            width, picker.untruncated = 100, True
     sep = picker._glyphs()[3]
     header = f"{len(entries)} mission{'s' if len(entries) != 1 else ''}{sep}{sum(1 for e in entries if e.live)} live"
     return header + "\n" + picker.plain_text(width)

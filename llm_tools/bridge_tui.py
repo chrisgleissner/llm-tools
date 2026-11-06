@@ -39,7 +39,7 @@ from .bridge_projection import ProjectionParams
 from .bridge_vocab import EventKind, MISSION_NEEDS_YOU_LABEL, status_label
 from . import bridge_format
 from .bridge_format import plain_reason
-from .bridge_glyphs import FINISHED_STATES, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
+from .bridge_glyphs import FINISHED_STATES, ascii_mode, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
 from .common import fmt_duration
 from . import terminal
 from .terminal import TerminalAction
@@ -768,7 +768,7 @@ def _confirmation_reason(command: str) -> str | None:
     except ValueError:
         return None
     if words and words[0] == "cancel":
-        return "Cancel this mission and its unfinished tasks?"
+        return "Cancel this mission and its unfinished tasks? This cannot be undone."
     if words and words[0] == "stop" and "--force" in words:
         return "Force stop this mission's owned active work?"
     if words and words[0] == "finish":
@@ -839,7 +839,7 @@ def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], widt
         last = max(runs, key=lambda op: str(op.get("created_at") or ""))
         who = _text(last.get("route_id") or last.get("station") or last.get("provider") or "provider", 40)
         code = last.get("exit_code")
-        lines.append(f"Last run: {who}" + (f", exit {_text(code, 8)}" if code is not None else "") + (f", {_text(last['status'], 20).lower()}" if _known(last.get("status")) else ""))
+        lines.append(f"Last run: {who}" + (f", {bridge_format.exit_short(_text(code, 8))}" if code is not None else "") + (f", {_text(last['status'], 20).lower()}" if _known(last.get("status")) else ""))
     progress = [
         _dict(event.get("data")) for event in _items(snapshot.get("events"))
         if _event_kind(event) == "operation-progress"
@@ -885,7 +885,7 @@ def _last_run_line(snapshot: dict[str, object], task: dict[str, object]) -> str 
         return None
     parts = [_text(last.get("route_id") or last.get("station") or last.get("provider") or "provider", 40)]
     if last.get("exit_code") is not None:
-        parts.append(f"exit {_text(last['exit_code'], 8)}")
+        parts.append(bridge_format.exit_short(_text(last["exit_code"], 8)))
     started = common.parse_epoch(last.get("created_at"), use_date=False)
     ended = common.parse_epoch(last.get("updated_at"), use_date=False)
     if started is not None and ended is not None and ended >= started and str(last.get("status")) not in {"RUNNING", "PREPARED", "INTENT"}:
@@ -2259,7 +2259,7 @@ def _waiting_on(task: dict[str, object], tasks: list[dict[str, object]], status:
 
 
 def _order_list_segments(tasks: list[dict[str, object]]) -> list[list[Segment]]:
-    """`id  ● STATE  P5  after 6  title` as segments, with the columns aligned.
+    """`id  ● STATE  prio 5  after 6  title` as segments, with the columns aligned.
 
     The id, priority and dependencies are secondary (`muted`); the state is the
     one coloured element; the title stays in the default foreground. Rows of
@@ -2268,7 +2268,7 @@ def _order_list_segments(tasks: list[dict[str, object]]) -> list[list[Segment]]:
     ids = [_text(task_number(task) if task_number(task) is not None else "?", 40) for task in tasks]
     states = [_text(task.get("status", "unknown"), 24).upper() for task in tasks]
     shown = [_state_text(state) for state in states]
-    priorities = [f"P{_text(task['priority'], 8)}" if _known(task.get("priority")) else "" for task in tasks]
+    priorities = [f"prio {_text(task['priority'], 8)}" if _known(task.get("priority")) else "" for task in tasks]  # `P0` reads as "most urgent"; here a higher number runs first
     task_status = {str(item.get("id")): str(item.get("status", "")).upper() for item in tasks}
     waits = [_waiting_on(task, tasks, task_status) for task in tasks]
     id_width = max((len(item) for item in ids), default=0)
@@ -2294,7 +2294,7 @@ def _order_list_segments(tasks: list[dict[str, object]]) -> list[list[Segment]]:
 
 
 def _order_list_rows(tasks: list[dict[str, object]]) -> list[str]:
-    """`id  ● STATE  P5  after 6  title` with the id, state, priority and dependency columns aligned."""
+    """`id  ● STATE  prio 5  after 6  title` with the id, state, priority and dependency columns aligned."""
     return [_segments_text(row) for row in _order_list_segments(tasks)]
 
 
@@ -2583,7 +2583,7 @@ def _activity_role(text: str) -> str:
     lowered = text.lower()
     if any(word in lowered for word in ("failed", "unknown", "out of handoffs", "unexpectedly", "rejected", "aborted")):
         return "error"
-    if lowered.startswith("provider exited (") and not lowered.startswith("provider exited (0)"):
+    if (lowered.startswith("provider exited (") and not lowered.startswith("provider exited (0)")) or lowered.startswith("provider stopped by bridge"):
         return "error"
     if any(word in lowered for word in ("awaiting approval", "awaiting review", "waiting for capacity", "paused", "blocked")):
         return "warn"
@@ -2619,7 +2619,7 @@ def _recent_operation_segments(op: dict[str, object], age: str | None) -> list[S
     return [
         (f"  recent: task {_text(op.get('task_ordinal') or op.get('task_id') or '-', 12)}{_SEP}", "dim"),
         (status, "error" + QUIET if failed else "dim"),
-        (_SEP, "dim"), (f"exit {exit_code}", "error" + QUIET if exit_code not in {"-", "0"} else "dim"),
+        (_SEP, "dim"), (bridge_format.exit_short(exit_code), "error" + QUIET if exit_code not in {"-", "0"} else "dim"),
         *([(f"{_SEP}{age}", "dim")] if age else []),
     ]
 
@@ -3210,7 +3210,13 @@ class _ConsoleState:
             lines = [f"{reason} · mission {_short_id(self.mission_id)}"]
             if approving is not None:
                 lines += _approval_summary(self.snapshot, approving)
-            self.output.extend([*lines, "Y approve · N or Esc cancel · o output · d diff" if approving is not None else "Y confirm · N or Esc cancel"])
+            if approving is not None:
+                footer = "Y approve · N or Esc cancel · o output · d diff"
+            elif reason.startswith("Cancel this mission"):
+                footer = "Y Cancel mission · N or Esc Keep mission"  # "cancel" must not be both the question and the way out
+            else:
+                footer = "Y confirm · N or Esc cancel"
+            self.output.extend([*lines, footer])
             self.response_overlay = True
             return True
         return self._dispatch(command)
@@ -4702,8 +4708,11 @@ def _header_segments(state: _ConsoleState, width: int) -> list[Segment]:
     room = width - len("LLM BRIDGE") - 2 * len(_SEP) - len(shown) - 2
     name = _clip(_text(mission.get("name") or state.mission_id, 120), max(8, room))
     chip_role = _mission_role_of(state.snapshot, state.mission_id)
+    # The identity bar carries colour only.  Its ASCII form is the same character as the ASCII
+    # separator (`| |`), so ASCII mode leaves it out of the header.
+    mark: list[Segment] = [] if ascii_mode() else [(glyph("chip"), chip_role)]
     return [
-        ("LLM BRIDGE", "brand"), (_SEP, "dim"), (glyph("chip"), chip_role), (" " + name, "info"), (_SEP, "dim"),
+        ("LLM BRIDGE", "brand"), (_SEP, "dim"), *mark, ((" " if mark else "") + name, "info"), (_SEP, "dim"),
         (shown, _mission_status_role(status)),
     ]
 

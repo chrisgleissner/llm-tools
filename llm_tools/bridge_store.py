@@ -88,6 +88,19 @@ def derive_title(prompt: str, fallback: str = "", limit: int = 100) -> str:
     return fallback
 
 
+def derive_mission_name(prompt: str, fallback: str = "", limit: int = 40) -> str:
+    """Default mission name: the first prompt line, cut at a word boundary under ``limit`` characters.
+
+    A line that fits is kept whole; a cut line ends in an ellipsis so it never looks complete.
+    The first word is kept even when it alone is longer than ``limit``.
+    """
+    title = derive_title(prompt, fallback, limit=10_000)
+    if len(title) <= limit:
+        return title
+    kept = title[: limit - 1].rsplit(None, 1)[0] if " " in title[: limit - 1] else title[: limit - 1]
+    return kept.rstrip(" ,;:.-") + "…"
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -863,15 +876,53 @@ class BridgeStore:
     def get_task(self, task_id: int) -> dict[str, Any]:
         return self._task_dict(self._task_row(task_id))
 
+    # A task that still competes for a run: the scheduler picks the next one by priority (highest first),
+    # then ordering (lowest first), then creation.  Finished tasks sort after every other task.
+    _RUN_ORDER_SQL = "ORDER BY (status IN ('COMPLETED','CANCELLED')), priority DESC, ordering, id"
+    _WAITING_TO_RUN = ("QUEUED", "READY", "RUNNING")
+
     def list_tasks(self, mission_id: str, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
-        """The mission's tasks in task-list order; ``limit``/``offset`` select one page of it."""
+        """The mission's tasks in the order the scheduler runs them, finished tasks last.
+
+        ``limit``/``offset`` select one page of that order.  Each task carries ``run_position``:
+        its place among the tasks still waiting to run (1 = next), or ``None`` for any other task.
+        """
         self._mission_row(mission_id)
-        query = "SELECT * FROM tasks WHERE mission_id=? ORDER BY ordering,id"
+        query = f"SELECT * FROM tasks WHERE mission_id=? {self._RUN_ORDER_SQL}"
         params: tuple[Any, ...] = (mission_id,)
         if limit is not None or offset:
             query += " LIMIT ? OFFSET ?"
             params += (-1 if limit is None else max(0, int(limit)), max(0, int(offset)))
-        return self._task_dicts(self.db.execute(query, params).fetchall())
+        tasks = self._task_dicts(self.db.execute(query, params).fetchall())
+        if tasks:
+            positions = self.run_positions(mission_id)
+            for task in tasks:
+                task["run_position"] = positions.get(int(task["id"]))
+        return tasks
+
+    def run_positions(self, mission_id: str) -> dict[int, int]:
+        """Task ID -> place in the run order (1 = next) for every task still waiting to run or running."""
+        marks = ",".join("?" for _ in self._WAITING_TO_RUN)
+        rows = self.db.execute(
+            f"SELECT id FROM tasks WHERE mission_id=? AND status IN ({marks}) ORDER BY priority DESC, ordering, id",
+            (mission_id, *self._WAITING_TO_RUN),
+        )
+        return {int(row[0]): position for position, row in enumerate(rows, 1)}
+
+    def runs_after(self, task_id: int) -> list[int]:
+        """Numbers of the tasks that run before this one, in run order (empty when it is next or not waiting)."""
+        task = self._task_row(task_id)
+        marks = ",".join("?" for _ in self._WAITING_TO_RUN)
+        rows = self.db.execute(
+            f"SELECT id,ordinal FROM tasks WHERE mission_id=? AND status IN ({marks}) ORDER BY priority DESC, ordering, id",
+            (task["mission_id"], *self._WAITING_TO_RUN),
+        ).fetchall()
+        ahead: list[int] = []
+        for row in rows:
+            if int(row[0]) == int(task_id):
+                return ahead
+            ahead.append(int(row[1]))
+        return []
 
     def list_proposals(self, mission_id: str, *, status: str = "PENDING", limit: int = 100, after_task_id: int = 0) -> list[dict[str, Any]]:
         """List proposal records with a bounded, stable task-id cursor."""
@@ -955,6 +1006,8 @@ class BridgeStore:
             if task["status"] in {"COMPLETED", "FAILED", "CANCELLED"}:
                 raise TransitionError(f"task {task['ordinal']} is {str(task['status']).lower()} and cannot be amended")
             pending = json.loads(task["pending_json"])
+            if prompt is not None and title is None and task["title"] == derive_title(task["prompt"]) and "title" not in pending:
+                title = derive_title(prompt) or None  # the title came from the first prompt line, so it follows the new one
             for key, value in (("prompt", prompt), ("title", title), ("priority", priority), ("acceptance", acceptance)):
                 if value is not None:
                     pending[key] = value

@@ -212,7 +212,7 @@ def test_rows_are_grouped_live_then_waiting_then_finished_and_finished_rows_are_
     assert "● /" in grid.row(6) and "● /" not in grid.row(7)  # the current folder keeps its marker, in the folder column
     # Finished rows recede (muted) except for the state word, which keeps its own colour.
     assert seen[(10, "done")] == roles["muted"] and seen[(11, "cancelled")] == roles["muted"]
-    assert seen[(10, "✓ COMPLETED")] == roles["state_done"] and seen[(11, "✕ CANCELLED")] == roles["state_paused"]
+    assert seen[(10, "✓ COMPLETED")] == roles["state_done"] and seen[(11, "⊘ CANCELLED")] == roles["state_paused"]
     assert seen[(8, "failed")] == roles["info"] and seen[(9, "fresh")] == roles["info"]
     assert seen[(6, "paused-here")] == roles["info"] and seen[(6, "‖ PAUSED")] == roles["state_paused"]
     assert launcher.status_group("STOPPED") == 1 and launcher.status_group("STOPPING") == 0

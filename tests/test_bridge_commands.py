@@ -181,7 +181,7 @@ def test_cli_mission_controls_route_through_the_command_layer(mission, capsys, m
     monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
     assert main(["pause", "--mission", mission_id, "--json"]) == 0
     assert main(["continue", "--mission", mission_id]) == 2
-    assert main(["cancel", "--mission", mission_id, "--json"]) == 0
+    assert main(["cancel", "--mission", mission_id, "--yes", "--json"]) == 0
     assert main(["stop", "--mission", mission_id, "--json"]) == 0
     capsys.readouterr()
     assert seen == ["mission.pause", "mission.continue", "mission.cancel", "mission.stop"]

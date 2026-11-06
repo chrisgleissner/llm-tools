@@ -262,6 +262,7 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_BRIDGE_THEME` (`dark`, `light`, `high-contrast`, `neutral` or `mono`; `dark`/`light` also fix the background; wins over `[bridge.theme] name`)
 * `LLM_BRIDGE_BACKGROUND` (`dark` or `light`; the terminal background when the theme name does not fix it; Bridge exports the detected value so a tmux station inherits it)
 * `LLM_BRIDGE_COLOR_<ROLE>` (override one Bridge colour role with an SGR string, hex colour or colour name; applied after `[bridge.theme.roles]` and `LLM_TOOLS_COLOR_<ROLE>`)
+* `LLM_BRIDGE_ASCII` (any value but empty, `0`, `false`, `no` or `off` forces the ASCII glyph set; without it Bridge also uses ASCII when `LC_ALL`, `LC_CTYPE` or `LANG` is `C` or `POSIX` as the user set it, even though Python coerces that locale to UTF-8 (PEP 538); `llm-bridge theme` shows the active set)
 * `LLM_BRIDGE_NO_OSC` (any value but empty, `0`, `false` or `no` skips the OSC 11 terminal-background query)
 * `LLM_BRIDGE_NO_SIGNIN_CHECK` (any value but empty, `0`, `false` or `no` skips the offline "installed but not signed in" warning `mission create` and `start --providers/--routes` print on stderr; the test suite sets it so results do not depend on the developer's home)
 * `LLM_BRIDGE_OSC_TIMEOUT_MS` (how long to wait for the OSC 11 answer, in milliseconds; clamped to 10–1000)

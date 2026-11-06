@@ -157,17 +157,18 @@ def test_render_is_ascii_only_in_non_utf8_locale() -> None:
     assert "@" in text and ">" in text and "|" in text
     narrow = "\n".join(t for t, _ in sw.MissionPicker(rows, unicode=False).lines(24, 40))
     narrow.encode("ascii")
-    assert "~" in narrow
+    assert "..." in narrow and "~" not in narrow  # `~` would read as the home folder
 
 
 def test_text_helpers() -> None:
     assert sw.clip("a\tb\nc", 10) == "a b c"
-    assert sw.clip("abcdef", 4) == "abc…" and sw.clip("abcdef", 4, unicode=False) == "abc~"
+    assert sw.clip("abcdef", 4) == "abc…" and sw.clip("abcdef", 6, unicode=False) == "abcdef" and sw.clip("abcdefgh", 6, unicode=False) == "abc..."
     assert sw.clip("abc", 1) == "…" and sw.clip("abc", 0) == ""
     assert sw.short_home("/h/u/x", "/h/u") == "~/x" and sw.short_home("/h/u", "/h/u") == "~" and sw.short_home("/o", "/h/u") == "/o"
     assert sw.short_home("/home/x")
     assert sw.middle_clip("/very/long/path/to/some/place", 12) .count("…") == 1
     assert sw.middle_clip("abc", 10) == "abc" and sw.middle_clip("abcdefgh", 1) == "…"
+    assert "..." in sw.middle_clip("/very/long/path/to/some/place", 12, unicode=False) and "~" not in sw.middle_clip("/very/long/path/to/some/place", 12, unicode=False)
     assert sw.fit_columns([5, 5, 5], 100) == [5, 5, 5]
     assert sum(sw.fit_columns([40, 40, 40], 30)) <= 30
 

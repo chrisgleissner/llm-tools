@@ -95,6 +95,7 @@ def resolve_mission_ref(
     read_only: bool = False,
     prefer_station: bool = False,
     reopen_completed: bool = False,
+    station_command: bool = False,
 ) -> str:
     """Return the full mission ID for an ID, a unique ID prefix, or the current folder.
 
@@ -107,7 +108,8 @@ def resolve_mission_ref(
     ``task list`` still work after completion. ``reopen_completed`` (task add)
     does the same for a folder whose only finished mission is COMPLETED,
     because a new task reopens a completed mission; a cancelled one never
-    qualifies.
+    qualifies. ``station_command`` (attach, detach, finish, station) names a
+    finished mission as having no station instead of suggesting follow-up work.
     """
     if ref:
         exact = store.mission_id_if_exists(ref)
@@ -145,6 +147,8 @@ def resolve_mission_ref(
         if finished:
             newest = order_missions(finished)[0]
             short = str(newest["id"])[:8]
+            if station_command:
+                raise ValueError(f"mission {short} in folder {here} is {str(newest['status']).lower()} and has no station · llm-bridge status shows its result")
             if newest["status"] == "COMPLETED":
                 follow_up = f"add follow-up work, which reopens it, with: llm-bridge task add --mission {short} --prompt \"...\" or create a new mission with: llm-bridge mission create --prompt \"...\""
             else:

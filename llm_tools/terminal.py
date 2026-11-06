@@ -110,7 +110,7 @@ STATUS_CONTEXT_FORMAT = (
 # to the attached client's width.
 _STATUS_CONTEXT_MAX_CHARS = 80
 _STATUS_LABEL_MAX_CHARS = 20
-_STATUS_CONTEXT_SAFE_RE = re.compile(r"[^\w .:/·…●○◆✓✕‖*=|-]", re.UNICODE)
+_STATUS_CONTEXT_SAFE_RE = re.compile(r"[^\w .:/·…●○◆✓✕⊘‖*=|-]", re.UNICODE)
 
 
 # Terminal (tab/window) title: "Bridge · <mission label> · <state>". The initial

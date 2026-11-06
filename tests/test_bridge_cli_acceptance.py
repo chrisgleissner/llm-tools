@@ -104,7 +104,7 @@ def test_cancellation_preserves_previously_verified_work(tmp_path, monkeypatch, 
         store.finish_operation(operation, exit_code=0)
     assert main(["task", "verify", "--mission", mission, "--task", str(first), "--approve", "--json"]) == 0
     capsys.readouterr()
-    assert main(["cancel", "--mission", mission, "--json"]) == 0
+    assert main(["cancel", "--mission", mission, "--yes", "--json"]) == 0
     capsys.readouterr()
     snapshot = status_snapshot(mission)
     assert snapshot["mission"]["status"] == "CANCELLED"
