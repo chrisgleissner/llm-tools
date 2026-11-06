@@ -5,7 +5,9 @@
 FROM scratch
 ARG TARGETARCH
 COPY --chmod=0555 bin/${TARGETARCH}/bridge-coordinator /usr/local/bin/bridge-coordinator
-COPY --chmod=0444 web/ /usr/share/bridge-coordinator/web/
+# Preserve the generated tree's directory traversal bits and read-only file modes.
+# chmod=0444 also applies to directories, preventing UID 65532 from entering web/.
+COPY web/ /usr/share/bridge-coordinator/web/
 # Mount point for the data volume, owned by the runtime user so a new named
 # volume starts writable without running anything as root.
 COPY --chown=65532:65532 --chmod=0700 data/ /data/

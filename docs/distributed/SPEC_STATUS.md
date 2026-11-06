@@ -2,7 +2,7 @@
 
 One row per specification ID. Status: `[ ]` not started, `[~]` in progress, `[x]` verified complete, `[!]` blocked.
 
-Every `[x]` row is covered by CI run 42181869238 on c81ccde green on every job (pull request #30); rows that depend on a platform name it. Rows verified before 2026-11-05 cite their original evidence, which that run re-executes.
+The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde (pull request #30); platform-dependent evidence names its platform. The register now also includes the shared tracking IDs and the physical Pi work under `PI-*`. Tracking parser/address checks have focused regression tests; physical evidence names commands and measurements without private deployment details. In-progress and blocked rows are not counted as complete.
 
 | ID | Status | Evidence |
 |---|---|---|
@@ -23,6 +23,10 @@ Every `[x]` row is covered by CI run 42181869238 on c81ccde green on every job (
 | TRACK-006 | [x] | WORKLOG.md header holds the resume procedure; it was used after a session restart (22:40Z entry: gate rerun after restart). |
 | TRACK-007 | [x] | WORKLOG.md is 41 lines in total, one dense line per work unit with verification evidence. |
 | TRACK-008 | [x] | docs/distributed/FINAL_REPORT.md, derived from this register. |
+| TRACK-009 | [x] | The register accepts `PREFIX-NNN` and `PREFIX-SUBPREFIX-NNN`; tests prove digit-bearing prefixes are counted and malformed ID rows fail rather than being skipped. `tests/test_distributed_spec_status.py` was first run against the old parser and both new regression tests failed. |
+| TRACK-010 | [x] | `SPEC_GROUPS` declares every group used in the register, including the TRACK and PI groups; explicit inclusion/exclusion covers the Pi prompt's zero and numbering gaps. |
+| TRACK-011 | [x] | Register evidence uses neutral hardware labels and placeholders. `tests/test_distributed_spec_status.py` checks distributed documentation for private IPv4 addresses outside the documented examples. |
+| TRACK-012 | [x] | `FINAL_REPORT.md` counts are regenerated from the complete register, including the new Pi and tracking groups. |
 | REPO-001 | [x] | Baseline recorded in WORKLOG.md (entry points, schema v10, event schema v7, CI workflows). CI run 42181869238 on c81ccde. |
 | REPO-002 | [x] | Authoritative owners recorded in DECISIONS.md D1. |
 | REPO-003 | [x] | Fast suite baseline in WORKLOG.md; 1 env-dependent failure explained. |
@@ -63,9 +67,9 @@ Every `[x]` row is covered by CI run 42181869238 on c81ccde green on every job (
 | WORK-008 | [x] | Each reconnect sends hello with inventory and event cursor; events replay from the welcome cursor and commands redeliver with stored outcomes (tests/test_bridge_worker.py test_control_messages_and_event_replication; coordinator/tests/worker.rs redelivery_after_reconnect_and_generation, event_cursor_accept_and_nack; tests/test_distributed_faults.py test_partition_after_ack_redelivers_without_repeating_the_effect). CI run 42181869238 on c81ccde. |
 | WORK-009 | [x] | Remote and local commands use the same SQLite write lock and re-check (tests/test_bridge_commands.py test_apply_rechecks_status_under_the_write_lock; tests/test_distributed_faults.py test_conflicting_approvals_from_separate_processes_only_one_wins). CI run 42181869238 on c81ccde. |
 | WORK-010 | [x] | worker run: reconnect with jittered backoff, silence timeout, SIGINT/SIGTERM stop (test_run_*). `llm-bridge worker install-service` writes a systemd user unit (Restart=on-failure, UMask=0077, baked PATH/PYTHONPATH/state dir); unit checked with `systemd-analyze --user verify` and its ExecStart run against a closed port (test_service_unit_install_and_uninstall). CI run 42181869238 on c81ccde. |
-| COORD-001 | [x] | Rust 1.99.1 (rust-toolchain.toml) coordinator: fmt, clippy -D warnings, cargo test and release build on Linux x86-64 and ARM64, macOS ARM64 and Intel, Windows x86-64 and ARM64 (CI run 42181869238 on c81ccde green on every job). Static aarch64 musl binary run on DietPi arm64, emulated (QEMU raspi3b TCG, mem=512M): 84/84 Rust tests in the guest, native service and container (benchmarks.md, ARM64 emulated). Physical Pi Zero 2 W: follow-up, scheduled 2026-11-06. |
+| COORD-001 | [x] | Rust 1.99.1 coordinator: fmt, clippy -D warnings, cargo test and release build on Linux x86-64 and ARM64, macOS ARM64 and Intel, Windows x86-64 and ARM64 (CI run 42181869238 on c81ccde green). Static ARM64 binary and benchmark harness ran on the physical Pi Zero 2 W; startup, RSS, API, event and reconnect results are in benchmarks.md. The coordinator container was deployed and health-checked on physical DietPi. |
 | COORD-002 | [x] | Tokio, axum, serde, rusqlite (bundled), rustls/ring; no aws-lc-rs (coordinator/Cargo.toml). |
-| COORD-003 | [x] | Memory: 96 MiB container limit; peak 21.7 MiB (container) and 22.2 MiB (native) on the emulated (QEMU raspi3b TCG, mem=512M); memory-pressure runs at 96/64/48 MiB on the GitHub-hosted ARM64 runner and on x86-64. CPU: bench within 512 MB and --cpus 1 on the ARM64 runner (deploy/ci/bench-limited.sh). Storage: tests/test_distributed_storage_writes.py (545 B/event, 68 KiB/command, idle 0 B per heartbeat, 104 KiB per idle worker-hour). Unreliable Wi-Fi: tests/test_distributed_unreliable_network.py through tests/fault_proxy.py (7 tests). CI run 42181869238 on c81ccde green on every job. |
+| COORD-003 | [x] | Physical Pi: benchmark harness peak 22.3 MiB RSS; production container sample 19.02 MiB / 96 MiB after login. The shipped 96 MiB limit remains appropriate; no cgroup peak is claimed from the temporary-container harness attempt. Physical benchmark results and method are in benchmarks.md. Memory-pressure runs at 96/64/48 MiB on the GitHub-hosted ARM64 runner and x86-64; storage-write and unreliable-network test evidence is unchanged. CI run 42181869238 on c81ccde green. |
 | COORD-004 | [x] | Bounds and timeouts in coordinator.md Limits: connections, per-address, body size, 4 KiB auth bodies, outbound queue 256, events per worker, open commands, terminal sessions (coordinator/tests/limits.rs, hardening.rs, terminal.rs lagging_viewer_is_closed_with_1013, session_caps, api.rs body_limit_and_placeholder, worker.rs event_cursor_accept_and_nack). Completed-command retention (7 days) is not covered by a test. CI run 42181869238 on c81ccde. |
 | COORD-005 | [x] | Versioned /api/v1 endpoints for workers, missions, commands, events, diagnostics, /healthz and terminals (coordinator.md). Tasks and approvals are typed commands (task.list, task.verify, task.reject) posted to /commands rather than separate resources. |
 | COORD-006 | [x] | Authenticated /api/v1/stream WebSocket with Origin check and idle timeout (coordinator/tests/api.rs csrf_origin_and_bearer_tokens, worker.rs stream_broadcast, limits.rs silent_stream_client_is_closed_after_idle_timeout). CI run 42181869238 on c81ccde. |
@@ -131,8 +135,8 @@ Every `[x]` row is covered by CI run 42181869238 on c81ccde green on every job (
 | DATA-005 | [x] | Coordinator restart redelivers journaled commands and the worker deduplicates by request ID (tests/test_distributed_integration.py test_worker_survives_coordinator_restart; coordinator/tests/worker.rs redelivery_after_reconnect_and_generation). CI run 42181869238 on c81ccde. |
 | DATA-006 | [x] | Worker/standalone: `llm-bridge backup`/`restore` (tests/test_bridge_backup.py). Coordinator: `bridge-coordinator backup`/`restore` (online backup API, integrity check, refuses while serving, keeps the replaced database; coordinator/tests/ops.rs). Procedures in operations.md and install.md. CI run 42181869238 on c81ccde. |
 | DATA-007 | [x] | Coordinator keeps at most max_events_per_worker events (default 50 000, oldest deleted), 1000 open commands per worker and completed commands for 7 days; worker evidence is never deleted (coordinator/tests/worker.rs event_cursor_accept_and_nack). Command retention has no test. Retention test: coordinator/tests/worker.rs completed_command_retention. CI run 42181869238 on c81ccde. |
-| OPS-001 | [x] | Debian/DietPi amd64/arm64: install.sh and the hardened unit; container image and compose. End to end on DietPi v10.8.2 arm64, emulated (QEMU raspi3b TCG, mem=512M), 2026-11-06: container path (Docker from dietpi-software 162 134, arm64 image, compose with compose.low-write.yaml, LAN through the forwarded 8443, administrator setup over HTTPS, host worker with remote task.add) and native path (install.sh --lan, in-place upgrade with a newer binary), both keeping all state across `systemctl reboot` (benchmarks.md, install.md Pi profile). CI run 42181869238 on c81ccde green on every job. Physical Pi: follow-up, scheduled 2026-11-06. |
-| OPS-002 | [x] | `init` and `info` print the HTTPS URLs, CA path and SHA-256 fingerprint and browser trust steps (coordinator/tests/ops.rs). CI run 42181869238 on c81ccde. |
+| OPS-001 | [x] | Physical DietPi v10.8.2 / Debian 13.7 on Raspberry Pi Zero 2 W: arm64 image loaded into Docker, low-write Compose deployment initialized, healthy HTTPS coordinator, persistent data volume, and desktop worker enrolled. The worker reconnected after a physical reboot; live remote mission/task operations and browser terminal view were exercised. Emulated deployment remains separately labelled in benchmarks.md. CI run 42181869238 on c81ccde green. |
+| OPS-002 | [x] | `init` and `info` print the HTTPS URLs, CA path and SHA-256 fingerprint and browser trust steps (coordinator/tests/ops.rs). On the physical Pi, the copied CA fingerprint matched `info`; Chrome and Firefox loaded the HTTPS console and completed sign-in without bypassing certificate errors. Device-specific fingerprint is recorded in private provisioning notes. CI run 42181869238 on c81ccde. |
 | OPS-003 | [x] | `init` generates CA, server certificate and setup token without source edits or manual cryptography; idempotent on an initialised directory; env overrides BRIDGE_COORDINATOR_DATA_DIR/BIND/LAN_ENABLED (coordinator/tests/ops.rs). CI run 42181869238 on c81ccde. |
 | OPS-004 | [x] | `admin reset-password`, `cert renew`, `cert install`, `setup-token` (only before an administrator exists), `backup`/`restore`; CLI tests in coordinator/tests/ops.rs; Recovery section in install.md. CI run 42181869238 on c81ccde. |
 | OPS-005 | [x] | install.md "Upgrades and compatibility": protocol negotiation, forward-only migrations, rollback by restoring the pre-upgrade backup, mixed worker versions, upgrade order. |
@@ -147,10 +151,10 @@ Every `[x]` row is covered by CI run 42181869238 on c81ccde green on every job (
 | TEST-009 | [x] | CSRF, Origin, bypass, malformed input and writer contention are tested (coordinator/tests/api.rs csrf_origin_and_bearer_tokens, hardening.rs auth_bodies_are_limited_to_4_kib, terminal.rs browser_upgrade_is_authenticated_and_origin_checked; tests/test_bridge_terminal_stream.py test_second_writer_and_local_client_get_view_only; web/e2e/terminal.spec.ts). CI run 42181869238 on c81ccde. |
 | TEST-010 | [x] | HTTPS and TLS versions, certificates (strict verification), login/logout, expiry, remember-device lifetimes, rate limiting and unauthenticated denial (coordinator/tests/worker.rs, certs.rs, api.rs, web_api.rs, limits.rs, routes.rs). CI run 42181869238 on c81ccde green on every job. |
 | TEST-011 | [x] | Playwright projects chromium-desktop, chromium-mobile, firefox-desktop and firefox-mobile run app.spec.ts, worker.spec.ts and terminal.spec.ts; CI job `web UI (TypeScript, Playwright)` in .github/workflows/test.yml. CI run 42181869238 on c81ccde. |
-| TEST-012 | [x] | tests/test_distributed_offline.py: the coordinator, worker and remote CLI round trip runs in a bwrap network namespace with only loopback (skips without bwrap), and a socket sampler asserts that only loopback sockets are opened during the round trip. CI run 42181869238 on c81ccde. |
-| TEST-013 | [x] | Platforms in CI: Linux x86-64 (Python 3.11 and 3.15, coverage gates), Linux ARM64, macOS ARM64 and Intel, Windows x86-64 and ARM64 (coordinator, and the WINDOWS_TESTS allowlist in test.yml: Windows policy, remote CLI, worker protocol, WebSocket client, command layer, coordinator integration; Playwright Chromium and Firefox on Linux, macOS and Windows) (CI run 42181869238 on c81ccde green on every job). Windows scope in DECISIONS.md D8. DietPi arm64: emulated (QEMU raspi3b TCG, mem=512M). |
-| TEST-014 | [x] | x86-64 host and container, GitHub-hosted ARM64 runner (512 MB / 1 CPU, memory limits) and DietPi arm64 emulated (QEMU raspi3b TCG, mem=512M): startup, idle and peak RSS, API latency, event throughput, reconnect latency, database growth, storage writes and memory pressure (benchmarks.md). CI run 42181869238 on c81ccde green on every job. Physical Pi Zero 2 W: follow-up, scheduled 2026-11-06. |
-| TEST-015 | [x] | benchmarks.md and install.md label every figure by platform: x86-64 host, container on x86-64, "GitHub-hosted ARM64 runner (not a Pi)", and "emulated (QEMU raspi3b TCG, mem=512M)"; the physical Pi Zero 2 W is stated as not yet measured (follow-up 2026-11-06). |
+| TEST-012 | [x] | tests/test_distributed_offline.py still verifies loopback-only isolation in CI. Physical Pi deployment also verified worker registration, remote mission listing, task.add/task.cancel, health and diagnostics over the LAN HTTPS coordinator. CI run 42181869238 on c81ccde. |
+| TEST-013 | [x] | CI platform matrix: Linux x86-64 and ARM64, macOS ARM64 and Intel, Windows x86-64 and ARM64; Playwright Chromium and Firefox projects remain covered by CI run 42181869238. Physical desktop Chrome and Firefox both completed HTTPS sign-in using the imported coordinator CA. Android phone validation is not claimed; it is separately blocked because Chrome and Firefox are absent on the attached phone. |
+| TEST-014 | [x] | Physical Pi Zero 2 W ARM64 benchmark: startup 339 ms, idle RSS 3.3 MiB, peak RSS 22.3 MiB, API p50/p95 2.15/2.25 ms (missions) and 3.11/3.67 ms (commands), 5933 events/s, reconnect p50/p95 16.4/42.1 ms, and 558 bytes/event (benchmarks.md). 24-hour card writes remain in private hardware verification and are not inferred here. CI run 42181869238 on c81ccde green. |
+| TEST-015 | [x] | benchmarks.md and install.md identify x86-64 host/container, GitHub-hosted ARM64 runner (not a Pi), emulated QEMU raspi3b and the physical Raspberry Pi Zero 2 W separately. Physical methodology and the outstanding 24-hour card-write test are labelled explicitly. |
 | TEST-016 | [x] | .github/workflows/test.yml: platform matrix (ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm), coordinator, web (Playwright, visual regression in the Playwright image), mypy, ARM64 container build with smoke and limit checks; branch runs through pull requests with one run per ref. CI run 42181869238 on c81ccde green on every job. |
 | TEST-017 | [x] | Final verification: CI run 42181869238 on c81ccde green on every job (full Python suite with both coverage gates, mypy, cargo fmt/clippy/test on six platforms, Playwright, ARM64 container); cargo audit and npm audit clean; OPS-001 on the emulated DietPi. |
 | QUAL-001 | [x] | DECISIONS.md D1 names one owner per business rule; the coordinator and web call the worker's command layer instead of reimplementing it (ARCH-004). |
@@ -174,7 +178,82 @@ Every `[x]` row is covered by CI run 42181869238 on c81ccde green on every job (
 | CONV-009 | [x] | Steps were pushed only after the full suite and coverage gates passed (step 10 push at 0952c13 after a green gate: 92% total, 94% Bridge). CI run 42181869238 on c81ccde. |
 | CONV-010 | [x] | Blocked pi-sim and hardware work was recorded in WORKLOG.md (18:46Z) and independent work continued. |
 | CONV-011 | [x] | No mandatory requirement was relaxed; unmet items stay open in this register. |
-| CONV-012 | [x] | All specification IDs verified; CI run 42181869238 on c81ccde green on every job. Follow-up, not a blocker (TEST-015 requires labelling only): physical Pi Zero 2 W verification, scheduled 2026-11-06. |
+| CONV-012 | [x] | All 169 specification IDs remain verified; CI run 42181869238 on c81ccde is green. The physical Pi measurement follow-up is closed with the dated results in benchmarks.md and install.md. Hardware endurance, optional Android checks and unattended kernel-upgrade edge cases remain private operational verification items, not unlabelled figures. |
+
+| PI-FLASH-001 | [x] | Downloaded DietPi image matched its published SHA-256 checksum and passed the compressed-image integrity check. |
+| PI-FLASH-002 | [x] | Detached signature verified in a temporary GnuPG home; signing-key fingerprint corroborated by an independent DietPi source. |
+| PI-FLASH-003 | [x] | Boot partition was configured with mtools; credential-bearing working image was deleted after flash verification. |
+| PI-FLASH-004 | [x] | Automated first-boot settings include key-only SSH, Docker and Compose, zram swap, RAM logging, locale, timezone, and headless GPU memory. |
+| PI-FLASH-005 | [x] | User entered Wi-Fi credentials through the hidden-input helper; both fields were confirmed non-empty without display or logging. |
+| PI-FLASH-006 | [x] | Headless GPU memory split set to the documented minimum for the image. |
+| PI-FLASH-007 | [ ] | Optional USB gadget fallback was not enabled; Wi-Fi succeeded after physical first boot. |
+| PI-FLASH-010 | [x] | SanDisk Extreme 128 GB card was identified and explicitly approved before erasing. |
+| PI-FLASH-011 | [~] | The reader's model and serial, card capacity, and partition state were inspected before writing, but it did not expose a card-specific serial. The user identified and explicitly approved the SanDisk card and target device; the missing card serial means the full identity check is not evidenced. |
+| PI-FLASH-012 | [x] | User's approved flash command exited 0, wrote 1,131,413,504 bytes, and completed `sync`. |
+| PI-FLASH-013 | [x] | Byte comparison returned identical; partition table showed FAT32 boot and ext4 root. |
+| PI-BOOT-001 | [x] | Card was installed in the board and its USB data port connected for power. |
+| PI-BOOT-002 | [x] | Key login identified the hostname, Pi Zero 2 W Rev 1.0 model, and active Wi-Fi address; unrelated Raspberry Pi and Pico devices were excluded by identity checks. |
+| PI-BOOT-003 | [x] | DietPi first-run installation stage reached 2. |
+| PI-BOOT-004 | [x] | Physical Debian 13.7 Trixie ARM64; kernel `6.18.60+rpt-rpi-v8`, four CPUs, 462 MiB RAM, 119.2 GiB card, root 117 GiB with 111 GiB free. |
+| PI-BOOT-005 | [x] | `apt full-upgrade` completed and the board rebooted; running and newest installed kernel match, and the previous pending-kernel warning is absent. |
+| PI-HARD-001 | [x] | Non-root administrator was created with SSH key and sudo, tested in a fresh login, then remote root login was disabled. |
+| PI-HARD-002 | [x] | Dropbear retained with password login disabled and remote root denied. |
+| PI-HARD-003 | [x] | nftables default-drop policy allows only required LAN SSH/coordinator access, DHCP replies, established traffic, loopback and ICMP; timed rollback was canceled after a fresh SSH login. |
+| PI-HARD-004 | [x] | Listener scan shows SSH, DHCP client, and coordinator HTTPS bound to the LAN address. |
+| PI-HARD-005 | [x] | `systemd-timesyncd` enabled and active; synchronized marker and NTP contact verified. `timedatectl` lacks system D-Bus in this image. |
+| PI-HARD-006 | [~] | Private hostname is configured and advertised by DHCP, but the router DNS alias did not resolve; only the verified numeric address is used in the certificate. |
+| PI-SYS-001 | [x] | Timers and services reviewed; unnecessary low-value documentation/filesystem maintenance timers were disabled where present, while DietPi recovery and required services were retained. |
+| PI-SYS-002 | [x] | Docker uses card-backed data root, overlayfs, journald, live restore; Compose plugin works and no orchestration layer is enabled. |
+| PI-SYS-003 | [x] | Swap is only `/dev/zram0` (231 MiB); no file-backed swap is present. |
+| PI-SYS-004 | [x] | `/var/log` and journald are volatile with a 32 MiB journal cap; coordinator logs also use journald while durable state remains on card. |
+| PI-SYS-005 | [x] | `vcgencmd get_throttled` returned `0x0`; targeted kernel-log search found no undervoltage, throttling, storage failure, or OOM. |
+| PI-SYS-006 | [~] | Daily DietPi and APT unattended updates are installed; automatic reboot into a newly installed kernel remains unverified because no newer kernel package was available. |
+| PI-WEAR-001 | [x] | DietPi-RAMlog and volatile journald keep system logs in RAM. |
+| PI-WEAR-002 | [x] | Docker default and Pi-local Compose override use journald; coordinator audit/database state remains durable. |
+| PI-WEAR-003 | [x] | zram is the only swap device; there is no card-backed swap file. |
+| PI-WEAR-004 | [x] | Root ext4 uses `noatime,lazytime`; `/tmp` and `/var/log` are tmpfs; default ext4 commit interval retained. |
+| PI-WEAR-005 | [x] | Card reports discard support and weekly `fstrim.timer` is enabled; continuous discard is not configured. |
+| PI-WEAR-006 | [x] | APT package indexes are compressed, downloaded packages are not retained, and autoclean runs after upgrades. |
+| PI-WEAR-007 | [x] | Coordinator health interval is 60 seconds; low-value periodic timers were reviewed and disabled where present. |
+| PI-WEAR-008 | [x] | Hourly fake-clock save is retained for sane time before network sync; remaining periodic writer is documented for the wear measurement. |
+| PI-WEAR-009 | [~] | A full 24-hour post-optimization card-write measurement and writer classification are still pending; no pre-change baseline was captured. |
+| PI-WEAR-010 | [~] | Encrypted off-device daily backup timer and initial backup are in place; restore and re-image restoration still need testing. |
+| PI-UPD-001 | [~] | `unattended-upgrades` covers the configured Debian, Raspberry Pi, DietPi, and Docker origins; dry run succeeded, but no candidate kernel update was available to demonstrate selection. |
+| PI-UPD-002 | [x] | DietPi cron APT action is check-only; DietPi update notice remains enabled. |
+| PI-UPD-003 | [~] | Persistent DietPi and APT timers are enabled; missed DietPi timer catch-up was observed after reboot. APT missed-run catch-up was not separately simulated. |
+| PI-UPD-004 | [!] | Kernel marker hook is installed, but no newer kernel package was available to verify a real package-triggered automatic reboot. Downgrading the installed kernel solely to manufacture this test was judged unsafe. |
+| PI-UPD-005 | [x] | Docker Engine updates flow through APT with live restore enabled; coordinator image updates are deliberately built on the desktop and loaded onto the board. |
+| PI-UPD-006 | [x] | `update-status` reports last successful runs, reboot marker, running/newest kernel, DietPi version, and timer schedule. |
+| PI-UPD-007 | [x] | APT upgrade service runs `dpkg --configure -a` before unattended upgrade to recover interrupted package configuration. |
+| PI-UPD-008 | [x] | Debian major-release upgrades are explicitly reserved for supervised maintenance. |
+| PI-UPD-009 | [!] | DietPi timer catch-up was verified; APT missed-run simulation and automatic reboot into a new kernel remain unverified because no kernel update is available and installing an older package to force the test is unsafe. |
+| PI-DEPLOY-000 | [x] | Docker bridge, LAN, desktop routes, and VPN ranges were compared before container startup; no overlap was found. |
+| PI-DEPLOY-001 | [x] | ARM64 image built on the desktop, transferred and loaded on the board; Compose files installed under `/opt/llm-bridge/`. |
+| PI-DEPLOY-002 | [x] | Coordinator initialized and started with only a verified address in its public-name list; the private DNS alias was omitted because it did not resolve. |
+| PI-DEPLOY-003 | [x] | nftables permits coordinator HTTPS only from the LAN; rollback was canceled after fresh SSH verification. |
+| PI-DEPLOY-004 | [x] | Coordinator CA fingerprint matched on the desktop; Chrome and Firefox trusted the CA and completed sign-in without bypassing TLS warnings. |
+| PI-DEPLOY-005 | [x] | Administrator setup completed in the browser; password and setup token remain in private mode-0600 files. |
+| PI-DEPLOY-006 | [x] | Desktop worker enrollment, remote status/list/task operations, event stream, and read-only browser terminal were verified. |
+| PI-DEPLOY-007 | [!] | Android browser verification needs Chrome and Firefox plus trusted CA installation; the attached phone lacks both browsers, and there is no safe unattended substitute. |
+| PI-VERIFY-001 | [x] | Physical OS, architecture, kernel, CPU count, RAM, card capacity and free space are recorded in benchmarks.md and install.md. |
+| PI-VERIFY-002 | [x] | Key-only SSH, firewall rules and active listeners were verified; only SSH, DHCP, and coordinator HTTPS are exposed as required. |
+| PI-VERIFY-003 | [~] | DHCP address and active time synchronization are known; private DNS alias does not resolve from the desktop. |
+| PI-VERIFY-004 | [x] | Pre-container physical host baseline: 462 MiB visible, 325 MiB available, load 0.08/0.07/0.05, one sample 91.2% CPU idle/1.8% I/O wait, dockerd 85 MiB RSS and containerd 44 MiB RSS. |
+| PI-VERIFY-005 | [x] | Physical benchmark and production-container samples are reported in benchmarks.md; benchmark harness peak was 22.3 MiB RSS and the live container sample was 19.02 MiB of its 96 MiB limit. |
+| PI-VERIFY-006 | [~] | Host reboot restored Wi-Fi, SSH, healthy coordinator and online worker. No task was in flight during reboot, so duplicate execution during recovery was not stress-tested. |
+| PI-VERIFY-007 | [!] | Wi-Fi interruption test severed the only SSH path; scheduled link-up did not restore it. User power-cycled the Pi to recover. Do not restart the only network link through its own SSH session. |
+| PI-VERIFY-008 | [!] | Power-loss-under-write test requires an operator to unplug the Pi for ten seconds; no safe unattended equivalent exists and it was not performed. |
+| PI-VERIFY-009 | [x] | Durable Docker volume, UID/GID 65532 ownership, configuration, and certificate persistence were checked after deployment and reboot. |
+| PI-VERIFY-010 | [~] | Daily encrypted off-device backup timer and initial archive are verified; coordinator restore and re-image restoration are not yet tested. |
+| PI-VERIFY-011 | [~] | `vcgencmd get_throttled` was `0x0`; no targeted storage errors, OOM, Wi-Fi failures, undervoltage, or throttling were found. Unrelated Bluetooth firmware warnings remain in the boot kernel log. |
+| PI-VERIFY-012 | [x] | Setup and administration were performed headlessly from the desktop; no monitor or keyboard was used. |
+| PI-VERIFY-013 | [!] | Optional passkey/Tailscale path was not run because the user asked to treat it as declined; password login remains the tested path. |
+| PI-REPO-001 | [x] | `benchmarks.md` records dated physical Pi measurements, units, and benchmark method beside the emulated and runner results; CI run 42250189901 passed all jobs. |
+| PI-REPO-002 | [x] | `install.md` replaces derived target figures with the physical host and coordinator measurements while retaining generic example addresses; CI run 42250189901 passed all jobs. |
+| PI-REPO-003 | [x] | Physical evidence is recorded for the affected IDs; `FINAL_REPORT.md` totals are generated from the 247-row register; CI run 42250189901 passed all jobs. |
+| PI-REPO-004 | [x] | Container web-asset directory permissions were fixed at the Dockerfile source; a regression test fails on the prior mode and the built image was smoke-tested as UID 65532 (PR #32). |
+| PI-REPO-005 | [x] | PR #32 contains the Pi measurements and unified IDs, is merged after all required checks passed, and its main CI run is green. The final PR revision's CI run is recorded in the worklog. |
+| PI-REPO-006 | [x] | The private research notes now label physical, emulated, assumed, and blocked results and replace former pending entries with physical evidence or exact blockers. |
 
 ## Operator addendum (2026-11-05, task revision 4)
 
@@ -183,7 +262,7 @@ Extends OPS-001, COORD-009, NET-003 and TEST-013/014/015; tracked here as A1-A5 
 - A1 [x] No Raspberry-Pi-specific code or configuration (checked: no Pi device checks or paths in coordinator/, deploy/, container/, llm_tools/); Pi Zero 2 W is a documented target profile in install.md.
 - A2 [x] Multi-arch (amd64/arm64) non-root OCI image, read-only root, health check, loopback-default compose; built and smoke-tested natively on the GitHub-hosted ARM64 runner and run on DietPi arm64 emulated (QEMU raspi3b TCG, mem=512M) (CI run 42181869238 on c81ccde green on every job).
 - A3 [x] DECISIONS.md D6: no worker image. Original item: Decision on an optional worker image recorded in DECISIONS.md; workers native by default.
-- A4 [x] ARM64 deployment, container and resource checks on pi-sim, labelled "emulated (QEMU raspi3b TCG, mem=512M)" (benchmarks.md, install.md). Physical Pi: follow-up, scheduled 2026-11-06.
+- A4 [x] ARM64 deployment and resource evidence on pi-sim (labelled emulated) and the physical Raspberry Pi Zero 2 W (benchmarks.md, install.md). Physical results are separately labelled.
 - A5 [x] Generic deployment docs: install.md (container, native, Low-write host, Windows), operations.md; one marked section, install.md "Raspberry Pi Zero 2 W target profile", with emulated figures labelled as such.
 
 ## Operator addenda 2-7 (2026-11-05 and 2026-11-06)

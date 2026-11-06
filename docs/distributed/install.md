@@ -419,79 +419,58 @@ sudo grep write_bytes /proc/$pid/io
 This is the only device-specific section in the distributed documentation. The rest
 of the documentation, the coordinator and the installer are hardware-neutral.
 
-Target: Raspberry Pi Zero 2 W (512 MB RAM, ARM64) running DietPi (Debian 13).
+Target: Raspberry Pi Zero 2 W (512 MB nominal RAM, ARM64) running DietPi (Debian 13).
 
-**Status: measured on an emulated Pi, not yet on the device.** The figures marked
-"emulated" come from pi-sim: QEMU `raspi3b` in TCG mode with `mem=512M` (478 MB
-visible), an unmodified DietPi v10.8.2 image (Debian 13, arm64, kernel 6.18.60). TCG
-runs Cortex-A53 code far slower than the real device, so times are pessimistic; memory
-and bytes written do not depend on the CPU speed. The physical Pi Zero 2 W measurement
-is scheduled for 2026-11-06 and repeats the commands below.
+**Status: physically measured on 2026-11-06.** The tested board was a Raspberry Pi
+Zero 2 W Rev 1.0, DietPi v10.8.2 / Debian 13.7, kernel `6.18.60+rpt-rpi-v8`, with
+four Cortex-A53 cores and 462 MiB RAM visible to Linux. The 119.2 GiB microSD had a
+117 GiB root filesystem, with 111 GiB free at measurement time. Detailed benchmark
+method and results are in `benchmarks.md`, “Raspberry Pi Zero 2 W (physical)”.
 
-Emulated results (2026-11-06, details in `benchmarks.md`, "ARM64, emulated"):
+Physical coordinator results (release ARM64 benchmark harness, run on the device;
+benchmark files and data were in `/tmp`, not compiled on the Pi): startup to
+`/healthz` 339 ms, idle RSS 3.3 MiB, peak RSS 22.3 MiB, 5933 events/s,
+2.15/2.25 ms `GET /api/v1/missions` p50/p95, 3.11/3.67 ms command p50/p95,
+16.4/42.1 ms reconnect p50/p95, and 558 bytes per event. The production container
+reported 19.02 MiB of its 96 MiB limit in one post-login `docker stats` sample and
+20 572 KiB from `/api/v1/diagnostics`. No cgroup peak from the benchmark harness is
+claimed: its temporary-container attempt did not become healthy within 30 seconds.
 
-- Native install with `install.sh --lan`: 9.8 s; rerunning it with a newer binary
-  upgraded the service in 11.7 s and kept the database, keys and administrator. The
-  service starts at boot, uses 3.4-4.6 MiB RSS idle and peaked at 22.2 MiB.
-- Container (Docker 29.9 and Compose 5.7 from `dietpi-software install 162 134`): the
-  arm64 image loads in 7 s; with `compose.low-write.yaml` and LAN publishing the
-  container used 2.4 MiB idle and peaked at 21.7 MiB (cgroup `memory.peak`, including
-  administrator setup and login) under its 96 MiB limit. Host memory in use stayed
-  below 150 MB of 478 MB.
-- Both paths: administrator setup over HTTPS from another machine, a worker on another
-  machine with remote commands, and all state kept across `systemctl reboot`.
-
-DietPi reported a pending kernel upgrade for CVE-2026-98432 in its login message on the
-emulated image. On the physical device run `apt update && apt full-upgrade`, then
-reboot, before installing the coordinator.
-
-Memory budget (derived from x86-64 container measurements; the emulated figures above are lower):
-
-- The container peak was 48.1 MiB RSS (`benchmarks.md`), measured with 30 concurrent
-  logins, 200 commands and 1500 replicated events. The shipped limit is 96 MiB, which
-  is under a fifth of 512 MB.
-- The limit covers the coordinator container only. The kernel, DietPi, the Docker
-  daemon (container deployment) and any other containers use the remaining memory. Their
-  size on this device is not known; check it with `free -m` before adding services.
-- The native install avoids the Docker daemon. It uses the same 96 MiB limit
-  (`MemoryMax=96M`).
+Physical idle host baseline before the container started: 325 MiB available of
+462 MiB, load averages 0.08 / 0.07 / 0.05, one CPU sample 91.2% idle and 1.8% I/O
+wait; `dockerd` RSS 85 MiB and `containerd` RSS 44 MiB. Docker uses the card-backed
+`/mnt/dietpi_userdata/docker-data` root with `overlayfs`, volatile `journald` logs,
+live restore and a 96 MiB coordinator limit. The Pi compose low-write file sets
+`journald` logging and a 60-second health interval. Zram is the only swap; the
+coordinator's `memswap_limit` equals `mem_limit`.
 
 Recommended settings:
 
-- Start with the shipped defaults: `BRIDGE_MEMORY_LIMIT=96m`, one CPU, loopback
-  publishing unless LAN access is needed (Container deployment).
-- Keep `memswap_limit` equal to `mem_limit` (the default in `compose.yaml`). The
-  coordinator then never swaps. If it needs more memory than the limit, the kernel stops
-  the container and `restart: unless-stopped` starts it again. This avoids heavy swap
-  writes on a microSD card. No swap or zram configuration is needed for the coordinator.
-- The card wears with writes. Follow Low-write host above: the low-write compose
-  override and a volatile journal.
-- The database uses `synchronous=FULL`, so each commit is flushed to the card. The
-  x86-64 measurement is 557 bytes per event including the write-ahead log; with the
-  default `max_events_per_worker` of 50 000 that is about 27 MB per worker (derived,
-  not measured on the card). Keep the data volume on a card or disk with free space of
-  at least several times that, and lower `max_events_per_worker` in `config.toml` if
-  space is short.
-- The Pi Zero 2 W has no battery-backed clock. TLS certificates and login sessions
-  depend on the system time, so keep a time-synchronisation service enabled on the
-  device and check `date` after each boot.
-- Build the arm64 image on another machine (`container/build.sh --oci`) and load it on
-  the Pi; building on the device is not intended.
+- Keep `BRIDGE_MEMORY_LIMIT=96m`, one CPU, and `memswap_limit` equal to `mem_limit`.
+  The measured benchmark peak is 23.3% of the limit; the live deployment sample was
+  19.02 MiB. Reconsider the limit only if future workloads approach 80% of 96 MiB.
+- Keep loopback publishing unless LAN access is needed. When LAN access is enabled,
+  limit the firewall rule to the local subnet and trust the coordinator CA in clients.
+- The database uses `synchronous=FULL`; do not disable it or put authoritative state
+  on tmpfs. The physical benchmark database grew by 558 bytes per event. The
+  24-hour physical card-write measurement is still pending and is not inferred from
+  benchmark data.
+- Follow Low-write host above: use the low-write compose file, volatile journal,
+  noatime and zram; keep at least 25% of the card free.
+- The Pi has no battery-backed clock. Keep time synchronization enabled and verify it
+  after boot. Build the ARM64 image on another machine with `container/build.sh --oci`
+  and load it on the Pi; do not compile on the device.
 
-Verification after deployment (run these on the device and record the results; they
-replace the derived figures above):
+Verification commands for the deployed container:
 
 ```sh
-docker compose exec coordinator bridge-coordinator health && echo healthy
+docker compose exec coordinator bridge-coordinator health
 docker compose exec coordinator bridge-coordinator info
-docker stats --no-stream            # MEM USAGE / LIMIT of the coordinator container
-free -m                             # host memory with the coordinator running
+docker stats --no-stream
+free -m
 ```
 
-For a native install run `bridge-coordinator health --data-dir
-/var/lib/bridge-coordinator` and `systemctl status bridge-coordinator` (it shows the
-memory in use). The diagnostics page (`GET /api/v1/diagnostics`) reports the process
-RSS. Take the reading after a few logins, because the Argon2id verification memory is
-allocated on first use. If the container uses more than about 80 percent of its limit,
-raise `BRIDGE_MEMORY_LIMIT` (for example to `128m`) and record the measured value in
-`benchmarks.md`.
+The authenticated diagnostics endpoint (`GET /api/v1/diagnostics`) reports process
+RSS. Measure after login as well as at idle, because Argon2id allocates memory during
+password verification. If the container approaches 80% of its limit under the real
+workload, increase `BRIDGE_MEMORY_LIMIT` and record a new physical measurement.
