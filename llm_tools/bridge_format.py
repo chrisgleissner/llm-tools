@@ -69,6 +69,27 @@ def printable(value: Any) -> str:
     return "".join(out)
 
 
+# Missions created before the execution policy existed carry no policy settings.
+LEGACY_POLICY_TEXT = "defaults (teams and token spend not set)"
+_AMENDMENT_ORDER = ("title", "priority", "acceptance", "prompt")
+
+
+def amendment_text(changes: Any) -> str:
+    """An amendment as words (``title: T; priority: 3``), not as a JSON object."""
+    if not isinstance(changes, dict) or not changes:
+        return "no changes"
+    parts = []
+    for key in [*_AMENDMENT_ORDER, *sorted(str(item) for item in changes if item not in _AMENDMENT_ORDER)]:
+        if key not in changes:
+            continue
+        value = changes[key]
+        if isinstance(value, (list, tuple)):
+            parts.append(f"{key}: {len(value)} criteri{'on' if len(value) == 1 else 'a'}" if key == "acceptance" else f"{key}: {len(value)} items")
+        else:
+            parts.append(f"{key}: {_clip(value, 100)}")
+    return "; ".join(parts)
+
+
 def _clip(value: Any, limit: int) -> str:
     text = " ".join(printable(value).split())
     return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
@@ -600,7 +621,7 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
         from .bridge_policy import effective_settings
 
         policy = effective_settings(config)
-    policy_label = "legacy (unchanged)" if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend')}"
+    policy_label = LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend')}"
     lines.append(f"Policy      {policy_label}")
     context = snapshot.get("station_context") or {}
     current = snapshot.get("current_task")

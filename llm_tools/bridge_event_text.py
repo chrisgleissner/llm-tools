@@ -53,6 +53,19 @@ def _text(value: object, limit: int = 1000) -> str:
         size *= 4
 
 
+# What each stored restoration state means to the operator: can the provider's own session be resumed?
+RESTORATION_WORDS = {
+    "NATIVE_CREATED": "resumable", "RESTORED_NATIVE": "resumed", "RECONSTRUCTED": "rebuilt",
+    "UNAVAILABLE": "cannot resume", "RESTORING": "restoring",
+}
+
+
+def restoration_word(value: object) -> str:
+    """Plain words for a stored restoration state; an unknown state is shown as stored, nothing as `-`."""
+    text = _text(value, 30) if _known(value) else ""
+    return RESTORATION_WORDS.get(text.upper(), text) if text else "-"
+
+
 def _dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
@@ -581,8 +594,8 @@ def _h_task_proposal_rejected(ctx: _EventContext) -> str:
 
 @_humanizer(EventKind.NATIVE_SESSION_RESTORATION)
 def _h_native_session(ctx: _EventContext) -> str:
-    state = _text(ctx.data.get("restoration_state") or "unknown", 30).lower().replace("_", " ")
-    return f"Session {state}" + (f" · {_text(ctx.data['provider'], 20)}" if _known(ctx.data.get("provider")) else "")
+    state = restoration_word(ctx.data.get("restoration_state"))
+    return f"Session {state if _known(ctx.data.get('restoration_state')) else 'unknown'}" + (f" · {_text(ctx.data['provider'], 20)}" if _known(ctx.data.get("provider")) else "")
 
 
 @_humanizer(EventKind.REPOSITORY_CHECKPOINT)

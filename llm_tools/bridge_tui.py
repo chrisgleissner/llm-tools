@@ -37,6 +37,7 @@ from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FI
 from . import bridge_events, bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
 from .bridge_projection import ProjectionParams
 from .bridge_vocab import EventKind
+from . import bridge_format
 from .bridge_format import plain_reason
 from .bridge_glyphs import FINISHED_STATES, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
 from .common import fmt_duration
@@ -71,6 +72,7 @@ from .bridge_event_text import (  # noqa: F401  (moved to bridge_event_text so t
     _text,
     _window_brief,
     _with_reason,
+    restoration_word,
 )
 from . import bridge_draw
 from .bridge_draw import (  # noqa: F401  (re-exported: other modules and tests reach these through bridge_tui)
@@ -3813,7 +3815,7 @@ class _ConsoleState:
             row("Tasks", orders),
         ]
         policy = _dict(_dict(data.get("mission")).get("execution_policy"))
-        policy_text = "legacy (unchanged)" if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
+        policy_text = bridge_format.LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
         rows.append(row("Policy", policy_text))
         needs = _needs_you_rows(data)
         for index, text in enumerate(needs):
@@ -3854,16 +3856,20 @@ class _ConsoleState:
         return [
             f"Task {_text(task_number(task) if task_number(task) is not None else '?', 32)}: {_cut_text(task.get('title') or 'Untitled', 100)}",
             f"Status {_text(task.get('status', 'unknown'), 24)} | priority {_text(task.get('priority', '?'), 16)} | revision {_text(task.get('revision', '?'), 16)}",
-            f"Origin {_text(task.get('origin') or 'operator', 24)} | proposal {_text(task.get('proposal_status') or 'not a proposal', 32)} | proposed by {_text(task.get('proposed_by_operation') or 'unknown', 32)}",
+            " | ".join(part for part in (
+                f"Origin {_text(task.get('origin') or 'operator', 24)}",
+                f"proposal {_text(task['proposal_status'], 32)}" if _known(task.get("proposal_status")) else "",
+                f"proposed by {_text(task['proposed_by_operation'], 32)}" if _known(task.get("proposed_by_operation")) else "",
+            ) if part),
             "Dependencies: " + (", ".join(_text(item, 32) for item in dependencies) if isinstance(dependencies, list) and dependencies else "none"),
             "Acceptance criteria:",
             *([f"  {index + 1}. {_cut_text(item, 240)}" for index, item in enumerate(acceptance[:_MAX_DETAIL_ITEMS])] if isinstance(acceptance, list) and acceptance else ["  none recorded"]),
             "Verification evidence:",
             *([f"  {index + 1}. {_evidence_text(item)}" for index, item in enumerate(evidence[:_MAX_DETAIL_ITEMS])] if isinstance(evidence, list) and evidence else ["  none recorded"]),
-            "Pending amendment: " + (_cut_text(json.dumps(pending, ensure_ascii=False, sort_keys=True), 400) if pending else "none"),
+            "Pending amendment: " + (_cut_text(bridge_format.amendment_text(pending), 400) if pending else "none"),
             "Amendment history:",
             *([
-                f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20)}: {_cut_text(json.dumps(item.get('changes', {}), ensure_ascii=False, sort_keys=True), 240)}"
+                f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20).lower()}: {_cut_text(bridge_format.amendment_text(item.get('changes', {})), 240)}"
                 for item in amendments[:5] if isinstance(item, dict)
             ] if isinstance(amendments, list) and amendments else ["  none recorded"]),
             "Prompt preview (v opens full prompt): " + _cut_text(task.get("prompt") or "", 800),
@@ -3973,7 +3979,7 @@ class _ConsoleState:
                 cell(item.get("model"), 28),
                 _state_text(cell(item.get("status"), 20)),
                 _short_id(item.get("native_session_id")),
-                cell(item.get("restoration_state"), 24),
+                restoration_word(item.get("restoration_state")),
             )
             for item in operations
         ]
@@ -4008,28 +4014,44 @@ class _ConsoleState:
             model_source = item.get("model_source") if item.get("model_source") == "observed" else ("configured" if _known(item.get("configured_model")) else "unknown")
             effort_source = item.get("effort_source") if item.get("effort_source") == "observed" else ("configured" if _known(item.get("configured_effort")) else "unknown")
             capability = _dict(item.get("capabilities"))
-            role = item.get("role") if item.get("role_source") == "observed" else "unknown"
+            role = item.get("role") if item.get("role_source") == "observed" else None
             activity_age = item.get("activity_age_seconds")
-            activity_age_text = f"{int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else "unknown"
+            activity_age_text = f"age {int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else ""
             lifecycle_age = item.get("lifecycle_age_seconds")
-            lifecycle_age_text = f"{int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else "unknown"
-            return [
-                f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status'), 30)}",
-                f"role: {_text(role, 80)} ({_text(item.get('role_source') or 'unknown', 20)})",
-                f"mission: {_text(item.get('mission_name') or item.get('mission_id'), 100)}",
-                f"age: {_span(item.get('age_seconds'), 2) if item.get('age_seconds') is not None else 'unknown'}",
-                f"model: {_text(model, 100)} ({_text(model_source, 20)})",
-                f"reasoning effort: {_text(effort, 40)} ({_text(effort_source, 20)})",
-                f"activity: {_text(item.get('activity'), 180)}",
-                f"last observed: {_text(item.get('last_activity_at') or 'unknown', 80)}",
-                f"native status: {_text(item.get('native_status') or 'unknown', 40)}",
-                f"parent: {_text(item.get('parent_id') or 'none', 100)}",
-                f"freshness: {_text(item.get('freshness'), 40)} · identity: {_text(item.get('identity_source') or 'provider metadata', 60)}",
-                f"activity freshness: {_text(item.get('activity_freshness') or 'unknown', 24)} · age {activity_age_text}",
-                f"lifecycle freshness: {_text(item.get('lifecycle_freshness') or 'unknown', 24)} · age {lifecycle_age_text}",
-                f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}",
-                "Esc returns to the map.",
+            lifecycle_age_text = f"age {int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else ""
+            mission = item.get("mission_name") if _known(item.get("mission_name")) else item.get("mission_id")
+            # A field the provider did not report is left out of the list and named once on the last line.
+            fields: list[tuple[str, str]] = [
+                ("role", f"{_text(role, 80)} ({_text(item.get('role_source') or 'observed', 20)})" if _known(role) else ""),
+                ("mission", _text(mission, 100) if _known(mission) else ""),
+                ("age", _span(item.get("age_seconds"), 2) if _known(item.get("age_seconds")) else ""),
+                ("model", f"{_text(model, 100)} ({_text(model_source, 20)})" if _known(model) else ""),
+                ("reasoning effort", f"{_text(effort, 40)} ({_text(effort_source, 20)})" if _known(effort) else ""),
+                ("activity", _text(item.get("activity"), 180) if _known(item.get("activity")) else ""),
+                ("last observed", _text(item.get("last_activity_at"), 80) if _known(item.get("last_activity_at")) else ""),
+                ("native status", _text(item.get("native_status"), 40) if _known(item.get("native_status")) else ""),
+                ("activity freshness", _SEP.join(part for part in (_text(item["activity_freshness"], 24) if _known(item.get("activity_freshness")) else "", activity_age_text) if part)),
+                ("lifecycle freshness", _SEP.join(part for part in (_text(item["lifecycle_freshness"], 24) if _known(item.get("lifecycle_freshness")) else "", lifecycle_age_text) if part)),
             ]
+            shown = {label: value for label, value in fields if value}
+            missing = [label for label, value in fields if not value]
+            identity = f"identity: {_text(item.get('identity_source') or 'provider metadata', 60)}"
+            rows = [f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status'), 30)}"]
+            for label in ("role", "mission", "age", "model", "reasoning effort", "activity", "last observed", "native status"):
+                if label in shown:
+                    rows.append(f"{label}: {shown[label]}")
+            rows.append(f"parent: {_text(item.get('parent_id') or 'none', 100)}")
+            rows.append(f"freshness: {_text(item['freshness'], 40)} · {identity}" if _known(item.get("freshness")) else identity)
+            for label in ("activity freshness", "lifecycle freshness"):
+                if label in shown:
+                    rows.append(f"{label}: {shown[label]}")
+            rows.append(f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}")
+            if {"activity freshness", "lifecycle freshness"} <= set(missing):
+                missing = [label for label in missing if "freshness" not in label] + ["freshness"]
+            if missing:  # one statement, wrapped so a narrow terminal does not cut it
+                rows.extend(textwrap.wrap("Not reported by the provider: " + ", ".join(missing), 70, subsequent_indent="  "))
+            rows.append("Esc returns to the map.")
+            return rows
         rows = format_agent_map(agent_map)
         rows.append("↑↓ select · Enter inspect/switch · i inspect · /agents refresh")
         return rows
@@ -4037,6 +4059,7 @@ class _ConsoleState:
     def _system_rows(self) -> list[str]:
         data = self.snapshot
         out: list[str] = []
+        internals: list[str] = []  # implementation facts for diagnosing Bridge itself; shown on the last row
 
         def add(label: str, value: str) -> None:
             if value:
@@ -4061,10 +4084,11 @@ class _ConsoleState:
             if heartbeat:
                 age = _int_or_none(heartbeat.get("age_seconds"))
                 lock = heartbeat.get("owner_lock_held")
+                if str(lock).lower() in {"true", "false"}:
+                    internals.append("owner lock held" if str(lock).lower() == "true" else "owner lock not held")
                 add("Controller heartbeat", _SEP.join(part for part in (
                     _text(heartbeat["reported_state"], 20).lower() if _known(heartbeat.get("reported_state")) else "",
                     f"{_age(age)} ago" if age is not None else "",
-                    "owner lock held" if str(lock).lower() == "true" else "owner lock not held" if str(lock).lower() == "false" else "",
                     f"mission wants {_text(heartbeat['desired_mission_status'], 20)}" if _known(heartbeat.get("desired_mission_status")) else "",
                     f"liveness {_text(heartbeat['current_liveness'], 20)}" if _known(heartbeat.get("current_liveness")) else "",
                 ) if part) or "none recorded")
@@ -4095,12 +4119,11 @@ class _ConsoleState:
         elif _known(health):
             add("Health", _text(health, 220))
         persistence = _dict(data.get("persistence"))
-        if persistence:
-            add("Persistence", _SEP.join(part for part in (
-                f"sqlite schema {_text(persistence['schema_version'], 8)}" if _known(persistence.get("schema_version")) else "",
-                f"{_text(persistence['journal_mode'], 12)} journal" if _known(persistence.get("journal_mode")) else "",
-                _text(persistence["database"], 300) if _known(persistence.get("database")) else "",
-            ) if part))
+        internals.extend(part for part in (
+            f"sqlite schema {_text(persistence['schema_version'], 8)}" if _known(persistence.get("schema_version")) else "",
+            f"{_text(persistence['journal_mode'], 12)} journal" if _known(persistence.get("journal_mode")) else "",
+            _text(persistence["database"], 300) if _known(persistence.get("database")) else "",
+        ) if part)
         criteria = _dict(data.get("criteria"))
         if criteria and _int_or_none(criteria.get("total")):
             add("Criteria", f"{_int_or_none(criteria.get('verified')) or 0}/{_int_or_none(criteria.get('total'))} verified")
@@ -4145,6 +4168,7 @@ class _ConsoleState:
             add("Capacity", header or "no capacity observation")
             for line in summaries:
                 out.append(f"{'':<{_SYSTEM_LABEL}}{_with_square(line)}")
+        add("Internals", _SEP.join(internals))
         return out or ["System and capacity status is not available in this snapshot."]
 
     def _log_rows(self) -> list[str]:

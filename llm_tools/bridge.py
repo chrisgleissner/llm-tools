@@ -82,11 +82,40 @@ def open_store(*, readonly: bool = False) -> BridgeStore:
     return BridgeStore(store_path(), readonly=readonly)
 
 
-def read_verbatim(path: str | Path) -> str:
+def _os_reason(exc: OSError) -> str:
+    """Why a file operation failed, in words (``no such file``), not the errno text."""
+    if isinstance(exc, FileNotFoundError):
+        return "no such file"
+    if isinstance(exc, IsADirectoryError):
+        return "it is a folder"
+    if isinstance(exc, NotADirectoryError):
+        return "a folder in the path is a file"
+    if isinstance(exc, PermissionError):
+        return "permission denied"
+    return (exc.strerror or type(exc).__name__).lower()
+
+
+def read_verbatim(path: str | Path, option: str = "--file") -> str:
+    """The text of ``path`` (``-`` is standard input); a failure names the option and the reason."""
     if str(path) == "-":
         return sys.stdin.read()
-    with Path(path).expanduser().open("r", encoding="utf-8", newline="") as stream:
-        return stream.read()
+    try:
+        with Path(path).expanduser().open("r", encoding="utf-8", newline="") as stream:
+            return stream.read()
+    except OSError as exc:
+        raise ValueError(f"cannot read {option} {path}: {_os_reason(exc)}") from exc
+    except UnicodeDecodeError:
+        raise ValueError(f"cannot read {option} {path}: it is not UTF-8 text") from None
+
+
+def prompt_from(args: argparse.Namespace) -> str:
+    """The prompt text from ``--file``/``--prompt-file`` or ``--prompt``; a blank prompt is refused with its source."""
+    path = getattr(args, "prompt_file", None)
+    prompt = read_verbatim(path) if path else getattr(args, "prompt", None)
+    if prompt is None or not str(prompt).strip():
+        source = " (read from standard input)" if path == "-" else f" (read from {path})" if path else ""
+        raise ValueError(f"the prompt is empty{source}")
+    return str(prompt)
 
 
 def controller_running(mission_id: str) -> bool:
@@ -447,13 +476,14 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 store.set_mission_config_value(mission_id, "stop_after_task", task_id, event_kind="steering-stop-task-requested")
                 result = {"kind": kind, "task_id": task_id, "status": "QUEUED_FOR_VERIFICATION"}
             else:
-                station = str(payload.get("route", "")).strip()
-                if not station:
-                    raise ValueError("handoff steering requires --route")
+                station = str(payload.get("route") or "").strip()
                 mission = store.get_mission(mission_id)
-                configured = {item.strip() for key in ("providers", "routes") for item in str(mission["config"].get(key, "")).split(",") if item.strip()}
-                if configured and station not in configured:
-                    raise ValueError(f"handoff station is not configured for this mission: {station}")
+                configured_names = [item.strip() for key in ("providers", "routes") for item in str(mission["config"].get(key) or "").split(",") if item.strip()]
+                choices = f" (one of: {', '.join(dict.fromkeys(configured_names))})" if configured_names else ""
+                if not station:
+                    raise ValueError(f"--kind handoff needs --route NAME{choices}")
+                if configured_names and station not in configured_names:
+                    raise ValueError(f"--route {station} is not in this mission's rotation{choices}")
                 store.set_mission_config_value(mission_id, "handoff_preference", station, event_kind="steering-handoff-requested")
                 result = {"kind": kind, "route": station, "status": "QUEUED_FOR_SELECTION"}
         elif action == "task.add":
@@ -553,7 +583,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
     """Shared standalone/interactive task parser result and durable handler."""
     with open_store(readonly=args.task_action in {"list", "show"}) as store:
         if args.task_action == "add":
-            prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+            prompt = prompt_from(args)
             dep_ids = _dependency_ids(store, args.mission, args.depends_on)
             command_result = commands.dispatch(commands.CommandRequest("task.add", {"prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": list(args.acceptance)}, mission_id=args.mission))
             result = command_result if preserve_receipt or command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
@@ -571,8 +601,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
             task = _resolve_task(store, args.mission, args.task, args.task_by_id)
             payload: dict[str, Any] = {"task_id": int(task["id"])}
             if args.task_action == "amend":
-                prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-                payload.update(action="task.amend", prompt=prompt)
+                payload.update(action="task.amend", prompt=prompt_from(args))
             elif args.task_action == "verify":
                 payload.update(action="task.verify", evidence=args.evidence, approved=args.approve)
             elif args.task_action == "reject":
@@ -1554,7 +1583,7 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     Raises ``ValueError`` for conflicting modes or an unusable folder before any
     store is opened, so a rejected command leaves no database behind.
     """
-    prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+    prompt = prompt_from(args)
     _reject_conflicting_modes(args)
     args.cwd = _validated_cwd(args.cwd)
     args.providers, args.routes = creation_rotation(args.providers, args.routes)
@@ -2101,8 +2130,8 @@ def _worker_command(args: argparse.Namespace) -> int:
     from . import bridge_worker as worker
 
     if args.worker_action == "enroll":
-        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
-        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        token = read_verbatim(args.token_file, "--token-file").strip()
+        ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
         config = worker.enroll(args.name, args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
                                allow_terminal_view=bool(args.allow_terminal_view))
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
@@ -2153,8 +2182,8 @@ def _remote_command(args: argparse.Namespace) -> int:
     from . import bridge_remote as remote
 
     if args.remote_action == "login":
-        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
-        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        token = read_verbatim(args.token_file, "--token-file").strip()
+        ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
         config = remote.login(args.coordinator, token, ca_pem=ca_pem)
         print(f"Remote targets now go through {config.coordinator_url}. List them with: llm-bridge worker list")
         return 0
@@ -2562,7 +2591,7 @@ def _main(argv: list[str] | None = None) -> int:
                         "task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or ""),
                     }, mission_id=args.mission))
                 else:
-                    prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+                    prompt = prompt_from(args)
                     payload = {
                         "action": "task.propose",
                         "source_operation_id": args.source_operation_id,

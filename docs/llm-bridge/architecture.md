@@ -195,7 +195,7 @@ llm-bridge task amend --mission ID --task ID --file amendment.md
 llm-bridge task priority|reorder|dependencies --mission ID --task ID ...
 llm-bridge task pause|resume|cancel|retry|verify --mission ID --task ID
 llm-bridge task verify --mission ID --task ID --approve
-llm-bridge events --mission ID [--after ID] [--limit N] [--json]
+llm-bridge events --mission ID [--after ID] [--since AGE] [--limit N] [--follow] [--verbose] [--json]
 llm-bridge doctor [--mission ID] [--json]
 ```
 

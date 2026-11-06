@@ -155,9 +155,19 @@ List missions with `llm-bridge mission list`, and inspect one with:
 
 ```bash
 llm-bridge status --mission MISSION_ID
-llm-bridge events --mission MISSION_ID --after 0 --limit 100
+llm-bridge events --mission MISSION_ID --limit 20
+llm-bridge events --mission MISSION_ID --since 10m --follow
 llm-bridge doctor --mission MISSION_ID
 ```
+
+`events` shows the newest events (the last 100 by default), oldest first, in the
+same words as the console's Activity view. Controller bookkeeping (heartbeats,
+mode, prompt and wake records) is hidden unless `--verbose` is given. `--since 10m`
+keeps only recent events (`90s`, `2h`, `1d`), `--follow` prints new events until
+Ctrl-C, and `--after ID` reads oldest first from an event ID. Event IDs are
+global across all missions, so a mission's first event is not ID 1. A
+`command-rejected` event carries the reason the command was refused. `--json`
+keeps the raw fields (`kind`, `data`) and adds the `total` of matching events.
 
 `status` reports the mission, tasks and their states, recent operations,
 pending commands, and recent events. `--json` selects machine-readable output;
