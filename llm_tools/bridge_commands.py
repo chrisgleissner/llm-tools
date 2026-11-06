@@ -238,6 +238,29 @@ def _task_show(store: BridgeStore | None, request: CommandRequest, params: dict[
         raise CommandFailure("not-found", str(exc)) from None
 
 
+def _review_task(store: BridgeStore, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """The task whose last run is read; ``dispatch`` has already turned ``task_number`` into ``task_id``."""
+    assert request.mission_id is not None
+    try:
+        return dict(_cli()._require_task(store, request.mission_id, params["task_id"]))
+    except TransitionError as exc:
+        raise CommandFailure("not-found", str(exc)) from None
+
+
+def _task_output(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from . import bridge_review
+
+    assert store is not None and request.mission_id is not None
+    return bridge_review.task_output(store, request.mission_id, _review_task(store, request, params))
+
+
+def _task_diff(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from . import bridge_review
+
+    assert store is not None and request.mission_id is not None
+    return bridge_review.task_diff(store, request.mission_id, _review_task(store, request, params))
+
+
 def _task_list(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     assert store is not None and request.mission_id is not None
     limit, offset = params["limit"], params["offset"]
@@ -435,6 +458,8 @@ OPERATIONS: dict[str, OperationSpec] = {
             _task_list,
         ),
         OperationSpec("task.show", "Show one task", False, True, _TASK_SELECTOR, _task_show),
+        OperationSpec("task.output", "End of the retained provider log of a task's last run", False, True, _TASK_SELECTOR, _task_output),
+        OperationSpec("task.diff", "Workspace change since the start of a task's last run", False, True, _TASK_SELECTOR, _task_diff),
         OperationSpec(
             "task.add",
             "Add a task",

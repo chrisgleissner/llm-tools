@@ -173,7 +173,7 @@ def _is_read_only(args: argparse.Namespace) -> bool:
     if command in {"status", "events", "doctor", "agents"}:
         return True
     if command == "task":
-        return getattr(args, "task_action", "") in {"list", "show"}
+        return getattr(args, "task_action", "") in {"list", "show", "output", "diff"}
     if command == "proposal":
         return getattr(args, "proposal_action", "") == "list"
     if command == "rotation":
@@ -536,7 +536,7 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
 
 def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) -> Any:
     """Shared standalone/interactive task parser result and durable handler."""
-    with open_store(readonly=args.task_action in {"list", "show"}) as store:
+    with open_store(readonly=args.task_action in {"list", "show", "output", "diff"}) as store:
         if args.task_action == "add":
             prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
             dep_ids = _dependency_ids(store, args.mission, args.depends_on)
@@ -552,6 +552,9 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
         elif args.task_action == "show":
             task_id = int(_resolve_task(store, args.mission, args.task, args.task_by_id)["id"])
             result = commands.dispatch(commands.CommandRequest("task.show", {"task_id": task_id}, mission_id=args.mission))
+        elif args.task_action in {"output", "diff"}:
+            task_id = int(_resolve_task(store, args.mission, args.task, args.task_by_id)["id"])
+            result = commands.dispatch(commands.CommandRequest(f"task.{args.task_action}", {"task_id": task_id}, mission_id=args.mission))
         else:
             task = _resolve_task(store, args.mission, args.task, args.task_by_id)
             payload: dict[str, Any] = {"task_id": int(task["id"])}
@@ -683,7 +686,7 @@ def expand_reject_alias(words: list[str], waiting: Callable[[], list[int]]) -> t
 
 # Console commands that only read state and print text meant for people.
 # The control pane's own readers (opening a task for editing) pass --json.
-_CONSOLE_HUMAN_COMMANDS = frozenset({("status",), ("events",), ("theme",), ("doctor",), ("rotation",), ("missions",), ("mission", "list"), ("proposal", "list"), ("task", "list"), ("task", "show")})
+_CONSOLE_HUMAN_COMMANDS = frozenset({("status",), ("events",), ("theme",), ("doctor",), ("rotation",), ("missions",), ("mission", "list"), ("proposal", "list"), ("task", "list"), ("task", "show"), ("task", "output"), ("task", "diff")})
 
 
 def _console_human(words: list[str]) -> bool:
@@ -848,6 +851,8 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             result = _task_result(args, preserve_receipt=True)
             if isinstance(result, dict) and result.get("status") == "REJECTED":
                 return "error: " + str((result.get("result") or {}).get("error", "command rejected"))
+            if human and words[1] in {"output", "diff"} and isinstance(result, dict):
+                return str(result["text"]) if result.get("available") else f"error: {result.get('message')}"
             if human:
                 return fmt.format_task_detail(result) if words[:2] == ["task", "show"] and isinstance(result, dict) else fmt.format_task_list(result)
             return json.dumps(result, ensure_ascii=False, indent=2)
@@ -1193,6 +1198,15 @@ def _build_parser(
     _add_mission_arg(show, default_mission)
     _add_task_selector(show)
     _add_json_arg(show)
+    output = task_sub.add_parser("output", help="read the provider's output of a task's last run")
+    _add_mission_arg(output, default_mission)
+    _add_task_selector(output)
+    output.add_argument("--follow", action="store_true", help="follow a log that is still growing; Up pauses, End resumes (needs a terminal)")
+    _add_json_arg(output)
+    diff = task_sub.add_parser("diff", help="show the files a task's last run changed in the working tree")
+    _add_mission_arg(diff, default_mission)
+    _add_task_selector(diff)
+    _add_json_arg(diff)
     amend = task_sub.add_parser("amend")
     _add_mission_arg(amend, default_mission)
     _add_task_selector(amend)
@@ -1826,6 +1840,37 @@ def _task_text(args: argparse.Namespace) -> Callable[[Any], str]:
     return lambda value: fmt.format_task_result(action, value)
 
 
+def _print_task_evidence(args: argparse.Namespace, result: dict[str, Any]) -> int:
+    """Print `task output` or `task diff`: JSON, plain text, or the log in the document viewer on a terminal."""
+    available = bool(result.get("available"))
+    if getattr(args, "json", False):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if available else 2
+    if not available:
+        print(f"llm-bridge: {result.get('message')}", file=sys.stderr)
+        return 2
+    if args.task_action == "diff":
+        sys.stdout.write(str(result["text"]))
+        return 0
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    if args.follow and not interactive:
+        raise ValueError("--follow needs an interactive terminal; omit it to print the log")
+    path = Path(str(result["path"]))
+    if interactive:
+        from .bridge_viewer import MAX_SOURCE_BYTES, run_document
+
+        title = f"Output · task {result.get('task')} · {result.get('provider') or 'provider'}"
+        if args.follow:
+            return run_document("", title=title, path=path, follow=True)
+        return run_document(path.read_bytes()[-MAX_SOURCE_BYTES:].decode("utf-8", "replace"), title=title)
+    import shutil
+
+    with path.open("rb") as stream:
+        shutil.copyfileobj(stream, sys.stdout.buffer)
+    sys.stdout.buffer.flush()
+    return 0
+
+
 def _proposal_text(args: argparse.Namespace) -> Callable[[Any], str]:
     if args.proposal_action == "list":
         return lambda value: fmt.format_proposals(value["proposals"])
@@ -2430,6 +2475,8 @@ def _main(argv: list[str] | None = None) -> int:
                 detail = result.get("result") or {}
                 print(f"llm-bridge: {detail.get('error', 'command rejected')}", file=sys.stderr)
                 return 2
+            if args.task_action in {"output", "diff"}:
+                return _print_task_evidence(args, result)
             if getattr(args, "json", False) and isinstance(result, fmt.TaskPage) and result.total is not None and len(result) < result.total - result.offset:
                 print(f"llm-bridge: listed {len(result)} of {result.total} tasks from position {result.offset + 1}; use --all for every task", file=sys.stderr)
             _print_result(result, bool(getattr(args, "json", False)), _task_text(args))
