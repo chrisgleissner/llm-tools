@@ -3092,13 +3092,11 @@ def _main(argv: list[str] | None = None) -> int:
                     mission = store.get_mission(args.mission)
                     if mission["status"] in STARTED_MISSION_STATUSES:
                         store.set_mission_status(args.mission, "STOPPING")
-                    operations = [
-                        dict(row)
-                        for row in store.db.execute(
-                            "SELECT id,process_pid,process_start,pane_id,status FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
-                            (args.mission,),
-                        )
-                    ]
+                    from .bridge_runtime import provider_operations_to_check
+
+                    # Includes UNCERTAIN operations that kept a process identity, so a second `stop --force`
+                    # retries a termination that failed the first time.
+                    operations = provider_operations_to_check(store, args.mission)
                     store.reconcile_interrupted_operations(args.mission, cause="stop-force")
                 # Verifiers use their own process groups. Stop those validated
                 # identities before terminating the controller that owns them.
@@ -3115,14 +3113,17 @@ def _main(argv: list[str] | None = None) -> int:
                     backend = None
                     handle = None  # type: ignore[assignment]  # checked on the next line
                 if handle is not None and backend is not None:
-                    provider_stopped = bool(operations)
+                    provider_stopped = any(operation["status"] != "UNCERTAIN" for operation in operations)
                     backend.stop(handle)
                 elif operations:
-                    from .bridge_runtime import _terminate_owned_process_group
+                    from .bridge_runtime import _process_start_token, _terminate_owned_process_group
 
                     for operation in operations:
                         process_pid = operation.get("process_pid")
                         process_start = operation.get("process_start")
+                        current_token = _process_start_token(int(process_pid)) if process_pid else ""
+                        if process_pid and process_start and current_token and current_token != str(process_start):
+                            continue  # the recorded provider is gone and its PID was reused: nothing to signal
                         if not process_pid:
                             # No provider process was ever recorded (the operation is still
                             # waiting to launch); the controller is stopped below.
@@ -3148,9 +3149,11 @@ def _main(argv: list[str] | None = None) -> int:
                     from .bridge_runtime import _process_start_token, _terminate_owned_process_group
 
                     current_start = _process_start_token(controller_pid)
-                    if current_start and current_start != controller_start:
+                    reused = bool(current_start) and current_start != controller_start
+                    if reused and MissionLock.is_held(state_dir() / "locks", args.mission):
+                        # The PID is someone else's, yet a process still owns the mission: its identity is unknown.
                         raise RuntimeError("controller PID no longer matches its persisted identity; mission remains STOPPING")
-                    if current_start:
+                    if current_start and not reused:
                         _terminate_owned_process_group(controller_pid, controller_start)
                 # The lock, not the ready file, is the controller-liveness
                 # authority. Do not claim STOPPED until ownership is released.

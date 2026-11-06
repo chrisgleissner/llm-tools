@@ -1733,6 +1733,24 @@ def _process_alive_but_unverifiable(process_pid: int) -> bool:
     return bool(tail and tail[0] != "Z")
 
 
+def provider_operations_to_check(store: BridgeStore, mission_id: str) -> list[dict[str, Any]]:
+    """Operations whose provider process may still be alive and must be checked before replacement work.
+
+    Unresolved operations, plus UNCERTAIN ones that kept a recorded process identity: a recovery that was
+    refused or failed part way marked its operations UNCERTAIN, and the next attempt must still see them.
+    A recorded identity that no longer matches a live process is skipped, so old rows cost one ``/proc`` read.
+    """
+    return [
+        dict(row)
+        for row in store.db.execute(
+            "SELECT * FROM operations WHERE mission_id=? AND (status IN ('INTENT','PREPARED','RUNNING') OR "
+            "(status='UNCERTAIN' AND process_pid IS NOT NULL AND process_start IS NOT NULL AND process_start!='')) "
+            "ORDER BY rowid DESC LIMIT 50",
+            (mission_id,),
+        )
+    ]
+
+
 def _terminate_owned_process_group(process_pid: int, process_start: str, *, timeout: float = 2.0) -> None:
     if process_pid < 2 or not process_start:
         raise PermissionError("refusing to signal a process whose persisted identity does not match")
@@ -2090,23 +2108,14 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         headless, native_tui = effective_headless, effective_native_tui
         providers = str(providers or mission["config"].get("providers", "claude,codex,opencode"))
         routes = str(mission["config"].get("routes", "")) if routes is None else str(routes)
-        interrupted = [
-            dict(row)
-            for row in store.db.execute(
-                "SELECT * FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
-                (mission_id,),
-            )
-        ]
+        interrupted = provider_operations_to_check(store, mission_id)
         interrupted_managed = store.unresolved_managed_processes(mission_id)
-        # Ownership is established before recovery. An unresolved operation is
-        # uncertain; its task is blocked and is never replayed automatically.
-        store.reconcile_interrupted_operations(mission_id)
-        if interrupted_managed:
-            terminate_managed_processes(store, mission_id)
         # A controller crash does not kill a native tmux pane or a detached
         # headless process group. Resolve those exact owned identities before
-        # creating a replacement controller/station, after first making the
-        # durable operation UNCERTAIN so recovery cannot replay it.
+        # creating a replacement controller/station. The checks run before the
+        # operations are marked UNCERTAIN: a refusal or a failed termination
+        # leaves them unresolved, so the next start repeats the check instead
+        # of finding nothing to check and starting replacement work.
         prior_handle: TerminalHandle | None = None
         if not prior_headless and shutil.which("tmux"):
             prior_handle = _open_existing(TmuxTerminalBackend(), runtime, mission_id)
@@ -2117,18 +2126,21 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             process_pid = operation.get("process_pid")
             process_start = operation.get("process_start")
             if process_pid and process_start and int(process_pid) not in terminated_pids:
-                current_identity = _process_start_token(int(process_pid))
-                if current_identity and current_identity != str(process_start):
-                    raise PermissionError(
-                        f"persisted provider pid {process_pid} now belongs to a different process; refusing recovery cleanup"
-                    )
-                if current_identity:
+                # A different start token at that PID means the recorded provider is gone and the PID
+                # was reused: there is nothing to signal, and the unrelated process is never touched.
+                if _process_start_token(int(process_pid)) == str(process_start):
                     _terminate_owned_process_group(int(process_pid), str(process_start))
                 terminated_pids.add(int(process_pid))
             elif operation["status"] == "RUNNING" and (prior_headless or prior_handle is None):
                 raise RuntimeError(
-                    f"cannot prove identity of surviving provider operation {operation['id']}; refusing to start replacement work"
+                    f"cannot prove identity of surviving provider operation {operation['id']}; refusing to start replacement work "
+                    f"· if no provider is running, acknowledge that with: llm-bridge stop --force --mission {mission_id[:8]}, then start again"
                 )
+        # Ownership is established before recovery. An unresolved operation is
+        # uncertain; its task is blocked and is never replayed automatically.
+        store.reconcile_interrupted_operations(mission_id)
+        if interrupted_managed:
+            terminate_managed_processes(store, mission_id)
         for command in store.pending_commands(mission_id):
             store.finish_command(command["id"], status="REJECTED", result={"error": "controller restarted; queued command was not replayed"})
         store.release_declined_tasks(mission_id)

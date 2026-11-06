@@ -247,3 +247,107 @@ def test_int007_setup_failure_after_the_mission_is_running_records_failure(tmp_p
     assert store.get_mission(mission["id"])["status"] == "FAILED"
     failed = [event for event in store.events(mission["id"]) if event["kind"] == "controller-failed"]
     assert len(failed) == 1 and "frozen tool config" in failed[0]["data"]["reason"]
+
+
+def _sleeper_operation(tmp_path, monkeypatch):
+    """A headless mission whose RUNNING operation names a live provider process with a verified identity."""
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    store = BridgeStore(tmp_path / "state" / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path, config={"headless": True})
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation_id = store.begin_operation(task_id, iteration=1, station="codex")
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    store.mark_operation_running(operation_id, process_pid=process.pid, process_start=runtime._process_start_token(process.pid))
+    return store, mission["id"], operation_id, process
+
+
+def _fail_once(real):
+    calls: list[int] = []
+
+    def terminate(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("could not terminate the provider")
+        return real(*args, **kwargs)
+
+    return terminate
+
+
+def test_int003_controller_start_retries_a_failed_provider_termination(tmp_path, monkeypatch) -> None:
+    import os
+    import signal
+
+    store, mission_id, operation_id, process = _sleeper_operation(tmp_path, monkeypatch)
+    monkeypatch.setattr(runtime, "_terminate_owned_process_group", _fail_once(runtime._terminate_owned_process_group))
+    monkeypatch.setattr(runtime.ralph_robin, "main", lambda *_a, **_k: 0)
+    try:
+        with pytest.raises(RuntimeError, match="could not terminate"):
+            runtime.run_controller(mission_id, headless=True)
+        assert process.poll() is None
+
+        runtime.run_controller(mission_id, headless=True)  # the second start must still see the provider
+
+        process.wait(timeout=5)  # the old code found no unresolved operation on the second start and left it running
+        assert store.get_operation(operation_id)["status"] == "UNCERTAIN"
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+
+
+def test_int003_second_force_stop_retries_a_failed_provider_termination(tmp_path, monkeypatch) -> None:
+    import os
+    import signal
+
+    from llm_tools import bridge
+
+    store, mission_id, _operation_id, process = _sleeper_operation(tmp_path, monkeypatch)
+    monkeypatch.setattr(runtime, "_terminate_owned_process_group", _fail_once(runtime._terminate_owned_process_group))
+    try:
+        assert bridge.main(["stop", "--mission", mission_id, "--force"]) == 1
+        assert process.poll() is None
+        assert store.get_mission(mission_id)["status"] == "STOPPING"
+
+        assert bridge.main(["stop", "--mission", mission_id, "--force"]) == 0
+
+        process.wait(timeout=5)  # the old code found no unresolved operation on the second attempt
+        assert store.get_mission(mission_id)["status"] == "STOPPED"
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+
+
+def test_int003_force_stop_treats_a_reused_controller_pid_as_a_dead_controller(tmp_path, monkeypatch) -> None:
+    import json
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    from llm_tools import bridge
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    store = BridgeStore(tmp_path / "state" / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path, config={"headless": True})
+    store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    runtime_dir = tmp_path / "state" / "runtime" / f"mission-{mission['id']}"
+    runtime_dir.mkdir(mode=0o700, parents=True)
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    (runtime_dir / "controller-ready.json").write_text(json.dumps({
+        "pid": unrelated.pid, "process_start": "boot:from-before-the-reboot", "startup_token": "t", "status": "RUNNING",
+    }), encoding="utf-8")
+    try:
+        # The mission lock is free and the PID belongs to another process: the old controller is certainly gone.
+        assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 0
+
+        assert store.get_mission(mission["id"])["status"] == "STOPPED"
+        assert unrelated.poll() is None  # never signalled
+    finally:
+        os.killpg(unrelated.pid, signal.SIGKILL)
+        unrelated.wait(timeout=5)
