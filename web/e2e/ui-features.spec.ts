@@ -180,7 +180,7 @@ test.describe("with a seeded worker", () => {
 
 test("mission activity humanizes, filters, and collapses system events", async ({ page }) => {
   const { mockApp, MISSION_PATH } = await import("./mock");
-  await mockApp(page, { auth: "in" });
+  const mock = await mockApp(page, { auth: "in", terminalClose: true });
   await page.goto("/");
   const overviewActivity = page.locator("#activity");
   await expect(overviewActivity).toContainText("Mission created");
@@ -192,6 +192,8 @@ test("mission activity humanizes, filters, and collapses system events", async (
 
   await page.goto(MISSION_PATH);
   const events = page.locator("#events-list");
+  await expect(events).toContainText("Terminal opened");
+  await expect(events).toContainText("Terminal closed · Terminal closed by test");
   await expect(events).toContainText("Mission created");
   await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
   await expect(events).not.toContainText("do-not-render-this");
@@ -212,6 +214,20 @@ test("mission activity humanizes, filters, and collapses system events", async (
   await page.getByLabel("Filter by event kind").selectOption("task-added");
   await expect(events).toContainText("Task added · Task 3 · Write a regression test");
   await expect(events).not.toContainText("RUNNING → VERIFYING");
+  await page.getByLabel("Filter by event kind").selectOption("all");
+  mock.emitStream({ type: "worker", worker: "alpha", state: "offline" });
+  await expect(events).toContainText("Worker offline · alpha");
+  await page.getByLabel("Filter events").selectOption("terminal");
+  await expect(events).toContainText("Terminal opened");
+  await expect(events).not.toContainText("Worker offline");
+  await page.getByLabel("Filter by event kind").selectOption("terminal-closed");
+  await expect(events).toContainText("Terminal closed · Terminal closed by test");
+  await expect(events).not.toContainText("Terminal opened");
+  await page.getByLabel("Filter by event kind").selectOption("all");
+  await page.getByLabel("Filter events").selectOption("worker");
+  await expect(events).toContainText("Worker offline · alpha");
+  await expect(events).not.toContainText("Terminal opened");
+  await page.getByLabel("Filter events").selectOption("all");
   await page.getByLabel("Filter by event kind").selectOption("all");
   await page.getByLabel("Filter events").selectOption("task");
   await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");

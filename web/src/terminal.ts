@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { button, h } from "./dom";
 import { announce } from "./ui";
+import { publishStreamMessage } from "./store";
 
 export type TermState = "idle" | "connecting" | "live" | "reconnecting" | "ended";
 
@@ -103,6 +104,7 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
   let paneCols = 0;
   let paneRows = 0;
   let follow = true; // keep the newest output in view until the user scrolls up
+  let activityOpened = false;
 
   function setState(next: TermState, detail = ""): void {
     state = next;
@@ -249,6 +251,13 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
         reason = typeof f.reason === "string" ? f.reason : "";
         paneCols = f.cols;
         paneRows = f.rows;
+        // The browser sees this worker status over the scoped terminal relay; it is live activity, not event history.
+        if (!activityOpened) {
+          activityOpened = true;
+          publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: "opened", mode, reason });
+        } else if (was !== `${mode}|${reason}`) {
+          publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: "mode-changed", mode, reason });
+        }
         if (t.cols !== f.cols || t.rows !== f.rows) {
           t.resize(f.cols, f.rows);
           // Shrinking the pane can leave the scroll position mid-buffer; keep following the tail unless the user scrolled away.
@@ -261,7 +270,10 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
         if (was !== `${mode}|${reason}`) announce(mode === "write" ? "Terminal: you have control." : `Terminal: view only${reason ? ` (${reason})` : ""}.`);
         if (mode === "write") t.focus();
       } else if (f.t === "x") {
-        endSession(typeof f.reason === "string" && f.reason ? f.reason : "The session ended.");
+        const endReason = typeof f.reason === "string" && f.reason ? f.reason : "The session ended.";
+        publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: activityOpened ? "closed" : "refused", mode, reason: endReason });
+        activityOpened = false;
+        endSession(endReason);
       }
     };
     socket.onclose = () => {

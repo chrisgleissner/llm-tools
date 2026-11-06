@@ -49,12 +49,14 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   let tOrder: "asc" | "desc" = "asc";
   let taskOffset = 0;
   let events: BridgeEvent[] = [];
+  let liveEvents: BridgeEvent[] = [];
   let eventShown = EVENT_PAGE;
   let eventStart = 0; // lowest cursor already requested
   let eventError = "";
   let eventFilter: "all" | EventCategory = "all";
   let eventKindFilter = "all";
   let showPlumbing = false;
+  let liveEventId = 0;
   let disposed = false;
   let termPanel: TerminalPanel | null = null;
 
@@ -311,7 +313,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   }, 200);
 
   function renderEvents(): void {
-    const newest = [...events].reverse();
+    const allEvents = [...events, ...liveEvents];
+    const newest = [...allEvents].reverse();
     const categoryEvents = newest.filter((event) =>
       (eventFilter === "all" || eventCategory(event.kind) === eventFilter)
       && (eventKindFilter === "all" || event.kind === eventKindFilter),
@@ -324,10 +327,10 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       eventShown = EVENT_PAGE;
       renderEvents();
     } },
-      ...(["all", "task", "command", "provider", "system"] as const).map((category) =>
+      ...(["all", "task", "command", "worker", "terminal", "provider", "system"] as const).map((category) =>
         h("option", { value: category, selected: eventFilter === category }, category === "all" ? "All event types" : `${category[0]!.toUpperCase()}${category.slice(1)} events`)),
     );
-    const kinds = [...new Set(events.map((event) => event.kind))].sort();
+    const kinds = [...new Set(allEvents.map((event) => event.kind))].sort();
     const kindFilter = h("select", { id: "event-kind-filter", "aria-label": "Filter by event kind", onchange: (event: Event) => {
       eventKindFilter = (event.currentTarget as HTMLSelectElement).value;
       eventShown = EVENT_PAGE;
@@ -345,7 +348,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       h("h2", { id: "ms-events" }, "Activity"),
       h("div", { class: "event-controls" }, filter, kindFilter, toggle),
       eventError ? h("p", { class: "notice", role: "status" }, eventError) : null,
-      events.length === 0
+      allEvents.length === 0
         ? h("p", { class: "muted" }, "No events loaded.")
         : visible.length === 0
           ? h("p", { class: "muted" }, "No events match this filter.")
@@ -438,6 +441,24 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   }
 
   const offStream = onStream((msg) => {
+    // Coordinator worker-state broadcasts and terminal-relay statuses are live-only; neither is in /api/v1/events.
+    if (msg.type === "worker" && msg.worker === workerName && (msg.state === "online" || msg.state === "offline")) {
+      liveEvents = [...liveEvents, {
+        id: -(++liveEventId), mission_id: missionId, task_id: null,
+        kind: `worker-${msg.state}`, data: { name: workerName }, created_at: new Date().toISOString(),
+      }];
+      renderEvents();
+      return;
+    }
+    if (msg.type === "terminal" && msg.worker === workerName && msg.mission_id === missionId) {
+      const kind = msg.state === "opened" ? "terminal-opened" : msg.state === "mode-changed" ? "terminal-mode-changed" : msg.state === "refused" ? "terminal-refused" : "terminal-closed";
+      liveEvents = [...liveEvents, {
+        id: -(++liveEventId), mission_id: missionId, task_id: null, kind,
+        data: { mode: msg.mode ?? "view", reason: msg.reason ?? "" }, created_at: new Date().toISOString(),
+      }];
+      renderEvents();
+      return;
+    }
     if (msg.type === "event" && msg.worker === workerName && msg.events) {
       const mine = msg.events.filter((e) => e["mission_id"] === missionId).map(normalize);
       if (mine.length) {

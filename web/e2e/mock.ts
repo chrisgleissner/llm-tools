@@ -1,6 +1,6 @@
 // Deterministic API for screenshot and accessibility tests: every /api/v1 call is answered from fixed data and the
 // clock is fixed. The page itself is the real built application served by the real coordinator.
-import type { Page, Route } from "@playwright/test";
+import type { Page, Route, WebSocketRoute } from "@playwright/test";
 
 export const NOW = new Date("2026-11-05T12:00:00Z");
 const nowS = Math.floor(NOW.getTime() / 1000);
@@ -18,6 +18,8 @@ export interface MockOptions {
   sessionRemembered?: boolean;
   /** Answer the terminal WebSocket with a fixed provider screen (used for the site screenshots). */
   terminalScreen?: boolean;
+  /** End the terminal session after its actual opened status frame. */
+  terminalClose?: boolean;
   /** A typed, text-free Codex question indication for Needs attention. */
   providerQuestion?: boolean;
 }
@@ -111,11 +113,13 @@ export interface Mock {
   /** Switch what /auth/state reports (used to simulate an expired session). */
   setAuth(mode: AuthMode): void;
   terminalInputCount(): number;
+  emitStream(message: Record<string, unknown>): void;
 }
 
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
   let terminalInputs = 0;
+  let streamSocket: WebSocketRoute | null = null;
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
   const providerNeedsYou = { kind: "provider", tasks: [], message: "Codex asks: Should I continue? · Choices: 1. Continue; 2. Stop · take control of the terminal to answer", command: "llm-bridge attach --mission 01a1b2c3" };
@@ -123,16 +127,19 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     opts.providerQuestion && i === 0 ? { ...entry, mission: { ...entry.mission, needs_you: providerNeedsYou } } : { ...entry, mission: { ...entry.mission } },
   );
   const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
-  await page.routeWebSocket(/\/api\/v1\/stream/, () => {
-    /* connected, silent: the page shows "Live" */
+  await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
+    streamSocket = ws;
   });
   await page.routeWebSocket(/\/api\/v1\/terminal/, (ws) => {
     ws.onMessage((message) => {
       if (typeof message !== "string") return;
       try { if ((JSON.parse(message) as { t?: string }).t === "i") terminalInputs += 1; } catch { /* ignore malformed test frames */ }
     });
-    ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "view", reason: "" }));
-    if (opts.terminalScreen) ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
+    setTimeout(() => {
+      ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "view", reason: "" }));
+      if (opts.terminalScreen) ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
+      if (opts.terminalClose) ws.send(JSON.stringify({ t: "x", reason: "Terminal closed by test" }));
+    }, 50);
   });
   await page.route("**/api/v1/**", async (route) => {
     const req = route.request();
@@ -243,5 +250,9 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     return json(route, 404, { error: { code: "not-found", message: `unmocked ${method} ${path}` } });
   });
-  return { setAuth: (m) => void (auth = m), terminalInputCount: () => terminalInputs };
+  return {
+    setAuth: (m) => void (auth = m),
+    terminalInputCount: () => terminalInputs,
+    emitStream: (message) => streamSocket?.send(JSON.stringify(message)),
+  };
 }

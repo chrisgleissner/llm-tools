@@ -1,7 +1,7 @@
 import type { BridgeEvent } from "./api";
 import { TUI_EVENT_PHRASES } from "./event-phrases.generated";
 
-export type EventCategory = "task" | "command" | "provider" | "system";
+export type EventCategory = "task" | "command" | "worker" | "terminal" | "provider" | "system";
 
 const PLUMBING = new Set([
   "controller-heartbeat", "capacity-refresh", "controller-heartbeat-error", "capacity-refresh-error",
@@ -36,7 +36,7 @@ export function humanizeEvent(event: Pick<BridgeEvent, "kind" | "task_id" | "dat
   if (model) details.push(model);
   if (kind.startsWith("command-") && value(data["command"])) details.push(value(data["command"]));
   if (kind === "operation-exited" && Number.isFinite(Number(data["exit_code"]))) details.push(`exit ${String(data["exit_code"]).slice(0, 8)}`);
-  if (reason && ["provider-wait", "provider-handoff", "provider-handoff-exhausted", "operation-uncertain", "operation-aborted-before-launch"].includes(kind)) details.push(reason);
+  if (reason && (["provider-wait", "provider-handoff", "provider-handoff-exhausted", "operation-uncertain", "operation-aborted-before-launch"].includes(kind) || kind.startsWith("terminal-"))) details.push(reason);
 
   const base = TUI_EVENT_PHRASES[kind] ?? kind.replace(/[-_.]/g, " ").replace(/^./, (c) => c.toUpperCase());
   if (kind.startsWith("command-") && value(data["command"])) return `${base}: ${value(data["command"])}`;
@@ -50,6 +50,8 @@ export function humanizeEvent(event: Pick<BridgeEvent, "kind" | "task_id" | "dat
 export function eventCategory(kind: string): EventCategory {
   if (kind.startsWith("task-") || kind.startsWith("verification-") || kind.startsWith("dependency-")) return "task";
   if (kind.startsWith("command-")) return "command";
+  if (kind.startsWith("worker-")) return "worker";
+  if (kind.startsWith("terminal-")) return "terminal";
   if (kind.startsWith("provider-") || kind.startsWith("operation-") || kind.startsWith("capacity-")) return "provider";
   return "system";
 }

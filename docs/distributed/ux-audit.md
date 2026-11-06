@@ -35,7 +35,7 @@ All screen states are rendered in both themes at desktop and Pixel 4 and scanned
 
 Overview and mission detail now share a browser phrase table generated from the production TUI humanizers. Task, command and provider activity is visible by default; bookkeeping events can be expanded as system activity. Mission detail offers both category and event-kind filters. Event payload rendering uses an explicit field allowlist, and a command-details link appears only when an event includes a valid request ID. `web/test_event_phrases.py` checks the generated artifact against every TUI kind; `web/e2e/ui-features.spec.ts` exercises humanized events, filters, collapsed system activity, command links, and rejection of an unlisted private payload field on desktop and Pixel 4.
 
-The event stream does not currently persist worker online/offline or terminal lifecycle history, and mission command events store a local command ID rather than the coordinator request ID. The interface does not invent those history rows; command detail links are shown only when the actual request ID is present.
+The event stream does not currently persist worker online/offline or terminal lifecycle history. The mission page adds worker-state entries only from real coordinator stream messages and terminal-session entries only from real terminal status/end frames, so these are live-only and appear after the page is open. Terminal frames do not include a session ID. Mission command events store a local command ID rather than the coordinator request ID; command detail links are shown only when the actual request ID is present.
 
 ## Before / after task measures
 
