@@ -329,6 +329,11 @@ impl Db {
             .execute("UPDATE commands SET updated_at=? WHERE request_id=?", params![updated_at, id])?;
         Ok(())
     }
+    /// Test hook: backdate a worker's stored `last_seen`.
+    pub fn worker_age(&self, name: &str, last_seen: i64) -> R<()> {
+        self.c().execute("UPDATE workers SET last_seen=? WHERE name=?", params![last_seen, name])?;
+        Ok(())
+    }
     pub fn sessions_clear(&self) -> R<()> {
         self.c().execute("DELETE FROM sessions", [])?;
         Ok(())

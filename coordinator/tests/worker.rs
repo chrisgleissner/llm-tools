@@ -27,6 +27,11 @@ async fn worker_authentication() {
     let (_, list) = api.get("/api/v1/workers").await;
     assert_eq!(list["workers"][0]["state"], "online");
     assert_eq!(list["workers"][0]["id"], "wid1");
+    // The stored last_seen is written only every ten minutes; a connected worker still reads as seen now.
+    env.srv.state.db.worker_age("w1", 1).unwrap();
+    let (_, list) = api.get("/api/v1/workers").await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    assert!(now - list["workers"][0]["last_seen"].as_i64().unwrap() <= 5, "{list}");
     let (_, missions) = api.get("/api/v1/missions").await;
     assert_eq!(missions["missions"][0]["mission"]["id"], "m1");
     assert_eq!(missions["missions"][0]["stale"], false);

@@ -531,8 +531,12 @@ async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buff
 // ---------------------------------------------------------------- handlers: workers, missions, events
 
 fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
-    json!({"name": w.name, "id": w.worker_id, "state": if st.hub.online(&w.name) { "online" } else { "offline" },
-           "last_seen": w.last_seen, "generation": w.generation, "event_cursor": w.event_cursor,
+    // A connected worker has been heard from within the last ping interval; the stored value is
+    // persisted only every few minutes (ws_worker.rs LAST_SEEN_EVERY_SECS) to spare storage.
+    let online = st.hub.online(&w.name);
+    let last_seen = if online { Some(crate::now()) } else { w.last_seen };
+    json!({"name": w.name, "id": w.worker_id, "state": if online { "online" } else { "offline" },
+           "last_seen": last_seen, "generation": w.generation, "event_cursor": w.event_cursor,
            "versions": {"software": w.software_version, "protocol": w.protocol_versions},
            "platform": w.platform, "capabilities": w.capabilities})
 }
