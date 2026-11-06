@@ -613,7 +613,7 @@ def _operator(action: str) -> Handler:
                     try:
                         dependency_ids.append(int(reader.task_by_ordinal(request.mission_id, int(number))["id"]))
                     except (KeyError, ValueError, TransitionError) as exc:
-                        raise CommandFailure("not-found", f"dependency task number {number} was not found") from exc
+                        raise CommandFailure("not-found", f"there is no task {number}") from exc
             if action == "task.add":
                 payload["depends_on"] = [*payload.get("depends_on", []), *dependency_ids]
             elif dependency_ids:
