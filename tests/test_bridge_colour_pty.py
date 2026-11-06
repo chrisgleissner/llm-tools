@@ -143,7 +143,10 @@ def test_console_opened_from_the_home_screen_is_pure_ascii_in_the_c_locale(seede
     output = run(env, work, OPEN_CONSOLE)
     assert [byte for byte in output if byte > 0x7F] == [], output[-600:]
     screen = tmux_screen(env, work, tmp_path, ["Down", "Enter"])
-    assert screen.splitlines()[0].startswith("LLM BRIDGE | | ") and "o CREATED" in screen.splitlines()[0]  # chip and state glyph fall back
+    header = screen.splitlines()[0]
+    # In ASCII mode the identity chip is left out (bridge_tui, ascii_mode) and the state glyph falls back to "o";
+    # the console golden screens (console-overview.*.ascii) show the same header shape.
+    assert header.startswith("LLM BRIDGE | ") and not header.startswith("LLM BRIDGE | | ") and "| o CREATED" in header
     assert "Ctrl-K actions" in screen and "?" in screen.splitlines()[-1]
     screen.encode("ascii")
 

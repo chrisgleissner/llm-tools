@@ -174,8 +174,8 @@ def test_task_list_shows_dependencies_in_an_after_column(tmp_path, state, capsys
     capsys.readouterr()
     assert main(["task", "list", "--mission", mission_id]) == 0
     rows = [line.split() for line in capsys.readouterr().out.splitlines()]
-    assert rows[0] == ["TASK", "STATUS", "PRIORITY", "AFTER", "TITLE"]
-    assert rows[1][3:] == ["Do", "it"]  # no dependency: the column is blank
-    assert rows[2][3] == "1" and rows[3][3] == "1,2"
+    assert rows[0] == ["TASK", "STATUS", "RUNS", "PRIORITY", "ORDER", "AFTER", "TITLE"]  # CLIUX-056 added RUNS and ORDER
+    assert rows[1][5:] == ["Do", "it"]  # no dependency: the column is blank
+    assert rows[2][5] == "1" and rows[3][5] == "1,2"
     assert main(["task", "show", "--mission", mission_id, "--task", "3"]) == 0
     assert "depends on 1, 2" in capsys.readouterr().out
