@@ -69,7 +69,9 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       announce(`${label}: the worker is offline.`, "failed");
       return;
     }
-    const r = await api.mutate(workerName, operation, missionId, task ? { task_id: task.id, expected_revision: task.revision, ...params } : params);
+    const r = task
+      ? await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params })
+      : await api.mutate(workerName, operation, missionId, params);
     announce(`${label}.`, r.outcome, r.message);
     await Promise.all([loadTasks(), loadSnapshot()]);
   }
@@ -332,9 +334,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       return;
     }
     try {
-      const row = await api.command(workerName, "task.list", missionId, { limit: TASK_FETCH, offset: 0 });
-      const r = (row.result?.result ?? {}) as { tasks?: Task[]; total?: number };
-      tasks = r.tasks ?? [];
+      const r = await api.missionTasks(workerName, missionId, TASK_FETCH, 0);
+      tasks = (r.tasks ?? []) as unknown as Task[];
       taskTotal = r.total ?? tasks.length;
       taskError = "";
       taskLoaded = true;

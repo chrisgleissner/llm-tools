@@ -176,6 +176,13 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "schema":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}
         }));
         if method == "GET" {
+            params.push(json!({
+                "name":"wait_ms","in":"query","required":false,
+                "description":"Wait for the worker response for up to 30 seconds; otherwise return its durable pending command.",
+                "schema":{"type":"integer","minimum":0,"maximum":30000}
+            }));
+        }
+        if method == "GET" {
             let page_key = match path {
                 "/api/v1/missions/{id}/events" => "after",
                 "/api/v1/missions/{id}/tasks" => "offset",

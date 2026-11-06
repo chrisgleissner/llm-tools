@@ -1551,6 +1551,17 @@
             }
           },
           {
+            "description": "Wait for the worker response for up to 30 seconds; otherwise return its durable pending command.",
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
             "in": "query",
             "name": "after",
             "required": false,
@@ -1706,6 +1717,17 @@
             }
           },
           {
+            "description": "Wait for the worker response for up to 30 seconds; otherwise return its durable pending command.",
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,
@@ -1849,6 +1871,17 @@
               "minLength": 1,
               "pattern": "^[a-z0-9][a-z0-9-]*$",
               "type": "string"
+            }
+          },
+          {
+            "description": "Wait for the worker response for up to 30 seconds; otherwise return its durable pending command.",
+            "in": "query",
+            "name": "wait_ms",
+            "required": false,
+            "schema": {
+              "maximum": 30000,
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {

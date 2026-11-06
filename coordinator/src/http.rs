@@ -823,8 +823,17 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
         "operations" => ("session.list", &["limit"]),
         _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown mission resource")),
     };
-    if let Some(key) = query.keys().find(|key| key.as_str() != "worker" && !allowed.contains(&key.as_str())) {
+    if let Some(key) = query
+        .keys()
+        .find(|key| !matches!(key.as_str(), "worker" | "wait_ms") && !allowed.contains(&key.as_str()))
+    {
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", format!("unknown query parameter {key}")));
+    }
+    let wait_ms = query
+        .get("wait_ms")
+        .map_or(Ok(0), |value| value.parse::<u64>().map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer")))?;
+    if wait_ms > MAX_WAIT_MS {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be at most 30000"));
     }
     let mut params = serde_json::Map::new();
     for key in allowed {
@@ -843,6 +852,7 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     }
     let command = json!({
         "target": worker,
+        "wait_ms": wait_ms,
         "request": {
             "schema_version": protocol::COMMAND_SCHEMA_VERSION,
             "operation": operation,

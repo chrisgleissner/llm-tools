@@ -152,6 +152,22 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const limit = Number(url.searchParams.get("limit") ?? list.length);
       return json(route, 200, { missions: list.slice(offset, offset + limit), total: list.length, offset, statuses: facets });
     }
+    const taskRoute = path.match(/^\/missions\/([^/]+)\/tasks(?:\/(\d+)(?:\/([a-z-]+))?)?$/);
+    if (taskRoute) {
+      let operation = "task.list";
+      let result: unknown = { tasks: TASKS, total: TASKS.length, offset: 0 };
+      if (method === "POST") {
+        operation = taskRoute[3] === "verify"
+          ? (JSON.parse(req.postData() ?? "{}").approved === false ? "task.reject" : "task.verify")
+          : taskRoute[3] ? `task.${taskRoute[3]}` : "task.add";
+        result = { status: "APPLIED" };
+      } else if (method === "PATCH") {
+        const body = JSON.parse(req.postData() ?? "{}") as Record<string, unknown>;
+        operation = "task." + ("prompt" in body ? "amend" : "priority" in body ? "priority" : "order" in body ? "reorder" : "dependency");
+        result = { status: "APPLIED" };
+      }
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: operation === "task.list" ? "ok" : "applied", result, error: null } });
+    }
     if (path === "/events") return json(route, 200, { events: [...EVENTS].reverse() });
     if (path === "/diagnostics") return json(route, 200, DIAG);
     if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });

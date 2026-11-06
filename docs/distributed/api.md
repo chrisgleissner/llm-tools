@@ -23,6 +23,8 @@ parameter because mission IDs are unique only within a worker. `GET
 the typed `task.list`, `mission.events` and `session.list` operations. They return
 the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
+Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
+the default is immediate durable acceptance.
 The current mutation adapters use the same command journal: `POST
 /api/v1/missions/{id}/start|resume|pause|stop|cancel|continue`, `POST
 /api/v1/missions/{id}/tasks`, `PATCH /api/v1/missions/{id}/tasks/{n}` and `POST
