@@ -171,3 +171,12 @@ The coordinator serves the JSON and a small script-free HTML reference; no CDN
 or renderer bundle is needed. `coordinator/src/bin/openapi.rs` regenerates the
 checked-in snapshot, and a Rust test compares the generated value to it.
 
+## D11 OpenAPI v1 compatibility baseline (API-011)
+
+Because the coordinator had no released OpenAPI document before this follow-up, the first
+published v1 contract is `docs/distributed/openapi-v1-baseline.json`. A standard-library
+compatibility checker compares the generated snapshot with that baseline and rejects removed
+paths, operations or fields and newly required fields. Breaking changes require a new API
+version; the checker treats a version change as a new compatibility line. This gives future
+changes a stable gate without inventing a pre-existing published contract.
+

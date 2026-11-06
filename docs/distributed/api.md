@@ -167,6 +167,9 @@ claims. `v1` changes are
 intended to be additive; breaking changes require a
 new version. A deprecated operation will carry a `Deprecation` header and a
 documented removal date before removal.
+`docs/distributed/openapi-v1-baseline.json` is the initial published v1
+contract; `tests/test_openapi_compat.py` fails on removed paths, operations or
+fields and on newly required fields.
 
 Mutation requests with a body must use `Content-Type: application/json` (UTF-8
 is accepted); other media types receive `415 unsupported-media-type`.
