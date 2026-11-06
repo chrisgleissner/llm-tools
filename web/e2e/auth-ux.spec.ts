@@ -87,6 +87,25 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("slow password sign-in shows visible announced progress until the server responds", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await signOutViaUi(page);
+    await page.route("**/api/v1/auth/login", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.continue();
+    });
+    await page.getByLabel("Username", { exact: true }).fill("admin");
+    await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+    await page.getByRole("button", { name: "Sign in" }).click();
+
+    const progress = page.locator("#login-progress");
+    await expect(progress).toBeVisible();
+    await expect(progress).toHaveText("Signing in…");
+    await expect(progress).toHaveAttribute("aria-live", "polite");
+    await expect(page.getByRole("button", { name: "Signing in…" })).toBeDisabled();
+    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  });
+
   test("wrong credentials give the same message for a wrong password and an unknown user", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await signOutViaUi(page);

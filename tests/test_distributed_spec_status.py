@@ -18,7 +18,7 @@ SPEC_GROUPS = {
     "NET": 10, "AUTH": 10, "SEC": 9, "WEB": 12, "DATA": 7, "OPS": 5, "TEST": 17, "QUAL": 10, "CONV": 12,
     "PI-FLASH": 13, "PI-BOOT": 5, "PI-HARD": 6, "PI-SYS": 6, "PI-WEAR": 10, "PI-UPD": 9,
     "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6,
-    "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 12, "PAR": 14,
+    "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 14, "PAR": 14,
 }
 SPEC_EXPLICIT_IDS = {"PI-DEPLOY-000"}
 SPEC_OMITTED_IDS = {"PI-FLASH-008", "PI-FLASH-009"}
