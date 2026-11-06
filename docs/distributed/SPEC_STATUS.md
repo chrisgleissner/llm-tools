@@ -228,9 +228,9 @@ negative tests remain incomplete unless explicitly recorded below.
 |---|---|---|
 | SEC2-001 | [ ] | TLS 1.3 default, opt-in TLS 1.2, ticket policy and testssl CI remain. |
 | SEC2-002 | [ ] | Global response headers now include two-year HSTS, COOP/CORP/COEP, Permissions-Policy and API `default-src 'none'`; `coordinator/tests/routes.rs::security_headers_cover_api_health_static_and_error_responses` and `coordinator/tests/web.rs::serves_index_and_assets_publicly_with_security_headers` pass. Table coverage and CI evidence remain. |
-| SEC2-003 | [ ] | Mutation content type is enforced with 415 (`coordinator/tests/web_api.rs::mutation_bodies_require_json_content_type`); parser bounds JSON to depth 16, 64 KiB strings, 1,000 array items and 128 object fields, with limits in the generated OpenAPI schema (`http::problem_tests::json_body_limits_bound_depth_strings_arrays_and_objects`); route-wide unknown-field, identifier and HEAD/OPTIONS audits remain. |
+| SEC2-003 | [ ] | Mutation content type is enforced with 415 (`coordinator/tests/web_api.rs::mutation_bodies_require_json_content_type`); parser bounds JSON to depth 16, 64 KiB strings, 1,000 array items and 128 object fields, with limits in the generated OpenAPI schema (`http::problem_tests::json_body_limits_bound_depth_strings_arrays_and_objects`); unknown-field and identifier audits remain. `OPTIONS` receives 405 and HEAD follows GET (`coordinator/tests/routes.rs::unknown_api_paths_and_methods_return_problem_details`). |
 | SEC2-004 | [ ] | Fetch Metadata checks for cookie sessions remain. |
-| SEC2-005 | [ ] | No CORS baseline remains; explicit HTTPS origin allow-list and preflight tests remain. |
+| SEC2-005 | [ ] | No CORS baseline and preflight rejection are covered by `coordinator/tests/routes.rs::unknown_api_paths_and_methods_return_problem_details` (405 with no allow-origin header); explicit HTTPS origin allow-list remains deferred to any future CORS configuration. |
 | SEC2-006 | [ ] | Password first run exists; TOTP, recovery codes, origin-gated passkeys and Internet-mode MFA remain. |
 | SEC2-007 | [ ] | Current password policy and Argon2id exist; NIST length policy, offline breached-password blocklist and measured configurable cost remain. |
 | SEC2-008 | [ ] | Session rotation, per-session CSRF, active-session management and step-up remain. |

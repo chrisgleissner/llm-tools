@@ -139,6 +139,19 @@ async fn unknown_api_paths_and_methods_return_problem_details() {
     assert_eq!(response.headers()["allow"], "GET,HEAD");
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["type"], "https://llm-tools.dev/problems/method-not-allowed");
+    let preflight = api
+        .bare(Method::OPTIONS, "/api/v1/missions")
+        .header("origin", "https://foreign.example")
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status().as_u16(), 405);
+    assert!(!preflight.headers().contains_key("access-control-allow-origin"));
+    let session = env.admin().await;
+    let head = session.rb(Method::HEAD, "/api/v1/missions").send().await.unwrap();
+    assert_eq!(head.status().as_u16(), 200);
+    assert!(head.bytes().await.unwrap().is_empty());
     env.stop().await;
 }
 
