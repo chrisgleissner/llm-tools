@@ -456,3 +456,37 @@ fn container_without_public_names_lists_only_localhost_and_says_how_to_add_names
         "{info}"
     );
 }
+
+/// A `flock` lock is shared with a child that the holder forks, until the child calls exec. A
+/// lock taken again right after a drop must not fail because another thread was spawning a
+/// process at that moment (the cause of an intermittent `backup_and_restore_round_trip`
+/// failure: "another bridge-coordinator is using ...").
+#[cfg(unix)]
+#[test]
+fn data_dir_lock_is_free_after_drop_while_children_are_spawned() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = common::tmp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let spawner = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = Command::new("true").status();
+            }
+        }
+    });
+    let mut failures = 0;
+    for _ in 0..200 {
+        let lock = ops::lock_data_dir(&dir).unwrap();
+        drop(lock);
+        match ops::lock_data_dir(&dir) {
+            Ok(lock) => drop(lock),
+            Err(_) => failures += 1,
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    spawner.join().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    assert_eq!(failures, 0, "lock still held after drop in {failures} of 200 attempts");
+}

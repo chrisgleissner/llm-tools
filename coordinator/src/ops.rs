@@ -21,10 +21,24 @@ pub fn lock_data_dir(dir: &Path) -> Result<std::fs::File, String> {
         .write(true)
         .open(dir.join(LOCK_FILE))
         .map_err(|e| format!("cannot open {}: {e}", dir.join(LOCK_FILE).display()))?;
-    f.try_lock()
-        .map_err(|_| format!("another bridge-coordinator is using {} (lock file {LOCK_FILE})", dir.display()))?;
-    Ok(f)
+    // A `flock` lock belongs to the open file description, and a child process forked by the
+    // holder shares that description until it calls exec (which closes the O_CLOEXEC lock
+    // file). A process that spawns children while it drops the lock, such as the test harness
+    // or a coordinator that is shutting down, therefore keeps the lock for a moment after the
+    // drop. Retrying for a bounded time covers that window; a real second coordinator still
+    // holds the lock after the deadline and is reported.
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match f.try_lock() {
+            Ok(()) => return Ok(f),
+            Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => return Err(format!("another bridge-coordinator is using {} (lock file {LOCK_FILE})", dir.display())),
+        }
+    }
 }
+
+/// How long [`lock_data_dir`] waits for a lock that a just-forked child may still share.
+pub const LOCK_WAIT: Duration = Duration::from_secs(1);
 
 /// SHA-256 of the first certificate in `ca.pem`, as colon-separated upper-case hex.
 pub fn ca_fingerprint(dir: &Path) -> Result<String, String> {
