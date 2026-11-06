@@ -122,5 +122,8 @@ documented removal date before removal.
 
 Mutation requests with a body must use `Content-Type: application/json` (UTF-8
 is accepted); other media types receive `415 unsupported-media-type`.
+Bodies are limited to 1 MiB, 16 nested levels, 64 KiB UTF-8 strings, 1,000
+items per array, and 128 fields per object (field names are limited to 128
+bytes). These bounds are described by the generated OpenAPI request schema.
 
 See the full route and scope table in the [coordinator guide](coordinator.md#http-api).

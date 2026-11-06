@@ -1,6 +1,6 @@
 //! OpenAPI document generated from the coordinator route policy table and Rust response types.
 
-use crate::http::{Access, ROUTES};
+use crate::http::{Access, MAX_JSON_ARRAY_ITEMS, MAX_JSON_DEPTH, MAX_JSON_OBJECT_FIELDS, MAX_JSON_STRING_BYTES, ROUTES};
 use axum::response::IntoResponse;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -143,7 +143,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if method == "POST" || method == "PATCH" || method == "DELETE" {
         op["requestBody"] = json!({
             "required": method == "POST",
-            "content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}
+            "content":{"application/json":{"schema":{"$ref":"#/components/schemas/BoundedRequestObject"}}}
         });
     }
     if path == "/api/v1/tokens" && method == "POST" {
@@ -235,6 +235,22 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     op
 }
 
+fn bounded_value_schema(depth: usize) -> Value {
+    let mut choices = vec![
+        json!({"type":"string","maxLength":MAX_JSON_STRING_BYTES}),
+        json!({"type":"number"}),
+        json!({"type":"integer"}),
+        json!({"type":"boolean"}),
+        json!({"type":"null"}),
+    ];
+    if depth < MAX_JSON_DEPTH {
+        let next = format!("#/components/schemas/BoundedJsonValueDepth{}", depth + 1);
+        choices.push(json!({"type":"array","maxItems":MAX_JSON_ARRAY_ITEMS,"items":{"$ref":next}}));
+        choices.push(json!({"type":"object","maxProperties":MAX_JSON_OBJECT_FIELDS,"propertyNames":{"maxLength":128},"additionalProperties":{"$ref":next}}));
+    }
+    json!({"anyOf":choices})
+}
+
 /// Build a stable OpenAPI 3.1 document from the same table used for auth policy enumeration.
 pub fn openapi_value() -> Value {
     let mut doc = serde_json::to_value(ApiSchemas::openapi()).expect("OpenAPI schema serializes");
@@ -251,6 +267,16 @@ pub fn openapi_value() -> Value {
         "cookieSession":{"type":"apiKey","in":"cookie","name":"__Host-bridge_session"},
         "workerBearer":{"type":"http","scheme":"bearer","bearerFormat":"Worker token"}
     });
+    doc["components"]["schemas"]["BoundedRequestObject"] = json!({
+        "type":"object",
+        "maxProperties":MAX_JSON_OBJECT_FIELDS,
+        "propertyNames":{"maxLength":128},
+        "additionalProperties":{"$ref":"#/components/schemas/BoundedJsonValueDepth0"},
+        "description":format!("JSON is limited to {MAX_JSON_DEPTH} nested levels, strings of at most {MAX_JSON_STRING_BYTES} UTF-8 bytes, arrays of at most {MAX_JSON_ARRAY_ITEMS} items and objects of at most {MAX_JSON_OBJECT_FIELDS} fields.")
+    });
+    for depth in 0..=MAX_JSON_DEPTH {
+        doc["components"]["schemas"][format!("BoundedJsonValueDepth{depth}")] = bounded_value_schema(depth);
+    }
     let mut paths = Map::new();
     for (path, methods, access, scope) in ROUTES {
         let item = paths.entry((*path).to_string()).or_insert_with(|| json!({}));

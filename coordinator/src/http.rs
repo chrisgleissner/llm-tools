@@ -23,6 +23,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_BODY: usize = 1024 * 1024;
+pub const MAX_JSON_DEPTH: usize = 16;
+pub const MAX_JSON_STRING_BYTES: usize = 64 * 1024;
+pub const MAX_JSON_ARRAY_ITEMS: usize = 1000;
+pub const MAX_JSON_OBJECT_FIELDS: usize = 128;
 /// Request bodies of the unauthenticated `/api/v1/auth/*` routes (login, setup) are tiny.
 pub const AUTH_BODY_MAX: usize = 4096;
 /// Bodies declared (or streamed with unknown length) above this size need one of
@@ -192,8 +196,59 @@ impl FromRequest<St> for Buffered {
 
 fn parse_body(bytes: &Bytes) -> Result<Map<String, Value>, ApiError> {
     match serde_json::from_slice::<Value>(bytes) {
-        Ok(Value::Object(m)) => Ok(m),
+        Ok(value @ Value::Object(_)) => {
+            check_json_limits(&value, 0)?;
+            let Value::Object(m) = value else { unreachable!() };
+            Ok(m)
+        }
         _ => Err(err(StatusCode::BAD_REQUEST, "invalid-request", "request body must be a JSON object")),
+    }
+}
+
+fn check_json_limits(value: &Value, depth: usize) -> Result<(), ApiError> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "JSON nesting exceeds the maximum depth"));
+    }
+    match value {
+        Value::String(text) if text.len() > MAX_JSON_STRING_BYTES => Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "JSON strings must not exceed 65536 UTF-8 bytes",
+        )),
+        Value::Array(values) => {
+            if values.len() > MAX_JSON_ARRAY_ITEMS {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid-request",
+                    "JSON arrays must not contain more than 1000 items",
+                ));
+            }
+            for child in values {
+                check_json_limits(child, depth + 1)?;
+            }
+            Ok(())
+        }
+        Value::Object(fields) => {
+            if fields.len() > MAX_JSON_OBJECT_FIELDS {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid-request",
+                    "JSON objects must not contain more than 128 fields",
+                ));
+            }
+            for (key, child) in fields {
+                if key.len() > 128 {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "invalid-request",
+                        "JSON field names must not exceed 128 UTF-8 bytes",
+                    ));
+                }
+                check_json_limits(child, depth + 1)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1631,6 +1686,28 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
 #[cfg(test)]
 mod problem_tests {
     use super::*;
+
+    #[test]
+    fn json_body_limits_bound_depth_strings_arrays_and_objects() {
+        let mut nested = json!({});
+        for _ in 0..MAX_JSON_DEPTH {
+            nested = json!({"x": nested});
+        }
+        assert!(check_json_limits(&nested, 0).is_ok());
+        nested = json!({"x": nested});
+        assert_eq!(check_json_limits(&nested, 0).unwrap_err().status, StatusCode::BAD_REQUEST);
+        assert!(check_json_limits(&json!("x".repeat(MAX_JSON_STRING_BYTES)), 0).is_ok());
+        assert_eq!(
+            check_json_limits(&json!("x".repeat(MAX_JSON_STRING_BYTES + 1)), 0).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            check_json_limits(&json!(vec![Value::Null; MAX_JSON_ARRAY_ITEMS + 1]), 0).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+        let too_many_fields = Value::Object((0..=MAX_JSON_OBJECT_FIELDS).map(|i| (i.to_string(), Value::Null)).collect());
+        assert_eq!(check_json_limits(&too_many_fields, 0).unwrap_err().status, StatusCode::BAD_REQUEST);
+    }
 
     #[tokio::test]
     async fn api_errors_use_stable_rfc9457_problem_details() {

@@ -1,6 +1,629 @@
 {
   "components": {
     "schemas": {
+      "BoundedJsonValueDepth0": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth1"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth1"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth1": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth2"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth2"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth10": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth11"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth11"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth11": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth12"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth12"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth12": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth13"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth13"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth13": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth14"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth14"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth14": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth15"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth15"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth15": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth16"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth16"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth16": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth2": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth3"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth3"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth3": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth4"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth4"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth4": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth5"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth5"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth5": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth6"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth6"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth6": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth7"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth7"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth7": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth8"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth8"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth8": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth9"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth9"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedJsonValueDepth9": {
+        "anyOf": [
+          {
+            "maxLength": 65536,
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          },
+          {
+            "items": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth10"
+            },
+            "maxItems": 1000,
+            "type": "array"
+          },
+          {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BoundedJsonValueDepth10"
+            },
+            "maxProperties": 128,
+            "propertyNames": {
+              "maxLength": 128
+            },
+            "type": "object"
+          }
+        ]
+      },
+      "BoundedRequestObject": {
+        "additionalProperties": {
+          "$ref": "#/components/schemas/BoundedJsonValueDepth0"
+        },
+        "description": "JSON is limited to 16 nested levels, strings of at most 65536 UTF-8 bytes, arrays of at most 1000 items and objects of at most 128 fields.",
+        "maxProperties": 128,
+        "propertyNames": {
+          "maxLength": 128
+        },
+        "type": "object"
+      },
       "CommandOutcome": {
         "properties": {
           "created_at": {
@@ -348,8 +971,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -483,8 +1105,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -628,8 +1249,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -773,8 +1393,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -1046,8 +1665,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -2489,8 +3107,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -2856,8 +3473,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -3041,8 +3657,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -3234,8 +3849,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -3419,8 +4033,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -4251,8 +4864,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -4794,8 +5406,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
@@ -4949,8 +5560,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/BoundedRequestObject"
               }
             }
           },
