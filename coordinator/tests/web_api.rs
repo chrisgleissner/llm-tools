@@ -180,6 +180,8 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         .worker_add("build-1", &bridge_coordinator::auth::sha256_hex(worker_secret))
         .unwrap();
     let operations = [
+        "mission.start",
+        "mission.resume",
         "mission.pause",
         "mission.stop",
         "mission.cancel",
@@ -202,6 +204,12 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         .unwrap();
 
     for (path, body, expected_operation) in [
+        (
+            "/api/v1/missions/mission-1/start?worker=build-1",
+            json!({"headless":true,"providers":"codex"}),
+            "mission.start",
+        ),
+        ("/api/v1/missions/mission-1/resume?worker=build-1", json!({}), "mission.resume"),
         ("/api/v1/missions/mission-1/pause?worker=build-1", json!({}), "mission.pause"),
         (
             "/api/v1/missions/mission-1/tasks?worker=build-1",

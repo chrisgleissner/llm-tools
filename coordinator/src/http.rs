@@ -1100,8 +1100,17 @@ async fn mission_action(
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
     }
     let m = parse_body(&body.bytes)?;
-    no_extra(&m, &["wait_ms"])?;
+    let allowed = if action == "start" {
+        &["headless", "native_tui", "providers", "routes", "wait_ms"][..]
+    } else {
+        &["wait_ms"][..]
+    };
+    no_extra(&m, allowed)?;
+    let mut params = m.clone();
+    params.remove("wait_ms");
     let operation = match action.as_str() {
+        "start" => "mission.start",
+        "resume" => "mission.resume",
         "pause" => "mission.pause",
         "stop" => "mission.stop",
         "cancel" => "mission.cancel",
@@ -1117,7 +1126,7 @@ async fn mission_action(
             worker: worker.clone(),
             mission_id: id,
             operation: operation.to_string(),
-            params: Map::new(),
+            params,
             wait_ms: resource_wait_ms(&m)?,
         },
     )

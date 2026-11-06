@@ -230,6 +230,27 @@ def _mission_control(action: str) -> Handler:
     return handler
 
 
+def _mission_start(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """Start the worker's existing controller after validating its selected rotation."""
+    cli = _cli()
+    assert request.mission_id is not None
+    with cli.open_store(readonly=True) as reader:
+        mission = reader.get_mission(request.mission_id)
+        config = mission.get("config") or {}
+    providers = params["providers"] if params["providers"] is not None else config.get("providers")
+    routes = params["routes"] if params["routes"] is not None else config.get("routes")
+    if not cli.controller_running(request.mission_id):
+        cli.require_launchable_rotation(config, providers, routes, explicit=params["providers"] is not None or params["routes"] is not None)
+    exit_code = cli.start_mission(
+        request.mission_id,
+        headless=params["headless"],
+        native_tui=params["native_tui"],
+        providers=providers,
+        routes=routes,
+    )
+    return {"exit_code": exit_code, "mission_id": request.mission_id}
+
+
 def _task_show(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     assert store is not None and request.mission_id is not None
     try:
@@ -422,7 +443,16 @@ OPERATIONS: dict[str, OperationSpec] = {
             {"after": Param(int, default=0), "limit": Param(int, default=50)},
             _mission_events,
         ),
+        OperationSpec(
+            "mission.start",
+            "Start a mission controller on this worker",
+            True,
+            True,
+            {"headless": Param(bool), "native_tui": Param(bool), "providers": Param(str), "routes": Param(str)},
+            _mission_start,
+        ),
         OperationSpec("mission.pause", "Pause autonomous scheduling", True, True, _NO_PARAMS, _mission_control("pause")),
+        OperationSpec("mission.resume", "Resume mission scheduling", True, True, _NO_PARAMS, _operator("resume")),
         OperationSpec("mission.stop", "Stop a mission after the current step", True, True, _NO_PARAMS, _mission_control("stop")),
         OperationSpec("mission.cancel", "Cancel a mission", True, True, _NO_PARAMS, _mission_control("cancel")),
         OperationSpec("mission.continue", "Release a held checkpoint", True, True, _NO_PARAMS, _mission_control("continue")),

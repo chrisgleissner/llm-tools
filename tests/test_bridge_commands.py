@@ -31,6 +31,31 @@ def test_catalog_lists_every_operation_with_typed_parameters():
     assert set(catalog) == set(commands.OPERATIONS)
     assert catalog["mission.events"]["params"] == {"after": {"type": "int", "required": False}, "limit": {"type": "int", "required": False}}
     assert catalog["mission.pause"]["mutating"] is True and catalog["mission.list"]["mutating"] is False
+    assert catalog["mission.start"]["params"] == {
+        "headless": {"type": "bool", "required": False},
+        "native_tui": {"type": "bool", "required": False},
+        "providers": {"type": "str", "required": False},
+        "routes": {"type": "str", "required": False},
+    }
+
+
+def test_mission_start_operation_uses_worker_controller_with_typed_options(mission, monkeypatch):
+    _, mission_id = mission
+    seen = {}
+    monkeypatch.setattr(bridge, "controller_running", lambda _mission_id: False)
+    monkeypatch.setattr(bridge, "require_launchable_rotation", lambda *args, **kwargs: seen.update(rotation=(args, kwargs)))
+
+    def start(_mission_id, **kwargs):
+        seen["start"] = kwargs
+        return 0
+
+    monkeypatch.setattr(bridge, "start_mission", start)
+    result = commands.execute(
+        CommandRequest("mission.start", {"headless": True, "providers": "codex"}, mission_id=mission_id, request_id="start-1")
+    )
+    assert result.outcome == "applied"
+    assert result.result == {"exit_code": 0, "mission_id": mission_id}
+    assert seen["start"] == {"headless": True, "native_tui": None, "providers": "codex", "routes": ""}
 
 
 @pytest.mark.parametrize(

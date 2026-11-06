@@ -202,7 +202,7 @@ checkbox means the full requirement and its CI evidence are not complete yet.
 
 | ID | Status | Current evidence / remaining work |
 |---|---|---|
-| API-001 | [ ] | Added worker-qualified mission task, event and operation reads plus pause/stop/cancel/continue, task-add/patch/verify resource mutations (`coordinator/tests/web_api.rs::mission_task_resource_adapts_to_the_typed_worker_command`, `mission_and_task_mutations_adapt_to_typed_worker_commands`); start/resume, other task actions, worker/diagnostics and remaining resources remain. |
+| API-001 | [ ] | Added worker-qualified mission task, event and operation reads plus start/resume/pause/stop/cancel/continue, task-add/patch/verify resource mutations (`coordinator/tests/web_api.rs::mission_task_resource_adapts_to_the_typed_worker_command`, `mission_and_task_mutations_adapt_to_typed_worker_commands`); other task actions, worker/diagnostics and remaining resources remain. |
 | API-002 | [ ] | Resource adapters serialize into the existing typed worker command envelope and call the same durable coordinator command handler; route adapter tests cover `task.list`, mission pause, `task.add`, `task.amend`, `task.verify` and `task.reject`. Web console and remote CLI migration remain. |
 | API-003 | [ ] | `Idempotency-Key` now maps to the durable request ID, repeated keys replay, and pending commands return 202 with `Location` (`coordinator/tests/worker.rs::request_id_idempotence_and_refusals`); `If-Match`/ETag and explicit uncertain mapping remain. |
 | API-004 | [ ] | API errors now use RFC 9457 `application/problem+json` with stable code URIs (`http::problem_tests`); opaque cursor pagination, timestamp contract and complete response tests remain. |

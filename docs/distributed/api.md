@@ -24,7 +24,7 @@ the typed `task.list`, `mission.events` and `session.list` operations. They retu
 the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 The current mutation adapters use the same command journal: `POST
-/api/v1/missions/{id}/pause|stop|cancel|continue`, `POST
+/api/v1/missions/{id}/start|resume|pause|stop|cancel|continue`, `POST
 /api/v1/missions/{id}/tasks`, `PATCH /api/v1/missions/{id}/tasks/{n}` and `POST
 /api/v1/missions/{id}/tasks/{n}/verify`. Task creation accepts `title`, `prompt`,
 `priority`, `order`, `depends_on` and `acceptance`; task patch changes exactly one
@@ -32,6 +32,9 @@ of `prompt`, `priority`, `order` or `depends_on`, and may include
 `expected_revision`. Verification uses `approved` and `evidence`; rejection uses
 `approved: false` and `reason`. Pass `Idempotency-Key` on any mutation to make
 retries reuse the same durable command request ID.
+Mission start accepts the worker's `headless`, `native_tui`, `providers` and
+`routes` choices and validates the rotation on that worker before launching its
+controller.
 
 ```sh
 export COORDINATOR=https://localhost:8443
