@@ -10,10 +10,18 @@ fn routed_paths() -> BTreeSet<String> {
     let src = include_str!("../src/http.rs");
     let body = &src[src.find("pub fn router(").expect("router fn")..];
     let body = &body[..body.find(".fallback(").expect("router fallback")];
-    body.split(".route(\"")
-        .skip(1)
-        .map(|rest| rest[..rest.find('"').unwrap()].to_string())
-        .collect()
+    let mut rest = body;
+    let mut paths = BTreeSet::new();
+    while let Some(index) = rest.find(".route(") {
+        rest = &rest[index + ".route(".len()..];
+        let call = rest.trim_start();
+        if let Some(literal) = call.strip_prefix('"') {
+            if let Some(end) = literal.find('"') {
+                paths.insert(literal[..end].to_string());
+            }
+        }
+    }
+    paths
 }
 
 fn concrete(path: &str) -> String {

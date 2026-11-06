@@ -39,6 +39,29 @@ def test_catalog_lists_every_operation_with_typed_parameters():
     }
 
 
+def test_mission_settings_colour_uses_the_typed_patch_and_get_path(mission):
+    _, mission_id = mission
+    before = commands.execute(CommandRequest("mission.settings.get", mission_id=mission_id))
+    assert before.outcome == "ok" and before.result["colour"] is None
+    changed = commands.execute(CommandRequest("mission.settings.patch", {
+        "colour": "4", "auto_continue": None, "teams": None, "token_spend": None, "suspend_when_rate_limited": None,
+    }, mission_id=mission_id))
+    assert changed.outcome == "applied" and changed.result["colour"] == 4
+    after = commands.execute(CommandRequest("mission.settings.get", mission_id=mission_id))
+    assert after.result["colour"] == 4
+
+
+def test_mission_steer_dispatches_every_supported_kind_through_the_shared_operator(mission, monkeypatch):
+    _, mission_id = mission
+    seen = []
+    monkeypatch.setattr(bridge, "_apply_operator_command", lambda _store, _mission, payload, **_kwargs: seen.append(dict(payload)) or {"kind": payload["kind"]})
+    kinds = ("replace", "review", "verify", "pause-after-iteration", "stop-after-task", "handoff")
+    for kind in kinds:
+        result = commands.execute(CommandRequest("mission.steer", {"kind": kind, "task": None, "task_id": None, "route": "codex", "prompt": "steering"}, mission_id=mission_id))
+        assert result.outcome == "applied" and result.result["kind"] == kind
+    assert [payload["kind"] for payload in seen] == list(kinds)
+
+
 def test_mission_start_operation_uses_worker_controller_with_typed_options(mission, monkeypatch):
     _, mission_id = mission
     seen = {}
@@ -318,10 +341,10 @@ def test_proposal_operations_list_and_decide_by_task_number(mission, capsys, mon
     real = commands.dispatch
     monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
     assert main(["proposal", "reject", "--mission", mission_id, "--task", "3", "--reason", "no", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["result"]["proposal_status"] == "REJECTED"
+    assert json.loads(capsys.readouterr().out)["proposal_status"] == "REJECTED"
     assert main(["proposal", "list", "--mission", mission_id, "--status", "ALL", "--json"]) == 0
     assert len(json.loads(capsys.readouterr().out)["proposals"]) == 2
-    assert seen == ["proposal.decide", "proposal.list"]
+    assert seen == ["proposal.reject", "proposal.list"]
     again = commands.execute(CommandRequest("proposal.decide", {"task_number": 2, "accept": False}, mission_id=mission_id))
     assert again.outcome == "rejected"
 

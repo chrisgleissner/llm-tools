@@ -161,9 +161,9 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             {"name":"offset","in":"query","required":false,"deprecated":true,"description":"Legacy pagination; use cursor.","schema":{"type":"integer","minimum":0}}
         ]);
     }
-    if method == "POST" || method == "PATCH" || method == "DELETE" {
+    if method == "POST" || method == "PATCH" || method == "PUT" || method == "DELETE" {
         op["requestBody"] = json!({
-            "required": method == "POST",
+            "required": method == "POST" || method == "PUT",
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/BoundedRequestObject"}}}
         });
     }
@@ -179,6 +179,38 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "allOf": [
                 {"$ref":"#/components/schemas/BoundedRequestObject"},
                 {"type":"object","required":["worker"],"properties":{"worker":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}}}
+            ]
+        });
+    }
+    if path == "/api/v1/workers/{name}/doctor" || path == "/api/v1/workers/{name}/agents" {
+        op["parameters"] = json!([{"name":"mission","in":"query","required":false,"schema":{"type":"string","maxLength":63}},
+                                  {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
+    }
+    if path == "/api/v1/workers/{name}/audit" {
+        op["parameters"] = json!([{"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":10000}},
+                                  {"name":"wait_ms","in":"query","required":false,"schema":{"type":"integer","minimum":0,"maximum":30000}}]);
+    }
+    if path == "/api/v1/missions/{id}/settings" && method == "GET" {
+        op["responses"]["200"]["content"]["application/json"]["schema"] = json!({
+            "type":"object",
+            "properties": {
+                "schema_version":{"type":"integer"}, "mission_id":{"type":"string"},
+                "auto_continue":{"type":"boolean"}, "suspend_when_rate_limited":{"type":"boolean"},
+                "colour":{"type":["integer","null"],"minimum":1,"maximum":8},
+                "execution_policy":{"type":"object","additionalProperties":true}
+            }
+        });
+    }
+    if path == "/api/v1/missions/{id}/settings" && method == "PATCH" {
+        op["requestBody"]["content"]["application/json"]["schema"] = json!({
+            "allOf":[
+                {"$ref":"#/components/schemas/BoundedRequestObject"},
+                {"type":"object","properties":{
+                    "auto_continue":{"type":"boolean"}, "teams":{"type":"boolean"},
+                    "token_spend":{"type":"string","enum":["low","medium","high"]},
+                    "suspend_when_rate_limited":{"type":"boolean"},
+                    "colour":{"oneOf":[{"type":"string","const":"auto"},{"type":"string","pattern":"^[1-8]$"}]}
+                }}
             ]
         });
     }
@@ -213,6 +245,13 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "description":"Wait for the worker response for up to 30 seconds; otherwise return its durable pending command.",
                 "schema":{"type":"integer","minimum":0,"maximum":30000}
             }));
+        }
+        if matches!(path, "/api/v1/missions/{id}/proposals") && method == "GET" {
+            params.extend([
+                json!({"name":"status","in":"query","required":false,"schema":{"type":"string","enum":["PENDING","ACCEPTED","REJECTED","ALL"]}}),
+                json!({"name":"limit","in":"query","required":false,"schema":{"type":"integer","minimum":1,"maximum":1000}}),
+                json!({"name":"after","in":"query","required":false,"schema":{"type":"integer","minimum":0}}),
+            ]);
         }
         if method == "PATCH" || path.ends_with("/verify") || path.ends_with("/{action}") {
             params.push(json!({
@@ -451,6 +490,15 @@ mod tests {
         let body_schema = &create["requestBody"]["content"]["application/json"]["schema"];
         assert_eq!(body_schema["allOf"][1]["required"], json!(["worker"]));
         assert_eq!(body_schema["allOf"][1]["properties"]["worker"]["type"], "string");
+        let settings = &doc["paths"]["/api/v1/missions/{id}/settings"];
+        assert_eq!(
+            settings["get"]["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["colour"]["type"],
+            json!(["integer", "null"])
+        );
+        assert_eq!(
+            settings["patch"]["requestBody"]["content"]["application/json"]["schema"]["allOf"][1]["properties"]["colour"]["oneOf"][0]["const"],
+            "auto"
+        );
     }
 
     #[test]

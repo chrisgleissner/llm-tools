@@ -1153,6 +1153,9 @@ def _build_parser(
     mission_set.add_argument("--token-spend", choices=("low", "medium", "high"), help="set token spend preference")
     mission_set.add_argument("--suspend-when-rate-limited", choices=("on", "off"), help="on: suspend at an idle capacity wait when no Bridge operation is active; off: wait awake (default)")
     _add_json_arg(mission_set)
+    mission_settings = mission_sub.add_parser("settings", help="show a mission's saved execution settings")
+    _add_mission_arg(mission_settings, default_mission)
+    _add_json_arg(mission_settings)
     colour = mission_sub.add_parser("colour", aliases=["color"], help="pin the mission's identity colour (1-8) or return to the automatic one")
     _add_mission_arg(colour, default_mission)
     colour.add_argument("value", metavar="N|auto", help=f"colour number 1-{MISSION_COUNT} ({', '.join(f'{n} {name}' for n, name in enumerate(MISSION_HUE_NAMES, 1))}) or auto")
@@ -2062,8 +2065,8 @@ def _worker_command(args: argparse.Namespace) -> int:
         _print_result(worker.status_public(), args.json, _format_worker_status)
         return 0
     if args.worker_action == "audit":
-        entries = worker.read_audit(args.limit)
-        _print_result({"entries": entries}, args.json, lambda value: "\n".join(
+        result = commands.dispatch(commands.CommandRequest("worker.audit", {"limit": args.limit}))
+        _print_result(result, args.json, lambda value: "\n".join(
             " ".join([str(entry.get("ts", "?")), str(entry.get("action", "?"))] + [f"{key}={entry[key]}" for key in sorted(entry) if key not in {"ts", "action"} and entry[key] is not None])
             for entry in value["entries"]) or "No worker audit entries.")
         return 0
@@ -2442,24 +2445,19 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "gc":
             from . import bridge_switcher
-
-            with open_store() as store:
-                entries = bridge_switcher.collect_entries(store)
-            results = bridge_switcher.gc_stations(entries)
+            result = commands.dispatch(commands.CommandRequest("worker.gc"))
             if args.json:
-                _json_print(bridge_switcher.gc_json(results))
+                _json_print(result)
             else:
-                print(bridge_switcher.format_gc(results))
+                print(bridge_switcher.format_gc(result["stations"]))
             return 0
         if args.command == "finish":
-            from .bridge_finish import FinishError, finish_mission
-
             try:
-                finished = finish_mission(args.mission)
-            except FinishError as exc:
+                finished = commands.dispatch(commands.CommandRequest("mission.finish", mission_id=args.mission))
+            except ValueError as exc:
                 print(f"llm-bridge: {exc}", file=sys.stderr)
                 return 2
-            _print_result(finished.as_json(), args.json, lambda value: value["detail"])
+            _print_result(finished, args.json, lambda value: value["detail"])
             return 0
         if args.command == "mission":
             with open_store(readonly=args.mission_action == "list") as store:
@@ -2467,19 +2465,24 @@ def _main(argv: list[str] | None = None) -> int:
                     prompt, config = _mission_creation_inputs(args, auto_continue=bool(args.auto_continue))
                     result = _create_mission_with_task(store, args, prompt, config)
                 elif args.mission_action == "set":
-                    if not any((args.auto_continue, args.teams, args.token_spend, args.suspend_when_rate_limited)):
-                        raise ValueError("mission set requires --auto-continue, --teams, --token-spend, or --suspend-when-rate-limited")
-                    result = {"schema_version": 1, "mission_id": args.mission}
-                    if args.auto_continue is not None:
-                        result.update(_set_mission_auto_continue(store, args.mission, args.auto_continue == "on"))
-                    if args.teams is not None or args.token_spend is not None:
-                        result.update(_set_mission_policy(store, args.mission, teams=args.teams, token_spend=args.token_spend))
-                    if args.suspend_when_rate_limited is not None:
-                        result.update(_set_mission_suspend_when_rate_limited(store, args.mission, args.suspend_when_rate_limited == "on"))
+                    result = commands.dispatch(commands.CommandRequest("mission.settings.patch", {
+                        "auto_continue": None if args.auto_continue is None else args.auto_continue == "on",
+                        "teams": None if args.teams is None else args.teams == "on",
+                        "token_spend": args.token_spend,
+                        "suspend_when_rate_limited": None if args.suspend_when_rate_limited is None else args.suspend_when_rate_limited == "on",
+                        "colour": None,
+                    }, mission_id=args.mission))
                     _print_result(result, bool(getattr(args, "json", False)), lambda value: value["detail"])
                     return 0
+                elif args.mission_action == "settings":
+                    result = commands.dispatch(commands.CommandRequest("mission.settings.get", mission_id=args.mission))
+                    _print_result(result, bool(getattr(args, "json", False)), lambda value: f"Auto-continue {'on' if value['auto_continue'] else 'off'} · capacity-wait suspend {'on' if value['suspend_when_rate_limited'] else 'off'} · teams {'on' if value['execution_policy']['teams_enabled'] else 'off'} · token spend {value['execution_policy']['token_spend']}")
+                    return 0
                 elif args.mission_action in {"colour", "color"}:
-                    result = _set_mission_colour(store, args.mission, args.value)
+                    result = commands.dispatch(commands.CommandRequest("mission.settings.patch", {
+                        "auto_continue": None, "teams": None, "token_spend": None,
+                        "suspend_when_rate_limited": None, "colour": args.value,
+                    }, mission_id=args.mission))
                     _print_result(result, bool(getattr(args, "json", False)), fmt.format_mission_colour)
                     return 0
                 else:
@@ -2494,13 +2497,12 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, fmt.format_status)
             return 0
         if args.command == "agents":
-            from .bridge_agents import build_agent_map, format_agent_map
+            from .bridge_agents import format_agent_map
 
-            with open_store(readonly=True) as store:
-                agent_mission = args.agent_mission
-                if _managed_session() and not args.agent_all_missions and agent_mission is None:
-                    agent_mission = os.environ.get(MANAGED_MISSION_ENV)
-                result = build_agent_map(store, mission_id=agent_mission)
+            agent_mission = args.agent_mission
+            if _managed_session() and not args.agent_all_missions and agent_mission is None:
+                agent_mission = os.environ.get(MANAGED_MISSION_ENV)
+            result = commands.dispatch(commands.CommandRequest("mission.agents", {"mission": agent_mission}))
             if args.json:
                 _json_print(result)
             else:
@@ -2528,25 +2530,16 @@ def _main(argv: list[str] | None = None) -> int:
                 if args.proposal_action == "list":
                     result = commands.dispatch(commands.CommandRequest("proposal.list", {"status": args.status, "limit": args.limit, "after": args.after}, mission_id=args.mission))
                 elif args.proposal_action in {"accept", "reject"}:
-                    result = commands.dispatch(commands.CommandRequest("proposal.decide", {
-                        "task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or ""),
+                    result = commands.dispatch(commands.CommandRequest(f"proposal.{args.proposal_action}", {
+                        "task_number": int(args.task), "task_id": None, "reason": str(getattr(args, "reason", "") or ""),
                     }, mission_id=args.mission))
                 else:
                     prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-                    payload = {
-                        "action": "task.propose",
-                        "source_operation_id": args.source_operation_id,
-                        "prompt": prompt,
-                        "title": args.title,
-                        "priority": args.priority,
-                        "depends_on": _dependency_ids(store, args.mission, args.depends_on),
+                    result = commands.dispatch(commands.CommandRequest("proposal.create", {
+                        "source_operation_id": args.source_operation_id, "prompt": prompt, "title": args.title,
+                        "priority": args.priority, "depends_on": _dependency_ids(store, args.mission, args.depends_on),
                         "acceptance": args.acceptance,
-                    }
-                    result = _apply_operator_command(store, args.mission, payload)
-            if isinstance(result, dict) and result.get("status") == "REJECTED":
-                detail = result.get("result") or {}
-                print(f"llm-bridge: {detail.get('error', 'proposal command rejected')}", file=sys.stderr)
-                return 2
+                    }, mission_id=args.mission))
             _print_result(result, bool(getattr(args, "json", False)), _proposal_text(args))
             return 0
         if args.command == "task":
@@ -2628,21 +2621,17 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("station", value, args.mission))
             return 0
         if args.command == "rotation":
-            result = _rotation_result(args)
+            params = {"set": args.set_list, "routes": args.routes, "providers": args.providers}
+            operation = "mission.rotation.put" if any(value is not None for value in params.values()) else "mission.rotation.get"
+            result = commands.dispatch(commands.CommandRequest(operation, params, mission_id=args.mission))
             _print_result(result, args.json, fmt.format_rotation)
             return 0
         if args.command == "steer":
             prompt = read_verbatim(args.prompt_file) if args.prompt_file else str(args.prompt or "")
-            with open_store() as store:
-                named = args.task is not None or args.task_by_id is not None
-                steer_task_id = int(_resolve_task(store, args.mission, args.task, args.task_by_id)["id"]) if named else None
-                result = _apply_operator_command(store, args.mission, {
-                    "action": "steer",
-                    "kind": args.kind,
-                    "task_id": steer_task_id,
-                    "route": args.route,
-                    "prompt": prompt,
-                })
+            result = commands.dispatch(commands.CommandRequest("mission.steer", {
+                "kind": args.kind, "task": args.task, "task_id": args.task_by_id,
+                "route": args.route, "prompt": prompt,
+            }, mission_id=args.mission))
             if result.get("status") == "REJECTED":
                 print(f"llm-bridge: {(result.get('result') or {}).get('error', 'steering rejected')}", file=sys.stderr)
                 return 2

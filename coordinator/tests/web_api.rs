@@ -287,6 +287,111 @@ async fn api016_create_suspend_restore_resources_and_worker_policy_are_exposed()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cli_parity_resource_adapters_queue_the_expected_typed_operations() {
+    let env = boot().await;
+    let api = env.admin().await;
+    env.srv
+        .state
+        .db
+        .worker_add("build-1", &bridge_coordinator::auth::sha256_hex("worker-secret-parity"))
+        .unwrap();
+    let operations = [
+        "mission.settings.get",
+        "mission.settings.patch",
+        "mission.rotation.get",
+        "mission.rotation.put",
+        "mission.steer",
+        "mission.finish",
+        "mission.agents",
+        "proposal.list",
+        "proposal.create",
+        "proposal.accept",
+        "proposal.reject",
+        "worker.doctor",
+        "worker.audit",
+        "worker.gc",
+    ];
+    let capabilities = operations.iter().map(|operation| json!({"operation":operation,"mutating":matches!(*operation,"mission.settings.patch"|"mission.rotation.put"|"mission.steer"|"mission.finish"|"proposal.create"|"proposal.accept"|"proposal.reject"|"worker.gc")})).collect::<Vec<_>>();
+    let mut hello = serde_json::Map::new();
+    hello.insert("missions".into(), json!([{"id":"mission-1","name":"Example"}]));
+    env.srv
+        .state
+        .db
+        .worker_hello("build-1", "worker-id-parity", &hello, &json!(capabilities), "203.0.113.8")
+        .unwrap();
+    let routes = [
+        (
+            Method::GET,
+            "/api/v1/missions/mission-1/settings?worker=build-1",
+            json!({}),
+            "mission.settings.get",
+        ),
+        (
+            Method::PATCH,
+            "/api/v1/missions/mission-1/settings?worker=build-1",
+            json!({"auto_continue":true}),
+            "mission.settings.patch",
+        ),
+        (
+            Method::PATCH,
+            "/api/v1/missions/mission-1/settings?worker=build-1",
+            json!({"colour":"auto"}),
+            "mission.settings.patch",
+        ),
+        (
+            Method::POST,
+            "/api/v1/missions/mission-1/steer?worker=build-1",
+            json!({"kind":"pause-after-iteration"}),
+            "mission.steer",
+        ),
+        (Method::POST, "/api/v1/missions/mission-1/finish?worker=build-1", json!({}), "mission.finish"),
+        (
+            Method::GET,
+            "/api/v1/missions/mission-1/rotation?worker=build-1",
+            json!({}),
+            "mission.rotation.get",
+        ),
+        (
+            Method::PUT,
+            "/api/v1/missions/mission-1/rotation?worker=build-1",
+            json!({"providers":"codex"}),
+            "mission.rotation.put",
+        ),
+        (Method::GET, "/api/v1/workers/build-1/agents", json!({}), "mission.agents"),
+        (Method::GET, "/api/v1/missions/mission-1/proposals?worker=build-1", json!({}), "proposal.list"),
+        (
+            Method::POST,
+            "/api/v1/missions/mission-1/proposals?worker=build-1",
+            json!({"source_operation_id":"op-1","prompt":"task"}),
+            "proposal.create",
+        ),
+        (
+            Method::POST,
+            "/api/v1/missions/mission-1/proposals/3/accept?worker=build-1",
+            json!({}),
+            "proposal.accept",
+        ),
+        (
+            Method::POST,
+            "/api/v1/missions/mission-1/proposals/3/reject?worker=build-1",
+            json!({"reason":"no"}),
+            "proposal.reject",
+        ),
+        (Method::GET, "/api/v1/workers/build-1/doctor", json!({}), "worker.doctor"),
+        (Method::GET, "/api/v1/workers/build-1/audit", json!({}), "worker.audit"),
+        (Method::POST, "/api/v1/workers/build-1/gc", json!({}), "worker.gc"),
+    ];
+    for (method, path, body, operation) in routes {
+        let request = api.rb(method.clone(), path);
+        let request = if matches!(method, Method::GET) { request } else { request.json(&body) };
+        let (status, response) = api.send(request).await;
+        assert_eq!(status, 202, "{method} {path}: {response}");
+        assert_eq!(response["operation"], operation, "{method} {path}: {response}");
+    }
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
     let env = boot().await;
     let api = env.admin().await;

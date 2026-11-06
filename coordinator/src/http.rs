@@ -1213,6 +1213,462 @@ async fn worker_restore_resource(State(st): State<St>, Authed(p, ip): Authed, Pa
     .await
 }
 
+async fn mission_settings_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    method: Method,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?
+        .clone();
+    if q.keys().any(|key| !matches!(key.as_str(), "worker" | "wait_ms")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut params = if method == Method::GET { Map::new() } else { parse_body(&body.bytes)? };
+    if method == Method::GET {
+        no_extra(&params, &[])?;
+    } else {
+        no_extra(
+            &params,
+            &["auto_continue", "teams", "token_spend", "suspend_when_rate_limited", "colour", "wait_ms"],
+        )?;
+    }
+    let wait_ms = q
+        .get("wait_ms")
+        .map(|v| v.parse::<u64>().ok().filter(|n| *n <= MAX_WAIT_MS))
+        .flatten()
+        .unwrap_or(0);
+    params.remove("wait_ms");
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: Some(id),
+            operation: if method == Method::GET {
+                "mission.settings.get"
+            } else {
+                "mission.settings.patch"
+            }
+            .into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn mission_rotation_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    method: Method,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?
+        .clone();
+    if q.keys().any(|key| !matches!(key.as_str(), "worker" | "wait_ms")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut params = if method == Method::GET { Map::new() } else { parse_body(&body.bytes)? };
+    if method == Method::GET {
+        no_extra(&params, &[])?;
+    } else {
+        no_extra(&params, &["set", "routes", "providers", "wait_ms"])?;
+    }
+    let wait_ms = q.get("wait_ms").and_then(|v| v.parse::<u64>().ok()).filter(|n| *n <= MAX_WAIT_MS).unwrap_or(0);
+    params.remove("wait_ms");
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: Some(id),
+            operation: if method == Method::GET {
+                "mission.rotation.get"
+            } else {
+                "mission.rotation.put"
+            }
+            .into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn mission_proposals_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    method: Method,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?
+        .clone();
+    let mut params = if method == Method::GET {
+        let mut values = Map::new();
+        for key in ["status", "limit", "after"] {
+            if let Some(value) = q.get(key) {
+                values.insert(
+                    key.into(),
+                    json!(if key == "status" {
+                        Value::String(value.clone())
+                    } else {
+                        Value::Number(value.parse::<u64>().unwrap_or(0).into())
+                    }),
+                );
+            }
+        }
+        values
+    } else {
+        parse_body(&body.bytes)?
+    };
+    if method == Method::GET {
+        if q.keys().any(|k| !matches!(k.as_str(), "worker" | "wait_ms" | "status" | "limit" | "after")) {
+            return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+        }
+    } else {
+        no_extra(
+            &params,
+            &["source_operation_id", "prompt", "title", "priority", "depends_on", "acceptance", "wait_ms"],
+        )?;
+    }
+    let wait_ms = if method == Method::GET {
+        q.get("wait_ms").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0)
+    } else {
+        resource_wait_ms(&params)?
+    };
+    params.remove("wait_ms");
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: Some(id),
+            operation: if method == Method::GET { "proposal.list" } else { "proposal.create" }.into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn mission_agents_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?
+        .clone();
+    if q.keys().any(|key| !matches!(key.as_str(), "worker" | "wait_ms")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let wait_ms = q.get("wait_ms").map_or(Ok(0), |v| {
+        v.parse::<u64>()
+            .ok()
+            .filter(|n| *n <= MAX_WAIT_MS)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer of at most 30000"))
+    })?;
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: Some(id),
+            operation: "mission.agents".into(),
+            params: Map::new(),
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn mission_steer_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?
+        .clone();
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut params = parse_body(&body.bytes)?;
+    no_extra(&params, &["kind", "task", "task_id", "route", "prompt", "wait_ms"])?;
+    let wait_ms = resource_wait_ms(&params)?;
+    params.remove("wait_ms");
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: Some(id),
+            operation: "mission.steer".into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn mission_finish_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?
+        .clone();
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut params = parse_body(&body.bytes)?;
+    no_extra(&params, &["wait_ms"])?;
+    let wait_ms = resource_wait_ms(&params)?;
+    params.clear();
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: Some(id),
+            operation: "mission.finish".into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn proposal_decision_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path((id, number, action)): Path<(String, u32, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?
+        .clone();
+    if q.keys().any(|k| !matches!(k.as_str(), "worker" | "wait_ms")) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut params = parse_body(&body.bytes)?;
+    no_extra(&params, &["reason", "wait_ms"])?;
+    params.insert("task_number".into(), json!(number));
+    let wait_ms = resource_wait_ms(&params)?;
+    params.remove("wait_ms");
+    let operation = match action.as_str() {
+        "accept" => "proposal.accept",
+        "reject" => "proposal.reject",
+        _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown proposal action")),
+    };
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: Some(id),
+            operation: operation.into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn worker_resource(
+    st: St,
+    p: Principal,
+    ip: String,
+    worker: String,
+    action: &str,
+    q: HashMap<String, String>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let mut params = Map::new();
+    let mut body_wait_ms = 0;
+    let operation = match action {
+        "doctor" => {
+            if let Some(mission) = q.get("mission") {
+                params.insert("mission".into(), json!(mission));
+            }
+            "worker.doctor"
+        }
+        "audit" => {
+            if let Some(limit) = q.get("limit") {
+                params.insert("limit".into(), json!(limit.parse::<u64>().unwrap_or(50)));
+            }
+            "worker.audit"
+        }
+        "agents" => {
+            if let Some(mission) = q.get("mission") {
+                params.insert("mission".into(), json!(mission));
+            }
+            "mission.agents"
+        }
+        "gc" => {
+            params = parse_body(&body.bytes)?;
+            no_extra(&params, &["wait_ms"])?;
+            body_wait_ms = resource_wait_ms(&params)?;
+            params.remove("wait_ms");
+            "worker.gc"
+        }
+        _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown worker resource")),
+    };
+    let wait_ms = q.get("wait_ms").map_or(Ok(body_wait_ms), |v| {
+        v.parse::<u64>()
+            .ok()
+            .filter(|n| *n <= MAX_WAIT_MS)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer of at most 30000"))
+    })?;
+    let allowed_query = if action == "audit" {
+        &["limit", "wait_ms"][..]
+    } else if matches!(action, "doctor" | "agents") {
+        &["mission", "wait_ms"][..]
+    } else {
+        &[][..]
+    };
+    if q.keys().any(|k| !allowed_query.contains(&k.as_str())) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker,
+            mission_id: None,
+            operation: operation.into(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn worker_doctor_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        worker,
+        "doctor",
+        q,
+        headers,
+        Buffered {
+            bytes: Bytes::new(),
+            _permit: None,
+        },
+    )
+    .await
+}
+async fn worker_agents_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        worker,
+        "agents",
+        q,
+        headers,
+        Buffered {
+            bytes: Bytes::new(),
+            _permit: None,
+        },
+    )
+    .await
+}
+async fn worker_audit_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    worker_resource(
+        st,
+        p,
+        ip,
+        worker,
+        "audit",
+        q,
+        headers,
+        Buffered {
+            bytes: Bytes::new(),
+            _permit: None,
+        },
+    )
+    .await
+}
+async fn worker_gc_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(worker): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    worker_resource(st, p, ip, worker, "gc", q, headers, body).await
+}
+
 async fn mission_events(
     State(st): State<St>,
     Authed(p, ip): Authed,
@@ -1969,6 +2425,10 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}", &["GET", "DELETE"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/restore", &["POST"], Access::Authed, "admin"),
+    ("/api/v1/workers/{name}/doctor", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/agents", &["GET"], Access::Authed, "read"),
+    ("/api/v1/workers/{name}/audit", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
@@ -1976,7 +2436,17 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/agents", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/settings", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/settings", &["PATCH"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/rotation", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/rotation", &["PUT"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/proposals", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/proposals", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/proposals/{n}/{action}", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/suspend-until-credits", &["POST"], Access::Authed, "admin"),
+    ("/api/v1/missions/{id}/steer", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/finish", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/{action}", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}/tasks", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/tasks", &["POST"], Access::Authed, "operate"),
@@ -2099,13 +2569,30 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/workers", get(list_workers).post(add_worker))
         .route("/api/v1/workers/{name}", get(get_worker).delete(revoke_worker))
         .route("/api/v1/workers/{name}/restore", post(worker_restore_resource))
+        .route("/api/v1/workers/{name}/doctor", get(worker_doctor_resource))
+        .route("/api/v1/workers/{name}/agents", get(worker_agents_resource))
+        .route("/api/v1/workers/{name}/audit", get(worker_audit_resource))
+        .route("/api/v1/workers/{name}/gc", post(worker_gc_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/missions", get(list_missions).post(create_mission_resource))
         .route("/api/v1/missions/{id}", get(mission_status_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
+        .route("/api/v1/missions/{id}/agents", get(mission_agents_resource))
+        .route(
+            "/api/v1/missions/{id}/settings",
+            get(mission_settings_resource).patch(mission_settings_resource),
+        )
+        .route("/api/v1/missions/{id}/rotation", get(mission_rotation_resource).put(mission_rotation_resource))
+        .route(
+            "/api/v1/missions/{id}/proposals",
+            get(mission_proposals_resource).post(mission_proposals_resource),
+        )
+        .route("/api/v1/missions/{id}/proposals/{n}/{action}", post(proposal_decision_resource))
         .route("/api/v1/missions/{id}/suspend-until-credits", post(suspend_until_credits_resource))
+        .route("/api/v1/missions/{id}/steer", post(mission_steer_resource))
+        .route("/api/v1/missions/{id}/finish", post(mission_finish_resource))
         .route("/api/v1/missions/{id}/{action}", post(mission_action))
         .route("/api/v1/missions/{id}/tasks", get(mission_tasks).post(add_mission_task))
         .route("/api/v1/missions/{id}/tasks/{n}", get(mission_task_show).patch(amend_mission_task))

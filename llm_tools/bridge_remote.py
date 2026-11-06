@@ -157,23 +157,65 @@ class Client:
         """Use the resource route when one exists; return ``None`` for legacy-only operations."""
         mission = request.mission_id
         op = request.operation
-        if mission is None and op not in {"mission.create", "worker.restore"}:
+        if mission is None and op not in {"mission.create", "worker.restore", "mission.agents", "worker.doctor", "worker.audit", "worker.gc"}:
             return None
         base = f"/api/v1/missions/{urllib.parse.quote(mission, safe='')}" if mission is not None else ""
         params = dict(request.params)
-        worker = urllib.parse.urlencode({"worker": target})
+        worker_query = urllib.parse.urlencode({"worker": target})
         headers = {"Idempotency-Key": request.request_id}
         wait_ms = int(wait * 1000)
         if op == "mission.create":
             status, body = self.call("POST", "/api/v1/missions", {**params, "worker": target, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op == "worker.restore":
             status, body = self.call("POST", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/restore", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op in {"mission.settings.get", "mission.rotation.get", "mission.rotation.put"}:
+            resource = "settings" if op.startswith("mission.settings") else "rotation"
+            method = "GET" if op.endswith(".get") else "PUT"
+            query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
+            status, body = self.call(method, f"{base}/{resource}?{query}", None if method == "GET" else {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op == "mission.settings.patch":
+            query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
+            status, body = self.call("PATCH", f"{base}/settings?{query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op in {"mission.steer", "mission.finish"}:
+            action = "steer" if op == "mission.steer" else "finish"
+            status, body = self.call("POST", f"{base}/{action}?{worker_query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op == "mission.agents":
+            query_values = {"worker": target, "wait_ms": wait_ms}
+            if mission is not None:
+                status, body = self.call("GET", f"{base}/agents?{urllib.parse.urlencode(query_values)}", timeout=wait + 15)
+            else:
+                if params.get("mission"):
+                    query_values["mission"] = params["mission"]
+                query_values.pop("worker")
+                status, body = self.call("GET", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/agents?{urllib.parse.urlencode(query_values)}", timeout=wait + 15)
+        elif op in {"proposal.list", "proposal.create"}:
+            if op == "proposal.list":
+                query = urllib.parse.urlencode({"worker": target, "status": params.get("status", "PENDING"), "limit": params.get("limit", 100), "after": params.get("after", 0), "wait_ms": wait_ms})
+                status, body = self.call("GET", f"{base}/proposals?{query}", timeout=wait + 15)
+            else:
+                status, body = self.call("POST", f"{base}/proposals?{urllib.parse.urlencode({'worker': target})}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op in {"proposal.accept", "proposal.reject"}:
+            number = int(params["task_number"])
+            body_params = {"reason": params.get("reason", ""), "wait_ms": wait_ms}
+            status, body = self.call("POST", f"{base}/proposals/{number}/{op.rsplit('.', 1)[1]}?{urllib.parse.urlencode({'worker': target})}", body_params, timeout=wait + 15, headers=headers)
+        elif op in {"worker.doctor", "worker.audit", "worker.gc"}:
+            name = urllib.parse.quote(target, safe="")
+            if op == "worker.gc":
+                status, body = self.call("POST", f"/api/v1/workers/{name}/gc", {"wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+            else:
+                query_values = {"wait_ms": wait_ms}
+                if op == "worker.audit":
+                    query_values["limit"] = params.get("limit", 50)
+                elif params.get("mission"):
+                    query_values["mission"] = params["mission"]
+                path = "audit" if op == "worker.audit" else "doctor"
+                status, body = self.call("GET", f"/api/v1/workers/{name}/{path}?{urllib.parse.urlencode(query_values)}", timeout=wait + 15)
         elif op == "mission.status":
             query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}?{query}", timeout=wait + 15)
         elif op in {"mission.start", "mission.resume", "mission.pause", "mission.stop", "mission.cancel", "mission.continue", "mission.suspend_until_credits"}:
             action = "suspend-until-credits" if op == "mission.suspend_until_credits" else op.removeprefix("mission.")
-            status, body = self.call("POST", f"{base}/{action}?{worker}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+            status, body = self.call("POST", f"{base}/{action}?{worker_query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op == "task.list":
             query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 50), "offset": params.get("offset", 0), "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/tasks?{query}", timeout=wait + 15)
@@ -190,7 +232,7 @@ class Client:
             query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/tasks/{int(task_number)}?{query}", timeout=wait + 15)
         elif op == "task.add":
-            status, body = self.call("POST", f"{base}/tasks?{worker}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+            status, body = self.call("POST", f"{base}/tasks?{worker_query}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op.startswith("task."):
             task_selector = params.get("task_number")
             if task_selector is None or "task_id" in params:
@@ -201,11 +243,11 @@ class Client:
             if op in {"task.verify", "task.reject"}:
                 if op == "task.reject":
                     body_params["approved"] = False
-                status, body = self.call("POST", f"{task_base}/verify?{worker}", body_params, timeout=wait + 15, headers=headers)
+                status, body = self.call("POST", f"{task_base}/verify?{worker_query}", body_params, timeout=wait + 15, headers=headers)
             elif op in {"task.amend", "task.priority", "task.reorder", "task.dependency"}:
-                status, body = self.call("PATCH", f"{task_base}?{worker}", body_params, timeout=wait + 15, headers=headers)
+                status, body = self.call("PATCH", f"{task_base}?{worker_query}", body_params, timeout=wait + 15, headers=headers)
             elif op in {"task.pause", "task.resume", "task.cancel", "task.retry"}:
-                status, body = self.call("POST", f"{task_base}/{op.removeprefix('task.')}?{worker}", body_params, timeout=wait + 15, headers=headers)
+                status, body = self.call("POST", f"{task_base}/{op.removeprefix('task.')}?{worker_query}", body_params, timeout=wait + 15, headers=headers)
             else:
                 return None
         else:
@@ -309,6 +351,33 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
             "unsupported_options": unsupported_options,
         }
         return make("mission.create", params, with_mission=False), fmt.format_mission_created
+    if command == "mission" and args.mission_action == "set":
+        params = {
+            "auto_continue": None if args.auto_continue is None else args.auto_continue == "on",
+            "teams": None if args.teams is None else args.teams == "on",
+            "token_spend": args.token_spend,
+            "suspend_when_rate_limited": None if args.suspend_when_rate_limited is None else args.suspend_when_rate_limited == "on",
+            "colour": None,
+        }
+        if all(value is None for value in params.values()):
+            raise ValueError("mission set requires at least one setting")
+        return make("mission.settings.patch", params), lambda value: str(value.get("detail", "Mission settings updated"))
+    if command == "mission" and args.mission_action == "settings":
+        return make("mission.settings.get"), lambda value: (f"Auto-continue {'on' if value['auto_continue'] else 'off'} · "
+            f"capacity-wait suspend {'on' if value['suspend_when_rate_limited'] else 'off'} · "
+            f"teams {'on' if value['execution_policy']['teams_enabled'] else 'off'} · "
+            f"token spend {value['execution_policy']['token_spend']} · colour {value.get('colour') or 'auto'}")
+    if command == "mission" and args.mission_action in {"colour", "color"}:
+        params = {"auto_continue": None, "teams": None, "token_spend": None,
+                  "suspend_when_rate_limited": None, "colour": str(args.value)}
+        return make("mission.settings.patch", params), lambda value: fmt.format_mission_colour(value)
+    if command == "rotation":
+        params = {"set": args.set_list, "routes": args.routes, "providers": args.providers}
+        operation = "mission.rotation.put" if any(value is not None for value in params.values()) else "mission.rotation.get"
+        return make(operation, params), lambda value: fmt.format_rotation(value)
+    if command == "agents":
+        request = commands.CommandRequest("mission.agents", {"mission": args.agent_mission}, mission_id=args.agent_mission, target=target)
+        return request, lambda value: "\n".join(__import__("llm_tools.bridge_agents", fromlist=["format_agent_map"]).format_agent_map(value))
     if command == "start":
         params = {
             "headless": getattr(args, "headless", None),
@@ -333,11 +402,39 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         params = {"force": bool(getattr(args, "force", False))} if command == "stop" else {}
         request = make(f"mission.{command}", params)
         return request, lambda value: fmt.format_command_receipt(command, value, request.mission_id or "")
+    if command == "proposal" and args.proposal_action == "create":
+        depends_on = [int(value.strip()) for value in args.depends_on.split(",") if value.strip()]
+        request = make("proposal.create", {"source_operation_id": args.source_operation_id, "prompt": _read_text(args),
+                                            "title": args.title, "priority": args.priority, "depends_on": depends_on,
+                                            "acceptance": list(args.acceptance)})
+        return request, lambda value: fmt.format_proposal_result("create", value)
     if command == "proposal" and args.proposal_action == "list":
         return make("proposal.list", {"status": args.status, "limit": args.limit, "after": args.after}), lambda value: fmt.format_proposals(value["proposals"])
     if command == "proposal" and args.proposal_action in {"accept", "reject"}:
-        params = {"task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or "")}
-        return make("proposal.decide", params), lambda value: fmt.format_proposal_result(args.proposal_action, value)
+        params = {"task_number": int(args.task), "reason": str(getattr(args, "reason", "") or "")}
+        return make(f"proposal.{args.proposal_action}", params), lambda value: fmt.format_proposal_result(args.proposal_action, value)
+    if command == "worker" and args.worker_action == "audit":
+        return make("worker.audit", {"limit": args.limit}, with_mission=False), lambda value: "\n".join(
+            " ".join([str(entry.get("ts", "?")), str(entry.get("action", "?"))] + [f"{key}={entry[key]}" for key in sorted(entry) if key not in {"ts", "action"} and entry[key] is not None])
+            for entry in value["entries"]) or "No worker audit entries."
+    if command == "gc":
+        return make("worker.gc", with_mission=False), lambda value: __import__("llm_tools.bridge_switcher", fromlist=["format_gc"]).format_gc(value["stations"])
+    if command == "doctor":
+        if args.include_config:
+            raise ValueError("doctor --include-config is not available with --target; run doctor locally")
+        return make("worker.doctor", {"mission": args.mission}, with_mission=False), lambda value: (
+            f"SQLite integrity {value.get('sqlite_integrity', 'unknown')} · "
+            f"tmux {'available' if value.get('tmux_available') else 'not found'} · "
+            f"{len(value.get('providers') or [])} provider checks")
+    if command == "finish":
+        request = make("mission.finish")
+        return request, lambda value: str(value.get("detail", "Finish request completed"))
+    if command == "steer":
+        params = {"kind": args.kind, "task": getattr(args, "task", None),
+                  "task_id": getattr(args, "task_by_id", None), "route": args.route, "prompt": _read_text(args)}
+        return make("mission.steer", params), lambda value: fmt.format_command_receipt("steer", value, request.mission_id or "")
+    if command == "backup":
+        raise ValueError("backup --target is unavailable: backup contains prompts and evidence, and the coordinator has no streaming artifact route; run backup locally on the worker")
     if command == "task":
         action = args.task_action
         if action == "list":

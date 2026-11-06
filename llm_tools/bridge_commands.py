@@ -212,6 +212,75 @@ def _mission_status(store: BridgeStore | None, request: CommandRequest, params: 
     return dict(_cli().status_snapshot(request.mission_id))
 
 
+def _mission_steer(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert request.mission_id is not None
+    cli = _cli()
+    with cli.open_store() as writer:
+        task_id = params["task_id"]
+        if params["task"] is not None:
+            try:
+                task_id = int(writer.task_by_ordinal(request.mission_id, params["task"])["id"])
+            except (KeyError, ValueError, TransitionError):
+                raise CommandFailure("not-found", f"no task numbered {params['task']}") from None
+        payload = {"action": "steer", "kind": params["kind"], "task_id": task_id,
+                   "route": params["route"], "prompt": params["prompt"]}
+        return dict(cli._apply_operator_command(writer, request.mission_id, payload, command_id=request.request_id))
+
+
+def _mission_finish(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert request.mission_id is not None
+    from .bridge_finish import finish_mission
+
+    return finish_mission(request.mission_id).as_json()
+
+
+def _mission_settings_get(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert store is not None and request.mission_id is not None
+    mission = store.get_mission(request.mission_id)
+    from .bridge_policy import effective_settings
+
+    config = mission.get("config") or {}
+    return {"schema_version": 1, "mission_id": request.mission_id,
+            "auto_continue": bool(config.get("auto_continue", False)),
+            "suspend_when_rate_limited": bool(config.get("suspend_when_rate_limited", False)),
+            "colour": config.get("colour"),
+            "execution_policy": effective_settings(config)}
+
+
+def _mission_settings_patch(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert request.mission_id is not None
+    if all(params[name] is None for name in ("auto_continue", "teams", "token_spend", "suspend_when_rate_limited", "colour")):
+        raise CommandFailure("invalid-argument", "mission.settings.patch requires at least one setting")
+    cli = _cli()
+    result: dict[str, Any] = {"schema_version": 1, "mission_id": request.mission_id}
+    with cli.open_store() as writer:
+        if params["auto_continue"] is not None:
+            result.update(cli._set_mission_auto_continue(writer, request.mission_id, params["auto_continue"]))
+        if params["teams"] is not None or params["token_spend"] is not None:
+            result.update(cli._set_mission_policy(writer, request.mission_id, teams=None if params["teams"] is None else ("on" if params["teams"] else "off"), token_spend=params["token_spend"]))
+        if params["suspend_when_rate_limited"] is not None:
+            result.update(cli._set_mission_suspend_when_rate_limited(writer, request.mission_id, params["suspend_when_rate_limited"]))
+        if params["colour"] is not None:
+            result.update(cli._set_mission_colour(writer, request.mission_id, params["colour"]))
+    return result
+
+
+def _mission_rotation(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    import argparse
+
+    assert request.mission_id is not None
+    return dict(_cli()._rotation_result(argparse.Namespace(
+        mission=request.mission_id, set_list=params["set"], routes=params["routes"], providers=params["providers"])))
+
+
+def _mission_agents(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from .bridge_agents import build_agent_map
+
+    assert store is not None
+    mission_id = request.mission_id or params["mission"]
+    return dict(build_agent_map(store, mission_id=mission_id))
+
+
 def _mission_events(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     assert store is not None and request.mission_id is not None
     if params["limit"] < 1 or params["limit"] > 1000:
@@ -326,6 +395,47 @@ def _proposal_list(store: BridgeStore | None, request: CommandRequest, params: d
     after_id = int(store.db.execute("SELECT COALESCE(MAX(id),0) FROM tasks WHERE mission_id=? AND ordinal<=?",
                                     (request.mission_id, max(0, params["after"]))).fetchone()[0])
     return {"proposals": store.list_proposals(request.mission_id, status=status, limit=params["limit"], after_task_id=after_id)}
+
+
+def _proposal_create(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    assert request.mission_id is not None
+    with _cli().open_store() as writer:
+        task_id = writer.propose_task(request.mission_id, params["prompt"], source_operation_id=params["source_operation_id"],
+                                      title=params["title"], priority=params["priority"], depends_on=params["depends_on"],
+                                      acceptance=params["acceptance"])
+        return dict(writer.get_task(task_id))
+
+
+def _proposal_decision(accept: bool) -> Handler:
+    def handler(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+        assert request.mission_id is not None
+        with _cli().open_store() as writer:
+            task_id = params["task_id"]
+            _cli()._require_task(writer, request.mission_id, task_id)
+            return dict(writer.decide_proposal(request.mission_id, task_id, accept=accept, reason=params["reason"]))
+    return handler
+
+
+def _worker_doctor(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    import shutil
+
+    mission = store.get_mission(params["mission"]) if store is not None and params["mission"] else None
+    providers = _cli()._doctor_provider_checks(mission)
+    return {"schema_version": 1, "sqlite_integrity": store.db.execute("PRAGMA integrity_check").fetchone()[0] if store else "unavailable",
+            "tmux_available": bool(shutil.which("tmux")), "providers": providers}
+
+
+def _worker_audit(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from .bridge_worker import read_audit
+
+    return {"entries": read_audit(params["limit"])}
+
+
+def _worker_gc(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from . import bridge_switcher
+
+    with _cli().open_store() as writer:
+        return bridge_switcher.gc_json(bridge_switcher.gc_stations(bridge_switcher.collect_entries(writer)))
 
 
 _SESSION_LIMIT_MAX = 1000
@@ -488,6 +598,19 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
                        "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
         OperationSpec("mission.status", "Show one mission's status projection", False, True, _NO_PARAMS, _mission_status),
+        OperationSpec("mission.settings.get", "Read a mission's saved execution settings", False, True, _NO_PARAMS, _mission_settings_get),
+        OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
+                      {"auto_continue": Param(bool), "teams": Param(bool), "token_spend": Param(str),
+                       "suspend_when_rate_limited": Param(bool), "colour": Param(str)}, _mission_settings_patch),
+        OperationSpec("mission.steer", "Queue typed steering for a mission task or safe boundary", True, True,
+                      {"kind": Param(str, required=True), "task": Param(int), "task_id": Param(int),
+                       "route": Param(str), "prompt": Param(str, default="")}, _mission_steer),
+        OperationSpec("mission.finish", "Ask the active native provider to exit safely", True, True, _NO_PARAMS, _mission_finish),
+        OperationSpec("mission.rotation.get", "Read a mission's saved provider rotation", False, True, _NO_PARAMS, _mission_rotation),
+        OperationSpec("mission.rotation.put", "Update a mission's saved provider rotation", True, True,
+                      {"set": Param(str), "routes": Param(str), "providers": Param(str)}, _mission_rotation),
+        OperationSpec("mission.agents", "Read bounded live operation and child-agent metadata", False, False,
+                      {"mission": Param(str)}, _mission_agents),
         OperationSpec(
             "mission.events",
             "Page a mission's durable events after a cursor",
@@ -559,6 +682,19 @@ OPERATIONS: dict[str, OperationSpec] = {
             {"status": Param(str, default="PENDING"), "limit": Param(int, default=100), "after": Param(int, default=0)},
             _proposal_list,
         ),
+        OperationSpec("proposal.create", "Create an agent-originated task proposal", True, True,
+                      {"source_operation_id": Param(str, required=True), "prompt": Param(str, required=True),
+                       "title": Param(str, default=""), "priority": Param(int, default=0),
+                       "depends_on": Param(list, default=[], item=int), "acceptance": Param(list, default=[], item=str)}, _proposal_create),
+        OperationSpec("proposal.accept", "Accept a pending proposal", True, True,
+                      {**_TASK_SELECTOR, "reason": Param(str, default="")}, _proposal_decision(True)),
+        OperationSpec("proposal.reject", "Reject a pending proposal", True, True,
+                      {**_TASK_SELECTOR, "reason": Param(str, default="")}, _proposal_decision(False)),
+        OperationSpec("worker.doctor", "Read bounded local worker diagnostics", False, False,
+                      {"mission": Param(str)}, _worker_doctor),
+        OperationSpec("worker.audit", "Read the local worker security audit log", False, False,
+                      {"limit": Param(int, default=50)}, _worker_audit),
+        OperationSpec("worker.gc", "Close idle stations for finished missions", True, False, _NO_PARAMS, _worker_gc),
         OperationSpec(
             "session.list",
             "List provider sessions (operations) of this worker's missions",

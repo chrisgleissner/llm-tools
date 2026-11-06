@@ -14,7 +14,7 @@ HTTP_RS = ROOT / "coordinator/src/http.rs"
 # Intentional local-only commands are named explicitly in the docs. The remaining
 # entries are likewise present so a new CLI leaf cannot silently escape review.
 COMMANDS = {
-    "help", "view", "mission create", "mission list", "mission set", "mission colour", "mission color",
+    "help", "view", "mission create", "mission list", "mission set", "mission settings", "mission colour", "mission color",
     "status", "screen", "agents", "suspend-until-credits", "task add", "task list", "task show",
     "task amend", "task priority", "task reorder", "task dependencies", "task pause", "task resume",
     "task cancel", "task retry", "task verify", "task reject", "proposal create", "proposal list",
@@ -82,7 +82,7 @@ def test_cli_commands_and_options_are_listed_in_parity_table() -> None:
 def test_coordinator_routes_are_listed_in_parity_table() -> None:
     doc = API_DOC.read_text()
     route_table = doc.split("Coordinator router declarations", 1)[1].split("The regression test", 1)[0]
-    documented = set(re.findall(r"`((?:GET|POST|PATCH|DELETE) /[^`]+)`", route_table))
+    documented = set(re.findall(r"`((?:GET|POST|PUT|PATCH|DELETE) /[^`]+)`", route_table))
     actual = _rust_routes()
     documented_routes = {(item.split(" ", 1)[0], item.split(" ", 1)[1]) for item in documented}
     assert len(documented_routes) == len(documented), "each coordinator route must be documented once"

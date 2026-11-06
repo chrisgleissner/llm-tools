@@ -44,7 +44,7 @@ def opener(routes):
     def open_(request, context=None, timeout=None):
         path = request.full_url.split("8443", 1)[1]
         key = (request.get_method(), path.split("?")[0])
-        calls.append((key, json.loads(request.data) if request.data else None, dict(request.header_items())))
+        calls.append((key, json.loads(request.data) if request.data else None, dict(request.header_items()), request.full_url))
         answer = routes[key]
         if isinstance(answer, list):
             answer = answer.pop(0)
@@ -97,6 +97,22 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["mission", "create", "--prompt", "new", "--cwd", ".", "--providers", "codex"], "mission.create",
          {"prompt": "new", "cwd": ".", "name": "", "acceptance": [], "providers": "codex", "routes": None,
           "headless": False, "native_tui": False, "teams": None, "token_spend": None, "trust_folder": False, "unsupported_options": []}),
+        (["mission", "settings", "--mission", "m1"], "mission.settings.get", {}),
+        (["mission", "set", "--mission", "m1", "--auto-continue", "on", "--teams", "off"], "mission.settings.patch",
+         {"auto_continue": True, "teams": False, "token_spend": None, "suspend_when_rate_limited": None, "colour": None}),
+        (["mission", "colour", "--mission", "m1", "4"], "mission.settings.patch",
+         {"auto_continue": None, "teams": None, "token_spend": None, "suspend_when_rate_limited": None, "colour": "4"}),
+        (["rotation", "--mission", "m1"], "mission.rotation.get", {"set": None, "routes": None, "providers": None}),
+        (["rotation", "--mission", "m1", "--set", "codex,claude"], "mission.rotation.put", {"set": "codex,claude", "routes": None, "providers": None}),
+        (["agents", "--mission", "m1"], "mission.agents", {"mission": "m1"}),
+        (["proposal", "create", "--mission", "m1", "--operation", "op1", "--prompt", "new"], "proposal.create",
+         {"source_operation_id": "op1", "prompt": "new", "title": "", "priority": 0, "depends_on": [], "acceptance": []}),
+        (["doctor"], "worker.doctor", {"mission": None}),
+        (["finish", "--mission", "m1"], "mission.finish", {}),
+        (["steer", "--mission", "m1", "--kind", "replace", "--task", "2", "--prompt", "new"], "mission.steer",
+         {"kind": "replace", "task": 2, "task_id": None, "route": None, "prompt": "new"}),
+        (["worker", "audit"], "worker.audit", {"limit": 50}),
+        (["gc"], "worker.gc", {}),
         (["status", "--mission", "m1"], "mission.status", {}),
         (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100}),
         (["stop", "--mission", "m1"], "mission.stop", {"force": False}),
@@ -113,8 +129,8 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["task", "retry", "--mission", "m1", "--task", "2"], "task.retry", {"task_number": 2}),
         (["task", "add", "--mission", "m1", "--prompt", "x"], "task.add", {"prompt": "x", "title": "", "priority": 0, "order": None, "acceptance": []}),
         (["proposal", "list", "--mission", "m1"], "proposal.list", {"status": "PENDING", "limit": 100, "after": 0}),
-        (["proposal", "accept", "--mission", "m1", "--task", "3"], "proposal.decide", {"task_number": 3, "accept": True, "reason": ""}),
-        (["proposal", "reject", "--mission", "m1", "--task", "3", "--reason", "no"], "proposal.decide", {"task_number": 3, "accept": False, "reason": "no"}),
+        (["proposal", "accept", "--mission", "m1", "--task", "3"], "proposal.accept", {"task_number": 3, "reason": ""}),
+        (["proposal", "reject", "--mission", "m1", "--task", "3", "--reason", "no"], "proposal.reject", {"task_number": 3, "reason": "no"}),
     ],
 )
 def test_request_mapping(argv, operation, params):
@@ -153,10 +169,58 @@ def test_create_suspend_and_restore_use_resource_endpoints():
     ]
 
 
+def test_api016_surface_operations_use_resource_routes():
+    routes = {
+        ("GET", "/api/v1/missions/m1/settings"): (200, {"state": "done", "result": {"auto_continue": False}}),
+        ("PATCH", "/api/v1/missions/m1/settings"): (200, {"state": "done", "result": {"detail": "updated"}}),
+        ("POST", "/api/v1/missions/m1/settings"): (404, None),
+        ("POST", "/api/v1/missions/m1/steer"): (200, {"state": "done", "result": {"status": "APPLIED"}}),
+        ("POST", "/api/v1/missions/m1/finish"): (200, {"state": "done", "result": {"detail": "finished"}}),
+        ("GET", "/api/v1/missions/m1/rotation"): (200, {"state": "done", "result": {"mode": "providers"}}),
+        ("PUT", "/api/v1/missions/m1/rotation"): (200, {"state": "done", "result": {"updated": True}}),
+        ("GET", "/api/v1/missions/m1/agents"): (200, {"state": "done", "result": {"agents": []}}),
+        ("GET", "/api/v1/workers/ws/agents"): (200, {"state": "done", "result": {"agents": []}}),
+        ("GET", "/api/v1/missions/m1/proposals"): (200, {"state": "done", "result": {"proposals": []}}),
+        ("POST", "/api/v1/missions/m1/proposals"): (200, {"state": "done", "result": {"id": "t"}}),
+        ("POST", "/api/v1/missions/m1/proposals/3/accept"): (200, {"state": "done", "result": {"accepted": True}}),
+        ("POST", "/api/v1/missions/m1/proposals/3/reject"): (200, {"state": "done", "result": {"accepted": False}}),
+        ("GET", "/api/v1/workers/ws/doctor"): (200, {"state": "done", "result": {"sqlite_integrity": "ok"}}),
+        ("GET", "/api/v1/workers/ws/audit"): (200, {"state": "done", "result": {"entries": []}}),
+        ("POST", "/api/v1/workers/ws/gc"): (200, {"state": "done", "result": {"stations": []}}),
+    }
+    api = client(routes)
+    requests = [
+        remote.request_for(args("mission", "settings", "--mission", "m1"), "ws")[0],
+        remote.request_for(args("mission", "set", "--mission", "m1", "--auto-continue", "on"), "ws")[0],
+        remote.request_for(args("mission", "color", "--mission", "m1", "auto"), "ws")[0],
+        remote.request_for(args("steer", "--mission", "m1", "--kind", "pause-after-iteration"), "ws")[0],
+        remote.request_for(args("finish", "--mission", "m1"), "ws")[0],
+        remote.request_for(args("rotation", "--mission", "m1"), "ws")[0],
+        remote.request_for(args("rotation", "--mission", "m1", "--set", "codex"), "ws")[0],
+        remote.request_for(args("agents", "--mission", "m1"), "ws")[0],
+        remote.request_for(args("proposal", "list", "--mission", "m1"), "ws")[0],
+        remote.request_for(args("proposal", "create", "--mission", "m1", "--operation", "op1", "--prompt", "new"), "ws")[0],
+        remote.request_for(args("proposal", "accept", "--mission", "m1", "--task", "3"), "ws")[0],
+        remote.request_for(args("proposal", "reject", "--mission", "m1", "--task", "3"), "ws")[0],
+        remote.request_for(args("doctor"), "ws")[0], remote.request_for(args("worker", "audit"), "ws")[0],
+        remote.request_for(args("gc"), "ws")[0],
+    ]
+    for request in requests:
+        assert api.submit_resource("ws", request) is not None, request.operation
+    colour_patch = next(call for call in api.opener.calls if call[0] == ("PATCH", "/api/v1/missions/m1/settings") and call[1].get("colour") == "auto")
+    assert colour_patch[1]["colour"] == "auto"
+    proposal_paths = [call[3].split("8443", 1)[1] for call in api.opener.calls if "/proposals" in call[3]]
+    assert any(path.startswith("/api/v1/missions/m1/proposals?") and "worker=ws" in path for path in proposal_paths)
+    assert any(path.endswith("/proposals/3/accept?worker=ws") for path in proposal_paths)
+    assert any(path.endswith("/proposals/3/reject?worker=ws") for path in proposal_paths)
+    all_agents = remote.request_for(args("agents", "--all-missions"), "ws")[0]
+    assert api.submit_resource("ws", all_agents) is not None
+    assert api.opener.calls[-1][0][1] == "/api/v1/workers/ws/agents"
+
+
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
-        (["doctor"], "not available"),
         (["task", "list", "--mission", "m1", "--all"], "--limit"),
         (["task", "add", "--mission", "m1", "--prompt", "x", "--depends-on", "1"], "depends-on"),
         (["task", "dependencies", "--mission", "m1", "--task", "1", "--add", "2"], "dependencies"),
@@ -165,6 +229,11 @@ def test_create_suspend_and_restore_use_resource_endpoints():
 def test_unmappable_commands_fail_explicitly(argv, message):
     with pytest.raises(ValueError, match=message):
         remote.request_for(args(*argv), "ws")
+
+
+def test_backup_target_is_explicitly_excluded_due_to_artifact_streaming_policy():
+    with pytest.raises(ValueError, match="streaming artifact route"):
+        remote.request_for(args("backup", "--output", "/tmp/bridge.db"), "ws")
 
 
 def test_run_cli_outcomes(capsys):
