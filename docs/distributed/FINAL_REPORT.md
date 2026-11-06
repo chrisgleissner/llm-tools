@@ -69,8 +69,8 @@ version-compatible correction is pending in PR #33.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 228 |
-| Incomplete `[~]` | 12 |
+| Verified `[x]` | 229 |
+| Incomplete `[~]` | 11 |
 | Blocked `[!]` | 6 |
 | Not started `[ ]` | 1 |
 | **Total** | **247** |

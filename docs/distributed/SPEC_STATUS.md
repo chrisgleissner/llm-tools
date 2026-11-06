@@ -217,7 +217,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-WEAR-007 | [x] | Coordinator health interval is 60 seconds; low-value periodic timers were reviewed and disabled where present. |
 | PI-WEAR-008 | [x] | Hourly fake-clock save is retained for sane time before network sync; remaining periodic writer is documented for the wear measurement. |
 | PI-WEAR-009 | [~] | A full 24-hour post-optimization card-write measurement and writer classification are still pending; no pre-change baseline was captured. |
-| PI-WEAR-010 | [~] | Encrypted off-device daily backup timer and initial backup are in place; restore and re-image restoration still need testing. |
+| PI-WEAR-010 | [~] | Daily encrypted off-device backup is configured; coordinator database restore from that archive passed its integrity check and returned healthy. Only restoration from a full microSD re-image remains untested. |
 | PI-UPD-001 | [~] | `unattended-upgrades` covers the configured Debian, Raspberry Pi, DietPi, and Docker origins; dry run succeeded, but no candidate kernel update was available to demonstrate selection. |
 | PI-UPD-002 | [x] | DietPi cron APT action is check-only; DietPi update notice remains enabled. |
 | PI-UPD-003 | [~] | Persistent DietPi and APT timers are enabled; missed DietPi timer catch-up was observed after reboot. APT missed-run catch-up was not separately simulated. |
@@ -244,10 +244,10 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-VERIFY-007 | [!] | Wi-Fi interruption test severed the only SSH path; scheduled link-up did not restore it. User power-cycled the Pi to recover. Do not restart the only network link through its own SSH session. |
 | PI-VERIFY-008 | [!] | Power-loss-under-write test requires an operator to unplug the Pi for ten seconds; no safe unattended equivalent exists and it was not performed. |
 | PI-VERIFY-009 | [x] | Durable Docker volume, UID/GID 65532 ownership, configuration, and certificate persistence were checked after deployment and reboot. |
-| PI-VERIFY-010 | [~] | Daily encrypted off-device backup timer and initial archive are verified; coordinator restore and re-image restoration are not yet tested. |
+| PI-VERIFY-010 | [x] | Daily encrypted off-device OS/coordinator archive is scheduled and verified; coordinator database restore from it passed the integrity check and the service returned healthy. Full microSD re-image restoration is tracked separately under PI-WEAR-010 and remains untested. |
 | PI-VERIFY-011 | [~] | `vcgencmd get_throttled` was `0x0`; no targeted storage errors, OOM, Wi-Fi failures, undervoltage, or throttling were found. Unrelated Bluetooth firmware warnings remain in the boot kernel log. |
 | PI-VERIFY-012 | [x] | Setup and administration were performed headlessly from the desktop; no monitor or keyboard was used. |
-| PI-VERIFY-013 | [!] | Optional passkey/Tailscale path was not run because the user asked to treat it as declined; password login remains the tested path. |
+| PI-VERIFY-013 | [!] | Blocked until passkey support from PR #31 reaches main; the overseer will then ask the user about the optional Tailscale path. Password login is the tested path so far. |
 | PI-REPO-001 | [x] | `benchmarks.md` records dated physical Pi measurements, units, and benchmark method beside the emulated and runner results; CI run 42250189901 passed all jobs. |
 | PI-REPO-002 | [x] | `install.md` replaces derived target figures with the physical host and coordinator measurements while retaining generic example addresses; CI run 42250189901 passed all jobs. |
 | PI-REPO-003 | [x] | Physical evidence is recorded for the affected IDs; `FINAL_REPORT.md` totals are generated from the 247-row register; CI run 42250189901 passed all jobs. |
