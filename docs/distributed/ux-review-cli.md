@@ -1522,8 +1522,8 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 
 | Finding | Severity | Status | Fix and test |
 |---|---|---|---|
-| CLIUX-001 | critical | open | |
-| CLIUX-002 | critical | open | |
+| CLIUX-001 | critical | fixed | 82a36cf. `start` refuses cancelled and completed missions (same rule as `resume`); it prints "running" only after the controller reports RUNNING; a controller that fails at start-up prints the reason and a fix and exits 2. The controller now rejects unknown rotation names before reporting ready. `tests/test_bridge_cli_start_create_ux.py`::test_start_refuses_a_cancelled_mission, test_launch_reports_a_controller_that_started_nothing and three more; failed before the fix (exit 0, "running"). |
+| CLIUX-002 | critical | fixed | 82a36cf. One validator (`bridge_rotation.validate_names`) for `rotation --set`, `mission create`, `start --providers/--routes` and the controller, with did-you-mean; a stderr warning for installed providers that are not signed in. `tests/test_bridge_cli_start_create_ux.py`::test_create_rejects_an_unknown_provider_with_a_suggestion and five more; failed before the fix. |
 | CLIUX-003 | high | fixed | 075d38c. New `task output` (pages the latest run log; reports pruned logs with size and sha256) and `task diff` (diff from the start-of-run commit recorded in the checkpoint, plus untracked files). The approval dialog lists changed files and adds `o output · d diff`; the Tasks inspect pane shows the last run. Both commands are typed read operations available remotely. `tests/test_bridge_task_review.py`: 21 tests failed before the fix (for example `test_checkpoint_records_the_head_commit_and_files_already_modified` with `KeyError: head`). |
 | CLIUX-004 | high | fixed | 0bde2f6. `control`/`console` explain the missing terminal; `usage` prints the table. `tests/test_bridge_cli_errors.py::test_control_without_a_terminal_explains_itself`, `test_usage_without_a_terminal_prints_the_usage_table` and three more; all failed before the fix. |
 | CLIUX-005 | high | fixed | fc9c5fa. Root cause: under `LLM_SCHEDULER_USAGE_JSON(_FILE)` the controller used the injected capacity while F8 read the providers itself. F8 now uses the same snapshots, labels its source, warns on a difference from the controller, lists the rotation by default (`a` all), and reads `× empty` at 0%. `tests/test_bridge_usage_agreement.py::test_embedded_read_uses_the_capacity_the_controller_observes` and `test_an_exhausted_monthly_window_reads_empty_not_conserve` failed before the fix. |
@@ -1531,7 +1531,7 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-007 | high | fixed | 0bde2f6. Did-you-mean for unknown commands, subcommands and options; internal commands hidden. `tests/test_bridge_cli_errors.py::test_unknown_command_suggests_the_closest_public_command` and eight more; failed before the fix on the argparse choice list. |
 | CLIUX-008 | high | open | |
 | CLIUX-009 | high | open | |
-| CLIUX-010 | high | open | |
+| CLIUX-010 | high | fixed | 82a36cf. `mission create` warns about an unfinished mission in the same folder (`--new` silences it); suggested commands include `--mission`; the ambiguity list shows when each mission was updated. `tests/test_bridge_cli_start_create_ux.py`::test_create_warns_when_the_folder_already_has_an_unfinished_mission and four more; failed before the fix. |
 | CLIUX-011 | medium | open | |
 | CLIUX-012 | medium | open | |
 | CLIUX-013 | medium | open | |
@@ -1573,7 +1573,7 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-049 | low | open | |
 | CLIUX-050 | low | open | |
 | CLIUX-051 | high | open | |
-| CLIUX-052 | high | open | |
+| CLIUX-052 | high | fixed | 82a36cf. The "Mission reopened" receipt now includes `--mission`. `tests/test_bridge_cli_start_create_ux.py`::test_suggested_commands_name_the_mission failed before the fix. |
 | CLIUX-053 | high | open | |
 | CLIUX-054 | medium | open | |
 | CLIUX-055 | high | open | |
