@@ -272,7 +272,8 @@ def _snapshot(status: str, **lifecycle: Any) -> dict[str, Any]:
     ("FAILED", "Controller  failed — reason not recorded; inspect with: llm-bridge events --mission abcdef12"),
 ])
 def test_status_never_shows_a_stale_heartbeat_for_a_finished_or_idle_mission(status: str, expected: str) -> None:
-    text = bridge_format.format_status(_snapshot(status))
+    # A paused mission whose controller is gone is INTERRUPTED (tests/test_bridge_status_honesty.py); here it is alive.
+    text = bridge_format.format_status(_snapshot(status, controller_running=status == "PAUSED" or False))
     assert expected in text.splitlines()
     assert "heartbeat" not in text
 

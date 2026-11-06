@@ -127,8 +127,8 @@ def test_unknown_stats_render_a_dash_and_a_stale_controller_shows_no_provider(tm
     state.probe = lambda ident: False
     grid = draw(state, size=(34, 120))
     running = grid.row(6)
-    assert "stale" in running and "2/5" not in running
-    assert re.search(r"stale\s+aaaaaaaa\s+▌ Port the bridge\s+-\s+-\s+4m ago", running), running
+    assert "INTERRUPTED" in running and "2/5" not in running
+    assert re.search(r"INTERRUPTED\s+aaaaaaaa\s+▌ Port the bridge\s+-\s+-\s+4m ago", running), running
 
 
 def test_progress_text_variants():

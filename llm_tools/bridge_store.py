@@ -1245,8 +1245,17 @@ class BridgeStore:
             self._event(op["mission_id"], "operation-exited", {"exit_code": int(exit_code), "task_status": status, "logs_path": logs_path, "provider_started": exit_code not in (143, 78)}, task_id=task["id"], operation_id=operation_id)
         return self.get_task(int(op["task_id"]))
 
-    def reconcile_interrupted_operations(self, mission_id: str) -> int:
+    def reconcile_interrupted_operations(self, mission_id: str, *, cause: str = "") -> int:
+        """Mark unresolved operations UNCERTAIN and block their tasks.
+
+        ``cause`` names an operator action that interrupted them (``stop-force``).
+        The event then says so, and ``release_interrupted_tasks`` can resume the
+        task when the mission is started again; without a cause the interruption
+        is a crash, and the task waits for the operator.
+        """
         count = 0
+        reason = {"stop-force": "interrupted by stop --force"}.get(cause, "operation outcome was not committed before controller exit")
+        data = {"reason": reason, **({"cause": cause} if cause else {})}
         with self._transaction():
             self._mission_row(mission_id)
             rows = self.db.execute("SELECT * FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')", (mission_id,)).fetchall()
@@ -1255,7 +1264,7 @@ class BridgeStore:
                 now = utc_now()
                 self.db.execute("UPDATE operations SET status='UNCERTAIN',updated_at=? WHERE id=?", (now, op["id"]))
                 self.db.execute("UPDATE tasks SET status='BLOCKED',updated_at=? WHERE id=?", (now, task["id"]))
-                self._event(mission_id, "operation-uncertain", {"reason": "operation outcome was not committed before controller exit"}, task_id=task["id"], operation_id=op["id"])
+                self._event(mission_id, "operation-uncertain", data, task_id=task["id"], operation_id=op["id"])
                 count += 1
         return count
 
@@ -1287,6 +1296,37 @@ class BridgeStore:
                     continue
                 self.db.execute("UPDATE tasks SET status='READY',updated_at=? WHERE id=?", (utc_now(), task["id"]))
                 self._event(mission_id, "task-declined-released", {"operation_id": operation["id"], "from": "BLOCKED", "to": "READY"}, task_id=task["id"], operation_id=operation["id"])
+                released.append(int(task["ordinal"]))
+        return released
+
+    def release_interrupted_tasks(self, mission_id: str) -> list[int]:
+        """Make tasks that ``stop --force`` interrupted runnable again; returns their ordinals.
+
+        Called when the operator starts the mission again. A task is released
+        only while its latest operation is the one the forced stop interrupted,
+        so a task that crashed, was retried since, or was blocked for another
+        reason is not touched.
+        """
+        released: list[int] = []
+        with self._transaction():
+            self._mission_row(mission_id)
+            rows = self.db.execute("SELECT id,ordinal FROM tasks WHERE mission_id=? AND status='BLOCKED'", (mission_id,)).fetchall()
+            for task in rows:
+                latest = self.db.execute(
+                    "SELECT id,status FROM operations WHERE mission_id=? AND task_id=? ORDER BY rowid DESC LIMIT 1",
+                    (mission_id, task["id"]),
+                ).fetchone()
+                if latest is None or latest["status"] != "UNCERTAIN":
+                    continue
+                forced = self.db.execute(
+                    "SELECT 1 FROM events WHERE mission_id=? AND operation_id=? AND kind='operation-uncertain' "
+                    "AND json_extract(data_json,'$.cause')='stop-force' LIMIT 1",
+                    (mission_id, latest["id"]),
+                ).fetchone()
+                if forced is None:
+                    continue
+                self.db.execute("UPDATE tasks SET status='READY',updated_at=? WHERE id=?", (utc_now(), task["id"]))
+                self._event(mission_id, "task-interrupted-released", {"operation_id": latest["id"], "from": "BLOCKED", "to": "READY"}, task_id=task["id"], operation_id=latest["id"])
                 released.append(int(task["ordinal"]))
         return released
 

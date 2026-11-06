@@ -13,8 +13,9 @@ used by the scheduler. Bridge adds no provider SDK or network service.
 Run `llm-bridge` with no arguments from any working directory to open the home
 screen. It lists saved missions with status, short id (the id the CLI accepts
 as `--mission`), name, age and folder; `●` marks a
-mission whose folder is the current folder and `stale` marks a RUNNING or PAUSED
-mission whose controller is not running (open it and type `resume`). With no
+mission whose folder is the current folder and `✕ INTERRUPTED` replaces the status of a RUNNING or PAUSED
+mission whose controller stopped unexpectedly (crash, kill or reboot); the detail line gives the fix,
+`llm-bridge start --mission ID`. With no
 missions it explains what a mission is. Use Up/Down and Enter to choose a
 mission, or **N** for a new mission; **?** opens help and **Q** quits.
 The creation form defaults to the current folder and Native interactive. With
@@ -644,7 +645,18 @@ boundary and closes the owned station after the controller stops; in native mode
 invocation to return and says how to finish if that takes a while; a later resume creates or reconnects the
 station as needed. `stop --force` reconciles unresolved work and terminates
 only a process group or tmux station whose persisted ownership can be
-validated. `cancel` durably cancels the mission and its unfinished tasks.
+validated. When no provider process was running it prints `Stopped · no provider
+process was running` and exits 0; it fails only when a recorded provider process
+cannot be confirmed as the mission's, and then names its PID. The task that
+`stop --force` interrupted is recorded as `interrupted by stop --force`, and the
+next `start` runs it again.
+
+While a provider's capacity cannot be determined (not signed in, no usage data),
+the task stays READY and no operation is open: `status` shows `Waiting for
+capacity data · claude has no usage data, launches anyway in 14m (at 19:50)`.
+The deadline is fixed when the wait starts (`--max-unavailable-wait`, default
+900 s), so the countdown only goes down. After it passes, Bridge launches the
+provider anyway. `cancel` durably cancels the mission and its unfinished tasks.
 
 After a controller restart, Bridge reconciles any operation that was in
 progress. It may mark the operation uncertain and the task blocked for review;
@@ -724,7 +736,7 @@ to a login session. Log in over SSH (or open another terminal) to find a
 running mission, inspect it and attach without disturbing the local session:
 
 ```bash
-llm-bridge mission list            # "(no controller)" marks a RUNNING or PAUSED mission whose controller is gone
+llm-bridge mission list            # "INTERRUPTED (was RUNNING)" marks a mission whose controller is gone
 llm-bridge status --mission 3f9a   # unique ID prefix of 4+ characters
 llm-bridge attach --mission 3f9a   # open the provider station
 # Ctrl-] then d detaches your terminal; mission and local session continue
@@ -836,7 +848,7 @@ asks for confirmation (**Y**/**N**) and then closes that station through the sam
 safe path the controller uses: a station whose provider process is alive, or to
 which a terminal is attached, is kept. `llm-bridge gc [--json]` does the same for
 every finished mission. A RUNNING, PAUSED or STOPPING mission without a running
-controller shows the `stale` marker in the picker as on the home screen.
+controller shows `INTERRUPTED` in the picker as on the home screen.
 
 Choosing another mission in the picker moves your terminal to that station. The
 station you left keeps running, and one detach (Ctrl-] then d) from the new

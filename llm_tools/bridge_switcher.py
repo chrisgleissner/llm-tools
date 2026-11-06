@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 from . import bridge_hangup, bridge_redraw
 from .bridge_format import printable
 from .bridge_glyphs import FINISHED_STATES, GLYPHS, provider_role, state_look, state_text
-from .bridge_vocab import MISSION_NEEDS_YOU_LABEL
+from .bridge_vocab import MISSION_INTERRUPTED_LABEL, MISSION_NEEDS_YOU_LABEL
 from .bridge_input import cell_slice, cell_width
 from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
 from .bridge_store import BridgeStore, controller_running, store_path
@@ -38,8 +38,7 @@ _TERMINAL_STATUSES = FINISHED_MISSION_STATUSES
 _TASK_RANK = {"RUNNING": 0, "VERIFYING": 1, "READY": 2}
 _CONTROLLED_STATUSES = CONTROLLED_MISSION_STATUSES
 _STATION_CLOSABLE_STATES = STATION_CLOSING_MISSION_STATUSES
-STALE_MARKER = "stale"
-STALE_CELLS = len(STALE_MARKER) + 1
+STALE_CELLS = len(MISSION_INTERRUPTED_LABEL) - 9  # INTERRUPTED is longer than the other status words
 
 
 # ---------------------------------------------------------------- text helpers
@@ -194,8 +193,9 @@ class MissionEntry:
 
     @property
     def display_status(self) -> str:
-        """The state word shown for the mission: ``NEEDS YOU`` while a task awaits the operator."""
-        return MISSION_NEEDS_YOU_LABEL if self.in_review else self.status
+        """The state word shown for the mission: ``NEEDS YOU`` while a task awaits the operator,
+        ``INTERRUPTED`` when its controller stopped unexpectedly."""
+        return MISSION_NEEDS_YOU_LABEL if self.in_review else MISSION_INTERRUPTED_LABEL if self.stale else self.status
 
     @property
     def short_id(self) -> str:
@@ -214,7 +214,7 @@ class MissionEntry:
 
     def _build_search_text(self) -> str:
         parts = [self.mission_id, self.name, self.status, self.cwd, short_home(self.cwd), self.provider, self.task_title,
-                 f"task {self.task_number}" if self.task_id is not None else "", "live" if self.live else "", "review" if self.in_review else "", "stale" if self.stale else "",
+                 f"task {self.task_number}" if self.task_id is not None else "", "live" if self.live else "", "review" if self.in_review else "", "stale interrupted" if self.stale else "",
                  "station idle" if self.station_idle else ""]
         return " ".join(parts).lower()
 
@@ -612,10 +612,8 @@ class MissionPicker:
         row: list[tuple[str, str]] = [
             (arrow if cursor else " ", "accent"), (mark, mark_role), (self._g("chip"), mission_role(entry.mission_id, entry.config)), (" ", "info"),
             (pad(entry.short_id, 8), "muted"), ("  ", "info"),
-            (pad(clip(state_text(entry.display_status, unicode=self.unicode), 11, unicode=self.unicode), 11), state_role),
+            (pad(clip(state_text(entry.display_status, unicode=self.unicode), self.state_cells, unicode=self.unicode), self.state_cells), state_role),
         ]
-        if self.state_cells > 11:
-            row.append((pad(" " + STALE_MARKER if entry.stale else "", self.state_cells - 11), "warn"))
         row += [
             ("  ", "info"),
             (pad(clip(entry.name or "-", widths[0], unicode=self.unicode), widths[0]), text_role), ("  ", "info"),
@@ -691,7 +689,7 @@ class MissionPicker:
             detail = [(f"task {entry.review_ordinal} awaits your review{sep}Enter to open", "state_review"), (f"{sep}{folder}", "muted")]
         elif entry is not None:
             state = ("station idle" if entry.station_idle else "station running" if entry.station
-                     else "controller running" if entry.controller else "controller not running" if entry.stale else "not running")
+                     else "controller running" if entry.controller else f"controller stopped unexpectedly{sep}llm-bridge start --mission {entry.short_id}" if entry.stale else "not running")
             role = "state_running" if entry.live else "warn" if entry.stale and not entry.finished else "muted"
             rotation = (entry.rotation or "-").replace(",", " -> " if not self.unicode else " → ")
             detail = [(f"{folder}{sep}{rotation}{sep}", "muted"), (state, role)]

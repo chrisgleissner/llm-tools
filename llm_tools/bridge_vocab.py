@@ -58,6 +58,8 @@ class TaskStatus(StrEnum):
 # ``REVIEW``.  A mission with such a task is shown as ``NEEDS YOU``.
 TASK_STATUS_LABELS: dict[str, str] = {"VERIFYING": "REVIEW"}
 MISSION_NEEDS_YOU_LABEL = "NEEDS YOU"
+# Shown for a mission that should have a controller but has none (it stopped unexpectedly).
+MISSION_INTERRUPTED_LABEL = "INTERRUPTED"
 
 
 def status_label(status: object) -> str:
@@ -215,6 +217,7 @@ class EventKind(StrEnum):
     TASK_AMENDED = "task-amended"
     TASK_AMENDMENT_APPLIED = "task-amendment-applied"
     TASK_DECLINED_RELEASED = "task-declined-released"
+    TASK_INTERRUPTED_RELEASED = "task-interrupted-released"
     TASK_EVIDENCE_RECORDED = "task-evidence-recorded"
     TASK_LAUNCH_REFUSED = "task-launch-refused"
     TASK_PRIORITY = "task-priority"
