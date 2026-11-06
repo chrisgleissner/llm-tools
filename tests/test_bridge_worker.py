@@ -18,6 +18,24 @@ from llm_tools.bridge_store import BridgeStore
 TOKEN = "t" * 40
 
 
+def test_worker_status_reports_connection_and_service_state_without_token(monkeypatch, capsys):
+    config = worker.WorkerConfig("worker-id", "build-1", "wss://coordinator.example/api/v1/worker/connect", TOKEN, False)
+    monkeypatch.setattr(worker, "load_config", lambda _env=None: config)
+    monkeypatch.setattr(worker, "read_audit", lambda _limit=50, _env=None: [
+        {"ts": "2026-11-06T14:00:00Z", "action": "connection.accepted", "generation": 2},
+    ])
+    status = worker.status_public(service_state="active")
+    assert status["connection_state"] == "connected"
+    assert status["last_connected_at"] == "2026-11-06T14:00:00Z"
+    assert status["service_state"] == "active"
+    assert "token" not in status and TOKEN not in json.dumps(status)
+    monkeypatch.setattr(worker, "status_public", lambda: status)
+    assert main(["worker", "status"]) == 0
+    output = capsys.readouterr().out
+    assert "Worker build-1 · connected to the coordinator" in output
+    assert "Worker service: active" in output
+
+
 @pytest.fixture
 def state(tmp_path, monkeypatch, capsys):
     directory = tmp_path / "state"

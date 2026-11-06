@@ -147,6 +147,53 @@ def read_audit(limit: int = 50, env: dict[str, str] | None = None) -> list[dict[
     return entries[-limit:] if limit > 0 else []
 
 
+def status_public(env: dict[str, str] | None = None, *, service_state: str | None = None) -> dict[str, Any]:
+    """Worker enrollment plus best-effort service and last coordinator connection state."""
+    config = load_config(env)
+    if service_state is None:
+        import shutil
+        import subprocess
+
+        unit = service_unit_path(env)
+        if not unit.exists():
+            service_state = "not-installed"
+        elif not shutil.which("systemctl"):
+            service_state = "unknown"
+        else:
+            try:
+                check = subprocess.run(
+                    ["systemctl", "--user", "is-active", f"{SERVICE_NAME}.service"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                service_state = "active" if check.returncode == 0 and check.stdout.strip() == "active" else "inactive"
+            except (OSError, subprocess.SubprocessError):
+                service_state = "unknown"
+    connection_events = [
+        entry for entry in read_audit(200, env)
+        if entry.get("action") in {"connection.accepted", "connection.ended", "connection.refused"}
+    ]
+    latest = connection_events[-1] if connection_events else None
+    connected = bool(latest and latest.get("action") == "connection.accepted" and service_state == "active")
+    last_connected = next((entry.get("ts") for entry in reversed(connection_events) if entry.get("action") == "connection.accepted"), None)
+    if connected:
+        connection_state = "connected"
+    elif latest and latest.get("action") in {"connection.ended", "connection.refused"}:
+        connection_state = "disconnected"
+    elif last_connected:
+        connection_state = "last-connected"
+    else:
+        connection_state = "not-connected"
+    return {
+        **config.public(),
+        "connection_state": connection_state,
+        "last_connected_at": last_connected,
+        "service_state": service_state,
+    }
+
+
 def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None,
            allow_terminal_view: bool = False) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""

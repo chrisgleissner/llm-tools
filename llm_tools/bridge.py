@@ -2050,7 +2050,7 @@ def _worker_command(args: argparse.Namespace) -> int:
                       f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
         return 0
     if args.worker_action == "status":
-        _print_result(worker.load_config().public(), args.json, lambda value: "\n".join(f"{key}: {value[key]}" for key in sorted(value)))
+        _print_result(worker.status_public(), args.json, _format_worker_status)
         return 0
     if args.worker_action == "audit":
         entries = worker.read_audit(args.limit)
@@ -2087,6 +2087,23 @@ def _worker_command(args: argparse.Namespace) -> int:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
     return 0
+
+
+def _format_worker_status(value: dict[str, Any]) -> str:
+    connection = {
+        "connected": "connected to the coordinator",
+        "disconnected": "disconnected from the coordinator",
+        "last-connected": "last connection ended or is unavailable",
+        "not-connected": "not connected yet",
+    }.get(str(value.get("connection_state")), "connection state unknown")
+    lines = [f"Worker {value.get('name', 'unknown')} · {connection}", f"Coordinator: {value.get('coordinator_url', 'unknown')}"]
+    last_connected = value.get("last_connected_at")
+    if last_connected:
+        lines.append(f"Last connected: {last_connected}")
+    lines.append(f"Worker service: {value.get('service_state', 'unknown')}")
+    lines.append(f"Remote access: {'control and terminal' if value.get('allow_control') else 'read-only'}")
+    lines.append(f"Worker ID: {str(value.get('worker_id', ''))[:8]}")
+    return "\n".join(lines)
 
 
 def _remote_command(args: argparse.Namespace) -> int:

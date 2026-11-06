@@ -286,7 +286,7 @@ negative tests remain incomplete unless explicitly recorded below.
 | DOG-002 | [x] | Online worker mission inventory updates via event batches and cursor (`coordinator/tests/worker.rs::event_batch_updates_mission_inventory_and_caught_up_status`, `tests/test_bridge_worker.py::test_event_batch_carries_current_mission_inventory_after_hello`, `web/e2e/worker.spec.ts`). |
 | DOG-003 | [x] | Created mission detail exposes `Start mission` for an online worker and calls the resource endpoint with an idempotency key; `web/e2e/screenshots.spec.ts::a created mission can be started from its detail page through the resource API` failed before the button/API wiring and passes after it. |
 | DOG-004 | [ ] | Finish a paused native provider, or accurate stop guidance, remains. |
-| DOG-005 | [ ] | Human-readable worker connection status remains. |
+| DOG-005 | [x] | `worker status` reports connection, last-connected time and systemd service state in human-readable output; `tests/test_bridge_worker.py::test_worker_status_reports_connection_and_service_state_without_token` verifies fields, rendering and token omission. |
 | DOG-006 | [x] | Mission name links to detail (`web/e2e/worker.spec.ts` verifies the link target). |
 | DOG-007 | [ ] | Native provider idle-at-prompt `needs_you` detection and operator notification remain. |
 | DOG-008 | [ ] | Take-control upgrade in place and Enter submission from the web terminal remain. |
