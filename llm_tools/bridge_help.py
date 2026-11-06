@@ -1,6 +1,8 @@
 """Offline help shipped in the Python package and shared with the terminal UI."""
 from __future__ import annotations
 
+import textwrap
+
 TOPICS: dict[str, str] = {
     "quickstart": """LLM Bridge — supervise AI work in your terminal
 
@@ -61,16 +63,37 @@ over SSH. Reattach with llm-bridge attach. The command llm-bridge detach is
 different: it removes a station client from outside, normally another terminal's
 (for example one still open at the machine while you are on SSH). Do not use it
 to leave your own session. Detaching or exiting Bridge does not stop the mission.
-Pause waits at the current invocation boundary and never suspends the host.
+Pause waits until the provider finishes its current step and never suspends this computer.
 Capacity waits stay awake by default; `mission set --suspend-when-rate-limited
 on` opts in to RTC-backed sleep at an idle boundary with no active operation.
 Pause, stop and cancel changes made during sleep take effect after the armed
 wake. Stop and cancel are separate explicit operations.
 
-More: help keys, remote, distributed, prompts, markdown, providers, states, verification, recovery.
+More help topics: @@TOPIC_LIST@@ (llm-bridge help lists them with descriptions).
 Every public command also has --help. ID and task numbers are placeholders.
 --mission accepts a unique ID prefix (4+ characters) and may be omitted when you
 run the command inside the mission's folder.""",
+    "terms": """Words Bridge uses
+
+Mission      One piece of work in one folder: your objective plus an ordered list of
+             tasks. Missions are saved, so closing the terminal does not lose them.
+Task         One step of a mission. Each task has a number (1, 2, ...) and a state:
+             waiting, running, in REVIEW (waiting for you), completed or cancelled.
+Provider     The AI command-line tool that does the work, for example Claude Code,
+             Codex or Copilot. A route is a provider pinned to one model.
+Rotation     The ordered list of providers a mission may use. When one runs out of
+             capacity, Bridge moves on to the next. Change it with llm-bridge rotation.
+Controller   The background process that runs a mission: it starts the provider,
+             watches capacity and moves from task to task. llm-bridge start starts it;
+             llm-bridge stop ends it.
+Station      The terminal window (a private tmux session) where you watch or use a
+             provider. llm-bridge attach opens it. Leaving it does not stop the mission.
+Verify       Check that a finished task is really done: read its output and diff, run a
+             verifier command if the mission has one, then approve or reject the task.
+Capacity     How much of a provider's usage allowance is left (the 5h, week and month
+             windows shown by llm-bridge usage).
+
+See help quickstart for the first mission, and help states for what each state means.""",
     "keys": """Keys and terminal ownership
 
 Provider focus: ordinary keys, slash commands, arrows, Tab, Escape, Ctrl-C,
@@ -131,21 +154,7 @@ way: its own OSC 52 sequences are ignored, so a provider cannot overwrite what
 you paste next. Without OSC 52 support nothing reaches the clipboard; use
 Shift-drag selection or export. The Bridge viewer's c copy uses a local helper
 (wl-copy, xclip, xsel or pbcopy) and is separate from this.""",
-    "console": """Bridge console: commands at the bottom line
-
-Type at the bottom line. Slash commands work like Codex and Claude Code, and the
-mission is implied. Bare words do the same (start, pause, ...).
-  /start /resume /pause /stop    start, continue or hold provider work
-  /attach  /detach               open the provider terminal; Ctrl-] P returns
-  /approve [N]  /reject N WHY    decide on a task in REVIEW
-  /status  /proposals            print the current state
-  /missions  /home               switch to another mission (the mission picker)
-  /overview /tasks /providers /activity /health /actions /usage /agents   open a view
-  /help [topic]                  this page; topics: keys, prompts, providers, states
-Keys: Ctrl-E add a task, Ctrl-R amend the selected task, Ctrl-K find an action,
-Tab completes, ? explains the current view, Ctrl-D leaves (the mission keeps running).
-Commands that run in a shell, such as llm-bridge task add --file F, are the same
-commands without the slash. llm-bridge --help lists them all.""",
+    "console": "@@CONSOLE_HELP@@",  # generated from COMMAND_GROUPS by console_help()
     "remote": """Remote use and shared windows
 
 Missions and provider stations belong to your user account, so you can log in
@@ -261,9 +270,10 @@ background work; it must not take ownership of the native provider terminal.""",
     "states": """Desired state, running work and boundaries
 
 Mission state is persisted intent; observed operations show what is executing.
-Pause during an invocation means 'Pausing after current invocation': work still
-runs until that boundary. Pause never suspends the host. ACTIVE requires a
-currently executing owned operation; Last selected is history, not execution.
+Pause means "pausing after the current step": the provider keeps working until
+its current step ends, then the mission holds. Pause never suspends this computer.
+A provider shows ACTIVE only while it is actually working; "Last selected" is a
+record of what was chosen, not of what is running.
 Completed missions have no active execution. Adding a task to one (task add, with or
 without --mission) reopens it as STOPPED and says so; start continues it. Cancelled
 missions cannot accept tasks.
@@ -274,37 +284,41 @@ before its next task until you /approve or /reject the reviewed one, or run
 /continue to start the next task while it keeps waiting (mission create
 --auto-continue, or mission set --auto-continue on, turns the hold off). Blocked means a dependency,
 verification request or uncertain operation needs attention: inspect status/events.
-Stop ends the owned controller; --force is for deliberately terminating owned
-work when graceful stop is insufficient. Cancel is a mission/task state mutation.
-Neither operation should affect unrelated sessions. Exiting Bridge or detaching
+Stop ends Bridge's controller for this mission; --force also ends a provider
+that does not exit by itself. Cancel marks the mission or task as cancelled and
+keeps its record. Neither affects other missions or your other terminals. Exiting Bridge or detaching
 only leaves the UI; it does not cancel or stop the controller.
 
-Boundary steering example:
-  llm-bridge steer --mission ID --kind pause-after-iteration
-This queues intent for a safe boundary; acceptance is not proof it already applied.
-Read submitting/accepted/deferred/applied/rejected feedback and current status.""",
+Changes that wait for the next safe point, for example a handoff:
+  llm-bridge steer --mission ID --kind handoff --to codex
+The command only queues the change. "Queued" does not mean the change has taken
+effect yet: the console shows submitting, accepted, deferred, applied or rejected,
+and status shows the current state.""",
     "verification": """Verify before declaring completion
 
-A successful invocation is not successful work. Inspect task source, evidence and
+A provider that exits without an error has not necessarily done the work. Inspect task source, evidence and
 acceptance conditions; use the actual mission and task IDs:
   llm-bridge task show --mission ID --task 1 --json
   llm-bridge task output --mission ID --task 1        the provider's output of the last run
   llm-bridge task diff --mission ID --task 1          the files that run changed in the working tree
   llm-bridge task verify --mission ID --task 1 --evidence 'pytest: 12 passed'
   llm-bridge task approve --mission ID --task 1 --evidence 'reviewed'
-Approval marks work complete only through authoritative transition rules. UI
-approval asks for target-aware confirmation; scripted CLI semantics are unchanged.
+Approving marks the task as completed. In the console, approving asks you to
+confirm which task you are approving; on the command line it does not ask.
 In the console the approval dialog lists the changed files; o opens the output and
 d the diff in the pager. task output pages the log on a terminal (--follow keeps
 following a growing log) and prints it plainly when piped; a log pruned for age
 is reported with its recorded size and digest. task diff compares the working
 tree with the commit and modified files recorded when the run started.
 
-Configure a verifier when creating the mission; each repeated argument is one
-argv item, not a shell command. Use equals for arguments beginning with '-':
-  llm-bridge mission create --file prompt.md --verifier-arg python \
-    --verifier-arg=-m --verifier-arg pytest --verifier-arg=-q
-Default verifier timeout is 300 seconds. A verifier may use {context}, {cwd},
+Set a verifier when you create the mission. It is a command that checks a finished
+task; it is split into words like a shell would, but it is not run through a shell:
+  llm-bridge mission create --file prompt.md --verifier 'python -m pytest -q'
+The same with the command last, after --:
+  llm-bridge mission create --file prompt.md -- python -m pytest -q
+The receipt prints the command as a list of arguments. For arguments that need exact
+quoting, repeat --verifier-arg once per argument (--verifier-arg=-m for one starting
+with a dash). Default verifier timeout is 300 seconds. A verifier may use {context}, {cwd},
 {mission_id}, {task_id}, {revision}. No verifier is added implicitly. Verification
 may execute the configured local command; task verify itself does not start a
 paid provider. Inspect failed evidence and correct the task before retrying.""",
@@ -430,6 +444,45 @@ def is_known_topic(topic: str) -> bool:
     return key in TOPICS or _command_path_parser(key) is not None
 
 
+# One list of help topics, in the order every list shows them; each has a one-line description.
+# `help`, `help --help`, the unknown-topic error, the quickstart and the console /help all read it.
+TOPIC_SUMMARIES: dict[str, str] = {
+    "quickstart": "your first mission, step by step",
+    "terms": "what mission, task, station, controller and the other words mean",
+    "keys": "keys, Ctrl-] and which terminal belongs to whom",
+    "console": "the command line at the bottom of Bridge and its slash commands",
+    "prompts": "write, import, amend and recover long prompts",
+    "markdown": "read full prompts and Markdown documents",
+    "providers": "providers, routes and native stations",
+    "states": "what paused, running, blocked and active mean",
+    "verification": "check finished work, set a verifier, approve or reject",
+    "recovery": "what to do after an error, a lost terminal or an unknown result",
+    "remote": "use Bridge over SSH and share a window",
+    "distributed": "run missions on other computers through a coordinator",
+}
+
+
+def topic_names() -> tuple[str, ...]:
+    """Every help topic name, in display order."""
+    return tuple(TOPIC_SUMMARIES)
+
+
+def topic_summary(name: str) -> str:
+    return TOPIC_SUMMARIES[name]
+
+
+def topic_list_text() -> str:
+    """The topic names on one line, for prose and option help."""
+    return ", ".join(topic_names())
+
+
+def topic_index() -> str:
+    """The topics as a table with their descriptions (``llm-bridge help``)."""
+    width = max(len(name) for name in TOPIC_SUMMARIES)
+    rows = [f"  {name:<{width}}  {summary}" for name, summary in TOPIC_SUMMARIES.items()]
+    return "Help topics (llm-bridge help TOPIC)\n" + "\n".join(rows) + "\n\nCommand pages: llm-bridge help COMMAND, for example llm-bridge help task approve."
+
+
 def topic_text(topic: str = "quickstart") -> str:
     key = " ".join(topic.strip().lower().split())
     if key in TOPICS:
@@ -439,11 +492,182 @@ def topic_text(topic: str = "quickstart") -> str:
 
             providers, routes = resolved_default_rotation()
             text = text.replace("@@DEFAULT_ROTATION@@", f"routes {routes}" if routes else f"providers {providers}")
-        return text
+        if "@@CONSOLE_HELP@@" in text:
+            text = text.replace("@@CONSOLE_HELP@@", console_help())
+        return text.replace("@@TOPIC_LIST@@", ", ".join(name for name in topic_names() if name not in {"quickstart", "terms", "console"}))
     parser = _command_path_parser(key)
     if parser is None:
-        return f"Unknown help topic '{topic.strip() or '(empty)'}' · topics: {', '.join(TOPICS)} · or a command such as: task verify"
+        return f"Unknown help topic '{topic.strip() or '(empty)'}' · topics: {topic_list_text()} · or a command such as: task verify"
     return parser.format_help()
+
+
+# The commands of the top-level page and of the console /help, grouped like `gh`. Each entry is
+# (command words, one-line description). A test checks that every public top-level command is here.
+COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    ("Start here", (
+        ("doctor", "check this computer and say what to do next"),
+        ("help quickstart", "your first mission, step by step"),
+        ("help", "list every help topic"),
+    )),
+    ("Missions", (
+        ("mission create", "save a mission and its first task"),
+        ("mission list", "list saved missions"),
+        ("mission set", "change a mission setting"),
+        ("missions", "every mission, live ones first; switch between them"),
+        ("status", "what the mission is doing and what needs you"),
+    )),
+    ("Tasks", (
+        ("task add", "add a task to the mission"),
+        ("task list", "list the mission's tasks"),
+        ("task show", "read a task's full text and evidence"),
+        ("task output", "read what the provider printed on its last run"),
+        ("task diff", "files the last run changed in the working tree"),
+        ("task amend", "replace a task's text"),
+        ("task approve", "accept a task that waits in REVIEW"),
+        ("task reject", "send a task back with a reason"),
+        ("proposal", "review tasks that a provider suggests"),
+    )),
+    ("Run control", (
+        ("start", "start working on the mission's tasks"),
+        ("pause", "hold after the provider's current step"),
+        ("resume", "continue after a pause or a stop"),
+        ("continue", "start the next task without approving the last one"),
+        ("finish", "ask the provider to exit so its task moves to review"),
+        ("stop", "stop the mission's controller"),
+        ("cancel", "cancel the mission's unfinished tasks"),
+        ("steer", "hand over to another provider or add a review"),
+    )),
+    ("Station", (
+        ("attach", "open the provider terminal"),
+        ("detach", "disconnect another terminal from the station"),
+        ("station", "choose which provider's terminal the controls show"),
+        ("control", "open the full control view"),
+        ("agents", "live provider operations and native child agents"),
+    )),
+    ("Capacity and power", (
+        ("usage", "capacity left for each provider"),
+        ("rotation", "show or change the providers a mission uses"),
+        ("suspend-until-credits", "suspend this computer until capacity returns"),
+    )),
+    ("Data", (
+        ("events", "recent mission events"),
+        ("view", "read a text file in the pager"),
+        ("backup", "copy the Bridge database to a file"),
+        ("restore", "replace the Bridge database from a backup"),
+        ("gc", "close the idle stations of finished missions"),
+    )),
+    ("Distributed", (
+        ("remote", "reach other computers through a coordinator"),
+        ("worker", "let a coordinator use this computer"),
+    )),
+    ("Appearance", (
+        ("theme", "show the colour theme and a swatch per role"),
+        ("mission colour", "pin the mission's colour, or return to automatic"),
+    )),
+)
+
+ROOT_GLOBAL_OPTIONS = (
+    ("--version", "print the installed version and exit"),
+    ("--target WORKER", "run the command on another computer through the coordinator (help distributed)"),
+    ("-h, --help", "show this page; llm-bridge COMMAND --help shows one command"),
+)
+
+# Extra sections appended after the global options on the top-level page, each already formatted
+# and separated from the previous one by a blank line (for example "Exit status").
+ROOT_HELP_TRAILER = ""
+
+
+def _rows(entries: tuple[tuple[str, str], ...], indent: str = "  ") -> list[str]:
+    width = max(len(name) for name, _ in entries)
+    return [f"{indent}{name:<{width}}  {text}" for name, text in entries]
+
+
+def root_help() -> str:
+    """The top-level ``llm-bridge --help`` page."""
+    lines = [
+        "usage: llm-bridge [--target WORKER] [COMMAND] [ARGS]",
+        "",
+        "Supervise AI work in your terminal. Run llm-bridge with no command to open the",
+        "home screen: your missions and a form for a new one. Opening it starts no provider.",
+    ]
+    names = [name for _, entries in COMMAND_GROUPS for name, _ in entries]
+    width = max(len(name) for name in names)
+    for title, entries in COMMAND_GROUPS:
+        lines += ["", title]
+        lines += [f"  {name:<{width}}  {text}" for name, text in entries]
+    lines += ["", "Global options"]
+    lines += _rows(ROOT_GLOBAL_OPTIONS)
+    text = "\n".join(lines) + "\n\nllm-bridge COMMAND --help shows one command; llm-bridge help lists the topics.\n"
+    if ROOT_HELP_TRAILER:
+        text += "\n" + ROOT_HELP_TRAILER.strip("\n") + "\n"
+    return text
+
+
+# Console views: (slash name, key, one-line description).
+_CONSOLE_VIEWS = (
+    ("overview", "F1", "what the mission is doing and what needs you"),
+    ("tasks", "F2", "the ordered tasks"),
+    ("providers", "F3", "who works and how much capacity is left"),
+    ("activity", "F4", "what happened, newest last"),
+    ("sessions", "F5", "provider operations and their session ids"),
+    ("health", "F6", "controller, storage and capacity diagnostics"),
+    ("actions", "F7", "what you can do now"),
+    ("usage", "F8", "the llm-usage dashboard"),
+)
+
+# Slash shortcuts that take plain arguments, with the shell command each one runs.
+_CONSOLE_SHORTCUTS = (
+    ("/approve [N]", "llm-bridge task approve --task N"),
+    ("/reject [N] WHY", "llm-bridge task reject --task N --reason WHY"),
+    ("/verify N EVIDENCE", "llm-bridge task verify --task N --evidence EVIDENCE"),
+    ("/retry N", "llm-bridge task retry --task N"),
+    ("/pause N, /resume N, /cancel N", "llm-bridge task pause --task N (and resume, cancel)"),
+    ("/add FILE", "llm-bridge task add --file FILE"),
+    ("/amend N FILE", "llm-bridge task amend --task N --file FILE"),
+    ("/proposals [STATUS]", "llm-bridge proposal list --status STATUS"),
+    ("/home", "llm-bridge missions --pick (the mission picker)"),
+)
+
+
+def console_help() -> str:
+    """The console ``/help`` page, generated from :data:`COMMAND_GROUPS`."""
+    view_names = {name for name, _, _ in _CONSOLE_VIEWS}
+    lines = [
+        "Bridge console: commands at the bottom line",
+        "",
+        "Type at the bottom line. The mission is implied, bare words work like slash",
+        "commands (start = /start), and Tab completes.",
+    ]
+    for title, entries in COMMAND_GROUPS:
+        shown: list[tuple[str, str]] = []
+        for name, text in entries:
+            if name == "help quickstart":
+                continue
+            if name == "help":
+                shown.append(("/help [TOPIC]", "a help topic; /help terms explains the words used here"))
+                continue
+            if name in view_names:
+                continue  # listed once, under Views
+            shown.append(("/" + name, text))
+        lines += ["", title]
+        lines += _rows(tuple(shown))
+    lines += ["", "Help topics", *textwrap.wrap(topic_list_text(), 76, initial_indent="  ", subsequent_indent="  ")]
+    lines += ["", "Views (open with the slash command or the F key)"]
+    lines += _rows(tuple((f"/{name} ({key})", text) for name, key, text in _CONSOLE_VIEWS))
+    lines += [
+        "",
+        "Slash commands and shell commands",
+        "  /NAME ARGS is llm-bridge NAME ARGS with the mission filled in, so /task list",
+        "  runs llm-bridge task list. These shortcuts take plain arguments instead of flags:",
+    ]
+    lines += _rows(_CONSOLE_SHORTCUTS, indent="    ")
+    lines += [
+        "",
+        "Keys: Ctrl-E add a task, Ctrl-R amend the selected task, Ctrl-K find an action,",
+        "? explains the current view, Ctrl-D leaves (the mission keeps running).",
+        "In a shell, llm-bridge --help lists every command.",
+    ]
+    return "\n".join(lines)
 
 
 COMMANDS: dict[str, tuple[str, str]] = {
@@ -463,9 +687,9 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "task priority": ("Change task scheduling priority; default priority is zero", "task priority --mission ID --task 1 --value 5"),
     "task reorder": ("Change a task's ordering value", "task reorder --mission ID --task 1 --value 10"),
     "task dependencies": ("Require another task before this task can run", "task dependencies --mission ID --task 2 --add 1"),
-    "task pause": ("Hold the targeted task at a safe boundary", "task pause --mission ID --task 1"),
-    "task resume": ("Make a held task eligible for the running controller", "task resume --mission ID --task 1"),
-    "task cancel": ("Cancel the targeted task, preserving its durable record", "task cancel --mission ID --task 1"),
+    "task pause": ("Hold the task so that it does not start", "task pause --mission ID --task 1"),
+    "task resume": ("Make a held task runnable again", "task resume --mission ID --task 1"),
+    "task cancel": ("Cancel the task; its record is kept", "task cancel --mission ID --task 1"),
     "task retry": ("Queue another attempt after inspecting the failure", "task retry --mission ID --task 1"),
     "task approve": ("Approve a task in REVIEW as complete; --evidence records the reviewer's note first. Pairs with task reject", "task approve --mission ID --task 1 --evidence 'tests passed'"),
     "task verify": ("Record verification evidence for a task in REVIEW without approving it (to approve, use task approve)", "task verify --mission ID --task 1 --evidence 'tests passed'"),
@@ -477,13 +701,13 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "proposal accept": ("Accept a pending proposal into mission work", "proposal accept --mission ID --task 1"),
     "proposal reject": ("Reject a pending proposal with a reason", "proposal reject --mission ID --task 1 --reason 'out of scope'"),
     "events": ("Show the newest mission events in plain words, oldest first; controller bookkeeping is hidden unless --verbose. --since 10m limits the age, --follow keeps printing new events, --after ID reads forward from a global event ID", "events --mission ID --limit 20"),
-    "start": ("Start the owned controller using saved mode unless overridden", "start --mission ID"),
-    "pause": ("Hold after the current invocation; never suspend the host", "pause --mission ID"),
+    "start": ("Start working on the mission's tasks with the first provider that has capacity, in the mission's saved mode unless --mode says otherwise", "start --mission ID"),
+    "pause": ("Hold the mission after the provider's current step; never suspends this computer", "pause --mission ID"),
     "resume": ("Allow the controller to continue eligible work", "resume --mission ID"),
     "continue": ("Start the next task now while a reviewed task stays in REVIEW (native missions hold for review by default)", "continue --mission ID"),
-    "stop": ("Stop the owned controller; --force targets owned running work", "stop --mission ID"),
+    "stop": ("Stop Bridge's controller for the mission; --force also ends a provider that does not exit by itself", "stop --mission ID"),
     "cancel": ("Cancel this mission's work; unrelated sessions are unaffected", "cancel --mission ID"),
-    "attach": ("Open the existing owned station; starts no provider", "attach --mission ID"),
+    "attach": ("Open the mission's station (its provider terminal); starts no provider", "attach --mission ID"),
     "missions": ("List every mission, live ones first; --pick switches to one (in a station: Ctrl-] then M)", "missions --json"),
     "gc": ("Close the idle tmux stations of finished missions; a station with a live provider process or an attached terminal is kept", "gc --json"),
     "finish": ("Ask the native provider to exit (its own /exit or /quit) so the task moves to verification", "finish --mission ID"),
@@ -492,9 +716,27 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "control": ("Inspect and steer the mission in Bridge controls; no autostart", "control --mission ID"),
     "usage": ("Inspect background capacity observations for this mission", "usage --mission ID"),
     "station": ("Select the viewed station; does not reroute a running task", "station --mission ID codex"),
-    "steer": ("Queue typed intent for a task or safe execution boundary", "steer --mission ID --kind pause-after-iteration"),
+    "steer": ("Change what happens at the next safe point: hand over to another provider, or add a review of a task", "steer --mission ID --kind handoff --to codex"),
     "help": ("Read offline workflow topics or a command help page", "help quickstart"),
     "view": ("Read a UTF-8 artifact; following is opt-in and starts no work", "view --file notes.md"),
+    "mission set": ("Change a saved mission setting: automatic continue, team guidance, token spend, or suspending when rate limited", "mission set --mission ID --auto-continue on"),
+    "mission colour": ("Pin the mission's identity colour (1-8) or return to the automatic one", "mission colour --mission ID 3"),
+    "theme": ("Show the detected terminal background, the active colour theme and a swatch per role", "theme --theme light"),
+    "backup": ("Write a consistent copy of the Bridge database (missions, tasks, events); an existing file is never overwritten", "backup --output bridge-backup.db"),
+    "restore": ("Replace the Bridge database with a backup; the current one is kept beside it", "restore --input bridge-backup.db"),
+    "remote": ("Configure this CLI to reach other computers through a coordinator, then use --target WORKER", "remote status"),
+    "remote login": ("Store the coordinator URL, CA and API token", "remote login --coordinator https://bridge.home.arpa:8443 --token-file api.token"),
+    "remote status": ("Show the configured coordinator without the token", "remote status"),
+    "remote logout": ("Delete the stored coordinator URL, CA and API token", "remote logout"),
+    "worker": ("Optional: let a Bridge coordinator use this computer; nothing connects unless you enrol and run it", "worker status"),
+    "worker enroll": ("Store the coordinator URL, CA and worker token for this computer", "worker enroll --name workstation --coordinator wss://bridge.home.arpa:8443 --token-file worker.token"),
+    "worker status": ("Show this computer's enrolment without the token", "worker status"),
+    "worker run": ("Run the worker in the foreground until interrupted", "worker run"),
+    "worker audit": ("Show this worker's security audit log (no tokens or terminal content)", "worker audit --limit 20"),
+    "worker install-service": ("Install and start a systemd user unit that runs the worker", "worker install-service --print"),
+    "worker uninstall-service": ("Stop and remove the worker's systemd user unit", "worker uninstall-service"),
+    "worker unenroll": ("Delete this computer's enrolment, token and coordinator CA", "worker unenroll"),
+    "worker list": ("List the workers registered with the configured coordinator (run it on the client, not on a worker)", "worker list"),
 }
 
 
@@ -505,6 +747,79 @@ def _mission_create_defaults() -> str:
     providers, routes = resolved_default_rotation()
     rotation = f"routes {routes}" if routes else f"providers {providers}"
     return f"\nDefaults: cwd is the current directory; {rotation} (from your llm-tools config when set);\nmode is Background unless --mode says otherwise."
+
+
+_PAID = "starts provider work (uses paid capacity)"
+
+# What a command changes, for commands that change anything. Read-only commands have no entry and
+# therefore no "Effects:" line on their page.
+EFFECTS: dict[str, str] = {
+    "mission create": "saves a new mission in Bridge's database; starts no provider.",
+    "mission set": "changes a saved setting of the mission.",
+    "mission colour": "changes the mission's saved colour.",
+    "task add": "adds a task to the mission; if the mission is running, the provider uses paid capacity on it when its turn comes.",
+    "task amend": "replaces the task's text; a provider that is working on it sees the change after its current step.",
+    "task priority": "changes the order in which tasks run.",
+    "task reorder": "changes the order in which tasks run.",
+    "task dependencies": "changes which tasks must finish before this one can run.",
+    "task pause": "holds the task so that it does not start.",
+    "task resume": "makes a held task runnable; a running mission " + _PAID + " on it.",
+    "task cancel": "cancels the task and keeps its record.",
+    "task retry": "queues another attempt; a running mission " + _PAID + ".",
+    "task approve": "marks the task completed; a running mission then moves on to its next task.",
+    "task verify": "records evidence on the task; starts no provider.",
+    "task reject": "sends the task back with your reason; a running mission " + _PAID + " for the next attempt.",
+    "proposal create": "records a proposal; it adds no work until it is accepted.",
+    "proposal accept": "adds the proposed task to the mission; a running mission " + _PAID + " on it.",
+    "proposal reject": "rejects the proposal; it adds no work.",
+    "start": _PAID + ".",
+    "pause": "holds the mission after the provider's current step; it does not suspend this computer.",
+    "resume": _PAID + ".",
+    "continue": _PAID + ".",
+    "stop": "stops the mission's controller; with --force it also ends a running provider.",
+    "cancel": "cancels the mission and its unfinished tasks, and ends their provider work.",
+    "attach": "opens the station terminal; starts no provider.",
+    "detach": "disconnects a station client; the mission keeps running.",
+    "finish": "types the provider's own exit command into its terminal so the task moves to review.",
+    "station": "changes which provider's terminal the controls show; it does not reroute running work.",
+    "rotation": "with --set, changes the providers the mission uses from its next provider choice; without it, only shows them.",
+    "steer": "queues a handoff or a review for the mission.",
+    "suspend-until-credits": "suspends this computer until credits recover; a wake timer is armed first.",
+    "gc": "closes the idle stations of finished missions.",
+    "backup": "writes a copy of the Bridge database to --output.",
+    "restore": "replaces the Bridge database with the backup; the current one is kept beside it.",
+    "remote login": "stores the coordinator URL and API token on this computer.",
+    "remote logout": "deletes the stored coordinator URL and API token.",
+    "worker enroll": "stores the coordinator URL and worker token on this computer.",
+    "worker run": "lets the coordinator reach this computer; with --allow-control at enrolment it can start and control missions here.",
+    "worker install-service": "installs and starts a systemd user unit that runs the worker.",
+    "worker uninstall-service": "stops and removes the worker's systemd user unit.",
+    "worker unenroll": "deletes this computer's enrolment, token and coordinator CA.",
+}
+
+# Subcommand order on group pages, most common first; commands not named follow in registered order.
+_COMMAND_ORDER: dict[str, tuple[str, ...]] = {
+    "mission": ("create", "list", "set", "colour"),
+    "task": ("add", "list", "show", "approve", "reject", "amend", "verify", "output", "diff", "pause", "resume", "cancel", "retry", "priority", "reorder", "dependencies"),
+    "proposal": ("list", "accept", "reject", "create"),
+}
+
+
+def _ordered_names(path: str, names: list[str]) -> list[str]:
+    if path:
+        preferred: list[str] = list(_COMMAND_ORDER.get(path, ()))
+    else:
+        preferred = [name.split()[0] for _, entries in COMMAND_GROUPS for name, _ in entries]
+    first = [name for name in dict.fromkeys(preferred) if name in names]
+    return first + [name for name in names if name not in first]
+
+
+def _row_text(text: str) -> str:
+    """One listing row from a description: its first clause, with a lowercase first letter."""
+    clause = text.replace(":", ";").split(";")[0].strip().rstrip(".")
+    if len(clause) > 1 and not clause[1].isupper():
+        clause = clause[0].lower() + clause[1:]
+    return clause
 
 
 def decorate_parser(parser: object) -> None:
@@ -521,24 +836,34 @@ def decorate_parser(parser: object) -> None:
                 return text
             return super()._get_help_string(action)
 
+        def _format_action(self, action: argparse.Action) -> str:
+            # A command list prints one row per command, without the "{a,b,c}" line argparse puts above it.
+            if isinstance(action, argparse._SubParsersAction):
+                return "".join(self._format_action(item) for item in action._get_subactions())
+            return super()._format_action(action)
+
     def visit(current: argparse.ArgumentParser, path: str) -> None:
         info = COMMANDS.get(path)
         current.formatter_class = HelpFormatter
         if info:
             description, example = info
-            starts = path in {"start", "resume", "task resume", "task retry", "task reject", "proposal accept"}
-            effect = "Can enable provider work and consume paid capacity." if starts else "Does not directly start paid provider work."
-            defaults = ""
+            lines = [description.rstrip(".") + "."]
+            effect = EFFECTS.get(path)
+            if effect:
+                lines.append("Effects: " + effect)
             lazy_defaults = _mission_create_defaults if path == "mission create" else None
             if path == "detach":
-                defaults = (
-                    "\nRemoves the station's one connected writable client, normally another terminal's."
-                    "\nWith several attached (for example local and SSH), pass --client /dev/pts/N."
-                    "\nTo leave your own terminal, press Ctrl-] then d (safe over SSH)."
+                lines += [
+                    "Removes the station's one connected writable client, normally another terminal's.",
+                    "With several attached (for example local and SSH), pass --client /dev/pts/N.",
+                    "To leave your own terminal, press Ctrl-] then d (safe over SSH).",
+                ]
+            if path == "steer":
+                lines.append(
+                    "Other kinds (replace, verify, pause-after-iteration, stop-after-task) still work in older scripts. "
+                    "To replace a task's text use task amend, to check a task use task verify, and to hold the mission use pause."
                 )
-            if path.startswith("task"):
-                defaults += "\nUse the actual mission ID and task number; input files retain source text."
-            current.description = description + ".\n" + effect + defaults
+            current.description = "\n".join(textwrap.fill(line, 78) for line in lines)
             if lazy_defaults is not None:
                 base_description = current.description
                 original_format_help = current.format_help
@@ -548,26 +873,34 @@ def decorate_parser(parser: object) -> None:
                     return original_format_help()
 
                 current.format_help = format_help  # type: ignore[method-assign]
-            shorthand = ""
-            if "--mission ID" in example:
-                shorthand = (
-                    "\n  llm-bridge " + example.replace("--mission ID", "--mission 3f9a1c2b")
-                    + "\n\n--mission takes a unique ID prefix (4+ characters) and may be omitted inside the mission's folder."
-                )
-            current.epilog = "Example:\n  llm-bridge " + example + shorthand + "\n\nMore: llm-bridge help keys · llm-bridge help recovery"
+            current.epilog = "Example:\n  llm-bridge " + example.replace("--mission ID", "--mission 3f9a1c2b")
         for action in current._actions:
             if isinstance(action, argparse._SubParsersAction):
-                public = [name for name in action.choices if name not in internal]
-                action.metavar = "{" + ",".join(public) + "}"
-                action._choices_actions[:] = [item for item in action._choices_actions if item.dest not in internal]
-                existing = {item.dest for item in action._choices_actions}
-                for name, child in action.choices.items():
-                    if name in internal:
+                choices = action.choices
+                helps = {item.dest: item.help for item in action._choices_actions}
+                ordered = _ordered_names(path, list(choices))
+                reordered = {name: choices[name] for name in ordered}
+                choices.clear()
+                choices.update(reordered)
+                rows: list[argparse.Action] = []
+                visited: list[object] = []
+                for name, child in reordered.items():
+                    if name in internal or child in visited:  # an alias shares its command's row
                         continue
+                    visited.append(child)
                     child_path = (path + " " + name).strip()
-                    if name not in existing:
-                        action._choices_actions.append(action._ChoicesPseudoAction(name, [], COMMANDS.get(child_path, (name, ""))[0]))
+                    own = COMMANDS.get(child_path)
+                    text = _row_text(own[0]) if own else _row_text(str(helps.get(name) or name))
+                    rows.append(action._ChoicesPseudoAction(name, [], text))
                     visit(child, child_path)
+                action._choices_actions[:] = rows
+                action.metavar = "{" + ",".join(row.dest for row in rows) + "}"
+                if path:
+                    group = current.add_argument_group("Commands")
+                    current._positionals._group_actions.remove(action)
+                    group._group_actions.append(action)
+                    current._action_groups.remove(group)
+                    current._action_groups.insert(current._action_groups.index(current._optionals), group)
             elif action.help is None:
                 action.help = {
                     "mission": "target mission ID",
@@ -580,6 +913,8 @@ def decorate_parser(parser: object) -> None:
                     "providers": "provider rotation order",
                     "routes": "configured launch/capacity route IDs",
                 }.get(action.dest, action.dest.replace("_", " "))
+            elif path == "help" and action.dest == "topic":
+                action.help = f"a help topic ({topic_list_text()}) or a command such as: task verify"
         advanced_names = {"verifier_argv", "verifier_timeout", "log_max_bytes", "log_rotations", "log_retained_runs", "capacity_refresh_seconds", "command_template"}
         advanced_actions = [action for action in current._optionals._group_actions if action.dest in advanced_names]
         if advanced_actions:
@@ -589,24 +924,10 @@ def decorate_parser(parser: object) -> None:
                 advanced._group_actions.append(action)
     visit(parser, "")
     parser.description = "llm-bridge — supervise AI work in your terminal"
-    parser.usage = "llm-bridge [COMMAND ...]"
-    # Keep the root a short entry page; every command still has nested --help.
+    parser.usage = "llm-bridge [--target WORKER] [COMMAND] [ARGS]"
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
-            action._choices_actions.clear()
             action.metavar = "COMMAND"
-    parser.epilog = """Start here (opening starts no provider)
-  llm-bridge                       Open missions
-  llm-bridge help quickstart        Learn the basic workflow
-  llm-bridge help prompts           Compose/import large prompts
-
-Common commands
-  mission create   Save a mission and first task
-  start / attach   Start work / reopen its existing station
-  status / task    Inspect work; add, amend and verify tasks
-  pause / stop     Hold at an invocation boundary / stop controller
-
-Also: missions, finish, mission list, mission colour, rotation, theme, resume, cancel,
-detach, proposal, events, doctor, control, usage, station, steer, view, backup, restore,
-remote, worker, help.
-More: llm-bridge COMMAND --help · help keys · help distributed (--target WORKER COMMAND)"""
+    # The root page is grouped text (COMMAND_GROUPS), not argparse's generated list; every command
+    # still has its own --help.
+    parser.format_help = root_help  # type: ignore[method-assign]

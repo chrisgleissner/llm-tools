@@ -1347,4 +1347,6 @@ def format_theme_report(resolved: ResolvedTheme, *, colors: int, color: bool) ->
         lines.append("Overrides   " + ", ".join(f"{role} ({resolved.origins[role]})" for role in overridden))
     lines.append("")
     lines.extend(swatch_line(resolved, role, colors=colors, color=color) for role in ROLES)
+    lines += ["", "Preview another theme with llm-bridge theme --theme light (dark, light, high-contrast, neutral or mono).",
+              'Set it with LLM_BRIDGE_THEME=light or [bridge.theme] name = "light" in ~/.config/llm-tools/config.toml']
     return "\n".join(lines)

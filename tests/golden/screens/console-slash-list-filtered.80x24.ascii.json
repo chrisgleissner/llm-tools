@@ -24,8 +24,8 @@
     "  /stop                   Stop after the current step; progress is kept",
     "  /status                 Print the mission state, blockers and queue",
     "  /steer                  Redirect work at a safe point (lists options)",
-    "  /suspend-until-credits  Arm a recovery wake, then sleep when safe",
     "  /station                Select the viewed station",
+    "  /suspend-until-credits  Arm a recovery wake, then sleep when safe",
     "  /sessions               Show the Sessions view",
     "> /s",
     "Enter run | Tab complete | Ctrl-P/Ctrl-N history | Ctrl-U clear | /help commands"
@@ -50,8 +50,8 @@
     [[0, "  ", "info"], [2, "/stop", "key"], [7, "                   ", "info"], [26, "Stop after the current step; progress is kept", "muted"], [71, "         ", "info"]],
     [[0, "  ", "info"], [2, "/status", "key"], [9, "                 ", "info"], [26, "Print the mission state, blockers and queue", "muted"], [69, "           ", "info"]],
     [[0, "  ", "info"], [2, "/steer", "key"], [8, "                  ", "info"], [26, "Redirect work at a safe point (lists options)", "muted"], [71, "         ", "info"]],
-    [[0, "  ", "info"], [2, "/suspend-until-credits", "key"], [24, "  ", "info"], [26, "Arm a recovery wake, then sleep when safe", "muted"], [67, "             ", "info"]],
     [[0, "  ", "info"], [2, "/station", "key"], [10, "                ", "info"], [26, "Select the viewed station", "muted"], [51, "                             ", "info"]],
+    [[0, "  ", "info"], [2, "/suspend-until-credits", "key"], [24, "  ", "info"], [26, "Arm a recovery wake, then sleep when safe", "muted"], [67, "             ", "info"]],
     [[0, "  ", "info"], [2, "/sessions", "key"], [11, "               ", "info"], [26, "Show the Sessions view", "muted"], [48, "                                ", "info"]],
     [[0, "> ", "accent"], [2, "/s", "info"]],
     [[0, "Enter", "key"], [5, " run", "muted"], [9, " | ", "dim"], [12, "Tab", "key"], [15, " complete", "muted"], [24, " | ", "dim"], [27, "Ctrl-P/Ctrl-N", "key"], [40, " history", "muted"], [48, " | ", "dim"], [51, "Ctrl-U", "key"], [57, " clear", "muted"], [63, " | ", "dim"], [66, "/help", "key"], [71, " commands", "muted"]]

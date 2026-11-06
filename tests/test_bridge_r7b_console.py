@@ -266,7 +266,8 @@ def test_console_help_lists_slash_commands_not_shell_commands() -> None:
     state._dispatch("/help")
     text = state.document_viewer.source  # type: ignore[union-attr]
     assert "/approve" in text and "/home" in text and "/start" in text
-    assert "llm-bridge task add" in text and text.count("llm-bridge ") <= 3  # a pointer, not the shell grammar
+    assert "/task add" in text and "llm-bridge task reject --task N --reason WHY" in text
+    assert "llm-bridge " not in text.split("Slash commands and shell commands")[0]  # the commands are slash forms; shell forms appear only in the mapping
     state._dispatch("/help keys")
     assert "Keys and terminal ownership" in state.document_viewer.source  # type: ignore[union-attr]
     assert "remote" in bridge_help.TOPICS and "window-size latest" in bridge_help.TOPICS["remote"]
