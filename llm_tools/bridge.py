@@ -83,11 +83,40 @@ def open_store(*, readonly: bool = False) -> BridgeStore:
     return BridgeStore(store_path(), readonly=readonly)
 
 
-def read_verbatim(path: str | Path) -> str:
+def _os_reason(exc: OSError) -> str:
+    """Why a file operation failed, in words (``no such file``), not the errno text."""
+    if isinstance(exc, FileNotFoundError):
+        return "no such file"
+    if isinstance(exc, IsADirectoryError):
+        return "it is a folder"
+    if isinstance(exc, NotADirectoryError):
+        return "a folder in the path is a file"
+    if isinstance(exc, PermissionError):
+        return "permission denied"
+    return (exc.strerror or type(exc).__name__).lower()
+
+
+def read_verbatim(path: str | Path, option: str = "--file") -> str:
+    """The text of ``path`` (``-`` is standard input); a failure names the option and the reason."""
     if str(path) == "-":
         return sys.stdin.read()
-    with Path(path).expanduser().open("r", encoding="utf-8", newline="") as stream:
-        return stream.read()
+    try:
+        with Path(path).expanduser().open("r", encoding="utf-8", newline="") as stream:
+            return stream.read()
+    except OSError as exc:
+        raise ValueError(f"cannot read {option} {path}: {_os_reason(exc)}") from exc
+    except UnicodeDecodeError:
+        raise ValueError(f"cannot read {option} {path}: it is not UTF-8 text") from None
+
+
+def prompt_from(args: argparse.Namespace) -> str:
+    """The prompt text from ``--file``/``--prompt-file`` or ``--prompt``; a blank prompt is refused with its source."""
+    path = getattr(args, "prompt_file", None)
+    prompt = read_verbatim(path) if path else getattr(args, "prompt", None)
+    if prompt is None or not str(prompt).strip():
+        source = " (read from standard input)" if path == "-" else f" (read from {path})" if path else ""
+        raise ValueError(f"the prompt is empty{source}")
+    return str(prompt)
 
 
 def controller_running(mission_id: str) -> bool:
@@ -148,8 +177,12 @@ def console_snapshot(
     return result
 
 
-def _json_print(value: Any) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+def _json_print(value: Any, *, compact: bool = False) -> None:
+    """Print ``value`` as sorted JSON; ``compact`` is one line, for streams such as ``events --follow``."""
+    if compact:
+        print(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    else:
+        print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
 def strip_frozen_config(value: Any) -> Any:
@@ -241,6 +274,20 @@ def _dependency_ids(store: BridgeStore, mission_id: str, raw: str) -> list[int]:
             raise ValueError(f"dependency {item!r} is not a task number; give task numbers such as 1,2")
         ids.append(int(store.task_by_ordinal(mission_id, int(item))["id"]))
     return ids
+
+
+_EVENT_AGE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _event_age(text: str) -> int:
+    """argparse type for ``--since``: ``90s``, ``10m``, ``2h``, ``1d`` or a run such as ``1h30m``, in seconds."""
+    import argparse
+
+    cleaned = text.strip().lower().replace(" ", "")
+    parts = re.findall(r"(\d{1,9})([smhd])", cleaned)
+    if not parts or "".join(f"{count}{unit}" for count, unit in parts) != cleaned:
+        raise argparse.ArgumentTypeError(f"invalid age {text[:24]!r}; use a number and a unit, for example 90s, 10m, 2h or 1d")
+    return sum(int(count) * _EVENT_AGE_UNITS[unit] for count, unit in parts)
 
 
 def _db_int(text: str) -> int:
@@ -436,13 +483,14 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
                 store.set_mission_config_value(mission_id, "stop_after_task", task_id, event_kind="steering-stop-task-requested")
                 result = {"kind": kind, "task_id": task_id, "status": "QUEUED_FOR_VERIFICATION"}
             else:
-                station = str(payload.get("route", "")).strip()
-                if not station:
-                    raise ValueError("handoff steering requires --route")
+                station = str(payload.get("route") or "").strip()
                 mission = store.get_mission(mission_id)
-                configured = {item.strip() for key in ("providers", "routes") for item in str(mission["config"].get(key, "")).split(",") if item.strip()}
-                if configured and station not in configured:
-                    raise ValueError(f"handoff station is not configured for this mission: {station}")
+                configured_names = [item.strip() for key in ("providers", "routes") for item in str(mission["config"].get(key) or "").split(",") if item.strip()]
+                choices = f" (one of: {', '.join(dict.fromkeys(configured_names))})" if configured_names else ""
+                if not station:
+                    raise ValueError(f"--kind handoff needs --route NAME{choices}")
+                if configured_names and station not in configured_names:
+                    raise ValueError(f"--route {station} is not in this mission's rotation{choices}")
                 store.set_mission_config_value(mission_id, "handoff_preference", station, event_kind="steering-handoff-requested")
                 result = {"kind": kind, "route": station, "status": "QUEUED_FOR_SELECTION"}
         elif action == "task.add":
@@ -542,7 +590,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
     """Shared standalone/interactive task parser result and durable handler."""
     with open_store(readonly=args.task_action in {"list", "show", "output", "diff"}) as store:
         if args.task_action == "add":
-            prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+            prompt = prompt_from(args)
             dep_ids = _dependency_ids(store, args.mission, args.depends_on)
             command_result = commands.dispatch(commands.CommandRequest("task.add", {"prompt": prompt, "title": args.title, "priority": args.priority, "order": args.order, "depends_on": dep_ids, "acceptance": list(args.acceptance)}, mission_id=args.mission))
             result = command_result if preserve_receipt or command_result.get("status") == "REJECTED" else (command_result.get("result") or command_result)
@@ -563,8 +611,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
             task = _resolve_task(store, args.mission, args.task, args.task_by_id)
             payload: dict[str, Any] = {"task_id": int(task["id"])}
             if args.task_action == "amend":
-                prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-                payload.update(action="task.amend", prompt=prompt)
+                payload.update(action="task.amend", prompt=prompt_from(args))
             elif args.task_action == "verify":
                 payload.update(action="task.verify", evidence=args.evidence, approved=args.approve)
             elif args.task_action == "approve":
@@ -1367,8 +1414,11 @@ def _build_parser(
 
     events = sub.add_parser("events")
     _add_mission_arg(events, default_mission)
-    events.add_argument("--after", metavar="EVENT", type=_db_int, default=0, help="only events with an ID above this (default: 0)")
-    events.add_argument("--limit", metavar="N", type=_db_int, default=100, help="maximum events returned (default: 100)")
+    events.add_argument("--after", metavar="EVENT", type=_db_int, default=None, help="oldest first: only events with an ID above this. Event IDs are global, counted across all missions, so a mission's first ID is not 1. Without --after, the newest events are shown")
+    events.add_argument("--limit", metavar="N", type=_db_int, default=100, help="maximum events returned: the newest N, or the first N after --after (default: 100)")
+    events.add_argument("--since", metavar="AGE", type=_event_age, default=0, help="only events from the last AGE, for example 90s, 10m, 2h or 1d")
+    events.add_argument("--follow", "-f", action="store_true", help="keep running and print new events as they arrive; Ctrl-C stops")
+    events.add_argument("--verbose", action="store_true", help="include controller bookkeeping (heartbeats, mode, prompt and wake records), which is hidden by default")
     _add_json_arg(events)
 
     for action in ("start", "pause", "resume", "continue", "stop", "cancel", "attach", "detach"):
@@ -1627,7 +1677,7 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     Raises ``ValueError`` for conflicting modes or an unusable folder before any
     store is opened, so a rejected command leaves no database behind.
     """
-    prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+    prompt = prompt_from(args)
     _resolve_mode_args(args)
     args.cwd = _validated_cwd(args.cwd)
     args.providers, args.routes = creation_rotation(args.providers, args.routes)
@@ -1912,6 +1962,59 @@ def _set_mission_suspend_when_rate_limited(store: BridgeStore, mission_id: str, 
     return {"schema_version": 1, "mission_id": mission_id, "suspend_when_rate_limited": enabled, "detail": detail}
 
 
+def _events_command(args: argparse.Namespace) -> int:
+    """``events``: the newest events (or the first ones after ``--after``), then new ones with ``--follow``."""
+    newest = args.after is None
+    after = args.after or 0
+
+    def fetch(cursor: int, *, latest: bool, limit: int, hide: bool, since: int = 0) -> dict[str, Any]:
+        params: dict[str, Any] = {"after": cursor, "limit": limit}
+        if latest:
+            params["newest"] = True
+        if since:
+            params["since_seconds"] = since
+        if hide:
+            params["hide_bookkeeping"] = True
+        return commands.dispatch(commands.CommandRequest("mission.events", params, mission_id=args.mission))
+
+    # Everything the mission has recorded so far, shown or not, so --follow starts after it.
+    seen = 0
+    if args.follow:
+        latest_any = fetch(0, latest=True, limit=1, hide=False)["events"]
+        seen = int(latest_any[-1]["id"]) if latest_any else 0
+    result = fetch(after, latest=newest, limit=args.limit, hide=not args.verbose, since=args.since)
+    events = result["events"]
+    if args.json and not args.follow:
+        _json_print(result)
+        return 0
+    if args.json:
+        for event in events:
+            _json_print(event, compact=True)
+    else:
+        print(fmt.format_events(events, total=result.get("total"), newest=newest, verbose=args.verbose, after=after))
+    if not args.follow:
+        return 0
+    printed = max([seen, *(int(event["id"]) for event in events)])
+    cursor = printed
+    try:
+        while True:
+            time.sleep(1.0)
+            page = fetch(cursor, latest=False, limit=1000, hide=not args.verbose)["events"]
+            fresh = [event for event in page if int(event["id"]) > printed]
+            if page:
+                cursor = int(page[-1]["id"])
+            for event in fresh:
+                if args.json:
+                    _json_print(event, compact=True)
+                else:
+                    print(fmt.format_event_line(event, verbose=args.verbose))
+            sys.stdout.flush()
+            if fresh:
+                printed = int(fresh[-1]["id"])
+    except KeyboardInterrupt:
+        return 0
+
+
 def _print_result(result: Any, as_json: bool, human: Callable[[Any], str] | None = None) -> None:
     """Print ``result``: stable sorted JSON for ``--json``, otherwise readable text."""
     if as_json:
@@ -2142,8 +2245,8 @@ def _worker_command(args: argparse.Namespace) -> int:
     from . import bridge_worker as worker
 
     if args.worker_action == "enroll":
-        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
-        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        token = read_verbatim(args.token_file, "--token-file").strip()
+        ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
         config = worker.enroll(args.name, args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
                                allow_terminal_view=bool(args.allow_terminal_view))
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
@@ -2194,8 +2297,8 @@ def _remote_command(args: argparse.Namespace) -> int:
     from . import bridge_remote as remote
 
     if args.remote_action == "login":
-        token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
-        ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        token = read_verbatim(args.token_file, "--token-file").strip()
+        ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
         config = remote.login(args.coordinator, token, ca_pem=ca_pem)
         print(f"Remote targets now go through {config.coordinator_url}. List them with: llm-bridge worker list")
         return 0
@@ -2601,9 +2704,7 @@ def _main(argv: list[str] | None = None) -> int:
                 print(result.get("message") or result.get("reason") or result.get("status"))
             return 0 if result.get("ok") is True else 2
         if args.command == "events":
-            result = commands.dispatch(commands.CommandRequest("mission.events", {"after": args.after, "limit": args.limit}, mission_id=args.mission))
-            _print_result(result, args.json, lambda value: fmt.format_events(value["events"]))
-            return 0
+            return _events_command(args)
         if args.command == "proposal":
             with open_store() as store:
                 if args.proposal_action == "list":
@@ -2613,7 +2714,7 @@ def _main(argv: list[str] | None = None) -> int:
                         "task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or ""),
                     }, mission_id=args.mission))
                 else:
-                    prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
+                    prompt = prompt_from(args)
                     payload = {
                         "action": "task.propose",
                         "source_operation_id": args.source_operation_id,

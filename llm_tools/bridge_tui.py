@@ -37,12 +37,43 @@ from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FI
 from . import bridge_events, bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
 from .bridge_projection import ProjectionParams
 from .bridge_vocab import EventKind, MISSION_NEEDS_YOU_LABEL, status_label
+from . import bridge_format
 from .bridge_format import plain_reason
 from .bridge_glyphs import FINISHED_STATES, glyph, localize, localize_cells, provider_role, spinner_frames, state_look, state_text
 from .common import fmt_duration
 from . import terminal
 from .terminal import TerminalAction
 from .bridge_actions import ACTIONS, Action, actions_for
+from .bridge_event_text import (  # noqa: F401  (moved to bridge_event_text so the CLI can phrase events; other modules and tests reach these through bridge_tui)
+    _HUMANIZERS,
+    _MISSION_STATE_WORDS,
+    _NO_VALUE,
+    _REVIEW_HOLD_EVENTS,
+    _SEP,
+    _TASK_STATE_WORDS,
+    _WINDOW_NAMES,
+    _EventContext,
+    _age,
+    _capacity_brief,
+    _compact_pairs,
+    _decision_owner,
+    _dict,
+    _event_kind,
+    _event_summary,
+    _humanize_event,
+    _humanizer,
+    _int_or_none,
+    _known,
+    _percent_left,
+    _relative_epoch,
+    _rotation_text,
+    _short_id,
+    _span,
+    _text,
+    _window_brief,
+    _with_reason,
+    restoration_word,
+)
 from . import bridge_draw
 from .bridge_draw import (  # noqa: F401  (re-exported: other modules and tests reach these through bridge_tui)
     QUIET,
@@ -581,20 +612,6 @@ _SYSTEM_LABEL = 22
 _SESSION_COLUMNS = ("op", "task", "provider", "model", "status", "native session", "restoration")
 
 
-def _text(value: object, limit: int = 1000) -> str:
-    """Make untrusted snapshot/result text safe for direct curses rendering."""
-    rendered = value if isinstance(value, str) else str(value)
-    # Sanitising and whitespace folding act on single characters, so the cleaned
-    # prefix of the text is a prefix of the cleaned whole. Clean a bounded prefix
-    # and only grow it when whitespace or removed characters left too little.
-    size = max(0, limit) * 4 + 256
-    while True:
-        clean = " ".join(_scrub(rendered[:size]).split())
-        if len(clean) >= limit or size >= len(rendered):
-            return clean[:limit]
-        size *= 4
-
-
 _TASK_VERB_PHRASES = {
     "add": "added", "amend": "amended", "priority": "priority changed", "reorder": "reordered",
     "dependencies": "dependencies updated", "pause": "paused", "resume": "resumed", "cancel": "cancelled",
@@ -1001,10 +1018,6 @@ class _CommandResult:
     outcome: str = "unknown"
 
 
-def _dict(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
 def _items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
@@ -1352,14 +1365,7 @@ def _mission_role_of(snapshot: dict[str, object], mission_id: str = "") -> str:
     return bridge_theme.mission_role(mission.get("id") or mission_id, _dict(mission.get("config")))
 
 
-_SEP = " · "
-_NO_VALUE = {"", "none", "unknown", "null", "-", "—"}
 _ESTIMATE_MISSING = _NO_VALUE | {"no rate data"}
-
-
-def _known(value: object) -> bool:
-    """True for a value worth showing: not None/empty/unknown placeholder."""
-    return value is not None and str(value).strip().lower() not in _NO_VALUE
 
 
 def _clip(text: str, width: int) -> str:
@@ -1370,50 +1376,6 @@ def _clip(text: str, width: int) -> str:
         return text
     mark = glyph("ellipsis")
     return cell_slice(text, 0, max(0, width - cell_width(mark))) + mark
-
-
-def _int_or_none(value: object) -> int | None:
-    try:
-        return int(float(str(value)))
-    except (TypeError, ValueError, OverflowError):  # not a number, or infinite
-        return None
-
-
-def _span(seconds: object, units: int = 2) -> str:
-    """Human duration limited to the largest units, e.g. 5d 19h or 4h 59m."""
-    from . import common
-
-    return " ".join(common.fmt_duration(seconds).split()[:units])
-
-
-def _age(seconds: object, *, note: bool = True) -> str:
-    """Compact age text with seconds resolution below a minute."""
-    value = _int_or_none(seconds)
-    if value is None:
-        return "—"
-    if note:
-        bridge_redraw.note_age(max(0, value))
-    return f"{max(0, value)}s" if value < 60 else _span(value)
-
-
-def _relative_epoch(value: object, now: float | None = None) -> str | None:
-    """`in 4h 59m` / `3m ago` for an epoch or ISO timestamp, else None."""
-    from . import common
-
-    epoch = common.parse_epoch(value, use_date=False)
-    if epoch is None:
-        return None
-    current = common.now_epoch() if now is None else now
-    delta = int(epoch - current)
-    remaining = epoch - current
-    if delta >= 0:
-        # Whole minutes: the text changes as the remaining time drops below the next minute mark,
-        # and a past-due target is shown as seconds from one second after it.
-        bridge_redraw.note_wall(remaining + 1.01 if remaining < 60 else remaining % 60 + 0.01)
-        return f"in {_span(delta)}"
-    elapsed = current - epoch
-    bridge_redraw.note_wall(int(elapsed) + 1 - elapsed if elapsed < 60 else 60 * (elapsed // 60 + 1) - elapsed)
-    return f"{_age(-delta, note=False)} ago"
 
 
 def _clock_epoch() -> float:
@@ -1440,23 +1402,11 @@ def _local_clock(value: object) -> str:
         return "--:--:--"
 
 
-def _short_id(value: object, length: int = 8) -> str:
-    return _text(value, 64)[:length] if _known(value) else "-"
-
-
 def _percent_value(value: object) -> float | None:
     try:
         return float(str(value))
     except (TypeError, ValueError):
         return None
-
-
-def _percent_left(value: object) -> str | None:
-    try:
-        number = float(str(value))
-    except (TypeError, ValueError):
-        return None
-    return f"{int(number + 0.5)}%"
 
 
 _DURATION_PART = re.compile(r"(\d+)\s*([dhms])\b")
@@ -1905,556 +1855,14 @@ def _project_events(value: object, limit: int = _MAX_EVENT_ROWS) -> list[dict[st
     return projected
 
 
-def _compact_pairs(value: dict[str, object], prefix: str = "", limit: int = 8) -> list[str]:
-    """Flatten a dict to `k=v` words: no braces or quotes, nulls skipped."""
-    pairs: list[str] = []
-    for key, item in value.items():
-        name = prefix + _text(key, 32)
-        if item is None or item == "" or item == []:
-            continue
-        if isinstance(item, dict):
-            pairs.extend(_compact_pairs(item, name + ".", limit))
-        elif isinstance(item, list):
-            pairs.append(f"{name}={len(item)} items")
-        elif isinstance(item, bool):
-            pairs.append(f"{name}={'yes' if item else 'no'}")
-        else:
-            pairs.append(f"{name}={_text(item, 40)}")
-    return pairs[:limit]
-
-
-_REVIEW_HOLD_EVENTS = frozenset({"review-hold", "review-hold-released"})  # operator-meaningful, never bookkeeping
-
-
-def _event_summary(event: dict[str, object]) -> str:
-    """One human line for a durable event."""
-    kind = str(event.get("kind") or event.get("event_type") or event.get("type") or "event")
-    raw = event.get("data")
-    data = raw if isinstance(raw, dict) else {}
-    task = f"task {_text(event['task_id'], 12)}" if _known(event.get("task_id")) else ""
-    op = f"op {_short_id(event.get('operation_id'))}" if _known(event.get("operation_id")) else ""
-    transition = ""
-    if _known(data.get("from")) or _known(data.get("to")):
-        transition = f"{_text(data.get('from') or '?', 20)} → {_text(data.get('to') or '?', 20)}"
-    reason = f" ({_text(data['reason'], 60)})" if _known(data.get("reason")) else ""
-    if kind in _REVIEW_HOLD_EVENTS and _known(data.get("summary")):
-        return _text(data["summary"], 160)
-    if kind == "mission-created":
-        return f"mission created · {_text(data.get('name') or '', 60)}".rstrip(" ·")
-    if kind == "task-added":
-        title = _text(data.get("title") or "", 60)
-        return f"{task or 'task'} added" + (f" · {title}" if title else "")
-    if kind in {"task-ready", "task-status"}:
-        return f"{task or 'task'} {transition}{reason}".strip()
-    if kind == "mission-status":
-        return f"mission {transition}{reason}".strip()
-    if kind == "operation-prepared":
-        return _SEP.join(part for part in (f"{op} prepared", task, _text(data.get("station") or "", 40)) if part)
-    if kind == "operation-running":
-        who = _text(data.get("route_id") or "", 40)
-        model = _text(data.get("model") or "", 40)
-        return _SEP.join(part for part in (f"{op} running", task, " ".join(item for item in (who, model) if item), f"pid {_text(data['process_pid'], 12)}" if _known(data.get("process_pid")) else "") if part)
-    if kind == "operation-exited":
-        state = f"{op} exited {_text(data.get('exit_code', '?'), 8)}"
-        return _SEP.join(part for part in (state, task, f"task now {status_label(_text(data['task_status'], 20))}" if _known(data.get("task_status")) else "") if part)
-    if kind in {"provider-selection", "capacity-refresh"}:
-        owner = _text(data.get("route") or data.get("provider") or "", 40)
-        model = _text(data.get("selected_model") if _known(data.get("selected_model")) else "", 40)
-        why = _text(plain_reason(data.get("rotation_reason") or ""), 40)
-        verb = "selected" if kind == "provider-selection" else "capacity refreshed"
-        return _SEP.join(part for part in (f"{verb} {owner}".rstrip(), model, why) if part)
-    if kind.startswith("command-"):
-        return f"command {kind[8:]}: {_text(data.get('command') or '', 60)}".rstrip(": ")
-    if kind == "native-session-restoration":
-        session = _short_id(data.get("session_id"), 13)
-        return _SEP.join(part for part in (f"session {_text(data.get('restoration_state') or 'unknown', 30).lower()}", _text(data.get("provider") or "", 20), session if session != "-" else "", op) if part)
-    if kind == "operation-uncertain":
-        return _SEP.join(part for part in (f"{op} outcome unknown".strip(), _text(data.get("reason") or "", 100)) if part)
-    if kind == "repository-checkpoint":
-        return _SEP.join(part for part in ("repository checkpoint saved", f"task {_text(data['task_id'], 12)}" if _known(data.get("task_id")) else task, f"revision {_text(data['revision'], 8)}" if _known(data.get("revision")) else "") if part)
-    if kind == "task-rejected":
-        return _SEP.join(part for part in (f"{task or 'task'} sent back", _text(data.get("reason") or "", 80)) if part)
-    if kind == "rotation-changed":
-        return f"rotation {transition}".strip()
-    if kind == "task-verified":
-        approved = " approved by operator" if data.get("approved") else ""
-        return f"{task or 'task'} verified · {_text(data.get('evidence_count', 0), 8)} evidence{approved}"
-    if kind == "verification-failed":
-        return _SEP.join(part for part in (f"{task or 'task'} verification failed", " ".join(_compact_pairs(data, limit=4))) if part)
-    if kind == "provider-handoff":
-        return _SEP.join(part for part in (
-            f"{task or 'task'} handed off after exit {_text(data.get('exit_code', '?'), 8)}",
-            f"failure {_text(data.get('failure_count', '?'), 6)}/{_text(data.get('max_failures', '?'), 6)}",
-        ) if part)
-    if kind == "provider-handoff-selected":
-        return f"handoff to {_text(data.get('station') or '?', 40)}"
-    if kind == "provider-handoff-exhausted":
-        return f"{task or 'task'} out of handoffs · {_text(data.get('failures', '?'), 6)} failures, limit {_text(data.get('max_failures', '?'), 6)}"
-    if kind == "provider-wait":
-        until = _relative_epoch(data.get("target_epoch"))
-        return _SEP.join(part for part in (
-            "waiting for capacity",
-            f"resumes {until}" if until else "",
-            _text(data.get("reason") or "", 60),
-        ) if part)
-    if kind == "controller-heartbeat":
-        return _text(data.get("controller_state") or "", 24)
-    pairs = _compact_pairs(data) if data else []
-    if not pairs:
-        fallback = event.get("summary")
-        return _text(fallback, 100) if _known(fallback) else ""
-    return " ".join(pairs)
-
-
 # Derived from the event registry (`bridge_events.EVENTS`), which holds the classification of every kind.
 _COLLAPSED_EVENTS = bridge_events.collapsed_kinds()
 _PLUMBING_EVENTS = bridge_events.plumbing_kinds()
-
-_TASK_STATE_WORDS = {
-    "READY": "ready", "QUEUED": "waiting", "RUNNING": "running", "VERIFYING": "awaiting review",
-    "COMPLETED": "completed", "FAILED": "failed", "BLOCKED": "blocked", "PAUSED": "paused",
-    "CANCELLED": "cancelled",
-}
-_MISSION_STATE_WORDS = {
-    "PAUSED": "Paused", "STOPPING": "Stopping", "STOPPED": "Stopped", "COMPLETED": "Mission completed",
-    "CANCELLED": "Mission cancelled", "FAILED": "Mission failed",
-}
-_WINDOW_NAMES = {"5h": "5h", "weekly": "week", "monthly": "month"}
-
-
-def _window_brief(window: dict[str, object]) -> str:
-    """`5h 95%` (percent left) for one measurable window, else empty."""
-    if window.get("kind") == "opaque":
-        return ""
-    percent = _percent_left(window.get("remaining_percent"))
-    if percent is None:
-        return ""
-    name = _text(window.get("name") or window.get("kind") or "", 12)
-    return f"{_WINDOW_NAMES.get(name, name)} {percent}".strip()
-
-
-def _decision_owner(row: dict[str, object]) -> str:
-    return str(row.get("route") or row.get("provider") or "")
-
-
-def _capacity_brief(decisions: object, owner: str = "") -> str:
-    """`5h 95%, week 21%` for `owner` (else the first decision with measurable windows)."""
-    rows = [_dict(row) for row in decisions] if isinstance(decisions, list) else []
-    chosen = [row for row in rows if _decision_owner(row) == owner] or rows
-    for row in chosen:
-        windows = row.get("windows")
-        parts = [_window_brief(_dict(window)) for window in windows] if isinstance(windows, list) else []
-        brief = ", ".join(part for part in parts if part)
-        if brief:
-            return brief
-    return ""
-
-
-def _event_kind(event: dict[str, object]) -> str:
-    return str(event.get("kind") or event.get("event_type") or event.get("type") or "event")
-
-
-def _rotation_text(value: object) -> str:
-    """`codex,claude` as `codex → claude`."""
-    names = [item.strip() for item in str(value or "").split(",") if item.strip()]
-    return f" {glyph('arrow')} ".join(_text(item, 30) for item in names) or "default"
 
 
 def _task_numbers(snapshot: dict[str, object]) -> dict[str, str]:
     """Task id to displayed number for the tasks on this page (differs once tasks carry an ordinal)."""
     return {str(task["id"]): str(task_number(task)) for task in _items(snapshot.get("tasks")) if task.get("id") is not None}
-
-
-@dataclass(frozen=True)
-class _EventContext:
-    """What a humaniser needs to phrase one event."""
-
-    kind: str
-    data: dict[str, object]
-    event: dict[str, object]
-    task: str  # `Task 3`, or `Task` when the event names none
-    on_task: str  # ` on task 3`, or empty
-    reason: str  # ` (reason)`, or empty
-    owner: str  # route, provider or station named by the data
-    model: str
-    new_state: str
-    old_state: str
-
-
-# One phrase function per event kind. A handler returns the phrase, or `(phrase, is_plumbing)` when the
-# flag depends on the event; otherwise the flag comes from `bridge_events.EVENTS`.
-_HUMANIZERS: dict[str, Callable[[_EventContext], str | tuple[str, bool]]] = {}
-
-
-def _humanizer(*kinds: EventKind) -> Callable[[Callable[[_EventContext], str | tuple[str, bool]]], Callable[[_EventContext], str | tuple[str, bool]]]:
-    def register(function: Callable[[_EventContext], str | tuple[str, bool]]) -> Callable[[_EventContext], str | tuple[str, bool]]:
-        for kind in kinds:
-            _HUMANIZERS[str(kind)] = function
-        return function
-
-    return register
-
-
-def _with_reason(label: str, data: dict[str, object], limit: int = 100) -> str:
-    return label + (f" · {_text(data['reason'], limit)}" if _known(data.get("reason")) else "")
-
-
-@_humanizer(EventKind.REVIEW_HOLD, EventKind.REVIEW_HOLD_RELEASED)
-def _h_review_hold(ctx: _EventContext) -> str:
-    summary = _text(ctx.data.get("summary") or "", 160)
-    fallback = "Holding the next task for your review" if ctx.kind == "review-hold" else "Review hold released"
-    return summary[:1].upper() + summary[1:] if summary else fallback
-
-
-@_humanizer(EventKind.MISSION_COLOUR)
-def _h_mission_colour(ctx: _EventContext) -> str:
-    value = ctx.data.get("value")
-    if isinstance(value, int) and 1 <= value <= bridge_theme.MISSION_COUNT:
-        return f"Mission colour set to {value} ({bridge_theme.MISSION_HUE_NAMES[value - 1]})"
-    return "Mission colour back to automatic"
-
-
-@_humanizer(EventKind.MISSION_CREATED)
-def _h_mission_created(ctx: _EventContext) -> str:
-    return f"Mission created · {_text(ctx.data.get('name') or '', 60)}".rstrip(" ·")
-
-
-@_humanizer(EventKind.MISSION_STATUS)
-def _h_mission_status(ctx: _EventContext) -> str:
-    if ctx.new_state == "RUNNING":
-        return "Resumed" if ctx.old_state == "PAUSED" else "Mission started"
-    return f"{_MISSION_STATE_WORDS.get(ctx.new_state, 'Mission ' + (ctx.new_state.lower() or 'changed'))}{ctx.reason}"
-
-
-@_humanizer(EventKind.MISSION_SUSPEND_WHEN_RATE_LIMITED)
-def _h_mission_suspend_when_rate_limited(ctx: _EventContext) -> str:
-    return "Capacity-wait suspend " + ("on" if ctx.data.get("value") is True else "off")
-
-
-@_humanizer(EventKind.TASK_ADDED)
-def _h_task_added(ctx: _EventContext) -> str:
-    title = _text(ctx.data.get("title") or "", 60)
-    return f"{ctx.task} added" + (f" · {title}" if title else "")
-
-
-@_humanizer(EventKind.TASK_READY, EventKind.TASK_STATUS)
-def _h_task_status(ctx: _EventContext) -> tuple[str, bool]:
-    if ctx.new_state == "QUEUED" and ctx.data.get("reason") == "dependency-added":
-        return f"{ctx.task} waiting on a new dependency", False
-    word = _TASK_STATE_WORDS.get(ctx.new_state, ctx.new_state.lower() or "updated")
-    return f"{ctx.task} {word}{ctx.reason}", ctx.new_state == "RUNNING"
-
-
-@_humanizer(EventKind.TASK_STATUS_TRANSITION)
-def _h_task_status_transition(ctx: _EventContext) -> str:
-    return f"{ctx.task} {status_label(ctx.old_state).lower()} → {status_label(ctx.new_state).lower()}" + ctx.reason
-
-
-@_humanizer(EventKind.OPERATION_RUNNING)
-def _h_operation_running(ctx: _EventContext) -> str:
-    return f"Started {ctx.owner or 'provider'}" + (f" ({ctx.model})" if ctx.model else "") + ctx.on_task
-
-
-@_humanizer(EventKind.OPERATION_EXITED)
-def _h_operation_exited(ctx: _EventContext) -> str:
-    return f"Provider exited ({_text(ctx.data.get('exit_code', '?'), 8)}){ctx.on_task}"
-
-
-@_humanizer(EventKind.OPERATION_UNCERTAIN)
-def _h_operation_uncertain(ctx: _EventContext) -> str:
-    return "Provider outcome unknown" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.OPERATION_ABORTED_BEFORE_LAUNCH)
-def _h_operation_aborted(ctx: _EventContext) -> str:
-    return "Launch aborted" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.OPERATION_PREPARED)
-def _h_operation_prepared(ctx: _EventContext) -> str:
-    return f"Preparing {ctx.owner or 'provider'}{ctx.on_task}"
-
-
-@_humanizer(EventKind.PROVIDER_SELECTION)
-def _h_provider_selection(ctx: _EventContext) -> str:
-    return f"Selected {ctx.owner}".rstrip() + (f" ({ctx.model})" if ctx.model else "")
-
-
-@_humanizer(EventKind.PROVIDER_RESULT_DIAGNOSED)
-def _h_provider_result_diagnosed(ctx: _EventContext) -> str:
-    failure = ctx.data.get("failure")
-    cause = failure.get("cause") if isinstance(failure, dict) else None
-    if isinstance(failure, dict) and failure.get("class") == "success" and cause == "completed":
-        # The provider process exited 0.  That is not the task's result: say whether the task now awaits the operator.
-        waiting = str(ctx.data.get("task_status") or "").upper() == "VERIFYING"
-        return "Provider result recorded · exited 0" + (" · awaiting review" if waiting else "")
-    return "Provider result recorded" + (f" · {_text(cause, 60)}" if _known(cause) else "")
-
-
-@_humanizer(EventKind.CAPACITY_REFRESH)
-def _h_capacity_refresh(ctx: _EventContext) -> str:
-    brief = _text(ctx.data.get("capacity_brief") or "", 80)
-    return f"Capacity: {ctx.owner or 'providers'} {brief}".rstrip() if brief else f"Capacity refreshed: {ctx.owner or 'providers'}"
-
-
-@_humanizer(EventKind.CAPACITY_REFRESH_ERROR)
-def _h_capacity_refresh_error(ctx: _EventContext) -> str:
-    return "Capacity refresh failed" + (f" ({_text(ctx.data['reason'], 60)})" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.SUSPEND_DECISION, EventKind.SUSPEND_INTENT, EventKind.SUSPEND_REFUSED, EventKind.SUSPEND_OUTCOME,
-            EventKind.SUSPEND_PROVIDER_STARTED,
-            EventKind.SUSPEND_WORK_RESUMED, EventKind.CAPACITY_WAKE_ARMED,
-            EventKind.CAPACITY_WAKE_UNAVAILABLE, EventKind.CAPACITY_WAKE_RESUMED,
-            EventKind.CAPACITY_WAKE_RESUME_UNVERIFIED, EventKind.CAPACITY_WAKE_PLAN)
-def _h_suspend_capacity(ctx: _EventContext) -> str:
-    labels = {
-        "suspend-decision": "Suspend path",
-        "suspend-intent": "Capacity suspend requested",
-        "suspend-refused": "Capacity suspend refused",
-        "suspend-outcome": "Capacity suspend finished",
-        "suspend-work-resumed": "Capacity-wait work resumed",
-        "suspend-provider-started": "Provider resumed after verified sleep",
-        "capacity-wake-armed": "Capacity wake armed",
-        "capacity-wake-unavailable": "Capacity wake unavailable",
-        "capacity-wake-resumed": "Capacity wake observed",
-        "capacity-wake-resume-unverified": "Capacity wake could not be verified",
-        "capacity-wake-plan": "Shared wake plan updated",
-    }
-    return _with_reason(labels.get(ctx.kind, "Capacity suspend updated"), ctx.data)
-
-
-@_humanizer(EventKind.CONTROLLER_HEARTBEAT)
-def _h_controller_heartbeat(ctx: _EventContext) -> str:
-    return "controller alive"
-
-
-@_humanizer(EventKind.CONTROLLER_HEARTBEAT_ERROR)
-def _h_controller_heartbeat_error(ctx: _EventContext) -> str:
-    return "controller heartbeat failed" + (f" ({_text(ctx.data['reason'], 40)})" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.CONTROLLER_EXITED_UNEXPECTEDLY)
-def _h_controller_exited(ctx: _EventContext) -> str:
-    return "Controller exited unexpectedly" + ctx.reason
-
-
-@_humanizer(EventKind.COMMAND_APPLIED, EventKind.COMMAND_FAILED, EventKind.COMMAND_QUEUED, EventKind.COMMAND_REJECTED)
-def _h_command(ctx: _EventContext) -> str:
-    return f"Command {ctx.kind[len('command-'):]}: {_text(ctx.data.get('command') or '', 60)}".rstrip(": ")
-
-
-@_humanizer(EventKind.STATION_HANDOFF, EventKind.PROVIDER_SWITCHED)
-def _h_provider_switched(ctx: _EventContext) -> str:
-    return f"Switched provider {_text(ctx.data.get('from') or '?', 30)} → {_text(ctx.data.get('to') or '?', 30)}{ctx.reason}"
-
-
-@_humanizer(EventKind.ROTATION_CHANGED)
-def _h_rotation_changed(ctx: _EventContext) -> str:
-    return f"Rotation changed to {_rotation_text(ctx.data.get('to'))}"
-
-
-@_humanizer(EventKind.ROTATION_APPLIED)
-def _h_rotation_applied(ctx: _EventContext) -> str:
-    return f"Rotation applied: {_rotation_text(ctx.data.get('routes') or ctx.data.get('providers'))}"
-
-
-@_humanizer(EventKind.ROTATION_REJECTED)
-def _h_rotation_rejected(ctx: _EventContext) -> str:
-    return "Rotation change rejected" + (f" · {_text(ctx.data['error'], 100)}" if _known(ctx.data.get("error")) else "")
-
-
-@_humanizer(EventKind.TASK_REJECTED)
-def _h_task_rejected(ctx: _EventContext) -> str:
-    return f"{ctx.task} sent back" + (f" · {_text(ctx.data['reason'], 100)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.MISSION_REOPENED)
-def _h_mission_reopened(ctx: _EventContext) -> str:
-    return _with_reason("Mission reopened", ctx.data)
-
-
-@_humanizer(EventKind.CONTROLLER_FAILED)
-def _h_controller_failed(ctx: _EventContext) -> str:
-    return _with_reason("Controller failed", ctx.data)
-
-
-@_humanizer(EventKind.STATION_STOPPED)
-def _h_station_stopped(ctx: _EventContext) -> str:
-    return "Provider station stopped"
-
-
-@_humanizer(EventKind.PROVIDER_HANDOFF)
-def _h_provider_handoff(ctx: _EventContext) -> str:
-    return (f"{ctx.task} handed off after exit {_text(ctx.data.get('exit_code', '?'), 8)} "
-            f"(failure {_text(ctx.data.get('failure_count', '?'), 6)}/{_text(ctx.data.get('max_failures', '?'), 6)})")
-
-
-@_humanizer(EventKind.PROVIDER_HANDOFF_SELECTED)
-def _h_provider_handoff_selected(ctx: _EventContext) -> str:
-    return f"Handing off to {_text(ctx.data.get('station') or '?', 40)}"
-
-
-@_humanizer(EventKind.PROVIDER_HANDOFF_EXHAUSTED)
-def _h_provider_handoff_exhausted(ctx: _EventContext) -> str:
-    return f"{ctx.task} out of handoffs ({_text(ctx.data.get('failures', '?'), 6)} failures, limit {_text(ctx.data.get('max_failures', '?'), 6)})"
-
-
-@_humanizer(EventKind.PROVIDER_WAIT)
-def _h_provider_wait(ctx: _EventContext) -> str:
-    until = _relative_epoch(ctx.data.get("target_epoch"))
-    return "Waiting for capacity" + (f", resumes {until}" if until else "") + (f" · {_text(ctx.data['reason'], 60)}" if _known(ctx.data.get("reason")) else "")
-
-
-@_humanizer(EventKind.TASK_VERIFIED)
-def _h_task_verified(ctx: _EventContext) -> str:
-    return f"{ctx.task} verified" + (" (approved by you)" if ctx.data.get("approved") else "")
-
-
-@_humanizer(EventKind.VERIFICATION_FAILED)
-def _h_verification_failed(ctx: _EventContext) -> str:
-    return f"{ctx.task} verification failed"
-
-
-@_humanizer(EventKind.TASK_EVIDENCE_RECORDED)
-def _h_task_evidence(ctx: _EventContext) -> str:
-    count = ctx.data.get("evidence_count")
-    return f"{ctx.task} evidence recorded" + (f" ({_text(count, 6)} item{'s' if count != 1 else ''})" if _known(count) else "")
-
-
-@_humanizer(EventKind.TASK_AMENDED)
-def _h_task_amended(ctx: _EventContext) -> str:
-    return f"{ctx.task} amended"
-
-
-@_humanizer(EventKind.TASK_AMENDMENT_APPLIED)
-def _h_task_amendment_applied(ctx: _EventContext) -> str:
-    return f"{ctx.task} amendment applied"
-
-
-@_humanizer(EventKind.TASK_PRIORITY)
-def _h_task_priority(ctx: _EventContext) -> str:
-    return f"{ctx.task} priority changed"
-
-
-@_humanizer(EventKind.TASK_REORDERED)
-def _h_task_reordered(ctx: _EventContext) -> str:
-    return f"{ctx.task} reordered"
-
-
-@_humanizer(EventKind.DEPENDENCY_ADDED)
-def _h_dependency_added(ctx: _EventContext) -> str:
-    deps = ctx.data.get("depends_on")
-    wait = ", ".join(_text(item, 12) for item in deps) if isinstance(deps, list) else _text(deps or "", 40)
-    return f"{ctx.task} now waits for {wait}".rstrip()
-
-
-@_humanizer(EventKind.TASK_PROPOSED)
-def _h_task_proposed(ctx: _EventContext) -> str:
-    return f"Agent proposed {ctx.task.lower()}"
-
-
-@_humanizer(EventKind.TASK_PROPOSAL_ACCEPTED)
-def _h_task_proposal_accepted(ctx: _EventContext) -> str:
-    return f"Proposal accepted: {ctx.task.lower()}"
-
-
-@_humanizer(EventKind.TASK_PROPOSAL_REJECTED)
-def _h_task_proposal_rejected(ctx: _EventContext) -> str:
-    return f"Proposal rejected: {ctx.task.lower()}"
-
-
-@_humanizer(EventKind.NATIVE_SESSION_RESTORATION)
-def _h_native_session(ctx: _EventContext) -> str:
-    state = _text(ctx.data.get("restoration_state") or "unknown", 30).lower().replace("_", " ")
-    return f"Session {state}" + (f" · {_text(ctx.data['provider'], 20)}" if _known(ctx.data.get("provider")) else "")
-
-
-@_humanizer(EventKind.REPOSITORY_CHECKPOINT)
-def _h_repository_checkpoint(ctx: _EventContext) -> str:
-    return "Repository checkpoint saved"
-
-
-@_humanizer(EventKind.OPERATION_PROCESS)
-def _h_operation_process(ctx: _EventContext) -> str:
-    return "Provider process started"
-
-
-@_humanizer(EventKind.OPERATION_PROGRESS)
-def _h_operation_progress(ctx: _EventContext) -> str:
-    return "Provider progress noted"
-
-
-@_humanizer(EventKind.CONTROLLER_MODE)
-def _h_controller_mode(ctx: _EventContext) -> str:
-    return f"Controller mode: {_text(ctx.data.get('actual_mode') or 'unknown', 20)}"
-
-
-@_humanizer(EventKind.CONTROLLER_CONFIG)
-def _h_controller_config(ctx: _EventContext) -> str:
-    return "Controller configured"
-
-
-@_humanizer(EventKind.CONTROLLER_OWNERSHIP)
-def _h_controller_ownership(ctx: _EventContext) -> str:
-    return "Controller ownership verified"
-
-
-@_humanizer(EventKind.STATION_OBSERVATION)
-def _h_station_observation(ctx: _EventContext) -> str:
-    return "Provider screen observed"
-
-
-@_humanizer(
-    EventKind.STEERING_HANDOFF_CONSUMED, EventKind.STEERING_HANDOFF_REQUESTED, EventKind.STEERING_PAUSE_APPLIED,
-    EventKind.STEERING_PAUSE_REQUESTED, EventKind.STEERING_STOP_TASK_APPLIED, EventKind.STEERING_STOP_TASK_REQUESTED,
-    EventKind.STEERING_VERIFY_APPLIED, EventKind.STEERING_VERIFY_DRAINED, EventKind.STEERING_VERIFY_REQUESTED,
-)
-def _h_steering(ctx: _EventContext) -> str:
-    return "Steering " + ctx.kind[len("steering-"):].replace("-", " ")
-
-
-def _humanize_event(event: dict[str, object], numbers: dict[str, str] | None = None) -> tuple[str, bool]:
-    """(operator-facing phrase, is_plumbing) for one durable event.
-
-    `numbers` maps task ids to the number shown for them, when that differs. The phrase comes from
-    the kind's entry in `_HUMANIZERS`; the flag from `bridge_events.EVENTS` unless the handler
-    returns its own. A kind without a handler (including a stored kind this build does not know)
-    reads `Label · detail`.
-    """
-    kind = _event_kind(event)
-    raw = event.get("data")
-    data = raw if isinstance(raw, dict) else {}
-    task_id = event.get("task_id") if _known(event.get("task_id")) else data.get("task_id")
-    if _known(event.get("task_ordinal")):
-        task_id = event["task_ordinal"]
-    elif numbers and _known(task_id):
-        task_id = numbers.get(str(task_id), task_id)
-    model_value = data.get("model") if _known(data.get("model")) else data.get("selected_model")
-    context = _EventContext(
-        kind=kind,
-        data=data,
-        event=event,
-        task=f"Task {_text(task_id, 12)}" if _known(task_id) else "Task",
-        on_task=f" on task {_text(task_id, 12)}" if _known(task_id) else "",
-        reason=f" ({_text(plain_reason(data['reason']), 60)})" if _known(data.get("reason")) else "",
-        owner=_text(data.get("route_id") or data.get("route") or data.get("provider") or data.get("station") or "", 40),
-        model=_text(model_value, 40) if _known(model_value) else "",
-        new_state=str(data.get("to") or "").upper(),
-        old_state=str(data.get("from") or "").upper(),
-    )
-    plumbing = bridge_events.is_plumbing(kind)
-    handler = _HUMANIZERS.get(kind)
-    if handler is None and kind.startswith("command-"):
-        handler = _h_command
-    elif handler is None and kind.startswith("steering-"):
-        handler = _h_steering
-    if handler is not None:
-        result = handler(context)
-        return result if isinstance(result, tuple) else (result, plumbing)
-    detail = _event_summary(event)
-    label = kind.replace("-", " ").capitalize()
-    return (f"{label} · {detail}" if detail else label), plumbing
 
 
 @dataclass(frozen=True)
@@ -4680,7 +4088,7 @@ class _ConsoleState:
             row("Tasks", orders),
         ]
         policy = _dict(_dict(data.get("mission")).get("execution_policy"))
-        policy_text = "legacy (unchanged)" if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
+        policy_text = bridge_format.LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend', 'medium')}"
         rows.append(row("Policy", policy_text))
         needs = _needs_you_rows(data)
         for index, text in enumerate(needs):
@@ -4721,17 +4129,21 @@ class _ConsoleState:
         return [
             f"Task {_text(task_number(task) if task_number(task) is not None else '?', 32)}: {_cut_text(task.get('title') or 'Untitled', 100)}",
             f"Status {_text(task.get('status', 'unknown'), 24)} | priority {_text(task.get('priority', '?'), 16)} | revision {_text(task.get('revision', '?'), 16)}",
-            f"Origin {_text(task.get('origin') or 'operator', 24)} | proposal {_text(task.get('proposal_status') or 'not a proposal', 32)} | proposed by {_text(task.get('proposed_by_operation') or 'unknown', 32)}",
+            " | ".join(part for part in (
+                f"Origin {_text(task.get('origin') or 'operator', 24)}",
+                f"proposal {_text(task['proposal_status'], 32)}" if _known(task.get("proposal_status")) else "",
+                f"proposed by {_text(task['proposed_by_operation'], 32)}" if _known(task.get("proposed_by_operation")) else "",
+            ) if part),
             *([line] if (line := _last_run_line(self.snapshot, task)) else []),
             "Dependencies: " + (", ".join(_text(item, 32) for item in dependencies) if isinstance(dependencies, list) and dependencies else "none"),
             "Acceptance criteria:",
             *([f"  {index + 1}. {_cut_text(item, 240)}" for index, item in enumerate(acceptance[:_MAX_DETAIL_ITEMS])] if isinstance(acceptance, list) and acceptance else ["  none recorded"]),
             "Verification evidence:",
             *([f"  {index + 1}. {_evidence_text(item)}" for index, item in enumerate(evidence[:_MAX_DETAIL_ITEMS])] if isinstance(evidence, list) and evidence else ["  none recorded"]),
-            "Pending amendment: " + (_cut_text(json.dumps(pending, ensure_ascii=False, sort_keys=True), 400) if pending else "none"),
+            "Pending amendment: " + (_cut_text(bridge_format.amendment_text(pending), 400) if pending else "none"),
             "Amendment history:",
             *([
-                f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20)}: {_cut_text(json.dumps(item.get('changes', {}), ensure_ascii=False, sort_keys=True), 240)}"
+                f"  revision {_text(item.get('revision', '?'), 16)} {_text(item.get('status', 'unknown'), 20).lower()}: {_cut_text(bridge_format.amendment_text(item.get('changes', {})), 240)}"
                 for item in amendments[:5] if isinstance(item, dict)
             ] if isinstance(amendments, list) and amendments else ["  none recorded"]),
             "Prompt preview (v opens full prompt): " + _cut_text(task.get("prompt") or "", 800),
@@ -4841,7 +4253,7 @@ class _ConsoleState:
                 cell(item.get("model"), 28),
                 _state_text(cell(item.get("status"), 20)),
                 _short_id(item.get("native_session_id")),
-                cell(item.get("restoration_state"), 24),
+                restoration_word(item.get("restoration_state")),
             )
             for item in operations
         ]
@@ -4876,28 +4288,44 @@ class _ConsoleState:
             model_source = item.get("model_source") if item.get("model_source") == "observed" else ("configured" if _known(item.get("configured_model")) else "unknown")
             effort_source = item.get("effort_source") if item.get("effort_source") == "observed" else ("configured" if _known(item.get("configured_effort")) else "unknown")
             capability = _dict(item.get("capabilities"))
-            role = item.get("role") if item.get("role_source") == "observed" else "unknown"
+            role = item.get("role") if item.get("role_source") == "observed" else None
             activity_age = item.get("activity_age_seconds")
-            activity_age_text = f"{int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else "unknown"
+            activity_age_text = f"age {int(activity_age)}s" if isinstance(activity_age, (int, float)) and not isinstance(activity_age, bool) else ""
             lifecycle_age = item.get("lifecycle_age_seconds")
-            lifecycle_age_text = f"{int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else "unknown"
-            return [
-                f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status_label') or item.get('status'), 30)}",
-                f"role: {_text(role, 80)} ({_text(item.get('role_source') or 'unknown', 20)})",
-                f"mission: {_text(item.get('mission_name') or item.get('mission_id'), 100)}",
-                f"age: {_span(item.get('age_seconds'), 2) if item.get('age_seconds') is not None else 'unknown'}",
-                f"model: {_text(model, 100)} ({_text(model_source, 20)})",
-                f"reasoning effort: {_text(effort, 40)} ({_text(effort_source, 20)})",
-                f"activity: {_text(item.get('activity'), 180)}",
-                f"last observed: {_text(item.get('last_activity_at') or 'unknown', 80)}",
-                f"native status: {_text(item.get('native_status') or 'unknown', 40)}",
-                f"parent: {_text(item.get('parent_id') or 'none', 100)}",
-                f"freshness: {_text(item.get('freshness'), 40)} · identity: {_text(item.get('identity_source') or 'provider metadata', 60)}",
-                f"activity freshness: {_text(item.get('activity_freshness') or 'unknown', 24)} · age {activity_age_text}",
-                f"lifecycle freshness: {_text(item.get('lifecycle_freshness') or 'unknown', 24)} · age {lifecycle_age_text}",
-                f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}",
-                "Esc returns to the map.",
+            lifecycle_age_text = f"age {int(lifecycle_age)}s" if isinstance(lifecycle_age, (int, float)) and not isinstance(lifecycle_age, bool) else ""
+            mission = item.get("mission_name") if _known(item.get("mission_name")) else item.get("mission_id")
+            # A field the provider did not report is left out of the list and named once on the last line.
+            fields: list[tuple[str, str]] = [
+                ("role", f"{_text(role, 80)} ({_text(item.get('role_source') or 'observed', 20)})" if _known(role) else ""),
+                ("mission", _text(mission, 100) if _known(mission) else ""),
+                ("age", _span(item.get("age_seconds"), 2) if _known(item.get("age_seconds")) else ""),
+                ("model", f"{_text(model, 100)} ({_text(model_source, 20)})" if _known(model) else ""),
+                ("reasoning effort", f"{_text(effort, 40)} ({_text(effort_source, 20)})" if _known(effort) else ""),
+                ("activity", _text(item.get("activity"), 180) if _known(item.get("activity")) else ""),
+                ("last observed", _text(item.get("last_activity_at"), 80) if _known(item.get("last_activity_at")) else ""),
+                ("native status", _text(item.get("native_status"), 40) if _known(item.get("native_status")) else ""),
+                ("activity freshness", _SEP.join(part for part in (_text(item["activity_freshness"], 24) if _known(item.get("activity_freshness")) else "", activity_age_text) if part)),
+                ("lifecycle freshness", _SEP.join(part for part in (_text(item["lifecycle_freshness"], 24) if _known(item.get("lifecycle_freshness")) else "", lifecycle_age_text) if part)),
             ]
+            shown = {label: value for label, value in fields if value}
+            missing = [label for label, value in fields if not value]
+            identity = f"identity: {_text(item.get('identity_source') or 'provider metadata', 60)}"
+            rows = [f"{_text(item.get('name'), 100)} · {_text(item.get('provider'), 40)} · {_text(item.get('status_label') or item.get('status'), 30)}"]
+            for label in ("role", "mission", "age", "model", "reasoning effort", "activity", "last observed", "native status"):
+                if label in shown:
+                    rows.append(f"{label}: {shown[label]}")
+            rows.append(f"parent: {_text(item.get('parent_id') or 'none', 100)}")
+            rows.append(f"freshness: {_text(item['freshness'], 40)} · {identity}" if _known(item.get("freshness")) else identity)
+            for label in ("activity freshness", "lifecycle freshness"):
+                if label in shown:
+                    rows.append(f"{label}: {shown[label]}")
+            rows.append(f"navigation: {_text(capability.get('reason') or 'inspect only', 160)}")
+            if {"activity freshness", "lifecycle freshness"} <= set(missing):
+                missing = [label for label in missing if "freshness" not in label] + ["freshness"]
+            if missing:  # one statement, wrapped so a narrow terminal does not cut it
+                rows.extend(textwrap.wrap("Not reported by the provider: " + ", ".join(missing), 70, subsequent_indent="  "))
+            rows.append("Esc returns to the map.")
+            return rows
         rows = format_agent_map(agent_map)
         rows.append("↑↓ select · Enter inspect/switch · i inspect · /agents refresh")
         return rows
@@ -4905,6 +4333,7 @@ class _ConsoleState:
     def _system_rows(self) -> list[str]:
         data = self.snapshot
         out: list[str] = []
+        internals: list[str] = []  # implementation facts for diagnosing Bridge itself; shown on the last row
 
         def add(label: str, value: str) -> None:
             if value:
@@ -4929,10 +4358,11 @@ class _ConsoleState:
             if heartbeat:
                 age = _int_or_none(heartbeat.get("age_seconds"))
                 lock = heartbeat.get("owner_lock_held")
+                if str(lock).lower() in {"true", "false"}:
+                    internals.append("owner lock held" if str(lock).lower() == "true" else "owner lock not held")
                 add("Controller heartbeat", _SEP.join(part for part in (
                     _text(heartbeat["reported_state"], 20).lower() if _known(heartbeat.get("reported_state")) else "",
                     f"{_age(age)} ago" if age is not None else "",
-                    "owner lock held" if str(lock).lower() == "true" else "owner lock not held" if str(lock).lower() == "false" else "",
                     f"mission wants {_text(heartbeat['desired_mission_status'], 20)}" if _known(heartbeat.get("desired_mission_status")) else "",
                     f"liveness {_text(heartbeat['current_liveness'], 20)}" if _known(heartbeat.get("current_liveness")) else "",
                 ) if part) or "none recorded")
@@ -4963,12 +4393,11 @@ class _ConsoleState:
         elif _known(health):
             add("Health", _text(health, 220))
         persistence = _dict(data.get("persistence"))
-        if persistence:
-            add("Persistence", _SEP.join(part for part in (
-                f"sqlite schema {_text(persistence['schema_version'], 8)}" if _known(persistence.get("schema_version")) else "",
-                f"{_text(persistence['journal_mode'], 12)} journal" if _known(persistence.get("journal_mode")) else "",
-                _text(persistence["database"], 300) if _known(persistence.get("database")) else "",
-            ) if part))
+        internals.extend(part for part in (
+            f"sqlite schema {_text(persistence['schema_version'], 8)}" if _known(persistence.get("schema_version")) else "",
+            f"{_text(persistence['journal_mode'], 12)} journal" if _known(persistence.get("journal_mode")) else "",
+            _text(persistence["database"], 300) if _known(persistence.get("database")) else "",
+        ) if part)
         criteria = _dict(data.get("criteria"))
         if criteria and _int_or_none(criteria.get("total")):
             add("Criteria", f"{_int_or_none(criteria.get('verified')) or 0}/{_int_or_none(criteria.get('total'))} verified")
@@ -5013,6 +4442,7 @@ class _ConsoleState:
             add("Capacity", header or "no capacity observation")
             for line in summaries:
                 out.append(f"{'':<{_SYSTEM_LABEL}}{_with_square(line)}")
+        add("Internals", _SEP.join(internals))
         return out or ["System and capacity status is not available in this snapshot."]
 
     def _log_rows(self) -> list[str]:

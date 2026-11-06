@@ -28,6 +28,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
+from . import bridge_events
 from .bridge_missions import MissionNotFound, resolve_mission_ref
 from .bridge_store import BridgeStore, TransitionError
 
@@ -211,7 +212,12 @@ def _mission_events(store: BridgeStore | None, request: CommandRequest, params: 
     assert store is not None and request.mission_id is not None
     if params["limit"] < 1 or params["limit"] > 1000:
         raise CommandFailure("invalid-argument", "mission.events: limit must be between 1 and 1000")
-    return {"schema_version": 1, "events": store.events(request.mission_id, after=params["after"], limit=params["limit"])}
+    if params["since_seconds"] < 0:
+        raise CommandFailure("invalid-argument", "mission.events: since_seconds must not be negative")
+    exclude = bridge_events.plumbing_kinds() if params["hide_bookkeeping"] else frozenset()
+    filters = {"after": params["after"], "since_seconds": params["since_seconds"], "exclude_kinds": exclude}
+    events = store.events(request.mission_id, limit=params["limit"], newest=params["newest"], **filters)
+    return {"schema_version": 1, "events": events, "total": store.event_count(request.mission_id, **filters)}
 
 
 def _mission_control(action: str) -> Handler:
@@ -439,10 +445,14 @@ OPERATIONS: dict[str, OperationSpec] = {
         OperationSpec("mission.status", "Show one mission's status projection", False, True, _NO_PARAMS, _mission_status),
         OperationSpec(
             "mission.events",
-            "Page a mission's durable events after a cursor",
+            "Page a mission's durable events after a cursor, or read the newest ones",
             False,
             True,
-            {"after": Param(int, default=0), "limit": Param(int, default=50)},
+            {
+                "after": Param(int, default=0), "limit": Param(int, default=50),
+                "newest": Param(bool, default=False), "since_seconds": Param(int, default=0),
+                "hide_bookkeeping": Param(bool, default=False),
+            },
             _mission_events,
         ),
         OperationSpec("mission.pause", "Pause autonomous scheduling", True, True, _NO_PARAMS, _mission_control("pause")),

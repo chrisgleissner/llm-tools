@@ -476,7 +476,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "proposal list": ("List pending proposals by default", "proposal list --mission ID --status ALL"),
     "proposal accept": ("Accept a pending proposal into mission work", "proposal accept --mission ID --task 1"),
     "proposal reject": ("Reject a pending proposal with a reason", "proposal reject --mission ID --task 1 --reason 'out of scope'"),
-    "events": ("Read bounded operational history; default limit is 100", "events --mission ID --limit 20 --json"),
+    "events": ("Show the newest mission events in plain words, oldest first; controller bookkeeping is hidden unless --verbose. --since 10m limits the age, --follow keeps printing new events, --after ID reads forward from a global event ID", "events --mission ID --limit 20"),
     "start": ("Start the owned controller using saved mode unless overridden", "start --mission ID"),
     "pause": ("Hold after the current invocation; never suspend the host", "pause --mission ID"),
     "resume": ("Allow the controller to continue eligible work", "resume --mission ID"),

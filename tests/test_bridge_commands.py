@@ -29,7 +29,11 @@ def _commands(state):
 def test_catalog_lists_every_operation_with_typed_parameters():
     catalog = {entry["operation"]: entry for entry in commands.operation_catalog()}
     assert set(catalog) == set(commands.OPERATIONS)
-    assert catalog["mission.events"]["params"] == {"after": {"type": "int", "required": False}, "limit": {"type": "int", "required": False}}
+    assert catalog["mission.events"]["params"] == {
+        "after": {"type": "int", "required": False}, "limit": {"type": "int", "required": False},
+        "newest": {"type": "bool", "required": False}, "since_seconds": {"type": "int", "required": False},
+        "hide_bookkeeping": {"type": "bool", "required": False},
+    }
     assert catalog["mission.pause"]["mutating"] is True and catalog["mission.list"]["mutating"] is False
 
 

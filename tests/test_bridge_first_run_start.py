@@ -109,7 +109,7 @@ def test_follow_up_task_reopens_a_completed_mission_and_start_runs_it(tmp_path, 
         _wait(lambda: status() == "COMPLETED")
         _wait(lambda: _released(state, mid))
         assert (tmp_path / "runs.txt").read_text().split() == ["1", "2"]  # the provider was told each task's mission number
-        assert "mission-reopened" in _call(env, "events", "--mission", mid)
+        assert "reopened" in _call(env, "events", "--mission", mid).lower()
     finally:
         if status() not in {"STOPPED", "COMPLETED", "FAILED", "CANCELLED"}:
             _call(env, "stop", "--mission", mid, "--force")

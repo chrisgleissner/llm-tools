@@ -118,8 +118,11 @@ def test_status_events_doctor_and_proposals_are_readable(tmp_path, state, capsys
     assert "frozen_tool_config" not in status and len(status.splitlines()) < 15
 
     events = _out(capsys, "events", "--mission", mid).splitlines()
-    assert events[0].split() == ["ID", "TIME", "KIND", "DETAIL"]
-    assert any("provider-selection" in line and "provider=codex" in line for line in events)
+    assert events[0].split() == ["ID", "TIME", "EVENT"]
+    assert any("Mission created" in line for line in events) and not any("provider-selection" in line or "Selected codex" in line for line in events)
+    verbose = _out(capsys, "events", "--mission", mid, "--verbose").splitlines()
+    assert verbose[0].split() == ["ID", "TIME", "KIND", "EVENT"]
+    assert any("provider-selection" in line and "Selected codex (m)" in line for line in verbose)
 
     doctor = _out(capsys, "doctor", "--mission", mid)
     assert "integrity ok" in doctor and f'Mission          {short} "Fix the tests"' in doctor
@@ -329,7 +332,8 @@ def test_format_helpers_cover_edge_cases() -> None:
     assert bridge_format.format_events([]) == "No events."
     event = {"id": 7, "created_at": "2033-05-18T03:00:00+00:00", "kind": "provider-selection", "data": {"route": "codex", "rotation_reason": "even-burn"}}
     rendered = bridge_format.format_events([event])
-    assert "rotation_reason=spreading use" in rendered and "even-burn" not in rendered
+    assert "Selected codex" in rendered and "provider-selection" not in rendered
+    assert bridge_format.plain_reason("even-burn") == "spreading use"
     assert event["data"]["rotation_reason"] == "even-burn"
     assert bridge_format.format_proposals([]) == "No proposals."
     assert bridge_format.format_command_receipt("pause", {"mission_status": "PAUSED", "detail": "later"}, "a" * 32) == "Pause requested · mission aaaaaaaa is PAUSED\nlater"

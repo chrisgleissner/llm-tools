@@ -209,7 +209,7 @@ def test_bridge_overview_quiet_mission_hides_empty_rows() -> None:
         "Now         idle",
         "Next        nothing ready",
         "Tasks       none yet — Ctrl-E adds a task",
-        "Policy      legacy (unchanged)",
+        "Policy      defaults (teams and token spend not set)",
     ]
     queued = make_state({"mission": {"status": "RUNNING"}, "pending_commands": [{}, {}, {}]}).rows()
     assert "Queue       3 commands waiting for the controller" in queued
@@ -377,14 +377,14 @@ def test_systems_view_is_sectioned_relative_and_never_a_repr() -> None:
     snapshot["capacity"]["selection"]["all_rate_limited"] = True  # type: ignore[index]
     rows = make_state(snapshot, view="Health").rows()
     text = "\n".join(rows)
-    for label in ("Mode", "Lifecycle", "Controller heartbeat", "Execution", "Health", "Persistence", "Criteria", "Suspend", "Capacity", "Last progress"):
+    for label in ("Mode", "Lifecycle", "Controller heartbeat", "Execution", "Health", "Internals", "Criteria", "Suspend", "Capacity", "Last progress"):
         assert any(row.startswith(label + " ") for row in rows), label
     assert "Mode                  configured native · actual headless" in rows
     assert "Lifecycle             RUNNING · controller healthy (verified" in text
     assert "Execution             iteration 2 · operation running 1m · last verified progress" not in text
     assert "Execution             iteration 2 · operation running 1m · no verified progress yet" in rows
     assert "2 consecutive failed operations (limit 4) · 2 operations without repository change" in text
-    assert "Persistence           sqlite schema 6 · wal journal · /state/bridge.sqlite3" in rows
+    assert "Internals             owner lock held · sqlite schema 6 · wal journal · /state/bridge.sqlite3" in rows
     assert "Suspend               suspend_until_renewal · until 2h · all rate limited" in rows
     assert "waiting in 10m · rate-limited" in text and "all routes rate-limited" in text
     assert "{" not in text and "None" not in text and "epoch" not in text and "=" not in text
@@ -396,7 +396,7 @@ def test_systems_wraps_long_values_under_the_section_label() -> None:
     screen = Screen(30, 60)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
     body = [line for line in screen.lines[3:12] if line.strip()]
-    assert body[0].lstrip().startswith("Persistence")
+    assert body[0].lstrip().startswith("Internals")
     assert len(body) > 2
     assert all(line.startswith(" " * 24) for line in body[1:])  # gutter + label column
     assert all(cell_width(line) <= 60 for line in screen.lines)
@@ -512,7 +512,7 @@ def test_sessions_view_is_an_aligned_table_with_short_ids() -> None:
     header = state.column_header()
     rows = state.rows()
     assert header == "op        task  provider       model  status     native session  restoration"
-    assert rows[0] == "01234567  1     codex          gpt    EXITED     abc             RESTORED_NATIVE"
+    assert rows[0] == "01234567  1     codex          gpt    EXITED     abc             resumed"
     assert rows[1] == "fedcba98  22    claude-sonnet  -      ● RUNNING  -               -"
     screen = Screen(30, 100)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]

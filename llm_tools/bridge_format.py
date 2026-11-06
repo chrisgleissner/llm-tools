@@ -71,6 +71,27 @@ def printable(value: Any) -> str:
     return "".join(out)
 
 
+# Missions created before the execution policy existed carry no policy settings.
+LEGACY_POLICY_TEXT = "defaults (teams and token spend not set)"
+_AMENDMENT_ORDER = ("title", "priority", "acceptance", "prompt")
+
+
+def amendment_text(changes: Any) -> str:
+    """An amendment as words (``title: T; priority: 3``), not as a JSON object."""
+    if not isinstance(changes, dict) or not changes:
+        return "no changes"
+    parts = []
+    for key in [*_AMENDMENT_ORDER, *sorted(str(item) for item in changes if item not in _AMENDMENT_ORDER)]:
+        if key not in changes:
+            continue
+        value = changes[key]
+        if isinstance(value, (list, tuple)):
+            parts.append(f"{key}: {len(value)} criteri{'on' if len(value) == 1 else 'a'}" if key == "acceptance" else f"{key}: {len(value)} items")
+        else:
+            parts.append(f"{key}: {_clip(value, 100)}")
+    return "; ".join(parts)
+
+
 def _clip(value: Any, limit: int) -> str:
     text = " ".join(printable(value).split())
     return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
@@ -381,36 +402,36 @@ def format_command_receipt(command: str, result: dict[str, Any], mission_id: str
     return text + (f"\n{detail}" if detail else "")
 
 
-def _event_summary(data: Any) -> str:
-    if not isinstance(data, dict):
-        return ""
-    parts = []
-    for key, value in data.items():
-        if key == "task_id":
-            continue  # a global ID; the task number is shown instead
-        if key == "depends_on_ordinal":
-            parts.append(f"after task {value}")
-            continue
-        if key == "depends_on" and "depends_on_ordinal" in data:
-            continue
-        if isinstance(value, (str, int, float, bool)) and value != "":
-            parts.append(f"{key}={_clip(plain_reason(value) if key in {'reason', 'rotation_reason'} else value, 40)}")
-        if len(parts) == 4:
-            break
-    return _clip(" ".join(parts), 100)
+def _event_time(event: dict[str, Any]) -> str:
+    stamp = _parse_time(event.get("created_at"))
+    return datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M:%S") if stamp is not None else "-"
 
 
-def format_events(events: list[dict[str, Any]]) -> str:
+def event_phrase(event: dict[str, Any]) -> str:
+    """The operator wording the console's Activity view uses for this event."""
+    from .bridge_event_text import _humanize_event
+
+    return _humanize_event(event)[0]
+
+
+def format_event_line(event: dict[str, Any], *, verbose: bool = False) -> str:
+    """One event as a single line, for ``events --follow``."""
+    cells = [str(event.get("id", "")), _event_time(event)]
+    if verbose:
+        cells.append(str(event.get("kind", "")))
+    return "  ".join([*cells, event_phrase(event)])
+
+
+def format_events(events: list[dict[str, Any]], *, total: int | None = None, newest: bool = True, verbose: bool = False, after: int = 0) -> str:
+    """The events table, and a line saying so when more matching events exist than are shown."""
     if not events:
         return "No events."
-    rows = []
-    for event in events:
-        stamp = _parse_time(event.get("created_at"))
-        when = datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M:%S") if stamp is not None else "-"
-        number = event.get("task_ordinal")
-        detail = _event_summary(event.get("data"))
-        rows.append([str(event.get("id", "")), when, str(event.get("kind", "")), (f"task {number} " if number is not None else "") + detail])
-    return table(["ID", "TIME", "KIND", "DETAIL"], rows)
+    rows = [[str(event.get("id", "")), _event_time(event), *([str(event.get("kind", ""))] if verbose else []), event_phrase(event)] for event in events]
+    text = table(["ID", "TIME", *(["KIND"] if verbose else []), "EVENT"], rows)
+    if total is not None and total > len(events):
+        where = f"the last {len(events)}" if newest else f"{len(events)} from ID {after}"
+        text += f"\nshowing {where} of {total} events · --limit N shows more · --after ID reads forward from an event ID (IDs are global)"
+    return text
 
 
 def provider_check_text(check: dict[str, Any]) -> str:
@@ -608,7 +629,7 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
         from .bridge_policy import effective_settings
 
         policy = effective_settings(config)
-    policy_label = "legacy (unchanged)" if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend')}"
+    policy_label = LEGACY_POLICY_TEXT if policy.get("legacy") else f"teams {'on' if policy.get('teams_enabled') else 'off'} · token spend {policy.get('token_spend')}"
     lines.append(f"Policy      {policy_label}")
     context = snapshot.get("station_context") or {}
     current = snapshot.get("current_task")

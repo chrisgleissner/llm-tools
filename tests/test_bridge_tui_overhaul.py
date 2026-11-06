@@ -266,7 +266,7 @@ def test_objective_stays_available_through_o() -> None:
     (event("command-queued", {"command": "pause"}), "Command queued: pause", True),
     (event("command-applied", {"command": "pause"}), "Command applied: pause", True),
     (event("command-rejected", {"command": "task.verify"}), "Command rejected: task.verify", False),
-    (event("native-session-restoration", {"provider": "codex", "restoration_state": "RESTORED_NATIVE"}), "Session restored native · codex", True),
+    (event("native-session-restoration", {"provider": "codex", "restoration_state": "RESTORED_NATIVE"}), "Session resumed · codex", True),
     (event("station-handoff", {"from": "codex", "to": "claude", "reason": "limit"}), "Switched provider codex → claude (limit)", False),
     (event("provider-handoff", {"exit_code": 1, "failure_count": 1, "max_failures": 2}, task_id=6), "Task 6 handed off after exit 1 (failure 1/2)", False),
     (event("provider-handoff-selected", {"station": "claude"}), "Handing off to claude", False),

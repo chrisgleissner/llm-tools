@@ -502,7 +502,7 @@ def test_cli_station_view_and_invalid_steering_report_rejection(tmp_path: Path, 
     assert main(["station", "--mission", mission["id"], "claude", "--json"]) == 2
     assert "not configured" in capsys.readouterr().err
     assert main(["steer", "--mission", mission["id"], "--kind", "handoff", "--route", "missing", "--json"]) == 2
-    assert "not configured" in capsys.readouterr().err
+    assert "not in this mission's rotation" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -536,7 +536,7 @@ def test_legacy_mode_starts_after_creating_durable_mission_and_missing_file_is_r
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.list_missions()[0]["objective"] == "legacy objective"
     assert main(["--prompt-file", str(tmp_path / "missing.md"), "--cwd", str(tmp_path)]) == 2
-    assert "No such file" in capsys.readouterr().err
+    assert "no such file" in capsys.readouterr().err
 
 
 def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: Path, monkeypatch) -> None:
