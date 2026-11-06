@@ -1,6 +1,7 @@
 """Nonblocking embedded llm-usage dashboard, using its existing Python API."""
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from typing import Any, Callable
@@ -20,6 +21,21 @@ def collect_usage() -> dict[str, Any]:
     # wide rows instead of wrapping them, so a table row is never split.
     cfg.terminal_width = 10000
     return usage.dashboard_snapshot(cfg)
+
+
+def print_usage_table(stream: Any = None) -> None:
+    """Print the llm-usage table once, for `llm-bridge usage` without a terminal."""
+    from . import usage
+    from .bridge_theme import colors_disabled
+    cfg = usage.Config()
+    cfg.show_remaining_time = True
+    cfg.show_source = False
+    cfg.show_copilot_credits = True
+    cfg.color_enabled = cfg.color_enabled and not colors_disabled()
+    cfg.progress_enabled = False
+    text = usage.dashboard_snapshot(cfg)["text"]
+    out = sys.stdout if stream is None else stream
+    out.write(text if text.endswith("\n") else text + "\n")
 
 
 class EmbeddedUsage:

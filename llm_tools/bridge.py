@@ -11,7 +11,7 @@ import sys
 import time
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any, Callable, NoReturn, TYPE_CHECKING, cast
+from typing import Any, Callable, NoReturn, Sequence, TYPE_CHECKING, cast
 
 from . import bridge_commands as commands
 from . import bridge_format as fmt
@@ -578,13 +578,83 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
 _CONSOLE_ONLY_COMMANDS = ("approve", "reject", "tasks", "orders", "proposals", "quit", "exit")
 
 
+def _close_names(word: str, names: Sequence[str], *, best_only: bool = False) -> list[str]:
+    """Up to three names that look like what was typed: close spellings first, then names that start with it.
+
+    With ``best_only`` a close spelling is returned alone (the command line suggests one fix, not a list).
+    """
+    import difflib
+
+    close = difflib.get_close_matches(word, list(names), n=1 if best_only else 3, cutoff=0.6 if best_only else 0.5)
+    if best_only and close:
+        return close
+    if word:
+        close += [name for name in names if name.startswith(word) and name not in close]
+    return close[:3]
+
+
+def _cli_parser_class() -> type[argparse.ArgumentParser]:
+    """The command line's parser class: an unknown command or option gets a one-line suggestion.
+
+    Created on first use so ``--version`` and similar never import argparse. Other argument errors
+    keep argparse's own usage message.
+    """
+    existing = globals().get("_CliParser")
+    if existing is not None:
+        return existing
+    import argparse
+
+    class _CliParser(argparse.ArgumentParser):
+        _arguments: list[str] = []
+
+        def parse_args(self, args: Sequence[str] | None = None, namespace: argparse.Namespace | None = None) -> argparse.Namespace:  # type: ignore[override]
+            self._arguments = list(sys.argv[1:] if args is None else args)  # the root parser reports options of every command
+            return super().parse_args(args, namespace)
+
+        def _command_for_arguments(self) -> argparse.ArgumentParser:
+            current: argparse.ArgumentParser = self
+            for word in self._arguments:
+                for action in current._actions:
+                    if isinstance(action, argparse._SubParsersAction) and word in action.choices:
+                        current = action.choices[word]
+                        break
+            return current
+
+        def error(self, message: str) -> NoReturn:
+            for action in self._actions:
+                if isinstance(action, argparse._SubParsersAction):
+                    unknown = re.match(rf"argument {re.escape(argparse._get_action_name(action) or '')}: invalid choice: '([^']*)'", message)
+                    if unknown:
+                        names = [name for name in action.choices if not name.startswith("_") and name != "console"]
+                        kind = "command" if " " not in self.prog else f"{self.prog.split()[-1]} command"
+                        hint = _close_names(unknown.group(1), names, best_only=True)
+                        suggestion = f" · did you mean {', '.join(hint)}?" if hint else ""
+                        self.exit(2, f"llm-bridge: unknown {kind} '{unknown.group(1)}'{suggestion} · {self.prog} --help lists commands\n")
+            if message.startswith("unrecognized arguments: "):
+                command = self._command_for_arguments()
+                words = message[len("unrecognized arguments: "):].split(" ")
+                options = sorted(
+                    option for option, action in command._option_string_actions.items()
+                    if option.startswith("--") and action.help != argparse.SUPPRESS
+                )
+                wrong = next((word.split("=", 1)[0] for word in words if word.startswith("--")), None)
+                if wrong is not None:
+                    hint = _close_names(wrong, options, best_only=True)
+                    suggestion = f" · did you mean {', '.join(hint)}?" if hint else ""
+                    self.exit(2, f"llm-bridge: unknown option '{wrong}'{suggestion} · {command.prog} --help lists options\n")
+                self.exit(2, f"llm-bridge: unrecognized arguments: {' '.join(words)} · {command.prog} --help shows the arguments\n")
+            super().error(message)
+
+    globals()["_CliParser"] = _CliParser
+    return _CliParser
+
+
 def _console_parser_class() -> type[argparse.ArgumentParser]:
     """The console's parser class, created on first use so ``--version`` and similar never import argparse."""
     existing = globals().get("_ConsoleParser")
     if existing is not None:
         return existing
     import argparse
-    import difflib
 
     class _ConsoleParser(argparse.ArgumentParser):
         def error(self, message: str) -> NoReturn:
@@ -601,9 +671,7 @@ def _console_parser_class() -> type[argparse.ArgumentParser]:
                 ]
                 if top_level:
                     names.extend(name for name in _CONSOLE_ONLY_COMMANDS if name not in names)
-                close = difflib.get_close_matches(word, names, n=3, cutoff=0.5)
-                if word:
-                    close += [name for name in names if name.startswith(word) and name not in close]
+                close = _close_names(word, names)
                 kind = "command" if top_level else f"{self.prog.split()[-1]} command"
                 hint = f" · did you mean {', '.join(close[:3])}?" if close else ""
                 raise ValueError(f"Unknown {kind} '{word}'{hint} · /help lists commands")
@@ -1126,7 +1194,7 @@ def _build_parser(
     import argparse
 
     if parser_class is None:
-        parser_class = argparse.ArgumentParser
+        parser_class = _cli_parser_class()
     parser = parser_class(prog="llm-bridge", description="Terminal command bridge for persistent LLM engineering missions")
     sub: Any = parser.add_subparsers(dest="command", required=True)
     if only is not None:
@@ -1262,7 +1330,7 @@ def _build_parser(
         _add_mission_arg(cmd, default_mission)
         if action in {"attach", "detach"}:
             client_help = (
-                "select a listed writable source client when switching from the Bridge console"
+                "terminal to use when several are attached (for example /dev/pts/3)"
                 if action == "attach"
                 else "select a writable client to detach; required only when multiple are connected"
             )
@@ -1278,7 +1346,7 @@ def _build_parser(
 
     missions = sub.add_parser("missions", help="list every mission, live ones first, or pick one to switch to")
     missions.add_argument("--pick", action="store_true", help="open the interactive mission picker (needs a terminal)")
-    missions.add_argument("--from", dest="from_mission", metavar="ID", help="mission whose station the picker was opened from (used by Ctrl-] then M)")
+    missions.add_argument("--from", dest="from_mission", metavar="ID", help=argparse.SUPPRESS)  # internal: the station's Ctrl-] then M binding passes it
     missions.add_argument("--client", metavar="TTY", help="station client to switch; default: the most recently active one")
     _add_json_arg(missions)
 
@@ -2079,6 +2147,11 @@ def _refuse_on_windows(arguments: list[str]) -> int | None:
     return 2
 
 
+def _interactive_terminal() -> bool:
+    """Whether stdin and stdout are both terminals, which every full-screen view needs."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def _main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
@@ -2146,6 +2219,19 @@ def _main(argv: list[str] | None = None) -> int:
         return run_remote(commands.ALL_TARGET, args)
     if _managed_session() and hasattr(args, "mission") and args.mission is None and os.environ.get(MANAGED_MISSION_ENV):
         args.mission = os.environ[MANAGED_MISSION_ENV].strip()  # never infer another mission from the folder
+    if args.command in {"control", "usage", "console"} and not _interactive_terminal():
+        # Every curses screen needs a terminal; without one, say so (or print what a script can use) instead of a traceback.
+        if args.command == "usage":
+            from .bridge_usage import print_usage_table
+
+            try:
+                print_usage_table()
+            except (OSError, ValueError) as exc:
+                print(f"llm-bridge: {exc}", file=sys.stderr)
+                return 2
+            return 0
+        print(f"llm-bridge: {args.command} needs an interactive terminal; use llm-bridge status", file=sys.stderr)
+        return 2
     if args.command in {"control", "usage", "console", "start", "resume", "attach", "view"}:
         from . import bridge_theme
 

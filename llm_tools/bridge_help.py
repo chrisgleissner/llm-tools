@@ -468,7 +468,7 @@ def decorate_parser(parser: object) -> None:
     """Add shared public descriptions without changing the argument grammar."""
     import argparse
     assert isinstance(parser, argparse.ArgumentParser)
-    internal = {"console", "_controller"}
+    internal = {"console", "_controller", "_station-gc"}
     class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
         def _get_help_string(self, action: argparse.Action) -> str | None:
             # Show a default only when it carries information: never "None",
