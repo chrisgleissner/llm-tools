@@ -116,9 +116,9 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
   }
 
   function updateButtons(): void {
-    const busy = state === "connecting" || state === "live" || state === "reconnecting";
-    openView.disabled = busy || !available;
-    openWrite.disabled = busy || !available;
+    const busy = state === "connecting" || state === "reconnecting";
+    openView.disabled = busy || state === "live" || !available;
+    openWrite.disabled = busy || (state === "live" && mode === "write") || !available;
   }
 
   function paintKeys(): void {
@@ -276,7 +276,25 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
   }
 
   function start(m: "view" | "write"): void {
-    if (state === "connecting" || state === "live" || state === "reconnecting") return;
+    if (state === "connecting" || state === "reconnecting") return;
+    if (state === "live") {
+      if (m !== "write" || mode !== "view" || !ws) return;
+      requested = "write";
+      const previous = ws;
+      ws = null;
+      setState("connecting", "Requesting control...");
+      let reopened = false;
+      const reopen = (): void => {
+        if (reopened || disposed || state !== "connecting" || requested !== "write") return;
+        reopened = true;
+        window.clearTimeout(timer);
+        connect();
+      };
+      previous.addEventListener("close", reopen, { once: true });
+      timer = window.setTimeout(reopen, 500);
+      previous.close(1000, "requesting control");
+      return;
+    }
     requested = m;
     mode = "view";
     reason = "";
