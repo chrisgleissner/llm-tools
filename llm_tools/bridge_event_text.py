@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from . import bridge_events
-from .bridge_format import plain_reason
+from .bridge_format import exit_activity_text, plain_reason
 from .bridge_glyphs import glyph
 from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES
 from .bridge_vocab import EventKind, status_label
@@ -386,7 +386,11 @@ def _h_operation_running(ctx: _EventContext) -> str:
 
 @_humanizer(EventKind.OPERATION_EXITED)
 def _h_operation_exited(ctx: _EventContext) -> str:
-    return f"Provider exited ({_text(ctx.data.get('exit_code', '?'), 8)}){ctx.on_task}"
+    code = ctx.data.get("exit_code", "?")
+    synthetic = exit_activity_text(code)  # 75, 76, 130, 143: Bridge's own statuses, shown as words (CLIUX-064)
+    if synthetic:
+        return f"{synthetic}{ctx.on_task}"
+    return f"Provider exited ({_text(code, 8)}){ctx.on_task}"
 
 
 @_humanizer(EventKind.OPERATION_UNCERTAIN)

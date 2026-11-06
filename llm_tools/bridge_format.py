@@ -8,6 +8,7 @@ bulky fields such as the frozen tool configuration and full prompts.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import unicodedata
 from datetime import datetime
@@ -51,6 +52,45 @@ def plain_capacity_reason(reason: Any) -> str:
     return _PLAIN_CAPACITY_REASONS.get(text, text)
 
 
+# Exit statuses that Bridge or the scheduler produce itself.  A provider never returns them, so a user
+# who searches the provider's documentation for "75" finds nothing; every screen says the meaning instead.
+# Only `--json` and `events` also show the number.
+_SYNTHETIC_EXITS: dict[int, tuple[str, str, str]] = {
+    # code: (short form, full sentence, activity text)
+    75: ("stopped by Bridge", "Bridge stopped the provider because it made no progress or was waiting for input",
+         "Provider stopped by Bridge (no progress, or waiting for input)"),
+    OPERATOR_DECLINED_EXIT_CODE: ("folder trust declined", "you declined the folder-trust prompt",
+                                  "Provider stopped (you declined the folder-trust prompt)"),
+    130: ("interrupted", "the provider was interrupted", "Provider interrupted"),
+    143: ("interrupted", "the provider was interrupted", "Provider interrupted"),
+}
+
+
+def _exit_number(code: Any) -> int | None:
+    try:
+        return int(str(code).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def exit_short(code: Any) -> str:
+    """`stopped by Bridge` for a synthetic status, else `exit N`; for tables and one-line summaries."""
+    known = _SYNTHETIC_EXITS.get(_exit_number(code) or -1)
+    return known[0] if known else f"exit {code}"
+
+
+def exit_sentence(code: Any) -> str | None:
+    """The full explanation of a synthetic exit status, or None for an ordinary provider exit."""
+    known = _SYNTHETIC_EXITS.get(_exit_number(code) or -1)
+    return known[1] if known else None
+
+
+def exit_activity_text(code: Any) -> str | None:
+    """Activity wording for a synthetic exit status (``Provider stopped by Bridge (...)``), or None."""
+    known = _SYNTHETIC_EXITS.get(_exit_number(code) or -1)
+    return known[2] if known else None
+
+
 NATIVE_STOP_HINT = "Stopping after the provider exits · exit the provider (e.g. /quit) or use stop --force"
 
 
@@ -72,6 +112,11 @@ _TITLE_LIMIT = 70
 
 def short_id(mission_id: Any) -> str:
     return str(mission_id)[:8]
+
+
+def clipped_name(value: Any) -> str:
+    """A mission name as a table shows it (cut to 40 cells)."""
+    return _clip(value, _NAME_LIMIT)
 
 
 def printable(value: Any) -> str:
@@ -196,7 +241,7 @@ def format_mission_list(missions: list[dict[str, Any]], now: float | None = None
     if not missions:
         return "No missions yet · create one with: llm-bridge mission create --prompt \"...\""
     rows = [
-        [short_id(item["id"]), (f"INTERRUPTED (was {item.get('status', '?')})" if no_controller(item) else str(item.get("status", "?"))), age(item.get("updated_at"), now), _clip(item.get("name", ""), _NAME_LIMIT), home_relative(item.get("cwd", ""))]
+        [short_id(item["id"]), (f"INTERRUPTED (was {item.get('status', '?')})" if no_controller(item) else str(item.get("status", "?"))), age(item.get("updated_at"), now), (_clip(item.get("name", ""), _NAME_LIMIT) if sys.stdout.isatty() else " ".join(printable(item.get("name", "")).split())), home_relative(item.get("cwd", ""))]
         for item in missions
     ]
     return table(["ID", "STATUS", "UPDATED", "NAME", "FOLDER"], rows)
@@ -218,7 +263,8 @@ def format_mission_created(result: dict[str, Any]) -> str:
     verifier = config.get("verifier")
     argv = verifier.get("argv") if isinstance(verifier, dict) else None
     checks = f" · verifier {json.dumps([str(item) for item in argv])}" if argv else ""
-    return f"Created mission {mid} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · task {task_number(task) or 1}{suffix}{checks} · start with: llm-bridge start --mission {mid}"
+    folder = f" in {home_relative(mission['cwd'])}" if mission.get("cwd") else ""
+    return f"Created mission {mid} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\"{folder} · task {task_number(task) or 1}{suffix}{checks} · start with: llm-bridge start --mission {mid}"
 
 
 def format_mission_colour(result: dict[str, Any]) -> str:
@@ -252,15 +298,20 @@ def format_task_list(tasks: list[dict[str, Any]]) -> str:
     return text
 
 
+TASK_LIST_LEGEND = "RUNS is the place in the run order (1 runs next) · PRIORITY: a higher number runs first · ORDER: a lower number runs first among equal priority"
+
+
 def _format_task_rows(tasks: list[dict[str, Any]]) -> str:
     rows = [
         [
-            str(task_number(task)), status_label(task.get("status", "?")), str(task.get("priority", 0)),
+            str(task_number(task)), status_label(task.get("status", "?")),
+            str(task["run_position"]) if task.get("run_position") is not None else "",
+            str(task.get("priority", 0)), str(task.get("ordering", "")),
             ",".join(str(item) for item in task.get("depends_on_ordinals", task.get("depends_on")) or []), _clip(task.get("title", ""), _TITLE_LIMIT),
         ]
         for task in tasks
     ]
-    return table(["TASK", "STATUS", "PRIORITY", "AFTER", "TITLE"], rows)
+    return table(["TASK", "STATUS", "RUNS", "PRIORITY", "ORDER", "AFTER", "TITLE"], rows) + "\n" + TASK_LIST_LEGEND
 
 
 def pending_amendment_line(pending: dict[str, Any]) -> str:
@@ -282,7 +333,7 @@ def format_task_detail(task: dict[str, Any], now: float | None = None) -> str:
     after = task.get("depends_on_ordinals", task.get("depends_on")) or []
     lines = [
         format_task_line(task),
-        f"priority {task.get('priority', 0)} · order {task.get('ordering', 0)} · revision {task.get('revision', 1)}"
+        f"priority {task.get('priority', 0)} (higher runs first) · order {task.get('ordering', 0)} (lower runs first) · revision {task.get('revision', 1)}"
         + (f" · depends on {', '.join(str(item) for item in after)}" if after else ""),
     ]
     acceptance = task.get("acceptance") or []
@@ -311,6 +362,36 @@ def _mission_option(task: dict[str, Any]) -> str:
     return f" --mission {short_id(mission_id)}" if mission_id else ""
 
 
+def verify_needs_message(number: Any, mission_id: Any) -> str:
+    """What `task verify` needs when it got neither evidence nor an approval."""
+    mission = short_id(mission_id)
+    return (f"task {number} needs evidence or approval · to complete it: llm-bridge task approve --mission {mission} --task {number}"
+            f" · to record evidence without completing it: llm-bridge task verify --mission {mission} --task {number} --evidence \"TEXT\"")
+
+
+def amend_in_review_message(number: Any, mission_id: Any) -> str:
+    """Why `task amend` refuses a task that awaits review, and what to do instead."""
+    return (f"task {number} is awaiting review · approve it first (llm-bridge task approve --mission {short_id(mission_id)} --task {number}) "
+            f"or reject it, or pass --requeue to send the result back and run the amended task again (uses capacity)")
+
+
+def _list_numbers(numbers: list[Any]) -> str:
+    items = [str(number) for number in numbers]
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + f" and {items[-1]}"
+
+
+def _runs_after_text(task: dict[str, Any]) -> str:
+    """` · runs next` or ` · runs after tasks 2 and 1` for a task that waits to run; empty for any other state."""
+    if task.get("status") not in {"QUEUED", "READY", "RUNNING"} or not isinstance(task.get("runs_after"), list):
+        return ""
+    ahead = task["runs_after"]
+    if not ahead:
+        return " · runs next"
+    if len(ahead) > 6:
+        return f" · runs after {len(ahead)} other tasks"
+    return f" · runs after task{'s' if len(ahead) > 1 else ''} {_list_numbers(ahead)}"
+
+
 def format_task_result(action: str, result: dict[str, Any]) -> str:
     """Receipt for one task command (add, amend, verify, pause, ...)."""
     inner = result.get("result") if isinstance(result.get("result"), dict) and "status" in result and "payload" in result else result
@@ -323,6 +404,9 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
     if action == "amend":
         number = inner.get("task_ordinal", inner.get("task_id"))
         text = f"Amended · task {number} is now revision {inner.get('revision')}"
+        if inner.get("requeued"):
+            when = "will run now" if inner.get("controller_running") is not False else "runs when the mission starts"
+            return text + f" · the earlier result was sent back; revision {inner.get('revision')} {when} (uses capacity)"
         return text if inner.get("applied", True) else text + " · applies after the current step"
     if action in {"verify", "approve"}:
         if inner.get("status") == "VERIFYING":
@@ -330,9 +414,20 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
             return f"Evidence recorded · task {number} still awaits your review · llm-bridge task approve{_mission_option(inner)} --task {number}"
         return f"{'Approved' if action == 'approve' else 'Verified'} · {format_task_line(inner)}"
     if action == "reject":
-        return f"Sent back · {format_task_line(inner)} · reason recorded"
+        number = task_number(inner)
+        option = _mission_option(inner)
+        if inner.get("held"):
+            return f"Sent back and held · {format_task_line(inner)} · it will not run until: llm-bridge task resume{option} --task {number}"
+        if inner.get("controller_running") is False:
+            return (f"Sent back · {format_task_line(inner)} · it runs again when the mission starts (uses capacity)"
+                    f" · to hold it instead: llm-bridge task pause{option} --task {number}")
+        return (f"Sent back · task {number} \"{_clip(inner.get('title', ''), _TITLE_LIMIT)}\" will run again now (uses capacity)"
+                f" · to hold it instead: llm-bridge task pause{option} --task {number}")
     task_id = inner.get("ordinal", inner.get("task_ordinal", (result.get("payload") or {}).get("task_id", inner.get("task_id", inner.get("id", "?")))))
-    verb = {"pause": "Paused", "resume": "Resumed", "cancel": "Cancelled", "retry": "Queued for retry", "priority": "Priority set for", "reorder": "Reordered", "dependencies": "Dependency added to"}.get(action, action.capitalize())
+    if action in {"priority", "reorder"}:
+        label = f"Priority of task {task_id} set to {inner.get('priority')}" if action == "priority" else f"Order of task {task_id} set to {inner.get('ordering')}"
+        return label + _runs_after_text(inner)
+    verb = {"pause": "Paused", "resume": "Resumed", "cancel": "Cancelled", "retry": "Queued for retry", "dependencies": "Dependency added to"}.get(action, action.capitalize())
     text = f"{verb} task {task_id}"
     if inner.get("status"):
         text += f" · {status_label(inner['status'])}"
@@ -436,11 +531,20 @@ def _event_time(event: dict[str, Any]) -> str:
     return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S") if stamp is not None else "-"
 
 
-def event_phrase(event: dict[str, Any]) -> str:
-    """The operator wording the console's Activity view uses for this event."""
+def event_phrase(event: dict[str, Any], *, code: bool = False) -> str:
+    """The operator wording the console's Activity view uses for this event.
+
+    With ``code``, a synthetic exit status (75, 76, 130, 143) keeps its number in parentheses.
+    """
     from .bridge_event_text import _humanize_event
 
-    return _humanize_event(event)[0]
+    phrase = _humanize_event(event)[0]
+    if code and event.get("kind") == "operation-exited":
+        raw = event.get("data")
+        status = raw.get("exit_code") if isinstance(raw, dict) else None
+        if exit_sentence(status) is not None:
+            phrase += f" (exit {status})"
+    return phrase
 
 
 def format_event_line(event: dict[str, Any], *, verbose: bool = False) -> str:
@@ -448,7 +552,7 @@ def format_event_line(event: dict[str, Any], *, verbose: bool = False) -> str:
     cells = [str(event.get("id", "")), _event_time(event)]
     if verbose:
         cells.append(str(event.get("kind", "")))
-    return "  ".join([*cells, event_phrase(event)])
+    return "  ".join([*cells, event_phrase(event, code=True)])
 
 
 # One event line stays readable on a terminal; the full payload is in `events --json`.
@@ -459,7 +563,7 @@ def format_events(events: list[dict[str, Any]], *, total: int | None = None, new
     """The events table, and a line saying so when more matching events exist than are shown."""
     if not events:
         return "No events."
-    rows = [[str(event.get("id", "")), _event_time(event), *([_clip(event.get("kind", ""), 40)] if verbose else []), _clip(event_phrase(event), EVENT_TEXT_LIMIT)] for event in events]
+    rows = [[str(event.get("id", "")), _event_time(event), *([_clip(event.get("kind", ""), 40)] if verbose else []), _clip(event_phrase(event, code=True), EVENT_TEXT_LIMIT)] for event in events]
     text = table(["ID", "TIME", *(["KIND"] if verbose else []), "EVENT"], rows)
     if total is not None and total > len(events):
         where = f"the last {len(events)}" if newest else f"{len(events)} from ID {after}"
@@ -661,7 +765,7 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     if no_controller({"status": mission.get("status"), "controller_running": lifecycle.get("controller_running")}):
         shown_state = f"INTERRUPTED (was {mission.get('status')}, {mode})"  # a mission with no live controller is not running
     lines = [
-        f"Mission     {short_id(mission['id'])} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · {shown_state}",
+        f"Mission     {short_id(mission['id'])} \"{' '.join(printable(mission.get('name', '')).split())}\" · {shown_state}",
         f"Folder      {home_relative(mission.get('cwd', ''))}",
         f"Controller  {controller_text}",
     ]

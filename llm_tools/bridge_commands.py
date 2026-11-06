@@ -414,6 +414,9 @@ def _usage_snapshot(store: BridgeStore | None, request: CommandRequest, params: 
             "source": value["source"], "providers": value["providers"]}
 
 
+_SWITCH_PARAMS = frozenset({"hold", "requeue"})
+
+
 def _operator(action: str) -> Handler:
     """Apply an operator payload ``{"action": action, **params}`` through the durable command path."""
 
@@ -421,7 +424,8 @@ def _operator(action: str) -> Handler:
         cli = _cli()
         assert request.mission_id is not None
         payload: dict[str, Any] = {"action": action}
-        payload.update((name, value) for name, value in params.items() if not (name == "expected_revision" and value is None))
+        # Optional switches (hold, requeue) enter the durable payload only when set, so a plain command keeps its stored shape.
+        payload.update((name, value) for name, value in params.items() if not (name == "expected_revision" and value is None) and not (name in _SWITCH_PARAMS and not value))
         with cli.open_store() as writer:
             return dict(cli._apply_operator_command(writer, request.mission_id, payload, command_id=request.request_id))
 
@@ -485,10 +489,10 @@ OPERATIONS: dict[str, OperationSpec] = {
             },
             _operator("task.add"),
         ),
-        _task_op("task.amend", "Amend a task prompt; creates a new revision", {"prompt": Param(str, required=True)}),
+        _task_op("task.amend", "Amend a task prompt; creates a new revision (a task awaiting review needs requeue)", {"prompt": Param(str, required=True), "requeue": Param(bool, default=False)}),
         _task_op("task.verify", "Record verification evidence; approve completes the task",
                  {"evidence": Param(str, default=""), "approved": Param(bool, default=False)}),
-        _task_op("task.reject", "Reject a task result", {"reason": Param(str, required=True)}),
+        _task_op("task.reject", "Reject a task result; it runs again unless hold is set", {"reason": Param(str, required=True), "hold": Param(bool, default=False)}),
         _task_op("task.priority", "Set task priority", {"priority": Param(int, required=True)}),
         _task_op("task.reorder", "Set task order among equal priorities", {"order": Param(int, required=True)}),
         _task_op("task.dependency", "Add a prerequisite task", {"depends_on": Param(int, required=True)}),

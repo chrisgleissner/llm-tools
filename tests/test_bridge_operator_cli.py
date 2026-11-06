@@ -36,7 +36,7 @@ def test_mission_create_and_list_are_readable_and_json_is_unchanged(tmp_path, st
     text = capsys.readouterr().out
     mission = BridgeStore(state / "bridge.sqlite3").list_missions()[0]
     short = mission["id"][:8]
-    assert text.strip() == f'Created mission {short} "Fix the tests" · task 1 · teams on · token spend medium · start with: llm-bridge start --mission {short}'
+    assert text.strip() == f'Created mission {short} "Fix the tests" in {tmp_path} · task 1 · teams on · token spend medium · start with: llm-bridge start --mission {short}'
     assert "frozen_tool_config" not in text
 
     listing = _out(capsys, "mission", "list")
@@ -64,14 +64,14 @@ def test_task_commands_print_receipts_and_tables(tmp_path, state, capsys) -> Non
     out = _out(capsys, "task", "add", "--mission", mid, "--prompt", "second job", "--title", "Second", "--priority", "3")
     assert out.strip() == 'Added task 2 "Second" · QUEUED · priority 3'
     table = _out(capsys, "task", "list", "--mission", mid).splitlines()
-    assert table[0].split() == ["TASK", "STATUS", "PRIORITY", "AFTER", "TITLE"]
-    assert ["2", "QUEUED", "3"] == next(line.split()[:3] for line in table if line.startswith("2"))
+    assert table[0].split() == ["TASK", "STATUS", "RUNS", "PRIORITY", "ORDER", "AFTER", "TITLE"]
+    assert ["2", "QUEUED", "1", "3"] == next(line.split()[:4] for line in table if line.startswith("2"))  # priority 3 runs before task 1
     assert _out(capsys, "task", "amend", "--mission", mid, "--task", "2", "--prompt", "new text").strip() == "Amended · task 2 is now revision 2"
     shown = _out(capsys, "task", "show", "--mission", mid, "--task", "2")
     assert 'task 2 "Second"' in shown and "revision 2" in shown and "new text" in shown and "second job" not in shown
     assert "pending amendment" not in shown
     assert _out(capsys, "task", "pause", "--mission", mid, "--task", "2").startswith("Paused task 2")
-    assert _out(capsys, "task", "priority", "--mission", mid, "--task", "2", "--value", "9").startswith("Priority set for task 2")
+    assert _out(capsys, "task", "priority", "--mission", mid, "--task", "2", "--value", "9").startswith("Priority of task 2 set to 9")
     assert _out(capsys, "task", "verify", "--mission", mid, "--task", "2", "--approve", code=4)  # not awaiting verification
 
 
@@ -95,7 +95,7 @@ def test_lifecycle_commands_print_one_line_receipts(tmp_path, state, capsys) -> 
     with MissionLock(state / "locks", mid):
         assert _out(capsys, "resume", "--mission", mid).strip() == f"Resume requested · mission {short} is RUNNING"
     assert _out(capsys, "stop", "--mission", mid).strip() == f"Stop requested · mission {short} is STOPPING"
-    assert _out(capsys, "cancel", "--mission", mid).strip() == f"Cancel requested · mission {short} is CANCELLED"
+    assert _out(capsys, "cancel", "--mission", mid, "--yes").strip() == f"Cancel requested · mission {short} is CANCELLED"
 
 
 def test_status_events_doctor_and_proposals_are_readable(tmp_path, state, capsys) -> None:
@@ -242,7 +242,8 @@ def test_attach_without_a_station_says_how_to_start_one(tmp_path, state, monkeyp
     monkeypatch.setattr(bridge_runtime, "mission_socket_path", lambda _mission_id, **_kw: tmp_path / "none.sock")
     err = _out(capsys, "attach", "--mission", mid, code=4)
     short = mid[:8]
-    assert f"No provider station is running for mission {short} · start it with: llm-bridge start --mission {short}" in err
+    assert f"No provider station is running for mission {short} · look at it without using capacity: llm-bridge control --mission {short}" in err
+    assert f"or start work: llm-bridge start --mission {short} (uses capacity)" in err  # CLIUX-079
     assert "tmux" not in err.lower()
 
 
@@ -377,7 +378,7 @@ def test_proposal_station_and_steer_receipts(tmp_path, state, capsys) -> None:
 
 def test_rejected_lifecycle_command_exits_nonzero_in_text_mode(tmp_path, state, capsys) -> None:
     mid = _create(tmp_path, capsys)["mission"]["id"]
-    assert main(["cancel", "--mission", mid]) == 0
+    assert main(["cancel", "--mission", mid, "--yes"]) == 0
     capsys.readouterr()
     assert main(["resume", "--mission", mid]) == 4  # a cancelled mission cannot be resumed
     assert "was cancelled and cannot be resumed" in capsys.readouterr().err

@@ -5,8 +5,8 @@
   "cursor": null,
   "cursor_visible": false,
   "rows": [
-    "LLM BRIDGE | | Release 2.0 hardening | # NEEDS YOU",
-    "# codex | task 4 running 20m | 5h 62% left | week 31% left",
+    "LLM BRIDGE | Release 2.0 hardening | ? NEEDS YOU",
+    "@ codex | task 4 running 20m | 5h 62% left | week 31% left",
     "Overview  Tasks  Providers  Activity  Sessions  Health  Actions  [Usage]  Agents",
     "  Usage | ready | updated 12s ago | rotation (a: all) | live llm-usage read",
     "  Provider   Ready   Scope     Remaining         Guidance              Resets in",
@@ -31,8 +31,8 @@
     "Up/Down scroll | l legend | Shift-Left/Right pan | Ctrl-D exit | ? help"
   ],
   "segments": [
-    [[0, "LLM BRIDGE", "brand"], [10, " | ", "dim"], [13, "|", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " | ", "dim"], [39, "# NEEDS YOU", "state_review"]],
-    [[0, "#", "provider_codex"], [1, " codex | task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m | 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left | week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
+    [[0, "LLM BRIDGE", "brand"], [10, " | ", "dim"], [13, "Release 2.0 hardening", "info"], [34, " | ", "dim"], [37, "? NEEDS YOU", "state_review"]],
+    [[0, "@", "provider_codex"], [1, " codex | task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m | 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left | week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
     [[0, "Overview  Tasks  Providers  Activity  Sessions  Health  Actions  ", "muted"], [65, "[Usage]", "accent"], [72, "  Agents", "muted"]],
     [[2, "Usage | ready | updated 12s ago | rotation (a: all) | live llm-usage read", "ok"]],
     [[2, "Provider   Ready   Scope     Remaining         Guidance              Resets in", "heading"]],

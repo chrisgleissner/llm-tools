@@ -120,7 +120,7 @@ def test_picker_text_matches_its_segments_and_is_ascii_without_utf8() -> None:
         assert "".join(part for part, _role in segments) == text
         text.encode("ascii")
     text = "\n".join(t for t, _ in picker.lines(24, 90))
-    assert "* RUNNING" in text and "# " in text and "|" in text and "@" in text
+    assert "* RUNNING" in text and "@ " in text and "|" in text
 
 
 def test_picker_json_carries_the_identity_role() -> None:
@@ -213,7 +213,7 @@ def test_theme_hint_is_shown_until_the_first_settled_key(tmp_path, monkeypatch) 
 
 def test_every_ui_glyph_has_an_ascii_form(monkeypatch) -> None:
     expected = {"sep": "|", "prompt": ">", "updown": "Up/Down", "dash": "-", "hbar": "-", "vbar": "|", "running": "*", "here": "*",
-                "waiting": "o", "review": "#", "done": "v", "failed": "x", "paused": "=", "square": "#", "chip": "|", "ellipsis": "...",
+                "waiting": "o", "review": "?", "done": "+", "failed": "!", "cancelled": "-", "paused": "=", "square": "@", "chip": "|", "ellipsis": "...",
                 "cursor": ">", "play": ">", "times": "x", "newline": "\\n"}
     for name, plain in expected.items():
         assert glyphs.GLYPHS[name][1] == plain, name

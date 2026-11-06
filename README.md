@@ -305,7 +305,7 @@ Run `llm-sleep-soak` once before an overnight job.
 - **SSH friendly.** Missions belong to your user, not your login. Start at your desk, check in from your phone's terminal, detach, carry on. If the connection drops, the Bridge screen exits with status 129 instead of spinning; the mission keeps running.
 - **Light and dark.** Auto-detected; force with `LLM_BRIDGE_THEME=light|dark`; preview with `llm-bridge theme`.
 - **`NO_COLOR`** gives monochrome. States always carry a glyph and a word.
-- **ASCII locales.** Plain ASCII under `LANG=C`.
+- **ASCII locales.** Plain ASCII symbols when `LC_ALL`, `LC_CTYPE` or `LANG` is `C` or `POSIX`, or when you set `LLM_BRIDGE_ASCII=1`; `llm-bridge theme` shows which set is active.
 
 ## Privacy and safety
 

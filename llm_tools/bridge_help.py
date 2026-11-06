@@ -69,6 +69,19 @@ on` opts in to RTC-backed sleep at an idle boundary with no active operation.
 Pause, stop and cancel changes made during sleep take effect after the armed
 wake. Stop and cancel are separate explicit operations.
 
+Stopping work
+
+  Command       What happens to the provider                Undo with
+  pause         finishes its current invocation, then waits resume
+  stop          controller stops when the provider exits    start
+  stop --force  provider and controller are ended now       start
+  finish        asked to exit with its own /exit or /quit   (the task goes to REVIEW)
+  task cancel   only that task ends; the mission goes on    nothing: cannot be undone
+  cancel        mission and unfinished tasks end for good   nothing: cannot be undone
+
+cancel asks for confirmation on a terminal and needs --yes in scripts. Repeating
+pause or stop says the mission is already paused or stopped.
+
 More help topics: @@TOPIC_LIST@@ (llm-bridge help lists them with descriptions).
 Every public command also has --help. ID and task numbers are placeholders.
 --mission accepts a unique ID prefix (3+ characters) and may be omitted when you
@@ -102,6 +115,10 @@ Ctrl-] is Bridge's prefix: b/B opens controls, p/P returns to Provider, ? shows
 station keys, z toggles zoom, d detaches only your own terminal (the safe choice
 over SSH). Ctrl-] Ctrl-] sends a literal prefix. Switching panes returns to the
 same process; it does not launch another provider.
+
+Symbols: Bridge draws Unicode symbols (a coloured bar, state marks, arrows) when
+the locale is UTF-8, and plain ASCII ones when LC_ALL, LC_CTYPE or LANG is C or
+POSIX, or when LLM_BRIDGE_ASCII=1 is set. llm-bridge theme shows which set is active.
 
 llm-bridge detach --mission ID is for another shell: it detaches the station's
 single connected writable client, which is usually a different terminal from the
@@ -723,7 +740,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "resume": ("Allow the controller to continue eligible work", "resume --mission ID"),
     "continue": ("Start the next task now while a reviewed task stays in REVIEW (native missions hold for review by default)", "continue --mission ID"),
     "stop": ("Stop Bridge's controller for the mission; --force also ends a provider that does not exit by itself", "stop --mission ID"),
-    "cancel": ("Cancel this mission's work; unrelated sessions are unaffected", "cancel --mission ID"),
+    "cancel": ("End this mission and its unfinished tasks for good; cannot be undone, so it asks first (scripts pass --yes); unrelated sessions are unaffected", "cancel --mission ID --yes"),
     "attach": ("Open the mission's station (its provider terminal); starts no provider", "attach --mission ID"),
     "missions": ("List every mission, live ones first; --pick switches to one (in a station: Ctrl-] then M)", "missions --json"),
     "gc": ("Close the idle tmux stations of finished missions; a station with a live provider process or an attached terminal is kept", "gc --json"),

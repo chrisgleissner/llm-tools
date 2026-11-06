@@ -30,8 +30,8 @@ Task and mission state:
     ``state_waiting``  queued or ready, nothing needed from you
     ``state_review``   a task or mission waiting for your review or decision
     ``state_done``     completed
-    ``state_failed``   failed, blocked or cancelled with an error
-    ``state_paused``   paused or stopped by the operator
+    ``state_failed``   failed or blocked (a cancel by the operator is ``state_paused``)
+    ``state_paused``   paused, stopped or cancelled by the operator
 
 Capacity health (quota remaining):
     ``capacity_ok`` ``capacity_low`` ``capacity_empty``
@@ -142,7 +142,7 @@ ROLE_DESCRIPTIONS: dict[str, str] = {
     "state_review": "a task or mission waiting for your review or decision",
     "state_done": "completed",
     "state_failed": "failed or blocked",
-    "state_paused": "paused or stopped by the operator",
+    "state_paused": "paused, stopped or cancelled by the operator",
     "capacity_ok": "plenty of quota remaining",
     "capacity_low": "quota running low",
     "capacity_empty": "quota exhausted",
@@ -1333,12 +1333,15 @@ def describe(resolved: ResolvedTheme, *, colors: int) -> dict[str, Any]:
 
 def format_theme_report(resolved: ResolvedTheme, *, colors: int, color: bool) -> str:
     """Human-readable report for ``llm-bridge theme``."""
+    from .bridge_glyphs import glyph_report
+
     background = resolved.polarity_source
     lines = [
         f"Background  {resolved.polarity}  ({background})",
         f"Theme       {resolved.name}  ({resolved.name_source})",
         f"Colours     {colors if colors else 'none'}"
         + ("  (colour disabled)" if resolved.colors_disabled else ""),
+        f"Glyphs      {glyph_report()}",
     ]
     lines.extend(f"Note        {note}" for note in resolved.probe_notes)
     lines.extend(f"Warning     {warning}" for warning in resolved.warnings)

@@ -184,7 +184,8 @@ def test_confirmation_overlay_shows_its_hint_once_after_the_question(monkeypatch
     assert state._confirm_or_dispatch("/cancel")
     plain = "\n".join(line for line in screen.lines)
     bridge_tui._draw_response_overlay(screen, state)
-    assert "\n".join(screen.lines).count("Y confirm · N or Esc cancel") == 1
+    assert "\n".join(screen.lines).count("Y Cancel mission · N or Esc Keep mission") == 1  # "cancel" is not also the way out (CLIUX-024)
+    assert "This cannot be undone" in "\n".join(screen.lines)
 
 
 # --- 4. objective preview ----------------------------------------------------------------

@@ -176,7 +176,9 @@ def test_task_reject_receipt_text_and_json(tmp_path, state, capsys) -> None:
         first = _verifying_task(store, mid)
         second = _verifying_task(store, mid, "other work")
     assert main(["task", "reject", "--mission", mid, "--task", str(first), "--reason", "tests missing"]) == 0
-    assert capsys.readouterr().out.strip() == f'Sent back · task {first} "Write the thing" · QUEUED · reason recorded'
+    assert capsys.readouterr().out.strip() == (
+        f'Sent back · task {first} "Write the thing" · QUEUED · it runs again when the mission starts (uses capacity)'
+        f' · to hold it instead: llm-bridge task pause --mission {mid[:8]} --task {first}')
 
     assert main(["task", "reject", "--mission", mid, "--task", str(second), "--reason", "bad", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -587,7 +589,9 @@ def test_reject_reruns_the_task_with_the_reason_and_a_changed_rotation(tmp_path,
         assert out.splitlines()[0] == "Rotation changed: codex → claude (saved for this mission)"
         assert "Applies from the next provider selection" in out.splitlines()[1]
         out = _call(env, "task", "reject", "--mission", mid, "--task", task, "--reason", "The parser ignores comments")
-        assert out.strip() == 'Sent back · task 1 "Write the parser" · QUEUED · reason recorded'
+        assert out.strip() == (
+            'Sent back · task 1 "Write the parser" will run again now (uses capacity)'
+            f' · to hold it instead: llm-bridge task pause --mission {mid[:8]} --task 1')
 
         _wait(lambda: len(received()) == 2 and task_status() == "VERIFYING")
         second = received()[1]

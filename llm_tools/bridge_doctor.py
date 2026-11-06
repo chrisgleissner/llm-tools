@@ -216,8 +216,12 @@ def readiness(providers: Sequence[Mapping[str, Any]], *, integrity: object = "ok
 
 
 def next_steps(*, tmux_available: bool, providers: Sequence[Mapping[str, Any]], folder: str | Path,
-               env: Mapping[str, str] | None = None) -> list[str]:
-    """What to do next, from the same facts ``doctor`` just reported."""
+               env: Mapping[str, str] | None = None, needs_you: str | None = None) -> list[str]:
+    """What to do next, from the same facts ``doctor`` just reported.
+
+    ``needs_you`` is the mission's own next step (what ``status`` shows as "Needs you"); with
+    ``doctor --mission`` it replaces the generic first-mission advice.
+    """
     steps: list[str] = []
     if not tmux_available:
         steps.append("Install tmux (sudo apt install tmux, or brew install tmux); native stations need it. Without tmux, create missions with --mode headless.")
@@ -229,7 +233,7 @@ def next_steps(*, tmux_available: bool, providers: Sequence[Mapping[str, Any]], 
         else:
             steps.append(f"Install and sign in to one provider CLI (install one of: {_offered_names()}), then run llm-bridge doctor again.")
         return steps
-    steps.append("Ready. In your project folder run llm-bridge, press N, type the task, then choose Start.")
+    steps.append(needs_you or "Ready. In your project folder run llm-bridge, press N, type the task, then choose Start.")
     first = ready[0]
     if (first.get("launch_cli") or first.get("name")) == "claude" and claude_folder_trusted(folder, env) is False:
         steps.append(TRUST_NOTE)

@@ -682,8 +682,8 @@ def orders_snapshot() -> dict[str, object]:
 def test_order_list_rows_align_id_state_and_priority() -> None:
     tasks = bridge_tui._items(orders_snapshot()["tasks"])
     assert bridge_tui._order_list_rows(tasks) == [
-        "2   ○ QUEUED  P5   after 1  Rewrite the quick start",
-        "10  ◆ REVIEW  P12           Troubleshooting",
+        "2   ○ QUEUED  prio 5   after 1  Rewrite the quick start",
+        "10  ◆ REVIEW  prio 12           Troubleshooting",
     ]
     assert bridge_tui._order_list_rows([{"id": 1, "status": "queued", "title": "No priority"}]) == ["1  ○ QUEUED  No priority"]
 
@@ -723,8 +723,8 @@ def test_orders_view_shows_selected_task_preview_below_the_list() -> None:
     state = make_state(orders_snapshot(), view="Tasks")
     screen = Screen(30, 110)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert screen.lines[3].startswith("> 2   ○ QUEUED  P5   after 1  Rewrite the quick start")
-    assert screen.lines[4].startswith("  10  ◆ REVIEW  P12           Troubleshooting")
+    assert screen.lines[3].startswith("> 2   ○ QUEUED  prio 5   after 1  Rewrite the quick start")
+    assert screen.lines[4].startswith("  10  ◆ REVIEW  prio 12           Troubleshooting")
     assert screen.lines[5].startswith("  ── task 2 · ○ QUEUED · priority 5 ──")
     assert any(line.strip().startswith("Acceptance  1. installs in five minutes") for line in screen.lines)
     assert any(line.strip().startswith("Prompt      Quick start") for line in screen.lines)

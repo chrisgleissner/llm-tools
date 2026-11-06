@@ -144,6 +144,8 @@ def _utf8_launcher_glyphs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     from llm_tools import bridge_glyphs
 
     monkeypatch.setattr(bridge_glyphs, "_locale_codeset", lambda: "UTF-8")
+    monkeypatch.setattr(bridge_glyphs, "_user_locale_is_c", lambda: False)  # the test host's LANG must not pick the glyph set
+    monkeypatch.delenv("LLM_BRIDGE_ASCII", raising=False)
     bridge_glyphs.ascii_mode.cache_clear()
     yield
     bridge_glyphs.ascii_mode.cache_clear()

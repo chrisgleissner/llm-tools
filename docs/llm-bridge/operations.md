@@ -285,7 +285,7 @@ task:
 ```bash
 llm-bridge task add --mission MISSION_ID --file follow-up.md \
   --priority 5 --depends-on 1 --acceptance "tests pass"
-llm-bridge task list --mission MISSION_ID        # first 200 tasks; --all, or --limit N --offset N
+llm-bridge task list --mission MISSION_ID        # first 200 tasks in run order; --all, or --limit N --offset N
 llm-bridge task show --mission MISSION_ID --task N
 llm-bridge task output --mission MISSION_ID --task N   # provider log of the last run; --follow while it runs
 llm-bridge task diff --mission MISSION_ID --task N     # working-tree change since that run started
@@ -298,6 +298,15 @@ llm-bridge task resume --mission MISSION_ID --task N
 llm-bridge task cancel --mission MISSION_ID --task N
 ```
 
+`task list` shows the tasks in the order the controller runs them, with finished
+tasks last. `RUNS` is the place of a task that still waits to run (1 runs next).
+`PRIORITY` and `ORDER` are the two stored sort keys and they sort in opposite
+directions: a higher priority number runs first (the default is 0, negative
+numbers run last; there are no P0 to P3 urgency levels), and among equal
+priorities a lower order number runs first. `task priority` and `task reorder`
+say where the task now runs, for example `Priority of task 3 set to -5 · runs
+after tasks 1 and 2`.
+
 Amend task text with `llm-bridge task amend --mission ID --task N --file
 revision.md`. Amendments preserve the earlier prompt and increment the task
 revision. When no provider step is working on the task, the new text applies at
@@ -306,7 +315,10 @@ task, the amendment waits for the end of that step; `task show` then lists it as
 `pending amendment (applies after the current step)` next to the text still in
 use. Since prior evidence may no longer apply, an amended task that was
 awaiting approval is queued again and must be verified against its new
-revision.
+revision. Because that changes what would be approved, `task amend` refuses a task
+that is in `REVIEW` unless you pass `--requeue`; the earlier result is then sent
+back and the amended task runs again (uses capacity). A task title that came from
+the first prompt line follows the new prompt.
 
 `task add` on a completed mission reopens it, with or without `--mission` (the
 folder's one completed mission is used when no unfinished one exists): the
@@ -325,10 +337,13 @@ llm-bridge task approve --mission MISSION_ID --task N \
 ```
 
 To send a task back instead, give a reason. The task is queued for another
-attempt and its next prompt quotes the reason:
+attempt and its next prompt quotes the reason. The retry starts at once when a
+controller is running and uses paid capacity, and the receipt says so. Add
+`--hold` to keep the task paused instead (resume it with `task resume`):
 
 ```bash
 llm-bridge task reject --mission MISSION_ID --task N --reason "tests were not run"
+llm-bridge task reject --mission MISSION_ID --task N --reason "tests were not run" --hold
 ```
 
 For deterministic checks, configure a verifier at mission creation. Write the
@@ -725,6 +740,13 @@ capacity data · claude has no usage data, launches anyway in 14m (at 19:50)`.
 The deadline is fixed when the wait starts (`--max-unavailable-wait`, default
 900 s), so the countdown only goes down. After it passes, Bridge launches the
 provider anyway. `cancel` durably cancels the mission and its unfinished tasks.
+It ends the mission for good (`resume` and `start` refuse a cancelled mission), so
+it asks `This cannot be undone` on a terminal and needs `--yes` when there is no
+terminal to ask on, for example `llm-bridge cancel --mission ID --yes`. The
+console's own dialog offers `Cancel mission` and `Keep mission`. A repeated
+`pause` or `stop` on a mission that is already paused or stopped says `Already
+paused` or `Already stopped`. `llm-bridge help quickstart` has a table of all the
+ways to stop work.
 
 After a controller restart, Bridge reconciles any operation that was in
 progress. It may mark the operation uncertain and the task blocked for review;
@@ -895,9 +917,12 @@ llm-tools config changes a hue. `llm-bridge theme` previews the palette.
 
 Colour never stands alone. Every state also has a glyph and a word:
 `● RUNNING`, `○ QUEUED`, `◆ REVIEW`, `✓ COMPLETED`, `✕ FAILED`,
-`‖ PAUSED`. A locale that is not UTF-8 (for example `LANG=C` over SSH) gets
-ASCII forms (`*`, `o`, `#`, `v`, `x`, `=`), and the home screen draws `|`
-instead of `·`, `Up/Down` instead of `↑↓` and `...` instead of `…`. See the
+`‖ PAUSED`, `⊘ CANCELLED`. A locale of `C` or `POSIX` (set in `LC_ALL`, `LC_CTYPE`
+or `LANG`, for example `LANG=C` over SSH), a locale that is not UTF-8, or
+`LLM_BRIDGE_ASCII=1` gives ASCII forms (`*` running, `o` queued, `?` review,
+`+` completed, `!` failed, `-` cancelled, `=` paused, `@` for a provider), and
+the screens draw `|` instead of `·`, `Up/Down` instead of `↑↓` and `...`
+instead of `…`. `llm-bridge theme` shows which glyph set is active. See the
 [colour guide](colour-guide.md).
 
 The home list orders live missions first, then waiting ones (created, stopped,

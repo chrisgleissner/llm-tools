@@ -137,7 +137,7 @@ def test_wrong_state_exits_4(tmp_path, state, capsys) -> None:
     assert err.startswith("llm-bridge: ")
     out, _ = _run(capsys, "task", "approve", "--mission", mid, "--task", "1", "--json", code=4)
     assert json.loads(out)["error"]["code"] == "wrong-state"
-    _run(capsys, "cancel", "--mission", mid)
+    _run(capsys, "cancel", "--mission", mid, "--yes")
     assert "cannot be started" in _run(capsys, "start", "--mission", mid, code=4)[1]
 
 

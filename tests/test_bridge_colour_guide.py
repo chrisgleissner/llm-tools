@@ -155,11 +155,11 @@ def test_tasks_list_colours_only_the_state_and_mutes_ids_and_finished_rows(roles
     assert [role for _text, role in selected] == ["selected"] and selected[0][0].startswith("> 2 ")
     queued_row = elements(screen, roles, row_of(screen, "10"))
     assert role_of(queued_row, "10") == "muted" and role_of(queued_row, "◆ REVIEW") == "state_review"
-    assert role_of(queued_row, "P12") == "muted" and role_of(queued_row, "Troubleshooting") == "info"
+    assert role_of(queued_row, "prio 12") == "muted" and role_of(queued_row, "Troubleshooting") == "info"
     done = elements(screen, roles, row_of(screen, "11"))
     assert role_of(done, "✓ COMPLETED") == "state_done" and role_of(done, "Shipped") == "muted"
     cancelled = elements(screen, roles, row_of(screen, "12"))
-    assert role_of(cancelled, "✕ CANCELLED") == "state_paused" and role_of(cancelled, "Dropped") == "muted"
+    assert role_of(cancelled, "⊘ CANCELLED") == "state_paused" and role_of(cancelled, "Dropped") == "muted"
 
 
 def test_preview_separator_state_matches_the_list(roles) -> None:

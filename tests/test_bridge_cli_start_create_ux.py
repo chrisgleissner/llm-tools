@@ -44,7 +44,7 @@ def _mission_count(state: Path) -> int:
 
 def test_start_refuses_a_cancelled_mission(tmp_path, state, capsys, monkeypatch) -> None:
     mid = _create(tmp_path, capsys, "gone", "--providers", "codex")["mission"]["id"]
-    assert main(["cancel", "--mission", mid]) == 0
+    assert main(["cancel", "--mission", mid, "--yes"]) == 0
     capsys.readouterr()
     monkeypatch.setattr(bridge, "start_mission", lambda *a, **k: pytest.fail("a cancelled mission must not launch a controller"))
 
@@ -186,7 +186,7 @@ def test_create_new_flag_silences_the_duplicate_warning(tmp_path, state, capsys)
 def test_create_does_not_warn_about_a_finished_mission(tmp_path, state, capsys) -> None:
     folder = _folder(tmp_path, "repo")
     first = _create(tmp_path, capsys, "parser", "--providers", "codex", folder=folder)["mission"]["id"]
-    assert main(["cancel", "--mission", first]) == 0
+    assert main(["cancel", "--mission", first, "--yes"]) == 0
     capsys.readouterr()
     assert main(["mission", "create", "--prompt", "again", "--cwd", str(folder), "--headless", "--providers", "codex"]) == 0
     assert capsys.readouterr().err == ""
