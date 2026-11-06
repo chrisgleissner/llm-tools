@@ -555,9 +555,15 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(provider_wait, dict):
         provider = _clip(provider_wait.get("provider") or "Provider", 40)
         command = f"llm-bridge attach --mission {mid}"
+        question_count = provider_wait.get("question_count")
+        if isinstance(question_count, int) and 1 <= question_count <= 32:
+            noun = "question" if question_count == 1 else "questions"
+            message = f"{provider} has {question_count} queued {noun} · take control of the terminal and press Shift+Left to answer: {command}"
+        else:
+            message = f"{provider} is waiting for your input at its terminal prompt · attach with: {command}"
         return {
             "kind": "provider", "tasks": [], "command": command,
-            "message": f"{provider} is waiting for your input at its terminal prompt · attach with: {command}",
+            "message": message,
         }
     return None
 

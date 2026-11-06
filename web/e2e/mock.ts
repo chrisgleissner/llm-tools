@@ -18,6 +18,8 @@ export interface MockOptions {
   sessionRemembered?: boolean;
   /** Answer the terminal WebSocket with a fixed provider screen (used for the site screenshots). */
   terminalScreen?: boolean;
+  /** A typed, text-free Codex question indication for Needs attention. */
+  providerQuestion?: boolean;
 }
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
@@ -167,7 +169,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     const missionResource = path.match(/^\/missions\/([^/]+)$/);
     if (missionResource && method === "GET") {
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
-      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, needs_you: { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
+      const providerQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, needs_you: providerQuestion ? { kind: "provider", tasks: [], message: "Codex has 1 queued question · take control of the terminal and press Shift+Left to answer" } : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
     }
     if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {

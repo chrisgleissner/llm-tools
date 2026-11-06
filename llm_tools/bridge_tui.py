@@ -1541,6 +1541,14 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
     pending = _dict(data.get("proposal_counts")).get("PENDING")
     if isinstance(pending, (int, float)) and pending:
         rows.append(f"{int(pending)} agent task proposal{'s' if pending != 1 else ''} to review — type proposals")
+    provider_wait = _dict(data.get("provider_wait"))
+    question_count = provider_wait.get("question_count")
+    if isinstance(question_count, (int, float)) and 1 <= question_count <= 32:
+        provider = _text(provider_wait.get("provider") or "Provider", 40)
+        mission_id = _text(_dict(data.get("mission")).get("id") or "?", 64)
+        attach = f"llm-bridge attach --mission {mission_id}"
+        noun = "question" if question_count == 1 else "questions"
+        rows.append(f"{provider} has {int(question_count)} queued {noun} — take control of the terminal and press Shift+Left to answer: {attach}")
     from .bridge_format import declined_message, declined_provider
 
     stuck = []

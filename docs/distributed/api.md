@@ -10,6 +10,11 @@ for mission and task changes; worker administration and diagnostics require
 reported at enrolment and the peer address of the active worker connection. The
 address is null while the worker is offline; forwarded headers do not affect it.
 
+For native Codex sessions, mission status may report the bounded number of
+queued follow-up questions when its stable terminal prompt is waiting. It never
+returns the question or answer text. Open the mission terminal and take control
+to answer; terminal input stays on the scoped WebSocket.
+
 The current version uses the durable `POST /api/v1/commands` adapter. A command
 request has a caller-chosen `request_id`; retrying the same request ID returns
 the journal entry rather than applying the operation again. `Idempotency-Key`

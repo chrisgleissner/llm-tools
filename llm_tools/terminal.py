@@ -1636,10 +1636,23 @@ def _native_input_prompt(provider: str, screen: str) -> bool:
     """Recognize only the stable input-prompt chrome for supported native providers."""
     normalized = provider.casefold().split("-", 1)[0]
     if normalized == "codex":
-        return "? for shortcuts" in screen.casefold() and bool(re.search(r"(?m)^\s*›\s*$", screen))
+        return "? for shortcuts" in screen.casefold() and bool(re.search(r"(?m)^\s*›(?:\s+Ask Codex to do anything)?\s*$", screen))
     if normalized == "claude":
         return bool(re.search(r"(?m)^\s*❯\s*$", screen))
     return False
+
+
+def _codex_queued_question_count(screen: str) -> int:
+    """Read Codex's visible queued-question count without retaining question content."""
+    if "queued follow-up inputs" not in screen.casefold():
+        return 0
+    if re.search(r"(?mi)^\s*[•·]\s*working\b", screen):
+        return 0
+    match = re.search(r"(?mi)^\s*\?\s*(\d{1,2})\s+questions?\s*$", screen)
+    if match is None:
+        return 0
+    count = int(match.group(1))
+    return count if 1 <= count <= 32 else 0
 
 
 def read_native_provider_wait(
@@ -1694,7 +1707,12 @@ def read_native_provider_wait(
     if idle_seconds < _PROVIDER_PROMPT_IDLE_SECONDS or not _native_input_prompt(provider, screen):
         return None
     provider_name = "Codex" if provider.casefold().startswith("codex") else "Claude Code"
-    return {"provider": provider_name, "idle_seconds": idle_seconds}
+    result: dict[str, Any] = {"provider": provider_name, "idle_seconds": idle_seconds}
+    if provider_name == "Codex":
+        question_count = _codex_queued_question_count(screen)
+        if question_count:
+            result["question_count"] = question_count
+    return result
 
 
 def read_provider_activity(mission_id: str, load_handle: Callable[[str], TerminalHandle]) -> tuple[int, str] | None:

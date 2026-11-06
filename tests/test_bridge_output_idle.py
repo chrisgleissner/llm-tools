@@ -58,6 +58,49 @@ def test_idle_phrase_threshold_and_rounding() -> None:
     assert bridge_tui._idle_phrase({"output_idle_seconds": "x"}) == ""
     assert bridge_tui._idle_phrase({"output_idle_seconds": 30}) == "no output for 30s"
     assert bridge_tui._idle_phrase({"output_idle_seconds": 59.9}) == "no output for 59s"
+
+
+def test_codex_queued_question_count_surfaces_terminal_answer_steps_without_question_text(monkeypatch) -> None:
+    screen = (
+        "• Queued follow-up inputs\n"
+        "  ? 1 question\n"
+        "    shift+← to answer\n"
+        "SENTINEL_PRIVATE_QUESTION\n"
+        "› Ask Codex to do anything\n"
+        "? for shortcuts\n"
+    )
+    readings = iter([(200, screen), (201, screen)])
+
+    class FakeBackend:
+        def pane_activity_screen(self, handle, *, pane, seen_epoch, start_line):
+            return next(readings)
+
+    mission_id = "codex-question-count"
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=100)
+    assert waiting is None
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=161)
+    assert waiting == {"provider": "Codex", "idle_seconds": 61, "question_count": 1}
+    assert "SENTINEL_PRIVATE_QUESTION" not in str(waiting)
+    assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 33 questions") == 0
+    assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 1 question\n• Working (turn 4)") == 0
+
+
+def test_codex_question_needs_you_explains_live_terminal_answer() -> None:
+    from llm_tools.bridge_format import needs_attention
+
+    result = needs_attention({
+        "mission": {"id": "mission-123"},
+        "provider_wait": {"provider": "Codex", "idle_seconds": 61, "question_count": 1},
+    })
+    assert result == {
+        "kind": "provider",
+        "tasks": [],
+        "command": "llm-bridge attach --mission mission-",
+        "message": "Codex has 1 queued question · take control of the terminal and press Shift+Left to answer: llm-bridge attach --mission mission-",
+    }
+    assert "SENTINEL" not in str(result)
     assert bridge_tui._idle_phrase({"output_idle_seconds": 60}) == "no output for 1m"
     assert bridge_tui._idle_phrase({"output_idle_seconds": 119}) == "no output for 1m"
     assert bridge_tui._idle_phrase({"output_idle_seconds": 125}) == "no output for 2m"
