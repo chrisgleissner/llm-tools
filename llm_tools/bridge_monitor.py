@@ -10,7 +10,6 @@ from datetime import datetime
 from typing import Any, cast
 
 from .bridge_format import countdown, needs_attention, plain_capacity_reason
-from .capacity import is_undetermined_reason
 from .bridge_store import BridgeStore
 from .bridge_events import recent_hidden_kinds
 from .bridge_projection import ProjectionParams, Snapshot
@@ -254,6 +253,8 @@ def _number(value: Any) -> float | None:
 
 def waiting_entry(decision: dict[str, Any]) -> dict[str, Any]:
     """The blocking window, or reason, of one provider that is not usable."""
+    from .capacity import is_undetermined_reason  # deferred: store-reading commands stay light
+
     windows = [w for w in decision.get("windows", []) if isinstance(w, dict)] if isinstance(decision.get("windows"), list) else []
     measured = [w for w in windows if _number(w.get("remaining_percent")) is not None]
     blocking = min(measured, key=lambda w: float(w["remaining_percent"]), default=None)

@@ -110,7 +110,7 @@ def test_status_events_doctor_and_proposals_are_readable(tmp_path, state, capsys
         store.add_task(mid, "later", title="Later job")
     status = _out(capsys, "status", "--mission", mid)
     short = mid[:8]
-    assert f'Mission     {short} "Fix the tests" · RUNNING (background)' in status
+    assert f'Mission     {short} "Fix the tests" · INTERRUPTED (was RUNNING, background)' in status
     assert "Current     none" in status
     assert 'Next        task 1 "Do the work" · QUEUED' in status
     assert "Tasks       2 total: 2 QUEUED" in status

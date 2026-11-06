@@ -242,9 +242,9 @@ def test_status_and_list_show_missing_controller(monkeypatch, tmp_path: Path, ca
     with bridge.open_store() as store:
         store.set_mission_status(mid, "RUNNING")
     assert bridge.main(["status", "--mission", mid]) == 0
-    assert f"Controller  not running — run: llm-bridge resume --mission {mid[:8]}" in capsys.readouterr().out
+    assert f"Controller  not running (stopped unexpectedly) — run: llm-bridge start --mission {mid[:8]}" in capsys.readouterr().out
     assert bridge.main(["mission", "list"]) == 0
-    assert "RUNNING (no controller)" in capsys.readouterr().out
+    assert "INTERRUPTED (was RUNNING)" in capsys.readouterr().out
     assert bridge.main(["mission", "list", "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)["missions"][0]
     assert listed["status"] == "RUNNING" and listed["controller_running"] is False
@@ -255,7 +255,7 @@ def test_status_and_list_show_missing_controller(monkeypatch, tmp_path: Path, ca
     lock.acquire()
     try:
         assert bridge.main(["mission", "list"]) == 0
-        assert "(no controller)" not in capsys.readouterr().out
+        assert "INTERRUPTED" not in capsys.readouterr().out
         assert bridge.main(["status", "--mission", mid]) == 0
         assert "not running" not in capsys.readouterr().out
     finally:

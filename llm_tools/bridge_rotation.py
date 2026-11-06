@@ -91,7 +91,13 @@ def validate_names(conf: dict[str, Any], raw: str, *, routes_allowed: bool) -> l
 
 
 def unknown_entry_problem(conf: dict[str, Any], providers: Any, routes: Any) -> str | None:
-    """Why a rotation names an entry that is neither a provider nor a declared route, or ``None``."""
+    """Why a rotation names an entry that is neither a provider nor a declared route, or ``None``.
+
+    A mission saved without any rotation (both values unset) uses the default rotation, which is
+    resolved when the controller starts, so there is nothing to check here.
+    """
+    if providers is None and routes is None:
+        return None
     route_text = str(routes or "").strip()
     route_names = [] if route_text.lower() in {"none", "off"} else _split(route_text)
     try:

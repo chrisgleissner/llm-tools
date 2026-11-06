@@ -103,8 +103,8 @@ def test_unavailable_providers_are_reported_by_reason_not_as_capacity(store, tmp
     decision = {"provider": "copilot", "usable": False, "reason": "not-authenticated", "windows": []}
     _wait_event(store, mission_id, [decision], all_limited=False)
     waiting = status_snapshot(mission_id)["waiting"]
-    assert waiting["reason"] == "unavailable" and waiting["detail"] == "copilot not-authenticated"
-    assert "for a usable provider · copilot not-authenticated" in bridge_format.format_waiting(waiting, "abc")
+    assert waiting["reason"] == "unavailable" and waiting["detail"] == "copilot is not signed in"
+    assert "for a usable provider · copilot is not signed in" in bridge_format.format_waiting(waiting, "abc")
 
 
 def test_waiting_message_names_each_provider_and_the_key_for_options() -> None:

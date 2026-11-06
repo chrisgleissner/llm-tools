@@ -439,11 +439,15 @@ def format_event_line(event: dict[str, Any], *, verbose: bool = False) -> str:
     return "  ".join([*cells, event_phrase(event)])
 
 
+# One event line stays readable on a terminal; the full payload is in `events --json`.
+EVENT_TEXT_LIMIT = 200
+
+
 def format_events(events: list[dict[str, Any]], *, total: int | None = None, newest: bool = True, verbose: bool = False, after: int = 0) -> str:
     """The events table, and a line saying so when more matching events exist than are shown."""
     if not events:
         return "No events."
-    rows = [[str(event.get("id", "")), _event_time(event), *([str(event.get("kind", ""))] if verbose else []), event_phrase(event)] for event in events]
+    rows = [[str(event.get("id", "")), _event_time(event), *([_clip(event.get("kind", ""), 40)] if verbose else []), _clip(event_phrase(event), EVENT_TEXT_LIMIT)] for event in events]
     text = table(["ID", "TIME", *(["KIND"] if verbose else []), "EVENT"], rows)
     if total is not None and total > len(events):
         where = f"the last {len(events)}" if newest else f"{len(events)} from ID {after}"

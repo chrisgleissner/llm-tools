@@ -194,6 +194,7 @@ def test_latest_capacity_wait_and_progress_survive_more_than_one_hundred_events(
 def test_new_usable_selection_clears_older_wait_and_uses_readiness_target(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("readiness", "objective", cwd=tmp_path)
+    store.set_mission_status(mission["id"], "RUNNING")  # only a running mission shows a wait target (CLIUX-053)
     old_wait = int(time.time()) + 600
     selected_wait = old_wait + 300
     store.record_runtime_event(mission["id"], "provider-selection", {
@@ -223,6 +224,7 @@ def test_new_usable_selection_clears_older_wait_and_uses_readiness_target(tmp_pa
 def test_new_capacity_refresh_clears_interleaved_provider_wait(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("refresh-order", "objective", cwd=tmp_path)
+    store.set_mission_status(mission["id"], "RUNNING")  # only a running mission shows a wait target (CLIUX-053)
     old_target = int(time.time()) + 600
     selected = {
         "provider": "codex",
