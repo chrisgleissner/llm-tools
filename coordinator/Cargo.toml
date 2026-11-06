@@ -33,6 +33,7 @@ sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+utoipa = { version = "6.0.0", default-features = false, features = ["macros"] }
 
 [dev-dependencies]
 # Plain tungstenite client over our own tokio-rustls stream (no TLS feature, so no second crypto provider).

@@ -85,12 +85,51 @@ async fn every_route_requires_credentials_except_the_public_ones() {
     }
     assert_eq!(
         seen_public,
-        ["/healthz", "/api/v1/auth/state", "/api/v1/auth/setup", "/api/v1/auth/login"],
+        [
+            "/healthz",
+            "/api/v1/auth/state",
+            "/api/v1/auth/setup",
+            "/api/v1/auth/login",
+            "/api/v1/openapi.json",
+            "/api/docs"
+        ],
         "the public API surface changed; review it for AUTH-001"
     );
     // Unknown API paths are not served by the SPA fallback; the application shell needs no credentials.
     assert_eq!(anon.send(anon.bare(Method::GET, "/api/v1/nope")).await.0, 404);
     assert_eq!(anon.send(anon.bare(Method::GET, "/")).await.0, 200);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn openapi_route_is_public_and_matches_the_runtime_generator() {
+    let env = boot().await;
+    let api = env.api();
+    let (status, body) = api.get("/api/v1/openapi.json").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["openapi"], "3.1.0");
+    assert!(body["paths"]["/api/v1/openapi.json"]["get"].is_object());
+    assert!(body["paths"]["/api/docs"]["get"].is_object());
+    let (status, html) = api.get("/api/docs").await;
+    assert_eq!(status, 200);
+    assert!(html.as_str().unwrap().contains("/api/v1/openapi.json"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_api_paths_and_methods_return_problem_details() {
+    let env = boot().await;
+    let api = env.api();
+    let (status, body) = api.get("/api/v1/unknown").await;
+    assert_eq!(status, 404);
+    assert_eq!(body["type"], "https://llm-tools.dev/problems/not-found");
+    let request = api.bare(Method::POST, "/api/v1/missions").json(&serde_json::json!({}));
+    let response = request.send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 405);
+    assert_eq!(response.headers()["content-type"], "application/problem+json");
+    assert_eq!(response.headers()["allow"], "GET,HEAD");
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["type"], "https://llm-tools.dev/problems/method-not-allowed");
     env.stop().await;
 }
 

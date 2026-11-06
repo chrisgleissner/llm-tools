@@ -67,7 +67,7 @@ async fn unknown_paths_get_the_app_shell_but_api_paths_do_not() {
     let (st, h, body) = get(&env, "/api/v1/nothing").await;
     assert_eq!(st, 404);
     assert!(body.contains("not-found"));
-    assert_eq!(h["content-type"], "application/json");
+    assert_eq!(h["content-type"], "application/problem+json");
     let (st, _, body) = get(&env, "/healthz").await;
     assert_eq!((st, body.as_str()), (200, "{\"status\":\"ok\"}"));
     env.stop().await;

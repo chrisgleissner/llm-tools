@@ -1,0 +1,66 @@
+# Coordinator API
+
+The coordinator serves its OpenAPI 3.1 document at `/api/v1/openapi.json` and a
+small local reference at `/api/docs`. API tokens are sent only in the
+`Authorization` header. Create a read token for inspection, or grant `operate`
+for mission and task changes; worker administration and diagnostics require
+`admin`. Token secrets are shown once by `bridge-coordinator token create`.
+
+The current version uses the durable `POST /api/v1/commands` adapter. A command
+request has a caller-chosen `request_id`; retrying the same request ID returns
+the journal entry rather than applying the operation again. `Idempotency-Key`
+may supply that ID and takes precedence over the request body's value. If a worker is
+offline, the command remains queued and the response has state `pending` and a
+`Location` header for its command record.
+`GET /api/v1/commands/{request_id}` retrieves its outcome. A completed command
+can still report `uncertain`; clients must not treat that as success. Resource
+endpoints, `Idempotency-Key`, `If-Match`, opaque cursor pagination and the
+remaining CLI parity operations are being added in this follow-up.
+
+```sh
+export COORDINATOR=https://localhost:8443
+export TOKEN='lbr_pat_…'
+export WORKER=build-1
+export MISSION='mission-id-from-the-list'
+```
+
+List missions, then inspect a mission’s tasks. The task operation is read-only
+and requires `read`:
+
+```sh
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  "$COORDINATOR/api/v1/missions?limit=100"
+
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"build-1","request":{"schema_version":1,"operation":"task.list","params":{"limit":100,"offset":0},"mission_id":"mission-id-from-the-list","target":"build-1","request_id":"list-tasks-001"}}' \
+  "$COORDINATOR/api/v1/commands"
+```
+
+Approve a task with evidence. Use its current revision and a new request ID;
+the worker checks the revision under its write lock:
+
+```sh
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"build-1","request":{"schema_version":1,"operation":"task.verify","params":{"task_number":3,"expected_revision":2,"approved":true,"evidence":"Reviewed the result and verified the acceptance criteria."},"mission_id":"mission-id-from-the-list","target":"build-1","request_id":"approve-task-003"}}' \
+  "$COORDINATOR/api/v1/commands"
+```
+
+Add a task with the same typed operation layer used by the CLI:
+
+```sh
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"build-1","request":{"schema_version":1,"operation":"task.add","params":{"title":"Add contract coverage","prompt":"Add tests for the new contract.","priority":0,"depends_on":[],"acceptance":["The regression test fails before the fix."]},"mission_id":"mission-id-from-the-list","target":"build-1","request_id":"add-task-004"}}' \
+  "$COORDINATOR/api/v1/commands"
+```
+
+Errors use `application/problem+json`. The stable `type` URI and `code` identify
+the existing coordinator error code; `status` is the HTTP status. List APIs
+currently use bounded `limit` with offset or event-cursor fields as described by
+their operation. `v1` changes are intended to be additive; breaking changes require a
+new version. A deprecated operation will carry a `Deprecation` header and a
+documented removal date before removal.
+
+See the full route and scope table in the [coordinator guide](coordinator.md#http-api).

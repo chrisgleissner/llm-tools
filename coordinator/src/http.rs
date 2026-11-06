@@ -82,7 +82,21 @@ impl From<rusqlite::Error> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut r = (self.status, axum::Json(json!({"error": {"code": self.code, "message": self.message}}))).into_response();
+        let status = self.status;
+        let mut r = (
+            status,
+            axum::Json(json!({
+                "type": format!("https://llm-tools.dev/problems/{}", self.code),
+                "title": "Coordinator request failed",
+                "status": status.as_u16(),
+                "detail": self.message,
+                "code": self.code,
+                "error": {"code": self.code, "message": self.message}
+            })),
+        )
+            .into_response();
+        r.headers_mut()
+            .insert(header::CONTENT_TYPE, "application/problem+json".parse().expect("static content type"));
         if let Some(s) = self.retry_after {
             r.headers_mut().insert(header::RETRY_AFTER, s.to_string().parse().expect("number"));
         }
@@ -697,13 +711,27 @@ async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<S
 
 // ---------------------------------------------------------------- handlers: commands
 
-async fn post_command(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["target", "request", "wait_ms"])?;
     let target = str_field(&m, "target")?;
     let Some(Value::Object(request)) = m.get("request") else {
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "request must be a JSON object"));
     };
+    let mut request = request.clone();
+    if let Some(key) = headers.get("idempotency-key") {
+        let key = key
+            .to_str()
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "Idempotency-Key must be ASCII"))?;
+        if !valid_id(key) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "Idempotency-Key must be 1-128 characters of letters, digits, '.', '_' or '-'",
+            ));
+        }
+        request.insert("request_id".into(), json!(key));
+    }
     let wait_ms = match m.get("wait_ms") {
         None | Some(Value::Null) => 0,
         Some(v) => v
@@ -711,7 +739,7 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
             .filter(|w| *w <= MAX_WAIT_MS)
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer of at most 30000"))?,
     };
-    protocol::check_command_request(request).map_err(|e| err(StatusCode::BAD_REQUEST, e.code, e.message))?;
+    protocol::check_command_request(&request).map_err(|e| err(StatusCode::BAD_REQUEST, e.code, e.message))?;
     let request_id = request["request_id"].as_str().expect("checked");
     if !valid_id(request_id) {
         return Err(err(
@@ -778,7 +806,14 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
         }
     }
     let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
-    Ok(json_ok(status, row.to_json()))
+    let mut response = json_ok(status, row.to_json());
+    if status == StatusCode::ACCEPTED {
+        response.headers_mut().insert(
+            header::LOCATION,
+            format!("/api/v1/commands/{request_id}").parse().expect("validated request id"),
+        );
+    }
+    Ok(response)
 }
 
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {
@@ -861,10 +896,20 @@ async fn stream_session(mut socket: WebSocket, mut rx: broadcast::Receiver<Arc<s
 // ---------------------------------------------------------------- router
 
 async fn static_files(State(st): State<St>, method: Method, uri: axum::http::Uri, headers: HeaderMap) -> Response {
+    if uri.path() == "/api" || uri.path().starts_with("/api/") {
+        return err(StatusCode::NOT_FOUND, "not-found", "no API route matches this path").into_response();
+    }
     crate::web::serve(st.web_dir.clone(), method, uri, headers).await
 }
 
 async fn security_headers(mut r: Response) -> Response {
+    if r.status() == StatusCode::METHOD_NOT_ALLOWED {
+        let allow = r.headers().get(header::ALLOW).cloned();
+        r = err(StatusCode::METHOD_NOT_ALLOWED, "method-not-allowed", "method is not allowed for this route").into_response();
+        if let Some(allow) = allow {
+            r.headers_mut().insert(header::ALLOW, allow);
+        }
+    }
     let h = r.headers_mut();
     // The static handler sets its own Content-Security-Policy and cache policy.
     for (k, v) in [
@@ -915,10 +960,29 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/stream", &["GET"], Access::Authed, "read"),
     ("/api/v1/diagnostics", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/openapi.json", &["GET"], Access::Public, ""),
+    ("/api/docs", &["GET"], Access::Public, ""),
     ("/api/v1/worker/connect", &["GET"], Access::WorkerToken, "worker"),
     ("/api/v1/terminal", &["GET"], Access::Authed, "terminal:conditional"),
     ("/api/v1/worker/terminal/{session_id}", &["GET"], Access::WorkerToken, "worker"),
 ];
+
+#[cfg(test)]
+mod problem_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn api_errors_use_stable_rfc9457_problem_details() {
+        let response = err(StatusCode::CONFLICT, "request-id-conflict", "request id was reused").into_response();
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024).await.expect("body");
+        let body: Value = serde_json::from_slice(&bytes).expect("JSON problem");
+        assert_eq!(body["type"], "https://llm-tools.dev/problems/request-id-conflict");
+        assert_eq!(body["status"], 409);
+        assert_eq!(body["detail"], "request id was reused");
+        assert_eq!(body["error"]["code"], "request-id-conflict");
+    }
+}
 
 fn route_matches(template: &str, path: &str) -> bool {
     let mut expected = template.split('/');
@@ -949,6 +1013,8 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/events", get(list_events))
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/diagnostics", get(diagnostics))
+        .route("/api/v1/openapi.json", get(crate::openapi::document))
+        .route("/api/docs", get(crate::openapi::reference))
         .route("/api/v1/worker/connect", get(crate::ws_worker::connect))
         .route("/api/v1/terminal", get(crate::terminal::browser))
         .route("/api/v1/worker/terminal/{session_id}", get(crate::terminal::worker))

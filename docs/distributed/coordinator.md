@@ -105,6 +105,14 @@ worker protocol is `protocol.md`.
 
 ## HTTP API (all under `/api/v1`, JSON)
 
+The generated OpenAPI 3.1 description is served at `/api/v1/openapi.json`; a
+script-free reference page is served locally at `/api/docs`. The document is
+generated from the route policy table and Rust response schemas, and its
+committed snapshot is checked in CI. See [API examples](api.md) for
+authentication and command examples. Resource-oriented mission and task
+endpoints, token management, and remaining parity operations are not yet
+available.
+
 Public:
 
 | Method | Path | Notes |
@@ -124,7 +132,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
 | GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (1-500; without it every match is returned) and `offset`. The reply adds `total` (matches before paging), `offset` and `statuses` (match counts per status, ignoring the status filter). |
-| POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. A command for an offline worker is queued with `state: pending` and delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. Same `request_id` returns the existing journal entry. |
+| POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
 | GET | `/events?worker=&after=&limit=` | Stored events, ascending. |
 | GET | `/stream` | WebSocket; pushes `worker`, `event` and `command` updates. |
@@ -137,6 +145,11 @@ Every state-changing request authenticated by cookie needs header
 coordinator's own origin; WebSocket upgrades check `Origin` too (AUTH-007).
 Bearer API tokens are not subject to CSRF checks because browsers never send
 them automatically.
+
+API errors are RFC 9457 problem details (`application/problem+json`) with a
+stable type URI derived from the existing error code. The nested `error` object
+is retained for the current web client. Unknown API paths return a problem
+response; unsupported methods return 405 with an `Allow` header.
 
 ## Limits and timeouts (COORD-004, NET-010)
 

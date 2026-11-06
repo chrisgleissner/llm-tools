@@ -1,7 +1,7 @@
 //! Worker WebSocket endpoint `/api/v1/worker/connect` (protocol.md).
 
 use crate::auth::sha256_hex;
-use crate::db::{CommandRow, EventsOutcome, HelloOutcome};
+use crate::db::{CommandRow, EventBatch, EventsOutcome, HelloOutcome};
 use crate::http::{Peer, St};
 use crate::hub::{ConnHandle, Outbound, PendingGuard, OUTBOUND_QUEUE};
 use crate::protocol::{self, Message, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
@@ -349,7 +349,15 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             let mission_cursor = p.get("mission_cursor").and_then(Value::as_u64);
             match st
                 .db
-                .events_store(name, after, through, &events, mission_cursor, missions.as_deref(), st.cfg.max_events_per_worker)
+                .events_store(EventBatch {
+                    worker: name,
+                    after,
+                    through,
+                    events: &events,
+                    mission_cursor,
+                    missions: missions.as_deref(),
+                    max: st.cfg.max_events_per_worker,
+                })
                 .map_err(db)?
             {
                 EventsOutcome::Accepted { cursor, stored } => {

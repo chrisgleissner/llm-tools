@@ -194,3 +194,27 @@ Extends OPS-001, COORD-009, NET-003 and TEST-013/014/015; tracked here as A1-A5 
 - Addendum 5 [x] Project site section and copy corrections (docs/site; check_site.py passes; Lighthouse accessibility, best practices and SEO 100).
 - Addendum 6 [x] Low-write hosts: compose.low-write.yaml and BRIDGE_HEALTHCHECK_INTERVAL; heartbeat writes removed; idle-write bound test; install.md "Low-write host".
 - Addendum 7 [x] Pull request #30: all checks green (CI run 42181869238 on c81ccde green on every job).
+
+## Follow-up REST API (2026-11-06)
+
+These are the API-001 to API-016 requirements from the follow-up mission. An empty
+checkbox means the full requirement and its CI evidence are not complete yet.
+
+| ID | Status | Current evidence / remaining work |
+|---|---|---|
+| API-001 | [ ] | Resource endpoints for mission/task operations, command lookup and diagnostics remain to be added. |
+| API-002 | [ ] | Existing `/commands` uses the typed command layer; resource adapters and client migration remain. |
+| API-003 | [ ] | `Idempotency-Key` now maps to the durable request ID, repeated keys replay, and pending commands return 202 with `Location` (`coordinator/tests/worker.rs::request_id_idempotence_and_refusals`); `If-Match`/ETag and explicit uncertain mapping remain. |
+| API-004 | [ ] | API errors now use RFC 9457 `application/problem+json` with stable code URIs (`http::problem_tests`); opaque cursor pagination, timestamp contract and complete response tests remain. |
+| API-005 | [ ] | Route scope policy, `--scope`, default `read`, old-token `admin` migration and per-route scope matrix are implemented (`coordinator/tests/routes.rs`, `coordinator/tests/ops.rs`, `coordinator/tests/hardening.rs`); green CI run evidence pending. |
+| API-006 | [ ] | Token management endpoints and console flow remain. |
+| API-007 | [ ] | Existing CSRF, Origin, TLS, body limits and no-CORS baseline remain; mutation rate limits and complete audit coverage remain. |
+| API-008 | [ ] | Existing terminal WebSocket path remains; audit for response data and terminal scopes remains. |
+| API-009 | [ ] | OpenAPI 3.1 generated from `http::ROUTES` and Rust schemas (`coordinator/src/openapi.rs`), served at `/api/v1/openapi.json`; committed snapshot comparison and live route tests added. Breaking-change check and green CI evidence remain. |
+| API-010 | [ ] | Local script-free reference at `/api/docs`; assets are not bundled. Test and bundle evidence pending. |
+| API-011 | [ ] | Snapshot is committed and regeneration checked in CI; released-baseline breaking-change checker remains. |
+| API-012 | [ ] | OpenAPI route/scope/snapshot tests added; response-wide schema validation and Schemathesis fuzzing remain. |
+| API-013 | [ ] | Remote CLI and `--target` client migration remains. |
+| API-014 | [ ] | Coordinator guide, API examples, README and site link updated; full versioning, pagination and rate-limit contract remains. |
+| API-015 | [ ] | CLI/route parity table and argparse-tree test remain. |
+| API-016 | [ ] | Worker opt-ins and enforcement remain. |

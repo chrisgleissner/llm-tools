@@ -237,7 +237,8 @@ Documentation: [install](./docs/distributed/install.md) (container and native
 install, certificate trust, backup, recovery, Raspberry Pi Zero 2 W target profile),
 [operations](./docs/distributed/operations.md) (worker service, audit log, backup,
 troubleshooting), [coordinator](./docs/distributed/coordinator.md) (configuration,
-HTTP API, limits), [protocol](./docs/distributed/protocol.md),
+HTTP API, limits), [API examples and reference](./docs/distributed/api.md),
+[protocol](./docs/distributed/protocol.md),
 [threat model](./docs/distributed/threat-model.md) and
 [benchmarks](./docs/distributed/benchmarks.md).
 

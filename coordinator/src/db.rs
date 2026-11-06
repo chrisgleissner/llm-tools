@@ -125,6 +125,16 @@ pub enum EventsOutcome {
     Nack { expected: u64 },
 }
 
+pub struct EventBatch<'a> {
+    pub worker: &'a str,
+    pub after: u64,
+    pub through: u64,
+    pub events: &'a [Value],
+    pub mission_cursor: Option<u64>,
+    pub missions: Option<&'a [Value]>,
+    pub max: u64,
+}
+
 pub enum HelloOutcome {
     Ok { generation: u64, cursor: u64 },
     WorkerIdMismatch,
@@ -560,16 +570,16 @@ impl Db {
     }
 
     // ---- events ----
-    pub fn events_store(
-        &self,
-        worker: &str,
-        after: u64,
-        through: u64,
-        events: &[Value],
-        mission_cursor: Option<u64>,
-        missions: Option<&[Value]>,
-        max: u64,
-    ) -> R<EventsOutcome> {
+    pub fn events_store(&self, batch: EventBatch<'_>) -> R<EventsOutcome> {
+        let EventBatch {
+            worker,
+            after,
+            through,
+            events,
+            mission_cursor,
+            missions,
+            max,
+        } = batch;
         let mut c = self.c();
         let tx = c.transaction()?;
         let cursor: i64 = tx.query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))?;

@@ -155,3 +155,13 @@ its scope policy in `http::ROUTES`, and the `Authed` extractor enforces the poli
 browser sessions retain their existing CSRF and Origin checks and full operator access. The route
 integration test exercises every authenticated route against each token scope.
 
+## D10 OpenAPI generation (API-009)
+
+Use `utoipa` 6 for compile-time schemas of the coordinator's Rust response types,
+then generate the operation list from `http::ROUTES`, the same route policy table
+used by authorization tests. This keeps the published route and scope list tied
+to server policy without introducing a separate handwritten endpoint inventory.
+The coordinator serves the JSON and a small script-free HTML reference; no CDN
+or renderer bundle is needed. `coordinator/src/bin/openapi.rs` regenerates the
+checked-in snapshot, and a Rust test compares the generated value to it.
+

@@ -271,6 +271,25 @@ async fn request_id_idempotence_and_refusals() {
     assert_eq!(fw.recv().await["payload"]["request_id"], "same");
     fw.barrier().await; // no second delivery queued before the pong
                         // same id, different payload: conflict
+    let keyed = api
+        .rb(reqwest::Method::POST, "/api/v1/commands")
+        .header("Idempotency-Key", "header-key")
+        .json(&submit("body-key-a"));
+    let response = keyed.send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 202);
+    assert_eq!(response.headers()["location"], "/api/v1/commands/header-key");
+    let first: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(first["request_id"], "header-key");
+    assert_eq!(fw.recv().await["payload"]["request_id"], "header-key");
+    fw.barrier().await;
+    let retry = api
+        .rb(reqwest::Method::POST, "/api/v1/commands")
+        .header("Idempotency-Key", "header-key")
+        .json(&submit("body-key-b"));
+    let (status, second) = api.send(retry).await;
+    assert_eq!(status, 202);
+    assert_eq!(first["created_at"], second["created_at"]);
+    fw.barrier().await;
     let mut other = submit("same");
     other["request"]["params"] = json!({"title": "different"});
     let (st, body) = api.post("/api/v1/commands", other).await;

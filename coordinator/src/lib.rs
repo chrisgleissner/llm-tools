@@ -9,6 +9,7 @@ pub mod http;
 pub mod hub;
 pub mod init;
 pub mod netinfo;
+pub mod openapi;
 pub mod ops;
 pub mod protocol;
 pub mod scopes;
