@@ -367,6 +367,7 @@ class BridgeStore:
         self.db.execute("PRAGMA busy_timeout=10000")
         self._initialize()
         self._secure_sqlite_files()
+        self._files_secured = False  # the first write transaction secures once more, for files that write creates
 
     def _open_readonly(self) -> sqlite3.Connection | None:
         """A read-only connection to a database at the current schema, else ``None``."""
@@ -534,13 +535,25 @@ class BridgeStore:
         if column not in columns:
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    _files_secured = False
+
     def _secure_sqlite_files(self) -> None:
+        """Restrict the database and its WAL/shared-memory files to the owner.
+
+        Opening the store creates all three files and secures them; SQLite gives a recreated WAL file the
+        database file's mode, so one pass after this connection's first write is enough. Repeating the three
+        stat/chmod calls after every transaction cost an idle controller dozens of system calls per second.
+        """
+        if self._files_secured:
+            return
         for path in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             try:
                 if path.exists():
                     path.chmod(0o600)
             except OSError:
                 pass
+        if not self.readonly:
+            self._files_secured = True
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:

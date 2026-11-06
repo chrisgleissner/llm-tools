@@ -351,3 +351,67 @@ def test_int003_force_stop_treats_a_reused_controller_pid_as_a_dead_controller(t
     finally:
         os.killpg(unrelated.pid, signal.SIGKILL)
         unrelated.wait(timeout=5)
+
+
+def test_int013_idle_controller_polls_without_taking_the_write_lock(tmp_path, monkeypatch) -> None:
+    store, mission_id, _ids = _running_mission(tmp_path, ["BLOCKED"])
+    statements: list[str] = []
+    store.db.set_trace_callback(lambda statement: statements.append(statement.split()[0:2].__str__()))
+    polls: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        polls.append(seconds)
+        if len(polls) == 6:
+            store.set_mission_status(mission_id, "STOPPING")
+
+    monkeypatch.setattr(runtime.time, "sleep", sleep)
+    assert _hooks(tmp_path, store, mission_id).before_iteration()["action"] == "stop"
+
+    # Six idle polls: one write for the single waiting event, one for the status change the test makes.
+    # Each poll used to open BEGIN IMMEDIATE through ready_tasks.
+    assert len(polls) == 6
+    assert statements.count("['BEGIN', 'IMMEDIATE']") <= 2
+
+
+def test_int013_wait_signature_does_not_promote_tasks(tmp_path) -> None:
+    store, mission_id, (task_id,) = _running_mission(tmp_path, ["QUEUED"])
+
+    signature = _hooks(tmp_path, store, mission_id)._wait_signature()
+
+    assert signature[2] == (task_id,)  # the runnable task is reported ...
+    assert store.get_task(task_id)["status"] == "QUEUED"  # ... without a write or a task-ready event
+    assert not any(event["kind"] == "task-ready" for event in store.events(mission_id))
+
+
+def test_int013_sqlite_file_modes_are_secured_once_per_connection(tmp_path, monkeypatch) -> None:
+    from pathlib import Path
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path)
+    chmods: list[Path] = []
+    real = Path.chmod
+    monkeypatch.setattr(Path, "chmod", lambda self, mode: (chmods.append(self), real(self, mode))[1])
+
+    for index in range(5):
+        store.record_runtime_event(mission["id"], "test-event", {"n": index})
+
+    assert len(chmods) == 0  # was one chmod pass over the database and its WAL files after every transaction
+    assert (tmp_path / "bridge.sqlite3").stat().st_mode & 0o777 == 0o600
+
+
+def test_int013_worker_session_reads_through_a_read_only_store(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from llm_tools import bridge_worker as worker
+
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    BridgeStore(tmp_path / "state" / "bridge.sqlite3").close()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(worker, "load_config", lambda env=None: SimpleNamespace())
+    monkeypatch.setattr(worker, "terminal_connector", lambda env=None: None)
+    monkeypatch.setattr(worker, "WorkerSession", lambda config, **kwargs: captured.update(kwargs))
+
+    worker.default_session("1.0")
+
+    with captured["open_store"]() as store:  # type: ignore[operator]
+        assert store.readonly is True  # the 0.5 s event poll takes no write lock and chmods nothing

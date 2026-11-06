@@ -555,7 +555,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
 
 def default_session(software_version: str, env: dict[str, str] | None = None) -> WorkerSession:
     config = load_config(env)
-    return WorkerSession(config, open_store=lambda: BridgeStore(store_path(env)), software_version=software_version,
+    return WorkerSession(config, open_store=lambda: BridgeStore(store_path(env), readonly=True), software_version=software_version,  # every use reads
                          save=lambda value: _save(value, env), terminal_launcher=TerminalLauncher(terminal_connector(env)))
 
 
