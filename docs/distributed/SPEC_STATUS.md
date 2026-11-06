@@ -207,7 +207,7 @@ checkbox means the full requirement and its CI evidence are not complete yet.
 | API-003 | [ ] | `Idempotency-Key` now maps to the durable request ID, repeated keys replay, and pending commands return 202 with `Location` (`coordinator/tests/worker.rs::request_id_idempotence_and_refusals`); `If-Match`/ETag and explicit uncertain mapping remain. |
 | API-004 | [ ] | API errors now use RFC 9457 `application/problem+json` with stable code URIs (`http::problem_tests`); opaque cursor pagination, timestamp contract and complete response tests remain. |
 | API-005 | [ ] | Route scope policy, `--scope`, default `read`, old-token `admin` migration and per-route scope matrix are implemented (`coordinator/tests/routes.rs`, `coordinator/tests/ops.rs`, `coordinator/tests/hardening.rs`); green CI run evidence pending. |
-| API-006 | [ ] | Token management endpoints and console flow remain. |
+| API-006 | [ ] | `GET/POST/DELETE /tokens` expose metadata, one-time secret creation, expiry and scopes; browser Account page supports create/list/revoke (`coordinator/tests/web_api.rs::token_management_lists_metadata_and_shows_secret_only_at_creation`, `web/e2e/auth-ux.spec.ts`); green CI evidence pending. |
 | API-007 | [ ] | Existing CSRF, Origin, TLS, body limits and no-CORS baseline remain; mutation rate limits and complete audit coverage remain. |
 | API-008 | [ ] | Existing terminal WebSocket path remains; audit for response data and terminal scopes remains. |
 | API-009 | [ ] | OpenAPI 3.1 generated from `http::ROUTES` and Rust schemas (`coordinator/src/openapi.rs`), served at `/api/v1/openapi.json`; committed snapshot comparison and live route tests added. Breaking-change check and green CI evidence remain. |

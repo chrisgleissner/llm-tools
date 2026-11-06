@@ -237,4 +237,21 @@ test.describe("account menu and password change", () => {
     await expect(page.locator("#login-notice")).toContainText("Every session was signed out");
     await loginViaUi(page, "admin", "another long passphrase");
   });
+
+  test("API tokens can be scoped, shown once, listed and revoked from account settings", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await navTo(page, "Account");
+    await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
+    await page.getByLabel("Token name").fill("automation-key");
+    await page.getByLabel("read", { exact: true }).uncheck();
+    await page.getByLabel("operate", { exact: true }).check();
+    await page.getByRole("button", { name: "Create token" }).click();
+    const secret = page.locator(".token-secret code");
+    await expect(secret).toContainText(/^.{30,}$/);
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
+    await page.getByRole("button", { name: "Revoke automation-key" }).click();
+    await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
+    await expect(secret).toHaveCount(1);
+  });
 });

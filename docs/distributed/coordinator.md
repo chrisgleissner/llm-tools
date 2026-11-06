@@ -110,8 +110,7 @@ script-free reference page is served locally at `/api/docs`. The document is
 generated from the route policy table and Rust response schemas, and its
 committed snapshot is checked in CI. See [API examples](api.md) for
 authentication and command examples. Resource-oriented mission and task
-endpoints, token management, and remaining parity operations are not yet
-available.
+endpoints and remaining CLI parity operations are still being added.
 
 Public:
 
@@ -131,6 +130,9 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/workers` | name, id, state (`online`/`offline`), last_seen, versions, platform, capabilities. |
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
+| GET | `/tokens` | Token name, scopes, creation, last-use and expiry metadata. Requires an administrator session or an `admin` token. |
+| POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry). Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
+| DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
 | GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (1-500; without it every match is returned) and `offset`. The reply adds `total` (matches before paging), `offset` and `statuses` (match counts per status, ignoring the status filter). |
 | POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |

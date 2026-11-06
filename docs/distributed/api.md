@@ -19,7 +19,9 @@ remaining CLI parity operations are being added in this follow-up.
 
 ```sh
 export COORDINATOR=https://localhost:8443
-export TOKEN='lbr_pat_…'
+export TOKEN='lbr_pat_…'              # read scope
+export OPERATE_TOKEN='lbr_pat_…'    # read and operate scopes
+export ADMIN_TOKEN='lbr_pat_…'      # admin scope
 export WORKER=build-1
 export MISSION='mission-id-from-the-list'
 ```
@@ -41,7 +43,7 @@ Approve a task with evidence. Use its current revision and a new request ID;
 the worker checks the revision under its write lock:
 
 ```sh
-curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $OPERATE_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"target":"build-1","request":{"schema_version":1,"operation":"task.verify","params":{"task_number":3,"expected_revision":2,"approved":true,"evidence":"Reviewed the result and verified the acceptance criteria."},"mission_id":"mission-id-from-the-list","target":"build-1","request_id":"approve-task-003"}}' \
   "$COORDINATOR/api/v1/commands"
@@ -50,10 +52,27 @@ curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
 Add a task with the same typed operation layer used by the CLI:
 
 ```sh
-curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+curl --cacert ca.pem -H "Authorization: Bearer $OPERATE_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"target":"build-1","request":{"schema_version":1,"operation":"task.add","params":{"title":"Add contract coverage","prompt":"Add tests for the new contract.","priority":0,"depends_on":[],"acceptance":["The regression test fails before the fix."]},"mission_id":"mission-id-from-the-list","target":"build-1","request_id":"add-task-004"}}' \
   "$COORDINATOR/api/v1/commands"
+```
+
+Manage API tokens with an administrator session (the browser adds CSRF and Origin
+checks) or a token that has `admin`. The create response includes the secret
+once; the list response contains metadata only:
+
+```sh
+curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"automation","scopes":["read","operate"],"expires_days":90}' \
+  "$COORDINATOR/api/v1/tokens"
+
+curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$COORDINATOR/api/v1/tokens"
+
+curl --cacert ca.pem -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$COORDINATOR/api/v1/tokens/automation"
 ```
 
 Errors use `application/problem+json`. The stable `type` URI and `code` identify

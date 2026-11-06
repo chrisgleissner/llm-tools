@@ -101,6 +101,37 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
     env.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let (status, created) = api
+        .post("/api/v1/tokens", json!({"name":"automation","scopes":["read","operate"],"expires_days":30}))
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let secret = created["secret"].as_str().expect("one-time token secret");
+    assert!(!secret.is_empty());
+    assert_eq!(created["token"]["scopes"], json!(["read", "operate"]));
+    assert!(created["token"]["created_at"].as_str().unwrap().ends_with('Z'));
+    assert!(created["token"]["expires_at"].as_str().unwrap().ends_with('Z'));
+
+    let (status, listed) = api.get("/api/v1/tokens").await;
+    assert_eq!(status, 200);
+    let token = listed["tokens"].as_array().unwrap().iter().find(|t| t["name"] == "automation").unwrap();
+    assert_eq!(token["scopes"], json!(["read", "operate"]));
+    assert!(token["last_used"].is_null());
+    assert!(token.get("secret").is_none() && token.get("token_hash").is_none());
+
+    let (status, revoked) = api.send(api.rb(Method::DELETE, "/api/v1/tokens/automation")).await;
+    assert_eq!(status, 200, "{revoked}");
+    assert!(!api.get("/api/v1/tokens").await.1["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == "automation"));
+    env.stop().await;
+}
+
 #[test]
 fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
     let dir = tmp_dir();

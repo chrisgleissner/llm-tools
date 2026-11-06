@@ -259,6 +259,13 @@ input[aria-invalid="true"] { border-color: var(--danger); border-width: 2px; }
 /* ---------------------------------------------------------------- cards, tiles, empty states */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: var(--space-4) var(--space-5); margin: var(--space-3) 0; box-shadow: var(--shadow); }
 .card.narrow { width: 100%; max-width: 440px; }
+.token-list { display: grid; gap: var(--space-2); list-style: none; margin: var(--space-3) 0 var(--space-5); padding: 0; }
+.token-list li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-3); }
+.token-list li .btn { margin-left: auto; }
+.token-create { display: grid; gap: var(--space-3); max-width: 520px; }
+.token-create fieldset { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-3); }
+.token-secret { margin-top: var(--space-4); border-left: 4px solid var(--accent); padding: var(--space-3); background: var(--surface-2); }
+.token-secret pre { overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .card h2:first-child { margin-top: 0; }
 .auth-card { width: 100%; max-width: 460px; }
 .auth-head { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-2); }

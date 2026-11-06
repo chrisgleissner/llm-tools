@@ -155,6 +155,15 @@ pub struct ApiToken {
     pub scopes: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApiTokenInfo {
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+    pub expires_at: Option<i64>,
+}
+
 fn json_col(s: Option<String>) -> Option<Value> {
     s.and_then(|s| serde_json::from_str(&s).ok())
 }
@@ -409,6 +418,21 @@ impl Db {
         let mut st = c.prepare("SELECT name, expires_at FROM api_tokens ORDER BY name")?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
         rows
+    }
+    pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT name, scopes, created_at, last_used, expires_at FROM api_tokens ORDER BY name")?;
+        let rows = st.query_map([], |r| {
+            let scopes_json: String = r.get(1)?;
+            Ok(ApiTokenInfo {
+                name: r.get(0)?,
+                scopes: serde_json::from_str(&scopes_json).unwrap_or_default(),
+                created_at: r.get(2)?,
+                last_used: r.get(3)?,
+                expires_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
     }
     pub fn token_revoke(&self, name: &str) -> R<bool> {
         Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)

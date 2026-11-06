@@ -39,8 +39,35 @@ struct CommandOutcome {
     updated_at: i64,
 }
 
+#[derive(Serialize, utoipa::ToSchema)]
+struct TokenInfo {
+    name: String,
+    scopes: Vec<String>,
+    created_at: String,
+    last_used: Option<String>,
+    expires_at: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct TokenList {
+    tokens: Vec<TokenInfo>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct TokenCreate {
+    name: String,
+    scopes: Option<Vec<String>>,
+    expires_days: Option<u32>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+struct TokenCreated {
+    token: TokenInfo,
+    secret: String,
+}
+
 #[derive(OpenApi)]
-#[openapi(components(schemas(ErrorDetail, ProblemDetails, CommandOutcome)))]
+#[openapi(components(schemas(ErrorDetail, ProblemDetails, CommandOutcome, TokenInfo, TokenList, TokenCreate, TokenCreated)))]
 struct ApiSchemas;
 
 fn operation_id(path: &str, method: &str) -> String {
@@ -58,7 +85,13 @@ fn operation_id(path: &str, method: &str) -> String {
     id
 }
 
-fn response_schema(path: &str) -> Value {
+fn response_schema(path: &str, method: &str) -> Value {
+    if path == "/api/v1/tokens" && method == "GET" {
+        return json!({"$ref":"#/components/schemas/TokenList"});
+    }
+    if path == "/api/v1/tokens" && method == "POST" {
+        return json!({"$ref":"#/components/schemas/TokenCreated"});
+    }
     if path == "/api/v1/commands/{id}" || path == "/api/v1/commands" {
         json!({"$ref":"#/components/schemas/CommandOutcome"})
     } else {
@@ -71,7 +104,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         "operationId": operation_id(path, method),
         "summary": format!("{} {}", method.to_ascii_uppercase(), path),
         "responses": {
-            "200": {"description":"Successful response","content":{"application/json":{"schema":response_schema(path)}}},
+            "200": {"description":"Successful response","content":{"application/json":{"schema":response_schema(path, method)}}},
             "400": {"description":"Invalid request","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "401": {"description":"Authentication required","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "403": {"description":"Insufficient scope or forbidden request","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
@@ -81,6 +114,16 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "429": {"description":"Rate limited","headers":{"Retry-After":{"schema":{"type":"integer"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}}
         }
     });
+    if path == "/api/v1/tokens" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreate"}}}
+        });
+        op["responses"]["201"] = json!({
+            "description":"Token created; secret is returned once",
+            "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreated"}}}
+        });
+    }
     if path == "/api/v1/commands" {
         op["parameters"] = json!([{
             "name":"Idempotency-Key",
@@ -99,6 +142,12 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         op["requestBody"] = json!({
             "required": method == "POST",
             "content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}
+        });
+    }
+    if path == "/api/v1/tokens" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreate"}}}
         });
     }
     if let Some(params) = op.get_mut("parameters").and_then(Value::as_array_mut) {

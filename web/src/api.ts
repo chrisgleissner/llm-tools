@@ -41,6 +41,19 @@ export interface CommandRow {
   result: { outcome?: string; result?: Record<string, unknown> | null; error?: { code: string; message: string } | null } | null;
 }
 
+export interface ApiTokenInfo {
+  name: string;
+  scopes: string[];
+  created_at: string;
+  last_used: string | null;
+  expires_at: string | null;
+}
+
+export interface ApiTokenCreated {
+  token: ApiTokenInfo;
+  secret: string;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,

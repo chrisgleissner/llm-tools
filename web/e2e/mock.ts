@@ -105,6 +105,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
   const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS;
+  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
   await page.routeWebSocket(/\/api\/v1\/stream/, () => {
     /* connected, silent: the page shows "Live" */
   });
@@ -153,6 +154,19 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     if (path === "/events") return json(route, 200, { events: [...EVENTS].reverse() });
     if (path === "/diagnostics") return json(route, 200, DIAG);
+    if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });
+    if (path === "/tokens" && method === "POST") {
+      const body = JSON.parse(req.postData() ?? "{}") as { name: string; scopes: string[]; expires_days: number };
+      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null };
+      tokens.push(token);
+      return json(route, 201, { token, secret: "lbr_pat_mock-secret" });
+    }
+    if (path.startsWith("/tokens/") && method === "DELETE") {
+      const name = decodeURIComponent(path.slice("/tokens/".length));
+      const i = tokens.findIndex((token) => token.name === name);
+      if (i >= 0) tokens.splice(i, 1);
+      return json(route, i >= 0 ? 200 : 404, { ok: i >= 0 });
+    }
     if (path === "/commands" && method === "POST") {
       const body = JSON.parse(req.postData() ?? "{}") as { target: string; request: { operation: string; request_id: string } };
       const op = body.request.operation;

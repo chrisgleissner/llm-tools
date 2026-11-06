@@ -574,6 +574,106 @@ async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buff
 
 // ---------------------------------------------------------------- handlers: workers, missions, events
 
+fn timestamp(epoch: Option<i64>) -> Option<String> {
+    let epoch = epoch?;
+    let days = epoch.div_euclid(86_400);
+    let seconds = epoch.rem_euclid(86_400);
+    let (year, month, day) = crate::certs::civil_from_days(days);
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3600,
+        seconds % 3600 / 60,
+        seconds % 60
+    ))
+}
+
+async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
+    let tokens: Vec<Value> = st
+        .db
+        .api_tokens_list()?
+        .into_iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "scopes": t.scopes,
+                "created_at": timestamp(Some(t.created_at)),
+                "last_used": timestamp(t.last_used),
+                "expires_at": timestamp(t.expires_at)
+            })
+        })
+        .collect();
+    Ok(json_ok(StatusCode::OK, json!({"tokens": tokens})))
+}
+
+async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["name", "scopes", "expires_days"])?;
+    let name = str_field(&m, "name")?;
+    if !valid_name(name) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-name",
+            "token name must be lowercase letters, digits and '-' (at most 63)",
+        ));
+    }
+    let scopes = match m.get("scopes") {
+        None => vec![scopes::READ.to_string()],
+        Some(Value::Array(values)) if !values.is_empty() && values.len() <= scopes::ALL.len() => {
+            let mut parsed = Vec::with_capacity(values.len());
+            for value in values {
+                let scope = value
+                    .as_str()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "scopes must be strings"))?;
+                if !scopes::valid(scope) || parsed.iter().any(|known| known == scope) {
+                    return Err(err(StatusCode::BAD_REQUEST, "invalid-scope", "scope is unknown or repeated"));
+                }
+                parsed.push(scope.to_string());
+            }
+            parsed
+        }
+        Some(_) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "scopes must be a non-empty array of known scopes",
+            ))
+        }
+    };
+    let days = match m.get("expires_days") {
+        None => 90,
+        Some(value) => value
+            .as_u64()
+            .filter(|days| *days <= 3650)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "expires_days must be an integer from 0 to 3650"))?,
+    };
+    let expires_at = (days > 0).then(|| crate::now() + (days as i64) * 86_400);
+    let secret = auth::random_token();
+    if !st.db.token_create_scoped(name, &auth::sha256_hex(&secret), expires_at, &scopes)? {
+        return Err(err(StatusCode::CONFLICT, "token-exists", "a token with this name already exists"));
+    }
+    let detail = format!(
+        "name={name} scopes={} expires_at={}",
+        scopes.join(","),
+        expires_at.map_or_else(|| "never".into(), |e| e.to_string())
+    );
+    st.db.audit(&p.actor(), "token.create", &detail, &ip);
+    Ok(json_ok(
+        StatusCode::CREATED,
+        json!({
+            "token": {"name": name, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "expires_at": timestamp(expires_at)},
+            "secret": secret
+        }),
+    ))
+}
+
+async fn revoke_token(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
+    if !st.db.token_revoke(&name)? {
+        return Err(err(StatusCode::NOT_FOUND, "unknown-token", "no such token"));
+    }
+    st.db.audit(&p.actor(), "token.revoke", &clean(&name), &ip);
+    Ok(json_ok(StatusCode::OK, json!({"ok": true})))
+}
+
 fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
     // A connected worker has been heard from within the last ping interval; the stored value is
     // persisted only every few minutes (ws_worker.rs LAST_SEEN_EVERY_SECS) to spare storage.
@@ -954,6 +1054,8 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/password", &["POST"], Access::Authed, "session"),
     ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}", &["DELETE"], Access::Authed, "admin"),
+    ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
+    ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
     ("/api/v1/commands", &["POST"], Access::Authed, "operate"),
     ("/api/v1/commands/{id}", &["GET"], Access::Authed, "read"),
@@ -1007,6 +1109,8 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/auth/password", post(change_password).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/workers", get(list_workers).post(add_worker))
         .route("/api/v1/workers/{name}", delete(revoke_worker))
+        .route("/api/v1/tokens", get(list_tokens).post(create_token))
+        .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/missions", get(list_missions))
         .route("/api/v1/commands", post(post_command))
         .route("/api/v1/commands/{id}", get(get_command))
