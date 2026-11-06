@@ -75,6 +75,9 @@ def _snapshot(state: Path) -> str:
 def mission(tmp_path, monkeypatch, capsys):
     state = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    # Property cases cover validation and dispatch; do not launch a real mission
+    # controller when a generated request happens to be a valid mission.start.
+    monkeypatch.setattr("llm_tools.bridge.start_mission", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(commands, "_usage_collect", lambda *a, **k: {"providers": []}, raising=False)  # never reach a live provider
     assert main(["mission", "create", "--prompt", "Objective\n", "--cwd", str(tmp_path), "--providers", "codex", "--json"]) == 0
     return state, json.loads(capsys.readouterr().out)["mission"]["id"]
