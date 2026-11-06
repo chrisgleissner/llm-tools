@@ -78,7 +78,7 @@ def test_cli_text_never_shows_verifying(tmp_path, state, capsys) -> None:
     status = _run(capsys, "status", "--mission", mid)
     assert "1 REVIEW" in status and "VERIFYING" not in status
     evidence = _run(capsys, "task", "verify", "--mission", mid, "--task", "1", "--evidence", "tests passed")
-    assert "VERIFYING" not in evidence and "llm-bridge task approve --task 1" in evidence
+    assert "VERIFYING" not in evidence and "llm-bridge task approve --mission " in evidence and "--task 1" in evidence
 
 
 def test_task_approve_pairs_with_task_reject(tmp_path, state, capsys) -> None:
@@ -109,7 +109,7 @@ def test_needs_you_hint_names_task_approve(tmp_path, state, capsys) -> None:
     mid, _task = _mission_in_review(tmp_path, state, capsys)
     snapshot = json.loads(_run(capsys, "status", "--mission", mid, "--json"))
     attention = bridge_format.needs_attention(snapshot)
-    assert attention is not None and "task approve --task 1" in attention["command"]
+    assert attention is not None and attention["command"].startswith("llm-bridge task approve --mission ") and attention["command"].endswith("--task 1")
     assert "task verify" not in attention["message"] and "--approve" not in attention["message"]
 
 
@@ -162,7 +162,7 @@ def test_follow_up_task_reopens_a_completed_mission_as_created(tmp_path, state, 
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.set_mission_status(mid, "COMPLETED")
     out = _run(capsys, "task", "add", "--mission", mid, "--prompt", "follow-up")
-    assert "Mission reopened" in out
+    assert " reopened · start it with: llm-bridge start --mission " in out
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_mission(mid)["status"] == "CREATED"
         reopened = [event for event in store.events(mid) if event["kind"] == "mission-reopened"]

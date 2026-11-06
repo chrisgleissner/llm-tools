@@ -218,7 +218,7 @@ def test_suggested_commands_name_the_mission(tmp_path, state, capsys) -> None:
         store.finish_operation(operation, exit_code=0)
     assert main(["status", "--mission", mid]) == 0
     status = capsys.readouterr().out
-    assert f"llm-bridge task verify --mission {mid[:8]} --task 1 --approve" in status
+    assert f"llm-bridge task approve --mission {mid[:8]} --task 1" in status
     assert f"llm-bridge task reject --mission {mid[:8]} --task 1" in status
     assert main(["task", "verify", "--mission", mid, "--task", "1", "--evidence", "x"]) == 0
-    assert f"llm-bridge task verify --mission {mid[:8]} --task 1 --approve" in capsys.readouterr().out
+    assert f"llm-bridge task approve --mission {mid[:8]} --task 1" in capsys.readouterr().out
