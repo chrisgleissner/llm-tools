@@ -254,6 +254,41 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-REPO-004 | [x] | Container web-asset directory permissions were fixed at the Dockerfile source; a regression test fails on the prior mode and the built image was smoke-tested as UID 65532 (PR #32). |
 | PI-REPO-005 | [~] | PR #32 contains the Pi measurements and unified IDs and is merged. Main CI run 42258350255 exposed a tmux 3.4 first-run test expectation mismatch; the version-compatible test correction is in draft PR #33 and awaits green CI. |
 | PI-REPO-006 | [x] | The private research notes now label physical, emulated, assumed, and blocked results and replace former pending entries with physical evidence or exact blockers. |
+| PRD-001 | [ ] | Not started. Five-minute first success. |
+| PRD-002 | [ ] | Not started. Release artifacts (signed multi-arch image, package, checksums, release dry run). |
+| PRD-003 | [ ] | Not started. Versioned upgrades and migrations. |
+| PRD-004 | [ ] | Not started. Configuration validation. |
+| PRD-005 | [ ] | Not started. Uninstall and data portability. |
+| PRD-006 | [ ] | Not started. Documentation as product. |
+| PRD-007 | [ ] | Not started. Soak test. |
+| PRD-008 | [ ] | Not started. Chaos. |
+| PRD-009 | [ ] | Not started. Capacity limits. |
+| PRD-010 | [ ] | Not started. Data retention. |
+| PRD-011 | [ ] | Not started. Observability for the operator. |
+| PRD-012 | [ ] | Not started. Diagnostic bundle. |
+| PRD-013 | [ ] | Not started. Backups by default. |
+| PRD-014 | [ ] | Not started; waits for PR #31 to merge (phase B). Mission control at a glance (web). |
+| PRD-015 | [ ] | Not started; waits for PR #31 to merge (phase B). Live session view (web). |
+| PRD-016 | [ ] | Not started; waits for PR #31 to merge (phase B). Full operator control from the console (web). |
+| PRD-017 | [ ] | Not started; waits for PR #31 to merge (phase B). Command palette and keyboard (web). |
+| PRD-018 | [ ] | Not started; waits for PR #31 to merge (phase B). Notifications (web). |
+| PRD-019 | [ ] | Not started; waits for PR #31 to merge (phase B). Accessibility (web). |
+| PRD-020 | [ ] | Not started; waits for PR #31 to merge (phase B). Performance budgets (web). |
+| PRD-021 | [ ] | Not started; waits for PR #31 to merge (phase B). Browser matrix (web). |
+| PRD-022 | [ ] | Not started; waits for PR #31 to merge (phase B). Internationalisation-ready (web). |
+| PRD-023 | [ ] | Not started. External-style penetration test. |
+| PRD-024 | [ ] | Not started. Security policy. |
+| PRD-025 | [ ] | Not started. Dependency hygiene. |
+| PRD-026 | [ ] | Not started. Safe defaults review. |
+| PRD-027 | [ ] | Not started; waits for PR #31 to merge (phase B). Abuse resistance at scale. |
+| PRD-028 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate checklist. |
+| PRD-029 | [ ] | Not started; waits for PR #31 to merge (phase B). Changelog and versioning. |
+| PRD-030 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate dry run. |
+| PRD-031 | [~] | Expert UX review of the CLI and terminal console. The overseer's pre-review (CLIUX-001 to CLIUX-050) is in `ux-review-cli.md`; the independent second reviewer pass is in progress. |
+| PRD-032 | [ ] | Not started; waits for PR #31 to merge (phase B). Expert UX review of the web console and site. |
+| PRD-033 | [ ] | Not started. Every UX finding fixed. |
+| PRD-034 | [ ] | Not started. Review of the inner workings. |
+| PRD-035 | [ ] | Not started; waits for PR #31 to merge (phase B). No open issues. |
 
 ## Operator addendum (2026-11-05, task revision 4)
 
