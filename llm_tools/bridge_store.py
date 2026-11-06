@@ -740,10 +740,12 @@ class BridgeStore:
                 raise TransitionError(mission_transition_message(mission_id, old, status))
             if status == "COMPLETED":
                 counts = self.db.execute(
-                    "SELECT COUNT(*) AS total, SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS completed FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')",
+                    "SELECT COUNT(*) AS total, SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS completed, "
+                    "SUM(CASE WHEN status='CANCELLED' THEN 1 ELSE 0 END) AS cancelled FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')",
                     (mission_id,),
                 ).fetchone()
-                if not counts["total"] or counts["total"] != counts["completed"]:
+                # A cancelled task is finished (the operator dropped it), but at least one task must have completed.
+                if not counts["completed"] or counts["total"] != counts["completed"] + counts["cancelled"]:
                     raise TransitionError("mission cannot complete while tasks are not complete")
             self.db.execute("UPDATE missions SET status=?,updated_at=? WHERE id=?", (status, utc_now(), mission_id))
             self._event(mission_id, "mission-status", {"from": old, "to": status})
@@ -965,6 +967,19 @@ class BridgeStore:
                 (mission_id, -1 if limit is None else max(0, int(limit))),
             )
             return self._task_dicts(rows.fetchall())
+
+    def runnable_task_ids(self, mission_id: str, *, limit: int | None = None) -> list[int]:
+        """IDs ``ready_tasks`` would return, in its order, without promoting or writing anything.
+
+        The controller's idle loop and capacity waits call this every poll; it takes no write lock.
+        """
+        rows = self.db.execute(
+            "SELECT t.id FROM tasks t WHERE t.mission_id=? AND t.status IN ('QUEUED','READY') AND (t.origin='operator' OR t.proposal_status='ACCEPTED') "
+            "AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.depends_on WHERE d.task_id=t.id AND p.status!='COMPLETED') "
+            "ORDER BY t.priority DESC,t.ordering,t.id LIMIT ?",
+            (mission_id, -1 if limit is None else max(0, int(limit))),
+        )
+        return [int(row["id"]) for row in rows]
 
     _AMENDABLE_COLUMNS = {"prompt": "prompt", "title": "title", "priority": "priority", "acceptance": "acceptance_json"}
 

@@ -58,6 +58,8 @@ NATIVE_COMPLETION_NOTE = (
     "(for example /exit) so Bridge can verify the work."
 )
 _CHECKPOINT_LIMIT = 12000
+IDLE_POLL_SECONDS = 0.5  # first poll interval while no task can run
+IDLE_POLL_MAX_SECONDS = 4.0  # the interval doubles up to this while nothing changes
 _EVENT_LINE_LIMIT = 300
 
 
@@ -184,7 +186,7 @@ class BridgeMissionHooks:
     def _wait_signature(self) -> tuple[Any, ...]:
         """What an operator can change during a capacity wait: the rotation and the runnable tasks."""
         config = self.store.get_mission(self.mission_id)["config"]
-        ready = tuple(int(task["id"]) for task in self.store.ready_tasks(self.mission_id, limit=50))
+        ready = tuple(self.store.runnable_task_ids(self.mission_id, limit=50))  # read-only: a wait must not promote tasks or write
         return (str(config.get("providers", "")), str(config.get("routes", "")), ready)
 
     def on_wait(self, selection: dict[str, Any], target_epoch: int | None) -> None:
@@ -280,6 +282,8 @@ class BridgeMissionHooks:
         return self._store
 
     def before_iteration(self) -> dict[str, Any]:
+        idle_delay = IDLE_POLL_SECONDS
+        idle_state: tuple[Any, ...] | None = None
         while True:
             self._apply_pending_boundary_requests()
             mission = self.store.get_mission(self.mission_id)
@@ -299,8 +303,10 @@ class BridgeMissionHooks:
                 continue
             self._hold_message = ""
 
-            tasks = self.store.ready_tasks(self.mission_id, limit=1)
+            # A read-only look first: an idle controller must not take the write lock every poll.
+            tasks = self.store.ready_tasks(self.mission_id, limit=1) if self.store.runnable_task_ids(self.mission_id, limit=1) else []
             if tasks:
+                self._operator_wait_state = None
                 self._wait_baseline = None  # a wait that ended is over; scheduler waits must not compare against it
                 task = tasks[0]
                 current = self.store.begin_iteration(int(task["id"]))
@@ -364,10 +370,51 @@ class BridgeMissionHooks:
                 )
             }
             total = sum(counts.values())
-            if total and counts.get("COMPLETED", 0) == total:
+            completed, cancelled = counts.get("COMPLETED", 0), counts.get("CANCELLED", 0)
+            if completed and completed + cancelled == total:
                 self.store.set_mission_status(self.mission_id, "COMPLETED")
                 return {"action": "stop", "reason": "all tasks verified", "exit_code": 0}
-            time.sleep(0.5)
+            if total and cancelled == total:
+                self.store.set_mission_status(self.mission_id, "STOPPED")
+                return {"action": "stop", "reason": "every task was cancelled", "exit_code": 0}
+            # No task can run and the mission is not finished: an operator action (approve,
+            # retry, start, add a task) is the only thing that changes that. Say so once per
+            # distinct state, and poll less often the longer nothing changes.
+            state = self._record_operator_wait(counts)
+            idle_delay = IDLE_POLL_SECONDS if state != idle_state else min(IDLE_POLL_MAX_SECONDS, idle_delay * 2)
+            idle_state = state
+            time.sleep(idle_delay)
+
+    _operator_wait_state: tuple[Any, ...] | None = None
+
+    def _record_operator_wait(self, counts: dict[str, int]) -> tuple[Any, ...]:
+        """Record ``mission-waiting-for-operator`` when the set of unfinished tasks changed; return that set."""
+        rows = self.store.db.execute(
+            "SELECT ordinal,status FROM tasks WHERE mission_id=? AND status NOT IN ('COMPLETED','CANCELLED') "
+            "AND (origin!='agent-proposal' OR proposal_status='ACCEPTED') ORDER BY ordering,id LIMIT 20",
+            (self.mission_id,),
+        ).fetchall()
+        state = tuple((int(row["ordinal"]), str(row["status"])) for row in rows)
+        if state == self._operator_wait_state:
+            return state
+        self._operator_wait_state = state
+        short = self.mission_id[:8]
+        if not state:
+            reason, command = "the mission has no tasks", f"llm-bridge task add --mission {short} PROMPT"
+        else:
+            first = next((ordinal for ordinal, status in state if status in {"BLOCKED", "FAILED", "PAUSED"}), state[0][0])
+            reason = "no task can run: " + ", ".join(f"{count} {status.lower()}" for status, count in sorted(counts.items()) if status not in {"COMPLETED", "CANCELLED"})
+            if any(status == "VERIFYING" for _, status in state):
+                command = f"llm-bridge task approve --mission {short} --task {first}"
+            else:
+                command = f"llm-bridge task retry --mission {short} --task {first}"
+        self.store.record_runtime_event(self.mission_id, "mission-waiting-for-operator", {
+            "reason": reason,
+            "summary": f"{reason} · {command}",
+            "tasks": [{"ordinal": ordinal, "status": status} for ordinal, status in state],
+            "command": command,
+        })
+        return state
 
     def _apply_pending_boundary_requests(self) -> None:
         mission = self.store.get_mission(self.mission_id)
