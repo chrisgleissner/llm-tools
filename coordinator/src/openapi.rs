@@ -95,12 +95,12 @@ fn response_schema(path: &str, method: &str) -> Value {
     if path == "/api/v1/tokens" && method == "POST" {
         return json!({"$ref":"#/components/schemas/TokenCreated"});
     }
-    if path == "/api/v1/commands/{id}" || path == "/api/v1/commands" {
-        json!({"$ref":"#/components/schemas/CommandOutcome"})
-    } else if matches!(
-        path,
-        "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
-    ) && method == "GET"
+    if path == "/api/v1/commands/{id}"
+        || path == "/api/v1/commands"
+        || (matches!(
+            path,
+            "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
+        ) && method == "GET")
     {
         json!({"$ref":"#/components/schemas/CommandOutcome"})
     } else {

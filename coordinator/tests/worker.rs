@@ -509,7 +509,10 @@ async fn tls_versions_and_suites() {
         }
     };
     assert!(connect(&[&rustls::version::TLS13]).await.unwrap().starts_with("TLS13_"));
-    assert!(connect(&[&rustls::version::TLS12]).await.is_err(), "TLS 1.2 requires an explicit compatibility opt-in");
+    assert!(
+        connect(&[&rustls::version::TLS12]).await.is_err(),
+        "TLS 1.2 requires an explicit compatibility opt-in"
+    );
     let _ = Method::GET;
     env.stop().await;
 }

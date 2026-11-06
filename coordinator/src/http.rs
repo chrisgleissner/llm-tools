@@ -1238,11 +1238,7 @@ async fn mission_settings_resource(
             &["auto_continue", "teams", "token_spend", "suspend_when_rate_limited", "colour", "wait_ms"],
         )?;
     }
-    let wait_ms = q
-        .get("wait_ms")
-        .map(|v| v.parse::<u64>().ok().filter(|n| *n <= MAX_WAIT_MS))
-        .flatten()
-        .unwrap_or(0);
+    let wait_ms = q.get("wait_ms").and_then(|v| v.parse::<u64>().ok().filter(|n| *n <= MAX_WAIT_MS)).unwrap_or(0);
     params.remove("wait_ms");
     resource_command(
         st,
@@ -1520,19 +1516,25 @@ async fn proposal_decision_resource(
     .await
 }
 
-async fn worker_resource(
-    st: St,
-    p: Principal,
-    ip: String,
+struct WorkerResourceRequest {
     worker: String,
-    action: &str,
+    action: String,
     q: HashMap<String, String>,
     headers: HeaderMap,
     body: Buffered,
-) -> ApiResult {
+}
+
+async fn worker_resource(st: St, p: Principal, ip: String, request: WorkerResourceRequest) -> ApiResult {
+    let WorkerResourceRequest {
+        worker,
+        action,
+        q,
+        headers,
+        body,
+    } = request;
     let mut params = Map::new();
     let mut body_wait_ms = 0;
-    let operation = match action {
+    let operation = match action.as_str() {
         "doctor" => {
             if let Some(mission) = q.get("mission") {
                 params.insert("mission".into(), json!(mission));
@@ -1568,7 +1570,7 @@ async fn worker_resource(
     })?;
     let allowed_query = if action == "audit" {
         &["limit", "wait_ms"][..]
-    } else if matches!(action, "doctor" | "agents") {
+    } else if matches!(action.as_str(), "doctor" | "agents") {
         &["mission", "wait_ms"][..]
     } else {
         &[][..]
@@ -1603,13 +1605,15 @@ async fn worker_doctor_resource(
         st,
         p,
         ip,
-        worker,
-        "doctor",
-        q,
-        headers,
-        Buffered {
-            bytes: Bytes::new(),
-            _permit: None,
+        WorkerResourceRequest {
+            worker,
+            action: "doctor".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
         },
     )
     .await
@@ -1625,13 +1629,15 @@ async fn worker_agents_resource(
         st,
         p,
         ip,
-        worker,
-        "agents",
-        q,
-        headers,
-        Buffered {
-            bytes: Bytes::new(),
-            _permit: None,
+        WorkerResourceRequest {
+            worker,
+            action: "agents".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
         },
     )
     .await
@@ -1647,13 +1653,15 @@ async fn worker_audit_resource(
         st,
         p,
         ip,
-        worker,
-        "audit",
-        q,
-        headers,
-        Buffered {
-            bytes: Bytes::new(),
-            _permit: None,
+        WorkerResourceRequest {
+            worker,
+            action: "audit".into(),
+            q,
+            headers,
+            body: Buffered {
+                bytes: Bytes::new(),
+                _permit: None,
+            },
         },
     )
     .await
@@ -1666,7 +1674,19 @@ async fn worker_gc_resource(
     headers: HeaderMap,
     body: Buffered,
 ) -> ApiResult {
-    worker_resource(st, p, ip, worker, "gc", q, headers, body).await
+    worker_resource(
+        st,
+        p,
+        ip,
+        WorkerResourceRequest {
+            worker,
+            action: "gc".into(),
+            q,
+            headers,
+            body,
+        },
+    )
+    .await
 }
 
 async fn mission_events(
@@ -2031,8 +2051,6 @@ async fn mission_action(
         &["headless", "native_tui", "providers", "routes", "wait_ms"][..]
     } else if action == "stop" {
         &["force", "wait_ms"][..]
-    } else if action == "suspend-until-credits" {
-        &["wait_ms"][..]
     } else {
         &["wait_ms"][..]
     };
