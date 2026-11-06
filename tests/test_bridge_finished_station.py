@@ -63,7 +63,10 @@ class _Client:
     def __init__(self, handle: TerminalHandle) -> None:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:  # pragma: no cover - replaced by exec
-            os.execvpe("tmux", ["tmux", "-S", str(handle.socket_path), "-f", str(handle.config_path), "attach-session", "-t", handle.session_name], {**os.environ, "TERM": "xterm-256color"})  # tmux refuses to attach without a usable TERM, which CI runners do not set
+            environment = {**os.environ, "TERM": "xterm-256color"}
+            environment.pop("TMUX", None)
+            environment.pop("TMUX_PANE", None)
+            os.execvpe("tmux", ["tmux", "-S", str(handle.socket_path), "-f", str(handle.config_path), "attach-session", "-t", handle.session_name], environment)  # tmux refuses to attach without a usable TERM, which CI runners do not set
         self.handle = handle
 
     def detach(self) -> None:
