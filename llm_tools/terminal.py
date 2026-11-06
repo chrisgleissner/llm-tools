@@ -1650,9 +1650,62 @@ def _codex_queued_question_count(screen: str) -> int:
         return 0
     match = re.search(r"(?mi)^\s*\?\s*(\d{1,2})\s+questions?\s*$", screen)
     if match is None:
-        return 0
-    count = int(match.group(1))
+        match = re.search(r"(?mi)^\s*(\d{1,2})\s+of\s+(\d{1,2})\s*$", screen)
+        if match is None or int(match.group(1)) > int(match.group(2)):
+            return 0
+        count = int(match.group(2))
+    else:
+        count = int(match.group(1))
     return count if 1 <= count <= 32 else 0
+
+
+def _codex_queued_questions(screen: str) -> list[dict[str, Any]]:
+    """Extract the currently expanded Codex question from its bounded TUI block.
+
+    Only text inside the explicit queued-question region is returned. Collapsed
+    questions, active work, screens without the submit footer, and overlong
+    content remain count-only so ordinary provider output is never projected.
+    """
+    if re.search(r"(?mi)^\s*[•·]\s*working\b", screen):
+        return []
+    lines = screen.splitlines()[-_PROVIDER_PROMPT_TAIL_LINES:]
+    heading = next((i for i, line in enumerate(lines) if "queued follow-up inputs" in line.casefold()), None)
+    if heading is None:
+        return []
+    region: list[str] = []
+    ended = False
+    for line in lines[heading + 1 :]:
+        if re.search(r"(?i)\benter\s+submit\b|shift\s*[+>]\s*main prompt", line):
+            ended = True
+            break
+        region.append(line)
+    if not ended or not region or re.search(r"^\s*\?\s*\d+\s+questions?\s*$", "\n".join(region), re.I):
+        return []
+
+    option_re = re.compile(r"^\s*[›>]?\s*\d+[.)]\s+(.+?)\s*$")
+    question_lines: list[str] = []
+    options: list[str] = []
+    in_options = False
+    for line in region:
+        match = option_re.match(line)
+        if match:
+            in_options = True
+            options.append(match.group(1).strip())
+            if len(options) > 8 or any(len(option) > 200 for option in options):
+                return []
+            continue
+        if in_options:
+            if line.strip():
+                return []  # Do not guess whether trailing text is an answer or another option.
+            continue
+        if re.match(r"^\s*\d+\s+of\s+\d+\s*$", line, re.I):
+            continue
+        if line.strip():
+            question_lines.append(line.strip())
+    question = " ".join(question_lines).strip()
+    if not question or len(question) > 800 or not options:
+        return []
+    return [{"question": question, "options": options}]
 
 
 def read_native_provider_wait(
@@ -1660,6 +1713,8 @@ def read_native_provider_wait(
     provider: str,
     load_handle: Callable[[str], TerminalHandle],
     *,
+    session_id: str | None = None,
+    cwd: str | None = None,
     now: float | None = None,
 ) -> dict[str, Any] | None:
     """Return a bounded native-provider wait classification, never the pane text.
@@ -1704,14 +1759,52 @@ def read_native_provider_wait(
         while len(_PROVIDER_PROMPT_SEEN) > _PROVIDER_PROMPT_CACHE_LIMIT:
             _PROVIDER_PROMPT_SEEN.popitem(last=False)
     idle_seconds = max(0, int(moment - changed_at))
-    if idle_seconds < _PROVIDER_PROMPT_IDLE_SECONDS or not _native_input_prompt(provider, screen):
+    normalized_provider = provider.casefold().split("-", 1)[0]
+    question_count = _codex_queued_question_count(screen) if normalized_provider == "codex" else 0
+    questions = _codex_queued_questions(screen) if normalized_provider == "codex" else []
+    if (
+        not questions
+        and session_id
+        and cwd
+        and normalized_provider in {"codex", "claude"}
+        and idle_seconds >= _PROVIDER_PROMPT_IDLE_SECONDS
+        and (question_count or normalized_provider == "claude")
+    ):
+        try:
+            from .bridge_sessions import pending_operator_questions
+
+            structured = pending_operator_questions(normalized_provider, session_id, cwd=cwd)
+            questions = []
+            for item in structured[:5]:
+                question = item.get("question")
+                option_rows = item.get("options")
+                if not isinstance(question, str) or not isinstance(option_rows, list):
+                    continue
+                option_text: list[str] = []
+                for option in option_rows:
+                    if not isinstance(option, dict) or not isinstance(option.get("label"), str):
+                        continue
+                    label = option["label"]
+                    description = option.get("description")
+                    option_text.append(f"{label} — {description}" if isinstance(description, str) and description else label)
+                if option_text:
+                    questions.append({"question": question, "options": option_text})
+        except Exception:  # Provider metadata is observational only; never break status reads.
+            questions = []
+    is_waiting = _native_input_prompt(provider, screen) or bool(question_count or questions)
+    if idle_seconds < _PROVIDER_PROMPT_IDLE_SECONDS or not is_waiting:
         return None
-    provider_name = "Codex" if provider.casefold().startswith("codex") else "Claude Code"
+    provider_name = "Codex" if normalized_provider == "codex" else "Claude Code"
     result: dict[str, Any] = {"provider": provider_name, "idle_seconds": idle_seconds}
     if provider_name == "Codex":
-        question_count = _codex_queued_question_count(screen)
         if question_count:
             result["question_count"] = question_count
+        if questions:
+            result["questions"] = questions
+            result["question_count"] = max(question_count, len(questions))
+    elif questions:
+        result["questions"] = questions
+        result["question_count"] = len(questions)
     return result
 
 

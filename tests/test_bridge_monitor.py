@@ -58,15 +58,20 @@ def test_native_provider_idle_prompt_surfaces_bounded_needs_you_without_screen_t
         store.set_mission_status(mission["id"], "RUNNING")
         operation_id = store.begin_operation(task_id, iteration=1, station="codex")
         store.mark_operation_running(operation_id, process_pid=42, process_start="test-start")
-        monkeypatch.setattr(terminal, "read_native_provider_wait", lambda mid, provider, load_handle: {
-            "provider": "Codex", "idle_seconds": 73,
+        monkeypatch.setattr(terminal, "read_native_provider_wait", lambda mid, provider, load_handle, **_kwargs: {
+            "provider": "Codex", "idle_seconds": 73, "question_count": 1,
+            "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
         })
 
         snapshot = project_snapshot(store, mission["id"])
 
-    assert snapshot["provider_wait"] == {"provider": "Codex", "idle_seconds": 73}
+    assert snapshot["provider_wait"] == {
+        "provider": "Codex", "idle_seconds": 73, "question_count": 1,
+        "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
+    }
     assert snapshot["needs_you"]["kind"] == "provider"
-    assert "Codex is waiting for your input" in snapshot["needs_you"]["message"]
+    assert "Codex asks: Choose a path" in snapshot["needs_you"]["message"]
+    assert "1. Proceed; 2. Wait" in snapshot["needs_you"]["message"]
     assert snapshot["needs_you"]["command"] == f"llm-bridge attach --mission {mission['id'][:8]}"
     assert "inspect the device" not in json.dumps(snapshot["needs_you"])
 

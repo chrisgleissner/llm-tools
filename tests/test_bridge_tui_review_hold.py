@@ -39,10 +39,13 @@ def test_needs_you_row_is_unchanged_without_a_hold_and_for_other_verifying_tasks
 def test_needs_you_explains_how_to_answer_a_codex_queued_question() -> None:
     snapshot = {
         "mission": {"id": "mission-123"},
-        "provider_wait": {"provider": "Codex", "question_count": 2},
+        "provider_wait": {
+            "provider": "Codex", "question_count": 2,
+            "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
+        },
     }
     assert bridge_tui._needs_you_rows(snapshot) == [
-        "Codex has 2 queued questions — take control of the terminal and press Shift+Left to answer: llm-bridge attach --mission mission-123"
+        "Codex asks: Choose a path — choices: 1. Proceed; 2. Wait — take control of the terminal to answer: llm-bridge attach --mission mission-123"
     ]
 
 

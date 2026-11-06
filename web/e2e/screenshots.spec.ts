@@ -56,7 +56,7 @@ const SCREENS: Screen[] = [
   { name: "login-signed-out", mock: IN, path: "/", run: async (p) => { await live(p); await p.locator("#account-button").click(); await p.locator("#logout").click(); await expect(p.locator("#login-notice")).toContainText("You signed out"); } },
   { name: "overview", mock: IN, path: "/", run: async (p) => { await live(p); await expect(p.locator('[data-attention="approval"]').first()).toBeVisible(); await expect(p.locator("#activity li").first()).toBeVisible(); await expect(p.locator(".running-list")).toContainText("Implement the new tokenizer"); await expect(p.locator(".transition-summary").first()).toContainText("RUNNING → VERIFYING"); } },
   { name: "overview-no-missions", mock: { ...IN, missions: "none" }, path: "/", run: async (p) => { await expect(p.getByText("Next: create a mission on a worker.")).toBeVisible(); await expect(p.locator("#ov-health")).toBeVisible(); } },
-  { name: "provider-question", mock: { ...IN, providerQuestion: true }, path: "/", run: async (p) => { const row = p.locator('[data-attention="provider-wait"]'); await expect(row).toHaveCount(1); await expect(row).toContainText("Codex has 1 queued question"); await expect(row).toContainText("take control of the terminal"); } },
+  { name: "provider-question", mock: { ...IN, providerQuestion: true }, path: "/", run: async (p) => { const row = p.locator('[data-attention="provider-wait"]'); await expect(row).toHaveCount(1); await expect(row).toContainText("Should I continue?"); await expect(row).toContainText("1. Continue; 2. Stop"); await expect(row).toContainText("take control of the terminal"); } },
   { name: "overview-no-workers", mock: { auth: "in", workers: "none" }, path: "/", run: async (p) => { await expect(p.getByRole("heading", { name: "No workers yet" })).toBeVisible(); } },
   { name: "workers", mock: IN, path: "/workers", run: async (p) => { await expect(p.locator("#workers-table tbody tr")).toHaveCount(3); const alpha = p.locator('tr[data-worker="alpha"]'); await expect(alpha.locator('[data-label="Host"]')).toHaveText("build-node"); await expect(alpha.locator('[data-label="Address"]')).toHaveText("203.0.113.10"); } },
   { name: "workers-none", mock: { auth: "in", workers: "none" }, path: "/workers", run: (p) => expect(p.getByRole("heading", { name: "No workers enrolled" })).toBeVisible() },
@@ -105,7 +105,7 @@ test("Codex queued-question attention opens the mission's live terminal", async 
   await mockApp(page, { ...IN, providerQuestion: true });
   await page.goto("/");
   const row = page.locator('[data-attention="provider-wait"]').first();
-  await expect(row).toContainText("Codex has 1 queued question");
+  await expect(row).toContainText("Should I continue?");
   await row.getByRole("link").click();
   await expect(page).toHaveURL(/\/missions\/alpha\//);
   await expect(page.locator("#terminal-control")).toBeEnabled();

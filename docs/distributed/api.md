@@ -10,10 +10,16 @@ for mission and task changes; worker administration and diagnostics require
 reported at enrolment and the peer address of the active worker connection. The
 address is null while the worker is offline; forwarded headers do not affect it.
 
-For native Codex sessions, mission status may report the bounded number of
-queued follow-up questions when its stable terminal prompt is waiting. It never
-returns the question or answer text. Open the mission terminal and take control
-to answer; terminal input stays on the scoped WebSocket.
+For native Codex sessions, mission status can include the bounded text and
+choices of the currently expanded queued question. When the exact session is
+known, Bridge reads the provider's structured question record; the local
+terminal capture parser is limited to the visible `Queued follow-up inputs`
+block. For Claude Code, Bridge reads only the exact session's documented
+`AskUserQuestion` tool input and drops it when the matching `tool_result`
+arrives. Neither path returns the surrounding transcript or captured screen.
+The CLI/TUI and web console show the question and choices; take control of the
+mission terminal and use the provider's own UI to answer. Terminal input stays
+on the scoped WebSocket.
 
 The current version uses the durable `POST /api/v1/commands` adapter. A command
 request has a caller-chosen `request_id`; retrying the same request ID returns

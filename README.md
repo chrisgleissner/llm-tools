@@ -219,6 +219,10 @@ llm-bridge --target build-1 mission list
 The coordinator's Workers page and `llm-bridge worker list` show the host name
 and the current connection address.
 
+When an idle native Codex or Claude Code session asks a structured question,
+Bridge shows its question and choices in `needs_you` and the web console. Open
+the mission terminal and take control to answer in the provider's own interface.
+
 A worker is read-only for remote clients by default. `--allow-terminal-view` at
 enrolment also shares mission terminals for viewing, and `--allow-control` allows
 changes and terminal input. `--target local` (the default) runs on this host; an

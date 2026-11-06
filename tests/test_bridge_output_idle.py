@@ -85,6 +85,47 @@ def test_codex_queued_question_count_surfaces_terminal_answer_steps_without_ques
     assert "SENTINEL_PRIVATE_QUESTION" not in str(waiting)
     assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 33 questions") == 0
     assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 1 question\n• Working (turn 4)") == 0
+    assert terminal._codex_queued_question_count("Queued follow-up inputs\n1 of 2\nQuestion text") == 2
+
+
+def test_codex_expanded_question_capture_extracts_only_question_and_choices(monkeypatch) -> None:
+    capture = Path(__file__).parent / "fixtures" / "codex-question-tui-capture.txt"
+    text = capture.read_text(encoding="utf-8")
+    expanded = text.split("State 2: after shift+Left, the question is expanded:\n", 1)[1].split(
+        "With two questions", 1
+    )[0]
+
+    expected = [{
+        "question": "Please unplug the Pi's data/power USB cable, wait 10 seconds, and reconnect it. It stopped answering on Wi-Fi after the requested DHCP renewal; its hostname change is saved, but the interface has not returned. I cannot switch USB power under the mission's power rule. Reply when it is powered again.",
+        "options": ["I'll reconnect it now", "I can't reconnect it right now", "Other"],
+    }]
+    assert terminal._codex_queued_questions(expanded) == expected
+
+    readings = iter([(300, expanded), (301, expanded)])
+
+    class FakeBackend:
+        def pane_activity_screen(self, handle, *, pane, seen_epoch, start_line):
+            return next(readings)
+
+    mission_id = "codex-expanded-question"
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    try:
+        assert terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=100) is None
+        waiting = terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=161)
+        assert waiting is not None
+        assert waiting["questions"] == expected
+        assert "hostname change" in str(waiting["questions"])
+    finally:
+        terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+
+
+def test_codex_question_capture_ignores_collapsed_or_working_state() -> None:
+    collapsed = "• Queued follow-up inputs\n  ? 1 question\n    shift+← to answer\n› Ask Codex to do anything"
+    working = "• Working (turn 5)\n• Queued follow-up inputs\n  Expanded but must not surface"
+
+    assert terminal._codex_queued_questions(collapsed) == []
+    assert terminal._codex_queued_questions(working) == []
 
 
 def test_codex_question_needs_you_explains_live_terminal_answer() -> None:
@@ -92,13 +133,16 @@ def test_codex_question_needs_you_explains_live_terminal_answer() -> None:
 
     result = needs_attention({
         "mission": {"id": "mission-123"},
-        "provider_wait": {"provider": "Codex", "idle_seconds": 61, "question_count": 1},
+        "provider_wait": {
+            "provider": "Codex", "idle_seconds": 61, "question_count": 1,
+            "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
+        },
     })
     assert result == {
         "kind": "provider",
         "tasks": [],
         "command": "llm-bridge attach --mission mission-",
-        "message": "Codex has 1 queued question · take control of the terminal and press Shift+Left to answer: llm-bridge attach --mission mission-",
+        "message": "Codex asks: Choose a path · Choices: 1. Proceed; 2. Wait · take control of the terminal to answer: llm-bridge attach --mission mission-",
     }
     assert "SENTINEL" not in str(result)
     assert bridge_tui._idle_phrase({"output_idle_seconds": 60}) == "no output for 1m"

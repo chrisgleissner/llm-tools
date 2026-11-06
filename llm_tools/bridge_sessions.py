@@ -750,6 +750,136 @@ def provider_session_metadata(
     return None
 
 
+def pending_operator_questions(
+    provider: str,
+    session_id: str,
+    *,
+    cwd: str | os.PathLike[str],
+    max_bytes: int = 2 * 1024 * 1024,
+) -> list[dict[str, object]]:
+    """Return bounded unanswered structured questions from one exact provider session.
+
+    Transcript identity is verified by ``provider_session_metadata`` first. Only
+    the currently unanswered question input fields are returned; tool results,
+    surrounding conversation and malformed/oversized records are discarded.
+    """
+    record = provider_session_metadata(provider, session_id, cwd=cwd)
+    if record is None:
+        return []
+    path = record.path
+    try:
+        info = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
+            return []
+        with open_regular_file(path, follow_symlinks=False) as stream:
+            opened = os.fstat(stream.fileno())
+            if not os.path.samestat(info, opened) or max_bytes <= 0:
+                return []
+            start = max(0, opened.st_size - max_bytes)
+            if start:
+                stream.seek(start)
+                stream.readline()  # discard the possibly partial first record
+            pending: dict[str, list[dict[str, object]]] = {}
+            for _ in range(4096):
+                remaining = opened.st_size - stream.tell()
+                if remaining <= 0:
+                    break
+                line = stream.readline(min(65537, remaining))
+                if not line:
+                    break
+                if len(line) > 65536 or not line.endswith(b"\n"):
+                    continue
+                try:
+                    event = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(event, Mapping):
+                    continue
+                call_id: object = None
+                question_input: object = None
+                if provider == "codex":
+                    payload = event.get("payload")
+                    if not isinstance(payload, Mapping):
+                        continue
+                    if event.get("type") != "response_item":
+                        continue
+                    if payload.get("type") == "function_call" and payload.get("name") == "request_user_input":
+                        call_id = payload.get("call_id")
+                        args = payload.get("arguments")
+                        if isinstance(args, str) and len(args.encode("utf-8", "replace")) <= 8192:
+                            try:
+                                question_input = json.loads(args)
+                            except json.JSONDecodeError:
+                                continue
+                        else:
+                            question_input = args
+                    elif payload.get("type") == "function_call_output":
+                        call_id = payload.get("call_id")
+                        if isinstance(call_id, str):
+                            pending.pop(call_id, None)
+                        continue
+                elif provider == "claude":
+                    message = event.get("message")
+                    if not isinstance(message, Mapping):
+                        continue
+                    content = message.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for part in content[:32]:
+                        if not isinstance(part, Mapping):
+                            continue
+                        if part.get("type") == "tool_use" and part.get("name") == "AskUserQuestion":
+                            call_id = part.get("id")
+                            question_input = part.get("input")
+                            break
+                        if part.get("type") == "tool_result" and isinstance(part.get("tool_use_id"), str):
+                            pending.pop(str(part["tool_use_id"]), None)
+                else:
+                    return []
+                if not isinstance(call_id, str) or not call_id or len(call_id) > 128:
+                    continue
+                questions = _question_fields(question_input)
+                if questions:
+                    pending[call_id] = questions
+            if not pending:
+                return []
+            return list(pending.values())[-1]
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return []
+
+
+def _question_fields(value: object) -> list[dict[str, object]]:
+    """Allowlist provider question fields and impose per-value and aggregate bounds."""
+    if not isinstance(value, Mapping) or not isinstance(value.get("questions"), list):
+        return []
+    result: list[dict[str, object]] = []
+    total = 0
+    if len(value["questions"]) > 5:
+        return []
+    for question in value["questions"]:
+        if not isinstance(question, Mapping):
+            return []
+        prompt = question.get("question")
+        options = question.get("options")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 800 or not isinstance(options, list) or len(options) > 8:
+            return []
+        cleaned_options: list[dict[str, str]] = []
+        for option in options[:8]:
+            if not isinstance(option, Mapping):
+                return []
+            label, description = option.get("label"), option.get("description", "")
+            if not isinstance(label, str) or not label.strip() or len(label) > 160 or not isinstance(description, str) or len(description) > 240:
+                return []
+            cleaned_options.append({"label": label, "description": description})
+            total += len(label) + len(description)
+        header = question.get("header", "")
+        if not isinstance(header, str) or len(header) > 80 or total + len(prompt) + len(header) > 4000:
+            return []
+        total += len(prompt) + len(header)
+        result.append({"header": header, "question": prompt, "options": cleaned_options})
+    return result if result else []
+
+
 def _installed_help(
     provider: str,
     executable: str | None,
