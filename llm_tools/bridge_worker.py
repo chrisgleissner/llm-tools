@@ -72,8 +72,20 @@ def worker_dir(env: dict[str, str] | None = None) -> Path:
     return default_state_dir(env) / "worker"
 
 
+def _make_private_dir(path: Path) -> None:
+    """Create ``path`` and its missing parents as 0700; Bridge refuses a state directory that others can enter.
+
+    ``mkdir(mode=0o700, parents=True)`` applies the mode to the last component only, so the first
+    command on a new host (``worker enroll``, ``remote login``) would otherwise leave the state
+    directory with the default umask mode and every later Bridge command would fail.
+    """
+    from .common import make_private_dirs
+
+    make_private_dirs(path)
+
+
 def _atomic_private_write(path: Path, text: str) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _make_private_dir(path.parent)
     os.chmod(path.parent, 0o700)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".tmp-")
     try:
@@ -119,7 +131,7 @@ def audit(action: str, env: dict[str, str] | None = None, **detail: Any) -> None
     path = worker_dir(env) / AUDIT_FILE
     try:
         with _AUDIT_LOCK:
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _make_private_dir(path.parent)
             if path.exists() and path.stat().st_size > AUDIT_MAX_BYTES:
                 os.replace(path, path.with_name(AUDIT_FILE + ".1"))
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -182,7 +194,8 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
     path = worker_dir(env) / WORKER_FILE
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return WorkerConfig(
+        plain = not str(value["coordinator_url"]).startswith("wss://")  # enrolment enforces this; an edited file must not bypass it
+        config = WorkerConfig(
             worker_id=str(value["worker_id"]), name=str(value["name"]), coordinator_url=str(value["coordinator_url"]),
             token=str(value["token"]), allow_control=bool(value["allow_control"]), max_generation=int(value.get("max_generation", 0)),
             allow_terminal_view=bool(value.get("allow_terminal_view", False)),
@@ -191,6 +204,9 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise WorkerConfigError(f"worker configuration {path} is unreadable: {type(exc).__name__}") from None
+    if plain:
+        raise WorkerConfigError(f"worker configuration {path} must name the coordinator with wss:// (workers never connect without TLS); run llm-bridge worker enroll again")
+    return config
 
 
 def unenroll(env: dict[str, str] | None = None) -> bool:

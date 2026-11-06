@@ -4932,7 +4932,9 @@ def suspend_ledger_path(env: dict[str, str] | None = None) -> Path:
 def _append_ledger(path: Path, record: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), 0o600)  # a ledger created by an older release is tightened too
             fh.write(json.dumps(record, separators=(",", ":")) + "\n")
             fh.flush()
             os.fsync(fh.fileno())

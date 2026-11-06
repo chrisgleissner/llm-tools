@@ -86,11 +86,14 @@ def load(env: dict[str, str] | None = None) -> RemoteConfig:
     path = remote_dir(env) / REMOTE_FILE
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return RemoteConfig(str(value["coordinator_url"]), str(value["token"]))
+        config = RemoteConfig(str(value["coordinator_url"]), str(value["token"]))
     except FileNotFoundError:
         raise RemoteError("no coordinator is configured; run llm-bridge remote login (known targets: local)") from None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise RemoteError(f"remote configuration {path} is unreadable: {type(exc).__name__}") from None
+    if not config.coordinator_url.startswith("https://"):  # login enforces this; an edited file must not bypass it
+        raise RemoteError(f"remote configuration {path} must name the coordinator with https://; run llm-bridge remote login again")
+    return config
 
 
 class Client:
