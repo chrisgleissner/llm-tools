@@ -71,13 +71,15 @@ wake. Stop and cancel are separate explicit operations.
 
 Stopping work
 
-  Command       What happens to the provider                Undo with
-  pause         finishes its current invocation, then waits resume
-  stop          controller stops when the provider exits    start
-  stop --force  provider and controller are ended now       start
-  finish        asked to exit with its own /exit or /quit   (the task goes to REVIEW)
-  task cancel   only that task ends; the mission goes on    nothing: cannot be undone
-  cancel        mission and unfinished tasks end for good   nothing: cannot be undone
+  Command              What happens to the provider                Undo with
+  pause                finishes its current invocation, then waits resume
+  pause --after-task   pauses when the invocation ends, even in a wait  resume
+  stop                 controller stops when the provider exits    start
+  stop --after-task    runs on until the task is completed         start
+  stop --force         provider and controller are ended now       start
+  finish               asked to exit with its own /exit or /quit   (the task goes to REVIEW)
+  task cancel          only that task ends; the mission goes on    nothing: cannot be undone
+  cancel               mission and unfinished tasks end for good   nothing: cannot be undone
 
 cancel asks for confirmation on a terminal and needs --yes in scripts. Repeating
 pause or stop says the mission is already paused or stopped.
@@ -736,10 +738,10 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "proposal reject": ("Reject a pending proposal with a reason", "proposal reject --mission ID --task 1 --reason 'out of scope'"),
     "events": ("Show the newest mission events in plain words, oldest first; controller bookkeeping is hidden unless --verbose. --since 10m limits the age, --follow keeps printing new events, --after ID reads forward from a global event ID", "events --mission ID --limit 20"),
     "start": ("Start working on the mission's tasks with the first provider that has capacity, in the mission's saved mode unless --mode says otherwise", "start --mission ID"),
-    "pause": ("Hold the mission after the provider's current step; never suspends this computer", "pause --mission ID"),
+    "pause": ("Hold the mission after the provider's current step; never suspends this computer. --after-task waits for the provider's current invocation to end instead of pausing now", "pause --mission ID"),
     "resume": ("Allow the controller to continue eligible work", "resume --mission ID"),
     "continue": ("Start the next task now while a reviewed task stays in REVIEW (native missions hold for review by default)", "continue --mission ID"),
-    "stop": ("Stop Bridge's controller for the mission; --force also ends a provider that does not exit by itself", "stop --mission ID"),
+    "stop": ("Stop Bridge's controller for the mission; --force also ends a provider that does not exit by itself. --after-task [N] waits until task N (default: the running task) is completed instead of stopping now", "stop --mission ID"),
     "cancel": ("End this mission and its unfinished tasks for good; cannot be undone, so it asks first (scripts pass --yes); unrelated sessions are unaffected", "cancel --mission ID --yes"),
     "attach": ("Open the mission's station (its provider terminal); starts no provider", "attach --mission ID"),
     "missions": ("List every mission, live ones first; --pick switches to one (in a station: Ctrl-] then M)", "missions --json"),
@@ -905,7 +907,7 @@ def decorate_parser(parser: object) -> None:
             if path == "steer":
                 lines.append(
                     "Other kinds (replace, verify, pause-after-iteration, stop-after-task) still work in older scripts. "
-                    "To replace a task's text use task amend, to check a task use task verify, and to hold the mission use pause."
+                    "To replace a task's text use task amend, to check a task use task verify, and to hold the mission use pause or pause --after-task (stop --after-task for stopping)."
                 )
             current.description = "\n".join(textwrap.fill(line, 78) for line in lines)
             if lazy_defaults is not None:
