@@ -1,14 +1,17 @@
 # Distributed Bridge: final report
 
 Summary: the optional distributed mode for LLM Bridge is implemented on
-`feat/distributed-bridge` (pull request #30). All 169 specification IDs and operator
-addenda 2 to 7 are verified. CI run 42181869238 on c81ccde is green on every job, across
-Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows x86-64 and ARM64. ARM64
-deployment was verified on DietPi arm64 under emulation (QEMU raspi3b TCG, mem=512M),
-for both the native service and the container. A Raspberry Pi Zero 2 W has not been
-measured, because the device was not available while this work ran; it arrives on
-2026-11-06. That verification is the one open follow-up. It does not block any ID, because
-TEST-015 requires only that every figure names its platform.
+`feat/distributed-bridge` (pull request #30). Its original 169 specification IDs and operator
+addenda 2 to 7 remain verified. The unified register now has 247 IDs, including tracking
+requirements and the physical Pi work; current in-progress and blocked rows are listed below.
+CI run 42181869238 on c81ccde is green on every job,
+across Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows x86-64 and ARM64.
+ARM64 deployment was verified under emulation and on the physical Raspberry Pi Zero 2 W.
+The physical board's deployment and coordinator measurements are recorded separately
+from QEMU and derived figures in `benchmarks.md` and `install.md`. The remaining physical
+card-write and operator-only recovery checks are listed as limitations, not reported as
+verified. This report is derived from `SPEC_STATUS.md`; the decisions it cites are in
+`DECISIONS.md`.
 Standalone Bridge is unchanged and opens no network connection. This report is derived
 from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
 
@@ -63,14 +66,14 @@ from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
 ## 2. Specification ID counts
 
 | Status | Count |
-|---|---|
-| Verified `[x]` | 169 |
-| Incomplete `[~]` | 0 |
-| Blocked `[!]` | 0 |
+|---|---:|
+| Verified `[x]` | 225 |
+| Incomplete `[~]` | 15 |
+| Blocked `[!]` | 6 |
+| Not started `[ ]` | 1 |
+| **Total** | **247** |
 
-Operator addenda A1 to A6 and addenda 2 to 7 are verified; `SPEC_STATUS.md` lists
-the evidence for each.
-
+The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete.
 ## 3. Test results and coverage
 
 CI run 42181869238 on c81ccde:
@@ -132,7 +135,7 @@ with a reason.
 | DietPi v10.8.2 arm64, emulated (QEMU raspi3b TCG, mem=512M) | 84/84 Rust tests in the guest. Native service: `install.sh --lan`, in-place upgrade, state kept across `systemctl reboot`. Container: Docker from `dietpi-software`, arm64 image, compose with `compose.low-write.yaml`, administrator setup over HTTPS, host worker with remote commands, state kept across `systemctl reboot`. |
 | macOS ARM64 and Intel | Coordinator, web UI (Playwright), usage tools and remote client in CI. |
 | Windows x86-64 and ARM64 | Coordinator and remote client in CI; web UI (Playwright) on Windows x86-64. |
-| Raspberry Pi Zero 2 W | Not measured. Follow-up, scheduled 2026-11-06. |
+| Raspberry Pi Zero 2 W, physical | Debian 13.7 arm64; physical coordinator deployed and health-checked; Chrome/Firefox HTTPS login; worker control and terminal view verified. ARM64 benchmark values are in `benchmarks.md`. |
 
 Two image builds of the same commit, in separate directories, produced an
 identical OCI archive and identical amd64 and arm64 binaries.
@@ -158,6 +161,11 @@ Details and methods are in `benchmarks.md`; every figure there names its platfor
   memory used is 80 MB of 478 MB with the native service and 146 MB with Docker and
   the container. Time figures from emulation are far slower than real hardware and
   do not predict the Pi.
+- **Raspberry Pi Zero 2 W, physical:** benchmark startup 339 ms, idle RSS 3.3 MiB,
+  peak RSS 22.3 MiB, 5933 events/s, 558 bytes/event; production-container sample
+  19.02 MiB of 96 MiB after login. Host baseline: 462 MiB visible, 325 MiB available,
+  `dockerd` 85 MiB RSS and `containerd` 44 MiB RSS. See `benchmarks.md` for method
+  and the separate production-container diagnostics sample.
 - **Storage writes:** 545 bytes per event and about 68 KiB per command; an idle
   coordinator with one connected worker writes 0 bytes per heartbeat in the 50-second
   test and about 104 KiB per hour in a one-hour run.
@@ -225,10 +233,18 @@ Details and methods are in `benchmarks.md`; every figure there names its platfor
   emulated DietPi. Back up first with `bridge-coordinator backup` and
   `llm-bridge backup`.
 
-## 10. Follow-up
+## 10. Physical verification notes
 
-1. Physical Pi Zero 2 W verification, scheduled 2026-11-06. Open because the device was
-   not available during the work. Steps: load the arm64 image,
-   run the compose flow with `compose.low-write.yaml`, repeat the `benchmarks.md`
-   measurements and the memory-pressure run on the device, and replace the emulated
-   figures in the `install.md` target profile with measured ones.
+The physical deployment and benchmark follow-up is closed by the measured results in
+`benchmarks.md` and the target profile in `install.md`. The device was booted headlessly,
+secured with key-only administration and a LAN firewall, and ran the coordinator with
+volatile logs and a persistent data volume. Desktop Chrome and Firefox trusted the
+coordinator CA and signed in without certificate bypass; the worker reconnected after a
+reboot and a browser terminal view was exercised.
+
+The separate private hardware verification records the remaining items: a full 24-hour
+card-write interval, end-to-end unattended kernel upgrade/reboot (no update was available
+and downgrading the installed kernel was not treated as a safe substitute), physical
+power-loss recovery (requires a person to unplug the Pi), and Android Chrome/Firefox
+checks (the attached phone lacks both browsers). These limitations are not presented as
+verified measurements.
