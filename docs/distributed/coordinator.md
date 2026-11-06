@@ -59,6 +59,38 @@ worker protocol is `protocol.md`.
   answer is `200` with `{"status":"ok"}`, otherwise 1. The whole check is limited to
   3 s. It needs no shell, DNS or other tools, so it works as a container
   `HEALTHCHECK` and in monitoring.
+- `bridge-coordinator check-config [--data-dir DIR] [--web-dir DIR]` validates
+  `config.toml` and the `BRIDGE_COORDINATOR_*` environment variables without binding a
+  port, opening the database or reading the keys. It reports every problem in one run,
+  one line each, in the form
+  `config error: <key> = <value>: <problem>; fix: <what to do>`, and exits 1; for a
+  valid configuration it prints one `config ok: ...` line and exits 0. `serve` runs the
+  same validation before it binds anything and prints the same lines. The checks
+  (`config_check.rs`):
+  - the file must be valid TOML; a syntax error is reported with its line number and
+    stops the other checks, because no keys can be read;
+  - an unknown key is an error. When a known key is within a small edit distance (or
+    the unknown key is the start of a known one, such as `ws_ping_interval`), the line
+    says `did you mean "<key>"?`; otherwise it lists the known keys;
+  - each value must have the right type (`bind` string, `lan_enabled` boolean, limits
+    whole numbers, `allowed_origins` list of strings, `web_dir` string) and range:
+    `max_events_per_worker`, `max_connections`, `max_connections_per_ip` and the
+    `*_secs` keys must be at least 1, `worker_reserve_connections` at least 0, and
+    `ws_idle_timeout_secs` larger than `ws_ping_interval_secs` (compared with the
+    default of the key that is not set);
+  - `bind` must be `ip:port` with a numeric address and a port from 0 to 65535 (a host
+    name is not accepted); a non-loopback `bind` needs `lan_enabled = true`, taking the
+    environment variables into account;
+  - each `allowed_origins` entry must be `scheme://host[:port]` with `http` or `https`
+    and no path; `web_dir` must contain `index.html` (not checked when `--web-dir` is
+    given, as `serve` ignores `web_dir` then);
+  - an environment variable with a bad value is reported under its own name:
+    `BRIDGE_COORDINATOR_BIND` (same rule as `bind`), `BRIDGE_COORDINATOR_LAN_ENABLED`
+    (a boolean), `BRIDGE_COORDINATOR_PUBLIC_PORT` (1 to 65535) and
+    `BRIDGE_COORDINATOR_PUBLIC_NAMES` (each item a DNS name or IP address).
+  Commands other than `serve` and `check-config` (for example `info` and `health`)
+  load the file with the same checks for syntax, keys, types and ranges, but do not
+  require `lan_enabled` or an existing `web_dir`.
 - `bridge-coordinator backup --output FILE` and `restore --input FILE` copy and
   replace the database; the procedure, the files a backup does not contain and the
   restore checks are in `install.md` (Backup and restore).

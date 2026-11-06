@@ -44,7 +44,7 @@ pub async fn start(data_dir: &Path) -> Result<RunningServer, String> {
 
 /// Like [`start`], with an explicit web directory that overrides `web_dir` in `config.toml`.
 pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<RunningServer, String> {
-    let cfg = Config::load(data_dir)?;
+    let cfg = Config::load_checked(data_dir, web_dir.is_some())?;
     let bind = cfg.checked_bind()?;
     let configured = cfg.web_dir.as_ref().map(std::path::PathBuf::from);
     let web_dir = crate::web::resolve_web_dir(web_dir.map(Path::to_path_buf).or(configured).as_deref())?;

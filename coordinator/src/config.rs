@@ -1,5 +1,6 @@
 //! `config.toml` in the data directory.
 
+use crate::config_check::{self, CheckOptions};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -122,36 +123,28 @@ pub fn parse_bool(name: &str, v: &str) -> Result<bool, String> {
 }
 
 impl Config {
+    /// Read and validate `config.toml` with the environment overrides. All problems are reported
+    /// together, one `config error: ...` line each (see `config_check.rs`).
     pub fn load(dir: &Path) -> Result<Config, String> {
+        Self::load_with(dir, CheckOptions::default())
+    }
+
+    /// [`Config::load`] plus the checks that only matter before serving: a non-loopback bind needs
+    /// `lan_enabled`, and `web_dir` must hold an `index.html` unless `--web-dir` replaces it.
+    pub fn load_checked(dir: &Path, web_dir_overridden: bool) -> Result<Config, String> {
+        Self::load_with(
+            dir,
+            CheckOptions {
+                require_lan: true,
+                check_paths: !web_dir_overridden,
+            },
+        )
+    }
+
+    fn load_with(dir: &Path, opts: CheckOptions) -> Result<Config, String> {
         let path = dir.join("config.toml");
         let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e} (run `init` first)", path.display()))?;
-        let mut cfg: Config = toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
-        // Environment variables win over config.toml (container deployments).
-        if let Some(v) = std::env::var_os(ENV_BIND) {
-            cfg.bind = v.to_string_lossy().into_owned();
-        }
-        if let Some(v) = std::env::var_os(ENV_LAN_ENABLED) {
-            cfg.lan_enabled = parse_bool(ENV_LAN_ENABLED, &v.to_string_lossy())?;
-        }
-        if cfg.max_events_per_worker == 0 {
-            return Err("max_events_per_worker must be at least 1".into());
-        }
-        if cfg.max_connections == 0
-            || cfg.max_connections_per_ip == 0
-            || cfg.request_body_timeout_secs == 0
-            || cfg.http_idle_timeout_secs == 0
-            || cfg.ws_ping_interval_secs == 0
-        {
-            return Err(
-                "max_connections, max_connections_per_ip, request_body_timeout_secs, http_idle_timeout_secs and ws_ping_interval_secs must be at least 1"
-                    .into(),
-            );
-        }
-        if cfg.ws_idle_timeout_secs <= cfg.ws_ping_interval_secs {
-            return Err("ws_idle_timeout_secs must be larger than ws_ping_interval_secs".into());
-        }
-        cfg.bind_addr()?;
-        Ok(cfg)
+        config_check::evaluate_env(&text, opts).map_err(|errors| errors.join("\n"))
     }
 
     pub fn bind_addr(&self) -> Result<SocketAddr, String> {

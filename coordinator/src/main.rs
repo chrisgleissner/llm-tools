@@ -13,6 +13,8 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
                                 (no --hostname/--ip: localhost, this machine's host name,
                                  <host>.home.arpa and its non-loopback addresses)
   info                          (URL, CA path and SHA-256, bind address, LAN state)
+  check-config                  (validate config.toml and the BRIDGE_COORDINATOR_* variables; lists every
+                                 error with key, value and fix; exit 0 valid, 1 not; --web-dir as for serve)
   health                        (HTTPS GET /healthz with the local CA; exit 0 healthy, 1 not)
   backup --output FILE | restore --input FILE   (restore needs the server stopped)
   setup-token                   (new setup token; only while no administrator exists)
@@ -124,6 +126,16 @@ async fn run(args: Args) -> Result<(), String> {
         ["init"] => bridge_coordinator::init::init_with(&dir, &sans, args.bind.as_deref()),
         ["info"] => {
             print!("{}", ops::report(&dir, false)?);
+            Ok(())
+        }
+        ["check-config"] => {
+            let cfg = config::Config::load_checked(&dir, args.web_dir.is_some())?;
+            println!(
+                "config ok: {} (bind {}, lan_enabled {})",
+                dir.join("config.toml").display(),
+                cfg.bind,
+                cfg.lan_enabled
+            );
             Ok(())
         }
         ["health"] => {
@@ -280,7 +292,12 @@ async fn main() -> ExitCode {
     match run(args).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            // Configuration errors are complete lines already.
+            if e.starts_with("config error:") {
+                eprintln!("{e}");
+            } else {
+                eprintln!("error: {e}");
+            }
             ExitCode::from(1)
         }
     }
