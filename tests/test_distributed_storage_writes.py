@@ -35,7 +35,8 @@ EVENTS_WRITE_BYTES_BOUND = 1536 * 1024  # measured 0.54 MiB for 1000 events (545
 COMMANDS_WRITE_BYTES_BOUND = 150 * 1024 * 1024  # measured 66-67 MiB for 1000 commands (68 KiB/command: five committed transactions each, a few 4 KiB pages per commit)
 DB_GROWTH_BYTES_PER_EVENT_BOUND = 1024  # measured 527-552 bytes/event of file growth; benchmarks.md has 557-558 over 10 000 events
 DIAGNOSTICS_GROWTH_BYTES_PER_EVENT_BOUND = 2048
-# Idle: a connected worker, pinged every 20 s, and an API client reading the worker list every 5 s.
+# Idle: a connected worker, pinged every 20 s. Authenticated API polling is deliberately excluded
+# because every bearer-token use must become an audit row and is measured by an API contract test.
 # Measured 0 bytes over 50 s (2026-11-05). Before the heartbeat throttle (ws_worker.rs
 # LAST_SEEN_EVERY_SECS) each ping committed a last_seen update: 24-32 KiB in the same window,
 # about 2.2 MiB per worker-hour. The bound allows one small commit (a throttled last_seen or
@@ -134,10 +135,14 @@ def test_one_thousand_command_round_trips_stay_within_the_write_bound(tmp_path, 
         _synced(system, store_path)
         pid = system.coordinator.process.pid
         writes_before = _write_bytes(pid)
+        tokens = system.coordinator.mutation_tokens(34)
 
         def submit(index: int) -> str:
             request = CommandRequest("mission.list", target="ws", request_id=f"storage-{index}")
-            status, body = system.coordinator.request("POST", "/api/v1/commands", {"target": "ws", "request": request.to_json(), "wait_ms": int(scaled(20) * 1000)})
+            status, body = system.coordinator.request(
+                "POST", "/api/v1/commands", {"target": "ws", "request": request.to_json(), "wait_ms": int(scaled(20) * 1000)},
+                token=tokens[index % len(tokens)], source_ip=f"127.0.0.{2 + index % 9}",
+            )
             assert status == 200, body
             return body["state"]
 
@@ -152,14 +157,10 @@ def test_one_thousand_command_round_trips_stay_within_the_write_bound(tmp_path, 
 def test_an_idle_coordinator_with_a_connected_worker_writes_nothing_per_heartbeat(tmp_path, monkeypatch, capsys, block_dir):
     with running_system(tmp_path, monkeypatch, capsys, allow_control=False, data_dir=block_dir / "coordinator") as system:
         _synced(system, system.state / "bridge.sqlite3")
-        status, _ = system.coordinator.request("GET", "/api/v1/workers")  # the token's last_used touch happens here, before measuring
-        assert status == 200
         pid = system.coordinator.process.pid
         writes_before = _write_bytes(pid)
         deadline = time.monotonic() + IDLE_SECONDS  # spans at least two 20-second worker pings
         while time.monotonic() < deadline:
-            status, body = system.coordinator.request("GET", "/api/v1/workers")
-            assert status == 200 and [w["name"] for w in body["workers"]] == ["ws"]
             time.sleep(5)
         written = _write_bytes(pid) - writes_before
         print(f"IDLE write_bytes={written} over {IDLE_SECONDS} s")

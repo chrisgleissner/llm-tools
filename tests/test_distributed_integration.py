@@ -7,6 +7,7 @@ Skipped when the coordinator has not been built (``cargo build`` in
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import re
 import socket
@@ -78,16 +79,43 @@ class Coordinator:
     def run(self, *args: str) -> str:
         return subprocess.run([str(BINARY), *args, "--data-dir", str(self.data)], check=True, capture_output=True, text=True, timeout=scaled(30)).stdout.strip()
 
-    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        *,
+        token: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[int, dict]:
+        headers = {"Authorization": f"Bearer {token or self.api_token}", "Content-Type": "application/json"}
+        encoded = None if body is None else json.dumps(body).encode()
+        if source_ip is not None:
+            connection = http.client.HTTPSConnection(
+                "localhost", self.port, context=self.context, timeout=scaled(30), source_address=(source_ip, 0),
+            )
+            connection.request(method, path, body=encoded, headers=headers)
+            response = connection.getresponse()
+            payload = response.read()
+            status = response.status
+            connection.close()
+            return status, json.loads(payload or b"{}")
         request = urllib.request.Request(
-            f"https://localhost:{self.port}{path}", method=method, data=None if body is None else json.dumps(body).encode(),
-            headers={"Authorization": f"Bearer {self.api_token}", "Content-Type": "application/json"},
+            f"https://localhost:{self.port}{path}", method=method, data=encoded, headers=headers,
         )
         try:
             with urllib.request.urlopen(request, context=self.context, timeout=scaled(30)) as response:
                 return response.status, json.loads(response.read() or b"{}")
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read() or b"{}")
+
+    def mutation_tokens(self, count: int) -> list[str]:
+        """Create distinct admin credentials for stress tests under normal per-token limits."""
+        if count < 1:
+            raise ValueError("at least one token is required")
+        return [self.api_token] + [
+            self.run("token", "create", f"load-{index}", "--scope", "admin") for index in range(1, count)
+        ]
 
     def stop(self) -> None:
         self.process.terminate()

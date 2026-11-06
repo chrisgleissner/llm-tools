@@ -170,9 +170,12 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["type"], "https://llm-tools.dev/problems/mutation-rate-limit");
 
+    let (status, _) = token_api.get("/api/v1/workers").await;
+    assert_eq!(status, 200, "read requests still succeed after the mutation budget is exhausted");
+
     let audit = env.srv.state.db.audit_list(100).unwrap();
     let token_uses: Vec<_> = audit.iter().filter(|row| row["action"] == "token.use").collect();
-    assert_eq!(token_uses.len(), 31);
+    assert_eq!(token_uses.iter().filter(|row| row["actor"] == "token:mutator").count(), 32);
     assert!(token_uses.iter().all(|row| row["actor"] == "token:mutator"));
     assert!(!serde_json::to_string(&token_uses).unwrap().contains(&secret));
     env.stop().await;
