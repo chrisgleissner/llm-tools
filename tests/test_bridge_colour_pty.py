@@ -155,7 +155,8 @@ def test_console_state_glyphs_and_chip_appear_in_a_utf8_locale(seeded, tmp_path)
     env, work = seeded
     env.update(LANG="C.UTF-8", LC_ALL="C.UTF-8")
     screen = tmux_screen(env, work, tmp_path, ["Down", "Enter"])
-    assert screen.splitlines()[0].startswith("LLM BRIDGE · ▌ Überprüfung 日本語 · ○ CREATED")
+    header = screen.splitlines()[0]
+    assert header.startswith("LLM BRIDGE · ▌ Überprüfung 日本語 (") and " · ○ CREATED" in header  # CLIUX-038: the short ID follows the name
     assert "Controller" in screen and "Ctrl-K actions" in screen
 
 
