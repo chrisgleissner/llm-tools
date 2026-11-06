@@ -416,14 +416,31 @@ of the documentation, the coordinator and the installer are hardware-neutral.
 
 Target: Raspberry Pi Zero 2 W (512 MB RAM, ARM64) running DietPi (Debian 13).
 
-**Status: not yet measured on this device.** No figure in this section comes from a
-Raspberry Pi, from ARM64 hardware or from an emulated Pi. All figures are derived from
-the x86-64 measurements in `benchmarks.md` and are labelled as such. Memory use, start
-time and login latency on a Cortex-A53 may differ. The physical device is expected on
-2026-11-06; until it has been measured, treat this section as a starting point and
-verify it with the commands below.
+**Status: measured on an emulated Pi, not yet on the device.** The figures marked
+"emulated" come from pi-sim: QEMU `raspi3b` in TCG mode with `mem=512M` (478 MB
+visible), an unmodified DietPi v10.8.2 image (Debian 13, arm64, kernel 6.18.60). TCG
+runs Cortex-A53 code far slower than the real device, so times are pessimistic; memory
+and bytes written do not depend on the CPU speed. The physical Pi Zero 2 W measurement
+is scheduled for 2026-11-06 and repeats the commands below.
 
-Memory budget (derived from x86-64 container measurements):
+Emulated results (2026-11-06, details in `benchmarks.md`, "ARM64, emulated"):
+
+- Native install with `install.sh --lan`: 9.8 s; rerunning it with a newer binary
+  upgraded the service in 11.7 s and kept the database, keys and administrator. The
+  service starts at boot, uses 3.4-4.6 MiB RSS idle and peaked at 22.2 MiB.
+- Container (Docker 29.9 and Compose 5.7 from `dietpi-software install 162 134`): the
+  arm64 image loads in 7 s; with `compose.low-write.yaml` and LAN publishing the
+  container used 2.4 MiB idle and peaked at 21.7 MiB (cgroup `memory.peak`, including
+  administrator setup and login) under its 96 MiB limit. Host memory in use stayed
+  below 150 MB of 478 MB.
+- Both paths: administrator setup over HTTPS from another machine, a worker on another
+  machine with remote commands, and all state kept across `systemctl reboot`.
+
+DietPi reported a pending kernel upgrade for CVE-2026-98432 in its login message on the
+emulated image. On the physical device run `apt update && apt full-upgrade`, then
+reboot, before installing the coordinator.
+
+Memory budget (derived from x86-64 container measurements; the emulated figures above are lower):
 
 - The container peak was 48.1 MiB RSS (`benchmarks.md`), measured with 30 concurrent
   logins, 200 commands and 1500 replicated events. The shipped limit is 96 MiB, which

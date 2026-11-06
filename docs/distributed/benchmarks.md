@@ -132,6 +132,29 @@ guest; the guest port is forwarded only to the host's loopback):
 | `systemctl restart` to healthy | 1.45 s |
 | `systemctl stop` | 0.21 s |
 | Guest memory used with the service running | 80 MB of 478 MB |
+| `install.sh` rerun with a newer binary (upgrade; database, keys and administrator kept) | 11.7 s |
+| After `systemctl reboot`: service active at boot, RSS / peak | 3.4 MiB / 21.8 MiB |
+
+Container, 2026-11-06, image built from 311538b (`container/build.sh --oci`),
+Docker 29.9.3 and Compose 5.7.0 installed with `dietpi-software install 162 134`,
+`compose.yaml` plus `compose.low-write.yaml` (journald, five-minute health checks),
+published on all guest interfaces and reached through the forwarded port:
+
+| Measurement | Result |
+|---|---|
+| `docker load` of the multi-architecture OCI archive (4.4 MB; arm64 image 8.4 MB) | 7.3 s |
+| `docker compose run --rm coordinator init` | 12.9 s |
+| `docker compose up -d` | 7.0 s |
+| Container memory idle (`docker stats`) | 2.4 MiB of 96 MiB |
+| Container peak (cgroup `memory.peak`) after administrator setup, a login, a worker and remote commands | 21.7 MiB |
+| Guest memory used with Docker and the container running | 146 MB of 478 MB |
+| After `systemctl reboot`: container started by Docker, healthy, state kept | yes (worker reconnected, administrator login and tasks unchanged) |
+
+Starting Docker in this guest first cut its network: Docker's default bridge
+`172.17.0.0/16` overlapped the emulator's own uplink on the outer Docker bridge.
+Setting `bip` and `default-address-pools` in the guest's `/etc/docker/daemon.json`
+fixed it (install.md, Container deployment). This is a property of the emulator setup,
+not of the coordinator.
 
 ## GitHub-hosted ARM64 runner (not a Pi)
 
