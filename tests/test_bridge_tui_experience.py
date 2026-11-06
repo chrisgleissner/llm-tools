@@ -95,7 +95,7 @@ def test_put_sanitizes_controls_without_collapsing_spaces() -> None:
 
 def test_header_uses_dot_separators_and_semantic_status_color() -> None:
     state = make_state(full_snapshot())
-    assert bridge_tui._header(state, 100) == "LLM BRIDGE · ▌ Fix the typo · ◆ NEEDS YOU"
+    assert bridge_tui._header(state, 100) == "LLM BRIDGE · ▌ Fix the typo (M1) · ◆ NEEDS YOU"
     assert bridge_tui._mission_status_role("RUNNING") == "state_running"
     assert bridge_tui._mission_status_role("PAUSED") == "state_paused"
     assert bridge_tui._mission_status_role("FAILED") == "state_failed"
@@ -105,8 +105,8 @@ def test_header_uses_dot_separators_and_semantic_status_color() -> None:
     assert bridge_tui._header(state, 100).endswith("· ‖ PAUSING")  # provider still running
     screen = Screen(34, 100)
     bridge_tui._draw_full(screen, state)  # type: ignore[arg-type]
-    assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo · ‖ PAUSING")
-    assert [w[2] for w in screen.writes[:6]] == ["LLM BRIDGE", " · ", "▌", " Fix the typo", " · ", "‖ PAUSING"]
+    assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo (M1) · ‖ PAUSING")
+    assert [w[2] for w in screen.writes[:7]] == ["LLM BRIDGE", " · ", "▌", " Fix the typo", " (M1)", " · ", "‖ PAUSING"]
 
 
 def test_header_states_before_first_snapshot_and_for_long_names() -> None:
@@ -646,7 +646,7 @@ def test_all_views_fit_without_overflow_or_collapsed_spacing(width: int, full: b
         screen = Screen(height, width)
         (bridge_tui._draw_full if full else bridge_tui._draw_compact)(screen, state)  # type: ignore[arg-type]
         assert all(cell_width(line) <= width for line in screen.lines), view
-        assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo · ◆ NEEDS YOU"), view
+        assert screen.lines[0].startswith("LLM BRIDGE · ▌ Fix the typo (M1) · ◆ NEEDS YOU"), view
         assert "LLM BRIDGE Fix" not in screen.lines[0]
         assert screen.lines[2].lstrip().startswith(("1 Bridge", "< ", "[1 Bridge]")) or "[" in screen.lines[2]
         assert screen.lines[height - 1].rstrip().endswith("? help"), (view, screen.lines[height - 1])

@@ -71,9 +71,9 @@ def test_ascii_header_leaves_out_the_identity_bar_so_it_cannot_read_as_two_separ
     state = make_state(full_snapshot(), view="Overview")
     _set_mode(monkeypatch, "ascii")
     header = bridge_glyphs.localize(bridge_tui._header(state, 100))  # the draw code localizes every segment
-    assert "| |" not in header and header.startswith("LLM BRIDGE | Fix the typo | ")
+    assert "| |" not in header and header.startswith("LLM BRIDGE | Fix the typo (M1) | ")
     _set_mode(monkeypatch, "utf8")
-    assert bridge_tui._header(state, 100).startswith("LLM BRIDGE · ▌ Fix the typo · ")
+    assert bridge_tui._header(state, 100).startswith("LLM BRIDGE · ▌ Fix the typo (M1) · ")
     bridge_glyphs.ascii_mode.cache_clear()
 
 

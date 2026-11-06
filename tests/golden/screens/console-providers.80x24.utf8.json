@@ -5,7 +5,7 @@
   "cursor": null,
   "cursor_visible": false,
   "rows": [
-    "LLM BRIDGE · ▌ Release 2.0 hardening · ◆ NEEDS YOU",
+    "LLM BRIDGE · ▌ Release 2.0 hardening (9a3c51e0) · ◆ NEEDS YOU",
     "■ codex · task 4 running 20m · 5h 62% left · week 31% left",
     "Overview  Tasks  [Providers]  Activity  Sessions  Health  Actions  Usage  Agents",
     "  Viewing codex · last launched codex · operation 5eed0005 RUNNING",
@@ -31,7 +31,7 @@
     "Enter mark viewed · ↑↓ select · Tab/F1-9 views · Ctrl-D exit · ? help"
   ],
   "segments": [
-    [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " · ", "dim"], [39, "◆ NEEDS YOU", "state_review"]],
+    [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " (9a3c51e0) · ", "dim"], [50, "◆ NEEDS YOU", "state_review"]],
     [[0, "■", "provider_codex"], [1, " codex · task ", "info"], [15, "4", "muted"], [16, " ", "info"], [17, "running", "state_running"], [24, " 20m · 5h ", "info"], [34, "62%", "capacity_ok"], [37, " left · week ", "info"], [50, "31%", "capacity_ok"], [53, " left", "info"]],
     [[0, "Overview  Tasks  ", "muted"], [17, "[Providers]", "accent"], [28, "  Activity  Sessions  Health  Actions  Usage  Agents", "muted"]],
     [[2, "Viewing codex · last launched codex · operation 5eed0005 ", "muted"], [59, "RUNNING", "state_running"]],

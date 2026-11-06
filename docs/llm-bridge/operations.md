@@ -339,7 +339,9 @@ llm-bridge task approve --mission MISSION_ID --task N \
 To send a task back instead, give a reason. The task is queued for another
 attempt and its next prompt quotes the reason. The retry starts at once when a
 controller is running and uses paid capacity, and the receipt says so. Add
-`--hold` to keep the task paused instead (resume it with `task resume`):
+`--hold` to keep the task paused instead (resume it with `task resume`). In the
+console, `/reject N REASON` asks for confirmation with two choices: `Y` rejects
+and retries, `H` rejects and holds (the same as `--hold`):
 
 ```bash
 llm-bridge task reject --mission MISSION_ID --task N --reason "tests were not run"
@@ -658,7 +660,14 @@ CLI form: `llm-bridge steer --mission ID --kind KIND`, with `--task N`
 `--to PROVIDER` (older name `--route`), and `--file PATH` or `--prompt TEXT` as
 required by that kind. `llm-bridge steer --help` lists only `handoff` and
 `review`. The other kinds still work for older scripts, but have their own
-commands: `task amend` (replace), `task verify` (verify) and `pause`.
+commands: `task amend` (replace), `task verify` (verify), `pause`, and
+`pause --after-task` and `stop --after-task [N]` for the two boundary kinds.
+`pause --after-task` stores the same intent as `steer --kind pause-after-iteration`
+(the mission pauses when the provider's current invocation ends, also during a
+wait for capacity). `stop --after-task [N]` stores the same intent as
+`steer --kind stop-after-task --task N`; without N it waits for the task that
+is running now. It cannot be combined with `--force`. The steer spellings remain
+hidden aliases.
 See `llm-bridge steer --help` and `steer help` in the console for the live
 syntax.
 
@@ -910,7 +919,10 @@ preserve its process identity.
 Each mission has an identity colour, one of eight hues (teal, azure, blue, indigo, violet,
 magenta, pink, slate) chosen from its ID. It appears as a `▌`
 chip before the mission name in the console header, the home list and the
-mission picker, and as the filled label in the tmux station's status row.
+mission picker, and as the filled label in the tmux station's status row. The
+console header also shows the mission's short ID after the name, `(9a3c51e0)`,
+so two missions with the same name stay distinguishable without the colour (the
+ID is left out only on a very narrow terminal).
 `llm-bridge mission colour [--mission ID] N|auto` pins a hue (1-8) or returns
 to the automatic one. `[bridge.theme.roles] mission_1 = "#5f87ff"` in the
 llm-tools config changes a hue. `llm-bridge theme` previews the palette.

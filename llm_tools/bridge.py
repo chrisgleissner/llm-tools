@@ -363,6 +363,20 @@ def _resolve_task(store: BridgeStore, mission_id: str, number: int | None, by_id
     return store.task_by_ordinal(mission_id, int(number))
 
 
+def _after_task_target(store: BridgeStore, mission_id: str, number: int) -> dict[str, Any]:
+    """The task ``stop --after-task [N]`` waits for: task N, or the task that is running now."""
+    if number:
+        task = store.task_by_ordinal(mission_id, number)
+    else:
+        running = store.db.execute("SELECT id FROM tasks WHERE mission_id=? AND status='RUNNING' ORDER BY ordering,id LIMIT 1", (mission_id,)).fetchone()
+        if running is None:
+            raise ValueError("no task is running now; name the task to wait for, e.g. llm-bridge stop --after-task 1")
+        task = store.get_task(int(running[0]))
+    if task["status"] in {"COMPLETED", "CANCELLED"}:
+        raise ValueError(f"task {task['ordinal']} is already {str(task['status']).lower()}; there is nothing to wait for (use llm-bridge stop)")
+    return dict(task)
+
+
 def _dependency_ids(store: BridgeStore, mission_id: str, raw: str) -> list[int]:
     """Global IDs for a comma-separated list of the mission's task numbers."""
     ids: list[int] = []
@@ -1644,8 +1658,11 @@ def _build_parser(
             cmd.add_argument("--native", dest="native_tui", action="store_true", default=None, help=argparse.SUPPRESS)
             cmd.add_argument("--providers", metavar="LIST", help="comma-separated providers to rotate through; changes the mission's saved rotation for this and later starts, and the receipt says so (default: the saved rotation)")
             cmd.add_argument("--routes", metavar="LIST", help="comma-separated route IDs to rotate through; changes the mission's saved rotation for this and later starts, and the receipt says so (default: the saved rotation)")
+        if action == "pause":
+            cmd.add_argument("--after-task", dest="after_task", action="store_true", help="do not pause now: let the provider finish its current invocation, then pause (the same intent as the older steer --kind pause-after-iteration; also applies while the mission waits for capacity)")
         if action == "stop":
             cmd.add_argument("--force", action="store_true", help="terminate owned provider work and the controller now instead of waiting for the provider to exit")
+            cmd.add_argument("--after-task", dest="after_task", nargs="?", type=int, const=0, default=None, metavar="TASK", help="do not stop now: stop once task TASK is completed (default: the task that is running now); the same intent as the older steer --kind stop-after-task")
         if action == "cancel":
             cmd.add_argument("--yes", action="store_true", help="confirm without asking; required when there is no terminal to ask on (scripts). Cancelling ends the mission for good and cannot be undone")
         _add_json_arg(cmd)
@@ -3062,6 +3079,22 @@ def _main(argv: list[str] | None = None) -> int:
             if result.get("status") == "REJECTED":
                 return _fail_rejected(result, "continue rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("continue", value, args.mission))
+            return 0
+        after_task = getattr(args, "after_task", None)  # pause: a flag; stop: None, or a task number (0 = the running task)
+        if args.command in {"pause", "stop"} and after_task is not None and after_task is not False:
+            if args.command == "stop" and args.force:
+                raise ValueError("--after-task and --force cannot be combined: --force ends the work now")
+            with open_store() as store:
+                steer_payload: dict[str, Any] = {"action": "steer", "kind": "pause-after-iteration" if args.command == "pause" else "stop-after-task"}
+                if args.command == "stop":
+                    task = _after_task_target(store, args.mission, int(after_task))
+                    steer_payload["task_id"] = int(task["id"])
+                result = _apply_operator_command(store, args.mission, steer_payload)
+                if args.command == "stop" and isinstance(result.get("result"), dict):
+                    result["result"]["task_ordinal"] = task["ordinal"]
+            if result.get("status") == "REJECTED":
+                return _fail_rejected(result, f"{args.command} --after-task rejected", args.json)
+            _print_result(result, args.json, lambda value: fmt.format_command_receipt(f"{args.command}-after-task", value, args.mission))
             return 0
         if args.command in {"pause", "stop", "cancel"}:
             with open_store() as store:

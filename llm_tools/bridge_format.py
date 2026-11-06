@@ -518,6 +518,11 @@ def format_command_receipt(command: str, result: dict[str, Any], mission_id: str
         number = inner.get("task_ordinal", inner.get("task_id"))
         target = f" task {number}" if number is not None else ""
         return f"Steering {inner.get('kind', '')}{target} · {inner.get('status', 'APPLIED')}"
+    if command == "pause-after-task":
+        return f"Pause scheduled · mission {mid} pauses when the provider finishes its current invocation; nothing is interrupted"
+    if command == "stop-after-task":
+        number = inner.get("task_ordinal", inner.get("task_id"))
+        return f"Stop scheduled · mission {mid} stops once task {number} is completed (approved, when it needs review); nothing is interrupted"
     if command == "continue" and inner.get("detail"):
         return str(inner["detail"])
     verb = {"pause": "Pause", "resume": "Resume", "stop": "Stop", "cancel": "Cancel"}.get(command, command.capitalize())
