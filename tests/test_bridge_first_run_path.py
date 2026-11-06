@@ -149,9 +149,10 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
         assert "Provider exited (status 0)" in exited
     else:
         # tmux < 3.5 does not expose pane_dead_status, so the station footer
-        # cannot safely claim that the provider exited successfully or show
-        # its review hint. It keeps the generic route to Bridge controls.
-        terminal.wait_for("Ctrl-] then B for Bridge controls")
+        # may omit its exit hint entirely. The Bridge pane still shows the
+        # review state and the always-visible route to its approval controls.
+        screen = terminal.wait_for("VERIFYING")
+        assert "Bridge: Ctrl-] then B" in screen
     assert (repo / "hello.txt").read_text() == "hello\n"
 
     # 5. Bridge controls point at /approve; the confirmation shows what is approved.
