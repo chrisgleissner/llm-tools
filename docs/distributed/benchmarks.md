@@ -277,12 +277,47 @@ Reading the figures:
   left alone. Do not lower `synchronous` to save writes: it is what keeps
   acknowledged commands and replicated events across a power loss.
 
-## Raspberry Pi Zero 2 W
+## Raspberry Pi Zero 2 W (physical)
 
-Not measured on the device (hardware arrives 2026-11-06). The emulated ARM64
-figures above show the memory behaviour on the same CPU architecture; their time
-figures must not be read as Pi Zero 2 W performance. The sizing that `install.md` gives for it (Raspberry Pi Zero 2 W
-target profile) is derived from the x86-64 figures and is labelled as such there.
+Hardware: Raspberry Pi Zero 2 W Rev 1.0, Debian 13.7 (DietPi v10.8.2), ARM64,
+`6.18.60+rpt-rpi-v8`, four Cortex-A53 cores, 462 MiB visible RAM. Measurements were
+collected on 2026-11-06 on the physical board.
+
+Method: the release benchmark test in `coordinator/tests/bench.rs` was cross-compiled
+on the desktop for `aarch64-unknown-linux-musl`, copied to `/tmp` on the Pi, and run
+natively there. The test's data directory was under `/tmp` (tmpfs), so its benchmark
+writes did not reach the microSD. This is a physical ARM64 CPU measurement of the
+coordinator binary; the isolated harness process itself was outside Docker. A second
+attempt to run the harness in a 96 MiB temporary container did not become healthy in
+30 seconds and produced no measurements, so no container cgroup peak is claimed from
+that attempt.
+
+| Measurement | Result |
+|---|---|
+| Startup to `/healthz` | 339 ms |
+| Idle RSS (2 s after healthy) | 3.3 MiB |
+| RSS after administrator setup and one login | 3.5 MiB |
+| RSS after 1000 events | 5.8 MiB |
+| Peak RSS (`VmHWM`) up to and including the 1000-event load | 22.3 MiB |
+| RSS after 10 000 events | 20.8 MiB |
+| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 2.15 / 2.25 ms |
+| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 3.11 / 3.67 ms |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 5933 events/s |
+| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 16.4 / 42.1 ms |
+| Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
+
+Physical host baseline before starting containers: 462 MiB RAM visible, 325 MiB
+available, load averages 0.08 / 0.07 / 0.05, CPU 91.2% idle and 1.8% I/O wait in
+one `top -bn1` sample; `dockerd` RSS 85 MiB and `containerd` RSS 44 MiB. The running
+coordinator deployment later reported 19.02 MiB / 96 MiB in `docker stats` after
+browser login and a diagnostics RSS of 20 572 KiB. These are different measurements
+and are reported separately. The 96 MiB limit remains appropriate: the physical
+harness peak was 23.3% of that limit and the deployed container sample was below it.
+
+The production container used a one-CPU limit, `mem_limit=memswap_limit=96m`,
+`journald` logging, a 60-second health interval and `restart: unless-stopped`. Its
+persistent Docker volume remained on the card. The physical board's 24-hour card-write
+measurement is still pending; do not infer it from the harness, which ran from tmpfs.
 
 ## Web interface: bundle size and initial load (Pixel 4 emulation, x86-64 host)
 

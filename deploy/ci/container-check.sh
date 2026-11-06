@@ -26,6 +26,40 @@ base=https://localhost:$BRIDGE_PORT
 curlc() { curl -sS --max-time 20 --cacert "$work/ca.pem" "$@"; }
 
 container_id() { dc ps -q coordinator; }
+check_web_permissions() {
+    id=$(container_id)
+    [ -n "$id" ] || fail "coordinator container is missing before web permission check"
+    docker export --output "$work/rootfs.tar" "$id" || fail "could not export the coordinator root filesystem"
+    python3 - "$work/rootfs.tar" <<'PY' || fail "web asset directories are not traversable or files are not readable by UID 65532"
+import sys
+import tarfile
+
+root = "usr/share/bridge-coordinator/web"
+required_dirs = {
+    "usr",
+    "usr/share",
+    "usr/share/bridge-coordinator",
+    root,
+}
+with tarfile.open(sys.argv[1], "r:") as archive:
+    members = {member.name.rstrip("/"): member for member in archive.getmembers()}
+    missing = sorted(path for path in required_dirs if path not in members or not members[path].isdir())
+    bad_dirs = sorted(
+        path for path, member in members.items()
+        if path == root or path.startswith(root + "/")
+        if member.isdir() and member.mode & 0o005 != 0o005
+    )
+    web_files = [
+        member for path, member in members.items()
+        if path.startswith(root + "/") and member.isfile()
+    ]
+    unreadable = sorted(member.name for member in web_files if member.mode & 0o004 == 0)
+    if missing or bad_dirs or unreadable or not web_files:
+        print(f"missing_dirs={missing}; bad_dirs={bad_dirs}; unreadable={unreadable}; files={len(web_files)}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+    say "| Web asset directories traversable and files readable by UID 65532 | yes |"
+}
 wait_healthy() { # prints seconds to healthy
     start=$(now)
     for _ in $(seq 1 240); do
@@ -68,6 +102,7 @@ dc down -v --timeout 20 >/dev/null 2>&1 || true
 dc run --rm coordinator init >"$work/init.out"
 t0=$(now)
 dc up -d
+check_web_permissions
 dc cp coordinator:/data/ca.pem "$work/ca.pem"
 https_s=$(wait_https)
 

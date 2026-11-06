@@ -645,3 +645,4 @@ Full-row acceptance: isolated attached rawfakechild verifiedstatusoff gives
 Operations guide documents standardtmuxstatuscommands. ff5bc4c documentation
 head passedbothCI matricesandCodeCov; finaldocumentationfollow-up changesno
 production/tests. Next: exact-headCI, mergePR27, tagmergedcommit1.2.0.
+2026-11-06T12:44Z | REPO-004 | Fixed coordinator web asset permissions: COPY now preserves traversable directory modes; added a compose test and a built-rootfs permission check to the container smoke test for UID 65532. | Focused compose tests passed (3 passed); cross-platform image build completed. | Run the container smoke check, then deploy after host setup.
