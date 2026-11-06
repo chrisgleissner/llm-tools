@@ -1,12 +1,16 @@
 # Distributed Bridge: final report
 
 Summary: the optional distributed mode for LLM Bridge is implemented on
-`feat/distributed-bridge` and verified on Linux x86-64. Of 169 specification
-IDs, 163 are verified and 6 are blocked. All 6 blocked IDs need ARM64 execution
-or Raspberry Pi Zero 2 W measurements, which could not run on this host: the
-emulated Pi (pi-sim) did not answer SSH, and the hardware arrives on 2026-11-06.
-Standalone Bridge is unchanged and opens no network connection. This report is
-derived from `SPEC_STATUS.md`. The decisions it refers to are in `DECISIONS.md`.
+`feat/distributed-bridge` (pull request #30). All 169 specification IDs and operator
+addenda 2 to 7 are verified. CI run 42181869238 on c81ccde is green on every job, across
+Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows x86-64 and ARM64. ARM64
+deployment was verified on DietPi arm64 under emulation (QEMU raspi3b TCG, mem=512M),
+for both the native service and the container. A Raspberry Pi Zero 2 W has not been
+measured, because the device was not available while this work ran; it arrives on
+2026-11-06. That verification is the one open follow-up. It does not block any ID, because
+TEST-015 requires only that every figure names its platform.
+Standalone Bridge is unchanged and opens no network connection. This report is derived
+from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
 
 ## 1. Implementation summary
 
@@ -28,43 +32,67 @@ derived from `SPEC_STATUS.md`. The decisions it refers to are in `DECISIONS.md`.
   coordinator URL, CA and API token. `llm-bridge --target WORKER COMMAND` runs a
   command on that worker, and `worker list` shows the registered workers. An
   unknown or offline target fails; it never falls back to local execution.
-- **Coordinator** (`coordinator/`, Rust: axum, rustls with ring, SQLite,
-  Argon2id). It keeps the worker index and the replicated events, relays
-  commands and terminal sessions, serves the browser UI and handles one
-  administrator login. It binds to loopback by default.
-- **Browser UI** (`web/`, TypeScript, xterm.js). It has these views: overview,
-  workers, missions, mission detail with tasks, approvals, lifecycle controls
-  and a terminal, sessions, provider usage, diagnostics and account.
+- **Coordinator** (`coordinator/`, Rust 1.99.1 pinned in `rust-toolchain.toml`:
+  axum, rustls with ring, SQLite with WAL and `synchronous=FULL`, Argon2id). It
+  keeps the worker index and the replicated events, relays commands and terminal
+  sessions, serves the browser UI and handles one administrator login. It binds to
+  loopback by default.
+- **Browser UI** (`web/`, TypeScript, xterm.js, no UI framework). Views: overview,
+  workers, missions, mission detail with tasks, approvals, lifecycle controls and a
+  terminal, sessions, provider usage, diagnostics and account. Setup, sign-in,
+  remember-device and account flows; phone layouts with touch targets of at least
+  44 px and a terminal key bar. A live refresh keeps keyboard focus on the element
+  that had it.
 - **Deployment.** The container image is `FROM scratch`, holds static musl
   binaries for amd64 and arm64, runs as non-root with a read-only root
   filesystem and has a health check. The compose file publishes only on
   loopback by default. The alternative is a hardened systemd unit installed by
   `install.sh`. Backup and restore exist for both the worker and the
   coordinator.
+- **Low-write hosts** (operator addendum 6). `container/compose.low-write.yaml`
+  switches logging to journald (`BRIDGE_LOG_DRIVER`) and health checks to every
+  five minutes (`BRIDGE_HEALTHCHECK_INTERVAL`); the defaults in `compose.yaml` are
+  unchanged. The coordinator no longer commits a write for every worker heartbeat:
+  `last_seen` is written at most every 10 minutes and session and token touches at
+  most every 5 minutes, while `synchronous=FULL` is kept. The API reports a
+  connected worker as seen now. `install.md` has a hardware-neutral "Low-write host"
+  section.
+- **Project site** (operator addendum 5). `docs/site` has a section on the web
+  console with screenshots, and its copy states the platform scope below.
 
 ## 2. Specification ID counts
 
 | Status | Count |
 |---|---|
-| Verified `[x]` | 163 |
+| Verified `[x]` | 169 |
 | Incomplete `[~]` | 0 |
-| Blocked `[!]` | 6: COORD-001, COORD-003, OPS-001, TEST-013, TEST-014, CONV-012 |
+| Blocked `[!]` | 0 |
 
-Operator addendum: A1 and A3 are verified. A2 and A5 are done on x86-64 and in
-the documentation, but have no ARM64 measurement. A4 (emulated Pi) is blocked.
+Operator addenda A1 to A6 and addenda 2 to 7 are verified; `SPEC_STATUS.md` lists
+the evidence for each.
 
 ## 3. Test results and coverage
 
-Final gate on commit 51a1824:
+CI run 42181869238 on c81ccde:
 
-- Python: 4181 passed, 18 skipped, 0 failed. Coverage is 92% total (gate 85%)
-  and 94% for the Bridge modules (gate 90%). mypy reports no issues.
-- Rust: `cargo fmt`, `clippy -D warnings`, and `cargo test` with 84 passed.
-- Browser: Playwright 68/68 on chromium-desktop, chromium-mobile,
-  firefox-desktop and firefox-mobile, including axe accessibility checks.
+- Python on Linux x86-64 (3.11 and 3.15): full suite. Coverage is 92% total (gate
+  85%) and 94% for the Bridge modules (gate 90%). mypy reports no issues.
+- Python on Linux ARM64 against the ARM64 coordinator binary; on macOS ARM64 and
+  Intel with the documented platform skips (section 4); on Windows x86-64 and
+  ARM64, the `WINDOWS_TESTS` allowlist in `.github/workflows/test.yml`.
+- Rust: `cargo fmt`, `clippy -D warnings`, `cargo test` and a release build on all
+  six platforms.
+- Browser: Playwright on chromium-desktop, chromium-mobile (Pixel 4),
+  firefox-desktop and firefox-mobile on Linux; Chromium and Firefox on macOS and
+  Windows. 118 screenshot baselines cover every page and state in both themes and
+  are compared in the Playwright container image. axe reports no violations in any
+  state. The bundle budget (`web/budget.json`) and the Pixel 4 load time with 4x
+  CPU throttling are enforced.
+- ARM64 container: built natively on the GitHub-hosted ARM64 runner, smoke test,
+  memory limits and the benchmark harness within 512 MB and one CPU.
 - No existing test lost lines.
 
-The distributed tests cover the following:
+The distributed tests cover:
 
 - registration, discovery, remote control, approvals, events, reconnection and
   terminal access;
@@ -74,46 +102,65 @@ The distributed tests cover the following:
 - seeded fuzzing of the protocol, of every operation's parameters and of
   redelivery and reconciliation;
 - route authentication;
-- offline operation in a network namespace with only loopback.
+- offline operation in a network namespace with only loopback;
+- unreliable Wi-Fi through a fault-injecting proxy (`tests/fault_proxy.py`);
+- storage-write bounds, including an idle coordinator with a connected worker,
+  which writes nothing per heartbeat.
 
-## 4. Platform verification
+## 4. Platform support and verification
+
+Platform scope is decision D8:
+
+| Component | Linux | macOS | Windows |
+|---|---|---|---|
+| Coordinator and web interface | supported | supported | supported |
+| Remote client (`--target`, `remote`, `worker list`) | supported | supported | supported |
+| Standalone Bridge: tmux station, console | supported | not supported | not supported |
+| `llm-usage`, `llm-scheduler`, `ralph-robin` | supported | supported, without systemd suspend or RTC wake | not supported |
+| Mission controller, verifier, force-stop, `worker run` | supported | not supported (needs Linux procfs) | not supported |
+
+On Windows, every other `llm-bridge` command exits with status 2 and one line, or
+with `--json` returns the error code `unsupported-platform`. On macOS, 41
+real-terminal and tmux tests timed out or rendered differently (CI run
+42159627299); the console and station were not ported, and those tests are skipped
+with a reason.
 
 | Platform | Result |
 |---|---|
-| Linux x86-64, native | Standalone, worker, remote CLI and coordinator verified. |
-| Linux x86-64, container (rootless Docker 29.9) | Verified: `init` and repeated `init`, health check, loopback-only publishing, administrator setup, workers and tokens through `exec`, a native worker, backup and restore, password reset, certificate renewal, restart, SIGTERM stop. |
-| Linux ARM64 | Cross-built only: static musl binary and image, reproducible. Not executed (blocked). |
-| Raspberry Pi Zero 2 W, DietPi | Not measured (blocked). `install.md` has a target-profile section with sizing derived from the x86-64 measurements. |
-| macOS | Not tested; no macOS host. |
+| Linux x86-64, native and container | All components (CI and host runs). |
+| Linux ARM64, GitHub-hosted runner (not a Pi) | Coordinator tests, Python suite against the ARM64 binary, container smoke test, memory limits, benchmark within 512 MB and one CPU. |
+| DietPi v10.8.2 arm64, emulated (QEMU raspi3b TCG, mem=512M) | 84/84 Rust tests in the guest. Native service: `install.sh --lan`, in-place upgrade, state kept across `systemctl reboot`. Container: Docker from `dietpi-software`, arm64 image, compose with `compose.low-write.yaml`, administrator setup over HTTPS, host worker with remote commands, state kept across `systemctl reboot`. |
+| macOS ARM64 and Intel | Coordinator, web UI (Playwright), usage tools and remote client in CI. |
+| Windows x86-64 and ARM64 | Coordinator and remote client in CI; web UI (Playwright) on Windows x86-64. |
+| Raspberry Pi Zero 2 W | Not measured. Follow-up, scheduled 2026-11-06. |
 
 Two image builds of the same commit, in separate directories, produced an
 identical OCI archive and identical amd64 and arm64 binaries.
 
 ## 5. Measured performance and resources
 
-All figures are from an x86-64 host (i7-6700K); details are in
-`benchmarks.md`.
+Details and methods are in `benchmarks.md`; every figure there names its platform.
 
-- **Native process:**
-  - startup to healthy in 47 ms;
-  - idle RSS 6.2 MiB;
-  - RSS 29.9 MiB after 10 000 events;
-  - API p50/p95 of 0.29/0.36 ms for reads and 0.52/0.84 ms for commands;
-  - about 40 000 events per second ingested;
-  - reconnect p50/p95 of 5.2/10.3 ms;
-  - 557 bytes of database per event.
-- **Container:**
-  - image size 6.44 MB;
-  - 1.5 MiB RSS before the first login;
-  - peak 48.1 MiB with 30 concurrent logins, 200 concurrent commands and
-    1500 events;
-  - shipped memory limit 96 MiB.
-- **Memory pressure:**
-  - A login burst peaks at about 42 MiB, because two Argon2id hashes run at
-    once.
-  - At limits of 48 MiB and above, no restart occurred.
-  - At 40 MiB and below, the process aborted during concurrent logins. Docker
-    restarted it and it kept its data.
+- **x86-64 host, native:** startup to healthy in 47 ms; idle RSS 6.2 MiB; 29.9 MiB
+  after 10 000 events; API p50/p95 0.29/0.36 ms for reads and 0.52/0.84 ms for
+  commands; about 40 000 events per second; reconnect p50/p95 5.2/10.3 ms;
+  557 bytes of database per event.
+- **x86-64 container:** image 6.44 MB; peak 48.1 MiB with 30 concurrent logins,
+  200 concurrent commands and 1500 events; shipped memory limit 96 MiB. At limits of
+  48 MiB and above no restart occurred; at 40 MiB and below the process aborted
+  during concurrent logins, and Docker restarted it with its data intact.
+- **GitHub-hosted ARM64 runner, 512 MB and one CPU:** startup 32 ms; idle RSS
+  5.0 MiB; peak 25.3 MiB; 67 550 events per second; container `memory.peak`
+  40.9 to 41.1 MiB under a login burst at 96, 64 and 48 MiB limits, with no restart
+  and no OOM kill.
+- **DietPi arm64, emulated:** idle RSS 3.2 MiB; peak 22.1 MiB (harness),
+  22.2 MiB (native service) and 21.7 MiB (container); 558 bytes per event. Guest
+  memory used is 80 MB of 478 MB with the native service and 146 MB with Docker and
+  the container. Time figures from emulation are far slower than real hardware and
+  do not predict the Pi.
+- **Storage writes:** 545 bytes per event and about 68 KiB per command; an idle
+  coordinator with one connected worker writes 0 bytes per heartbeat in the 50-second
+  test and about 104 KiB per hour in a one-hour run.
 
 ## 6. Security verification
 
@@ -123,17 +170,14 @@ All figures are from an x86-64 host (i7-6700K); details are in
   findings except M4 are fixed, and each fix has a test that fails when the fix
   is reverted. M4 is accepted and documented: control mode lets a remote
   administrator make the provider agent run commands. The findings and their
-  handling are in `DECISIONS.md` D7. The fixes include:
-  - a login limiter that cannot be bypassed by concurrent requests;
-  - a name-constrained local CA;
-  - API tokens that expire;
-  - connection and body limits;
-  - the `__Host-` session cookie;
-  - terminal access as a separate opt-in;
-  - generation fencing.
+  handling are in `DECISIONS.md` D7. The fixes include a login limiter that
+  concurrent requests cannot bypass, a name-constrained local CA, expiring API
+  tokens, connection and body limits, the `__Host-` session cookie, terminal access
+  as a separate opt-in, and generation fencing.
+- Server certificates pass strict X.509 verification (Python 3.15
+  `VERIFY_X509_STRICT`: key usage, authority and subject key identifiers).
 - Every coordinator route is tested without credentials and with invalid ones.
-- `cargo audit` and `npm audit` report no vulnerabilities. The unmaintained
-  `rustls-pemfile` crate was replaced.
+- `cargo audit` and `npm audit` report no vulnerabilities.
 
 ## 7. Architecture deviations
 
@@ -147,6 +191,8 @@ All figures are from an x86-64 host (i7-6700K); details are in
   enforces both itself, independent of the coordinator (D5, D7).
 - No worker container image is provided, so provider credentials stay out of
   container configuration (D6).
+- The Bridge console, station, controller and worker are Linux-only; macOS and
+  Windows support the subsets in section 4 (D8).
 
 ## 8. Known limitations
 
@@ -157,37 +203,32 @@ All figures are from an x86-64 host (i7-6700K); details are in
 - If the coordinator's names change after `init` and the new names are outside
   the CA's name constraints, the operator must run `cert new-ca`. Browsers and
   workers then need the new CA.
-- ARM64 and Pi Zero 2 W behaviour is not measured.
-- macOS is untested.
+- If the host LAN or another Docker network overlaps 172.17.0.0/16, Docker's
+  default bridge must be moved with `bip` and `default-address-pools`
+  (`install.md`).
+- Run either the native service or the container on one host, not both; both use
+  port 8443.
 
 ## 9. Installation and upgrade
 
-- **Coordinator:**
-  - Container (recommended): run `container/build.sh`, then use
-    `container/compose.yaml`.
-  - Native: use `deploy/install.sh` with the systemd unit.
-  - Instructions for both, plus certificate trust, backup, restore and
-    recovery, are in `install.md`.
-- **Workers:** run `llm-bridge worker enroll`, then
-  `llm-bridge worker install-service`. Operation and troubleshooting are in
-  `operations.md`.
-- **Upgrade:**
-  - Container: replace the image and run `docker compose up -d`. The `/data`
-    volume keeps all state, and the database schema migrates on start.
-  - Native: run `install.sh` again; it is idempotent.
-  - Back up before an upgrade with `bridge-coordinator backup` and
-    `llm-bridge backup`.
+- **Coordinator:** container (recommended) with `container/build.sh` and
+  `container/compose.yaml`, plus `compose.low-write.yaml` on flash storage; or
+  native with `deploy/install.sh` and the systemd unit. `install.md` covers both,
+  certificate trust, backup, restore, recovery, Windows, and the Raspberry Pi Zero 2 W
+  target profile with the emulated figures labelled as such. On DietPi, run
+  `apt update && apt full-upgrade` and reboot before installing (CVE-2026-98432).
+- **Workers:** `llm-bridge worker enroll`, then `llm-bridge worker install-service`.
+  Operation and troubleshooting are in `operations.md`.
+- **Upgrade:** container: replace the image and run `docker compose up -d`; the
+  `/data` volume keeps all state and the schema migrates on start. Native: run
+  `install.sh` again; it is idempotent and was verified as an in-place upgrade on the
+  emulated DietPi. Back up first with `bridge-coordinator backup` and
+  `llm-bridge backup`.
 
-## 10. Remaining blockers
+## 10. Follow-up
 
-1. ARM64 execution and Pi Zero 2 W measurements (COORD-001, COORD-003,
-   OPS-001, TEST-013, TEST-014, A2, A4, A5).
-   - pi-sim at `ssh -p 2222 root@127.0.0.1` timed out during the SSH banner
-     exchange in every attempt on 2026-11-05. It was not modified.
-   - The physical Pi Zero 2 W arrives on 2026-11-06.
-   - The next steps are the same on either device:
-     1. Load the arm64 image (`container/build.sh --oci`).
-     2. Run the compose flow.
-     3. Repeat the `benchmarks.md` measurements and the memory-pressure run.
-     4. Fill in the target-profile section in `install.md`.
-2. macOS is untested (TEST-013, "where practical"); no macOS host is available.
+1. Physical Pi Zero 2 W verification, scheduled 2026-11-06. Open because the device was
+   not available during the work. Steps: load the arm64 image,
+   run the compose flow with `compose.low-write.yaml`, repeat the `benchmarks.md`
+   measurements and the memory-pressure run on the device, and replace the emulated
+   figures in the `install.md` target profile with measured ones.
