@@ -1533,26 +1533,26 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-009 | high | fixed | b137f3e. Help defaults come from the resolving function; completed missions reopen the same way with or without `--mission`; `help keys` names all nine views; a refused command clears the line. `tests/test_bridge_mode_option.py::test_help_default_rotation_drops_providers_the_config_disables` and six more; failed before the fix. |
 | CLIUX-010 | high | fixed | 82a36cf. `mission create` warns about an unfinished mission in the same folder (`--new` silences it); suggested commands include `--mission`; the ambiguity list shows when each mission was updated. `tests/test_bridge_cli_start_create_ux.py`::test_create_warns_when_the_folder_already_has_an_unfinished_mission and four more; failed before the fix. |
 | CLIUX-011 | medium | open | |
-| CLIUX-012 | medium | open | |
-| CLIUX-013 | medium | open | |
+| CLIUX-012 | medium | fixed | 4cf1bf0. Typing `/` shows a filtered list of commands with descriptions; Tab completes only a common prefix and a second Tab lists matches. `tests/test_bridge_cli_ux_console.py::test_tab_never_picks_the_first_of_several_matches` and `test_typing_slash_lists_commands_with_descriptions_and_filters_as_typed` failed before the fix; new goldens `console-slash-list*`. |
+| CLIUX-013 | medium | fixed | 4cf1bf0. Footer `Esc close (draft kept)`, line count instead of bytes below 80 %, Ctrl-E restores the last add-task draft with its time. `tests/test_bridge_cli_ux_console.py::test_esc_keeps_the_draft_and_ctrl_e_reopens_it_with_its_time` and `test_composer_footer_labels_escape_and_counts_lines` failed before the fix. |
 | CLIUX-014 | medium | open | |
 | CLIUX-015 | medium | open | |
 | CLIUX-016 | medium | open | |
 | CLIUX-017 | medium | open | |
 | CLIUX-018 | medium | open | |
 | CLIUX-019 | medium | open | |
-| CLIUX-020 | medium | open | |
-| CLIUX-021 | medium | open | |
+| CLIUX-020 | medium | fixed | 1f05142, 80f2676. `events` uses the Activity humaniser (moved to `bridge_event_text.py`) and hides bookkeeping unless `--verbose`; `command-rejected` records the reason; Health groups internals; Sessions and inspectors use plain words and omit unreported fields. `tests/test_bridge_events_cli.py`, `tests/test_bridge_plain_wording.py`; failed before the fix. |
+| CLIUX-021 | medium | fixed | 80f2676. Plain messages for unreadable files, empty prompts and handoff without a route; a test checks CLI stderr and `raise` texts for `None`, `Errno` and `{}`. `tests/test_bridge_error_messages.py`, failed before the fix. |
 | CLIUX-022 | medium | open | |
 | CLIUX-023 | medium | open | |
 | CLIUX-024 | medium | open | |
 | CLIUX-025 | medium | open | |
 | CLIUX-026 | medium | open | |
-| CLIUX-027 | medium | open | |
+| CLIUX-027 | medium | fixed | 4cf1bf0. Help pages open word-wrapped with `↑↓ scroll · / find · Esc close` and no file-viewer controls; home `?` shows home keys (`T` opens the quickstart). Plain-text reflow instead of Markdown rendering, because the renderer merged command lines. `tests/test_bridge_cli_ux_console.py::test_help_pages_wrap_at_word_boundaries` failed before the fix. |
 | CLIUX-028 | medium | open | |
 | CLIUX-029 | medium | open | |
 | CLIUX-030 | medium | open | |
-| CLIUX-031 | medium | open | |
+| CLIUX-031 | medium | fixed | 9b3dd51. Sign-in state on provider entries, one provider list for doctor and the form, F5 starts from any field, clearer rotation hint, subtitle lists installed providers and fits 80 columns. Alt-S was not used because Esc-prefixed keys conflict with the form. `tests/test_bridge_form_capacity.py`: 24 of 26 failed before the fix. |
 | CLIUX-032 | medium | open | |
 | CLIUX-033 | medium | open | |
 | CLIUX-034 | medium | open | |
@@ -1565,31 +1565,31 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-041 | low | open | |
 | CLIUX-042 | low | open | |
 | CLIUX-043 | low | open | |
-| CLIUX-044 | low | open | |
+| CLIUX-044 | low | fixed | 1f05142. `events --since AGE` and `--follow`; help says IDs are global. `tests/test_bridge_events_cli.py`, failed before the fix. |
 | CLIUX-045 | low | open | |
 | CLIUX-046 | low | open | |
 | CLIUX-047 | low | open | |
 | CLIUX-048 | low | fixed | 0bde2f6. `missions --from` suppressed, `attach --client` reworded. `tests/test_bridge_cli_errors.py::test_missions_from_and_attach_client_help`, failed before the fix. |
 | CLIUX-049 | low | open | |
-| CLIUX-050 | low | open | |
-| CLIUX-051 | high | open | |
+| CLIUX-050 | low | fixed | 4cf1bf0. Dimmed placeholder in an empty add-task composer, removed on the first keystroke. `tests/test_bridge_cli_ux_console.py::test_empty_composer_shows_a_dim_placeholder_until_the_first_keystroke` failed before the fix; new golden `overlay-composer-empty`. |
+| CLIUX-051 | high | fixed | 1668bcb. Root cause: the operation was opened and marked RUNNING before the scheduler waited up to 900 s for capacity data, and the countdown showed the next poll. The wait now happens before the operation exists, with one absolute deadline. `tests/test_bridge_status_honesty.py::test_capacity_data_wait_is_not_a_running_operation_and_its_deadline_does_not_move`, failed before the fix. |
 | CLIUX-052 | high | fixed | 82a36cf. The "Mission reopened" receipt now includes `--mission`. `tests/test_bridge_cli_start_create_ux.py`::test_suggested_commands_name_the_mission failed before the fix. |
-| CLIUX-053 | high | open | |
-| CLIUX-054 | medium | open | |
-| CLIUX-055 | high | open | |
+| CLIUX-053 | high | fixed | 1668bcb. Root cause: `stop --force` reconciled the operation like a crash, so the task stayed BLOCKED. Force-stopped tasks are released on `start`; no invented reset time. `tests/test_bridge_status_honesty.py::test_a_task_interrupted_by_stop_force_is_released_by_start_but_a_crashed_one_is_not` and `test_start_after_stop_force_runs_the_interrupted_task_again`, failed before the fix. |
+| CLIUX-054 | medium | fixed | 1668bcb. With no recorded provider PID, `stop --force` stops the controller and says no provider process was running. `tests/test_bridge_status_honesty.py::test_stop_force_with_no_provider_process_succeeds_and_says_so`, failed before the fix. |
+| CLIUX-055 | high | fixed | 9b3dd51. The form reads capacity in the background: an exhausted provider is annotated with its reset, the Start hint says Start waits, and an automatic pick prefers a provider with capacity; doctor lists Copilot. `tests/test_bridge_form_capacity.py`, failed before the fix; new golden `home-form-start-waits`. |
 | CLIUX-056 | medium | open | |
 | CLIUX-057 | medium | open | |
-| CLIUX-058 | medium | open | |
+| CLIUX-058 | medium | fixed | 1f05142. `events` shows the newest N events (printed oldest to newest) with a "showing the last N of M" line; `--after` keeps the forward cursor. `tests/test_bridge_events_cli.py`, failed before the fix. |
 | CLIUX-059 | medium | open | |
 | CLIUX-060 | medium | open | |
 | CLIUX-061 | medium | open | |
-| CLIUX-062 | medium | open | |
+| CLIUX-062 | medium | fixed | 1668bcb. A RUNNING or PAUSED mission without a controller shows `INTERRUPTED` with the restart command; the `stale` word is gone. `tests/test_bridge_status_honesty.py::test_a_mission_with_no_controller_is_not_shown_as_plainly_running`, failed before the fix. |
 | CLIUX-063 | medium | open | |
 | CLIUX-064 | medium | open | |
 | CLIUX-065 | medium | open | |
-| CLIUX-066 | medium | open | |
-| CLIUX-067 | low | open | |
-| CLIUX-068 | low | open | |
+| CLIUX-066 | medium | fixed | 9b3dd51. `doctor` exits 1 when no provider can run or the database check fails; JSON has `ready` and `blocking`. `tests/test_bridge_form_capacity.py`, failed before the fix. |
+| CLIUX-067 | low | fixed | 9b3dd51. Objective hint `Type or paste the task · F5 start now · Tab more options · Ctrl-E full editor`. `tests/test_bridge_form_capacity.py`, failed before the fix. |
+| CLIUX-068 | low | fixed | 9b3dd51. Empty state names only installed providers and wraps at word boundaries. `tests/test_bridge_form_capacity.py`, failed before the fix. |
 | CLIUX-069 | low | open | |
 | CLIUX-070 | low | open | |
 | CLIUX-071 | low | open | |
