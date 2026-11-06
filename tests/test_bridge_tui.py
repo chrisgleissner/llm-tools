@@ -297,9 +297,11 @@ def test_task_completion_and_click_to_focus_command_entry() -> None:
     state.command_cursor = len(state.command)
     state.input_focused = True
     state.handle_key("\t")
-    assert state.command == "task add"
+    assert state.command == "task "  # several subcommands match: Tab does not pick one
+    assert state.output[-1].startswith("Matches: task add")
+    state.command, state.command_cursor = "task ad", len("task ad")
     state.handle_key("\t")
-    assert state.command == "task list"
+    assert state.command == "task add"
 
     state.input_focused = False
     state.handle_mouse(22, 30, 24, 80)

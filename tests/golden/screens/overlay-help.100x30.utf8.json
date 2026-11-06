@@ -5,7 +5,7 @@
   "cursor": null,
   "cursor_visible": false,
   "rows": [
-    "Bridge help · Tasks · read-only · source",
+    "Bridge help · Tasks",
     "Tasks: the ordered work of this mission",
     "",
     "Keys: Up/Down choose · Enter inspect · v read the full prompt · Ctrl-R amend",
@@ -34,11 +34,11 @@
     "",
     "",
     "",
-    "q close | 1/8 419B 0 matches | / find m mode w wrap s export"
+    "↑↓ scroll · / find · Esc close"
   ],
   "segments": [
-    [[0, "Bridge help · Tasks · read-only · source", "heading"]],
-    [[0, "Tasks: the ordered work of this mission", "info"]],
+    [[0, "Bridge help · Tasks", "heading"]],
+    [[0, "Tasks: the ordered work of this mission", "brand"]],
     [],
     [[0, "Keys: Up/Down choose · Enter inspect · v read the full prompt · Ctrl-R amend", "info"]],
     [[0, "      Ctrl-E add a task · Ctrl-F find in task text (Esc clears the filter)", "info"]],
@@ -66,6 +66,6 @@
     [],
     [],
     [],
-    [[0, "q close | 1/8 419B 0 matches | / find m mode w wrap s export", "dim"]]
+    [[0, "↑↓ scroll · / find · Esc close", "dim"]]
   ]
 }

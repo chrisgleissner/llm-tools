@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable
 
 from .bridge_input import BracketedPaste, TextBuffer, cell_width, cell_slice, input_view, offset_for_cells
-from .bridge_documents import DocumentViewer, heading_label
+from .bridge_documents import DocumentViewer, heading_label, wrap_plain_lines
 from .bridge_states import ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, STARTED_MISSION_STATUSES
 from . import bridge_events, bridge_hangup, bridge_mouse, bridge_redraw, bridge_theme
 from .bridge_projection import ProjectionParams
@@ -95,8 +95,17 @@ def compose_document(
     *,
     title: str = "Bridge document",
     window: curses.window | None = None,
+    placeholder: str = "",
+    restored_from: Path | None = None,
+    draft_prefix: str = "composer-recovery-",
 ) -> str | None:
-    """Full-screen UTF-8 composer with a private crash checkpoint and recovery action."""
+    """Full-screen UTF-8 composer with a private crash checkpoint and recovery action.
+
+    ``placeholder`` is dim guidance shown while the buffer is empty. ``restored_from``
+    names a retained draft whose text is ``initial``: it is deleted once this
+    composer has its own checkpoint, and the notice line says when it was written.
+    ``draft_prefix`` names the kept draft's file, so a kind of draft can be found again.
+    """
     curses.use_env(False)
     global LAST_RECOVERY_DRAFT
     import termios
@@ -110,10 +119,15 @@ def compose_document(
     paste_activity = 0.0
     preferred_column: int | None = None
     notice = ""  # transient warnings only; the status line below carries the keys
+    if restored_from is not None:
+        try:
+            notice = f"Restored draft from {time.strftime('%H:%M', time.localtime(restored_from.stat().st_mtime))} · Ctrl-D discard"
+        except OSError:
+            notice = "Restored draft · Ctrl-D discard"
     draft_dir = default_state_dir() / "drafts"
     draft_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(draft_dir, 0o700)
-    checkpoint_fd, checkpoint_name = tempfile.mkstemp(prefix="composer-recovery-", suffix=".md", dir=draft_dir)
+    checkpoint_fd, checkpoint_name = tempfile.mkstemp(prefix=draft_prefix, suffix=".md", dir=draft_dir)
     os.close(checkpoint_fd)
     checkpoint_path = Path(checkpoint_name)
     os.chmod(checkpoint_path, 0o600)
@@ -180,6 +194,8 @@ def compose_document(
         return checkpoint_path
 
     checkpoint()
+    if restored_from is not None and restored_from != checkpoint_path:
+        restored_from.unlink(missing_ok=True)  # the new checkpoint holds the same text
 
     def loop(window: curses.window) -> str | None:
         nonlocal preferred_column, notice, escape_pending, escape_at, paste_activity, buffer, last_checkpoint, discarded
@@ -241,8 +257,12 @@ def compose_document(
                         _put(window, row, 0, value, width, preserve_spacing=True)
                     _put(window, height - 2, 0, notice, width,
                          role="warn" if notice.startswith(("Paste rejected", "Input rejected", "Incomplete", "Recovery")) else "dim")
-                    status = f"F2/Ctrl-S Save · Esc Recover · Ctrl-D Discard · {buffer.size_bytes}/{buffer.max_bytes} bytes · {len(lines)} lines"
-                    _put(window, height - 1, 0, status, width, role="dim")
+                    if not buffer.text and placeholder:
+                        # A no-break space keeps a quoted example such as "- criterion" on one row.
+                        hint_rows = wrap_plain_lines((localize(placeholder).replace('"- ', '"-\xa0'),), max(1, width))
+                        for offset, hint_row in enumerate(hint_rows[:max(1, height - 3)]):
+                            _put(window, 1 + offset, 0, hint_row.replace("\xa0", " "), width, role="dim", attr=curses.A_DIM)
+                    _put(window, height - 1, 0, _composer_status(buffer.size_bytes, buffer.max_bytes, len(lines)), width, role="dim")
                     visible_row = line_no - top + 1
                     try:
                         curses.curs_set(1)
@@ -429,6 +449,14 @@ def compose_document(
         sys.stdout.flush()
 
 
+def _composer_status(size_bytes: int, max_bytes: int, line_count: int) -> str:
+    """Composer footer: the keys, the line count, and the byte count only when the limit is near."""
+    parts = ["F2/Ctrl-S Save", "Esc close (draft kept)", "Ctrl-D Discard", f"{line_count} {'line' if line_count == 1 else 'lines'}"]
+    if size_bytes * 5 > max_bytes * 4:
+        parts.append(f"{size_bytes}/{max_bytes} bytes")
+    return _SEP.join(parts)
+
+
 _NOT_PRINTABLE_ASCII = re.compile(r"[^ -~]")
 
 
@@ -546,6 +574,7 @@ _MAX_STATION_ROWS = 32
 _MAX_EVENT_ROWS = 80
 _MAX_DETAIL_TEXT = 16000
 _MAX_DETAIL_ITEMS = 12
+_FILE_VIEWER_KEYS = frozenset({"s", "c", "e", "m", "w", "h", "KEY_LEFT", "KEY_RIGHT"})
 _SELECTABLE_VIEWS = frozenset({"Tasks", "Providers", "Actions", "Agents"})
 _BRIDGE_LABEL = 12
 _SYSTEM_LABEL = 22
@@ -800,7 +829,7 @@ def _approval_summary(snapshot: dict[str, object], target: tuple[str, str], widt
 
 
 # Console-only shortcuts that expand to public commands.
-_CONSOLE_ALIASES = ("approve", "reject", "overview", "providers", "activity", "health", "actions", "home")
+_CONSOLE_ALIASES = ("approve", "reject", "overview", "providers", "activity", "health", "actions", "sessions", "home")
 
 
 def _expand_console_alias(command: str, snapshot: dict[str, object]) -> tuple[str, str | None]:
@@ -867,7 +896,53 @@ def _command_completions(command: str) -> list[str]:
     if not complete and groups and not prefix.startswith("-"):
         candidates.extend(name for name in _CONSOLE_ALIASES if name not in candidates)
     base = command if trailing else command[:-len(prefix)] if prefix else command
-    return [base + value for value in candidates if value.startswith(prefix) and value not in {"console", "_controller"}]
+    return [base + value for value in candidates if value.startswith(prefix) and value not in {"console", "_controller"} and not value.startswith("_")]
+
+
+# Commands that lead the list shown when `/` is typed; the rest follow in parser order.
+_SLASH_FIRST = ("start", "approve", "reject", "resume", "pause", "stop", "status", "attach", "task", "steer", "help")
+_SLASH_ALIAS_TEXT = {
+    "approve": "Approve a task that awaits review (asks first)",
+    "reject": "Send a task back with a reason",
+    "overview": "Show the Overview view",
+    "providers": "Show the Providers view",
+    "activity": "Show the Activity view",
+    "sessions": "Show the Sessions view",
+    "health": "Show the Health view",
+    "actions": "Show the Actions view",
+    "home": "Pick another mission",
+    "backup": "Copy the Bridge database to a file",
+    "restore": "Replace the Bridge database from a backup",
+    "worker": "Connect this host to a coordinator (optional)",
+    "remote": "Reach other hosts through a coordinator",
+    "theme": "Show the colour theme and a swatch per role",
+}
+
+
+@functools.lru_cache(maxsize=1)
+def _slash_table() -> tuple[tuple[str, str], ...]:
+    """Every slash command with its one-line description, the most used first.
+
+    Names come from the same completion source the Tab key uses. A description is
+    the command table of `llm-bridge help`, else the Actions registry, else the
+    console-only shortcut text.
+    """
+    from .bridge_help import COMMANDS
+
+    effects = {action.command.split()[0]: action.effect for action in ACTIONS if action.command.split()[0] != "task"}  # "task" has one action row but many subcommands
+    names = [item[1:] for item in _command_completions("/")]
+    ordered = [name for name in _SLASH_FIRST if name in names] + [name for name in names if name not in _SLASH_FIRST]
+    return tuple(
+        ("/" + name, effects.get(name) or _SLASH_ALIAS_TEXT.get(name) or COMMANDS.get(name, ("",))[0].split(";")[0])
+        for name in ordered
+    )
+
+
+def _slash_matches(command: str) -> list[tuple[str, str]] | None:
+    """The slash commands whose names start with the typed text, or None when no command name is being typed."""
+    if not command.startswith("/") or any(char.isspace() for char in command):
+        return None
+    return [(name, text) for name, text in _slash_table() if name.startswith(command)]
 
 
 @dataclass(frozen=True)
@@ -3551,6 +3626,22 @@ class _ConsoleState:
         thread.start()
         return True
 
+    def _complete_command(self) -> None:
+        """Tab: a single match completes; several complete their common prefix, and Tab again lists them."""
+        candidates = _command_completions(self.command)
+        if not candidates:
+            return
+        common = candidates[0] if len(candidates) == 1 else os.path.commonprefix(candidates)
+        if len(common) > len(self.command) or (len(candidates) == 1 and common != self.command):
+            self.command = common
+            self.command_cursor = len(common)
+            return
+        if len(candidates) > 1:
+            shown = ", ".join(candidates[:12])
+            line = f"Matches: {shown}" + (f" and {len(candidates) - 12} more" if len(candidates) > 12 else "")
+            if not self.output or self.output[-1] != line:
+                self.output.append(line)
+
     def open_help(self, topic: str) -> None:
         """Show a help topic, or with `view:NAME` the short help of one view, in the document viewer."""
         from .bridge_help import topic_text, view_help
@@ -3560,7 +3651,7 @@ class _ConsoleState:
         self.close_document()
         self.document_task_id = None
         self.document_notice = ""
-        self.document_viewer = DocumentViewer(f"Bridge help · {topic[len('view:'):] if by_view else topic}", text)
+        self.document_viewer = DocumentViewer(f"Bridge help · {topic[len('view:'):] if by_view else topic}", text, rendered=True, plain=True)
 
     def _confirm_or_dispatch(self, command: str) -> bool:
         command, problem = _expand_console_alias(command, self.snapshot)
@@ -3684,6 +3775,8 @@ class _ConsoleState:
             if key == "\x1b":
                 self.close_document()
                 return True
+            if viewer.plain and key in _FILE_VIEWER_KEYS:
+                return True  # a help page has no mode, wrap, export, copy, edit or heading controls
             if key in {"q", "KEY_ENTER", "\n", "\r"}:
                 self.close_document()
             elif key in {"KEY_UP", "k"}:
@@ -3791,14 +3884,7 @@ class _ConsoleState:
             self.choose_view((self.view_index + 1) % len(VIEWS))
             return True
         if key == "\t" and self.input_focused:
-            if not self.completion_candidates or self.command not in self.completion_candidates:
-                self.completion_prefix = self.command
-                self.completion_candidates = _command_completions(self.command)
-                self.completion_index = 0
-            if self.completion_candidates:
-                self.command = self.completion_candidates[self.completion_index % len(self.completion_candidates)]
-                self.command_cursor = len(self.command)
-                self.completion_index += 1
+            self._complete_command()
             return True
         if key == "KEY_BTAB" and not self.input_focused:
             self.choose_view((self.view_index - 1) % len(VIEWS))
@@ -5064,6 +5150,37 @@ def _draw_command_line(window: curses.window, y: int, state: _ConsoleState, widt
         _put(window, y, used, _placeholder(state), width - used, role="dim", attr=curses.A_DIM)
 
 
+def _slash_popup_rows(state: _ConsoleState, width: int, room: int) -> list[list[Segment]]:
+    """The rows of the slash-command list (at most `room`), or none when no command name is being typed."""
+    matches = _slash_matches(state.command)
+    if matches is None or room < 2:
+        return []
+    if not matches:
+        return [_inline_segments(f"No command starts with {_clip(state.command, 24)}", "warn") + [(f"{_SEP}/help lists them", "dim")]]
+    rows: list[list[Segment]] = [[("Commands", "heading"), (f"{_SEP}Tab completes{_SEP}type to narrow", "dim")]]
+    shown = room - 1
+    if len(matches) > shown:
+        shown -= 1
+    name_width = min(26, max(cell_width(name) for name, _ in matches[:shown]))
+    for name, text in matches[:shown]:
+        pad = " " * (name_width - min(name_width, cell_width(name)) + 2)
+        rows.append([("  ", "info"), (name, "key"), (pad, "info"), (text, "muted")])
+    if len(matches) > shown:
+        rows.append([(f"  {len(matches) - shown} more{_SEP}keep typing to narrow the list", "dim")])
+    return rows
+
+
+def _draw_slash_popup(window: curses.window, state: _ConsoleState, prompt_y: int, width: int, top: int) -> None:
+    """Draw the slash-command list in the rows just above the command line."""
+    if not state.input_focused or state.palette_filter_editing or state.search_editing:
+        return
+    rows = _slash_popup_rows(state, width, min(9, prompt_y - top))
+    for offset, segments in enumerate(rows):
+        y = prompt_y - len(rows) + offset
+        _put(window, y, 0, " " * width, width, role="info")
+        _put_segments(window, y, 0, _clip_segments(segments, width), width)
+
+
 def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     """Keys that work in the current view, most useful first, plus the closing hint."""
     if state.palette_filter_editing:
@@ -5073,6 +5190,9 @@ def _hint_items(state: _ConsoleState) -> tuple[list[str], str]:
     if state.search_editing:
         return ["type text to find in tasks", "Enter search", "Esc cancel", "Ctrl-U clear"], ""
     if state.input_focused:
+        matches = _slash_matches(state.command) if not state.full else None
+        if matches:  # a short pane has no room for the list: name the matches in the hint row
+            return [name for name, _ in matches[:6]], "Tab completes"
         return ["Enter run", "Tab complete", "Ctrl-P/Ctrl-N history", "Ctrl-U clear", "Esc back to view"], "/help commands"
     views = "Tab/F1-9 views"
     # The empty command line already says "type a command or /help".
@@ -5477,6 +5597,7 @@ def _draw_full(window: curses.window, state: _ConsoleState) -> None:
             _put(window, y, gutter, f"{label_text:<{_BRIDGE_LABEL}}", avail, role="muted")
             _put(window, y, gutter + _BRIDGE_LABEL, value, max(0, avail - _BRIDGE_LABEL), role=value_role)
     if height >= 2:
+        _draw_slash_popup(window, state, height - 2, width, 3)
         _draw_status_lines(window, state, height - 2, height - 1, width)
         _place_cursor(window, state, height - 2, width)
     window.noutrefresh()
@@ -5564,7 +5685,7 @@ def _draw_document(window: curses.window, state: _ConsoleState) -> None:
     mode = "rendered" if viewer.rendered else "source"
     rich_rows = viewer.rich_lines(width) if viewer.rendered else ()
     degraded = " · plain source" if viewer.rendered and rich_rows and rich_rows[0][0][0].startswith("[plain source") else ""
-    _put(window, 0, 0, f"{viewer.title} · read-only · {mode}{degraded}", width, role="heading")
+    _put(window, 0, 0, viewer.title if viewer.plain else f"{viewer.title} · read-only · {mode}{degraded}", width, role="heading")
     content_height = max(1, height - 2)
     if state.document_heading_list:
         headings = viewer.headings()
@@ -5599,10 +5720,12 @@ def _draw_document(window: curses.window, state: _ConsoleState) -> None:
         bridge_redraw.note_wall(0.15)  # a render or layout is running; repaint when it lands
     footer = (f"q close | {viewer.top + 1}/{max(1, viewer.layout_rows)} {viewer.source_size}B "
               f"{viewer.search_count} matches | / find m mode w wrap s export")
+    if viewer.plain:
+        footer = _SEP.join(["↑↓ scroll", "/ find", "Esc close", *([viewer.footer_extra] if viewer.footer_extra else [])])
     if state.document_heading_list:
         footer = "Headings · Up/Down select · Enter go · Esc close"
     elif state.document_notice:
-        footer = "q close | " + state.document_notice
+        footer = ("Esc close | " if viewer.plain else "q close | ") + state.document_notice
     if state.document_export_editing:
         footer = "Export original source to new path: " + state.document_entry
         if state.document_notice:
@@ -5705,6 +5828,46 @@ def _edit_task_prompt(
         state.output.append(f"Task editor failed: {_text(exc, 180)}")
 
 
+TASK_DRAFT_PREFIX = "composer-recovery-task-"
+TASK_PLACEHOLDER = 'First line = title. Describe the change. Optional: "Acceptance:" followed by "- criterion" lines.'
+_RESTORE_MAX_AGE_SECONDS = 24 * 3600
+
+
+def retained_composer_draft(now: float | None = None) -> tuple[Path, str] | None:
+    """The newest non-empty composer draft kept in the last 24 hours, with its text.
+
+    Esc in the composer keeps the draft in the private drafts directory;
+    a saved or discarded draft is deleted, so what remains is what was kept.
+    """
+    from .bridge_store import default_state_dir
+
+    draft_dir = default_state_dir() / "drafts"
+    current = time.time() if now is None else now
+    newest: tuple[float, Path] | None = None
+    try:
+        names = list(draft_dir.glob(TASK_DRAFT_PREFIX + "*.md"))
+    except OSError:
+        return None
+    for path in names:
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size == 0 or info.st_size > 1_048_576:
+            continue
+        if current - info.st_mtime > _RESTORE_MAX_AGE_SECONDS:
+            continue
+        if newest is None or info.st_mtime > newest[0]:
+            newest = (info.st_mtime, path)
+    if newest is None:
+        return None
+    try:
+        text = newest[1].read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    return (newest[1], text) if text.strip() else None
+
+
 def _compose_task_prompt(
     window: curses.window,
     state: _ConsoleState,
@@ -5723,18 +5886,30 @@ def _compose_task_prompt(
         if str(task.get("status", "")).upper() in {"COMPLETED", "FAILED", "CANCELLED"}:
             state.output.append(f"Cannot amend task {task_id}: it is {str(task.get('status')).lower()}. Choose an editable task.")
             return
+    restored: Path | None = None
+    if task_id is None and not initial_text:
+        kept = retained_composer_draft()
+        if kept is not None:
+            restored, initial_text = kept
+    options: dict[str, object] = {}
+    if task_id is None:
+        options["placeholder"] = TASK_PLACEHOLDER
+        options["draft_prefix"] = TASK_DRAFT_PREFIX
+    if restored is not None:
+        options["restored_from"] = restored
     try:
         source = compose_document(
             initial_text,
             title=f"Amend task {task_id} prompt" if task_id else "Add task prompt",
             window=window,
+            **options,  # type: ignore[arg-type]  # only the keyword names above are ever set
         )
     finally:
         window.clear()
         window.refresh()
     if source is None:
-        if LAST_RECOVERY_DRAFT is not None:
-            state.output.append(f"Task source retained for recovery: {LAST_RECOVERY_DRAFT}")
+        if LAST_RECOVERY_DRAFT is not None and LAST_RECOVERY_DRAFT.is_file() and LAST_RECOVERY_DRAFT.stat().st_size:
+            state.output.append("Draft kept · Ctrl-E reopens it" if task_id is None else "Task unchanged; your edit is kept in the private drafts folder")
         return
     from .bridge_store import default_state_dir
 

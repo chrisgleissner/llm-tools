@@ -1055,7 +1055,7 @@ def _field_hint(state: Launcher, width: int) -> str:
     if state.focus == 0:
         hint = "Type the task · Tab moves on to Start · Ctrl-E full editor · paste supported"
         if state.objective:
-            hint += f" · {len(state.objective.encode('utf-8'))} bytes · {state.objective.count(chr(10)) + 1} lines"
+            hint += f" · {len(state.objective.encode('utf-8'))} bytes · {state.objective.count(chr(10)) + 1} {'line' if chr(10) not in state.objective else 'lines'}"
         return hint
     if state.focus == 1:
         if state.is_vertical():
@@ -1764,9 +1764,12 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
         if action == "quit":
             return 0
         if action == "help":
-            from .bridge_help import topic_text
+            from .bridge_help import HOME_HELP, topic_text
             from .bridge_viewer import run_document
-            run_document(topic_text("quickstart"), title=localize("Bridge help · quickstart"))
+            run_document(
+                HOME_HELP, title=localize("Bridge help · home"), plain=True,
+                switch=("T", "quickstart", localize("Bridge help · quickstart"), topic_text("quickstart")),
+            )
             continue
         if action == "compose-objective":
             from . import bridge_tui
