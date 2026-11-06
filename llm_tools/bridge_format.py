@@ -32,7 +32,7 @@ def plain_reason(reason: Any) -> str:
     return _PLAIN_ROTATION_REASONS.get(text, text)
 
 
-NATIVE_STOP_HINT = "Stopping after the provider exits · exit the provider (e.g. /quit) or use stop --force"
+NATIVE_STOP_HINT = "Stopping after the provider exits · if it stays open, run `llm-bridge stop --force --mission <id>`"
 
 
 def nothing_to_pause(status: str) -> str:

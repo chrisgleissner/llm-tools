@@ -285,7 +285,7 @@ negative tests remain incomplete unless explicitly recorded below.
 | DOG-001 | [~] | Coordinator container web asset permissions fix is in open Pi PR #32 (`feat/pi-zero-2w-verification`); recheck after it merges before marking complete. |
 | DOG-002 | [x] | Online worker mission inventory updates via event batches and cursor (`coordinator/tests/worker.rs::event_batch_updates_mission_inventory_and_caught_up_status`, `tests/test_bridge_worker.py::test_event_batch_carries_current_mission_inventory_after_hello`, `web/e2e/worker.spec.ts`). |
 | DOG-003 | [x] | Created mission detail exposes `Start mission` for an online worker and calls the resource endpoint with an idempotency key; `web/e2e/screenshots.spec.ts::a created mission can be started from its detail page through the resource API` failed before the button/API wiring and passes after it. |
-| DOG-004 | [ ] | Finish a paused native provider, or accurate stop guidance, remains. |
+| DOG-004 | [x] | Stop guidance now names the working `llm-bridge stop --force --mission <id>` fallback and does not suggest `finish`; `tests/test_bridge_operator_cli.py::test_paused_native_stop_guidance_names_the_force_command` covers a paused mission with a live provider. |
 | DOG-005 | [x] | `worker status` reports connection, last-connected time and systemd service state in human-readable output; `tests/test_bridge_worker.py::test_worker_status_reports_connection_and_service_state_without_token` verifies fields, rendering and token omission. |
 | DOG-006 | [x] | Mission name links to detail (`web/e2e/worker.spec.ts` verifies the link target). |
 | DOG-007 | [ ] | Native provider idle-at-prompt `needs_you` detection and operator notification remain. |
