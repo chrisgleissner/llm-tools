@@ -341,7 +341,8 @@ def test_proposal_operations_list_and_decide_by_task_number(mission, capsys, mon
     real = commands.dispatch
     monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
     assert main(["proposal", "reject", "--mission", mission_id, "--task", "3", "--reason", "no", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["proposal_status"] == "REJECTED"
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["result"]["proposal_status"] == "REJECTED"
     assert main(["proposal", "list", "--mission", mission_id, "--status", "ALL", "--json"]) == 0
     assert len(json.loads(capsys.readouterr().out)["proposals"]) == 2
     assert seen == ["proposal.reject", "proposal.list"]
