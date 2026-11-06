@@ -1706,6 +1706,7 @@ def _build_parser(
     doctor = sub.add_parser("doctor")
     _add_mission_arg(doctor, default_mission, inferred=False)
     doctor.add_argument("--include-config", action="store_true", help="with --json, include the mission's saved copy of the llm-tools config (large; left out by default)")
+    doctor.add_argument("--bundle", nargs="?", const="", default=None, metavar="PATH", help="write a redacted diagnostic archive for bug reports (default: llm-bridge-bundle-<UTC time>.tar.gz here; never overwrites)")
     _add_json_arg(doctor)
 
     theme = sub.add_parser("theme", help="show the detected terminal background, the active colour theme and a swatch per role")
@@ -3211,6 +3212,12 @@ def _main(argv: list[str] | None = None) -> int:
                 }
             if not args.include_config:
                 report = strip_frozen_config(report)
+            if args.bundle is not None:  # the archive is the answer; whether a provider can run is in its doctor report
+                from . import bridge_bundle
+
+                written = bridge_bundle.write_bundle(args.bundle or None, report, version=package_version(), state=state_dir(), store_file=store_path())
+                _print_result(written, args.json, lambda value: f"Wrote {value['path']}\n{value['note']}")
+                return 0
             _print_result(report, args.json, fmt.format_doctor)
             return 0 if verdict["ready"] else 1
         if args.command == "station":

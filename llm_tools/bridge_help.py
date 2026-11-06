@@ -746,7 +746,7 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "gc": ("Close the idle tmux stations of finished missions; a station with a live provider process or an attached terminal is kept", "gc --json"),
     "finish": ("Ask the native provider to exit (its own /exit or /quit) so the task moves to verification", "finish --mission ID"),
     "detach": ("Detach another terminal from the station, from outside; to leave your own terminal press Ctrl-] d (in the console: /leave)", "detach --mission ID"),
-    "doctor": ("Inspect local prerequisites and persistence; exits 1 when no provider can run; mission is optional", "doctor --json"),
+    "doctor": ("Inspect local prerequisites and persistence; exits 1 when no provider can run; mission is optional; --bundle [PATH] writes a redacted archive for bug reports", "doctor --json"),
     "control": ("Inspect and steer the mission in Bridge controls; no autostart", "control --mission ID"),
     "usage": ("Inspect background capacity observations for this mission", "usage --mission ID"),
     "station": ("Select the viewed station; does not reroute a running task", "station --mission ID codex"),

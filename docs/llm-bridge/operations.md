@@ -255,6 +255,42 @@ only after a verified controller-mode event; provider liveness and observed
 model remain `unknown` when no provider observation proves them. An operation's
 model is a configured scheduler pin, not an observed model.
 
+### Diagnostic bundle for bug reports
+
+```bash
+llm-bridge doctor --bundle                 # llm-bridge-bundle-<UTC time>.tar.gz in this folder
+llm-bridge doctor --bundle report.tar.gz   # or a path (a folder gets the default name inside it)
+```
+
+`doctor --bundle` writes one archive with mode 0600 and prints its path and a
+one-line note on what was removed. It never overwrites a file and exits 0 when
+the archive was written, whether or not a provider can run (that answer is in
+`doctor.json`). Members:
+
+| Member | Content |
+| --- | --- |
+| `versions.json` | llm-tools, Python and operating system versions |
+| `doctor.json` | the `doctor` report; the mission appears only as its ID and status |
+| `config/llm-tools.toml` | the llm-tools configuration file |
+| `config/worker.json`, `config/remote.json` | worker enrolment and coordinator metadata; the token is replaced by `token_present` |
+| `store-summary.json` | schema version, mission, task and event counts, statuses, and per-mission counts; no names or text |
+| `health.json` | controller liveness per mission |
+| `logs/...` | the last 200 lines (at most 64 KiB) of the controller log and of recent provider logs; prompt copies are never included |
+
+Every text member passes through one redaction function
+(`llm_tools/bridge_bundle.py`, `redact`). It removes bearer and API tokens
+(`sk-`, `ghp_`, `github_pat_`, JWT-shaped values, long hex and base64
+strings, private keys), values of keys named like token, secret, password,
+api_key or authorization, e-mail addresses, private and LAN addresses (10/8,
+172.16/12, 192.168/16, 100.64/10, 127/8, fc00::/7, fe80::/10, ::1), host names
+under `.home.arpa`, `.local`, `.lan` and `.internal`, and replaces the home
+folder with `~`. Mission names, objectives and task text are removed from log
+tails by exact match, line by line and word by word for long words. A
+provider that echoes a prompt reworded or wrapped differently can still leave
+a fragment, so read the archive before attaching it to a public issue. The
+coordinator has its own `bridge-coordinator support-bundle`; this command does
+not collect coordinator data.
+
 ## Task ordering and verification
 
 The task lifecycle uses `QUEUED`, `READY`, `RUNNING`, `VERIFYING`, `COMPLETED`,

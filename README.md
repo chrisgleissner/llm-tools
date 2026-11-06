@@ -55,6 +55,8 @@ Next             Ready. In your project folder run llm-bridge, press N, type the
 
 If tmux is missing, or no provider is signed in, the `Next` line says what to fix. `doctor` lists every provider the new-mission form offers, exits 1 when no provider can run (so scripts can gate on it), and `doctor --json` carries `ready` and `blocking` fields. No `pipx`, or another route? See [install paths](./docs/reference.md#install-paths). Check the installed version with `llm-bridge --version`.
 
+To report a problem, `llm-bridge doctor --bundle` writes `llm-bridge-bundle-<UTC time>.tar.gz` (mode 0600, never overwrites; `--bundle PATH` chooses the file). It holds versions, the doctor report, the configuration, a mission and event count summary, controller health and the tail of recent logs, with tokens, e-mail addresses, private addresses, host names, prompts and task text removed and your home folder shown as `~`. Read it before you attach it to a public issue. Details: [diagnostic bundle](./docs/llm-bridge/operations.md#diagnostic-bundle-for-bug-reports).
+
 For scripts, `llm-bridge` exits 0 on success or nothing to do, 1 on a runtime failure, 2 on a usage error, 3 when a mission or task is not found or the name is ambiguous, and 4 when the mission or task is in the wrong state. With `--json` an error is `{"error": {"code", "message", "hint"}}` on standard output and every list is an object. See [command-line conventions](./docs/llm-bridge/operations.md#command-line-conventions).
 
 ## Your first Bridge mission
