@@ -292,7 +292,7 @@ def test_mission_create_help_describes_every_option_without_none_noise(capsys) -
         main(["stop", "--help"])
     stop = " ".join(capsys.readouterr().out.split())
     assert "[--mission ID]" in stop and "--force" in stop and "(default: False)" not in stop
-    assert "--mission 3f9a1c2b" in stop and "unique prefix of 4+ characters" in stop
+    assert "--mission 3f9a1c2b" in stop and "unique prefix of 3+ characters" in stop
 
 
 def test_default_rotation_follows_the_llm_tools_config(tmp_path, monkeypatch, capsys) -> None:
