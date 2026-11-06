@@ -214,10 +214,10 @@ export async function missionStatus(target: string, missionId: string): Promise<
   return resourceResult(row);
 }
 
-export async function missionEvents(target: string, missionId: string, after: number, limit: number): Promise<{ events: Array<{ id: number; event: Record<string, unknown> }> }> {
+export async function missionEvents(target: string, missionId: string, after: number, limit: number): Promise<{ events: Array<Record<string, unknown>> }> {
   const q = new URLSearchParams({ worker: target, after: String(after), limit: String(limit), wait_ms: "10000" });
   const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/events?${q}`);
-  return resourceResult(row) as { events: Array<{ id: number; event: Record<string, unknown> }> };
+  return resourceResult(row) as { events: Array<Record<string, unknown>> };
 }
 
 /** Send task changes through the resource routes while preserving durable command outcomes. */

@@ -380,7 +380,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
       const r = await api.missionEvents(workerName, missionId, eventStart, 1000);
-      events = r.events.map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
+      events = r.events.map(normalize).filter((e) => e.mission_id === missionId);
       eventError = "";
     } catch (e) {
       eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
@@ -393,7 +393,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const from = Math.max(0, upto - EVENT_WINDOW);
     try {
       const r = await api.missionEvents(workerName, missionId, from, EVENT_WINDOW);
-      const older = r.events.filter((x) => x.id <= upto).map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
+      const older = r.events.filter((x) => Number(x["id"]) <= upto).map(normalize).filter((e) => e.mission_id === missionId);
       events = [...older, ...events];
       eventStart = from;
       eventShown += older.length;

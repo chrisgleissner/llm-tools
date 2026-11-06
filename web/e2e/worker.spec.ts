@@ -74,6 +74,7 @@ test.describe("with a connected worker", () => {
       await expect(tasks).toHaveCount(2, { timeout: 20_000 });
       await expect(page.locator("#mission-status")).toContainText("status");
       await expect(page.locator("#events-list li").first()).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator("#events-list .ev-kind").filter({ hasText: "Mission created" })).toHaveCount(1);
       await expectNoHorizontalScroll(page);
       await expectAccessible(page, "mission detail");
 
@@ -105,9 +106,9 @@ test.describe("with a connected worker", () => {
       await fake.stopWorker();
       await expect(page.locator("#mission-tasks").getByRole("button", { name: "Pause" }).first()).toBeDisabled({ timeout: 20_000 });
       await expect(page.locator(".page-head .badge.stale")).toBeVisible({ timeout: 20_000 });
-      await expect(page.locator(".page-head .notice")).toContainText("not connected");
+      await expect(page.locator("#mission-actions .notice")).toContainText("not connected");
       await navTo(page, "Workers");
-      await expect(page.locator('tr[data-worker="e2e-worker"]').getByText("offline", { exact: true })).toBeVisible();
+      await expect(page.locator('tr[data-worker="e2e-worker"] .badge.w-offline')).toHaveText("offline");
       await navTo(page, "Missions");
       await expect(page.locator("#missions-table .badge.stale")).toBeVisible();
     } finally {
