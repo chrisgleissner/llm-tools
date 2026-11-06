@@ -1767,8 +1767,7 @@ def read_native_provider_wait(
         and session_id
         and cwd
         and normalized_provider in {"codex", "claude"}
-        and idle_seconds >= _PROVIDER_PROMPT_IDLE_SECONDS
-        and (question_count or normalized_provider == "claude")
+        and (question_count or (idle_seconds >= _PROVIDER_PROMPT_IDLE_SECONDS and normalized_provider == "claude"))
     ):
         try:
             from .bridge_sessions import pending_operator_questions
@@ -1792,7 +1791,10 @@ def read_native_provider_wait(
         except Exception:  # Provider metadata is observational only; never break status reads.
             questions = []
     is_waiting = _native_input_prompt(provider, screen) or bool(question_count or questions)
-    if idle_seconds < _PROVIDER_PROMPT_IDLE_SECONDS or not is_waiting:
+    # A structured unanswered question is already definitive evidence of a
+    # provider wait. Do not require a process-local idle timer: one-shot CLI
+    # status reads start with no observation history.
+    if (idle_seconds < _PROVIDER_PROMPT_IDLE_SECONDS and not questions) or not is_waiting:
         return None
     provider_name = "Codex" if normalized_provider == "codex" else "Claude Code"
     result: dict[str, Any] = {"provider": provider_name, "idle_seconds": idle_seconds}

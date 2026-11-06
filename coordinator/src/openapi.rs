@@ -293,7 +293,38 @@ pub fn openapi_value() -> Value {
         "type":"object",
         "required":["missions","total","offset","next_cursor","statuses"],
         "properties":{
-            "missions":{"type":"array","items":{"type":"object","required":["worker","stale","mission"],"properties":{"worker":{"type":"string"},"stale":{"type":"boolean"},"mission":{"type":"object","additionalProperties":true}}}},
+            "missions":{
+                "type":"array",
+                "items":{
+                    "type":"object",
+                    "required":["worker","stale","mission"],
+                    "properties":{
+                        "worker":{"type":"string"},
+                        "stale":{"type":"boolean"},
+                        "mission":{
+                            "type":"object",
+                            "additionalProperties":true,
+                            "properties":{
+                                "needs_you":{
+                                    "oneOf":[
+                                        {
+                                            "type":"object",
+                                            "required":["kind","message","command"],
+                                            "properties":{
+                                                "kind":{"const":"provider"},
+                                                "message":{"type":"string","maxLength":2048},
+                                                "command":{"type":"string","maxLength":512}
+                                            },
+                                            "additionalProperties":false
+                                        },
+                                        {"type":"null"}
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             "total":{"type":"integer","minimum":0},
             "offset":{"type":"integer","minimum":0,"description":"Compatibility field; use next_cursor for subsequent pages."},
             "next_cursor":{"type":["string","null"],"maxLength":2048},

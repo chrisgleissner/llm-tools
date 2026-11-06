@@ -109,7 +109,10 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let terminalInputs = 0;
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
-  const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS;
+  const providerNeedsYou = { kind: "provider", tasks: [], message: "Codex asks: Should I continue? · Choices: 1. Continue; 2. Stop · take control of the terminal to answer", command: "llm-bridge attach --mission 01a1b2c3" };
+  const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS.map((entry, i) =>
+    opts.providerQuestion && i === 0 ? { ...entry, mission: { ...entry.mission, needs_you: providerNeedsYou } } : { ...entry, mission: { ...entry.mission } },
+  );
   const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
   await page.routeWebSocket(/\/api\/v1\/stream/, () => {
     /* connected, silent: the page shows "Live" */
@@ -174,8 +177,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     const missionResource = path.match(/^\/missions\/([^/]+)$/);
     if (missionResource && method === "GET") {
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
-      const providerQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
-      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: providerQuestion ? { kind: "provider", tasks: [], message: "Codex asks: Should I continue? · Choices: 1. Continue; 2. Stop · take control of the terminal to answer" } : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
+      const isProviderQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
     }
     if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {

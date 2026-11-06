@@ -10,6 +10,12 @@ for mission and task changes; worker administration and diagnostics require
 reported at enrolment and the peer address of the active worker connection. The
 address is null while the worker is offline; forwarded headers do not affect it.
 
+The mission index may include `mission.needs_you` for an online native worker
+when its provider is waiting on a structured question. It contains the bounded
+question and choice text, plus the local CLI answer command; use the linked
+mission detail to open the provider terminal and answer it. No raw terminal
+content or surrounding transcript is returned.
+
 For native Codex sessions, mission status can include the bounded text and
 choices of the currently expanded queued question. When the exact session is
 known, Bridge reads the provider's structured question record; the local

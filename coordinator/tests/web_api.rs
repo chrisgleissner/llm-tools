@@ -394,11 +394,14 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
         seq: 0,
     };
     let mission = |id: &str, name: &str, status: &str, folder: &str, updated: &str| json!({"id": id, "name": name, "status": status, "folder": folder, "updated_at": updated});
+    let mut first_mission = mission("m1", "Refactor parser", "RUNNING", "parser", "2026-01-03T10:00:00Z");
+    first_mission["needs_you"] =
+        json!({"kind":"provider","message":"Codex asks: Reconnect? Choices: 1. Yes; 2. No","command":"llm-bridge attach --mission m1"});
     fw.send(
         "hello",
         json!({"worker_id": "wid", "name": "w1", "software_version": "test", "protocol_versions": [1],
                "platform": {"system": "Linux"}, "capabilities": caps(), "event_cursor": 0, "missions": [
-            mission("m1", "Refactor parser", "RUNNING", "parser", "2026-01-03T10:00:00Z"),
+            first_mission,
             mission("m2", "Fix login bug", "FAILED", "web", "2026-01-01T10:00:00Z"),
             mission("m3", "Write docs", "COMPLETED", "docs", "2026-01-02T10:00:00Z"),
             mission("m4", "refactor docs", "RUNNING", "docs", "2026-01-04T10:00:00Z"),
@@ -419,6 +422,10 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
     assert_eq!(st, 200);
     assert_eq!(all["total"], 4, "default page includes every matching fixture mission");
     assert_eq!(ids(&all).len(), 4);
+    assert_eq!(
+        all["missions"][0]["mission"]["needs_you"]["message"],
+        "Codex asks: Reconnect? Choices: 1. Yes; 2. No"
+    );
     assert_eq!(all["statuses"], json!({"COMPLETED": 1, "FAILED": 1, "RUNNING": 2}));
 
     let (_, b) = api.get("/api/v1/missions?q=REFACTOR&sort=name").await;

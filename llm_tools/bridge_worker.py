@@ -41,6 +41,8 @@ _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 PING_INTERVAL = 20.0
 SILENCE_LIMIT = 60.0
 EVENT_BATCH = 200
+MISSION_QUESTION_REFRESH_SECS = 5.0
+MAX_QUESTION_MISSIONS_PER_REFRESH = 64
 
 
 class WorkerConfigError(ValueError):
@@ -368,17 +370,16 @@ class WorkerSession:
         self.terminal_launcher = terminal_launcher
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
+        self.last_question_refresh = 0.0
+        self.last_question_mission_id: str | None = None
+        self.mission_questions: dict[str, dict[str, str] | None] = {}
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
         return Message(kind, self.config.worker_id, self.generation, payload)
 
     def hello(self) -> Message:
         with self.open_store() as store:
-            missions = [
-                {"id": row["id"], "name": row.get("name") or "", "status": row["status"], "folder": Path(str(row["cwd"])).name,
-                 "updated_at": row.get("updated_at")}
-                for row in store.list_missions()
-            ]
+            missions = [self._mission_summary(store, row) for row in store.list_missions()]
             cursor = store.last_event_id()
         allowed = {spec["operation"] for spec in commands.operation_catalog() if self.config.allow_control or not spec["mutating"]}
         payload: dict[str, Any] = {
@@ -395,6 +396,57 @@ class WorkerSession:
         if host_name and len(host_name.encode("utf-8")) <= 255 and not any(ord(char) < 32 or ord(char) == 127 for char in host_name):
             payload["host_name"] = host_name
         return Message("hello", self.config.worker_id, 0, payload)
+
+    def _provider_question(self, store: BridgeStore, mission_id: str) -> dict[str, str] | None:
+        """Project the existing bounded status decision for one active native mission."""
+        try:
+            from .bridge_monitor import project_snapshot
+
+            needs = project_snapshot(store, mission_id, task_limit=1).get("needs_you")
+        except Exception:  # noqa: BLE001 - observation must never stop worker replication
+            return None
+        if not isinstance(needs, dict) or needs.get("kind") != "provider":
+            return None
+        message = needs.get("message")
+        command = needs.get("command")
+        if not isinstance(message, str) or not message or not isinstance(command, str) or not command:
+            return None
+        return {"kind": "provider", "message": message[:2048], "command": command[:512]}
+
+    def _mission_summary(self, store: BridgeStore, row: dict[str, Any]) -> dict[str, Any]:
+        mission_id = str(row["id"])
+        summary: dict[str, Any] = {
+            "id": mission_id,
+            "name": row.get("name") or "",
+            "status": row["status"],
+            "folder": Path(str(row["cwd"])).name,
+            "updated_at": row.get("updated_at"),
+        }
+        config = row.get("config")
+        if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
+            question = self._provider_question(store, mission_id)
+            summary["needs_you"] = question
+            self.mission_questions[mission_id] = question
+        elif mission_id in self.mission_questions:
+            # Event-driven summaries clear a question when its mission leaves RUNNING.
+            summary["needs_you"] = None
+            self.mission_questions.pop(mission_id, None)
+        return summary
+
+    def _question_refresh_batch(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Select a bounded, rotating slice so large inventories are not starved."""
+        ordered = sorted(rows, key=lambda row: str(row["id"]))
+        if not ordered:
+            return []
+        if self.last_question_mission_id is not None:
+            start = next(
+                (index for index, row in enumerate(ordered) if str(row["id"]) > self.last_question_mission_id),
+                0,
+            )
+            ordered = ordered[start:] + ordered[:start]
+        batch = ordered[:MAX_QUESTION_MISSIONS_PER_REFRESH]
+        self.last_question_mission_id = str(batch[-1]["id"])
+        return batch
 
     def error(self, code: str, text: str, in_reply_to: str | None = None) -> Message:
         payload: dict[str, Any] = {"code": code, "message": text}
@@ -490,24 +542,42 @@ class WorkerSession:
             return None
         with self.open_store() as store:
             events = store.events_since(self.cursor, limit=min(EVENT_BATCH, MAX_EVENTS_PER_BATCH))
-        if not events:
-            return None
-        after = self.cursor
-        self.cursor = int(events[-1]["id"])
-        # Send only summaries for missions present in this event batch, while advancing
-        # mission_cursor on every new-protocol batch. This keeps task and operation
-        # activity in sync without transferring the worker's whole mission list.
-        mission_ids = {
-            str(event["mission_id"]) for event in events
-            if isinstance(event.get("mission_id"), str) and event["mission_id"]
-        }
-        with self.open_store() as store:
-            missions = [
-                {"id": row["id"], "name": row.get("name") or "", "status": row["status"],
-                 "folder": Path(str(row["cwd"])).name, "updated_at": row.get("updated_at")}
-                for mission_id in sorted(mission_ids)
+            moment = time.monotonic()
+            refresh_questions = moment - self.last_question_refresh >= MISSION_QUESTION_REFRESH_SECS
+            if not events and not refresh_questions:
+                return None
+            after = self.cursor
+            if events:
+                self.cursor = int(events[-1]["id"])
+            # Ordinary summaries remain event-scoped. A small, periodic scan of
+            # active native missions catches provider questions, which can arrive
+            # without a Bridge database event.
+            event_mission_ids = {
+                str(event["mission_id"]) for event in events
+                if isinstance(event.get("mission_id"), str) and event["mission_id"]
+            }
+            candidate_rows: dict[str, dict[str, Any]] = {
+                mission_id: row for mission_id in sorted(event_mission_ids)
                 if (row := store.get_mission(mission_id))
-            ]
+            }
+            if refresh_questions:
+                self.last_question_refresh = moment
+                active_native = [
+                    row for row in store.list_missions()
+                    if row.get("status") == "RUNNING" and isinstance(row.get("config"), dict)
+                    and row["config"].get("native_tui") is True
+                ]
+                active_native = self._question_refresh_batch(active_native)
+                candidate_rows.update({str(row["id"]): row for row in active_native})
+            missions: list[dict[str, Any]] = []
+            for mission_id, row in candidate_rows.items():
+                previous = self.mission_questions.get(mission_id)
+                summary = self._mission_summary(store, row)
+                current = self.mission_questions.get(mission_id)
+                if mission_id in event_mission_ids or current != previous:
+                    missions.append(summary)
+            if not events and not missions:
+                return None
         return self.message("events", {"after": after, "through": self.cursor, "events": events,
                                         "mission_cursor": self.cursor, "missions": missions})
 

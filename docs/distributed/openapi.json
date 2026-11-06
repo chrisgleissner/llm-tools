@@ -693,6 +693,37 @@
               "properties": {
                 "mission": {
                   "additionalProperties": true,
+                  "properties": {
+                    "needs_you": {
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "command": {
+                              "maxLength": 512,
+                              "type": "string"
+                            },
+                            "kind": {
+                              "const": "provider"
+                            },
+                            "message": {
+                              "maxLength": 2048,
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "message",
+                            "command"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
                   "type": "object"
                 },
                 "stale": {

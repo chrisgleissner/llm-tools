@@ -181,6 +181,51 @@ def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_pa
     assert all(set(mission) == {"id", "name", "status", "folder", "updated_at"} for mission in summaries.values())
 
 
+def test_worker_replicates_new_provider_question_without_a_database_event(state, monkeypatch):
+    directory, mission_id = state
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        mission = store.get_mission(mission_id)
+        config = {**mission["config"], "native_tui": True}
+        store.db.execute("UPDATE missions SET status='RUNNING',config_json=? WHERE id=?", (json.dumps(config), mission_id))
+    question = {"kind": "provider", "command": f"llm-bridge attach --mission {mission_id[:8]}",
+                "message": "Codex asks: Should I reconnect? · Choices: 1. Yes; 2. No · take control of the terminal to answer"}
+    observed = {"needs": None}
+    monkeypatch.setattr("llm_tools.bridge_monitor.project_snapshot", lambda *_args, **_kwargs: {"needs_you": observed["needs"]})
+    session, _ = _session(directory)
+    hello = session.hello()
+    _welcome(session, cursor=hello.payload["event_cursor"])
+    assert hello.payload["missions"][0]["needs_you"] is None
+
+    # request_user_input can be pending without a Bridge SQLite event.
+    observed["needs"] = question
+    session.last_question_refresh = 0.0
+    batch = session.next_events()
+
+    assert batch is not None
+    assert batch.payload["events"] == []
+    assert batch.payload["after"] == batch.payload["through"]
+    assert len(batch.payload["missions"]) == 1
+    summary = batch.payload["missions"][0]
+    assert summary["id"] == mission_id and summary["status"] == "RUNNING"
+    assert summary["needs_you"] == question
+    decode(batch.encode())
+
+
+def test_periodic_question_scan_rotates_beyond_its_bounded_batch(monkeypatch):
+    monkeypatch.setattr(worker, "MAX_QUESTION_MISSIONS_PER_REFRESH", 3)
+    session = object.__new__(worker.WorkerSession)
+    session.last_question_mission_id = None
+    rows = [{"id": f"mission-{index:02d}"} for index in range(7)]
+
+    first = session._question_refresh_batch(rows)
+    second = session._question_refresh_batch(rows)
+    third = session._question_refresh_batch(rows)
+
+    assert [row["id"] for row in first] == ["mission-00", "mission-01", "mission-02"]
+    assert [row["id"] for row in second] == ["mission-03", "mission-04", "mission-05"]
+    assert [row["id"] for row in third] == ["mission-06", "mission-00", "mission-01"]
+
+
 class FakeConnection:
     def __init__(self, incoming, stop, *, fail_after=False):
         self.incoming = list(incoming)

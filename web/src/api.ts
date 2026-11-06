@@ -18,6 +18,7 @@ export interface MissionInfo {
   status: string;
   folder: string;
   updated_at: string | null;
+  needs_you?: { kind: string; message: string; command?: string } | null;
 }
 
 export interface MissionEntry {

@@ -6,7 +6,7 @@
 // axe-core on all four projects, in both themes, and must have no violations of any impact.
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
-import { mockApp, MISSION_PATH, MISSION_START_PATH, type MockOptions } from "./mock";
+import { mockApp, MISSIONS, MISSION_PATH, MISSION_START_PATH, type MockOptions } from "./mock";
 import { currentWorkSummary } from "../src/current-work";
 import type { Page } from "@playwright/test";
 
@@ -62,6 +62,7 @@ const SCREENS: Screen[] = [
   { name: "workers-none", mock: { auth: "in", workers: "none" }, path: "/workers", run: (p) => expect(p.getByRole("heading", { name: "No workers enrolled" })).toBeVisible() },
   { name: "workers-add-dialog", mock: IN, path: "/workers", run: async (p) => { await p.locator("#add-worker-button").click(); await p.getByLabel("Worker name").fill("Bad Name"); await p.locator("#add-worker").getByRole("button", { name: "Add worker" }).click(); await expect(p.locator("#worker-name-error")).toContainText("lowercase"); } },
   { name: "missions", mock: IN, path: "/missions", run: async (p) => { await expect(p.locator("#missions-table tbody tr")).toHaveCount(8); await expect(p.locator(".now-doing")).toContainText("Implement the new tokenizer"); } },
+  { name: "missions-provider-question", mock: { ...IN, providerQuestion: true }, path: "/missions", run: async (p) => { const row = p.locator(`#missions-table tbody tr[data-mission="${MISSIONS[0]!.mission.id}"]`); await expect(row.locator("[data-needs-you=provider]")).toContainText("Codex asks: Should I continue?"); await expect(row.getByRole("link", { name: "Open mission to answer" })).toHaveAttribute("href", MISSION_PATH); } },
   { name: "missions-filtered", mock: IN, path: "/missions?status=RUNNING", run: async (p) => { await expect(p.locator("#missions-table tbody tr")).toHaveCount(2); } },
   { name: "missions-no-match", mock: IN, path: "/missions?q=zzz", run: (p) => expect(p.getByRole("heading", { name: "No missions match" })).toBeVisible() },
   { name: "missions-none", mock: { auth: "in", missions: "none" }, path: "/missions", run: (p) => expect(p.getByRole("heading", { name: "No missions yet" })).toBeVisible() },

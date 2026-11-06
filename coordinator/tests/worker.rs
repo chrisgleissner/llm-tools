@@ -122,6 +122,28 @@ async fn event_batch_updates_mission_inventory_and_caught_up_status() {
     assert_eq!(missions[3]["mission"]["status"], "STOPPED");
     assert!(missions.iter().all(|mission| mission["stale"] == false), "{list}");
 
+    // A provider question may appear without a local Bridge event. The worker
+    // can replicate just that changed mission summary with an empty event batch.
+    fw.send(
+        "events",
+        json!({
+            "after": 4,
+            "through": 4,
+            "mission_cursor": 4,
+            "events": [],
+            "missions": [{
+                "id": "m3", "name": "started while connected", "status": "RUNNING", "folder": "active",
+                "updated_at": "2026-11-06T12:00:00+00:00",
+                "needs_you": {"kind": "provider", "message": "Codex asks: Reconnect?", "command": "llm-bridge attach --mission m3"}
+            }]
+        }),
+    )
+    .await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    let active = list["missions"].as_array().unwrap().iter().find(|m| m["mission"]["id"] == "m3").unwrap();
+    assert_eq!(active["mission"]["needs_you"]["message"], "Codex asks: Reconnect?");
+
     // An event-only legacy batch advances the event cursor but cannot claim its mission
     // inventory is current, so the coordinator accurately marks the copy stale.
     fw.send("events", json!({"after": 4, "through": 5, "events": [{"id": 5}]})).await;
