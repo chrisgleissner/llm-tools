@@ -12,6 +12,7 @@ pub mod init;
 pub mod netinfo;
 pub mod openapi;
 pub mod ops;
+pub mod passkeys;
 pub mod protocol;
 pub mod scopes;
 pub mod server;

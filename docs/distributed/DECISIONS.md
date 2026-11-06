@@ -1,5 +1,11 @@
 # Distributed Bridge decisions
 
+## PK-003 WebAuthn core
+
+Choose `webauthn-rs` 0.6.2 (Kanidm, MPL-2.0) for server-side WebAuthn verification. It is maintained, exposes typed registration/authentication state and credential types, verifies origins/RP IDs and authenticator assertions, and documents that ceremony state must be persisted. The coordinator serializes that state only in its private SQLite database, with a single-use session/setup-bound challenge row capped at five minutes. The `danger-allow-state-serialisation` feature is required because the library deliberately gates persistence of in-flight ceremony state behind an explicit opt-in; the state remains private and is never returned to a client.
+
+This is a core storage/library decision, not a claim that passkey ceremonies are wired into HTTP. The standard registration helper currently does not enforce discoverable credentials; a follow-up integration must use an API that does so while retaining no attestation, and explicitly confirm the requested ES256/Ed25519/RS256 policy against the crate's actual algorithms before enabling registration. PK-003 remains partial until fixed-vector valid/invalid ceremony tests and route integration exist.
+
 Only consequential decisions. Architecture contracts for standalone Bridge stay in
 `docs/llm-bridge/architecture.md`.
 

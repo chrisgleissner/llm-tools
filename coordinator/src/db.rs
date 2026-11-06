@@ -66,6 +66,30 @@ pub struct Db {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebauthnChallengeRow {
+    pub principal_id: String,
+    pub binding: String,
+    pub kind: String,
+    pub state: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyCredentialRow {
+    pub credential_id: String,
+    pub principal_id: String,
+    pub credential: String,
+    pub user_name: String,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+    pub aaguid: Option<String>,
+    pub transports: String,
+    pub backup_eligible: bool,
+    pub backed_up: bool,
+    pub sign_count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerRow {
     pub name: String,
@@ -212,7 +236,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -231,6 +255,21 @@ const MIGRATE_V3_COLUMN: &str = "ALTER TABLE sessions ADD COLUMN remember INTEGE
 const MIGRATE_V4_COLUMN: &str = "ALTER TABLE workers ADD COLUMN mission_cursor INTEGER NOT NULL DEFAULT 0;";
 const MIGRATE_V5_COLUMN: &str = "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"admin\"]';";
 const MIGRATE_V7_COLUMN: &str = "ALTER TABLE workers ADD COLUMN worker_policy TEXT;";
+/// Version 8: short-lived, session-bound WebAuthn ceremony state and passkey credentials.
+const MIGRATE_V8: &str = "
+CREATE TABLE webauthn_challenges(
+  id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, binding TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('registration','authentication')),
+  state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  CHECK(expires_at > created_at AND expires_at <= created_at + 300));
+CREATE INDEX webauthn_challenges_expiry ON webauthn_challenges(expires_at);
+CREATE TABLE passkeys(
+  credential_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, credential TEXT NOT NULL,
+  user_name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used INTEGER,
+  aaguid TEXT, transports TEXT NOT NULL DEFAULT '[]', backup_eligible INTEGER NOT NULL DEFAULT 0,
+  backed_up INTEGER NOT NULL DEFAULT 0, sign_count INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX passkeys_principal ON passkeys(principal_id);
+";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -325,6 +364,9 @@ impl Db {
             let alter = if has_table && !has_column { MIGRATE_V7_COLUMN } else { "" };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 7; COMMIT;"))?;
         }
+        if version < 8 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V8} PRAGMA user_version = 8; COMMIT;"))?;
+        }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -334,6 +376,100 @@ impl Db {
 
     fn c(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Persist server-side ceremony state for at most five minutes. Binding is an opaque
+    /// session/setup-token identifier, never a browser supplied value.
+    pub fn webauthn_challenge_put(&self, id: &str, row: &WebauthnChallengeRow) -> R<()> {
+        let now = crate::now();
+        if id.is_empty()
+            || row.principal_id.is_empty()
+            || row.binding.is_empty()
+            || !matches!(row.kind.as_str(), "registration" | "authentication")
+            || row.expires_at <= now
+            || row.expires_at > now + 300
+        {
+            return Err(rusqlite::Error::InvalidParameterName("invalid WebAuthn challenge bounds".into()));
+        }
+        self.c().execute(
+            "INSERT INTO webauthn_challenges(id,principal_id,binding,kind,state,created_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+            params![id, row.principal_id, row.binding, row.kind, row.state, now, row.expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// Consume once, only for the matching principal and session/setup binding. Expired
+    /// challenges are deleted; a mismatched caller cannot invalidate another session's challenge.
+    pub fn webauthn_challenge_take(&self, id: &str, principal: &str, binding: &str, kind: &str) -> R<Option<WebauthnChallengeRow>> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let row = tx
+            .query_row(
+                "SELECT principal_id,binding,kind,state,created_at,expires_at FROM webauthn_challenges WHERE id=?",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let result = if let Some((p, b, k, state, created, expires)) = row {
+            let now = crate::now();
+            if expires <= now || expires > created + 300 {
+                tx.execute("DELETE FROM webauthn_challenges WHERE id=?", [id])?;
+                None
+            } else if p == principal && b == binding && k == kind {
+                tx.execute("DELETE FROM webauthn_challenges WHERE id=?", [id])?;
+                Some(WebauthnChallengeRow {
+                    principal_id: p,
+                    binding: b,
+                    kind: k,
+                    state,
+                    expires_at: expires,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn passkey_put(&self, row: &PasskeyCredentialRow) -> R<()> {
+        self.c().execute("INSERT INTO passkeys(credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            params![row.credential_id,row.principal_id,row.credential,row.user_name,row.created_at,row.last_used,row.aaguid,row.transports,row.backup_eligible as i64,row.backed_up as i64,row.sign_count])?;
+        Ok(())
+    }
+
+    pub fn passkeys_for_principal(&self, principal: &str) -> R<Vec<PasskeyCredentialRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare("SELECT credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count FROM passkeys WHERE principal_id=? ORDER BY created_at,credential_id")?;
+        let rows = stmt
+            .query_map([principal], |r| {
+                Ok(PasskeyCredentialRow {
+                    credential_id: r.get(0)?,
+                    principal_id: r.get(1)?,
+                    credential: r.get(2)?,
+                    user_name: r.get(3)?,
+                    created_at: r.get(4)?,
+                    last_used: r.get(5)?,
+                    aaguid: r.get(6)?,
+                    transports: r.get(7)?,
+                    backup_eligible: r.get::<_, i64>(8)? != 0,
+                    backed_up: r.get::<_, i64>(9)? != 0,
+                    sign_count: r.get(10)?,
+                })
+            })?
+            .collect();
+        rows
     }
 
     // ---- admin ----
@@ -831,6 +967,7 @@ impl Db {
             params![now - COMPLETED_COMMAND_KEEP_SECS],
         )?;
         c.execute("DELETE FROM known_addrs WHERE last_success < ?", params![now - KNOWN_ADDR_SECS])?;
+        c.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", params![now])?;
         c.execute("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?", params![now])?;
         c.execute("DELETE FROM audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM audit) - ?", params![AUDIT_KEEP])?;
         Ok(())
