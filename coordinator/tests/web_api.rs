@@ -132,6 +132,43 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
     env.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn mission_task_resource_adapts_to_the_typed_worker_command() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let worker_secret = "worker-secret-for-resource-test";
+    env.srv
+        .state
+        .db
+        .worker_add("build-1", &bridge_coordinator::auth::sha256_hex(worker_secret))
+        .unwrap();
+    let mut hello = serde_json::Map::new();
+    hello.insert("missions".into(), json!([{"id":"mission-1","name":"Example"}]));
+    env.srv
+        .state
+        .db
+        .worker_hello(
+            "build-1",
+            "worker-id-resource-test",
+            &hello,
+            &json!([{"operation":"task.list","mutating":false}]),
+        )
+        .unwrap();
+
+    let (status, command) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=25&offset=5").await;
+    assert_eq!(status, 202, "{command}");
+    assert_eq!(command["operation"], "task.list");
+    assert_eq!(command["request"]["params"], json!({"limit":25,"offset":5}));
+    assert_eq!(command["request"]["mission_id"], "mission-1");
+    assert_eq!(command["target"], "build-1");
+    assert!(command["request_id"].as_str().unwrap().starts_with("resource-"));
+
+    let (status, problem) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&admin=true").await;
+    assert_eq!(status, 400, "{problem}");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+    env.stop().await;
+}
+
 #[test]
 fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
     let dir = tmp_dir();

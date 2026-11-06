@@ -17,6 +17,13 @@ can still report `uncertain`; clients must not treat that as success. Resource
 endpoints, `Idempotency-Key`, `If-Match`, opaque cursor pagination and the
 remaining CLI parity operations are being added in this follow-up.
 
+Worker-owned mission resources take the worker name as a required `worker` query
+parameter because mission IDs are unique only within a worker. `GET
+/api/v1/missions/{id}/tasks`, `/events` and `/operations` are thin adapters over
+the typed `task.list`, `mission.events` and `session.list` operations. They return
+the durable command envelope; if the worker is offline, the response is `202`
+with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
+
 ```sh
 export COORDINATOR=https://localhost:8443
 export TOKEN='lbr_pat_…'              # read scope
@@ -32,6 +39,9 @@ and requires `read`:
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
   "$COORDINATOR/api/v1/missions?limit=100"
+
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  "$COORDINATOR/api/v1/missions/$MISSION/tasks?worker=$WORKER&limit=100&offset=0"
 
 curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \

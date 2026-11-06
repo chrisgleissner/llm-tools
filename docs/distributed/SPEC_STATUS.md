@@ -202,7 +202,7 @@ checkbox means the full requirement and its CI evidence are not complete yet.
 
 | ID | Status | Current evidence / remaining work |
 |---|---|---|
-| API-001 | [ ] | Resource endpoints for mission/task operations, command lookup and diagnostics remain to be added. |
+| API-001 | [ ] | Added `GET /missions/{id}/tasks`, `/events` and `/operations`, with explicit worker qualification and typed read-command adapters (`coordinator/tests/web_api.rs::mission_task_resource_adapts_to_the_typed_worker_command`); mutation sub-resources and remaining resource routes remain. |
 | API-002 | [ ] | Existing `/commands` uses the typed command layer; resource adapters and client migration remain. |
 | API-003 | [ ] | `Idempotency-Key` now maps to the durable request ID, repeated keys replay, and pending commands return 202 with `Location` (`coordinator/tests/worker.rs::request_id_idempotence_and_refusals`); `If-Match`/ETag and explicit uncertain mapping remain. |
 | API-004 | [ ] | API errors now use RFC 9457 `application/problem+json` with stable code URIs (`http::problem_tests`); opaque cursor pagination, timestamp contract and complete response tests remain. |

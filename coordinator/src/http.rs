@@ -797,6 +797,131 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
     ))
 }
 
+struct MissionReadRequest {
+    headers: HeaderMap,
+    mission_id: String,
+    worker: Option<String>,
+    resource: &'static str,
+    query: HashMap<String, String>,
+}
+
+/// Read a worker-owned mission resource through the same durable typed-command path as the
+/// low-level endpoint. The route adapter selects a fixed read operation; callers cannot choose
+/// an arbitrary command or pass fields outside that operation's parameter set.
+async fn mission_read(st: St, principal: Principal, ip: String, request: MissionReadRequest) -> ApiResult {
+    let MissionReadRequest {
+        headers,
+        mission_id,
+        worker,
+        resource,
+        query,
+    } = request;
+    let worker = worker.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    let (operation, allowed): (&str, &[&str]) = match resource {
+        "tasks" => ("task.list", &["limit", "offset"]),
+        "events" => ("mission.events", &["after", "limit"]),
+        "operations" => ("session.list", &["limit"]),
+        _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown mission resource")),
+    };
+    if let Some(key) = query.keys().find(|key| key.as_str() != "worker" && !allowed.contains(&key.as_str())) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", format!("unknown query parameter {key}")));
+    }
+    let mut params = serde_json::Map::new();
+    for key in allowed {
+        if let Some(value) = query.get(*key) {
+            let number = value
+                .parse::<u64>()
+                .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", format!("{key} must be a non-negative integer")))?;
+            if (*key == "limit" && !(1..=1000).contains(&number)) || number > i64::MAX as u64 {
+                return Err(err(StatusCode::BAD_REQUEST, "invalid-request", format!("{key} is outside its allowed range")));
+            }
+            params.insert((*key).to_string(), json!(number));
+        }
+    }
+    if resource == "operations" {
+        params.insert("mission".into(), json!(mission_id));
+    }
+    let command = json!({
+        "target": worker,
+        "request": {
+            "schema_version": protocol::COMMAND_SCHEMA_VERSION,
+            "operation": operation,
+            "params": params,
+            "mission_id": mission_id,
+            "target": worker,
+            "request_id": format!("resource-{}", auth::random_token())
+        }
+    });
+    let bytes = Bytes::from(serde_json::to_vec(&command).expect("command JSON serializes"));
+    post_command(State(st), Authed(principal, ip), headers, Buffered { bytes, _permit: None }).await
+}
+
+async fn mission_tasks(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    mission_read(
+        st,
+        p,
+        ip,
+        MissionReadRequest {
+            headers,
+            mission_id: id,
+            worker: q.get("worker").cloned(),
+            resource: "tasks",
+            query: q,
+        },
+    )
+    .await
+}
+
+async fn mission_events(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    mission_read(
+        st,
+        p,
+        ip,
+        MissionReadRequest {
+            headers,
+            mission_id: id,
+            worker: q.get("worker").cloned(),
+            resource: "events",
+            query: q,
+        },
+    )
+    .await
+}
+
+async fn mission_operations(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    mission_read(
+        st,
+        p,
+        ip,
+        MissionReadRequest {
+            headers,
+            mission_id: id,
+            worker: q.get("worker").cloned(),
+            resource: "operations",
+            query: q,
+        },
+    )
+    .await
+}
+
 async fn list_events(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
     let num = |k: &str, default: u64| -> Result<u64, ApiError> {
         q.get(k).map_or(Ok(default), |v| {
@@ -1057,6 +1182,9 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/tasks", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
     ("/api/v1/commands", &["POST"], Access::Authed, "operate"),
     ("/api/v1/commands/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/events", &["GET"], Access::Authed, "read"),
@@ -1112,6 +1240,9 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/missions", get(list_missions))
+        .route("/api/v1/missions/{id}/tasks", get(mission_tasks))
+        .route("/api/v1/missions/{id}/events", get(mission_events))
+        .route("/api/v1/missions/{id}/operations", get(mission_operations))
         .route("/api/v1/commands", post(post_command))
         .route("/api/v1/commands/{id}", get(get_command))
         .route("/api/v1/events", get(list_events))

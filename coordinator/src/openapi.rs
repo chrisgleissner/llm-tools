@@ -168,6 +168,30 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 .collect(),
         );
     }
+    if method == "GET" && path.starts_with("/api/v1/missions/{id}/") {
+        let mut params = op["parameters"].as_array().cloned().unwrap_or_default();
+        params.push(json!({
+            "name":"worker","in":"query","required":true,
+            "description":"Worker that owns this mission ID.",
+            "schema":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}
+        }));
+        let page_key = match path {
+            "/api/v1/missions/{id}/events" => "after",
+            "/api/v1/missions/{id}/tasks" => "offset",
+            _ => "",
+        };
+        if !page_key.is_empty() {
+            params.push(json!({
+                "name":page_key,"in":"query","required":false,
+                "schema":{"type":"integer","minimum":0}
+            }));
+        }
+        params.push(json!({
+            "name":"limit","in":"query","required":false,
+            "schema":{"type":"integer","minimum":1,"maximum":1000}
+        }));
+        op["parameters"] = Value::Array(params);
+    }
     if access == Access::Authed {
         op["security"] = json!([{"bearerAuth":[]}, {"cookieSession":[]}]);
         op["x-required-scope"] = if scope == "terminal:conditional" {
