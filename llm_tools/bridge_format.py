@@ -531,8 +531,8 @@ def event_phrase(event: dict[str, Any], *, code: bool = False) -> str:
 
     phrase = _humanize_event(event)[0]
     if code and event.get("kind") == "operation-exited":
-        data = event.get("data") if isinstance(event.get("data"), dict) else {}
-        status = data.get("exit_code")
+        raw = event.get("data")
+        status = raw.get("exit_code") if isinstance(raw, dict) else None
         if exit_sentence(status) is not None:
             phrase += f" (exit {status})"
     return phrase
