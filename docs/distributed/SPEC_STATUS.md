@@ -257,7 +257,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-001 | [ ] | Not started. Five-minute first success. |
 | PRD-002 | [ ] | Not started. Release artifacts (signed multi-arch image, package, checksums, release dry run). |
 | PRD-003 | [ ] | Not started. Versioned upgrades and migrations. |
-| PRD-004 | [ ] | Not started. Configuration validation. |
+| PRD-004 | [~] | `bridge-coordinator check-config` and the start-up path report every configuration error at once (`config error: <key> = <value>: <problem>; fix: ...`), with a did-you-mean for unknown keys and checks of environment overrides; `coordinator/tests/config_check.rs` is table-driven (25 rows) and its three CLI tests failed before the change. Waiting for a green CI run ID. |
 | PRD-005 | [ ] | Not started. Uninstall and data portability. |
 | PRD-006 | [ ] | Not started. Documentation as product. |
 | PRD-007 | [ ] | Not started. Soak test. |
@@ -284,7 +284,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-028 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate checklist. |
 | PRD-029 | [ ] | Not started; waits for PR #31 to merge (phase B). Changelog and versioning. |
 | PRD-030 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate dry run. |
-| PRD-031 | [~] | Expert UX review of the CLI and terminal console. The overseer's pre-review (CLIUX-001 to CLIUX-050) is in `ux-review-cli.md`; the independent second reviewer pass is in progress. |
+| PRD-031 | [~] | Expert UX review of the CLI and terminal console in `ux-review-cli.md`: the overseer's pre-review (CLIUX-001 to CLIUX-050) and an independent second reviewer pass (CLIUX-051 to CLIUX-080, 4 high, 12 medium, 14 low). Fixes are tracked under PRD-033 in that file's fix-status table. |
 | PRD-032 | [ ] | Not started; waits for PR #31 to merge (phase B). Expert UX review of the web console and site. |
 | PRD-033 | [ ] | Not started. Every UX finding fixed. |
 | PRD-034 | [ ] | Not started. Review of the inner workings. |

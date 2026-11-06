@@ -911,7 +911,612 @@ llm-bridge worker list                 workers, connection state and last seen  
 
 ## Second reviewer
 
-Pending.
+An independent reviewer, briefed as a principal UX designer for developer tools and given the pre-review's headings only to avoid duplicates, reviewed the same scope on 2026-11-06 at commit 8ecd9ae.
+
+Reviewer: independent second review, 2026-11-06, checkout `feat/distributed-release-readiness` (`8ecd9ae`), `llm-bridge 1.4.0`.
+
+Method: every `--help` page and help topic was captured with a throwaway `HOME`, state and XDG directories. Headless missions were driven from the CLI with a fake provider (`--command-template "python3 ok.py"`), once with no capacity data and once with an injected `LLM_SCHEDULER_USAGE_JSON` snapshot. The home screen, new-mission form, station strip and console were driven at 80x24 in a private tmux server started with `env -i`, so no inherited Bridge variables reached it. Golden screens in `tests/golden/screens/` were read at 80x24 and 140x40, UTF-8 and ASCII. Theme roles were read with `llm-bridge theme --theme light|dark --json`, and contrast was computed against white and black backgrounds. No real mission, real state directory or coordinator was touched. The only real provider CLI that the form selected (Copilot) never ran, because Bridge put it into a capacity wait (see CLIUX-055).
+
+### Summary
+
+The pre-review covered the vocabulary, help and JSON problems. This review found a second class of problem: **status that is wrong while work is not happening**. Bridge often shows `RUNNING`, or a countdown, or a hint, that does not match what the controller is doing.
+
+* A task shows `RUNNING · operation RUNNING` for up to 15 minutes while the scheduler is still waiting for capacity data, and the countdown restarts every minute (CLIUX-051).
+* After `stop --force`, `start` runs a controller that never resumes the task. Status blames capacity, while the task is actually blocked (CLIUX-053).
+* The home form says `Starts copilot now` for a provider whose quota resets in 24 days, and the mission then waits for 24 days under a `● RUNNING` header (CLIUX-055).
+* A receipt prints `start it with: llm-bridge start` without `--mission`. Run from another folder, that command starts a different mission (CLIUX-052).
+
+Ordering is also inconsistent:
+
+* `task list` does not show the order in which tasks run.
+* `P0` is the *lowest* priority.
+* `events` shows the oldest events first, so the command that `Needs you` and `help recovery` recommend shows mission creation instead of the failure (CLIUX-056 to CLIUX-058).
+
+The rest are smaller problems in wording, layout and scripting.
+
+### Count by severity
+
+| Severity | Count |
+| --- | --- |
+| Critical | 0 |
+| High | 4 |
+| Medium | 12 |
+| Low | 14 |
+| Total | 30 |
+
+---
+
+### Second reviewer findings
+
+#### CLIUX-051 · high · System status · A task shows RUNNING for up to 15 minutes while no provider runs, and the countdown restarts
+
+**Command/Screen**: `llm-bridge status` for a headless mission whose provider has no capacity data (for example, a provider that is not signed in, or one whose usage endpoint is unreachable).
+
+**Evidence**
+
+```
+$ llm-bridge mission create --prompt "OK job" --headless --providers claude --command-template "python3 ok.py"
+$ llm-bridge start
+$ llm-bridge status            # at +6 s, +21 s, +40 s and about 3 min
+Current     task 1 "OK job" · RUNNING · operation RUNNING
+Tasks       1 total: 1 RUNNING
+Capacity
+  claude        no capacity data · unavailable
+Waiting     next provider capacity in 53s      (then 34s, 22s, and 41s again)
+$ ls
+(empty: out.txt was never written)
+```
+
+The scheduler's run log shows the real state: `usage decision: unavailable`. `scheduler.py:60` gives the default: `--max-unavailable-wait SECONDS … (default: 900)`. The provider was not launched until that 900 s wait ran out. `llm-bridge stop` during this wait printed `STOPPING` and kept `operation RUNNING`, because it waits for a provider process that does not exist yet.
+
+**Why it hurts users**: The status says that paid work is in progress when no provider has started. The `Waiting … in 53s` countdown reaches about 20 s and then jumps back up, so it never predicts anything. A first-run user whose provider is not signed in sees `RUNNING` for 15 minutes and has no hint that sign-in is the problem.
+
+**Fix**: Do not mark the task or the operation `RUNNING` until the provider process has started. Use a distinct state, `○ WAITING for capacity data (claude: no usage data · launches anyway in 14m)`, and show the deadline as an absolute time that does not restart. When the reason is `not-authenticated` or `missing-cli`, put that reason and the sign-in command in `Needs you`. Make plain `stop` complete at once when no provider process exists.
+
+#### CLIUX-052 · high · Error prevention · `Mission reopened · start it with: llm-bridge start` can start a different mission
+
+**Command/Screen**: `task add --mission ID` for a completed mission, run from another folder.
+
+**Evidence**
+
+```
+(cwd: …/env/repo, which has its own unfinished missions; mission 4141ac50 lives in …/repo3 and was COMPLETED)
+$ llm-bridge task add --mission 4141 --pri 3 --prompt x
+Added task 2 "x" · QUEUED · priority 3
+Mission reopened · start it with: llm-bridge start
+```
+
+`bridge_format.py:268` always appends the hint without `--mission`:
+`text += "\nMission reopened · start it with: llm-bridge start"`.
+In a folder that has exactly one unfinished mission (`…/folderA`, mission `4cda1a45`), `llm-bridge status` resolves to that mission. The printed `llm-bridge start` would therefore start paid work on `4cda1a45`, not on the mission that was reopened.
+
+**Why it hurts users**: Users copy and paste the receipt. The command it suggests can spend capacity on the wrong mission without any warning. This differs from CLIUX-010, where the suggested command fails safely on ambiguity.
+
+**Fix**: Always print the resolved mission in receipts: `Mission 4141ac50 reopened · start it with: llm-bridge start --mission 4141ac50`. Add a test that runs `task add --mission X` from a folder that belongs to mission Y and checks that every command in the receipt names X.
+
+#### CLIUX-053 · high · Recovery · After `stop --force`, `start` runs a controller that never resumes the task, and status blames capacity
+
+**Command/Screen**: `stop --force` during a run, then `start`, then `status`.
+
+**Evidence**
+
+```
+$ llm-bridge stop --force
+llm-bridge: no verifiable process identity; mission remains STOPPING        (exit 2)
+$ llm-bridge status
+Mission     43f80dda "OK job" · STOPPED (headless)
+Current     task 1 "OK job" · BLOCKED
+Needs you   task 1 is blocked, its provider run ended without a result · check llm-bridge events, then llm-bridge task retry --task 1
+$ llm-bridge start
+mission 43f80dda running without a terminal station · inspect with: …          (exit 0)
+$ llm-bridge status
+Mission     43f80dda "OK job" · RUNNING (headless)
+Current     task 1 "OK job" · BLOCKED
+Capacity
+  claude        no capacity data · unavailable
+Waiting     for a usable provider · claude resets in <1m · change providers with: llm-bridge rotation --mission 43f80dda --set LIST
+```
+
+`events` shows the cause: `operation-uncertain  task 1 reason=operation outcome was not committed bef…`.
+
+**Why it hurts users**: The user stopped the work. Bridge reports that "its provider run ended without a result", which suggests a provider fault. `start` then reports success and shows a mission `RUNNING` that will never run the task. The `Waiting` line gives a third explanation: it claims a reset in under a minute for a provider that has `no capacity data`. That reset time was invented. Each of the three surfaces gives a different, wrong reason.
+
+**Fix**: Record a forced stop as `task 1 interrupted by stop --force`. On the next `start`, re-queue an interrupted task automatically, or refuse with `task 1 was interrupted by stop --force · llm-bridge task retry --task 1, then start`. Show the `Waiting` line only when capacity is the actual blocker, and never show a reset time for a provider that has no capacity data.
+
+#### CLIUX-054 · medium · Error messages · `stop --force` reports an internal failure that did not happen
+
+**Command/Screen**: `llm-bridge stop --force` on a headless mission that is waiting for capacity (CLIUX-051).
+
+**Evidence**
+
+```
+$ llm-bridge stop --force
+llm-bridge: no verifiable process identity; mission remains STOPPING     (exit 2)
+$ llm-bridge status
+Mission     43f80dda "OK job" · STOPPED (headless)
+```
+
+A second `stop --force` printed `Stop forced · mission 43f80dda is STOPPED`.
+
+**Why it hurts users**: "Verifiable process identity" is an internal term. The message says the mission is still `STOPPING`, but it is `STOPPED` a moment later. A failure exit for a stop that succeeded makes scripts retry, and makes users think something is stuck.
+
+**Fix**: When no provider process exists, report `Stopped · no provider process was running` with exit 0. Report a real failure only when a process is still alive: `could not confirm that provider process 12345 belongs to this mission; it was left running. Check with: ps -p 12345`.
+
+#### CLIUX-055 · high · Error prevention · The home form starts a provider whose quota is empty for 24 days, and the mission then shows RUNNING
+
+**Command/Screen**: Home → `N` → Start, at 80x24, in an environment where Copilot is the only installed provider and its monthly quota is at 0%.
+
+**Evidence**
+
+```
+Start row hint:      Starts copilot now · uses provider capacity
+After Enter:         Waiting for capacity: copilot monthly quota resets in 24d 5h. Ctrl-] then B for
+                     options.
+Controls header:     LLM BRIDGE · ▌ Write hello.txt · ● RUNNING
+                     waiting for capacity · copilot monthly 0% · resumes in 24d 5h
+F3 Providers:        > ■ copilot  default model  rate-limited, resets in 24d 5h
+$ llm-usage --json   copilot: {"source": "copilot api", "available": true, "monthly": {"used": 100.0, "remaining": 0.0}}
+$ llm-bridge doctor  (does not list copilot at all; Next: "Install and sign in to a provider CLI (Claude Code or Codex)")
+```
+
+**Why it hurts users**: The Start row says the provider starts now. Instead, the user gets a station that waits for 24 days under a `● RUNNING` header. The form already has the usage data that shows this. The form, `doctor` and the console disagree about whether Copilot is a usable provider.
+
+**Fix**: In the form, annotate an exhausted provider: `[ ] copilot (quota empty · resets in 24d)`. Do not select it by default. Change the Start hint to `copilot has no quota until Dec 1 · Save mission only, or choose another provider`. In the console header, show `○ WAITING` (not `● RUNNING`) while no operation is executing. Make `doctor` check the same provider list as the form (see CLIUX-031).
+
+#### CLIUX-056 · medium · Information architecture · `task list` does not show the order in which tasks will run
+
+**Command/Screen**: `llm-bridge task list` compared with `status` `Next` and the console Tasks view.
+
+**Evidence**
+
+```
+$ llm-bridge task priority --task 3 --value -5
+Priority set for task 3 · QUEUED
+$ llm-bridge task reorder --task 1 --value 99
+Reordered task 1 · QUEUED
+$ llm-bridge task list
+TASK  STATUS  PRIORITY  AFTER  TITLE
+2     QUEUED  0                Second task
+3     QUEUED  -5        2      Third
+1     QUEUED  0                Write tests for the parser
+```
+
+The scheduler runs `ORDER BY priority DESC,ordering,id` (`bridge_store.py:899`), which gives the order 2, 1, 3. `task list` sorts with `ORDER BY ordering,id` (`bridge_store.py:859`), which gives 2, 3, 1. The console Tasks view sorts by priority (golden `console-tasks.80x24.utf8`: P2, P1, P1, P0 …). The ordering value that `reorder` changes is not shown in any table, and neither receipt shows the new value.
+
+**Why it hurts users**: Users reorder work to control what runs next. The CLI table shows a different order from the one the controller will use, and from the order in the console.
+
+**Fix**: Sort `task list` the same way the scheduler sorts (with finished tasks last, or in a separate group), and add an `ORDER` column or a `#` "runs as" column. Make the receipts show the result: `Priority of task 3 set to -5 · runs after tasks 2 and 1`.
+
+#### CLIUX-057 · medium · Vocabulary · `P0` is the lowest priority, and priority and order sort in opposite directions
+
+**Command/Screen**: Console Tasks view; `task priority --help`; `task reorder --help`.
+
+**Evidence**
+
+```
+golden console-tasks.80x24.utf8, rows 03-08:
+  2   ✕ FAILED     P2           Fix the flaky login test
+  4   ● RUNNING    P1           Update the CI matrix
+  1   ✓ COMPLETED  P0           Audit dependency licences
+task priority --value N   new priority; higher runs first
+task reorder  --value N   new ordering value; lower runs first
+```
+
+Negative values are accepted, so the view can show `P-5`.
+
+**Why it hurts users**: In issue trackers and incident tooling, `P0` means the most urgent item. In Bridge, `P0` is the default, lowest bucket, and `P2` runs before it. Two numeric fields that both affect run order, sorted in opposite directions, will be set the wrong way round.
+
+**Fix**: Do not display `P<n>`. Show `prio 2`, or show nothing for the default and `↑2` for raised priority. Better still, replace the two fields with one operator action: `task move --task 3 --before 1` or `--first`, and keep `priority` and `order` as internal sort keys.
+
+#### CLIUX-058 · medium · Diagnostics · `events` shows the oldest events first, so the recommended `--limit 20` never reaches the failure
+
+**Command/Screen**: `llm-bridge events --limit N`, which `help recovery` and the `Needs you` hints recommend.
+
+**Evidence**
+
+```
+$ llm-bridge events --limit 5
+ID  TIME            KIND             DETAIL
+1   11-06 18:51:56  mission-created  cwd=/tmp/… name=Write tests for the parser
+2   11-06 18:51:56  task-added       task 1 priority=0 title=Write tests for the parser
+3   11-06 18:51:56  command-queued   …
+4   11-06 18:51:56  task-added       task 2 …
+5   11-06 18:51:56  command-applied  …
+(no "more events" line)
+```
+
+The query is `… WHERE e.mission_id=? AND e.id>? ORDER BY e.id` with `--after` defaulting to 0 (`bridge_store.py:1559`). `help recovery` says: `llm-bridge events --mission ID --limit 20 --json`. `Needs you` says: `check llm-bridge events, then llm-bridge task retry`. A controller writes a heartbeat every 5 s, so after a few minutes the default `--limit 100` shows only the start of the mission.
+
+**Why it hurts users**: The command that Bridge recommends for diagnosis shows the creation history and hides the failure. Nothing on the screen says that more events exist.
+
+**Fix**: Default to the newest N events, printed oldest to newest (as `git log -n` and `journalctl -n` do). Print `showing the last 20 of 140 · --after 120 for older` when the output is truncated. Make `Needs you` link to the relevant range: `llm-bridge events --task 1`.
+
+#### CLIUX-059 · medium · Concepts · `/detach` in the console and `llm-bridge detach` in a shell are described as opposites
+
+**Command/Screen**: F7 Actions, `help console`, `help keys`, `detach --help`.
+
+**Evidence**
+
+```
+Actions (bridge_actions.py:57):  Detach   /detach   Leave the provider terminal; work keeps running
+help console:                    /attach  /detach    open the provider terminal; Ctrl-] P returns
+help keys:                       llm-bridge detach --mission ID is for another shell … usually a different terminal
+quickstart:                      The command llm-bridge detach is different: it removes a station client from outside …
+                                 Do not use it to leave your own session.
+help console:                    Commands that run in a shell … are the same commands without the slash.
+```
+
+In code, both forms call `TmuxTerminalBackend.detach_client`, which selects "the station's one connected writable client" (`terminal.py:1094`, `1716`, `1729`).
+
+**Why it hurts users**: The help says that slash commands and shell commands are the same. It then says that the shell command must not be used to leave your own session, while the Actions view offers the slash command for exactly that. `help console` describes `/detach` as opening the provider terminal. With a local terminal and an SSH terminal both attached, a user cannot predict which one `/detach` removes.
+
+**Fix**: Give the two operations different names. Use `/leave` (or only `Ctrl-] d`) for "detach my terminal", and `detach --client` for "remove another terminal". Describe each one in a single sentence, and use the same sentence in Actions, `help console` and `--help`.
+
+#### CLIUX-060 · medium · Navigation · The Overview tells you to press Ctrl-] B while you are already in the Ctrl-] B controls
+
+**Command/Screen**: Console Overview, `Needs you` row, during a capacity wait.
+
+**Evidence**
+
+```
+  Needs you   Waiting for capacity: copilot monthly quota resets in 24d 5h.
+              Ctrl-] then B for options.
+▶ Bridge: Ctrl-] then B │ … │ Provider: Ctrl-] then P
+```
+
+The sentence comes from `bridge_monitor.waiting_message`, whose docstring says it is "The sentence shown in an empty provider pane". The Overview reuses it unchanged.
+
+**Why it hurts users**: The one row meant to say what to do sends the user to the screen they are already on. The real options (`/rotation`, `/stop`, `/suspend-until-credits`) are not named.
+
+**Fix**: Give the console its own wording: `Waiting for capacity: copilot resets in 24d 5h · /rotation to add a provider · /stop to stop waiting`. Keep the `Ctrl-] then B` sentence only for the provider pane.
+
+#### CLIUX-061 · medium · Status consistency · A READY task is described as "nothing ready" and "no task waiting"
+
+**Command/Screen**: Console Overview after a stop, 80x24.
+
+**Evidence**
+
+```
+LLM BRIDGE · ▌ Write hello.txt · ‖ STOPPED
+stopped · no task waiting · Ctrl-E adds one
+  Controller  stopped — type start or resume
+  Now         task 1  ○ READY  Write hello.txt
+  Next        nothing ready
+  Tasks       1 ready
+```
+
+**Why it hurts users**: Three lines on one screen contradict each other. The header tells the user to add a task, although a task is ready and only needs `start`. The label `Now` suggests that task 1 is executing.
+
+**Fix**: When the mission is stopped, rename `Now` to `Up next` (or show `Now  nothing running`), and put the ready task under `Next`. Change the header line to `stopped · task 1 ready · type start`. Generate all three lines from the same task query.
+
+#### CLIUX-062 · medium · Vocabulary · `RUNNING stale` and `PAUSED stale` are unexplained, and RUNNING is shown for a mission with no controller
+
+**Command/Screen**: Home list and mission picker.
+
+**Evidence**
+
+```
+golden mission-picker.80x24.utf8 row 05:  › ▌ 000000c3  ● RUNNING   stale  Investigat…  ~/w…ampler  ■ codex  1 Reprodu…
+                                  row 22:  ~/work/sampler · codex → claude · controller not running
+golden home-list.80x24.utf8 row 07:  > ‖ PAUSED    stale  000000b2  ▌ Port the exporter …
+                               row 22:  controller not running · Enter opens controls, then type resume
+```
+
+`stale` is set when a mission that should have a controller has none (`bridge_launcher.py:561`). Neither help nor the screen defines the word.
+
+**Why it hurts users**: This is the state that every mission shows after a reboot or a crash. A green `● RUNNING` glyph next to a yellow `stale` reads as "running, data is old", not as "stopped unexpectedly, resume it".
+
+**Fix**: Replace the mission state with `✕ INTERRUPTED` (or `‖ STOPPED (interrupted)`) when the controller is gone, and drop the separate `stale` column. Use the same word in `status`, the picker and the home list. Put the action in the detail line: `interrupted at 03:12 · Enter, then resume`.
+
+#### CLIUX-063 · medium · Error recovery · Commands in a finished mission's folder fail with one message that does not fit most of them
+
+**Command/Screen**: `task add`, `attach`, `finish`, `detach` and `station` in the folder of a completed mission, without `--mission`.
+
+**Evidence**
+
+```
+$ llm-bridge task add --prompt "follow up"        (in …/repo3, mission 4141ac50 COMPLETED)
+llm-bridge: mission 4141ac50 in folder …/repo3 is finished (completed); add follow-up work with: llm-bridge task add --mission 4141ac50 --prompt "..." or create a new mission with: llm-bridge mission create --prompt "..."
+$ llm-bridge attach      → the same "add follow-up work …" message
+$ llm-bridge detach      → the same message
+$ llm-bridge station claude → the same message
+```
+
+In the same folder, `status`, `task list`, `task show` and `events` resolve the finished mission without complaint.
+
+**Why it hurts users**: For `task add`, Bridge has identified the mission and asks the user to type the same command again with the ID it already found. For `attach` and `detach`, a message about adding follow-up work does not answer the question the user asked.
+
+**Fix**: For `task add`, act on the only mission in the folder and print the reopen receipt (with `--mission`, see CLIUX-052). Ask only when several finished missions match. For station commands, say `mission 4141ac50 is completed and has no station · llm-bridge status for its result`.
+
+#### CLIUX-064 · medium · Information hierarchy · Synthetic exit codes (75) are shown without their meaning
+
+**Command/Screen**: Activity, Overview Recent, Providers (golden screens).
+
+**Evidence**
+
+```
+console-activity.80x24.utf8 row 14:   03:12:50  Provider exited (75) on task 6
+console-providers.80x24.utf8 row 14:      recent: task 6 · exited · exit 75 · 20m ago
+console-overview.140x40.utf8 row 23:  03:12:50  Provider exited (75) on task 6
+```
+
+AGENTS.md defines status 75 as the scheduler's autonomy abort: an idle timeout, a blocking prompt, a hung tool call, or a provider that is silently rate-limited. Status 76 means that the operator declined the folder-trust prompt.
+
+**Why it hurts users**: Users read `75` as an error code from the provider and search for it in the provider's documentation. These are the runs that most need explaining, because Bridge stopped them, not the provider.
+
+**Fix**: Map the synthetic statuses to words in every surface: `Stopped by Bridge: no output for 10m (idle timeout)` or `Stopped by Bridge: provider was waiting for input`. Show the number only in `--json` and `events`. Do the same for 76 (`you declined the folder-trust prompt`) and 130/143 (`interrupted`).
+
+#### CLIUX-065 · medium · Accessibility · The ASCII fallback never applies for `LANG=C`, and there is no override
+
+**Command/Screen**: Any curses screen over SSH with a non-UTF-8 terminal.
+
+**Evidence**
+
+`bridge_glyphs.ascii_mode` documents itself as the fallback for "``LANG=C`` over SSH". It reads `locale.nl_langinfo(CODESET)`. Python 3.7 and later coerce the C locale to UTF-8 (PEP 538):
+
+```
+$ env -i LANG=C python3 -c "import locale;print(locale.nl_langinfo(locale.CODESET))"
+UTF-8
+$ env -i LANG=C LC_ALL=C python3 -c "…"
+ANSI_X3.4-1968
+```
+
+At 80x24 with `LANG=C`, the home screen and the console drew `●`, `‖`, `▌` and `·`. No `LLM_BRIDGE_*` variable forces ASCII glyphs.
+
+**Why it hurts users**: Only users who set `LC_ALL=C` get the ASCII screens that the golden suite tests. A terminal that really is not UTF-8 (a serial console, an old PuTTY profile, some CI log viewers) shows mojibake in the state column, which is the column that carries the meaning.
+
+**Fix**: Decide the glyph set from `LC_ALL`/`LC_CTYPE`/`LANG` as the user set them, before coercion, or from `sys.flags.utf8_mode` together with the original environment. Add `LLM_BRIDGE_GLYPHS=ascii|utf8` as an explicit override, and document it in `help keys` and `theme`.
+
+#### CLIUX-066 · medium · Exit codes · `doctor` exits 0 when no provider can run, and its JSON has no overall verdict
+
+**Command/Screen**: `llm-bridge doctor`, `llm-bridge doctor --json`.
+
+**Evidence**
+
+```
+$ llm-bridge doctor
+Providers        claude: not on PATH · install it, or remove it from the rotation with: llm-bridge rotation --set LIST
+                 codex: not on PATH · …
+                 opencode: not on PATH · …
+Next             Install and sign in to a provider CLI (Claude Code or Codex), then run llm-bridge doctor again.
+exit 0
+$ llm-bridge doctor --json | jq keys
+["database","mission","next_steps","providers","schema_version","sqlite_integrity","state_dir","tmux_available"]
+```
+
+On a machine with no mission, `doctor` advises `remove it from the rotation with: llm-bridge rotation --set LIST`, which needs a mission. `Next` names only Claude Code and Codex, although the home subtitle advertises Codex, Claude Code, Copilot, Kilo and OpenCode.
+
+**Why it hurts users**: Install scripts and CI cannot gate on `doctor`. `brew doctor` and `flutter doctor` both exit non-zero when a blocking problem is found. The per-provider advice suggests a command that cannot work yet.
+
+**Fix**: Exit 1 when `Next` is not `Ready`, and add `"ready": false` and `"blocking": [...]` to the JSON. Without `--mission`, drop the rotation advice and say `install one of: claude, codex, copilot, opencode, kilo`. Generate that list from the provider registry.
+
+#### CLIUX-067 · low · Home form · The Objective hint says "Tab moves on to Start", but Tab moves to Providers
+
+**Command/Screen**: Home → `N`, Objective field, 80x24. See also CLIUX-031.
+
+**Evidence**
+
+```
+Type the task · Tab moves on to Start · Ctrl-E full editor · paste supported
+(Tab)
+> Providers: ▸[1] copilot  (codex, claude, kilo, opencode, minimax not installed
+```
+
+`help quickstart`, step 3, says: "Press Tab five times to reach 'Start and open provider'".
+
+**Why it hurts users**: This is the first hint a new user reads, and the first key press proves it wrong. The help and the screen give different instructions.
+
+**Fix**: Change the hint to `Tab next field · Alt-S start now`, together with the direct Start key that CLIUX-031 proposes. Until that key exists, say `Tab ×5 reaches Start`.
+
+#### CLIUX-068 · low · Home screen · The empty state names providers that are not installed, and wraps in the middle of a phrase
+
+**Command/Screen**: Home screen with no missions, 80x24, with only Copilot installed.
+
+**Evidence**
+
+```
+Run Copilot on your tasks
+…
+A mission is a goal plus ordered tasks run by Codex/Claude in this folder · N
+to create one
+```
+
+**Why it hurts users**: The subtitle is built from the installed providers. The explanation underneath is fixed text, so it contradicts the subtitle. The line breaks between `N` and `to create one`, which splits the key from its action.
+
+**Fix**: Build the sentence from the same provider list, or make it neutral ("run by your AI coding CLI"). Wrap at word boundaries and keep `N to create one` together.
+
+#### CLIUX-069 · low · Glyphs · In ASCII mode, the header shows `| |`, because the identity bar and the separator are the same character
+
+**Command/Screen**: Every console view in ASCII mode.
+
+**Evidence**
+
+```
+golden console-overview.80x24.ascii row 00:  LLM BRIDGE | | Release 2.0 hardening | * RUNNING
+golden console-overview.80x24.utf8  row 00:  LLM BRIDGE · ▌ Release 2.0 hardening · ● RUNNING
+```
+
+**Why it hurts users**: `| |` looks like an empty field or a rendering fault on the first row of every screen. This is separate from the collisions listed in CLIUX-037.
+
+**Fix**: In ASCII mode, drop the identity bar from the header (it carries colour only), or map `·` to ` - ` or `  `, so that the bar stays distinct from the separator.
+
+#### CLIUX-070 · low · CLI layout · `status` prints an empty `Capacity` heading
+
+**Command/Screen**: `llm-bridge status` for a STOPPED or COMPLETED mission.
+
+**Evidence**
+
+```
+Tasks       1 total: 1 COMPLETED
+Capacity
+$
+```
+
+**Why it hurts users**: A heading with nothing under it looks like a failed read.
+
+**Fix**: Omit the section when there is no snapshot, or print `Capacity    not observed while stopped`.
+
+#### CLIUX-071 · low · Error prevention · Long options accept prefixes, so `stop --f` means `--force`
+
+**Command/Screen**: Any command (argparse `allow_abbrev` is left at its default).
+
+**Evidence**
+
+```
+$ llm-bridge stop --f --mission 4141
+Stop forced · mission 4141ac50 is STOPPED
+$ llm-bridge mission create --prompt q --auto --json      → accepted as --auto-continue
+$ llm-bridge status --mis 4141                            → accepted as --mission
+```
+
+**Why it hurts users**: A two-character prefix runs the destructive form of `stop`. Scripts that rely on prefixes break, or change meaning, as soon as a new option with the same prefix is added.
+
+**Fix**: Set `allow_abbrev=False` on every parser. Add the real short aliases instead (CLIUX-080).
+
+#### CLIUX-072 · low · Consistency · Three pagination models across list commands
+
+**Command/Screen**: `events --help`, `proposal list --help`, `task list --help`.
+
+**Evidence**
+
+```
+events         --after EVENT   only events with an ID above this (global across missions)
+proposal list  --after N       only proposals with a task number above this
+task list      --offset N      skip the first N tasks of the list   (and --all, --limit)
+```
+
+**Why it hurts users**: The same word, `--after`, means a global event ID in one command and a per-mission task number in another. Offset-based paging is a third model. Scripts written for one command fail silently on another. This extends CLIUX-044.
+
+**Fix**: Use one model: `--limit N` plus `--after CURSOR`, where the cursor is opaque and printed in the "more" line, or use `--offset` everywhere. Name the cursor in the output: `more: --after 120`.
+
+#### CLIUX-073 · low · Time display · Activity and Recent show times without dates
+
+**Command/Screen**: Activity view, Overview Recent; `events`.
+
+**Evidence**
+
+```
+Activity:  03:13:50  Waiting for capacity, resumes in 25m …     (bridge_tui._local_clock: "%H:%M:%S")
+events:    11-06 18:51:56                                       (bridge_format.py:401: "%m-%d %H:%M:%S")
+```
+
+Capacity waits can last days (CLIUX-055 waits 24 days), and suspended missions resume after many hours.
+
+**Why it hurts users**: `03:13:50` from yesterday reads as this morning. `11-06` is ambiguous between month-day and day-month, and has no year.
+
+**Fix**: In views, show `HH:MM:SS` for today, `Mon 03:13` within the last week, and `2026-11-06 03:13` otherwise. In `events`, use ISO 8601 (`2026-11-06 18:51:56`).
+
+#### CLIUX-074 · low · Help · Four different lists of help topics
+
+**Command/Screen**: `help --help`, `help quickstart`, `help nosuch`, `/help` (`help console`).
+
+**Evidence**
+
+```
+help --help:      quickstart, keys, remote, prompts, markdown, providers, states, verification, recovery
+help quickstart:  help keys, remote, distributed, prompts, markdown, providers, states, verification, recovery
+help nosuch:      quickstart, keys, console, remote, distributed, prompts, markdown, providers, states, verification, recovery
+help console:     /help [topic] … topics: keys, prompts, providers, states
+```
+
+**Why it hurts users**: `console` and `distributed` exist but appear in only some lists. Users cannot find a topic that a list leaves out.
+
+**Fix**: Generate every list from one registry in `bridge_help`, give each topic a one-line description, and print them as a table in `llm-bridge help`.
+
+#### CLIUX-075 · low · Error messages · `task verify` without flags does not name the flags it needs
+
+**Command/Screen**: `llm-bridge task verify --task 1`.
+
+**Evidence**
+
+```
+llm-bridge: completion requires verification evidence or explicit operator approval
+```
+
+**Why it hurts users**: The message states a policy, not the fix. "Operator approval" does not tell the user to add `--approve`.
+
+**Fix**: `task 1 needs --approve to complete, or --evidence TEXT to record evidence without completing it · example: llm-bridge task verify --task 1 --approve`.
+
+#### CLIUX-076 · low · Key hints · Footers are cut without an ellipsis, and the key to leave is lost
+
+**Command/Screen**: Home screen after saving, 80x24; Overview, 140x40.
+
+**Evidence**
+
+```
+golden home-saved.80x24.utf8 row 23:     ↑↓ select · Enter controls · S start · N new mission · / filter · ? help · Q qu
+golden console-overview.140x40.utf8 row 38:  › type a command · /help · Ctrl-K actions
+                                    row 39:  o objective · Ctrl-E add task · Tab/F1-9 views · Ctrl-D exit · Ctrl-K actions · ? help
+```
+
+In the same golden set, the Enter key is labelled `Enter open` in `home-list` and `Enter controls` in `home-saved`.
+
+**Why it hurts users**: How to quit is the hint a lost user needs most, and it is the one that gets cut. Duplicated hints use space that the 80-column layout needs.
+
+**Fix**: Drop the lowest-priority hints first, and always keep `? help` and the quit key. Never repeat a hint that appears on the prompt line. Use one label for Enter on the home list.
+
+#### CLIUX-077 · low · First run · Bare `llm-bridge` silently prints help when it cannot open the home screen
+
+**Command/Screen**: `llm-bridge` with no arguments, when stdin or stdout is not a TTY, `TERM` is empty or `dumb`, or `LLM_BRIDGE_MANAGED=1`.
+
+**Evidence**
+
+`bridge._main`: `if … sys.stdin.isatty() and sys.stdout.isatty() and TERM not in {"", "dumb"} and not _managed_session(): run_launcher(…)`, otherwise `_build_parser().print_help(); return 0`. Inside a Bridge-managed session, a 24-line argparse page appeared in place of the home screen, with exit 0 and no reason given.
+
+**Why it hurts users**: A user on `ssh host llm-bridge` (no `-t`) or with `TERM=dumb` expects the home screen. They get a help page and cannot tell why.
+
+**Fix**: Print a one-line reason before the help: `llm-bridge: the home screen needs an interactive terminal (stdout is not a TTY); showing help instead`. Exit 2 when the reason is a missing TTY, as `missions --pick` does.
+
+#### CLIUX-078 · low · Error prevention · `--providers ""` and unknown `--routes` create missions that cannot run
+
+**Command/Screen**: `mission create`. This adds new cases to CLIUX-002.
+
+**Evidence**
+
+```
+$ llm-bridge mission create --prompt x --providers ""
+Created mission adfac9e2 "x" · task 1 · … · start with: llm-bridge start --mission adfac9e2      (exit 0)
+$ llm-bridge rotation --mission adfac9e2
+No rotation saved for this mission.
+$ llm-bridge mission create --prompt "y" --routes nosuch-route
+Created mission e6d19655 "y" …                                                                  (exit 0)
+```
+
+`rotation --set ""` rejects the same input: `a rotation needs at least one provider or route name`.
+
+**Fix**: Run the `rotation --set` validator for both flags in `mission create` and `start`. An empty list is an error. An unknown route lists the configured route IDs.
+
+#### CLIUX-079 · low · Recovery · `attach` to a stopped mission offers only paid work
+
+**Command/Screen**: `llm-bridge attach` for a native mission whose station has gone.
+
+**Evidence**
+
+```
+llm-bridge: No provider station is running for mission a4ba439f · start it with: llm-bridge start --mission a4ba439f
+```
+
+**Why it hurts users**: Users often attach only to look at what happened. The only way out the message offers starts a provider and uses capacity.
+
+**Fix**: Offer the free option first: `No station is running · inspect with: llm-bridge control --mission a4ba439f · or start work with: llm-bridge start --mission a4ba439f (uses capacity)`.
+
+#### CLIUX-080 · low · Ergonomics · No short options, and task numbers are required options rather than positional arguments
+
+**Command/Screen**: Every command page (see `mission create --help`, `task verify --help`).
+
+**Evidence**
+
+The only short option in the CLI is `-h`. The most frequent command in the review loop is:
+
+```
+llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
+```
+
+`gh`, `git` and `kubectl` accept `-R`/`-n`, and positional IDs (`gh pr view 12`). CLIUX-045 covers only `view --file`.
+
+**Why it hurts users**: The commands are long to type and to read, and users who know `gh` or `git` expect `llm-bridge task approve 1`.
+
+**Fix**: Add `-m/--mission`, `-t/--task` and `-j/--json`, and accept the task number as an optional positional argument on every `task` subcommand (`llm-bridge task show 1`). Keep `--task` for compatibility.
 
 ## Fix status
 
@@ -920,10 +1525,10 @@ Pending.
 | CLIUX-001 | critical | open | |
 | CLIUX-002 | critical | open | |
 | CLIUX-003 | high | open | |
-| CLIUX-004 | high | open | |
+| CLIUX-004 | high | fixed | 0bde2f6. `control`/`console` explain the missing terminal; `usage` prints the table. `tests/test_bridge_cli_errors.py::test_control_without_a_terminal_explains_itself`, `test_usage_without_a_terminal_prints_the_usage_table` and three more; all failed before the fix. |
 | CLIUX-005 | high | open | |
 | CLIUX-006 | high | open | |
-| CLIUX-007 | high | open | |
+| CLIUX-007 | high | fixed | 0bde2f6. Did-you-mean for unknown commands, subcommands and options; internal commands hidden. `tests/test_bridge_cli_errors.py::test_unknown_command_suggests_the_closest_public_command` and eight more; failed before the fix on the argparse choice list. |
 | CLIUX-008 | high | open | |
 | CLIUX-009 | high | open | |
 | CLIUX-010 | high | open | |
@@ -964,6 +1569,36 @@ Pending.
 | CLIUX-045 | low | open | |
 | CLIUX-046 | low | open | |
 | CLIUX-047 | low | open | |
-| CLIUX-048 | low | open | |
+| CLIUX-048 | low | fixed | 0bde2f6. `missions --from` suppressed, `attach --client` reworded. `tests/test_bridge_cli_errors.py::test_missions_from_and_attach_client_help`, failed before the fix. |
 | CLIUX-049 | low | open | |
 | CLIUX-050 | low | open | |
+| CLIUX-051 | high | open | |
+| CLIUX-052 | high | open | |
+| CLIUX-053 | high | open | |
+| CLIUX-054 | medium | open | |
+| CLIUX-055 | high | open | |
+| CLIUX-056 | medium | open | |
+| CLIUX-057 | medium | open | |
+| CLIUX-058 | medium | open | |
+| CLIUX-059 | medium | open | |
+| CLIUX-060 | medium | open | |
+| CLIUX-061 | medium | open | |
+| CLIUX-062 | medium | open | |
+| CLIUX-063 | medium | open | |
+| CLIUX-064 | medium | open | |
+| CLIUX-065 | medium | open | |
+| CLIUX-066 | medium | open | |
+| CLIUX-067 | low | open | |
+| CLIUX-068 | low | open | |
+| CLIUX-069 | low | open | |
+| CLIUX-070 | low | open | |
+| CLIUX-071 | low | open | |
+| CLIUX-072 | low | open | |
+| CLIUX-073 | low | open | |
+| CLIUX-074 | low | open | |
+| CLIUX-075 | low | open | |
+| CLIUX-076 | low | open | |
+| CLIUX-077 | low | open | |
+| CLIUX-078 | low | open | |
+| CLIUX-079 | low | open | |
+| CLIUX-080 | low | open | |
