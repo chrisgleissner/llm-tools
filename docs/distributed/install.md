@@ -137,6 +137,11 @@ sudo deploy/install.sh --binary ./bridge-coordinator --web-dir ./web --lan
 4. installs and enables `bridge-coordinator.service`,
 5. prints the `info` output: URL(s), CA path and fingerprint, setup-token path.
 
+Run either the native service or the container on a host, not both: both listen on
+port 8443 and keep separate data. Before switching to the container, run
+`sudo systemctl disable --now bridge-coordinator`; a unit that is only stopped starts
+again at the next boot and takes the port before Docker starts the container.
+
 Options: `--bind HOST:PORT`, `--lan` (same as `--bind 0.0.0.0:8443`), repeatable
 `--hostname NAME` and `--ip ADDR` (certificate names; they replace automatic
 discovery), `--prefix DIR` (stage files below DIR, no user, no systemd), and
