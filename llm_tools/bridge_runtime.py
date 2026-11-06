@@ -2147,63 +2147,75 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             _write_controller_ready(ready, startup_token, mission["status"])
             return 0
 
-        # A start that names a different rotation changes the mission's saved
-        # rotation; record it so the Activity view shows the change.
-        store.set_rotation(mission_id, providers=providers, routes=routes, source="start")
-        mission = store.set_mission_config_values(
-            mission_id,
-            {"headless": headless, "native_tui": native_tui},
-            event_kind="controller-config",
-        )
-        prior_headless = bool(mission["config"].get("headless", False))
-
-        _install_frozen_tool_config(mission, runtime)
-        problem = rotation_problem(mission, providers, routes)
-        if problem:
-            record_controller_failure(store, mission_id, problem, f"llm-bridge rotation --mission {mission_id[:8]} --set LIST")
-            store.set_mission_status(mission_id, "FAILED")
-            print(f"controller failure: {problem}", file=sys.stderr, flush=True)
-            return 2
         backend: TmuxTerminalBackend | None = None
         handle: TerminalHandle | None = None
-        if not headless:
-            if not shutil.which("tmux"):
-                record_controller_failure(store, mission_id, "tmux is required for native mode; retry with --mode headless")
-                store.set_mission_status(mission_id, "FAILED")
-                raise RuntimeError("tmux is required for native mode; retry with --mode headless")
-            backend = TmuxTerminalBackend()
-            handle = _open_existing(backend, runtime, mission_id)
-            if handle is None:
-                controller_log = runtime / "controller.log"
-                controller_log.touch(mode=0o600, exist_ok=True)
-                os.chmod(controller_log, 0o600)
-                bridge_argv = rooted_module_argv("llm_tools.bridge", "console", "--mission", mission_id)
-                handle = backend.start(
-                    provider_argv=_provider_station_argv(native_tui, controller_log),
-                    bridge_argv=bridge_argv,
-                    picker_argv=rooted_module_argv("llm_tools.bridge", "missions", "--pick", "--from", mission_id),
-                    cwd=mission["cwd"],
-                    socket_path=mission_socket_path(mission_id),
-                    session_name=_session_name(mission_id),
-                    size=(120, 40),
-                    server_env=station_server_environment(mission["config"]),
-                )
+        try:
+            # A start that names a different rotation changes the mission's saved
+            # rotation; record it so the Activity view shows the change.
+            store.set_rotation(mission_id, providers=providers, routes=routes, source="start")
+            mission = store.set_mission_config_values(
+                mission_id,
+                {"headless": headless, "native_tui": native_tui},
+                event_kind="controller-config",
+            )
+            prior_headless = bool(mission["config"].get("headless", False))
 
-        if backend is not None and handle is not None:
-            try:
-                backend.set_detach_command(handle, station_detach_argv(mission_id))
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                pass  # without the hook a finished station is closed by `llm-bridge stop`
-        _write_controller_ready(ready, startup_token, "RUNNING", tmux=bool(handle))
-        actual_mode = "native" if native_tui else "headless" if headless else "autonomous"
-        store.record_runtime_event(mission_id, "controller-mode", {
-            "verified": True,
-            "actual_mode": actual_mode,
-            "controller_pid": os.getpid(),
-            "process_start": _process_start_token(os.getpid()) or None,
-            "runtime_source": _runtime_source_identity(),
-            **common.diagnostic_clock_fields(),
-        })
+            _install_frozen_tool_config(mission, runtime)
+            problem = rotation_problem(mission, providers, routes)
+            if problem:
+                record_controller_failure(store, mission_id, problem, f"llm-bridge rotation --mission {mission_id[:8]} --set LIST")
+                store.set_mission_status(mission_id, "FAILED")
+                print(f"controller failure: {problem}", file=sys.stderr, flush=True)
+                return 2
+            if not headless:
+                if not shutil.which("tmux"):
+                    record_controller_failure(store, mission_id, "tmux is required for native mode; retry with --mode headless")
+                    store.set_mission_status(mission_id, "FAILED")
+                    raise RuntimeError("tmux is required for native mode; retry with --mode headless")
+                backend = TmuxTerminalBackend()
+                handle = _open_existing(backend, runtime, mission_id)
+                if handle is None:
+                    controller_log = runtime / "controller.log"
+                    controller_log.touch(mode=0o600, exist_ok=True)
+                    os.chmod(controller_log, 0o600)
+                    bridge_argv = rooted_module_argv("llm_tools.bridge", "console", "--mission", mission_id)
+                    handle = backend.start(
+                        provider_argv=_provider_station_argv(native_tui, controller_log),
+                        bridge_argv=bridge_argv,
+                        picker_argv=rooted_module_argv("llm_tools.bridge", "missions", "--pick", "--from", mission_id),
+                        cwd=mission["cwd"],
+                        socket_path=mission_socket_path(mission_id),
+                        session_name=_session_name(mission_id),
+                        size=(120, 40),
+                        server_env=station_server_environment(mission["config"]),
+                    )
+
+            if backend is not None and handle is not None:
+                try:
+                    backend.set_detach_command(handle, station_detach_argv(mission_id))
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    pass  # without the hook a finished station is closed by `llm-bridge stop`
+            _write_controller_ready(ready, startup_token, "RUNNING", tmux=bool(handle))
+            actual_mode = "native" if native_tui else "headless" if headless else "autonomous"
+            store.record_runtime_event(mission_id, "controller-mode", {
+                "verified": True,
+                "actual_mode": actual_mode,
+                "controller_pid": os.getpid(),
+                "process_start": _process_start_token(os.getpid()) or None,
+                "runtime_source": _runtime_source_identity(),
+                **common.diagnostic_clock_fields(),
+            })
+        except BaseException as exc:
+            # The mission is RUNNING here: a failure of the setup must not leave it that way with no controller.
+            if store.get_mission(mission_id)["status"] in CONTROLLED_MISSION_STATUSES:
+                record_controller_failure(store, mission_id, controller_failure_reason(exc, runtime / "controller.log"))
+                store.set_mission_status(mission_id, "FAILED")
+            if backend is not None and handle is not None:
+                try:
+                    backend.stop(handle)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    pass  # the station is a courtesy of a mission that already failed
+            raise
         refresh_worker: CapacityRefreshWorker | None = None
         try:
             configured_routes = routes.split(",") if routes else providers.split(",")

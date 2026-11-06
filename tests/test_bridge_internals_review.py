@@ -227,3 +227,23 @@ def test_int014_lock_probe_that_cannot_decide_reports_the_lock_as_held(tmp_path,
 
     monkeypatch.setattr(fcntl, "flock", no_locks)
     assert MissionLock.is_held(tmp_path / "locks", "m1") is True
+
+
+def test_int007_setup_failure_after_the_mission_is_running_records_failure(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    store = BridgeStore(tmp_path / "state" / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path, config={"headless": True})
+    store.add_task(mission["id"], "work")
+
+    def broken(*_args, **_kwargs):
+        raise OSError("cannot write the frozen tool config")
+
+    monkeypatch.setattr(runtime, "_install_frozen_tool_config", broken)
+    monkeypatch.setattr(runtime.ralph_robin, "main", lambda *_a, **_k: pytest.fail("setup failed; no provider may start"))
+
+    with pytest.raises(OSError, match="frozen tool config"):
+        runtime.run_controller(mission["id"], headless=True)
+
+    assert store.get_mission(mission["id"])["status"] == "FAILED"
+    failed = [event for event in store.events(mission["id"]) if event["kind"] == "controller-failed"]
+    assert len(failed) == 1 and "frozen tool config" in failed[0]["data"]["reason"]
