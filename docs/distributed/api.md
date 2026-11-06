@@ -63,6 +63,13 @@ controller.
 when the worker answers synchronously, includes a strong `ETag` containing its
 revision. Send that value as `If-Match` on a task mutation; it becomes
 `expected_revision`, and a stale value returns `412`.
+The mission task, event and operation list routes accept `limit` and an opaque
+`cursor`; the command result includes `next_cursor` when another page is
+available. Use that value unchanged with the same worker, mission, resource and
+limit. Cursors are authenticated and encrypted, and reject altered or mismatched
+queries. Legacy numeric `offset` (tasks and operations) and `after` (events)
+remain available but cannot be combined with a cursor. The default page sizes
+are 50 tasks, 50 events and 100 operations; the maximum is 1000.
 The stop action accepts `{"force":true}` to terminate only the worker-owned provider
 processes and controller for that mission, matching `llm-bridge stop --force`.
 The mission detail page and `llm-bridge --target` use these resource routes for

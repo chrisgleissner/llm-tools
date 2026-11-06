@@ -292,9 +292,9 @@ _NATIVE_SESSION_SHAPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 def _session_list(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     """Provider operations (sessions) of this worker's missions; metadata only, never prompts, logs or paths."""
     assert store is not None
-    limit = params["limit"]
-    if not 1 <= limit <= _SESSION_LIMIT_MAX:
-        raise CommandFailure("invalid-argument", f"session.list: limit must be between 1 and {_SESSION_LIMIT_MAX}")
+    limit, offset = params["limit"], params["offset"]
+    if not 1 <= limit <= _SESSION_LIMIT_MAX or offset < 0:
+        raise CommandFailure("invalid-argument", f"session.list: limit must be 1-{_SESSION_LIMIT_MAX} and offset non-negative")
     where, args = "", []
     if params["mission"]:
         where = "WHERE o.mission_id=?"
@@ -303,9 +303,10 @@ def _session_list(store: BridgeStore | None, request: CommandRequest, params: di
         "SELECT o.id,o.mission_id,m.name,o.task_id,t.ordinal,o.station,o.route_id,o.model,o.status,o.restoration_state,"
         "o.native_session_id,o.created_at,o.updated_at FROM operations o "
         "JOIN missions m ON m.id=o.mission_id LEFT JOIN tasks t ON t.id=o.task_id "
-        f"{where} ORDER BY o.created_at DESC,o.rowid DESC LIMIT ?",
-        (*args, limit),
+        f"{where} ORDER BY o.created_at DESC,o.rowid DESC LIMIT ? OFFSET ?",
+        (*args, limit, offset),
     ).fetchall()
+    total = store.db.execute(f"SELECT COUNT(*) FROM operations o {where}", args).fetchone()[0]
     sessions = []
     for row in rows:
         native = row[10]
@@ -324,7 +325,7 @@ def _session_list(store: BridgeStore | None, request: CommandRequest, params: di
             "started_at": row[11],
             "last_activity_at": row[12],
         })
-    return {"schema_version": 1, "sessions": sessions}
+    return {"schema_version": 1, "sessions": sessions, "total": total, "offset": offset}
 
 
 def _usage_scopes(rows: list[Any], provider: str, cfg: Any, usage: Any) -> list[dict[str, Any]]:
@@ -509,7 +510,7 @@ OPERATIONS: dict[str, OperationSpec] = {
             "List provider sessions (operations) of this worker's missions",
             False,
             False,
-            {"mission": Param(str), "limit": Param(int, default=100)},
+            {"mission": Param(str), "limit": Param(int, default=100), "offset": Param(int, default=0)},
             _session_list,
         ),
         OperationSpec("usage.snapshot", "Provider capacity snapshot as llm-usage reports it", False, False, _NO_PARAMS, _usage_snapshot),

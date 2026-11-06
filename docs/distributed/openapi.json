@@ -643,6 +643,22 @@
             "type": "string"
           },
           "result": {
+            "properties": {
+              "result": {
+                "additionalProperties": true,
+                "properties": {
+                  "next_cursor": {
+                    "description": "Opaque continuation cursor for task, event, or operation list results.",
+                    "maxLength": 2048,
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              }
+            },
             "type": [
               "object",
               "null"
@@ -2742,6 +2758,18 @@
             }
           },
           {
+            "description": "Authenticated and encrypted opaque cursor returned as next_cursor; bound to worker, mission, resource, and limit.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
             "in": "query",
             "name": "after",
             "required": false,
@@ -2766,8 +2794,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CommandOutcome"
                 }
               }
             },
@@ -2928,6 +2955,27 @@
             }
           },
           {
+            "description": "Authenticated and encrypted opaque cursor returned as next_cursor; bound to worker, mission, resource, and limit.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
             "in": "query",
             "name": "limit",
             "required": false,
@@ -2943,8 +2991,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CommandOutcome"
                 }
               }
             },
@@ -3105,6 +3152,18 @@
             }
           },
           {
+            "description": "Authenticated and encrypted opaque cursor returned as next_cursor; bound to worker, mission, resource, and limit.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
             "in": "query",
             "name": "offset",
             "required": false,
@@ -3129,8 +3188,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/CommandOutcome"
                 }
               }
             },

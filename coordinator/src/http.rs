@@ -2,7 +2,7 @@
 
 use crate::auth::{self, MutationLimiter, RateLimiter};
 use crate::config::Config;
-use crate::db::{Db, InsertOutcome};
+use crate::db::{CommandRow, Db, InsertOutcome};
 use crate::hub::{Hub, SendResult};
 use crate::protocol::{self, valid_id, valid_name};
 use crate::scopes;
@@ -980,11 +980,11 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
         query,
     } = request;
     let worker = worker.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
-    let (operation, allowed): (&str, &[&str]) = match resource {
-        "mission" => ("mission.status", &[]),
-        "tasks" => ("task.list", &["limit", "offset"]),
-        "events" => ("mission.events", &["after", "limit"]),
-        "operations" => ("session.list", &["limit"]),
+    let (operation, allowed, position_key, default_limit): (&str, &[&str], Option<&str>, u64) = match resource {
+        "mission" => ("mission.status", &[], None, 0),
+        "tasks" => ("task.list", &["limit", "cursor", "offset"], Some("offset"), 50),
+        "events" => ("mission.events", &["limit", "cursor", "after"], Some("after"), 50),
+        "operations" => ("session.list", &["limit", "cursor", "offset"], Some("offset"), 100),
         _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown mission resource")),
     };
     if let Some(key) = query
@@ -993,6 +993,27 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     {
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", format!("unknown query parameter {key}")));
     }
+    let limit = query.get("limit").map_or(Ok(default_limit), |value| {
+        value
+            .parse::<u64>()
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be a positive integer"))
+    })?;
+    if position_key.is_some() && !(1..=1000).contains(&limit) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be between 1 and 1000"));
+    }
+    let legacy_key = match resource {
+        "tasks" | "operations" => Some("offset"),
+        "events" => Some("after"),
+        _ => None,
+    };
+    if query.contains_key("cursor") && legacy_key.is_some_and(|key| query.contains_key(key)) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "cursor cannot be combined with legacy pagination parameters",
+        ));
+    }
+    let filters = format!("worker={worker};mission={mission_id};resource={resource};limit={limit}");
     let wait_ms = query.get("wait_ms").map_or(Ok(0), |value| {
         value
             .parse::<u64>()
@@ -1003,6 +1024,9 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     }
     let mut params = serde_json::Map::new();
     for key in allowed {
+        if *key == "cursor" || *key == "limit" {
+            continue;
+        }
         if let Some(value) = query.get(*key) {
             let number = value
                 .parse::<u64>()
@@ -1012,6 +1036,25 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
             }
             params.insert((*key).to_string(), json!(number));
         }
+    }
+    if let Some(position_key) = position_key {
+        let position = match query.get("cursor") {
+            Some(cursor) => crate::cursor::read(&st.cursor_key, &format!("missions/{resource}"), &filters, cursor)
+                .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "cursor is invalid or belongs to a different list"))?,
+            None => legacy_key
+                .and_then(|key| query.get(key))
+                .map(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "pagination position must be a non-negative integer"))
+                })
+                .transpose()?
+                .unwrap_or(0),
+        };
+        params.insert(position_key.to_string(), json!(position));
+    }
+    if position_key.is_some() {
+        params.insert("limit".into(), json!(limit));
     }
     if resource == "operations" {
         params.insert("mission".into(), json!(mission_id));
@@ -1296,7 +1339,11 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
         ));
     }
     let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
-    let mut response = json_ok(status, row.to_json());
+    let mut value = row.to_json();
+    if status == StatusCode::OK {
+        add_next_page_cursor(&st, &row, &mut value);
+    }
+    let mut response = json_ok(status, value);
     if status == StatusCode::ACCEPTED {
         response.headers_mut().insert(
             header::LOCATION,
@@ -1306,9 +1353,56 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
     Ok(response)
 }
 
+fn add_next_page_cursor(st: &St, row: &CommandRow, response: &mut Value) {
+    let Some(request) = row.request.as_object() else { return };
+    let Some(params) = request.get("params").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(result) = response.pointer_mut("/result/result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let (resource, limit_default, next_position) = match row.operation.as_str() {
+        "task.list" => {
+            let offset = result.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let len = result.get("tasks").and_then(Value::as_array).map_or(0, Vec::len) as u64;
+            let total = result.get("total").and_then(Value::as_u64).unwrap_or(offset);
+            ("tasks", 50, (offset.saturating_add(len) < total).then_some(offset.saturating_add(len)))
+        }
+        "mission.events" => {
+            let events = result.get("events").and_then(Value::as_array);
+            let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50);
+            let last = events.and_then(|rows| rows.last()).and_then(|event| event.get("id")).and_then(Value::as_u64);
+            ("events", 50, events.filter(|rows| rows.len() as u64 == limit).and(last))
+        }
+        "session.list" => {
+            let offset = result.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let len = result.get("sessions").and_then(Value::as_array).map_or(0, Vec::len) as u64;
+            let total = result.get("total").and_then(Value::as_u64).unwrap_or(offset);
+            ("operations", 100, (offset.saturating_add(len) < total).then_some(offset.saturating_add(len)))
+        }
+        _ => return,
+    };
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(limit_default);
+    let worker = row.worker.as_str();
+    let mission = request
+        .get("mission_id")
+        .and_then(Value::as_str)
+        .or_else(|| params.get("mission").and_then(Value::as_str))
+        .unwrap_or("");
+    let filters = format!("worker={worker};mission={mission};resource={resource};limit={limit}");
+    let next_cursor = next_position
+        .and_then(|next| usize::try_from(next).ok())
+        .map(|next| crate::cursor::issue(&st.cursor_key, &format!("missions/{resource}"), &filters, next));
+    result.insert("next_cursor".into(), json!(next_cursor));
+}
+
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {
     match st.db.command_get(&id)? {
-        Some(r) => Ok(json_ok(StatusCode::OK, r.to_json())),
+        Some(r) => {
+            let mut value = r.to_json();
+            add_next_page_cursor(&st, &r, &mut value);
+            Ok(json_ok(StatusCode::OK, value))
+        }
         None => Err(err(StatusCode::NOT_FOUND, "unknown-command", "no such request_id")),
     }
 }

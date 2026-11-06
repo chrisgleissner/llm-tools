@@ -97,6 +97,12 @@ fn response_schema(path: &str, method: &str) -> Value {
     }
     if path == "/api/v1/commands/{id}" || path == "/api/v1/commands" {
         json!({"$ref":"#/components/schemas/CommandOutcome"})
+    } else if matches!(
+        path,
+        "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
+    ) && method == "GET"
+    {
+        json!({"$ref":"#/components/schemas/CommandOutcome"})
     } else {
         json!({"type":"object","additionalProperties":true})
     }
@@ -217,17 +223,20 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "/api/v1/missions/{id}/tasks" | "/api/v1/missions/{id}/events" | "/api/v1/missions/{id}/operations"
             )
         {
-            let page_key = match path {
+            let legacy_key = match path {
                 "/api/v1/missions/{id}/events" => "after",
-                "/api/v1/missions/{id}/tasks" => "offset",
-                _ => "",
+                _ => "offset",
             };
-            if !page_key.is_empty() {
-                params.push(json!({
-                    "name":page_key,"in":"query","required":false,
-                    "schema":{"type":"integer","minimum":0}
-                }));
-            }
+            params.push(json!({
+                "name":"cursor","in":"query","required":false,
+                "description":"Authenticated and encrypted opaque cursor returned as next_cursor; bound to worker, mission, resource, and limit.",
+                "schema":{"type":"string","maxLength":2048}
+            }));
+            params.push(json!({
+                "name":legacy_key,"in":"query","required":false,"deprecated":true,
+                "description":"Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
+                "schema":{"type":"integer","minimum":0}
+            }));
             params.push(json!({
                 "name":"limit","in":"query","required":false,
                 "schema":{"type":"integer","minimum":1,"maximum":1000}
@@ -330,6 +339,11 @@ pub fn openapi_value() -> Value {
             "next_cursor":{"type":["string","null"],"maxLength":2048},
             "statuses":{"type":"object","additionalProperties":{"type":"integer","minimum":0}}
         }
+    });
+    doc["components"]["schemas"]["CommandOutcome"]["properties"]["result"]["properties"]["result"] = json!({
+        "type":"object",
+        "additionalProperties":true,
+        "properties":{"next_cursor":{"type":["string","null"],"maxLength":2048,"description":"Opaque continuation cursor for task, event, or operation list results."}}
     });
     for depth in 0..=MAX_JSON_DEPTH {
         doc["components"]["schemas"][format!("BoundedJsonValueDepth{depth}")] = bounded_value_schema(depth);

@@ -381,6 +381,137 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
     env.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect(&env, &token, "cursor-worker", 0).await;
+
+    let filters = "worker=w1;mission=m1;resource=tasks;limit=1";
+    let cursor = bridge_coordinator::cursor::issue(&env.srv.state.cursor_key, "missions/tasks", filters, 3);
+    let read_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let get = tokio::spawn(async move {
+        read_api
+            .rb(
+                Method::GET,
+                &format!("/api/v1/missions/m1/tasks?worker=w1&limit=1&cursor={cursor}&wait_ms=5000"),
+            )
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "task.list");
+    assert_eq!(command["payload"]["params"]["offset"], 3);
+    assert_eq!(command["payload"]["params"]["limit"], 1);
+    let request_id = command["payload"]["request_id"].as_str().unwrap();
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":request_id,"operation":"task.list","outcome":"ok","result":{"tasks":[{"ordinal":4}],"total":5,"offset":3},"error":null}),
+        )
+        .await;
+    let response = get.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    let next = body["result"]["result"]["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        bridge_coordinator::cursor::read(&env.srv.state.cursor_key, "missions/tasks", filters, next),
+        Ok(4),
+        "continuation advances by the number of returned rows"
+    );
+
+    let (bad_status, bad) = api.get("/api/v1/missions/m1/tasks?worker=w1&limit=1&cursor=not-a-cursor").await;
+    assert_eq!(bad_status, 400, "{bad}");
+    assert_eq!(bad["code"], "invalid-cursor");
+    let (mismatch_status, mismatch) = api.get(&format!("/api/v1/missions/m1/tasks?worker=w1&limit=2&cursor={next}")).await;
+    assert_eq!(mismatch_status, 400, "{mismatch}");
+    assert_eq!(mismatch["code"], "invalid-cursor");
+
+    let operation_filters = "worker=w1;mission=m1;resource=operations;limit=1";
+    let operation_cursor = bridge_coordinator::cursor::issue(&env.srv.state.cursor_key, "missions/operations", operation_filters, 0);
+    let operation_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let operations = tokio::spawn(async move {
+        operation_api
+            .rb(
+                Method::GET,
+                &format!("/api/v1/missions/m1/operations?worker=w1&limit=1&cursor={operation_cursor}&wait_ms=5000"),
+            )
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "session.list");
+    assert_eq!(command["payload"]["params"]["mission"], "m1");
+    assert_eq!(command["payload"]["params"]["offset"], 0);
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"session.list","outcome":"ok","result":{"sessions":[{"operation_id":"op-1"}],"total":2,"offset":0},"error":null}),
+        )
+        .await;
+    let response = operations.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    let next = body["result"]["result"]["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        bridge_coordinator::cursor::read(&env.srv.state.cursor_key, "missions/operations", operation_filters, next),
+        Ok(1)
+    );
+
+    let event_filters = "worker=w1;mission=m1;resource=events;limit=2";
+    let event_cursor = bridge_coordinator::cursor::issue(&env.srv.state.cursor_key, "missions/events", event_filters, 4);
+    let event_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let events = tokio::spawn(async move {
+        event_api
+            .rb(
+                Method::GET,
+                &format!("/api/v1/missions/m1/events?worker=w1&limit=2&cursor={event_cursor}&wait_ms=5000"),
+            )
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "mission.events");
+    assert_eq!(command["payload"]["params"]["after"], 4);
+    worker
+        .send(
+            "command.result",
+            json!({"schema_version":1,"request_id":command["payload"]["request_id"],"operation":"mission.events","outcome":"ok","result":{"events":[{"id":5},{"id":6}]},"error":null}),
+        )
+        .await;
+    let response = events.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let body: Value = response.json().await.unwrap();
+    let next = body["result"]["result"]["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        bridge_coordinator::cursor::read(&env.srv.state.cursor_key, "missions/events", event_filters, next),
+        Ok(6)
+    );
+    env.stop().await;
+}
+
 #[test]
 fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
     let dir = tmp_dir();
