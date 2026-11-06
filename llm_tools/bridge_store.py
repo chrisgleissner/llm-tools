@@ -16,7 +16,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any, Iterator
 
 from .bridge_states import (
@@ -1019,7 +1019,14 @@ class BridgeStore:
             if row["status"] != "QUEUED":
                 return self.get_command(command_id)
             self.db.execute("UPDATE commands SET status=?,result_json=?,updated_at=? WHERE id=?", (status, self._json(result or {}), utc_now(), command_id))
-            self._event(row["mission_id"], "command-" + status.lower(), {"command_id": command_id, "result": result or {}})
+            try:
+                action = json.loads(row["payload_json"]).get("action")
+            except (ValueError, AttributeError):
+                action = None
+            data: dict[str, Any] = {"command_id": command_id, "result": result or {}}
+            if action:
+                data["command"] = str(action)  # the queued event names it too; the outcome should say which command it was
+            self._event(row["mission_id"], "command-" + status.lower(), data)
         return self.get_command(command_id)
 
     def begin_iteration(self, task_id: int) -> dict[str, Any]:
@@ -1552,19 +1559,55 @@ class BridgeStore:
             self._event(task["mission_id"], "task-status", {"from": old, "to": status}, task_id=task_id)
         return self.get_task(task_id)
 
-    def events(self, mission_id: str, *, after: int = 0, limit: int | None = None) -> list[dict[str, Any]]:
+    def _event_filter(self, mission_id: str, after: int, since_seconds: int, exclude_kinds: Iterable[str]) -> tuple[str, tuple[Any, ...]]:
+        """WHERE clause and parameters for the events of one mission above a cursor, newer than an age, without some kinds."""
+        where = "e.mission_id=? AND e.id>?"
+        params: list[Any] = [mission_id, after]
+        if since_seconds > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+            where += " AND e.created_at>=?"
+            params.append(cutoff.isoformat(timespec="seconds"))
+        excluded = sorted(set(exclude_kinds))
+        if excluded:
+            where += f" AND e.kind NOT IN ({','.join('?' * len(excluded))})"
+            params.extend(excluded)
+        return where, tuple(params)
+
+    def events(
+        self,
+        mission_id: str,
+        *,
+        after: int = 0,
+        limit: int | None = None,
+        newest: bool = False,
+        since_seconds: int = 0,
+        exclude_kinds: Iterable[str] = (),
+    ) -> list[dict[str, Any]]:
+        """A mission's events in ascending ID order.
+
+        By default these are the first ``limit`` events above ``after``. With ``newest`` they are the
+        last ``limit`` events that match, still returned oldest to newest. ``since_seconds`` keeps
+        events at most that old, and ``exclude_kinds`` leaves kinds out before the limit applies.
+        """
         self._mission_row(mission_id)
         if limit is not None and not 0 <= limit <= 1000:
             raise ValueError("event page limit must be between 0 and 1000")
-        query = "SELECT e.*, t.ordinal AS task_ordinal FROM events e LEFT JOIN tasks t ON t.id=e.task_id WHERE e.mission_id=? AND e.id>? ORDER BY e.id"
-        params: tuple[Any, ...] = (mission_id, after)
+        where, params = self._event_filter(mission_id, after, since_seconds, exclude_kinds)
+        query = f"SELECT e.*, t.ordinal AS task_ordinal FROM events e LEFT JOIN tasks t ON t.id=e.task_id WHERE {where} ORDER BY e.id" + (" DESC" if newest else "")
         if limit is not None:
             query += " LIMIT ?"
             params += (limit,)
-        return [
+        rows = [
             {**dict(row), "data": json.loads(row["data_json"])}
             for row in self.db.execute(query, params)
         ]
+        return rows[::-1] if newest else rows
+
+    def event_count(self, mission_id: str, *, after: int = 0, since_seconds: int = 0, exclude_kinds: Iterable[str] = ()) -> int:
+        """How many events ``events`` could return for the same filters, ignoring the limit."""
+        self._mission_row(mission_id)
+        where, params = self._event_filter(mission_id, after, since_seconds, exclude_kinds)
+        return int(self.db.execute(f"SELECT COUNT(*) FROM events e WHERE {where}", params).fetchone()[0])
 
     def last_event_id(self) -> int:
         """Highest event ID in this database: the worker's replication cursor."""

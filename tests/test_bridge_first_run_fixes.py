@@ -492,7 +492,7 @@ def test_read_only_commands_use_the_folders_finished_mission(tmp_path, state, ca
     assert "COMPLETED" in _run(capsys, "status")
     assert "VERIFYING" not in _run(capsys, "task", "list") and "COMPLETED" in _run(capsys, "task", "list")
     assert _run(capsys, "task", "show", "--task", "1").startswith("task 1 ")
-    assert "mission-created" in _run(capsys, "events")
+    assert "Mission created" in _run(capsys, "events")
     # A command that changes things keeps the rule and says how to continue.
     err = _run(capsys, "task", "add", "--prompt", "more", code=2)
     assert f"mission {mid[:8]} in folder" in err and "is finished (completed)" in err

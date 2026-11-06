@@ -373,36 +373,36 @@ def format_command_receipt(command: str, result: dict[str, Any], mission_id: str
     return text + (f"\n{detail}" if detail else "")
 
 
-def _event_summary(data: Any) -> str:
-    if not isinstance(data, dict):
-        return ""
-    parts = []
-    for key, value in data.items():
-        if key == "task_id":
-            continue  # a global ID; the task number is shown instead
-        if key == "depends_on_ordinal":
-            parts.append(f"after task {value}")
-            continue
-        if key == "depends_on" and "depends_on_ordinal" in data:
-            continue
-        if isinstance(value, (str, int, float, bool)) and value != "":
-            parts.append(f"{key}={_clip(plain_reason(value) if key in {'reason', 'rotation_reason'} else value, 40)}")
-        if len(parts) == 4:
-            break
-    return _clip(" ".join(parts), 100)
+def _event_time(event: dict[str, Any]) -> str:
+    stamp = _parse_time(event.get("created_at"))
+    return datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M:%S") if stamp is not None else "-"
 
 
-def format_events(events: list[dict[str, Any]]) -> str:
+def event_phrase(event: dict[str, Any]) -> str:
+    """The operator wording the console's Activity view uses for this event."""
+    from .bridge_event_text import _humanize_event
+
+    return _humanize_event(event)[0]
+
+
+def format_event_line(event: dict[str, Any], *, verbose: bool = False) -> str:
+    """One event as a single line, for ``events --follow``."""
+    cells = [str(event.get("id", "")), _event_time(event)]
+    if verbose:
+        cells.append(str(event.get("kind", "")))
+    return "  ".join([*cells, event_phrase(event)])
+
+
+def format_events(events: list[dict[str, Any]], *, total: int | None = None, newest: bool = True, verbose: bool = False, after: int = 0) -> str:
+    """The events table, and a line saying so when more matching events exist than are shown."""
     if not events:
         return "No events."
-    rows = []
-    for event in events:
-        stamp = _parse_time(event.get("created_at"))
-        when = datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M:%S") if stamp is not None else "-"
-        number = event.get("task_ordinal")
-        detail = _event_summary(event.get("data"))
-        rows.append([str(event.get("id", "")), when, str(event.get("kind", "")), (f"task {number} " if number is not None else "") + detail])
-    return table(["ID", "TIME", "KIND", "DETAIL"], rows)
+    rows = [[str(event.get("id", "")), _event_time(event), *([str(event.get("kind", ""))] if verbose else []), event_phrase(event)] for event in events]
+    text = table(["ID", "TIME", *(["KIND"] if verbose else []), "EVENT"], rows)
+    if total is not None and total > len(events):
+        where = f"the last {len(events)}" if newest else f"{len(events)} from ID {after}"
+        text += f"\nshowing {where} of {total} events · --limit N shows more · --after ID reads forward from an event ID (IDs are global)"
+    return text
 
 
 def provider_check_text(check: dict[str, Any]) -> str:

@@ -146,8 +146,9 @@ def console_snapshot(
     return result
 
 
-def _json_print(value: Any) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+def _json_print(value: Any, *, compact: bool = False) -> None:
+    """Print ``value`` as sorted JSON; ``compact`` is one line, for streams such as ``events --follow``."""
+    print(json.dumps(value, ensure_ascii=False, sort_keys=True, **({"separators": (",", ":")} if compact else {"indent": 2})))
 
 
 def strip_frozen_config(value: Any) -> Any:
@@ -237,6 +238,20 @@ def _dependency_ids(store: BridgeStore, mission_id: str, raw: str) -> list[int]:
             raise ValueError(f"dependency {item!r} is not a task number; give task numbers such as 1,2")
         ids.append(int(store.task_by_ordinal(mission_id, int(item))["id"]))
     return ids
+
+
+_EVENT_AGE_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _event_age(text: str) -> int:
+    """argparse type for ``--since``: ``90s``, ``10m``, ``2h``, ``1d`` or a run such as ``1h30m``, in seconds."""
+    import argparse
+
+    cleaned = text.strip().lower().replace(" ", "")
+    parts = re.findall(r"(\d{1,9})([smhd])", cleaned)
+    if not parts or "".join(f"{count}{unit}" for count, unit in parts) != cleaned:
+        raise argparse.ArgumentTypeError(f"invalid age {text[:24]!r}; use a number and a unit, for example 90s, 10m, 2h or 1d")
+    return sum(int(count) * _EVENT_AGE_UNITS[unit] for count, unit in parts)
 
 
 def _db_int(text: str) -> int:
@@ -1321,8 +1336,11 @@ def _build_parser(
 
     events = sub.add_parser("events")
     _add_mission_arg(events, default_mission)
-    events.add_argument("--after", metavar="EVENT", type=_db_int, default=0, help="only events with an ID above this (default: 0)")
-    events.add_argument("--limit", metavar="N", type=_db_int, default=100, help="maximum events returned (default: 100)")
+    events.add_argument("--after", metavar="EVENT", type=_db_int, default=None, help="oldest first: only events with an ID above this. Event IDs are global, counted across all missions, so a mission's first ID is not 1. Without --after, the newest events are shown")
+    events.add_argument("--limit", metavar="N", type=_db_int, default=100, help="maximum events returned: the newest N, or the first N after --after (default: 100)")
+    events.add_argument("--since", metavar="AGE", type=_event_age, default=0, help="only events from the last AGE, for example 90s, 10m, 2h or 1d")
+    events.add_argument("--follow", "-f", action="store_true", help="keep running and print new events as they arrive; Ctrl-C stops")
+    events.add_argument("--verbose", action="store_true", help="include controller bookkeeping (heartbeats, mode, prompt and wake records), which is hidden by default")
     _add_json_arg(events)
 
     for action in ("start", "pause", "resume", "continue", "stop", "cancel", "attach", "detach"):
@@ -1829,6 +1847,59 @@ def _set_mission_suspend_when_rate_limited(store: BridgeStore, mission_id: str, 
     detail = "Capacity-wait suspend " + ("on" if enabled else "off")
     detail += " · Bridge sleeps only at an idle boundary with no active operation and an armed wake" if enabled else " · Bridge waits awake"
     return {"schema_version": 1, "mission_id": mission_id, "suspend_when_rate_limited": enabled, "detail": detail}
+
+
+def _events_command(args: argparse.Namespace) -> int:
+    """``events``: the newest events (or the first ones after ``--after``), then new ones with ``--follow``."""
+    newest = args.after is None
+    after = args.after or 0
+
+    def fetch(cursor: int, *, latest: bool, limit: int, hide: bool, since: int = 0) -> dict[str, Any]:
+        params: dict[str, Any] = {"after": cursor, "limit": limit}
+        if latest:
+            params["newest"] = True
+        if since:
+            params["since_seconds"] = since
+        if hide:
+            params["hide_bookkeeping"] = True
+        return commands.dispatch(commands.CommandRequest("mission.events", params, mission_id=args.mission))
+
+    # Everything the mission has recorded so far, shown or not, so --follow starts after it.
+    seen = 0
+    if args.follow:
+        latest_any = fetch(0, latest=True, limit=1, hide=False)["events"]
+        seen = int(latest_any[-1]["id"]) if latest_any else 0
+    result = fetch(after, latest=newest, limit=args.limit, hide=not args.verbose, since=args.since)
+    events = result["events"]
+    if args.json and not args.follow:
+        _json_print(result)
+        return 0
+    if args.json:
+        for event in events:
+            _json_print(event, compact=True)
+    else:
+        print(fmt.format_events(events, total=result.get("total"), newest=newest, verbose=args.verbose, after=after))
+    if not args.follow:
+        return 0
+    printed = max([seen, *(int(event["id"]) for event in events)])
+    cursor = printed
+    try:
+        while True:
+            time.sleep(1.0)
+            page = fetch(cursor, latest=False, limit=1000, hide=not args.verbose)["events"]
+            fresh = [event for event in page if int(event["id"]) > printed]
+            if page:
+                cursor = int(page[-1]["id"])
+            for event in fresh:
+                if args.json:
+                    _json_print(event, compact=True)
+                else:
+                    print(fmt.format_event_line(event, verbose=args.verbose))
+            sys.stdout.flush()
+            if fresh:
+                printed = int(fresh[-1]["id"])
+    except KeyboardInterrupt:
+        return 0
 
 
 def _print_result(result: Any, as_json: bool, human: Callable[[Any], str] | None = None) -> None:
@@ -2481,9 +2552,7 @@ def _main(argv: list[str] | None = None) -> int:
                 print(result.get("message") or result.get("reason") or result.get("status"))
             return 0 if result.get("ok") is True else 2
         if args.command == "events":
-            result = commands.dispatch(commands.CommandRequest("mission.events", {"after": args.after, "limit": args.limit}, mission_id=args.mission))
-            _print_result(result, args.json, lambda value: fmt.format_events(value["events"]))
-            return 0
+            return _events_command(args)
         if args.command == "proposal":
             with open_store() as store:
                 if args.proposal_action == "list":

@@ -453,7 +453,10 @@ def _h_controller_exited(ctx: _EventContext) -> str:
 
 @_humanizer(EventKind.COMMAND_APPLIED, EventKind.COMMAND_FAILED, EventKind.COMMAND_QUEUED, EventKind.COMMAND_REJECTED)
 def _h_command(ctx: _EventContext) -> str:
-    return f"Command {ctx.kind[len('command-'):]}: {_text(ctx.data.get('command') or '', 60)}".rstrip(": ")
+    text = f"Command {ctx.kind[len('command-'):]}: {_text(ctx.data.get('command') or '', 60)}".rstrip(": ")
+    result = ctx.data.get("result")
+    error = result.get("error") if isinstance(result, dict) else None
+    return f"{text} · {_text(error, 160)}" if _known(error) and ctx.kind != "command-applied" else text
 
 
 @_humanizer(EventKind.STATION_HANDOFF, EventKind.PROVIDER_SWITCHED)
