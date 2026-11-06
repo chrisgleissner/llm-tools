@@ -28,6 +28,9 @@ FROZEN = (
 def state(tmp_path, monkeypatch) -> Path:
     directory = tmp_path / "state"
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(directory))
+    config = tmp_path / "llm-tools.toml"
+    config.write_text(FROZEN, encoding="utf-8")  # mission create checks route names against the current config
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(config))
     return directory
 
 

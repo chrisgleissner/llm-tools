@@ -263,6 +263,7 @@ Copilot readiness accounts for pay-as-you-go: once the included monthly allowanc
 * `LLM_BRIDGE_BACKGROUND` (`dark` or `light`; the terminal background when the theme name does not fix it; Bridge exports the detected value so a tmux station inherits it)
 * `LLM_BRIDGE_COLOR_<ROLE>` (override one Bridge colour role with an SGR string, hex colour or colour name; applied after `[bridge.theme.roles]` and `LLM_TOOLS_COLOR_<ROLE>`)
 * `LLM_BRIDGE_NO_OSC` (any value but empty, `0`, `false` or `no` skips the OSC 11 terminal-background query)
+* `LLM_BRIDGE_NO_SIGNIN_CHECK` (any value but empty, `0`, `false` or `no` skips the offline "installed but not signed in" warning `mission create` and `start --providers/--routes` print on stderr; the test suite sets it so results do not depend on the developer's home)
 * `LLM_BRIDGE_OSC_TIMEOUT_MS` (how long to wait for the OSC 11 answer, in milliseconds; clamped to 10–1000)
 * `LLM_BRIDGE_FINISH_<PROVIDER>` (replace the exit command `llm-bridge finish` types into a native provider, e.g. `LLM_BRIDGE_FINISH_CODEX=/exit`; defaults `/exit` for Claude Code and Copilot, `/quit` for Codex)
 * `TEST_TIMEOUT_SCALE` (test-only: multiplier for test polling deadlines, subprocess timeouts and fixed fake-CLI delays; default 1.0)

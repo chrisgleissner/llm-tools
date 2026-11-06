@@ -67,6 +67,65 @@ def _split(raw: Any) -> list[str]:
     return list(dict.fromkeys(item.strip() for item in str(raw or "").split(",") if item.strip()))
 
 
+def validate_names(conf: dict[str, Any], raw: str, *, routes_allowed: bool) -> list[str]:
+    """Names in ``raw`` after checking each is a provider (or, when allowed, a declared route).
+
+    ``rotation --set``, ``mission create`` and ``start`` share this check. An
+    unknown name raises ``ValueError`` with the closest known names and the full list.
+    """
+    import difflib
+
+    from .capacity import ALL_PROVIDERS
+
+    names = _split(raw)
+    if not names:
+        raise ValueError("a rotation needs at least one provider or route name")
+    declared = list(conf.get("routes", {})) if routes_allowed and isinstance(conf.get("routes"), dict) else []
+    known = [*declared, *(name for name in ALL_PROVIDERS if name not in declared)]
+    for name in names:
+        if name not in known:
+            close = difflib.get_close_matches(name, known, n=3, cutoff=0.5)
+            hint = f" · did you mean {', '.join(close)}?" if close else ""
+            raise ValueError(f"unknown rotation entry '{name}'{hint} · available: {', '.join(known)}")
+    return names
+
+
+def unknown_entry_problem(conf: dict[str, Any], providers: Any, routes: Any) -> str | None:
+    """Why a rotation names an entry that is neither a provider nor a declared route, or ``None``."""
+    route_text = str(routes or "").strip()
+    route_names = [] if route_text.lower() in {"none", "off"} else _split(route_text)
+    try:
+        if _split(providers):
+            validate_names(conf, str(providers), routes_allowed=False)
+        elif not route_names:
+            raise ValueError("a rotation needs at least one provider or route name")
+        if route_names:
+            validate_names(conf, ",".join(route_names), routes_allowed=True)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def signin_warnings(conf: dict[str, Any], providers: Any, routes: Any, env: Any = None) -> list[str]:
+    """One warning per rotation entry whose CLI is installed but whose sign-in files are missing.
+
+    Offline: it reads only the files ``llm-bridge doctor`` reads. ``LLM_BRIDGE_NO_SIGNIN_CHECK=1``
+    turns it off (the test suite sets it so results do not depend on the developer's home).
+    """
+    if os.environ.get("LLM_BRIDGE_NO_SIGNIN_CHECK", "").strip() not in {"", "0", "false", "no"}:
+        return []
+    from .bridge_doctor import provider_checks
+
+    warnings = []
+    for check in provider_checks([(name, cli) for name, cli in entries(conf, providers, routes)], env):
+        if check.get("installed") and check.get("logged_in") is False:
+            name = str(check["name"])
+            detail = str(check.get("detail") or "").strip()
+            how = f" ({detail})" if detail else ""
+            warnings.append(f"warning: {name} is not signed in{how}; it will be skipped until it is")
+    return warnings
+
+
 def entries(conf: dict[str, Any], providers: Any, routes: Any) -> list[tuple[str, str]]:
     """``(rotation name, launch CLI)`` for each entry; routes win over providers."""
     route_names = _split(routes)
@@ -116,11 +175,16 @@ def check_rotation(
 ) -> str | None:
     """Return a refusal message, or ``None`` when the rotation can launch.
 
+    An entry that is neither a provider nor a declared route is always refused:
+    it can never launch, whether the operator typed it or it was saved earlier.
     An explicit rotation (typed by the operator) is refused when any entry is
     disabled, because the dropped entry would silently never run. A saved or
     default rotation is refused only when no entry is left, which matches
     ``ralph-robin`` dropping disabled entries and continuing with the rest.
     """
+    unknown = unknown_entry_problem(conf, providers, routes)
+    if unknown:
+        return unknown
     disabled = disabled_entries(enabled, conf, providers, routes)
     if not disabled:
         return None

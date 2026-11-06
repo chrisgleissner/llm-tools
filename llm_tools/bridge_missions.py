@@ -11,6 +11,7 @@ database reads go through named ``BridgeStore`` methods (``mission_id_if_exists`
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -48,11 +49,42 @@ def order_missions(rows: list[Any]) -> list[Any]:
     return sorted(newest, key=lambda row: (not mission_live(str(row["id"])), str(row["status"]) in FINISHED_MISSION_STATUSES))
 
 
+def _stamp(value: Any) -> str:
+    """``YYYY-MM-DD HH:MM:SS`` in local time for a stored UTC timestamp, or ``-``."""
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return "-"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def mission_choices(rows: list[Any]) -> str:
+    """One line per mission with its ID, name, state and last-updated time, so look-alike missions can be told apart."""
+    ordered = order_missions(rows)
+    name_width = min(40, max((len(str(row["name"])[:40]) for row in ordered), default=0))
+    state_width = max((len(str(row["status"])) for row in ordered), default=0)
     return "\n".join(
-        f"  {str(row['id'])[:8]}  {str(row['name'])[:40]}  {row['status']}" + ("  (live)" if mission_live(str(row["id"])) else "")
-        for row in order_missions(rows)
+        f"  {str(row['id'])[:8]}  {str(row['name'])[:40]:<{name_width}}  {str(row['status']):<{state_width}}  updated {_stamp(row['updated_at'])}"
+        + ("  (live)" if mission_live(str(row["id"])) else "")
+        for row in ordered
     )
+
+
+def missions_in_folder(store: BridgeStore, here: Path) -> list[Any]:
+    """Missions whose folder equals or contains ``here``, newest first."""
+    return [
+        row
+        for row in store.missions_newest_first()
+        if here == Path(row["cwd"]) or Path(row["cwd"]) in here.parents
+    ]
+
+
+def unfinished_in_folder(store: BridgeStore, cwd: str | Path) -> list[Any]:
+    """Unfinished missions that folder inference would consider for ``cwd``, in display order."""
+    here = Path(cwd).expanduser().resolve()
+    return order_missions([row for row in missions_in_folder(store, here) if row["status"] not in FINISHED_MISSION_STATUSES])
 
 
 def resolve_mission_ref(
@@ -86,11 +118,7 @@ def resolve_mission_ref(
             raise ValueError(f"mission ID prefix {ref!r} is ambiguous; matches:\n{mission_choices(rows)}")
         return str(rows[0]["id"])
     here = Path(cwd if cwd is not None else Path.cwd()).expanduser().resolve()
-    in_folder = [
-        row
-        for row in store.missions_newest_first()
-        if here == Path(row["cwd"]) or Path(row["cwd"]) in here.parents
-    ]
+    in_folder = missions_in_folder(store, here)
     candidates = [row for row in in_folder if row["status"] not in FINISHED_MISSION_STATUSES]
     live = [row for row in candidates if row["status"] in LIVE_MISSION_STATUSES]
     pool = live or candidates
