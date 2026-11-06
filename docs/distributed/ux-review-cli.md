@@ -1524,7 +1524,7 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 |---|---|---|---|
 | CLIUX-001 | critical | open | |
 | CLIUX-002 | critical | open | |
-| CLIUX-003 | high | open | |
+| CLIUX-003 | high | fixed | 075d38c. New `task output` (pages the latest run log; reports pruned logs with size and sha256) and `task diff` (diff from the start-of-run commit recorded in the checkpoint, plus untracked files). The approval dialog lists changed files and adds `o output · d diff`; the Tasks inspect pane shows the last run. Both commands are typed read operations available remotely. `tests/test_bridge_task_review.py`: 21 tests failed before the fix (for example `test_checkpoint_records_the_head_commit_and_files_already_modified` with `KeyError: head`). |
 | CLIUX-004 | high | fixed | 0bde2f6. `control`/`console` explain the missing terminal; `usage` prints the table. `tests/test_bridge_cli_errors.py::test_control_without_a_terminal_explains_itself`, `test_usage_without_a_terminal_prints_the_usage_table` and three more; all failed before the fix. |
 | CLIUX-005 | high | fixed | fc9c5fa. Root cause: under `LLM_SCHEDULER_USAGE_JSON(_FILE)` the controller used the injected capacity while F8 read the providers itself. F8 now uses the same snapshots, labels its source, warns on a difference from the controller, lists the rotation by default (`a` all), and reads `× empty` at 0%. `tests/test_bridge_usage_agreement.py::test_embedded_read_uses_the_capacity_the_controller_observes` and `test_an_exhausted_monthly_window_reads_empty_not_conserve` failed before the fix. |
 | CLIUX-006 | high | open | |
