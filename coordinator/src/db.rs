@@ -552,6 +552,15 @@ impl Db {
         let rows = st.query_map([], worker_row)?.collect();
         rows
     }
+    /// Stable database-local HMAC key used to sign opaque pagination cursors.
+    pub fn cursor_key(&self) -> R<String> {
+        let c = self.c();
+        c.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('cursor_hmac_key',?1)",
+            params![crate::auth::random_token()],
+        )?;
+        c.query_row("SELECT value FROM meta WHERE key='cursor_hmac_key'", [], |row| row.get(0))
+    }
     /// Record that a worker was seen now. A connected worker's heartbeat calls this every ping;
     /// `min_interval` skips the update while the stored value is younger than that many seconds,
     /// so an idle connection does not commit (and fsync) a transaction per ping. An UPDATE that

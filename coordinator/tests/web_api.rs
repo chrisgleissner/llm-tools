@@ -417,7 +417,7 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
 
     let (st, all) = api.get("/api/v1/missions").await;
     assert_eq!(st, 200);
-    assert_eq!(all["total"], 4, "no limit returns every mission");
+    assert_eq!(all["total"], 4, "default page includes every matching fixture mission");
     assert_eq!(ids(&all).len(), 4);
     assert_eq!(all["statuses"], json!({"COMPLETED": 1, "FAILED": 1, "RUNNING": 2}));
 
@@ -436,6 +436,25 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
     assert_eq!(b["total"], 0);
     let (_, b) = api.get("/api/v1/missions?limit=0").await;
     assert_eq!(ids(&b).len(), 1, "limit is clamped to at least 1");
+
+    let (_, page_one) = api.get("/api/v1/missions?limit=2").await;
+    assert_eq!(ids(&page_one), ["m1", "m2"] as [&str; 2]);
+    let next = page_one["next_cursor"].as_str().expect("next page cursor").to_string();
+    let (_, page_two) = api.get(&format!("/api/v1/missions?limit=2&cursor={next}")).await;
+    assert_eq!(ids(&page_two), ["m3", "m4"] as [&str; 2]);
+    assert!(page_two["next_cursor"].is_null());
+    let (invalid_status, invalid) = api.get(&format!("/api/v1/missions?limit=2&sort=name&cursor={next}")).await;
+    assert_eq!(invalid_status, 400);
+    assert_eq!(invalid["code"], "invalid-cursor");
+    let mut forged = next.into_bytes();
+    forged[0] = if forged[0] == b'A' { b'B' } else { b'A' };
+    let forged = String::from_utf8(forged).unwrap();
+    let (forged_status, forged_problem) = api.get(&format!("/api/v1/missions?limit=2&cursor={forged}")).await;
+    assert_eq!(forged_status, 400);
+    assert_eq!(forged_problem["code"], "invalid-cursor");
+    let (conflict_status, conflict) = api.get("/api/v1/missions?cursor=bogus&offset=0").await;
+    assert_eq!(conflict_status, 400);
+    assert_eq!(conflict["code"], "invalid-request");
 
     for bad in ["sort=colour", "order=sideways", "limit=-1", "offset=x"] {
         let (st, e) = api.get(&format!("/api/v1/missions?{bad}")).await;

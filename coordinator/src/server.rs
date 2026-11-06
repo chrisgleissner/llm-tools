@@ -50,6 +50,7 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     let web_dir = crate::web::resolve_web_dir(web_dir.map(Path::to_path_buf).or(configured).as_deref())?;
     let tls = TlsAcceptor::from(crate::certs::load_server_config(data_dir)?);
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
+    let cursor_key = db.cursor_key().map_err(|e| format!("cannot load pagination cursor key: {e}"))?;
     let listener = TcpListener::bind(bind).await.map_err(|e| format!("cannot bind {bind}: {e}"))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -64,6 +65,7 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         limiter: RateLimiter::new(5, Duration::from_secs(60), 4096),
         started: Instant::now(),
         dummy_hash,
+        cursor_key,
         argon_slots: Semaphore::new(2),
         big_bodies: Arc::new(Semaphore::new(http::BIG_BODY_SLOTS)),
         shutdown: shutdown_rx.clone(),

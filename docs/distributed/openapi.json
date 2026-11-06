@@ -686,6 +686,64 @@
         ],
         "type": "object"
       },
+      "MissionListPage": {
+        "properties": {
+          "missions": {
+            "items": {
+              "properties": {
+                "mission": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "stale": {
+                  "type": "boolean"
+                },
+                "worker": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "worker",
+                "stale",
+                "mission"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "maxLength": 2048,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Compatibility field; use next_cursor for subsequent pages.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "statuses": {
+            "additionalProperties": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "total": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "missions",
+          "total",
+          "offset",
+          "next_cursor",
+          "statuses"
+        ],
+        "type": "object"
+      },
       "ProblemDetails": {
         "properties": {
           "code": {
@@ -2233,13 +2291,99 @@
     "/api/v1/missions": {
       "get": {
         "operationId": "get_missions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "worker",
+            "required": false,
+            "schema": {
+              "maxLength": 63,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "maxLength": 256,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "enum": [
+                "name",
+                "status",
+                "worker",
+                "updated"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size, default 100, maximum 500.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Authenticated and encrypted opaque cursor returned as next_cursor; bound to this filter set.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "Legacy pagination; use cursor.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "type": "object"
+                  "$ref": "#/components/schemas/MissionListPage"
                 }
               }
             },

@@ -50,6 +50,7 @@ pub struct AppState {
     pub limiter: RateLimiter,
     pub started: Instant,
     pub dummy_hash: String,
+    pub cursor_key: String,
     pub argon_slots: Semaphore,
     /// Permits for request bodies larger than [`BIG_BODY_BYTES`] (see [`read_body`]).
     pub big_bodies: Arc<Semaphore>,
@@ -807,18 +808,23 @@ async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): 
 
 /// `GET /missions` query: `q` (case-insensitive substring of name, id, folder or worker), `worker`,
 /// `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`),
-/// `limit` (1-500) and `offset`. Without `limit` every match is returned. The reply carries
-/// `total` (matches before paging) and `statuses` (match counts per status ignoring the status
-/// filter, for filter chips).
+/// `limit` (default 100, maximum 500) and an authenticated, encrypted opaque `cursor`. Legacy `offset` remains
+/// accepted. The reply carries `total`, `next_cursor` and status facets.
 async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
     let bad = |m: &str| err(StatusCode::BAD_REQUEST, "invalid-request", m.to_string());
+    if let Some(key) = q
+        .keys()
+        .find(|key| !matches!(key.as_str(), "q" | "worker" | "status" | "sort" | "order" | "limit" | "offset" | "cursor"))
+    {
+        return Err(bad(&format!("unknown query parameter {key}")));
+    }
     let num = |k: &str| -> Result<Option<usize>, ApiError> {
         q.get(k)
             .map(|v| v.parse::<usize>().map_err(|_| bad(&format!("{k} must be a non-negative integer"))))
             .transpose()
     };
-    let limit = num("limit")?.map(|l| l.clamp(1, 500));
-    let offset = num("offset")?.unwrap_or(0);
+    let limit = num("limit")?.unwrap_or(100).clamp(1, 500);
+    let legacy_offset = num("offset")?;
     let sort = q.get("sort").map(String::as_str);
     if !matches!(sort, None | Some("name" | "status" | "worker" | "updated")) {
         return Err(bad("sort must be name, status, worker or updated"));
@@ -829,10 +835,27 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
         Some(_) => return Err(bad("order must be asc or desc")),
     };
     let needle = q.get("q").map(|v| v.to_lowercase()).filter(|v| !v.is_empty());
-    let statuses: Vec<String> = q
+    let mut statuses: Vec<String> = q
         .get("status")
         .map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_uppercase).collect())
         .unwrap_or_default();
+    statuses.sort();
+    statuses.dedup();
+    let filters = serde_json::to_string(&json!({
+        "q": needle,
+        "worker": q.get("worker"),
+        "status": statuses,
+        "sort": sort.unwrap_or("worker"),
+        "descending": descending,
+    }))
+    .expect("mission list filters serialize");
+    let offset = match (q.get("cursor"), legacy_offset) {
+        (Some(_), Some(_)) => return Err(bad("cursor and offset cannot be used together")),
+        (Some(cursor), None) => crate::cursor::read(&st.cursor_key, "missions", &filters, cursor)
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "cursor is invalid or belongs to a different query"))?,
+        (None, Some(offset)) => offset,
+        (None, None) => 0,
+    };
     let workers: HashMap<String, crate::db::WorkerRow> = st.db.workers_list()?.into_iter().map(|w| (w.name.clone(), w)).collect();
     let text = |info: &Value, k: &str| info.get(k).and_then(Value::as_str).unwrap_or("").to_string();
     let mut rows: Vec<(String, bool, Value)> = st
@@ -873,13 +896,17 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
         }
     }
     let total = rows.len();
-    let page = rows.into_iter().skip(offset).take(limit.unwrap_or(usize::MAX));
-    let missions: Vec<Value> = page
+    let missions: Vec<Value> = rows
+        .into_iter()
+        .skip(offset)
+        .take(limit)
         .map(|(worker, stale, info)| json!({"worker": worker, "stale": stale, "mission": info}))
         .collect();
+    let next_cursor = (offset.saturating_add(missions.len()) < total)
+        .then(|| crate::cursor::issue(&st.cursor_key, "missions", &filters, offset.saturating_add(missions.len())));
     Ok(json_ok(
         StatusCode::OK,
-        json!({"missions": missions, "total": total, "offset": offset, "statuses": by_status}),
+        json!({"missions": missions, "total": total, "offset": offset, "next_cursor": next_cursor, "statuses": by_status}),
     ))
 }
 

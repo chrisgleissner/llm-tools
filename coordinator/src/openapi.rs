@@ -86,6 +86,9 @@ fn operation_id(path: &str, method: &str) -> String {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if path == "/api/v1/missions" && method == "GET" {
+        return json!({"$ref":"#/components/schemas/MissionListPage"});
+    }
     if path == "/api/v1/tokens" && method == "GET" {
         return json!({"$ref":"#/components/schemas/TokenList"});
     }
@@ -139,6 +142,18 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "headers":{"Location":{"schema":{"type":"string","format":"uri-reference"}}},
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/CommandOutcome"}}}
         });
+    }
+    if path == "/api/v1/missions" && method == "GET" {
+        op["parameters"] = json!([
+            {"name":"q","in":"query","required":false,"schema":{"type":"string","maxLength":1024}},
+            {"name":"worker","in":"query","required":false,"schema":{"type":"string","maxLength":63}},
+            {"name":"status","in":"query","required":false,"schema":{"type":"string","maxLength":256}},
+            {"name":"sort","in":"query","required":false,"schema":{"type":"string","enum":["name","status","worker","updated"]}},
+            {"name":"order","in":"query","required":false,"schema":{"type":"string","enum":["asc","desc"]}},
+            {"name":"limit","in":"query","required":false,"description":"Page size, default 100, maximum 500.","schema":{"type":"integer","minimum":1,"maximum":500}},
+            {"name":"cursor","in":"query","required":false,"description":"Authenticated and encrypted opaque cursor returned as next_cursor; bound to this filter set.","schema":{"type":"string","maxLength":2048}},
+            {"name":"offset","in":"query","required":false,"deprecated":true,"description":"Legacy pagination; use cursor.","schema":{"type":"integer","minimum":0}}
+        ]);
     }
     if method == "POST" || method == "PATCH" || method == "DELETE" {
         op["requestBody"] = json!({
@@ -274,6 +289,17 @@ pub fn openapi_value() -> Value {
         "additionalProperties":{"$ref":"#/components/schemas/BoundedJsonValueDepth0"},
         "description":format!("JSON is limited to {MAX_JSON_DEPTH} nested levels, strings of at most {MAX_JSON_STRING_BYTES} UTF-8 bytes, arrays of at most {MAX_JSON_ARRAY_ITEMS} items and objects of at most {MAX_JSON_OBJECT_FIELDS} fields.")
     });
+    doc["components"]["schemas"]["MissionListPage"] = json!({
+        "type":"object",
+        "required":["missions","total","offset","next_cursor","statuses"],
+        "properties":{
+            "missions":{"type":"array","items":{"type":"object","required":["worker","stale","mission"],"properties":{"worker":{"type":"string"},"stale":{"type":"boolean"},"mission":{"type":"object","additionalProperties":true}}}},
+            "total":{"type":"integer","minimum":0},
+            "offset":{"type":"integer","minimum":0,"description":"Compatibility field; use next_cursor for subsequent pages."},
+            "next_cursor":{"type":["string","null"],"maxLength":2048},
+            "statuses":{"type":"object","additionalProperties":{"type":"integer","minimum":0}}
+        }
+    });
     for depth in 0..=MAX_JSON_DEPTH {
         doc["components"]["schemas"][format!("BoundedJsonValueDepth{depth}")] = bounded_value_schema(depth);
     }
@@ -350,6 +376,23 @@ mod tests {
             assert!(ROUTES.iter().any(|(declared, _, _, _)| declared == path));
         }
         assert!(doc["components"]["schemas"]["ProblemDetails"].is_object());
+        let mission_list = &doc["paths"]["/api/v1/missions"]["get"];
+        let params = mission_list["parameters"].as_array().expect("mission list query parameters");
+        let cursor = params
+            .iter()
+            .find(|param| param["name"] == "cursor" && param["in"] == "query")
+            .expect("opaque cursor query parameter");
+        assert_eq!(cursor["schema"]["type"], "string");
+        assert_eq!(cursor["schema"]["maxLength"], 2048);
+        assert!(cursor["description"].as_str().unwrap().contains("bound to this filter set"));
+        assert_eq!(
+            mission_list["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/MissionListPage"
+        );
+        assert_eq!(
+            doc["components"]["schemas"]["MissionListPage"]["properties"]["next_cursor"]["type"],
+            json!(["string", "null"])
+        );
     }
 
     #[test]

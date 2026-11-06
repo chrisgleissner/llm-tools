@@ -81,11 +81,19 @@ export MISSION='mission-id-from-the-list'
 ```
 
 List missions, then inspect a mission’s tasks. The task operation is read-only
-and requires `read`:
+and requires `read`. Mission lists default to 100 rows and cap pages at 500;
+follow `next_cursor` as the next request's `cursor`. Cursors are opaque,
+authenticated and encrypted, and bound to the original filters and sort order. They are
+rejected if changed or reused with different filters. `offset` remains available
+for compatibility but cannot be combined with `cursor`.
 
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
   "$COORDINATOR/api/v1/missions?limit=100"
+
+# If next_cursor is non-null, use it unchanged for the next page:
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  "$COORDINATOR/api/v1/missions?limit=100&cursor=$NEXT_CURSOR"
 
 curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
   "$COORDINATOR/api/v1/missions/$MISSION/tasks?worker=$WORKER&limit=100&offset=0"
@@ -138,9 +146,12 @@ curl --cacert ca.pem -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 
 Errors use `application/problem+json`. The stable `type` URI and `code` identify
-the existing coordinator error code; `status` is the HTTP status. List APIs
-currently use bounded `limit` with offset or event-cursor fields as described by
-their operation. `v1` changes are intended to be additive; breaking changes require a
+the existing coordinator error code; `status` is the HTTP status. List APIs use
+stable ordering, bounded `limit`, and either opaque page cursors or event
+cursors as described by their operation. Mission-list cursors use authenticated
+encryption with a coordinator database key and expose no filter or offset
+claims. `v1` changes are
+intended to be additive; breaking changes require a
 new version. A deprecated operation will carry a `Deprecation` header and a
 documented removal date before removal.
 
