@@ -252,7 +252,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-REPO-002 | [x] | `install.md` replaces derived target figures with the physical host and coordinator measurements while retaining generic example addresses; CI run 42250189901 passed all jobs. |
 | PI-REPO-003 | [x] | Physical evidence is recorded for the affected IDs; `FINAL_REPORT.md` totals are generated from the 247-row register; CI run 42250189901 passed all jobs. |
 | PI-REPO-004 | [x] | Container web-asset directory permissions were fixed at the Dockerfile source; a regression test fails on the prior mode and the built image was smoke-tested as UID 65532 (PR #32). |
-| PI-REPO-005 | [~] | PR #32 contains the Pi measurements and unified IDs and is merged. Main CI run 42258350255 exposed a tmux 3.4 first-run test expectation mismatch; the version-compatible test correction is in draft PR #33 and awaits green CI. |
+| PI-REPO-005 | [x] | PR #32 contains the Pi measurements and unified IDs and is merged. PR #33 fixed the tmux 3.4 first-run footer assertion and is merged; its full check run 42265040466 passed after retrying an unrelated ARM64 tmux startup flake. Main CI run 42269767860 is green on all jobs, including the ARM64 coordinator/register suite. |
 | PI-REPO-006 | [x] | The private research notes now label physical, emulated, assumed, and blocked results and replace former pending entries with physical evidence or exact blockers. |
 
 ## Operator addendum (2026-11-05, task revision 4)
