@@ -2,6 +2,10 @@
 import { build } from "esbuild";
 import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { basename } from "node:path";
+import { spawnSync } from "node:child_process";
+
+const phraseGeneration = spawnSync("python3", ["generate_event_phrases.py"], { encoding: "utf8" });
+if (phraseGeneration.status !== 0) throw new Error(`cannot generate TUI event phrases: ${phraseGeneration.stderr || phraseGeneration.error}`);
 
 rmSync("dist", { recursive: true, force: true });
 mkdirSync("dist", { recursive: true });

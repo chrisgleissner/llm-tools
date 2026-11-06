@@ -1,13 +1,14 @@
 import * as api from "../api";
 import type { BridgeEvent, MissionEntry } from "../api";
-import { emptyState, h, keepFocus, relTime, timeEl } from "../dom";
+import { button, emptyState, h, keepFocus, relTime, timeEl } from "../dom";
 import { icon, type IconName } from "../icons";
 import { currentWorkSummary } from "../current-work";
 import { onStream, store, subscribe, worker, workerState } from "../store";
+import { humanizeEvent, isPlumbing, transitionSummary } from "../event-humanizer";
 
 const MAX_SNAPSHOTS = 12;
 const ACTIVE = new Set(["CREATED", "RUNNING", "PAUSED", "STOPPING"]);
-const NOISE = /heartbeat|refresh|progress|prompt-assembled|controller-(mode|config|ownership)|command-(queued|applied)|plumbing|operation-(process|prepared)|station-observation|events-pruned/;
+
 
 interface Snapshot {
   worker: string;
@@ -26,18 +27,6 @@ interface ActivityItem {
 const link = (e: { worker: string; id: string; name: string }) => h("a", { href: `/missions/${encodeURIComponent(e.worker)}/${encodeURIComponent(e.id)}` }, e.name || e.id);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-export function humanKind(kind: string): string {
-  const t = kind.replace(/[-_.]/g, " ");
-  return t.charAt(0).toUpperCase() + t.slice(1);
-}
-
-/** Show only stable state names from event payloads; opaque event JSON can contain private details. */
-export function transitionSummary(data: Record<string, unknown>): string | null {
-  const from = data["from"];
-  const to = data["to"];
-  const safe = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z][A-Za-z _-]{0,31}$/.test(v);
-  return safe(from) && safe(to) ? `${from} → ${to}` : null;
-}
 
 export function overview(root: HTMLElement): () => void {
   const body = h("div", {});
@@ -49,6 +38,9 @@ export function overview(root: HTMLElement): () => void {
   let checked = 0;
   let eligible = 0;
   let activity: ActivityItem[] = [];
+  let liveActivity: ActivityItem[] = [];
+  let liveEventId = 0;
+  let showPlumbing = false;
   let activityLoaded = false;
   let disposed = false;
   let lastKey = "";
@@ -96,14 +88,14 @@ export function overview(root: HTMLElement): () => void {
         try {
           const after = Math.max(0, w.event_cursor - 80);
           const r = await api.get<{ events: Array<{ id: number; event: BridgeEvent }> }>(`/api/v1/events?worker=${encodeURIComponent(w.name)}&after=${after}&limit=200`);
-          for (const x of r.events) if (!NOISE.test(x.event.kind)) items.push({ worker: w.name, event: { ...x.event, id: x.id } });
+          for (const x of r.events) items.push({ worker: w.name, event: { ...x.event, id: x.id } });
         } catch {
           /* the list simply stays shorter */
         }
       }),
     );
     if (disposed) return;
-    activity = items.sort((a, b) => Date.parse(b.event.created_at) - Date.parse(a.event.created_at) || b.event.id - a.event.id).slice(0, 8);
+    activity = [...liveActivity, ...items].sort((a, b) => Date.parse(b.event.created_at) - Date.parse(a.event.created_at) || b.event.id - a.event.id).slice(0, 80);
     activityLoaded = true;
     render();
   }
@@ -139,6 +131,8 @@ export function overview(root: HTMLElement): () => void {
   }
 
   const render = () => {
+    const hiddenPlumbing = activity.filter((item) => isPlumbing(item.event.kind));
+    const visibleActivity = (showPlumbing ? activity : activity.filter((item) => !isPlumbing(item.event.kind))).slice(0, 8);
     if (disposed) return;
     const online = store.workers.filter((w) => workerState(w) === "online").length;
     const counts = new Map<string, number>();
@@ -190,13 +184,19 @@ export function overview(root: HTMLElement): () => void {
               "section",
               { "aria-labelledby": "ov-activity" },
               h("h2", { id: "ov-activity" }, "Recent activity"),
+              hiddenPlumbing.length ? h("div", { class: "event-controls" }, button(
+                showPlumbing ? `Hide ${hiddenPlumbing.length} system events` : `Show ${hiddenPlumbing.length} system events`,
+                () => { showPlumbing = !showPlumbing; render(); },
+              )) : null,
               activity.length === 0
                 ? h("p", { class: "muted", id: "activity-empty" }, activityLoaded ? "No activity recorded yet." : "Loading...")
+                : visibleActivity.length === 0
+                  ? h("p", { class: "muted", id: "activity-empty" }, "No operator activity recorded yet.")
                 : h(
                     "ul",
                     { class: "timeline", id: "activity" },
-                    ...activity.map((a) =>
-                      h("li", {}, h("strong", {}, humanKind(a.event.kind)), transitionSummary(a.event.data) ? h("span", { class: "transition-summary" }, transitionSummary(a.event.data)!) : null, " ", h("span", { class: "muted" }, `on ${missionName(a.worker, a.event.mission_id)} (${a.worker})`), h("div", {}, timeEl(a.event.created_at))),
+                    ...visibleActivity.map((a) =>
+                      h("li", {}, h("strong", {}, humanizeEvent(a.event)), transitionSummary(a.event.data) ? h("span", { class: "transition-summary" }, transitionSummary(a.event.data)!) : null, " ", h("span", { class: "muted" }, a.event.mission_id ? `on ${missionName(a.worker, a.event.mission_id)} (${a.worker})` : `on worker ${a.worker}`), h("div", {}, timeEl(a.event.created_at))),
                     ),
                   ),
             ),
@@ -231,7 +231,17 @@ export function overview(root: HTMLElement): () => void {
       schedule();
     }
   });
-  const unStream = onStream((m) => m.type === "event" && schedule(1200));
+  const unStream = onStream((m) => {
+    if (m.type === "event") schedule(1200);
+    if (m.type === "worker" && m.worker && (m.state === "online" || m.state === "offline")) {
+      liveActivity = [{
+        worker: m.worker,
+        event: { id: -(++liveEventId), mission_id: "", task_id: null, kind: `worker-${m.state}`, data: { name: m.worker }, created_at: new Date().toISOString() },
+      }, ...liveActivity].slice(0, 8);
+      activity = [...liveActivity, ...activity.filter((a) => a.event.mission_id)].slice(0, 8);
+      render();
+    }
+  });
   lastKey = key();
   render();
   if (store.loaded) schedule(0);

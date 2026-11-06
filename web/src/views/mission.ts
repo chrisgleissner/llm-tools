@@ -6,7 +6,7 @@ import { currentWorkSummary } from "../current-work";
 import { isStale, onStream, store, subscribe, worker } from "../store";
 import type { TerminalPanel } from "../terminal";
 import { announce, confirmDialog } from "../ui";
-import { humanKind, transitionSummary } from "./overview";
+import { eventCategory, humanizeEvent, isPlumbing, transitionSummary, type EventCategory } from "../event-humanizer";
 
 const TASK_PAGE = 25;
 const TASK_FETCH = 500;
@@ -52,6 +52,9 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   let eventShown = EVENT_PAGE;
   let eventStart = 0; // lowest cursor already requested
   let eventError = "";
+  let eventFilter: "all" | EventCategory = "all";
+  let eventKindFilter = "all";
+  let showPlumbing = false;
   let disposed = false;
   let termPanel: TerminalPanel | null = null;
 
@@ -309,31 +312,56 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
 
   function renderEvents(): void {
     const newest = [...events].reverse();
-    const visible = newest.slice(0, eventShown);
+    const categoryEvents = newest.filter((event) =>
+      (eventFilter === "all" || eventCategory(event.kind) === eventFilter)
+      && (eventKindFilter === "all" || event.kind === eventKindFilter),
+    );
+    const hiddenPlumbing = categoryEvents.filter((event) => isPlumbing(event.kind));
+    const filtered = categoryEvents.filter((event) => showPlumbing || !isPlumbing(event.kind));
+    const visible = filtered.slice(0, eventShown);
+    const filter = h("select", { id: "event-filter", "aria-label": "Filter events", onchange: (event: Event) => {
+      eventFilter = (event.currentTarget as HTMLSelectElement).value as typeof eventFilter;
+      eventShown = EVENT_PAGE;
+      renderEvents();
+    } },
+      ...(["all", "task", "command", "provider", "system"] as const).map((category) =>
+        h("option", { value: category, selected: eventFilter === category }, category === "all" ? "All event types" : `${category[0]!.toUpperCase()}${category.slice(1)} events`)),
+    );
+    const kinds = [...new Set(events.map((event) => event.kind))].sort();
+    const kindFilter = h("select", { id: "event-kind-filter", "aria-label": "Filter by event kind", onchange: (event: Event) => {
+      eventKindFilter = (event.currentTarget as HTMLSelectElement).value;
+      eventShown = EVENT_PAGE;
+      renderEvents();
+    } },
+      h("option", { value: "all", selected: eventKindFilter === "all" }, "All event kinds"),
+      ...kinds.map((kind) => h("option", { value: kind, selected: eventKindFilter === kind }, humanizeEvent({ kind, task_id: null, data: {} }))),
+    );
+    const toggle = hiddenPlumbing.length ? button(
+      showPlumbing ? `Hide ${hiddenPlumbing.length} system events` : `Show ${hiddenPlumbing.length} system events`,
+      () => { showPlumbing = !showPlumbing; renderEvents(); },
+    ) : null;
     fill(
       eventBox,
-      h("h2", { id: "ms-events" }, "Events"),
+      h("h2", { id: "ms-events" }, "Activity"),
+      h("div", { class: "event-controls" }, filter, kindFilter, toggle),
       eventError ? h("p", { class: "notice", role: "status" }, eventError) : null,
       events.length === 0
         ? h("p", { class: "muted" }, "No events loaded.")
-        : h(
-            "ol",
-            { class: "events", reversed: true, id: "events-list" },
-            ...visible.map((e) =>
-              h(
-                "li",
-                {},
-                h("span", { class: "ev-kind" }, humanKind(e.kind)),
-                e.task_id != null ? h("span", { class: "muted small" }, ` task ${e.task_id}`) : null,
-                transitionSummary(e.data ?? {}) ? h("span", { class: "transition-summary" }, transitionSummary(e.data ?? {})!) : null,
-                h("div", {}, timeEl(e.created_at)),
-              ),
+        : visible.length === 0
+          ? h("p", { class: "muted" }, "No events match this filter.")
+          : h("ol", { class: "events", reversed: true, id: "events-list" },
+              ...visible.map((event) => h(
+                "li", { class: isPlumbing(event.kind) ? "event-plumbing" : "" },
+                h("span", { class: "ev-kind" }, humanizeEvent(event)),
+                transitionSummary(event.data ?? {}) ? h("span", { class: "transition-summary" }, transitionSummary(event.data ?? {})!) : null,
+                event.kind.startsWith("command-") && typeof event.data?.["request_id"] === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(event.data["request_id"])
+                  ? h("a", { class: "event-command-link", href: `/api/v1/commands/${encodeURIComponent(event.data["request_id"])}` }, "Command details")
+                  : null,
+                h("div", {}, timeEl(event.created_at)),
+              )),
             ),
-          ),
-      h(
-        "div",
-        { class: "actions" },
-        newest.length > eventShown ? button("Show more", () => { eventShown += EVENT_PAGE; renderEvents(); }) : null,
+      h("div", { class: "actions" },
+        filtered.length > eventShown ? button("Show more", () => { eventShown += EVENT_PAGE; renderEvents(); }) : null,
         eventStart > 0 ? button("Load older events", () => void loadOlderEvents()) : null,
       ),
     );
@@ -373,7 +401,13 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     if (!disposed) renderTasks();
   }
 
-  const normalize = (raw: Record<string, unknown>): BridgeEvent => raw as unknown as BridgeEvent;
+  const normalize = (raw: Record<string, unknown>): BridgeEvent => {
+    const nested = raw["event"];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      return { ...(nested as Record<string, unknown>), id: Number(raw["id"] ?? (nested as Record<string, unknown>)["id"]) } as unknown as BridgeEvent;
+    }
+    return raw as unknown as BridgeEvent;
+  };
 
   async function loadEvents(): Promise<void> {
     const cursor = worker(workerName)?.event_cursor ?? 0;
@@ -412,7 +446,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         renderEvents();
         void loadTasks();
         void loadSnapshot();
-        announce(`New event: ${humanKind(mine[mine.length - 1]?.kind ?? "update")}`);
+        announce(`New event: ${humanizeEvent(mine[mine.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
       }
     }
   });

@@ -177,3 +177,43 @@ test.describe("with a seeded worker", () => {
     }
   });
 });
+
+test("mission activity humanizes, filters, and collapses system events", async ({ page }) => {
+  const { mockApp, MISSION_PATH } = await import("./mock");
+  await mockApp(page, { auth: "in" });
+  await page.goto("/");
+  const overviewActivity = page.locator("#activity");
+  await expect(overviewActivity).toContainText("Mission created");
+  await expect(overviewActivity).toContainText("Command queued: task.verify");
+  await expect(overviewActivity).toContainText("Selected codex (gpt-5)");
+  await expect(overviewActivity).not.toContainText("Controller heartbeat");
+  await page.getByRole("button", { name: /Show \d+ system events/ }).click();
+  await expect(overviewActivity).toContainText("controller alive");
+
+  await page.goto(MISSION_PATH);
+  const events = page.locator("#events-list");
+  await expect(events).toContainText("Mission created");
+  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
+  await expect(events).not.toContainText("do-not-render-this");
+  await expect(events).toContainText("Command queued: task.verify");
+  await expect(events).toContainText("Selected codex (gpt-5)");
+  await expect(events.locator('a[href="/api/v1/commands/safe-request-01"]')).toHaveText("Command details");
+  await expect(events).not.toContainText("controller alive");
+  await page.getByRole("button", { name: /Show \d+ system events/ }).click();
+  await expect(events).toContainText("controller alive");
+
+  await page.getByLabel("Filter events").selectOption("provider");
+  await expect(events).toContainText("Started provider · codex · Task 2 · gpt-5");
+  await expect(events).not.toContainText("Task status changed");
+  await page.getByLabel("Filter events").selectOption("all");
+  await page.getByLabel("Filter by event kind").selectOption("task-status");
+  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
+  await expect(events).not.toContainText("Write a regression test");
+  await page.getByLabel("Filter by event kind").selectOption("task-added");
+  await expect(events).toContainText("Task added · Task 3 · Write a regression test");
+  await expect(events).not.toContainText("RUNNING → VERIFYING");
+  await page.getByLabel("Filter by event kind").selectOption("all");
+  await page.getByLabel("Filter events").selectOption("task");
+  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
+  await expect(events).not.toContainText("Started provider");
+});

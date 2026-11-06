@@ -69,9 +69,18 @@ const TASKS = [
   { id: 6, ordinal: 6, title: "Tag the release", status: "PAUSED", priority: 0, revision: 2 },
 ];
 
-const EVENTS = ["mission-started", "task-status", "provider-selection", "verification-requested", "task-status", "operation-finished"].map((kind, i) => ({
+const EVENTS = [
+  ["mission-created", null, { name: "Refactor the parser" }],
+  ["task-added", 3, { title: "Write a regression test" }],
+  ["task-status", 2, { from: "RUNNING", to: "VERIFYING", private_value: "do-not-render-this" }],
+  ["provider-selection", 2, { provider: "codex", model: "gpt-5" }],
+  ["command-queued", null, { command: "task.verify", request_id: "safe-request-01" }],
+  ["operation-running", 2, { route_id: "codex", model: "gpt-5" }],
+  ["operation-exited", 2, { exit_code: 0, task_status: "VERIFYING" }],
+  ["controller-heartbeat", null, { controller_state: "RUNNING" }],
+].map(([kind, task_id, data], i) => ({
   id: 40 - i,
-  event: { mission_id: MISSIONS[0]!.mission.id, task_id: i % 2 ? 2 : null, kind, data: i === 1 ? { from: "RUNNING", to: "VERIFYING", private_value: "do-not-render-this" } : {}, created_at: iso(120 + i * 600) },
+  event: { mission_id: MISSIONS[0]!.mission.id, task_id, kind, data, created_at: iso(120 + i * 600) },
 }));
 
 const SESSIONS = [
@@ -200,7 +209,11 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       }
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: operation === "task.list" ? "ok" : "applied", result, error: null } });
     }
-    if (path === "/events") return json(route, 200, { events: [...EVENTS].reverse() });
+    if (path === "/events") {
+      const target = url.searchParams.get("worker");
+      const missionIds = new Set(missions.filter((mission) => !target || mission.worker === target).map((mission) => mission.mission.id));
+      return json(route, 200, { events: [...EVENTS].filter((row) => missionIds.has(row.event.mission_id)).reverse() });
+    }
     if (path === "/diagnostics") return json(route, 200, DIAG);
     if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });
     if (path === "/tokens" && method === "POST") {
