@@ -835,9 +835,9 @@ class Launcher:
         order = [name for name in bridge_doctor_order() if name in installed and name not in exhausted]
         signed_in = [name for name in order if (self.signins.get(name) or (None,))[0] is True]
         fallback = [name for name in order if (self.signins.get(name) or (None,))[0] is not False]
-        pick = (signed_in or fallback or [None])[0]
-        if pick is not None:
-            self.providers = pick
+        candidates = signed_in or fallback
+        if candidates:
+            self.providers = candidates[0]
 
     def _quota_phrase(self, name: str) -> str:
         """`copilot has no quota until Dec 1` (or `... until 14:30` within a day, `... left` when no reset is known)."""
@@ -1424,9 +1424,9 @@ def _draw_checklist(put: Callable[..., int], state: Launcher, layout: FormLayout
         extra = 4 + item_width + 2
         if detail:
             extra += put(row, extra, detail, row_role if under else "dim", room=width) + 2
-        note = state.annotation(name)
-        if note is not None:
-            put(row, extra, note[0], row_role if under else note[1], room=width)
+        tag = state.annotation(name)
+        if tag is not None:
+            put(row, extra, tag[0], row_role if under else tag[1], room=width)
 
 
 def list_footer(state: Launcher) -> str:

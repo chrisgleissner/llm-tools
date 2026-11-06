@@ -112,7 +112,7 @@ def provider_check(name: str, launch_cli: str | None = None, env: Mapping[str, s
     return {"name": name, "launch_cli": cli, "installed": True, "path": path, "logged_in": logged_in, "detail": detail}
 
 
-def provider_checks(entries: list[tuple[str, str | None]], env: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
+def provider_checks(entries: Sequence[tuple[str, str | None]], env: Mapping[str, str] | None = None) -> list[dict[str, Any]]:
     """One check per distinct ``(name, launch_cli)`` rotation entry, in rotation order."""
     seen: set[tuple[str, str | None]] = set()
     checks = []
