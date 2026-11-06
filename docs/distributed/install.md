@@ -471,6 +471,25 @@ Recommended settings:
   after boot. Build the ARM64 image on another machine with `container/build.sh --oci`
   and load it on the Pi; do not compile on the device.
 
+### Verify a published image
+
+Release tags publish a multi-architecture image, sign its digest with the GitHub
+Actions identity, attach build provenance, and upload a CycloneDX SBOM. Replace
+`OWNER`, `REPO`, `VERSION`, and `sha256:DIGEST` with the release values:
+
+```sh
+IMAGE=ghcr.io/OWNER/REPO/coordinator
+cosign verify "$IMAGE@sha256:DIGEST" \
+  --certificate-identity-regexp="https://github.com/OWNER/REPO/.github/workflows/container-release.yml@refs/tags/.*" \
+  --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+gh attestation verify "oci://$IMAGE:VERSION" --repo OWNER/REPO
+gh run download RUN_ID -n coordinator-container-cyclonedx-VERSION
+```
+
+The first command checks the signature for the exact digest and the expected release
+workflow identity. The second verifies GitHub's provenance attestation; download the
+SBOM artifact from the same release workflow run.
+
 Verification commands for the deployed container:
 
 ```sh

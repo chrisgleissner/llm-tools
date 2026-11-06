@@ -47,7 +47,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | SEC2-012 | ASVS 04.02, 16.05; API3:2023, API4:2023 | `[~]` Problem details exist. Schema-driven least-data responses, generic correlated 5xx and page caps remain. |
 | SEC2-013 | ASVS 16.02, 16.03, 16.04; API8:2023 | `[~]` Existing audit rows cover several mutations. Append-only hash-chained security log and admin API remain. |
 | SEC2-014 | ASVS 06.04, 16.02, 16.03; NIST 4.1, 4.2; API2:2023 | `[ ]` New-device/failure/token notifications and optional outbound webhook remain. |
-| SEC2-015 | ASVS 15.02; API8:2023, API9:2023 | `[ ]` CI dependency audits, action SHA pins, SBOM, image signature and provenance remain. |
+| SEC2-015 | ASVS 15.02; API8:2023, API9:2023 | `[~]` `.github/workflows/supply-chain.yml` audits Rust, production npm and Python development dependencies; `tests/test_supply_chain_config.py` checks full-SHA pins, audit wiring, Dependabot, image signature, provenance and CycloneDX publication. Focused local cargo audit/deny, npm audit and config tests pass; Python audit and release artifact execution await CI. |
 | SEC2-016 | ASVS 15.01, 04.01, 04.02; API1:2023–API10:2023 | `[ ]` Schemathesis is tracked under API-012; ZAP API/console scans and SEC2 negative-test coverage remain. |
 | SEC2-017 | ASVS 12.01, 12.02, 12.03, 04.01; API8:2023, API9:2023 | `[ ]` Separated listeners, trusted proxy CIDRs and remote-access guidance remain. |
 | SEC2-018 | ASVS 13.01, 13.02, 13.04; API8:2023 | `[ ]` `exposure` migration and Internet-mode startup precondition validation remain. |
@@ -58,7 +58,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 
 | ID | Relevant clauses | Status and register evidence / remaining work |
 |---|---|---|
-| PK-001 | ASVS 06.07, 12.01; NIST 3.2.5, 4.1 | `[ ]` Optional Tailscale profile and concise passkey setup documentation remain. Tailscale configuration has no direct clause match. |
+| PK-001 | ASVS 06.07, 12.01; NIST 3.2.5, 4.1 | `[~]` `container/compose.yaml` adds an opt-in Tailscale sidecar and certificate renewal service; `coordinator/tests/certs.rs::configured_certificate_files_reload_for_new_tls_handshakes` verifies reload and internal-CA fallback; compose/install tests check persistence and concise setup. Live tailnet and Android checks remain. Tailscale configuration has no direct clause match. |
 | PK-002 | ASVS 06.07, 06.04, 08.02; NIST 3.2.5, 4.1.2 | `[ ]` Canonical public origin and RP ID change/re-enrolment safeguards remain. |
 | PK-003 | ASVS 06.07, 06.04, 11.04, 11.06; NIST 3.1.7, 4.1 | `[ ]` Maintained WebAuthn implementation and credential persistence remain. |
 | PK-004 | ASVS 06.03, 06.05, 06.07; NIST 2, 3.1.7, 3.2.5 | `[ ]` Conditional and button passkey sign-in with password fallback remain. |

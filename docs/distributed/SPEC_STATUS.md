@@ -319,7 +319,7 @@ negative tests remain incomplete unless explicitly recorded below.
 | SEC2-012 | [~] | Problem details exist; schema-driven least-data responses, generic correlated 5xx and page caps remain. |
 | SEC2-013 | [~] | Existing audit rows cover several mutations; append-only hash-chained security log and admin API remain. |
 | SEC2-014 | [ ] | New-device/failure/token notifications and optional outbound webhook remain. |
-| SEC2-015 | [ ] | CI dependency audits, action SHA pins, SBOM, image signature and provenance remain. |
+| SEC2-015 | [~] | All external workflow actions are full-SHA pinned (`tests/test_supply_chain_config.py::test_all_external_workflow_actions_are_full_sha_pinned`); Cargo audit/deny, production npm audit, and Python `pip-audit` have dedicated CI jobs; release workflow signs the immutable image digest, uploads CycloneDX, and attaches build provenance. Policy wiring, Dependabot coverage, semver release triggers and image artifacts are covered by `tests/test_supply_chain_config.py`. Local cargo audit/deny, npm audit and focused tests pass; local `pip-audit` could not run because the tool is not installed. CI evidence is pending. |
 | SEC2-016 | [ ] | Schemathesis begins as part of API-012; ZAP API and console scans and SEC2 negative-test coverage remain. |
 | SEC2-017 | [ ] | Separated listeners, trusted proxy CIDRs and remote-access guidance remain. |
 | SEC2-018 | [ ] | `exposure` migration and Internet-mode startup precondition validation remain. |
@@ -330,7 +330,7 @@ negative tests remain incomplete unless explicitly recorded below.
 
 | ID | Status | Current evidence / remaining work |
 |---|---|---|
-| PK-001 | [ ] | Optional Tailscale profile and concise passkey setup documentation remain. |
+| PK-001 | [~] | Optional Tailscale Compose profile, persistent state, certificate renewal sidecar and concise setup steps exist; `coordinator/tests/certs.rs::configured_certificate_files_reload_for_new_tls_handshakes` proves external cert replacement while LAN SNI retains the internal certificate, and `tests/test_container_compose.py::test_tailscale_profile_is_opt_in_and_persists_its_state` checks profile and install steps. No live tailnet or Android verification has run. |
 | PK-002 | [ ] | Canonical public origin and RP ID change/re-enrolment safeguards remain. |
 | PK-003 | [ ] | Maintained WebAuthn implementation and credential persistence remain. |
 | PK-004 | [ ] | Conditional and button passkey sign-in with password fallback remain. |

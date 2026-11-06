@@ -1,0 +1,35 @@
+[advisories]
+version = 2
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "deny"
+# Current upstream trees require both major-compatible families; keep these
+# narrowly versioned exceptions visible so new duplicate families still fail.
+skip = [
+    { name = "base64", version = "0.23.1" },
+    { name = "getrandom", version = "0.3.4" },
+    { name = "hashbrown", version = "0.17.1" },
+    { name = "rand", version = "0.9.5" },
+    { name = "rand_chacha", version = "0.9.0" },
+    { name = "rand_core", version = "0.9.5" },
+    { name = "windows-sys", version = "0.61.2" },
+]
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -8,7 +8,7 @@
 # commit (SOURCE_DATE_EPOCH), so a rebuild of the same commit gives the same
 # binaries and image layers.
 #
-# Usage: container/build.sh [--ref COMMIT] [--tag NAME] [--load | --oci FILE | --push]
+# Usage: container/build.sh [--ref COMMIT] [--tag NAME] [--load | --oci FILE | --push] [--metadata FILE]
 #   --load       load the image for this host's architecture into Docker (default)
 #   --oci FILE   write a multi-architecture OCI archive (amd64 + arm64) to FILE
 #   --push       push the multi-architecture image to the registry in --tag
@@ -20,6 +20,7 @@ ref=HEAD
 tag=llm-bridge-coordinator:latest
 mode=load
 oci=
+metadata=
 while [ $# -gt 0 ]; do
     case "$1" in
         --ref) ref=$2; shift 2 ;;
@@ -27,6 +28,7 @@ while [ $# -gt 0 ]; do
         --load) mode=load; shift ;;
         --oci) mode=oci; oci=$2; shift 2 ;;
         --push) mode=push; shift ;;
+        --metadata) metadata=$2; shift 2 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
@@ -59,7 +61,10 @@ set -- docker buildx build --provenance=false --build-arg SOURCE_DATE_EPOCH \
 case "$mode" in
     load) set -- "$@" --load ;;
     oci) set -- "$@" --platform linux/amd64,linux/arm64 --output "type=oci,dest=$oci,rewrite-timestamp=true" ;;
-    push) set -- "$@" --platform linux/amd64,linux/arm64 --output "type=image,push=true,rewrite-timestamp=true" ;;
+    push)
+        set -- "$@" --platform linux/amd64,linux/arm64 --output "type=image,push=true,rewrite-timestamp=true"
+        if [ -n "$metadata" ]; then set -- "$@" --metadata-file "$metadata"; fi
+        ;;
 esac
 "$@" "$work/context"
 echo "built $tag from $commit"
