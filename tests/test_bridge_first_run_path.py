@@ -142,11 +142,17 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
 
     # 4. Start runs the provider in its station; when it exits the station says how to continue.
     terminal.keys("Enter")
-    exited = terminal.wait_for("is waiting for your review. Ctrl-] then B, then /approve or /reject.")
-    # tmux 3.4 sometimes records no exit status for a dead pane and then draws no footer
-    # (see tests.conftest.recorded_exit_status); later versions always draw it.
     from llm_tools.terminal import tmux_version
-    assert "Provider exited (status 0)" in exited or (tmux_version() or (99, 0)) < (3, 5)
+    version = tmux_version() or (99, 0)
+    if version >= (3, 5):
+        exited = terminal.wait_for("is waiting for your review. Ctrl-] then B, then /approve or /reject.")
+        assert "Provider exited (status 0)" in exited
+    else:
+        # tmux < 3.5 does not expose pane_dead_status, so the station footer
+        # may omit its exit hint entirely. The Bridge pane still shows the
+        # review state and the always-visible route to its approval controls.
+        screen = terminal.wait_for("VERIFYING")
+        assert "Bridge: Ctrl-] then B" in screen
     assert (repo / "hello.txt").read_text() == "hello\n"
 
     # 5. Bridge controls point at /approve; the confirmation shows what is approved.
