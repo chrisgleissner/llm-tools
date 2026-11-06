@@ -25,6 +25,12 @@ volume (SQLite database, CA and server keys, `config.toml`, setup token). Logs g
 stdout/stderr. `SIGTERM` drains connections and exits within 10 s. The image health
 check runs `bridge-coordinator health`.
 
+If the host's LAN or another Docker host network overlaps Docker's default bridge
+`172.17.0.0/16`, set `bip` and `default-address-pools` in `/etc/docker/daemon.json`
+(for example `"bip": "172.30.1.1/24"` and
+`"default-address-pools": [{"base": "172.29.0.0/16", "size": 24}]`) before starting
+Docker; otherwise starting the daemon cuts the host's network.
+
 Build it from this repository (cross-compiles static musl binaries for amd64 and
 arm64 on the build host with cargo-zigbuild; nothing is compiled inside an emulated
 container):
