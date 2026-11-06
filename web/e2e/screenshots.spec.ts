@@ -6,7 +6,7 @@
 // axe-core on all four projects, in both themes, and must have no violations of any impact.
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
-import { mockApp, MISSION_PATH, type MockOptions } from "./mock";
+import { mockApp, MISSION_PATH, MISSION_START_PATH, type MockOptions } from "./mock";
 import type { Page } from "@playwright/test";
 
 interface Screen {
@@ -112,5 +112,21 @@ test("mission task UI uses resource reads and idempotent resource mutations", as
   await expect(page.locator(".toast.applied")).toBeVisible();
   expect(requests.some((request) => request.method === "GET" && request.path.endsWith("/tasks"))).toBe(true);
   expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/tasks/5/pause") && request.key)).toBe(true);
+  expect(requests.some((request) => request.path.endsWith("/commands"))).toBe(false);
+});
+
+test("a created mission can be started from its detail page through the resource API", async ({ page }) => {
+  const requests: Array<{ method: string; path: string; key?: string }> = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.includes("/missions/")) requests.push({ method: request.method(), path: url.pathname, key: request.headers()["idempotency-key"] });
+  });
+  await mockApp(page, IN);
+  await page.goto(MISSION_START_PATH);
+  await expect(page.getByRole("heading", { name: "Add telemetry opt-out" })).toBeVisible();
+  await page.getByRole("button", { name: "Start mission" }).click();
+  await expect(page.locator(".toast.applied")).toContainText("Start mission");
+  await expect(page.locator("#mission-status")).toContainText("RUNNING");
+  expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/start") && request.key)).toBe(true);
   expect(requests.some((request) => request.path.endsWith("/commands"))).toBe(false);
 });

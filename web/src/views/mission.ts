@@ -71,7 +71,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     }
     const r = task
       ? await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params })
-      : await api.mutate(workerName, operation, missionId, params);
+      : await api.mutateMission(workerName, operation, missionId, params);
     announce(`${label}.`, r.outcome, r.message);
     await Promise.all([loadTasks(), loadSnapshot()]);
   }
@@ -110,7 +110,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const e = entry();
     const m = e?.mission;
     const stale = e ? isStale(e) : !online();
-    const mb = (label: string, op: string, danger = false) =>
+    const mb = (label: string, op: string, danger = false, kind = "") =>
       button(
         label,
         () =>
@@ -121,7 +121,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
             }
             await run(`${label} mission`, op, {});
           })(),
-        { kind: danger ? "danger" : "", disabled: !online(), title: online() ? undefined : "Worker is offline" },
+        { kind: `${danger ? "danger" : kind} small`.trim(), disabled: !online(), title: online() ? undefined : "Worker is offline" },
       );
     fill(
       header,
@@ -137,7 +137,14 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         m?.folder ? h("span", { class: "muted" }, ` - ${m.folder}`) : null,
       ),
       h("p", { class: "meta muted small" }, "Mission ID ", idChip(missionId, "mission ID")),
-      h("div", { class: "row-actions" }, mb("Pause mission", "mission.pause"), mb("Continue", "mission.continue"), mb("Cancel mission", "mission.cancel", true)),
+      h(
+        "div",
+        { class: "row-actions" },
+        m && ["CREATED", "STOPPED"].includes(m.status) ? mb("Start mission", "mission.start", false, "primary") : null,
+        mb("Pause mission", "mission.pause"),
+        mb("Continue", "mission.continue"),
+        mb("Cancel mission", "mission.cancel", true),
+      ),
       !online() ? h("p", { class: "notice", role: "status" }, "The worker is not connected. Actions are disabled and the data below may be out of date.") : null,
     );
   }

@@ -172,20 +172,23 @@ export interface MutationResult {
  * `accepted` (queued, not yet confirmed), `rejected` (the worker refused), `failed` (never carried
  * out) or `uncertain` (the connection broke after the request may have been delivered).
  */
-export async function mutate(target: string, operation: string, missionId: string | null, params: Record<string, unknown> = {}, waitMs = 10000): Promise<MutationResult> {
-  let row: CommandRow;
+export async function mutateMission(target: string, operation: string, missionId: string, params: Record<string, unknown> = {}, waitMs = 10000): Promise<MutationResult> {
+  const action = operation.slice("mission.".length);
+  const q = new URLSearchParams({ worker: target });
+  const base = `/api/v1/missions/${encodeURIComponent(missionId)}`;
   try {
-    row = await request<CommandRow>("POST", "/api/v1/commands", { target, wait_ms: waitMs, request: commandRequest(operation, missionId, params) });
+    const row = await request<CommandRow>("POST", `${base}/${action}?${q}`, { ...params, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() });
+    if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
+    const result = row.result;
+    if (result?.outcome === "uncertain") return { outcome: "uncertain", message: result.error?.message ?? "The worker could not confirm the command outcome." };
+    if (result?.outcome === "rejected" || result?.outcome === "failed" || result?.error)
+      return { outcome: "rejected", message: result.error?.message ?? `The worker reported: ${result.outcome ?? "failure"}.` };
+    return { outcome: "applied", message: result?.error?.message ?? "" };
   } catch (e) {
     if (e instanceof ApiError && e.status === 0) return { outcome: "uncertain", message: "The connection broke while sending the request; it may have reached the coordinator." };
     if (e instanceof ApiError && e.status >= 500) return { outcome: "uncertain", message: e.message };
     return { outcome: e instanceof ApiError && e.status === 422 ? "rejected" : "failed", message: e instanceof ApiError ? e.message : "Unexpected error." };
   }
-  if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
-  const r = row.result;
-  const known = r?.outcome === "applied" || r?.outcome === "accepted" || r?.outcome === "rejected" || r?.outcome === "failed" || r?.outcome === "uncertain";
-  const outcome = known ? (r?.outcome as MutationResult["outcome"]) : r?.error ? "failed" : "applied";
-  return { outcome, message: r?.error?.message ?? "" };
 }
 
 function resourceResult(row: CommandRow): Record<string, unknown> {

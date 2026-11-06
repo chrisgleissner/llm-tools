@@ -203,7 +203,7 @@ checkbox means the full requirement and its CI evidence are not complete yet.
 | ID | Status | Current evidence / remaining work |
 |---|---|---|
 | API-001 | [ ] | Added worker-qualified mission status/task/event/operation reads and task detail, plus start/resume/pause/stop/cancel/continue, task-add/patch/verify and task pause/resume/cancel/retry resource mutations (`coordinator/tests/web_api.rs::mission_task_resource_adapts_to_the_typed_worker_command`, `mission_and_task_mutations_adapt_to_typed_worker_commands`, `task_revision_etag_and_if_match_enforce_preconditions`); `mission.stop` now carries the CLI `force` option. Other task options and remaining resource routes remain. |
-| API-002 | [ ] | Resource adapters serialize into the existing typed worker command envelope and call the same durable coordinator command handler; route adapter tests cover reads, mission controls (including `mission.stop force`), `task.add`, `task.amend`, `task.verify`, `task.reject` and task lifecycle actions. The CLI, worker operation and REST route share `_force_stop_mission`; remaining console views remain. |
+| API-002 | [ ] | Resource adapters serialize into the existing typed worker command envelope and call the same durable coordinator command handler; route adapter tests cover reads, mission controls (including `mission.stop force`), `task.add`, `task.amend`, `task.verify`, `task.reject` and task lifecycle actions. The CLI, worker operation and REST route share `_force_stop_mission`; mission detail actions, including start, now use resource routes. Remaining console views remain. |
 | API-003 | [ ] | `Idempotency-Key` maps to the durable request ID, repeated keys replay, and pending commands return 202 with `Location` (`coordinator/tests/worker.rs::request_id_idempotence_and_refusals`); task detail returns revision `ETag`, `If-Match` maps to `expected_revision`, mismatch yields 400 and stale worker conflict maps to 412 (`coordinator/tests/web_api.rs::task_revision_etag_and_if_match_enforce_preconditions`); explicit uncertain mapping remains. |
 | API-004 | [ ] | API errors use RFC 9457 `application/problem+json` with stable code URIs (`http::problem_tests`); mutation requests with a body require JSON and unsupported media types return 415 (`coordinator/tests/web_api.rs::mutation_bodies_require_json_content_type`); opaque cursor pagination, timestamp contract and response-wide schema tests remain. |
 | API-005 | [ ] | Route scope policy, `--scope`, default `read`, old-token `admin` migration and per-route scope matrix are implemented (`coordinator/tests/routes.rs`, `coordinator/tests/ops.rs`, `coordinator/tests/hardening.rs`); green CI run evidence pending. |
@@ -263,3 +263,46 @@ negative tests remain incomplete unless explicitly recorded below.
 | PK-010 | [ ] | Browser capability detection and calm unavailable state remain. |
 | PK-011 | [ ] | WebAuthn vectors, Playwright virtual-authenticator flow and negative tests remain. |
 | PK-012 | [ ] | Physical Android validation belongs to the separate Pi verification prompt. |
+
+## Principal UX pass, adversarial review, dog-food and parity (2026-11-06)
+
+| ID | Status | Current evidence / remaining work |
+|---|---|---|
+| UX-001 | [ ] | Before audit for all three personas, desktop/Pixel 4 and both themes remains. |
+| UX-002 | [ ] | Reference patterns and reasons remain to be recorded in `ux-audit.md`. |
+| UX-003 | [ ] | Console redesign and before/after flow measurements remain. |
+| UX-004 | [ ] | Site hero and concise distributed section remain to be audited and improved. |
+| UX-005 | [ ] | After times/clicks, Lighthouse, bundle, Pixel INP/CLS and axe evidence remain. |
+| UX-006 | [ ] | Visual baseline and bundle-budget checks remain. |
+| REV-001 | [ ] | Fetched and checked `origin/main`, currently identical to the branch's recorded base; merge commit and review of later Pi changes await PI PR #32. |
+| REV-002 | [ ] | Adversarial evidence/revertability audit of every registered ID remains. |
+| REV-003 | [ ] | Correctness/race/replay/platform review remains. |
+| REV-004 | [ ] | Security/API/passkey review and independent second opinion remain. |
+| REV-005 | [ ] | Duplication and maintainability review remains. |
+| REV-006 | [ ] | Performance measurements on a 512 MiB ARM64 host remain. |
+| REV-007 | [ ] | Standalone CLI compatibility audit remains. |
+| REV-008 | [ ] | Findings disposition, full gates, Pi PR ordering and merge/deploy checks remain. |
+| DOG-001 | [~] | Coordinator container web asset permissions fix is in open Pi PR #32 (`feat/pi-zero-2w-verification`); recheck after it merges before marking complete. |
+| DOG-002 | [x] | Online worker mission inventory updates via event batches and cursor (`coordinator/tests/worker.rs::event_batch_updates_mission_inventory_and_caught_up_status`, `tests/test_bridge_worker.py::test_event_batch_carries_current_mission_inventory_after_hello`, `web/e2e/worker.spec.ts`). |
+| DOG-003 | [x] | Created mission detail exposes `Start mission` for an online worker and calls the resource endpoint with an idempotency key; `web/e2e/screenshots.spec.ts::a created mission can be started from its detail page through the resource API` failed before the button/API wiring and passes after it. |
+| DOG-004 | [ ] | Finish a paused native provider, or accurate stop guidance, remains. |
+| DOG-005 | [ ] | Human-readable worker connection status remains. |
+| DOG-006 | [x] | Mission name links to detail (`web/e2e/worker.spec.ts` verifies the link target). |
+| DOG-007 | [ ] | Native provider idle-at-prompt `needs_you` detection and operator notification remain. |
+| DOG-008 | [ ] | Take-control upgrade in place and Enter submission from the web terminal remain. |
+| DOG-009 | [ ] | Read-only native terminal snapshot or last-message status remains. |
+| DOG-010 | [ ] | Structured provider questions and answer flow through CLI and console remain. |
+| PAR-001 | [ ] | Mission list and `needs_you` visibility across CLI/web/API remain. |
+| PAR-002 | [ ] | Tasks, current run, events and capacity across CLI/web/API remain. |
+| PAR-003 | [~] | Start is available through CLI, REST and mission detail (`a created mission can be started from its detail page through the resource API`); browser configuration options beyond saved defaults and full parity evidence remain. |
+| PAR-004 | [~] | CLI, web and REST support pause/resume actions; full cross-channel behavior matrix and evidence remain. |
+| PAR-005 | [~] | Stop, including force, is in CLI/typed operation/REST; console parity and conformance tests remain. |
+| PAR-006 | [ ] | Task creation across CLI/web/API remains. |
+| PAR-007 | [ ] | Task amendment across CLI/web/API remains. |
+| PAR-008 | [ ] | Priority and dependency changes across CLI/web/API remain. |
+| PAR-009 | [ ] | All steer kinds across CLI/web/API remain. |
+| PAR-010 | [ ] | Approval evidence and rejection reason across CLI/web/API remain. |
+| PAR-011 | [ ] | Live terminal open/view/write at Pixel 4 size across supported clients remains. |
+| PAR-012 | [ ] | Worker health and connection state across CLI/web/API remain. |
+| PAR-013 | [ ] | Password sign-in and sign-out across CLI/web remain. |
+| PAR-014 | [ ] | Passkey sign-in in Chromium virtual authenticator and physical Android (Pi task) remains. |

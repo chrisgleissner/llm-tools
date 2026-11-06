@@ -56,6 +56,7 @@ export const MISSIONS = [
   mk(8, "alpha", "Document the HTTP API", "STOPPED", "docs", 8 * 3600),
 ];
 export const MISSION_PATH = `/missions/alpha/${MISSIONS[0]!.mission.id}`;
+export const MISSION_START_PATH = `/missions/alpha/${MISSIONS[5]!.mission.id}`;
 
 const TASKS = [
   { id: 1, ordinal: 1, title: "Plan the change", status: "COMPLETED", priority: 0, revision: 4 },
@@ -152,9 +153,21 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const limit = Number(url.searchParams.get("limit") ?? list.length);
       return json(route, 200, { missions: list.slice(offset, offset + limit), total: list.length, offset, statuses: facets });
     }
+    const missionAction = path.match(/^\/missions\/([^/]+)\/(start|resume|pause|stop|cancel|continue)$/);
+    if (missionAction && method === "POST") {
+      const operation = `mission.${missionAction[2]}`;
+      const current = missions.find((mission) => mission.mission.id === missionAction[1]);
+      if (current) {
+        const status = missionAction[2] === "start" || missionAction[2] === "resume" || missionAction[2] === "continue" ? "RUNNING"
+          : missionAction[2] === "pause" ? "PAUSED" : missionAction[2] === "stop" ? "STOPPED" : "CANCELLED";
+        current.mission.status = status;
+      }
+      return json(route, 200, { request_id: "resource-mock", target: url.searchParams.get("worker"), operation, state: "done", result: { outcome: "applied", result: { mission: current?.mission ?? null }, error: null } });
+    }
     const missionResource = path.match(/^\/missions\/([^/]+)$/);
     if (missionResource && method === "GET") {
-      const result = { mission: { id: MISSIONS[0]!.mission.id, name: MISSIONS[0]!.mission.name, status: "RUNNING", cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, needs_you: { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
+      const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, needs_you: { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
     }
     if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {
