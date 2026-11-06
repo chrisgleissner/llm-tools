@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from tests import process_hygiene
+from tests import process_hygiene, state_guard
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL_COMMANDS = {"./llm-usage", "./llm-scheduler", "./ralph-robin"}
@@ -425,6 +425,8 @@ _REAL_RUNTIME_ENV = os.environ.get("XDG_RUNTIME_DIR", "")
 _SESSION_RUNTIME_DIRS: set[str] = set()
 _SESSION_START = time.time()
 _BASELINE: dict[str, object] = {}
+# The operator's real Bridge databases, resolved from the environment before any test isolation.
+_REAL_STATE_DATABASES = state_guard.real_state_databases(os.environ)
 _ESCAPED_SOCKETS: dict[str, str] = {}  # socket path -> test id that asked for it
 
 
@@ -497,6 +499,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
             _quiet_run([_RM, "-rf", "--", directory])
     _BASELINE["entries"] = _list_entries(_real_bridge_dirs())
     _BASELINE["controllers"] = _controller_pids()
+    _BASELINE["real_missions"] = state_guard.snapshot(_REAL_STATE_DATABASES)
 
 
 def _quiet_run(argv: list[str]) -> None:
@@ -784,6 +787,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if leaked:
         problems.append("Bridge _controller processes started by this session are still alive: "
                         + ", ".join(map(str, leaked)))
+    real_missions: dict[Path, set[str]] = _BASELINE.get("real_missions", {})  # type: ignore[assignment]
+    written = state_guard.leaked_missions(real_missions, [tempfile.gettempdir(), basetemp, *sorted(_SESSION_RUNTIME_DIRS)])
+    if written:
+        problems.append("missions were created in the operator's real Bridge state from temporary folders:\n  "
+                        + "\n  ".join(written))
     # Under pytest-xdist every worker is its own session: it checks only what it created (its own
     # temp dirs and sockets) and hands the result to the controller, which sets the exit status
     # because a worker's exit status does not fail the run.
