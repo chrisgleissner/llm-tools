@@ -134,9 +134,14 @@ permission bits: the files are created normally and the access control list of t
 directory (by default the user profile) is the protection. Keep the data directory in a
 location only the service account can read.
 
-The Python test suite skips on Windows only what needs a missing facility, centrally in
-`tests/conftest.py`: modules that import `curses`, `termios`, `fcntl` or `pty`, tests marked
-`tmux` or `pty`, the modules in `WINDOWS_SKIPPED_MODULES`, and (on any platform without `/proc`, so macOS as well) the modules in `PROCFS_ONLY_MODULES` and `PROCFS_ONLY_TESTS`, each with its reason. On macOS it also
+On Windows, CI runs only the tests listed once in `WINDOWS_TESTS` in
+`.github/workflows/test.yml`: the Windows policy, the remote CLI, the worker protocol parser,
+the WebSocket client, the store-independent tests of the command layer and the coordinator
+integration tests. The step fails when an entry names a missing file, and
+`tests/test_workflow_hardening.py` checks every entry on every platform. The rest of the suite
+tests components this table marks unsupported on Windows. Other platform skips are decided
+centrally in `tests/conftest.py`: on any platform without `/proc` (macOS and Windows) it
+skips the modules in `PROCFS_ONLY_MODULES` and `PROCFS_ONLY_TESTS`, each with its reason. On macOS it also
 skips tests marked `tmux` or `pty` and the console tests in `MACOS_SKIPPED_TESTS`, because the
 console and station are not supported there. Nothing is skipped on Linux by that code. The evidence for each skip is the CI run listed in
 `SPEC_STATUS.md`.

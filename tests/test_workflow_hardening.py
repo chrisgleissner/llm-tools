@@ -115,3 +115,28 @@ def test_test_workflow_runs_branches_through_pull_requests_with_one_run_per_ref(
     assert "  push:\n    branches: [main]\n  pull_request:\n" in header
     assert "group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}" in header
     assert "cancel-in-progress: true" in header
+
+
+def _windows_tests() -> list[str]:
+    job = _jobs(WORKFLOWS / "test.yml")["cross-platform"]
+    block = job[job.index("WINDOWS_TESTS: >-") :].splitlines()[1:]
+    entries: list[str] = []
+    for line in block:
+        if not line.startswith("            ") or not line.strip().startswith("tests/"):
+            break
+        entries.append(line.strip())
+    return entries
+
+
+def test_windows_jobs_run_an_allowlist_whose_entries_all_exist() -> None:
+    """The Windows step runs WINDOWS_TESTS only; every entry must name an existing file and test."""
+    entries = _windows_tests()
+    assert "tests/test_windows_policy.py" in entries and "tests/test_distributed_integration.py" in entries
+    root = WORKFLOWS.parents[1]
+    for entry in entries:
+        file, _, name = entry.partition("::")
+        assert (root / file).is_file(), entry
+        if name:
+            assert re.search(rf"^def {re.escape(name)}\(", (root / file).read_text(encoding="utf-8"), re.M), entry
+    job = _jobs(WORKFLOWS / "test.yml")["cross-platform"]
+    assert "python -m pytest -q $WINDOWS_TESTS" in job and "if: runner.os == 'Windows'" in job

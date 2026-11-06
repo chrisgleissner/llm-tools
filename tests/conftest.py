@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import shutil
@@ -128,6 +129,8 @@ def _measure_terminal_children(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _no_launcher_burst_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process launcher tests feed keys instantly; real-time guard tests opt back in."""
+    if importlib.util.find_spec("_curses") is None:
+        return  # Windows: no curses, and the launcher is not supported there (DECISIONS.md D8).
     from llm_tools import bridge_launcher
 
     monkeypatch.setattr(bridge_launcher, "_BURST_SECONDS", 0.0)
@@ -248,25 +251,12 @@ def _load_markers() -> dict[str, list[str]]:
 
 # --- Windows ------------------------------------------------------------------
 #
-# Windows runs the remote client, the typed command layer, the protocol and the integration tests
-# against a coordinator built for Windows (docs/distributed/DECISIONS.md D8). Everything else needs a
-# facility Windows does not have, and is skipped there with the reason below. Nothing is skipped on
-# Linux by this code.
+# Windows CI runs only the tests named in WINDOWS_TESTS in .github/workflows/test.yml: the components
+# Windows supports (docs/distributed/DECISIONS.md D8). The hooks below skip, with a reason, the parts of
+# those files that need a POSIX facility. Nothing is skipped on Linux by this code.
 
 _MISSING_POSIX_MODULE = re.compile(r"No module named '(_?curses|termios|fcntl|pty|tty|pwd|grp|resource)'")
 WINDOWS_NO_TMUX = "tmux and POSIX pseudo-terminals do not exist on Windows (docs/distributed/DECISIONS.md D8)"
-# Test module (file stem) -> reason. Windows has no tmux, curses, termios, fcntl locks, POSIX signals,
-# or shebang executables, so these modules cannot run there. Keep entries narrow and justified.
-_NO_UNIX_SERVICE = (
-    "imports the llm-usage sampler service, which serves a Unix-domain socket (socketserver.UnixStreamServer); "
-    "Windows supports only the coordinator and the remote client (docs/distributed/DECISIONS.md D8)"
-)
-WINDOWS_SKIPPED_MODULES: dict[str, str] = {
-    "test_additional_paths": _NO_UNIX_SERVICE,
-    "test_no_process_umask": _NO_UNIX_SERVICE,
-    "test_security_module_launch": _NO_UNIX_SERVICE,
-    "test_usage_service_security": _NO_UNIX_SERVICE,
-}
 
 
 # --- macOS --------------------------------------------------------------------
@@ -319,11 +309,6 @@ def pytest_make_collect_report(collector: Any):
         return
     report = outcome.get_result()
     if report.failed:
-        listed = WINDOWS_SKIPPED_MODULES.get(collector.path.stem)
-        if listed:  # these fail at import (for example socketserver.UnixStreamServer), before items exist
-            report.outcome = "skipped"
-            report.longrepr = (str(collector.path), 0, f"Skipped: {listed}")
-            return
         found = _MISSING_POSIX_MODULE.search(str(report.longrepr))
         if found:
             report.outcome = "skipped"
@@ -343,10 +328,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             elif {"tmux", "pty"} & set(manifest.get(key, ())):
                 item.add_marker(pytest.mark.skip(reason=MACOS_CONSOLE_REASON))
         if _WINDOWS:
-            reason = WINDOWS_SKIPPED_MODULES.get(Path(str(item.fspath)).stem)
-            if reason:
-                item.add_marker(pytest.mark.skip(reason=reason))
-            elif {"tmux", "pty"} & set(manifest.get(_marker_key(item.nodeid), ())):
+            if {"tmux", "pty"} & set(manifest.get(_marker_key(item.nodeid), ())):
                 item.add_marker(pytest.mark.skip(reason=WINDOWS_NO_TMUX))
         for kind in manifest.get(_marker_key(item.nodeid), ()):
             if kind in RESOURCE_MARKERS:

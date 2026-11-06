@@ -360,8 +360,9 @@ jobs:
   # the coordinator natively (clippy with warnings denied, unit and integration tests, release build)
   # and runs the Python suite against that binary. Labels: macos-latest is Apple silicon;
   # macos-15-intel is the Intel image GitHub still offers; windows-11-arm is available to public
-  # repositories. Windows runs the remote client only (docs/distributed/DECISIONS.md D8): tmux, curses,
-  # termios and fcntl do not exist there, and tests/conftest.py skips what needs them, with the reason.
+  # repositories. Windows supports only the coordinator and the remote client
+  # (docs/distributed/DECISIONS.md D8, install.md "Windows"), so the Windows jobs run the allowlist in
+  # WINDOWS_TESTS below instead of the whole suite.
   cross-platform:
     name: ${{ matrix.name }} (coordinator, Python)
     runs-on: ${{ matrix.os }}
@@ -434,10 +435,36 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . pytest
       - name: Python suite against the native coordinator
+        if: runner.os != 'Windows'
         env:
           BRIDGE_REQUIRE_COORDINATOR: "1"
           BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator${{ matrix.exe }}
         run: python -m pytest -q
+      # The tests for the components Windows supports: Windows policy, remote CLI, worker protocol,
+      # WebSocket client, the store-independent part of the command layer, and coordinator integration.
+      # The step fails when an entry names a file that does not exist.
+      - name: Python tests for the Windows components against the native coordinator
+        if: runner.os == 'Windows'
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
+          BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator${{ matrix.exe }}
+          WINDOWS_TESTS: >-
+            tests/test_windows_policy.py
+            tests/test_bridge_remote.py
+            tests/test_bridge_protocol.py
+            tests/test_bridge_ws.py
+            tests/test_bridge_commands.py::test_catalog_lists_every_operation_with_typed_parameters
+            tests/test_bridge_commands.py::test_request_json_round_trip_and_strict_decoding
+            tests/test_bridge_commands.py::test_error_mapping_is_stable
+            tests/test_distributed_integration.py
+        run: |
+          missing=0
+          for entry in $WINDOWS_TESTS; do
+            file="${entry%%::*}"
+            if [ ! -f "$file" ]; then echo "::error::WINDOWS_TESTS names a missing file: $file"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          python -m pytest -q $WINDOWS_TESTS
 
   # The browser suite on the other desktop platforms, against the coordinator built there. Chromium and
   # Firefox only (WebKit is optional). Visual baselines are Linux-only (web/playwright.config.ts).
