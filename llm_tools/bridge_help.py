@@ -112,7 +112,7 @@ Actions lists what applies to the current state, with the command for each; / fi
 activates the selected action. Disabled actions explain their unavailable target.
 
 Composer: Enter newline; Tab indent; PgUp/PgDn page; F2/Ctrl-S saves. Ctrl-O opens VISUAL/EDITOR.
-Escape retains a recovery draft. Ctrl-D offers explicit discard confirmation.
+Escape closes and keeps the draft; Ctrl-E in the console reopens it. Ctrl-D discards.
 Viewer: Up/Down, PgUp/PgDn or Space page; Home/End go first/last; / searches,
 n/N visit matches; Escape cancels search before closing, q closes the viewer.
 m toggles source/render, w toggles wrap, Left/Right scroll unwrapped lines.
@@ -330,6 +330,24 @@ Missing CLI/tmux or login: fix the local prerequisite; see help providers.
 Broken renderer: use plain source. Help needs neither Rich, tmux nor mission state.
 Stop/cancel have explicit scopes; detach and exit keep the mission separate.""",
 }
+
+
+HOME_HELP = """Home screen: your saved missions
+
+You are already here, so the quickstart's first step is done. Opening a mission or the
+form below starts no provider; only S (start) and "Start and open provider" do.
+
+N              new mission: type the task, then Save or Start
+Enter          open the selected mission's controls (attach, when its provider is live)
+o              open the controls of the selected mission
+S              start the selected mission, when it has not started
+Up/Down        choose a mission (j and k also work)
+/              filter the list by name or folder
+?              this page
+Q or Esc       leave Bridge
+
+Nothing to start yet? T opens the step-by-step quickstart; the same text is
+llm-bridge help quickstart."""
 
 
 _VIEW_HELP_FOOTER = "Every key: /help keys · every slash command: /help · Esc closes this page"

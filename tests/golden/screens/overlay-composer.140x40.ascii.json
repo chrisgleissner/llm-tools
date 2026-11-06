@@ -44,7 +44,7 @@
     "",
     "",
     "",
-    "F2/Ctrl-S Save | Esc Recover | Ctrl-D Discard | 81/1048576 bytes | 7 lines"
+    "F2/Ctrl-S Save | Esc close (draft kept) | Ctrl-D Discard | 7 lines"
   ],
   "segments": [
     [[0, "Add task prompt | full source", "heading"]],
@@ -86,6 +86,6 @@
     [],
     [],
     [],
-    [[0, "F2/Ctrl-S Save | Esc Recover | Ctrl-D Discard | 81/1048576 bytes | 7 lines", "dim"]]
+    [[0, "F2/Ctrl-S Save | Esc close (draft kept) | Ctrl-D Discard | 7 lines", "dim"]]
   ]
 }

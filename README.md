@@ -173,7 +173,7 @@ In a station, `Ctrl-]` is the prefix:
 | `Ctrl-]` then `d` | Detach; the mission keeps running |
 | `Ctrl-]` then `?` | Help |
 
-The controls feel like Codex and Claude Code: nine tabs on `F1`–`F9` (Overview, Tasks, Providers, Activity, Sessions, Health, Actions, Usage, Agents), `Ctrl-K` for actions, and slash commands such as `/start`, `/approve`, `/reject 2 needs tests`, `/finish` and `/missions`.
+The controls feel like Codex and Claude Code: nine tabs on `F1`–`F9` (Overview, Tasks, Providers, Activity, Sessions, Health, Actions, Usage, Agents), `Ctrl-K` for actions, and slash commands such as `/start`, `/approve`, `/reject 2 needs tests`, `/finish` and `/missions`. Typing `/` lists the commands with a one-line description each, narrowing as you type; Tab completes the common prefix and a second Tab names the matches. `Ctrl-E` opens the task composer (a kept draft comes back with `Restored draft from HH:MM`); `?` opens a word-wrapped help page.
 
 The Agents view shows mission roots and verified native Codex children, with
 age, model, effort, status and last observed activity. Select a row to inspect

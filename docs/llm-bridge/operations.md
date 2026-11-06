@@ -396,8 +396,11 @@ accepts slash commands as well as bare commands: `/help [TOPIC]`, `/start`
 (opens the provider station in native mode), `/attach` (also works from inside
 your own tmux), `/approve [N]` (approve task N; N may be omitted when exactly
 one task is in `REVIEW`), `/continue` (start the next task while a reviewed one stays in `REVIEW`), `/pause`, `/resume`, `/stop`, `/cancel`, `/status`,
-`/tasks` and `/events`. Tab completes command names, and an unknown command is
-answered with close matches. `cancel`, `stop --force`, task cancellation and
+`/tasks` and `/events`. Typing `/` opens a list of the slash commands with a
+one-line description each; it narrows as you type. Tab completes a single
+match, or only the common prefix of several (a second Tab names the matches),
+so an ambiguous prefix is never completed to the first command. An unknown
+command is answered with close matches. `cancel`, `stop --force`, task cancellation and
 approval ask for a compact confirmation: **Y** confirms, **N** or **Esc**
 cancels. The Overview's `Needs you` row names tasks awaiting approval.
 Console commands include mission controls (`pause`, `resume`, `stop`,
@@ -506,8 +509,16 @@ Keyboard and mouse operate those views:
 
 The composer keeps recoverable source in private state. Ctrl-O launches the
 external editor as argv on a private file; returning from that editor does not
-submit the task. F2/Ctrl-S explicitly saves the composed source. Escape retains
-the draft, while explicit discard is separate. Rejected saves keep their source. The UI accepts printable command text without
+submit the task. F2/Ctrl-S explicitly saves the composed source. Escape closes
+the composer and keeps the draft (`Esc close (draft kept)`); Ctrl-E in the
+console reopens the newest kept task draft of the last 24 hours with `Restored
+draft from HH:MM · Ctrl-D discard`, while explicit discard is separate. An empty
+task composer shows dim guidance on the first line (title, description, optional
+`Acceptance:` list). The footer shows a line count, and the byte count only above
+80% of the 1 MiB limit. Help pages (`?`, `/help`) open as a word-wrapped page
+with `↑↓ scroll · / find · Esc close` and none of the file viewer's controls; `?`
+on the home screen shows a short home-screen key summary, and `T` there opens the
+quickstart. Rejected saves keep their source. The UI accepts printable command text without
 using letters as view shortcuts. Actions and keyboard commands use the
 same dispatcher. The command result pane summarizes durable command envelopes
 as a concise applied/rejected message; detailed state remains available in the

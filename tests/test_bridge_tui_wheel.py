@@ -369,7 +369,7 @@ def test_composer_footer_does_not_repeat_the_key_hints(tmp_path, monkeypatch) ->
     for frame in window.frames:
         footer = [frame[row] for row in (12, 13) if row in frame]
         assert not any("Enter newline" in line or "Enter inserts a newline" in line for line in footer)
-        assert footer[-1].startswith("F2/Ctrl-S Save · Esc Recover · Ctrl-D Discard")
+        assert footer[-1].startswith("F2/Ctrl-S Save · Esc close (draft kept) · Ctrl-D Discard")
         assert sum("Ctrl-S" in line for line in footer) == 1
     assert window.frames[0][12] == ""  # the notice row is empty until something needs saying
 
