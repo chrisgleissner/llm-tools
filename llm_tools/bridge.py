@@ -2833,11 +2833,15 @@ def _main(argv: list[str] | None = None) -> int:
             return run_control(args.mission, dispatch=dispatch_console_command, snapshot=console_snapshot,
                                initial_view="Usage" if args.command == "usage" else "Bridge")
         if args.command == "resume":
+            from .bridge_runtime import _LOCK_STARTUP_WAIT_SECONDS
+
             with open_store() as store:
                 mission = store.get_mission(args.mission)
                 probe = MissionLock(state_dir() / "locks", args.mission)
                 try:
-                    probe.acquire()
+                    # A liveness probe (console, `mission list`) holds the lock for a moment; wait it out
+                    # instead of taking a probe for a controller.
+                    probe.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
                 except BlockingIOError:
                     pass  # a controller already owns the mission; its rotation was checked when it started
                 else:
@@ -2850,7 +2854,7 @@ def _main(argv: list[str] | None = None) -> int:
                 return _fail_rejected(result, "resume rejected", args.json)
             lock = MissionLock(state_dir() / "locks", args.mission)
             try:
-                lock.acquire()
+                lock.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
             except BlockingIOError:
                 if not config.get("headless") and config.get("native_tui") and sys.stdin.isatty() and sys.stdout.isatty():
                     from .bridge_runtime import mission_socket_path

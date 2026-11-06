@@ -2125,7 +2125,7 @@ class MissionLock:
             except BlockingIOError:
                 return True
             except OSError:
-                return False
+                return True  # e.g. ENOLCK: absence of a controller is not proven, so do not report one as gone
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
             return False
         finally:

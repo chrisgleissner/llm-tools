@@ -176,3 +176,54 @@ def test_int006_stop_with_a_live_controller_still_requests_stopping(tmp_path, mo
         result = bridge._apply_operator_command(store, mission["id"], {"action": "stop"})
 
     assert result["result"]["mission_status"] == "STOPPING"
+
+
+def test_int014_resume_waits_out_a_momentary_liveness_probe(tmp_path, monkeypatch) -> None:
+    import fcntl
+    import threading
+
+    from llm_tools import bridge
+
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("m", "objective", cwd=tmp_path, config={"headless": True})
+    store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    store.set_mission_status(mission["id"], "PAUSED")
+    store.close()
+    lock_dir = state / "locks"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_file = lock_dir / f"mission-{mission['id']}.lock"
+    lock_file.touch()
+    started: list[str] = []
+    monkeypatch.setattr(bridge, "require_launchable_rotation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bridge, "start_mission", lambda mission_id, **kwargs: started.append(mission_id) or 0)
+
+    holder = lock_file.open("r")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_SH)  # what MissionLock.is_held does, briefly
+    release = threading.Timer(0.1, lambda: (fcntl.flock(holder.fileno(), fcntl.LOCK_UN), holder.close()))
+    release.start()
+    try:
+        assert bridge.main(["resume", "--mission", mission["id"]]) == 0
+    finally:
+        release.join()
+
+    assert started == [mission["id"]]  # the old zero-timeout probe took the probe for a controller and started nothing
+
+
+def test_int014_lock_probe_that_cannot_decide_reports_the_lock_as_held(tmp_path, monkeypatch) -> None:
+    import errno
+    import fcntl
+
+    from llm_tools.bridge_store import MissionLock
+
+    lock = MissionLock(tmp_path / "locks", "m1")
+    lock.acquire()
+    lock.release()
+
+    def no_locks(_fd, _operation):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    assert MissionLock.is_held(tmp_path / "locks", "m1") is True
