@@ -1,5 +1,5 @@
 import * as api from "../api";
-import { button, copyButton, emptyState, field, h, idChip, timeEl } from "../dom";
+import { button, copyButton, emptyState, field, h, idChip, keepFocus, timeEl } from "../dom";
 import { icon } from "../icons";
 import { refresh, store, subscribe, workerState } from "../store";
 import { announce, confirmDialog, openPanel } from "../ui";
@@ -74,7 +74,7 @@ export function workers(root: HTMLElement): () => void {
     void refresh().catch(() => {});
   }
 
-  const render = () => {
+  const renderNow = () => {
     if (store.workers.length === 0) {
       body.replaceChildren(
         store.loaded
@@ -117,6 +117,7 @@ export function workers(root: HTMLElement): () => void {
       h("p", { class: "muted small" }, icon("info", 14), " Last seen is when the coordinator last heard from the worker."),
     );
   };
+  const render = () => keepFocus(body, renderNow);
   const un = subscribe(render);
   render();
   return un;

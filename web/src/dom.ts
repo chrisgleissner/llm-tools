@@ -33,6 +33,35 @@ export function fill(el: Element, ...children: Child[]): void {
   append(el, children);
 }
 
+const FOCUSABLE = "a[href], button, input, select, textarea, summary, [tabindex]";
+
+function focusKey(el: Element): string {
+  const tile = el.getAttribute("data-tile");
+  if (tile) return `tile:${tile}`;
+  if (el.id) return `id:${el.id}`;
+  const label = el.getAttribute("aria-label") || el.getAttribute("name") || (el.textContent ?? "").trim().slice(0, 80);
+  return `${el.tagName}|${el.getAttribute("href") ?? ""}|${label}`;
+}
+
+/**
+ * Run a re-render of `container` without losing keyboard focus. A live refresh that replaces the
+ * focused element would otherwise send focus back to the start of the page, so a keyboard user
+ * tabbing through the view would start over. Focus moves to the new element with the same
+ * identity (data-tile, id, or tag, href and label) when one exists.
+ */
+export function keepFocus(container: Element, update: () => void): void {
+  const active = document.activeElement;
+  const key = active && active !== container && container.contains(active) ? focusKey(active) : null;
+  update();
+  if (key === null || (document.activeElement && container.contains(document.activeElement))) return;
+  for (const el of container.querySelectorAll<HTMLElement>(FOCUSABLE)) {
+    if (focusKey(el) === key) {
+      el.focus({ preventScroll: true });
+      return;
+    }
+  }
+}
+
 // ---- time: every timestamp shows a relative and an absolute form
 
 const pad = (n: number) => String(n).padStart(2, "0");

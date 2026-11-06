@@ -140,3 +140,19 @@ def test_windows_jobs_run_an_allowlist_whose_entries_all_exist() -> None:
             assert re.search(rf"^def {re.escape(name)}\(", (root / file).read_text(encoding="utf-8"), re.M), entry
     job = _jobs(WORKFLOWS / "test.yml")["cross-platform"]
     assert "python -m pytest -q $WINDOWS_TESTS" in job and "if: runner.os == 'Windows'" in job
+
+
+def test_every_job_that_runs_cargo_installs_the_toolchain_through_the_shared_action() -> None:
+    """One shared action installs rust-toolchain.toml; no job carries its own rustup commands."""
+    action = (WORKFLOWS.parent / "actions" / "rust-toolchain" / "action.yml").read_text(encoding="utf-8")
+    assert "rustup toolchain uninstall" in action and "rustup toolchain install\n" in action
+    for path in FILES:
+        for name, job in _jobs(path).items():
+            uses_rust = re.search(r"\bcargo |container/build\.sh|rust-cache@", job)
+            if uses_rust:
+                assert "uses: ./.github/actions/rust-toolchain" in job, f"{path.name}: {name}"
+            assert "rustup toolchain" not in job and "rustup-init" not in job, f"{path.name}: {name}"
+        text = path.read_text(encoding="utf-8")
+        for match in re.finditer(r"- uses: Swatinem/rust-cache@", text):
+            previous = text[: match.start()].rstrip().splitlines()[-1]
+            assert previous.strip() == "- uses: ./.github/actions/rust-toolchain", f"{path.name}: toolchain must come before rust-cache"

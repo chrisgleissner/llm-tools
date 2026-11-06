@@ -1,6 +1,6 @@
 import * as api from "../api";
 import type { BridgeEvent, MissionEntry } from "../api";
-import { emptyState, h, relTime, timeEl } from "../dom";
+import { emptyState, h, keepFocus, relTime, timeEl } from "../dom";
 import { icon, type IconName } from "../icons";
 import { onStream, store, subscribe, worker, workerState } from "../store";
 
@@ -132,7 +132,7 @@ export function overview(root: HTMLElement): () => void {
     const approvals = taskTotals["VERIFYING"] ?? 0;
     const failed = taskTotals["FAILED"] ?? 0;
     const staleNote = checked < eligible ? `checked ${checked} of ${eligible} active missions` : `${plural(store.missions.filter((m) => ACTIVE.has(m.mission.status.toUpperCase())).length, "active mission")}`;
-    body.replaceChildren(
+    keepFocus(body, () => body.replaceChildren(
       h(
         "section",
         { "aria-label": "Summary", class: "tiles" },
@@ -176,7 +176,7 @@ export function overview(root: HTMLElement): () => void {
           : h("ul", { class: "chips" }, ...[...counts].sort().map(([s, n]) => h("li", {}, h("a", { class: "chip", href: `/missions?status=${encodeURIComponent(s)}` }, h("span", { class: `badge s-${s.toLowerCase()}` }, s.toLowerCase()), h("span", { class: "n" }, String(n)))))),
       ),
       h("p", { class: "muted small", id: "ov-health" }, diag ? `Coordinator healthy: up ${Math.round(Number(diag["uptime_seconds"] ?? 0) / 60)} min, v${String(diag["version"] ?? "?")}.` : diagError ? `Coordinator: ${diagError}` : "Checking the coordinator..."),
-    );
+    ));
   };
 
   const key = () => store.missions.map((m) => `${m.worker}/${m.mission.id}/${m.mission.status}`).join("|") + store.workers.map((w) => `${w.name}:${w.state}`).join("|") + store.conn;
