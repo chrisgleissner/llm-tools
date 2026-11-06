@@ -364,13 +364,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: macOS ARM64, os: macos-latest, exe: "" }
-          - { name: macOS Intel, os: macos-15-intel, exe: "" }
-          - { name: Windows x86-64, os: windows-latest, exe: ".exe" }
-          - { name: Windows ARM64, os: windows-11-arm, exe: ".exe" }
+          - { name: macOS ARM64, os: macos-latest, exe: "", tmpdir: /tmp }
+          - { name: macOS Intel, os: macos-15-intel, exe: "", tmpdir: /tmp }
+          - { name: Windows x86-64, os: windows-latest, exe: ".exe", tmpdir: "" }
+          - { name: Windows ARM64, os: windows-11-arm, exe: ".exe", tmpdir: "" }
     defaults:
       run:
         shell: bash
+    env:
+      # macOS temp directories are long (/private/var/folders/...) and exceed the 104-byte AF_UNIX
+      # path limit that tmux and the sampler sockets hit; a short TMPDIR keeps pytest paths below it.
+      TMPDIR: ${{ matrix.tmpdir }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -451,11 +455,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -465,12 +464,6 @@ jobs:
         with:
           workspaces: coordinator
           shared-key: ${{ matrix.os }}
-      - name: Install tmux and the Python worker (macOS; the worker end-to-end tests need them)
-        if: runner.os == 'macOS'
-        run: |
-          brew install tmux
-          python -m venv .venv
-          .venv/bin/python -m pip install -e .
       - name: Build the coordinator
         run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
       - name: Cache Playwright browsers

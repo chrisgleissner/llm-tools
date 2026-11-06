@@ -42,16 +42,17 @@ pub fn now() -> i64 {
 
 /// `OpenOptions` whose created files get `mode` on Unix. Windows has no permission bits: files are
 /// created normally and the access control list of the data directory is the protection.
+#[cfg(unix)]
 pub fn private_options(mode: u32) -> std::fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
     let mut options = std::fs::OpenOptions::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(mode);
-    }
-    #[cfg(not(unix))]
-    let _ = mode;
+    options.mode(mode);
     options
+}
+
+#[cfg(not(unix))]
+pub fn private_options(_mode: u32) -> std::fs::OpenOptions {
+    std::fs::OpenOptions::new()
 }
 
 /// Restrict `path` to its owner (`mode`, for example 0o700 or 0o600). Best effort, and a no-op on
