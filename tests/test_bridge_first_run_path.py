@@ -183,7 +183,7 @@ def test_doctor_next_steps_cover_the_unready_machines(tmp_path: Path) -> None:
     env = {"HOME": str(tmp_path)}
 
     no_tmux = bridge_doctor.next_steps(tmux_available=False, providers=[claude_ready], folder=tmp_path, env=env)
-    assert "Install tmux" in no_tmux[0] and "--headless" in no_tmux[0]
+    assert "Install tmux" in no_tmux[0] and "--mode headless" in no_tmux[0]
     assert any(step.startswith("Ready.") for step in no_tmux)
 
     signed_out = bridge_doctor.next_steps(tmux_available=True, providers=[codex_signed_out, missing], folder=tmp_path, env=env)

@@ -298,7 +298,8 @@ def test_default_rotation_follows_the_llm_tools_config(tmp_path, monkeypatch, ca
     with pytest.raises(SystemExit):
         main(["mission", "create", "--help"])
     text = " ".join(capsys.readouterr().out.split())
-    assert "(default: claude,codex)" in text and "routes claude,kilo-zai-glm-52" in text
+    assert "routes claude,kilo-zai-glm-52" in text and "(default: claude,kilo-zai-glm-52)" in text
+    assert "(default: claude,codex)" not in text  # providers have no default while default routes are configured
     config.write_text("not = [valid", encoding="utf-8")
     assert bridge.default_rotation() == ("claude,codex,opencode", "")
 

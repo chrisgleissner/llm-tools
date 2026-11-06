@@ -23,6 +23,7 @@ from .bridge_states import (
     STARTED_MISSION_STATUSES,
 )
 from .bridge_states import MISSION_COUNT, MISSION_HUE_NAMES, THEME_CHOICES
+from .bridge_vocab import RunMode
 from .bridge_missions import (  # noqa: F401  (re-exported: the CLI and tests reach these through bridge)
     MIN_MISSION_PREFIX,
     MissionNotFound,
@@ -165,6 +166,7 @@ def strip_frozen_config(value: Any) -> Any:
 
 TASK_LIST_PAGE = 200
 BUILTIN_PROVIDERS = "claude,codex,opencode"
+RUN_MODES = tuple(str(mode) for mode in RunMode)
 
 
 def _is_read_only(args: argparse.Namespace) -> bool:
@@ -199,6 +201,7 @@ def _resolve_parsed_mission(args: argparse.Namespace, *, optional: bool = False,
                 store, reference,
                 read_only=_is_read_only(args),
                 prefer_station=getattr(args, "command", "") in {"attach", "detach"},
+                reopen_completed=getattr(args, "command", "") == "task" and getattr(args, "task_action", "") == "add",
             )
             setattr(args, attribute, resolved)
     except MissionNotFound:
@@ -926,6 +929,19 @@ def default_rotation() -> tuple[str, str]:
     return ",".join(configured_providers) or providers, ",".join(configured_routes)
 
 
+def resolved_default_rotation() -> tuple[str, str]:
+    """The (providers, routes) a new mission gets with no ``--providers``/``--routes``, for help text.
+
+    This is ``creation_rotation(None, None)`` itself, so help names exactly what creation resolves
+    (providers the config disables are already removed); when nothing is usable the configured
+    default is shown and creation reports the problem.
+    """
+    try:
+        return creation_rotation(None, None)
+    except ValueError:
+        return default_rotation()
+
+
 def resolve_rotation(providers: str | None, routes: str | None) -> tuple[str, str]:
     """Resolve an explicit ``--providers`` / ``--routes`` pair against the config defaults.
 
@@ -1053,18 +1069,20 @@ class _RotationDefaultText:
         self._render = render
 
     def __str__(self) -> str:
-        return self._render(*default_rotation())
+        return self._render(*resolved_default_rotation())
 
 
 def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = False) -> None:
     """Options shared by ``mission create`` and the legacy bare ``--prompt`` form."""
+    import argparse
+
     create.add_argument("--name", metavar="NAME", help="mission name shown in lists (default: first line of the prompt)")
     create.add_argument("--cwd", metavar="DIR", default=str(Path.cwd()), help="folder the providers work in (default: the current folder)")
     # argparse validates a help string when the option is added, so the lazy placeholders are set afterwards.
     providers_help = "comma-separated providers to rotate through, in order; an explicit list without --routes disables configured routes"
     providers_action = create.add_argument("--providers", metavar="LIST", default=None, help=providers_help)
-    providers_action.help = providers_help + " (default: %(rotation_providers)s)"
-    providers_action.rotation_providers = _RotationDefaultText(lambda providers, routes: providers)  # type: ignore[attr-defined]
+    providers_action.help = providers_help + "%(rotation_providers)s"
+    providers_action.rotation_providers = _RotationDefaultText(lambda providers, routes: "" if routes else f" (default: {providers})")  # type: ignore[attr-defined]
     routes_help = "comma-separated route IDs from the llm-tools config to rotate through instead of providers; wins over --providers"
     routes_action = create.add_argument("--routes", metavar="LIST", default=None, help=routes_help)
     routes_action.help = routes_help + "%(rotation_routes)s"
@@ -1072,8 +1090,15 @@ def _add_mission_create_args(create: argparse.ArgumentParser, *, legacy: bool = 
     create.add_argument("--acceptance", metavar="TEXT", action="append", default=[], help="acceptance criterion for the first task; repeat for several")
     create.add_argument("--teams", choices=("on", "off"), default=None, help="provider-native team guidance (default: on; global default: [bridge].teams)")
     create.add_argument("--token-spend", choices=("low", "medium", "high"), default=None, help="token spend preference (default: medium; global default: [bridge].token_spend)")
-    create.add_argument("--headless", action="store_true", help="Headless mode: the provider runs without a terminal and there is no station, so nothing to attach to; without --headless or --native the mission runs in Background mode (a station shows the activity log)")
-    create.add_argument("--native", dest="native_tui", action="store_true", help="Native mode: the provider's own interactive terminal runs in a station; open it with attach")
+    create.add_argument("--mode", choices=RUN_MODES, default=None, help=(
+        "how the provider runs. Native: the provider's own interactive terminal runs in a station (open it with attach). "
+        "Background: the provider runs under a controller and a station shows its activity log. "
+        "Headless: no terminal and no station, so nothing to attach to. "
+        "Background is the default because it needs no terminal, so scripts behave the same on every machine; "
+        "the home screen offers all three and recommends Native"))
+    # Older spellings of --mode native / --mode headless; still accepted, no longer advertised.
+    create.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
+    create.add_argument("--native", dest="native_tui", action="store_true", help=argparse.SUPPRESS)
     create.add_argument("--verifier-arg", dest="verifier_argv", metavar="ARG", action="append", default=[], help="one argument of the command that checks a finished task; repeat per argument; supports {context}, {cwd}, {mission_id}, {task_id}, {revision}")
     create.add_argument("--verifier-file", dest="verifier_files", metavar="PATH", action="append", default=[], help="a file the verifier depends on, relative to --cwd; repeat per file; if it changes after the mission is created a passing verifier no longer completes a task without your approval (the verifier program and the script it interprets are tracked automatically)")
     create.add_argument("--verifier-timeout", metavar="SECONDS", type=float, default=300, help="seconds before a verifier run is treated as failed (default: 300)")
@@ -1268,8 +1293,9 @@ def _build_parser(
             )
             cmd.add_argument("--client", metavar="TTY", help=client_help)
         if action == "start":
-            cmd.add_argument("--headless", action="store_true", default=None, help="Headless mode: run the provider without a terminal and without a station (default: the mission's saved mode)")
-            cmd.add_argument("--native", dest="native_tui", action="store_true", default=None, help="Native mode: supervise the provider's own interactive terminal in a station (default: the mission's saved mode)")
+            cmd.add_argument("--mode", choices=RUN_MODES, default=None, help="run mode for this start: Native (the provider's own terminal in a station), Background (a station shows the activity log) or Headless (no station); the choice is saved with the mission (default: the mission's saved mode, shown by status)")
+            cmd.add_argument("--headless", action="store_true", default=None, help=argparse.SUPPRESS)
+            cmd.add_argument("--native", dest="native_tui", action="store_true", default=None, help=argparse.SUPPRESS)
             cmd.add_argument("--providers", metavar="LIST", help="comma-separated providers to rotate through; changes the mission's saved rotation for this and later starts, and the receipt says so (default: the saved rotation)")
             cmd.add_argument("--routes", metavar="LIST", help="comma-separated route IDs to rotate through; changes the mission's saved rotation for this and later starts, and the receipt says so (default: the saved rotation)")
         if action == "stop":
@@ -1376,6 +1402,7 @@ def _build_parser(
     _add_mission_arg(controller, default_mission, required=True, inferred=False)
     controller.add_argument("--headless", action="store_true")
     controller.add_argument("--native", dest="native_tui", action="store_true")
+    controller.add_argument("--background", action="store_true")
     controller.add_argument("--startup-token", default="")
     controller.add_argument("--providers", default=None)
     controller.add_argument("--routes", default=None)
@@ -1454,11 +1481,24 @@ def _validated_cwd(raw: str) -> str:
     return str(path)
 
 
-def _reject_conflicting_modes(args: argparse.Namespace) -> None:
-    """A mission is either Native (``--native``), Headless (``--headless``) or, with neither, Background."""
-    if args.headless and args.native_tui:
-        raise ValueError("--headless and --native cannot be combined: Native runs the provider's own terminal in a station, "
-                         "Headless runs it without a terminal. Pass one of them, or neither for Background.")
+def _resolve_mode_args(args: argparse.Namespace) -> None:
+    """Fold ``--mode`` and the older ``--native`` / ``--headless`` flags into one choice.
+
+    Afterwards ``args.headless`` and ``args.native_tui`` hold the chosen mode, and ``args.mode`` is the
+    explicit choice or ``None``. On ``start`` an unspecified choice leaves both ``None`` (keep the saved
+    mode); on ``mission create`` it leaves both ``False`` (Background).
+    """
+    headless, native = bool(getattr(args, "headless", None)), bool(getattr(args, "native_tui", None))
+    if headless and native:
+        raise ValueError("--headless and --native cannot be combined; use --mode native, background or headless")
+    flag = "headless" if headless else ("native" if native else None)
+    mode = getattr(args, "mode", None)
+    if mode and flag and mode != flag:
+        raise ValueError(f"--mode {mode} cannot be combined with --{flag}; use --mode alone")
+    chosen = mode or flag
+    args.mode = chosen
+    if chosen is not None:
+        args.headless, args.native_tui = chosen == "headless", chosen == "native"
 
 
 def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -> tuple[str, dict[str, Any]]:
@@ -1469,7 +1509,7 @@ def _mission_creation_inputs(args: argparse.Namespace, *, auto_continue: bool) -
     store is opened, so a rejected command leaves no database behind.
     """
     prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
-    _reject_conflicting_modes(args)
+    _resolve_mode_args(args)
     args.cwd = _validated_cwd(args.cwd)
     args.providers, args.routes = creation_rotation(args.providers, args.routes)
     from . import bridge_policy, config as toolconfig
@@ -2185,7 +2225,7 @@ def _main(argv: list[str] | None = None) -> int:
                 max_bytes=int(retention.get("log_max_bytes", 4 * 1024 * 1024)),
                 rotations=int(retention.get("log_rotations", 3)),
             ):
-                return run_controller(args.mission, headless=args.headless, native_tui=args.native_tui, providers=args.providers, routes=args.routes, startup_token=args.startup_token)
+                return run_controller(args.mission, headless=args.headless, native_tui=args.native_tui, **({"background": True} if args.background else {}), providers=args.providers, routes=args.routes, startup_token=args.startup_token)
         if args.command == "_station-gc":
             from .bridge_runtime import gc_finished_station
 
@@ -2248,6 +2288,8 @@ def _main(argv: list[str] | None = None) -> int:
             with open_store() as store:
                 mission = store.get_mission(args.mission)
                 config = mission["config"]
+            if args.command == "start":
+                _resolve_mode_args(args)
             requested_headless = getattr(args, "headless", None)
             requested_native = getattr(args, "native_tui", None)
             if requested_headless is True:

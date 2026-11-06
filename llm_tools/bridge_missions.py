@@ -62,6 +62,7 @@ def resolve_mission_ref(
     cwd: str | Path | None = None,
     read_only: bool = False,
     prefer_station: bool = False,
+    reopen_completed: bool = False,
 ) -> str:
     """Return the full mission ID for an ID, a unique ID prefix, or the current folder.
 
@@ -71,7 +72,10 @@ def resolve_mission_ref(
     ``prefer_station`` narrows several matches to the ones with a running
     station (attach and detach). ``read_only`` lets a folder whose only
     missions are finished resolve to the finished one, so ``status`` and
-    ``task list`` still work after completion.
+    ``task list`` still work after completion. ``reopen_completed`` (task add)
+    does the same for a folder whose only finished mission is COMPLETED,
+    because a new task reopens a completed mission; a cancelled one never
+    qualifies.
     """
     if ref:
         exact = store.mission_id_if_exists(ref)
@@ -105,11 +109,16 @@ def resolve_mission_ref(
             return str(finished[0]["id"])
         if read_only and finished:
             raise ValueError(f"several finished missions match folder {here}; pass --mission ID:\n{mission_choices(finished)}")
+        completed = [row for row in finished if row["status"] == "COMPLETED"]
+        if reopen_completed and len(completed) == 1:
+            return str(completed[0]["id"])
+        if reopen_completed and len(completed) > 1:
+            raise ValueError(f"several completed missions match folder {here}; pass --mission ID:\n{mission_choices(completed)}")
         if finished:
             newest = order_missions(finished)[0]
             short = str(newest["id"])[:8]
             if newest["status"] == "COMPLETED":
-                follow_up = f"add follow-up work with: llm-bridge task add --mission {short} --prompt \"...\" or create a new mission with: llm-bridge mission create --prompt \"...\""
+                follow_up = f"add follow-up work, which reopens it, with: llm-bridge task add --mission {short} --prompt \"...\" or create a new mission with: llm-bridge mission create --prompt \"...\""
             else:
                 follow_up = "create a new mission with: llm-bridge mission create --prompt \"...\""
             raise ValueError(f"mission {short} in folder {here} is finished ({str(newest['status']).lower()}); {follow_up}")

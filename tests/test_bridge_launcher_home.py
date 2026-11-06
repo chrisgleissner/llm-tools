@@ -172,8 +172,8 @@ def test_hint_is_specific_to_the_focused_field():
     assert field(state, 0) == "Type the task · Tab moves on to Start · Ctrl-E full editor · paste supported · 17 bytes · 2 lines"
     assert field(state, 1) == "←/→ choose · Space toggle · numbers show rotation order"
     assert field(state, 2) == "Path to work in · Tab next"
-    assert field(state, 3).startswith("Space/←/→ switch: Native shows the provider terminal in a station; Headless runs it without a terminal")
-    assert "bytes" not in field(state, 3, width=70) and field(state, 3, width=70).endswith("Headless: no terminal")
+    assert field(state, 3) == "Space/←/→ switch: Native shows the provider terminal; Background, an activity log in a station; Headless, no station"
+    assert "bytes" not in field(state, 3, width=70) and field(state, 3, width=70).endswith("Headless: no station")
     assert field(state, 4) == "Enter to save · no provider is started"
     assert field(state, 5) == "Starts codex now · uses provider capacity"
     state.objective = ""
@@ -429,7 +429,7 @@ def test_native_start_returning_nonzero_after_launch_opens_controls_not_the_form
     status, calls, recorder = run_with(start, tmp_path, monkeypatch, start_keys())
     assert status == 0
     assert [c[0] for c in calls] == ["mission", "start", "control"]
-    assert calls[1][3] == "--native" and calls[2][:2] == ["control", "--mission"]
+    assert calls[1][3:] == ["--mode", "native"] and calls[2][:2] == ["control", "--mission"]
     assert not any("Mission was saved" in screen for screen in recorder.screens)
     with bridge.open_store() as store:
         assert len(store.list_missions()) == 1
@@ -439,11 +439,11 @@ def test_headless_start_failing_after_launch_also_opens_controls(tmp_path, monke
     def start(args):
         set_status(args[2], "RUNNING")
         return 3
-    keys = ["n", *"Go", "\t", "\t", "\t", " ", "\t", "\t", "\n"]  # Space on Mode selects Headless, then Tab to Start
+    keys = ["n", *"Go", "\t", "\t", "\t", " ", " ", "\t", "\t", "\n"]  # Space twice on Mode selects Headless (Native, Background, Headless), then Tab to Start
     status, calls, _ = run_with(start, tmp_path, monkeypatch, keys)
     assert status == 0
     assert [c[0] for c in calls] == ["mission", "start", "control"]
-    assert calls[1][3] == "--headless"
+    assert calls[1][3:] == ["--mode", "headless"]
 
 
 def test_start_failing_before_launch_returns_to_list_with_real_error(tmp_path, monkeypatch):

@@ -15,6 +15,21 @@ from __future__ import annotations
 from enum import StrEnum
 
 
+class RunMode(StrEnum):
+    """How a mission's provider runs: in its own terminal in a station, under a controller with an activity log in a station, or with no station."""
+
+    NATIVE = "native"
+    BACKGROUND = "background"
+    HEADLESS = "headless"
+
+
+def mission_mode(config: dict[str, object]) -> str:
+    """The run mode a mission config names (the two saved booleans; Native wins when both are set, as the controller does)."""
+    if config.get("native_tui"):
+        return RunMode.NATIVE
+    return RunMode.HEADLESS if config.get("headless") else RunMode.BACKGROUND
+
+
 class MissionStatus(StrEnum):
     CREATED = "CREATED"
     RUNNING = "RUNNING"

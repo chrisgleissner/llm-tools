@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .bridge_states import FINISHED_MISSION_STATUSES, OPERATOR_DECLINED_EXIT_CODE, STARTED_MISSION_STATUSES
+from .bridge_vocab import mission_mode
 
 # Internal rotation reasons (ralph_robin) and their plain-word display forms.
 # Only display text changes; event data and JSON keep the internal reason.
@@ -265,7 +266,7 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
     if action == "add":
         text = f"Added {format_task_line(inner)} · priority {inner.get('priority', 0)}"
         if inner.get("mission_reopened"):
-            text += "\nMission reopened · start it with: llm-bridge start"
+            text += f"\nMission {short_id(inner.get('mission_id'))} reopened · start it with: llm-bridge start"
         return text
     if action == "amend":
         number = inner.get("task_ordinal", inner.get("task_id"))
@@ -557,7 +558,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     mission = snapshot["mission"]
     config = mission.get("config") or {}
-    mode = "native" if config.get("native_tui") else ("headless" if config.get("headless") else "background")
+    mode = mission_mode(config)
     if config.get("trust_folder"):
         mode += ", trusts folder"
     lifecycle = snapshot.get("lifecycle") or {}

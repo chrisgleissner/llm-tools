@@ -7,7 +7,7 @@ has happened before approving completion or retrying uncertain work.
 ## Install and create a mission
 
 Install `llm-tools` as usual. Native and Background missions use a tmux
-station, so they need `tmux`; Headless (`--headless`) runs a mission without it. The existing provider CLIs and credentials are
+station, so they need `tmux`; Headless (`--mode headless`) runs a mission without it. The existing provider CLIs and credentials are
 used by the scheduler. Bridge adds no provider SDK or network service.
 
 Run `llm-bridge` with no arguments from any working directory to open the home
@@ -116,21 +116,28 @@ llm-bridge start --mission MISSION_ID
 A mission runs in one of three modes. The same three names appear in the home
 form, `--help`, `llm-bridge help` and `status`:
 
-| Mode | Flag | Provider | Station |
+| Mode | `--mode` | Provider | Station |
 | --- | --- | --- | --- |
-| Native | `--native` | the provider's own interactive terminal UI | tmux station with the provider in its pane; open it with `attach` |
-| Headless | `--headless` | runs without a terminal; Bridge shows its activity output | none; no tmux needed, nothing to attach to |
-| Background | neither flag (CLI default) | runs without a terminal, controlled by a background controller | tmux station whose provider pane tails the controller log; the Bridge pane takes control commands |
+| Native | `native` | the provider's own interactive terminal UI | tmux station with the provider in its pane; open it with `attach` |
+| Headless | `headless` | runs without a terminal; Bridge shows its activity output | none; no tmux needed, nothing to attach to |
+| Background | `background` (CLI default) | runs without a terminal, controlled by a background controller | tmux station whose provider pane tails the controller log; the Bridge pane takes control commands |
 
-The home form offers Native and Headless (Space switches); a mission created
-without either flag on the command line runs in Background mode. Older
-documentation and saved events call Background mode "autonomous".
+The home form offers all three (Space or Left/Right switches) and starts on
+Native, which is recommended for interactive work. The command line defaults to
+Background because it needs no terminal, so a script behaves the same on every
+machine. Older documentation and saved events call Background mode "autonomous".
+Mission JSON carries `"mode": "native|background|headless"` in `config`, next to
+the saved `headless` and `native_tui` booleans.
 
-Pass `--native` or `--headless` to `mission create` or `start`; a flag on
-`start` overrides the saved mode. Use one of them, not both: `mission create` and `start` both
-refuse the combination (`--headless and --native cannot be combined`). The
+Pass `--mode native|background|headless` to `mission create` or `start`; a mode
+on `start` overrides and saves the mission's mode. The older `--native` and
+`--headless` flags still work as aliases of `--mode native` and `--mode
+headless`. A flag that contradicts `--mode`, or `--native` with `--headless`,
+is refused (`--headless and --native cannot be combined`). The
 rotation comes from the llm-tools config (`[ralph]` before `[defaults]`),
-else the built-in `claude,codex,opencode`. `--routes` names configured route IDs and wins over
+else the built-in `claude,codex,opencode`, limited to the providers the config
+enables. `mission create --help` prints the rotation a new mission gets now.
+`--routes` names configured route IDs and wins over
 `--providers`. An explicit `--providers` without `--routes` clears configured
 routes, so the providers you list are what runs.
 
@@ -213,9 +220,11 @@ use. Since prior evidence may no longer apply, an amended task that was
 awaiting approval is queued again and must be verified against its new
 revision.
 
-`task add` on a completed mission reopens it: the mission becomes `STOPPED`, a
-`mission-reopened` event is recorded and the receipt says `Mission reopened ·
-start it with: llm-bridge start`. A cancelled mission takes no tasks.
+`task add` on a completed mission reopens it, with or without `--mission` (the
+folder's one completed mission is used when no unfinished one exists): the
+mission becomes `STOPPED`, a `mission-reopened` event is recorded and the
+receipt says `Mission ID reopened · start it with: llm-bridge start`. A
+cancelled mission takes no tasks.
 
 A provider's successful exit moves its task to `VERIFYING`; success alone does
 not complete the task. `task verify --evidence TEXT` alone only records the

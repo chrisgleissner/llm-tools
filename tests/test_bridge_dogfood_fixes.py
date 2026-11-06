@@ -392,13 +392,16 @@ def test_approve_alias_asks_for_confirmation_then_dispatches_the_public_command(
 
 def test_approve_alias_needs_a_single_candidate_or_a_number() -> None:
     state, _sent = _console([{"id": 1, "status": "VERIFYING"}, {"id": 2, "status": "VERIFYING"}])
-    assert not state._confirm_or_dispatch("approve")
-    assert state.output[-1] == "error: approve needs a task number · tasks awaiting approval: 1, 2"
-    assert not state._confirm_or_dispatch("approve x")
-    assert state.output[-1] == "error: usage: approve [TASK-NUMBER]"
+    # A refused command is consumed (the caller clears the line) and kept in history for recall.
+    assert state._confirm_or_dispatch("approve")
+    assert state.output[-1].startswith("error: approve needs a task number · tasks awaiting approval: 1, 2")
+    assert state._confirm_or_dispatch("approve x")
+    assert state.output[-1].startswith("error: usage: approve [TASK-NUMBER]")
+    assert list(state.history)[-2:] == ["approve", "approve x"] and state.confirm_command is None
     state, _sent = _console([])
-    assert not state._confirm_or_dispatch("approve")
-    assert state.output[-1].endswith("no task awaits approval")
+    assert state._confirm_or_dispatch("approve")
+    assert state.confirm_command is None
+    assert state.output[-1].startswith("error: approve needs a task number · no task awaits approval")
     assert bridge_tui._expand_console_alias("pause", {}) == ("pause", None)
     assert bridge_tui._expand_console_alias("approve 'unterminated", {}) == ("approve 'unterminated", None)
 

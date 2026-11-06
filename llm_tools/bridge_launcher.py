@@ -33,6 +33,15 @@ from .bridge_glyphs import (  # noqa: F401 - several names are re-exported
 )
 from .bridge_theme import mission_role
 from .bridge_states import CONTROLLED_MISSION_STATUSES, FINISHED_MISSION_STATUSES
+from .bridge_vocab import RunMode
+
+# The form's Mode row and Start button for each run mode (``{dash}`` is the localized dash glyph).
+_MODE_ROW = {
+    "native": "Native {dash} provider terminal in a station",
+    "background": "Background {dash} activity log in a station",
+    "headless": "Headless {dash} provider runs without a terminal",
+}
+_START_LABEL = {"native": "Start and open provider", "background": "Start and open activity log", "headless": "Start headless work"}
 
 _MAX_OBJECTIVE_BYTES = 1_048_576
 # Primary signal for an unbracketed paste is input already queued behind an
@@ -433,7 +442,7 @@ class Launcher:
     # which they were toggled on).
     providers: str = "codex"
     directory: str = ""
-    native: bool = True
+    mode: str = "native"
     error: str = ""
     cursors: list[int] = field(default_factory=lambda: [0, 0, 0])
     recovery_draft: Path | None = None
@@ -731,6 +740,20 @@ class Launcher:
         self.directory = str(directory)
         self.providers = ",".join(providers)
 
+    @property
+    def native(self) -> bool:
+        """True when the form is set to Native (the mode that opens the provider's own terminal)."""
+        return self.mode == "native"
+
+    @native.setter
+    def native(self, value: bool) -> None:
+        self.mode = "native" if value else "headless"
+
+    def cycle_mode(self, step: int) -> None:
+        """Move the Mode field to the next (``step`` 1) or previous (``-1``) of Native, Background, Headless."""
+        modes = tuple(RunMode)
+        self.mode = str(modes[(modes.index(RunMode(self.mode)) + step) % len(modes)])
+
     def create_args(self) -> list[str]:
         """Rotation arguments for ``mission create``.
 
@@ -852,7 +875,7 @@ class Launcher:
         elif key in {curses.KEY_BTAB, curses.KEY_UP}:
             self._move_focus(max(0, self.focus - 1))
         elif self.focus == 3 and key in {" ", curses.KEY_LEFT, curses.KEY_RIGHT}:
-            self.native = not self.native
+            self.cycle_mode(-1 if key == curses.KEY_LEFT else 1)
         elif enter and burst and self.focus == 0:
             # A newline inside a burst belongs to the pasted text, not to form
             # navigation: keep the focus on Objective and edit in the composer.
@@ -1064,8 +1087,8 @@ def _field_hint(state: Launcher, width: int) -> str:
     if state.focus == 2:
         return "Path to work in · Tab next"
     if state.focus == 3:
-        full = "Space/←/→ switch: Native shows the provider terminal in a station; Headless runs it without a terminal"
-        short = "Space/←/→ switch · Native: terminal in a station · Headless: no terminal"
+        full = "Space/←/→ switch: Native shows the provider terminal; Background, an activity log in a station; Headless, no station"
+        short = "Space/←/→ switch · Native: provider terminal · Background: activity log · Headless: no station"
         return full if cell_width(localize(full)) < width else short
     if state.focus == 4:
         return "Enter to save · no provider is started"
@@ -1349,10 +1372,9 @@ def _draw(window: curses.window, state: Launcher) -> None:
             objective_row,
             None,
             field(2, "Folder: ", state.directory or short_path(state.cwd, 4096)),
-            "Mode: " + (f"Native {glyph('dash')} provider terminal in a station" if state.native
-                        else f"Headless {glyph('dash')} provider runs without a terminal"),
+            "Mode: " + _MODE_ROW[state.mode].format(dash=glyph("dash")),
             "Save mission only",
-            "Start and open provider" if state.native else "Start headless work",
+            _START_LABEL[state.mode],
         )
         for index, text in enumerate(rows):  # type: ignore[assignment]  # rows holds strings; `text` also names a str | None earlier
             focused = index == state.focus
@@ -1805,9 +1827,7 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
                 _announce_saved(mission_id)
             return dispatch(["control", "--mission", mission_id])
         args = ["mission", "create", "--prompt=" + state.objective, *state.create_args(),
-                "--cwd", state.directory, "--json"]
-        if state.native:
-            args.append("--native")
+                "--cwd", state.directory, "--mode", state.mode, "--json"]
         output = io.StringIO()
         errors = io.StringIO()
         with redirect_stdout(output), redirect_stderr(errors):
@@ -1852,7 +1872,7 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
         _announce_saved(mission_id)
         start_errors = _Tee(sys.stderr)
         with redirect_stderr(start_errors):
-            started = dispatch(["start", "--mission", mission_id, *( ["--native"] if state.native else ["--headless"] )])
+            started = dispatch(["start", "--mission", mission_id, "--mode", state.mode])
         if started and _mission_status(mission_id) in {"CREATED", None}:
             # Start failed before any provider work began (the mission is still
             # CREATED, or its state cannot be read): show why on the home list with the saved mission selected.
@@ -1863,7 +1883,7 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
             reason = " ".join(start_errors.getvalue().split())
             state.error = reason or "Mission was saved but could not start. Open it and use start from its controls to retry."
             continue
-        if state.native:
+        if state.mode != "headless":
             # start attaches to the validated owned provider station. Once the
             # operator returns with Ctrl-] B/P or detaches (or the station was
             # closed), reopen the mission controls; the mission already exists.

@@ -93,14 +93,18 @@ def test_typing_a_view_name_switches_view_without_dispatching(word: str, view: s
     assert not state.command_pending and state.expand_requested
 
 
-def test_orders_and_tasks_commands_still_reach_the_dispatcher() -> None:
+def test_orders_and_tasks_words_open_the_tasks_view_and_task_list_still_reaches_the_dispatcher() -> None:
     sent: list[str] = []
     state = make_state()
     state.dispatch = lambda _mission, command: sent.append(command) or "ok"
     for word in ("orders", "tasks"):
+        state.choose_view(0)
         state._dispatch(word)
-        settle(state)
-    assert sent == ["orders", "tasks"] and state.view == "Overview"
+        assert state.view == "Tasks"
+    assert sent == []
+    state._dispatch("task list")
+    settle(state)
+    assert sent == ["task list"]
 
 
 def test_view_commands_are_completed_and_control_view_action_selects_normalized_view() -> None:

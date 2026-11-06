@@ -178,7 +178,7 @@ def next_steps(*, tmux_available: bool, providers: Sequence[Mapping[str, Any]], 
     """What to do next, from the same facts ``doctor`` just reported."""
     steps: list[str] = []
     if not tmux_available:
-        steps.append("Install tmux (sudo apt install tmux, or brew install tmux); native stations need it. Without tmux, create missions with --headless.")
+        steps.append("Install tmux (sudo apt install tmux, or brew install tmux); native stations need it. Without tmux, create missions with --mode headless.")
     ready = [check for check in providers if check.get("installed") and check.get("logged_in") is True]
     if not ready:
         waiting = [check for check in providers if check.get("installed") and check.get("logged_in") is False]
