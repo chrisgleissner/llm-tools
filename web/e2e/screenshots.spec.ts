@@ -96,3 +96,21 @@ for (const theme of ["light", "dark"] as const) {
     });
   }
 }
+
+test("mission task UI uses resource reads and idempotent resource mutations", async ({ page }) => {
+  const requests: Array<{ method: string; path: string; key?: string }> = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.includes("/missions/") && url.pathname.includes("/tasks")) {
+      requests.push({ method: request.method(), path: url.pathname, key: request.headers()["idempotency-key"] });
+    }
+  });
+  await mockApp(page, IN);
+  await page.goto(MISSION_PATH);
+  await expect(page.locator("#tasks-table tbody tr")).toHaveCount(6);
+  await page.getByRole("button", { name: "Pause task 5" }).click();
+  await expect(page.locator(".toast.applied")).toBeVisible();
+  expect(requests.some((request) => request.method === "GET" && request.path.endsWith("/tasks"))).toBe(true);
+  expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/tasks/5/pause") && request.key)).toBe(true);
+  expect(requests.some((request) => request.path.endsWith("/commands"))).toBe(false);
+});

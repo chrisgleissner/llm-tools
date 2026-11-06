@@ -203,6 +203,18 @@ export async function missionTasks(target: string, missionId: string, limit = 50
   return resourceResult(row) as { tasks: Array<Record<string, unknown>>; total: number; offset: number };
 }
 
+export async function missionStatus(target: string, missionId: string): Promise<Record<string, unknown>> {
+  const q = new URLSearchParams({ worker: target, wait_ms: "10000" });
+  const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}?${q}`);
+  return resourceResult(row);
+}
+
+export async function missionEvents(target: string, missionId: string, after: number, limit: number): Promise<{ events: Array<{ id: number; event: Record<string, unknown> }> }> {
+  const q = new URLSearchParams({ worker: target, after: String(after), limit: String(limit), wait_ms: "10000" });
+  const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/events?${q}`);
+  return resourceResult(row) as { events: Array<{ id: number; event: Record<string, unknown> }> };
+}
+
 /** Send task changes through the resource routes while preserving durable command outcomes. */
 export async function mutateTask(
   target: string,

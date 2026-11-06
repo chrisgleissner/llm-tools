@@ -818,6 +818,7 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     } = request;
     let worker = worker.ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
     let (operation, allowed): (&str, &[&str]) = match resource {
+        "mission" => ("mission.status", &[]),
         "tasks" => ("task.list", &["limit", "offset"]),
         "events" => ("mission.events", &["after", "limit"]),
         "operations" => ("session.list", &["limit"]),
@@ -829,9 +830,11 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     {
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", format!("unknown query parameter {key}")));
     }
-    let wait_ms = query
-        .get("wait_ms")
-        .map_or(Ok(0), |value| value.parse::<u64>().map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer")))?;
+    let wait_ms = query.get("wait_ms").map_or(Ok(0), |value| {
+        value
+            .parse::<u64>()
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer"))
+    })?;
     if wait_ms > MAX_WAIT_MS {
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be at most 30000"));
     }
@@ -882,6 +885,28 @@ async fn mission_tasks(
             mission_id: id,
             worker: q.get("worker").cloned(),
             resource: "tasks",
+            query: q,
+        },
+    )
+    .await
+}
+
+async fn mission_status_resource(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> ApiResult {
+    mission_read(
+        st,
+        p,
+        ip,
+        MissionReadRequest {
+            headers,
+            mission_id: id,
+            worker: q.get("worker").cloned(),
+            resource: "mission",
             query: q,
         },
     )
@@ -1463,6 +1488,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/{action}", &["POST"], Access::Authed, "operate"),
@@ -1526,6 +1552,7 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/missions", get(list_missions))
+        .route("/api/v1/missions/{id}", get(mission_status_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
         .route("/api/v1/missions/{id}/{action}", post(mission_action))

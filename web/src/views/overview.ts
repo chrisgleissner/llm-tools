@@ -62,8 +62,7 @@ export function overview(root: HTMLElement): () => void {
         const i = next++;
         const m = picked[i] as MissionEntry;
         try {
-          const row = await api.command(m.worker, "mission.status", m.mission.id, {}, 8000);
-          const r = (row.result?.result ?? {}) as { task_counts?: Record<string, number>; needs_you?: Snapshot["needs"] };
+          const r = (await api.missionStatus(m.worker, m.mission.id)) as { task_counts?: Record<string, number>; needs_you?: Snapshot["needs"] };
           results[i] = { worker: m.worker, id: m.mission.id, name: m.mission.name, counts: r.task_counts ?? {}, needs: r.needs_you ?? null };
         } catch {
           results[i] = null;

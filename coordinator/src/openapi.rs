@@ -168,7 +168,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 .collect(),
         );
     }
-    if path.starts_with("/api/v1/missions/{id}/") {
+    if path == "/api/v1/missions/{id}" || path.starts_with("/api/v1/missions/{id}/") {
         let mut params = op["parameters"].as_array().cloned().unwrap_or_default();
         params.push(json!({
             "name":"worker","in":"query","required":true,

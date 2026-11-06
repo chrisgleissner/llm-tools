@@ -19,8 +19,8 @@ remaining CLI parity operations are being added in this follow-up.
 
 Worker-owned mission resources take the worker name as a required `worker` query
 parameter because mission IDs are unique only within a worker. `GET
-/api/v1/missions/{id}/tasks`, `/events` and `/operations` are thin adapters over
-the typed `task.list`, `mission.events` and `session.list` operations. They return
+/api/v1/missions/{id}`, `/tasks`, `/events` and `/operations` are thin adapters over
+the typed `mission.status`, `task.list`, `mission.events` and `session.list` operations. They return
 the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
@@ -38,6 +38,10 @@ retries reuse the same durable command request ID.
 Mission start accepts the worker's `headless`, `native_tui`, `providers` and
 `routes` choices and validates the rotation on that worker before launching its
 controller.
+The mission detail page and `llm-bridge --target` use these resource routes for
+status, events, task lists and supported task/mission actions; commands without a
+resource mapping continue through the low-level command endpoint while their
+parity decision is tracked below.
 
 ```sh
 export COORDINATOR=https://localhost:8443

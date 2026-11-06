@@ -152,6 +152,14 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const limit = Number(url.searchParams.get("limit") ?? list.length);
       return json(route, 200, { missions: list.slice(offset, offset + limit), total: list.length, offset, statuses: facets });
     }
+    const missionResource = path.match(/^\/missions\/([^/]+)$/);
+    if (missionResource && method === "GET") {
+      const result = { mission: { id: MISSIONS[0]!.mission.id, name: MISSIONS[0]!.mission.name, status: "RUNNING", cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, needs_you: { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
+    }
+    if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.events", state: "done", result: { outcome: "ok", result: { schema_version: 1, events: [...EVENTS].reverse() }, error: null } });
+    }
     const taskRoute = path.match(/^\/missions\/([^/]+)\/tasks(?:\/(\d+)(?:\/([a-z-]+))?)?$/);
     if (taskRoute) {
       let operation = "task.list";

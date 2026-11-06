@@ -44,7 +44,7 @@ def opener(routes):
     def open_(request, context=None, timeout=None):
         path = request.full_url.split("8443", 1)[1]
         key = (request.get_method(), path.split("?")[0])
-        calls.append((key, json.loads(request.data) if request.data else None))
+        calls.append((key, json.loads(request.data) if request.data else None, dict(request.header_items())))
         answer = routes[key]
         if isinstance(answer, list):
             answer = answer.pop(0)
@@ -97,6 +97,8 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["status", "--mission", "m1"], "mission.status", {}),
         (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100}),
         (["stop", "--mission", "m1"], "mission.stop", {}),
+        (["start", "--mission", "m1", "--headless", "--providers", "codex"], "mission.start", {"headless": True, "native_tui": None, "providers": "codex", "routes": None}),
+        (["resume", "--mission", "m1"], "mission.resume", {}),
         (["task", "list", "--mission", "m1"], "task.list", {"limit": 200, "offset": 0}),
         (["task", "show", "--mission", "m1", "--task-id", "4"], "task.show", {"task_id": 4}),
         (["task", "verify", "--mission", "m1", "--task", "2", "--approve"], "task.verify", {"task_number": 2, "evidence": "", "approved": True}),
@@ -134,23 +136,36 @@ def test_run_cli_outcomes(capsys):
     assert remote.run_cli("ws", args("mission", "list"), client=client({("POST", "/api/v1/commands"): (200, done)})) == 0
     assert capsys.readouterr().out.strip()
     pending = {"state": "pending", "result": None}
-    assert remote.run_cli("ws", args("status", "--mission", "m"), client=client({("POST", "/api/v1/commands"): (202, pending)})) == remote.EXIT_UNAVAILABLE
+    assert remote.run_cli("ws", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (202, pending)})) == remote.EXIT_UNAVAILABLE
     assert "stays queued" in capsys.readouterr().err
     uncertain = {"state": "done", "result": {"outcome": "uncertain", "error": {"message": "disk"}}}
-    assert remote.run_cli("ws", args("cancel", "--mission", "m"), client=client({("POST", "/api/v1/commands"): (200, uncertain)})) == 2
+    assert remote.run_cli("ws", args("cancel", "--mission", "m"), client=client({("POST", "/api/v1/missions/m/cancel"): (200, uncertain)})) == 2
     assert "uncertain" in capsys.readouterr().err
     refused = {"error": {"code": "unknown-target", "message": "no worker"}}
-    assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("POST", "/api/v1/commands"): (404, refused)})) == 2
+    assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (404, refused)})) == 2
     assert "unknown-target" in capsys.readouterr().err
-    assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("POST", "/api/v1/commands"): (401, None)})) == 2
+    assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (401, None)})) == 2
     assert "API token" in capsys.readouterr().err
-    assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("POST", "/api/v1/commands"): (500, {})})) == 2
+    assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (500, {})})) == 2
     assert "HTTP 500" in capsys.readouterr().err
-    unreachable = client({("POST", "/api/v1/commands"): urllib.error.URLError("refused")})
+    unreachable = client({("GET", "/api/v1/missions/m"): urllib.error.URLError("refused")})
     assert remote.run_cli("x", args("status", "--mission", "m"), client=unreachable) == 2
     assert "cannot reach" in capsys.readouterr().err
     assert remote.run_cli("ws", args("status"), client=client({})) == 2
     assert "--mission is required" in capsys.readouterr().err
+
+
+def test_resource_submission_uses_resource_path_and_idempotency_key():
+    done = {"state": "done", "request_id": "req-add", "result": {"outcome": "applied", "result": {"id": 4}, "error": None}}
+    fake = client({("POST", "/api/v1/missions/m1/tasks"): (200, done)})
+    request = remote.commands.CommandRequest(
+        "task.add", {"title": "A task", "prompt": "Do work"}, mission_id="m1", target="ws", request_id="req-add"
+    )
+    assert fake.submit_resource("ws", request) == done["result"]
+    sent = fake.opener.calls[0]
+    assert sent[0] == ("POST", "/api/v1/missions/m1/tasks")
+    assert sent[1] == {"title": "A task", "prompt": "Do work", "wait_ms": 15000}
+    assert sent[2]["Idempotency-key"] == "req-add"
 
 
 def test_target_all_aggregates_reads_and_reports_unavailable_workers(capsys):

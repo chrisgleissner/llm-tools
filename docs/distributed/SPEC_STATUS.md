@@ -202,8 +202,8 @@ checkbox means the full requirement and its CI evidence are not complete yet.
 
 | ID | Status | Current evidence / remaining work |
 |---|---|---|
-| API-001 | [ ] | Added worker-qualified mission task, event and operation reads plus start/resume/pause/stop/cancel/continue, task-add/patch/verify and task pause/resume/cancel/retry resource mutations (`coordinator/tests/web_api.rs::mission_task_resource_adapts_to_the_typed_worker_command`, `mission_and_task_mutations_adapt_to_typed_worker_commands`); other task options and remaining resource routes remain. |
-| API-002 | [ ] | Resource adapters serialize into the existing typed worker command envelope and call the same durable coordinator command handler; route adapter tests cover reads, mission controls, `task.add`, `task.amend`, `task.verify`, `task.reject` and task lifecycle actions. Mission detail task list/actions in the web console use these routes; remaining console views and remote CLI migration remain. |
+| API-001 | [ ] | Added worker-qualified mission status/task/event/operation reads plus start/resume/pause/stop/cancel/continue, task-add/patch/verify and task pause/resume/cancel/retry resource mutations (`coordinator/tests/web_api.rs::mission_task_resource_adapts_to_the_typed_worker_command`, `mission_and_task_mutations_adapt_to_typed_worker_commands`); other task options and remaining resource routes remain. |
+| API-002 | [ ] | Resource adapters serialize into the existing typed worker command envelope and call the same durable coordinator command handler; route adapter tests cover reads, mission controls, `task.add`, `task.amend`, `task.verify`, `task.reject` and task lifecycle actions. Mission detail/overview status and mission task/event reads plus supported task mutations use these routes; remaining console views remain. |
 | API-003 | [ ] | `Idempotency-Key` now maps to the durable request ID, repeated keys replay, and pending commands return 202 with `Location` (`coordinator/tests/worker.rs::request_id_idempotence_and_refusals`); `If-Match`/ETag and explicit uncertain mapping remain. |
 | API-004 | [ ] | API errors now use RFC 9457 `application/problem+json` with stable code URIs (`http::problem_tests`); opaque cursor pagination, timestamp contract and complete response tests remain. |
 | API-005 | [ ] | Route scope policy, `--scope`, default `read`, old-token `admin` migration and per-route scope matrix are implemented (`coordinator/tests/routes.rs`, `coordinator/tests/ops.rs`, `coordinator/tests/hardening.rs`); green CI run evidence pending. |
@@ -214,7 +214,7 @@ checkbox means the full requirement and its CI evidence are not complete yet.
 | API-010 | [ ] | Local script-free reference at `/api/docs`; assets are not bundled. Test and bundle evidence pending. |
 | API-011 | [ ] | Snapshot is committed and regeneration checked in CI; released-baseline breaking-change checker remains. |
 | API-012 | [ ] | OpenAPI route/scope/snapshot tests added; response-wide schema validation and Schemathesis fuzzing remain. |
-| API-013 | [ ] | Remote CLI and `--target` client migration remains. |
+| API-013 | [ ] | Standard-library `llm-bridge remote` client maps mission status/events/controls and task list/add/amend/verify/reject/priority/reorder/lifecycle operations to resource routes with existing CLI result handling (`tests/test_bridge_remote.py`); remaining operations still use `/commands` or have explicit unmappable errors. |
 | API-014 | [ ] | Coordinator guide, API examples, README and site link updated; full versioning, pagination and rate-limit contract remains. |
 | API-015 | [ ] | CLI/route parity table and argparse-tree test remain. |
 | API-016 | [ ] | Worker opt-ins and enforcement remain. |

@@ -1,12 +1,12 @@
 """Remote CLI: run typed commands on another worker through the coordinator.
 
 ``llm-bridge --target NAME ...`` maps the parsed command line to a
-``CommandRequest`` and submits it to the coordinator's ``POST
-/api/v1/commands``. The worker executes it through the same command layer as a
-local run, so the output is the same JSON (CLI-003, TEST-003). Nothing here
-falls back to local execution: an unknown, unreachable or silent target is an
-explicit error (CLI-005). ``--target all`` aggregates read operations only
-(CLI-004).
+``CommandRequest``. The client uses the matching resource endpoint when one is
+available, otherwise the low-level ``POST /api/v1/commands`` adapter. The worker
+executes every operation through the same command layer as a local run, so the
+output is the same JSON (CLI-003, TEST-003). Nothing here falls back to local
+execution: an unknown, unreachable or silent target is an explicit error
+(CLI-005). ``--target all`` aggregates read operations only (CLI-004).
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import ssl
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -103,12 +104,20 @@ class Client:
         self.context.minimum_version = ssl.TLSVersion.TLSv1_2
         self.opener = opener or _open_without_redirects
 
-    def call(self, method: str, path: str, body: dict[str, Any] | None = None, *, timeout: float = 30.0) -> tuple[int, Any]:
+    def call(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        *,
+        timeout: float = 30.0,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, Any]:
         request = urllib.request.Request(
             self.config.coordinator_url + path,
             method=method,
             data=None if body is None else json.dumps(body).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.config.token}", "Content-Type": "application/json", "Accept": "application/json"},
+            headers={"Authorization": f"Bearer {self.config.token}", "Content-Type": "application/json", "Accept": "application/json", **(headers or {})},
         )
         try:
             with self.opener(request, context=self.context, timeout=timeout) as response:
@@ -139,6 +148,64 @@ class Client:
         if not isinstance(body, dict) or body.get("state") != "done" or not isinstance(body.get("result"), dict):
             raise RemoteError(
                 f"target {target!r} did not answer within {wait:.0f}s; request {request.request_id} stays queued and is "
+                "delivered when the worker reconnects",
+                exit_code=EXIT_UNAVAILABLE,
+            )
+        return dict(body["result"])
+
+    def submit_resource(self, target: str, request: commands.CommandRequest, *, wait: float = WAIT_SECONDS) -> dict[str, Any] | None:
+        """Use the resource route when one exists; return ``None`` for legacy-only operations."""
+        mission = request.mission_id
+        if mission is None:
+            return None
+        base = f"/api/v1/missions/{urllib.parse.quote(mission, safe='')}"
+        op = request.operation
+        params = dict(request.params)
+        worker = urllib.parse.urlencode({"worker": target})
+        headers = {"Idempotency-Key": request.request_id}
+        wait_ms = int(wait * 1000)
+        if op == "mission.status":
+            query = urllib.parse.urlencode({"worker": target, "wait_ms": wait_ms})
+            status, body = self.call("GET", f"{base}?{query}", timeout=wait + 15)
+        elif op in {"mission.start", "mission.resume", "mission.pause", "mission.stop", "mission.cancel", "mission.continue"}:
+            action = op.removeprefix("mission.")
+            status, body = self.call("POST", f"{base}/{action}?{worker}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op == "task.list":
+            query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 50), "offset": params.get("offset", 0), "wait_ms": wait_ms})
+            status, body = self.call("GET", f"{base}/tasks?{query}", timeout=wait + 15)
+        elif op == "mission.events":
+            query = urllib.parse.urlencode({"worker": target, "after": params.get("after", 0), "limit": params.get("limit", 50), "wait_ms": wait_ms})
+            status, body = self.call("GET", f"{base}/events?{query}", timeout=wait + 15)
+        elif op == "session.list":
+            query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 100), "wait_ms": wait_ms})
+            status, body = self.call("GET", f"{base}/operations?{query}", timeout=wait + 15)
+        elif op == "task.add":
+            status, body = self.call("POST", f"{base}/tasks?{worker}", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
+        elif op.startswith("task."):
+            task_selector = params.get("task_number")
+            if task_selector is None or "task_id" in params:
+                return None
+            task_base = f"{base}/tasks/{int(task_selector)}"
+            body_params = {key: value for key, value in params.items() if key not in {"task_number", "task_id"}}
+            body_params["wait_ms"] = wait_ms
+            if op in {"task.verify", "task.reject"}:
+                if op == "task.reject":
+                    body_params["approved"] = False
+                status, body = self.call("POST", f"{task_base}/verify?{worker}", body_params, timeout=wait + 15, headers=headers)
+            elif op in {"task.amend", "task.priority", "task.reorder", "task.dependency"}:
+                status, body = self.call("PATCH", f"{task_base}?{worker}", body_params, timeout=wait + 15, headers=headers)
+            elif op in {"task.pause", "task.resume", "task.cancel", "task.retry"}:
+                status, body = self.call("POST", f"{task_base}/{op.removeprefix('task.')}?{worker}", body_params, timeout=wait + 15, headers=headers)
+            else:
+                return None
+        else:
+            return None
+        if status not in {200, 202}:
+            raise RemoteError(_api_error(status, body))
+        if not isinstance(body, dict) or body.get("state") != "done" or not isinstance(body.get("result"), dict):
+            request_id = body.get("request_id", request.request_id) if isinstance(body, dict) else request.request_id
+            raise RemoteError(
+                f"target {target!r} did not answer within {wait:.0f}s; request {request_id} stays queued and is "
                 "delivered when the worker reconnects",
                 exit_code=EXIT_UNAVAILABLE,
             )
@@ -202,6 +269,18 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         return make("mission.events", {"after": args.after, "limit": args.limit}), lambda value: fmt.format_events(value["events"])
     if command == "mission" and args.mission_action == "list":
         return make("mission.list", {"include_config": bool(args.include_config)}, with_mission=False), lambda value: fmt.format_mission_list(value["missions"])
+    if command == "start":
+        params = {
+            "headless": getattr(args, "headless", None),
+            "native_tui": getattr(args, "native_tui", None),
+            "providers": getattr(args, "providers", None),
+            "routes": getattr(args, "routes", None),
+        }
+        request = make("mission.start", params)
+        return request, lambda value: fmt.format_command_receipt("start", value, request.mission_id or "")
+    if command == "resume":
+        request = make("mission.resume")
+        return request, lambda value: fmt.format_command_receipt("resume", value, request.mission_id or "")
     if command in {"pause", "cancel", "continue"} or (command == "stop" and not getattr(args, "force", False)):
         request = make(f"mission.{command}")
         return request, lambda value: fmt.format_command_receipt(command, value, request.mission_id or "")
@@ -235,7 +314,7 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         operation = f"task.{action}"
         commands.lookup(operation)
         return make(operation, {**_task_selector(args), **extra}), lambda value: fmt.format_task_result(action, value)
-    raise ValueError(f"{command} is not available with --target {target}; remote commands: status, events, mission list, pause, stop, cancel, continue, task, proposal list|accept|reject")
+    raise ValueError(f"{command} is not available with --target {target}; remote commands: status, events, mission list, start, resume, pause, stop, cancel, continue, task, proposal list|accept|reject")
 
 
 def _envelope_exit(envelope: dict[str, Any]) -> tuple[int, str | None]:
@@ -259,7 +338,8 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
         request, human = request_for(args, target)
         spec = commands.lookup(request.operation)
         if target != commands.ALL_TARGET:
-            envelope = client.submit(target, request)
+            resource_result = client.submit_resource(target, request)
+            envelope = client.submit(target, request) if resource_result is None else resource_result
             code, message = _envelope_exit(envelope)
             if message:
                 print(f"llm-bridge: {target}: {message}", file=sys.stderr)
@@ -276,7 +356,9 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
                 failures += 1
                 continue
             try:
-                results[name] = client.submit(name, dataclasses.replace(request, target=name, request_id=os.urandom(16).hex()))
+                per_worker = dataclasses.replace(request, target=name, request_id=os.urandom(16).hex())
+                resource_result = client.submit_resource(name, per_worker)
+                results[name] = client.submit(name, per_worker) if resource_result is None else resource_result
             except RemoteError as exc:
                 results[name] = {"outcome": "unavailable", "error": {"code": "unreachable", "message": str(exc)}}
                 failures += 1

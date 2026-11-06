@@ -318,8 +318,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       return;
     }
     try {
-      const row = await api.command(workerName, "mission.status", missionId, {});
-      snapshot = (row.result?.result ?? null) as Record<string, unknown> | null;
+      snapshot = await api.missionStatus(workerName, missionId);
       snapshotError = snapshot ? "" : "The worker returned no status.";
     } catch (e) {
       snapshotError = e instanceof api.ApiError ? e.message : "Cannot load status.";
@@ -351,7 +350,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const cursor = worker(workerName)?.event_cursor ?? 0;
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
-      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${eventStart}&limit=1000`);
+      const r = await api.missionEvents(workerName, missionId, eventStart, 1000);
       events = r.events.map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
       eventError = "";
     } catch (e) {
@@ -364,7 +363,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const upto = eventStart;
     const from = Math.max(0, upto - EVENT_WINDOW);
     try {
-      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${from}&limit=${EVENT_WINDOW}`);
+      const r = await api.missionEvents(workerName, missionId, from, EVENT_WINDOW);
       const older = r.events.filter((x) => x.id <= upto).map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
       events = [...older, ...events];
       eventStart = from;

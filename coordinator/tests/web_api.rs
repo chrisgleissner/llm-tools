@@ -151,7 +151,7 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
             "build-1",
             "worker-id-resource-test",
             &hello,
-            &json!([{"operation":"task.list","mutating":false}]),
+            &json!([{"operation":"task.list","mutating":false},{"operation":"mission.status","mutating":false}]),
         )
         .unwrap();
 
@@ -166,6 +166,9 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
     let (status, problem) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&admin=true").await;
     assert_eq!(status, 400, "{problem}");
     assert_eq!(problem["type"], "https://llm-tools.dev/problems/invalid-request");
+    let (status, status_command) = api.get("/api/v1/missions/mission-1?worker=build-1").await;
+    assert_eq!(status, 202, "{status_command}");
+    assert_eq!(status_command["operation"], "mission.status");
     env.stop().await;
 }
 
