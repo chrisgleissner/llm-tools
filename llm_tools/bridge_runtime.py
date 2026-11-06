@@ -438,7 +438,8 @@ class BridgeMissionHooks:
         """
         from .scheduler import _route_or_provider_decision, is_undetermined_reason
 
-        decision = selection.get("decision") if isinstance(selection.get("decision"), dict) else {}
+        decision_raw = selection.get("decision")
+        decision: dict[str, Any] = decision_raw if isinstance(decision_raw, dict) else {}
         if decision.get("usable") is not False or not is_undetermined_reason(str(decision.get("reason") or "")):
             return True  # usable, no decision recorded, or a known wait that Ralph's selection already handles
         if getattr(scheduler_config, "suspend_until_ready", False):

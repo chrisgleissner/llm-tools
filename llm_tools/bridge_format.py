@@ -687,7 +687,8 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     total = sum(int(value) for value in counts.values())
     lines.append(f"Tasks       {total} total" + (": " + ", ".join(f"{count} {name}" for name, count in sorted((status_label(key), value) for key, value in counts.items())) if counts else ""))
     attention = snapshot.get("needs_you") or needs_attention(snapshot)
-    waiting_now = snapshot.get("waiting") if isinstance(snapshot.get("waiting"), dict) else {}
+    waiting_raw = snapshot.get("waiting")
+    waiting_now: dict[str, Any] = waiting_raw if isinstance(waiting_raw, dict) else {}
     # A provider that is not signed in (or not installed) will not recover by waiting: that needs the operator.
     unfixable = [e for e in waiting_now.get("entries") or [] if e.get("reason") in {"not-authenticated", "missing-cli"}]
     if attention and (attention.get("kind") != "capacity" or unfixable):

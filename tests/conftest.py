@@ -296,6 +296,8 @@ PROCFS_ONLY_MODULES = frozenset({
 })
 # Single tests in otherwise portable modules that read a process start token or /proc/self/cmdline.
 PROCFS_ONLY_TESTS = frozenset({
+    "tests/test_bridge_status_honesty.py::test_stop_force_with_no_provider_process_succeeds_and_says_so",
+    "tests/test_bridge_status_honesty.py::test_start_after_stop_force_runs_the_interrupted_task_again",
     "tests/test_bridge_refresh.py::test_refresh_worker_records_heartbeat_then_delays_quota_refresh",
     "tests/test_bridge_review_regressions.py::test_complete_stop_terminates_owned_descendant_in_a_new_session",
     "tests/test_bridge_review_regressions.py::test_owned_group_termination_kills_descendant_after_leader_exits",
