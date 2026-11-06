@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 REGISTER = Path(__file__).resolve().parents[1] / "docs" / "distributed" / "SPEC_STATUS.md"
+FINAL_REPORT = REGISTER.with_name("FINAL_REPORT.md")
 
 # Prefix and highest number of each ID group in the distributed Bridge specification.
 SPEC_GROUPS = {
@@ -63,6 +64,15 @@ def test_verified_and_blocked_rows_carry_evidence() -> None:
     for identifier, status, evidence in register_rows():
         if status in {"[x]", "[!]"}:
             assert evidence, f"{identifier} is {status} without evidence or blocker"
+
+
+def test_final_report_counts_match_the_register() -> None:
+    counts = Counter(status for _, status, _ in register_rows())
+    labels = {"[x]": "Verified", "[~]": "Incomplete", "[!]": "Blocked", "[ ]": "Not started"}
+    report = FINAL_REPORT.read_text(encoding="utf-8")
+    for status, label in labels.items():
+        assert f"| {label} `[{status[1]}]` | {counts[status]} |" in report
+    assert f"| **Total** | **{sum(counts.values())}** |" in report
 
 
 def test_numeric_prefix_id_is_not_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
