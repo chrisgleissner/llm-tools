@@ -749,6 +749,9 @@ def provider_ready(rows: list[UsageRow], provider: str) -> bool:
 
 def classify_budget_guidance(window: str, remaining: Any, reset: Any, env: dict[str, str] | None = None) -> GuidanceInfo:
     rem = common.num(remaining)
+    if rem is not None and rem <= 0:
+        # An exhausted window is not "behind pace": say so, as the 5h rows do.
+        return GuidanceInfo("× empty", "empty")
     expected = expected_remaining_percent(window, reset, env)
     if rem is None or expected is None:
         return GuidanceInfo("· no rate data", "unknown")
@@ -2737,11 +2740,15 @@ def dashboard_snapshot(cfg: Config, *, provider_data: dict[str, Any] | None = No
     Fetching remains the caller's background responsibility. No subprocess
     running llm-usage, global stdout redirection or duplicate quota math is used.
     """
-    from io import StringIO
-
     if provider_data is None:
         provider_data, _ = _render_data_for_frame(cfg, start_ephemeral=False)
     rows, show_model = _build_usage_rows(cfg, provider_data)
+    return _dashboard_payload(cfg, rows, show_model)
+
+
+def _dashboard_payload(cfg: Config, rows: list[Any], show_model: bool) -> dict[str, Any]:
+    from io import StringIO
+
     cols = fitted_columns_for_rows(cfg, rows, show_model)
     stream = StringIO()
     if not cfg.no_header:
@@ -2763,6 +2770,34 @@ def dashboard_snapshot(cfg: Config, *, provider_data: dict[str, Any] | None = No
             "kind": row.kind,
         } for row in rows],
     }
+
+
+def row_provider_key(row: Any) -> str:
+    """The provider id (`claude`, `zai`) a usage row belongs to, from the name its Provider column shows."""
+    label = str(getattr(row, "provider_label", "") or getattr(row, "provider", "")).strip().lower().replace(".", "")
+    return label.split(" ")[0] if label else ""
+
+
+def dashboard_views(
+    cfg: Config,
+    provider_data: dict[str, Any],
+    *,
+    rotation: "frozenset[str]",
+    hide: "frozenset[str]" = frozenset(),
+) -> "tuple[dict[str, Any], dict[str, Any]]":
+    """(rotation-only dashboard, dashboard of every provider not in `hide`), both built from one set of rows.
+
+    The rows are built once, so burn-rate samples are logged once. Rows whose
+    provider is not a provider id (the overall budget total) belong to the second
+    dashboard only.
+    """
+    rows, _show_model = _build_usage_rows(cfg, provider_data)
+
+    def view(keep: Any) -> dict[str, Any]:
+        subset = [row for row in rows if keep(row_provider_key(row))]
+        return _dashboard_payload(cfg, subset, any(row.model for row in subset))
+
+    return view(lambda key: key in rotation), view(lambda key: key not in hide)
 
 
 def render_watch_frame(cfg: Config) -> None:

@@ -136,7 +136,8 @@ def console_snapshot(
     extra = {} if prompt_chars is None else {"prompt_chars": prompt_chars}
     result = status_snapshot(mission_id, task_limit=task_limit, task_offset=task_offset, search=search, event_offset=event_offset, event_anchor=event_anchor, **extra)
     if view == "Usage":
-        from .bridge_usage import embedded_usage
+        from .bridge_usage import embedded_usage, rotation_providers
+        embedded_usage.set_rotation(rotation_providers(result))
         result["usage"] = embedded_usage.snapshot()
     if view == "Agents":
         from .bridge_agents import build_agent_map

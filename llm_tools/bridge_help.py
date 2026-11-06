@@ -359,9 +359,11 @@ The list follows the mission state; the command to type is shown for each.
 Keys: Up/Down choose · Enter run (risky ones ask first) · Ctrl-K find an action
 Slash: typing / followed by a letter goes to the command line, so
 /reject 3 WHY works here too.""",
-    "Usage": """Usage: the llm-usage dashboard for all providers
+    "Usage": """Usage: the llm-usage dashboard for the mission's providers
 
-The table comes first. Keys: l show or hide the legend · Up/Down scroll
+The table comes first. It lists the mission's rotation providers; a shows every
+installed provider. If a live read differs from the controller's last observation, a
+line under the title says so. Keys: l show or hide the legend · Up/Down scroll
 Shift-Left/Right pan wide tables. At narrow widths the Remaining Time column is
 hidden before anything else. Slash: /providers shows the capacity per provider.""",
 }

@@ -1444,6 +1444,50 @@ def _usage_capacity_lines(snapshot: dict[str, object]) -> list[str]:
     ]
 
 
+# Percent points two capacity readings of the same window may differ before they are reported as a disagreement.
+_USAGE_AGREEMENT_TOLERANCE = 5.0
+
+
+def _usage_disagreements(snapshot: dict[str, object]) -> list[str]:
+    """One line per provider whose Usage rows contradict the controller's last capacity observation.
+
+    The dashboard is a live llm-usage read; Overview, Providers and `status` show what the
+    controller last observed. When they differ for a window, say so and give the controller's
+    figures and their age instead of leaving two screens that answer differently.
+    """
+    usage = _dict(snapshot.get("usage"))
+    if not isinstance(usage.get("rows"), list):
+        return []
+    capacity = _dict(snapshot.get("capacity"))
+    age = _int_or_none(capacity.get("source_age_seconds"))
+    now = _clock_epoch()
+    lines: list[str] = []
+    reported: set[str] = set()
+    for decision in _items(_dict(capacity.get("selection")).get("decisions")):
+        provider = str(decision.get("capacity_provider") or decision.get("provider") or "").strip().lower()
+        windows = [window for window in _items(decision.get("windows")) if _percent_value(window.get("remaining_percent")) is not None]
+        rows = _usage_rows_for(snapshot, provider)
+        if not provider or provider in reported or not windows or not rows:
+            continue
+
+        def agrees(window: dict[str, object]) -> bool:
+            """True when the dashboard has no row for this window or a row within the tolerance."""
+            wanted = _percent_value(window.get("remaining_percent"))
+            same = [row for row in rows if row.get("scope") == window.get("name")]
+            return not same or any(
+                (seen := _percent_value(row.get("remaining_percent"))) is not None and wanted is not None
+                and abs(seen - wanted) <= _USAGE_AGREEMENT_TOLERANCE
+                for row in same
+            )
+
+        if all(agrees(window) for window in windows):
+            continue
+        reported.add(provider)
+        observed = _SEP.join(_window_summary(window, now).split(", resets")[0] for window in windows)
+        lines.append(f"{provider} differs from the controller's last observation" + (f" ({_age(age)} ago)" if age is not None else "") + f": {observed}")
+    return lines
+
+
 def _with_square(text: str) -> str:
     """Put the provider square in front of a capacity line (`■ codex (active) · 5h 95% left`)."""
     return f"{glyph('square')} {text}"
@@ -3120,6 +3164,7 @@ class _ConsoleState:
     expand_requested: bool = False
     usage_hscroll: int = 0
     usage_legend: bool = False
+    usage_all: bool = False
     saved_notice: bool = False  # show "saved as ID" in the status strip until the first key
     usage_reader: Callable[[], dict[str, object]] | None = field(default=None, repr=False)
     content_width: int = 0  # columns available to view content; set by the last draw (0 = unknown)
@@ -3834,6 +3879,9 @@ class _ConsoleState:
         if key == "l" and self.view == "Usage" and not self.input_focused and not self.command:
             self.usage_legend = not self.usage_legend
             return True
+        if key == "a" and self.view == "Usage" and not self.input_focused and not self.command and "all_text" in _dict(self.snapshot.get("usage")):
+            self.usage_all = not self.usage_all
+            return True
         if key == "v" and self.view == "Tasks" and not self.input_focused:
             task = self.selected_task()
             if task is not None:
@@ -4350,7 +4398,9 @@ class _ConsoleState:
         from .bridge_documents import render_ansi_segments
 
         usage = _dict(self.snapshot.get("usage"))
-        text = str(usage.get("text") or "Loading full llm-usage dashboard...")
+        limited = "all_text" in usage  # the default text is the mission's rotation; `a` shows every provider
+        everything = limited and self.usage_all
+        text = str(usage.get("all_text" if everything else "text") or "Loading full llm-usage dashboard...")
         styled = [[(localize_cells(part), role) for part, role in line] for line in render_ansi_segments(text)]
         lines = [_segments_text(line) for line in styled]
         parts = ["Usage", str(usage.get("status") or "refreshing")]
@@ -4358,10 +4408,14 @@ class _ConsoleState:
         parts.append(f"updated {_age(age)} ago" if age is not None else "first sample pending")
         if usage.get("error"):
             parts.append(f"last refresh failed: {_text(usage.get('error'), 60)}")
+        if limited:
+            parts.append("all providers (a: rotation)" if everything else "rotation (a: all)")
+        parts.append("live llm-usage read")  # the source, so a difference from the controller's observation is explicable
         status = [(_SEP.join(parts), _status_role(_SEP.join(parts)))]
+        differences = [[(localize_cells(line), "warn")] for line in _usage_disagreements(self.snapshot)]
         table_start = next((index for index, line in enumerate(lines) if _USAGE_HEADER.match(line)), None)
         if table_start is None:
-            return [status, *styled]
+            return [status, *differences, *styled]
         table = _fit_usage_segments(styled[table_start:], self.content_width)
         while table and not _segments_text(table[-1]).strip():
             table.pop()
@@ -4369,7 +4423,7 @@ class _ConsoleState:
             table[0] = [(_segments_text(table[0]), "heading")]
         if len(table) > 1 and _segments_text(table[1]).strip() and set(_segments_text(table[1]).strip()) <= {"─", "-", " "}:
             table[1] = [(_segments_text(table[1]), "dim")]
-        result = [status, *table]
+        result = [status, *differences, *table]
         legend = [line for line in styled[1:table_start] if _segments_text(line).strip()]
         if legend:
             result.extend([[], *(legend if self.usage_legend else [[("l shows the legend", "dim")]])])
