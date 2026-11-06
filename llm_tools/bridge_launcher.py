@@ -28,7 +28,7 @@ from .bridge_format import printable
 from .bridge_input import cell_slice, cell_width, without_flow_control
 from .bridge_input import BracketedPaste
 from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
-from .bridge_vocab import MISSION_NEEDS_YOU_LABEL
+from .bridge_vocab import MISSION_INTERRUPTED_LABEL, MISSION_NEEDS_YOU_LABEL
 from .bridge_glyphs import (  # noqa: F401 - several names are re-exported
     FINISHED_STATES, GLYPHS, _locale_codeset, ascii_mode, glyph, localize, provider_role, state_look, state_text,
 )
@@ -65,8 +65,8 @@ _AGE_WIDTH = 8
 _ID_WIDTH = 8  # the short mission id
 _MIN_COLUMNS, _MIN_ROWS = 60, 20
 _PROVIDERS_LABEL = "Providers: "
-_STALE_MARKER = "stale"
-_STALE_WIDTH = len(_STALE_MARKER) + 1
+# A mission whose controller is gone shows INTERRUPTED, which is longer than the other status words.
+_STALE_WIDTH = len(MISSION_INTERRUPTED_LABEL) - _STATUS_WIDTH
 # How long one controller-liveness probe is reused. The probe takes a lock
 # briefly, so it must not run on every draw; a visible live mission is redrawn
 # at this interval so a controller that stopped shows as stale.
@@ -1061,7 +1061,7 @@ def controller_note(mission: dict[str, Any], controller: str | None, review: int
     if review is not None:
         return localize(f"task {review} awaits your review · Enter to open"), "state_review"
     if controller == "stale":
-        return localize("controller not running · Enter opens controls, then type resume"), "warn"
+        return localize(f"controller stopped unexpectedly · llm-bridge start --mission {str(mission.get('id', ''))[:8]} resumes it"), "warn"
     if controller != "live":
         return "Enter opens controls", "dim"
     config = mission.get("config")
@@ -1270,18 +1270,16 @@ def _mission_row(state: Launcher, mission: dict[str, Any], cols: ListColumns, co
     stale = controller == "stale"
     finished = status_group(status) == _GROUP_FINISHED
     reviewing = state.review_task(mission) is not None
-    shown_status = MISSION_NEEDS_YOU_LABEL if reviewing else status
+    shown_status = MISSION_NEEDS_YOU_LABEL if reviewing else MISSION_INTERRUPTED_LABEL if stale else status
     base = "selected" if selected else ("muted" if finished else "info")
     quiet = "selected" if selected else "muted"
     config = mission.get("config") if isinstance(mission.get("config"), dict) else {}
     chip = "selected" if selected else mission_role(mission.get("id"), config)
     parts: list[tuple[str, str]] = [
         ("> " if selected else "  ", "selected" if selected else "info"),
-        (pad(truncate(state_text(shown_status), _STATE_CELLS), _STATE_CELLS),
+        (pad(truncate(state_text(shown_status), _STATE_CELLS + stale_w), _STATE_CELLS + stale_w),
          "selected" if selected else ("state_review" if reviewing else "warn" if stale else status_role(status))),
     ]
-    if stale_w:
-        parts.append((pad(" " + _STALE_MARKER if stale else "", stale_w), "selected" if selected else "warn"))
     if cols.ident:
         parts += [("  ", base), (pad(str(mission.get("id", ""))[:cols.ident], cols.ident), quiet)]
     parts += [("  ", base), (glyph("chip") + " ", chip), (pad(truncate(str(mission.get("name", "")), cols.name), cols.name), base)]

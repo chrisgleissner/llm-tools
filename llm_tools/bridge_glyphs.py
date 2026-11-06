@@ -15,7 +15,7 @@ import locale
 import sys
 import unicodedata
 
-from .bridge_vocab import MISSION_NEEDS_YOU_LABEL, status_label
+from .bridge_vocab import MISSION_INTERRUPTED_LABEL, MISSION_NEEDS_YOU_LABEL, status_label
 
 # name -> (UTF-8, ASCII).  Composite forms come before the single glyphs they
 # contain, because ``localize`` replaces in table order.
@@ -141,6 +141,7 @@ STATE_LOOK: dict[str, tuple[str, str]] = {
     "INTENT": ("waiting", "state_waiting"), "PREPARED": ("waiting", "state_waiting"),
     "VERIFYING": ("review", "state_review"), "REVIEW": ("review", "state_review"),
     MISSION_NEEDS_YOU_LABEL: ("review", "state_review"),
+    MISSION_INTERRUPTED_LABEL: ("failed", "state_failed"),
     "COMPLETED": ("done", "state_done"), "DONE": ("done", "state_done"), "SUCCEEDED": ("done", "state_done"),
     "FAILED": ("failed", "state_failed"), "BLOCKED": ("failed", "state_failed"),
     "UNAVAILABLE": ("failed", "state_failed"), "ERROR": ("failed", "state_failed"),

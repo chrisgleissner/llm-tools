@@ -301,12 +301,12 @@ def test_list_columns_alignment_markers_and_detail(tmp_path):
         mission("日本語のミッション 🚀", "PAUSED", here, timedelta(hours=3), "22222222bbbb"),
         mission("x" * 200, "COMPLETED", "/srv/z", timedelta(days=5), "33333333cccc"),
     ], here)
-    state = Launcher(here, missions=items, selected=1, installed=("codex",))
+    state = Launcher(here, missions=items, selected=1, installed=("codex",), probe=lambda ident: ident.startswith("1111"))
     grid = Grid()
     launcher._draw(grid, state)
     rows = [grid.row(y) for y in range(5, 9)]
     assert rows[0].lstrip().startswith("New mission in this folder")
-    assert rows[1].startswith("> ‖ PAUSED") and "3h ago" in rows[1]
+    assert rows[1].startswith("> ✕ INTERRUPTED") and "3h ago" in rows[1]
     assert rows[2].startswith("  ● RUNNING") and "2m ago" in rows[2]
     assert rows[3].startswith("  ✓ COMPLETED") and "…" in rows[3] and "5d ago" in rows[3]
     # The "here" marker sits in the folder column, and only on the current folder's row.

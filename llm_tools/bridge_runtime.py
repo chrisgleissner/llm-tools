@@ -425,7 +425,53 @@ class BridgeMissionHooks:
             return updated
         return selection
 
+    def _await_capacity_data(self, context: dict[str, Any], selection: dict[str, Any], scheduler_config: Any) -> bool:
+        """Wait for a provider whose capacity cannot be determined, with no operation open.
+
+        Ralph selects such a provider when no other one is usable, and the
+        scheduler would then wait up to ``max_unavailable_wait`` before it
+        launches optimistically. Waiting here instead keeps the task READY and
+        the operation absent until a provider process is really about to start.
+        The deadline is an absolute epoch recorded once, so a countdown that
+        reads it only goes down. Returns ``False`` when the loop should select
+        again (mission boundary, or the capacity became a known wait).
+        """
+        from .scheduler import _route_or_provider_decision, is_undetermined_reason
+
+        decision = selection.get("decision") if isinstance(selection.get("decision"), dict) else {}
+        if decision.get("usable") is not False or not is_undetermined_reason(str(decision.get("reason") or "")):
+            return True  # usable, no decision recorded, or a known wait that Ralph's selection already handles
+        if getattr(scheduler_config, "suspend_until_ready", False):
+            return True  # the scheduler launches optimistically at once in suspend mode
+        max_wait = int(scheduler_config.max_unavailable_wait)
+        deadline = common.now_epoch() + max_wait if max_wait > 0 else None
+        poll = max(1, int(scheduler_config.poll_interval))
+        task_id = int(context["task_id"])
+        self.on_wait(selection, deadline)
+        next_read = time.monotonic() + poll
+        try:
+            while deadline is None or common.now_epoch() < deadline:
+                if self._should_interrupt_wait(task_id):
+                    return False
+                if time.monotonic() >= next_read:
+                    next_read = time.monotonic() + poll
+                    _snapshot, fresh = _route_or_provider_decision(scheduler_config)
+                    if fresh.get("usable") is True:
+                        return True
+                    if not is_undetermined_reason(str(fresh.get("reason") or "")):
+                        return False  # a known wait: select again so the all-blocked path owns it
+                time.sleep(0.25)
+            scheduler_config.unavailable_wait_done = True
+            return True
+        finally:
+            self._wait_baseline = None  # the wait is over; the scheduler's waits must not compare against it
+
     def before_launch(self, context: dict[str, Any], selection: dict[str, Any], scheduler_config: Any, iteration: int) -> bool:
+        mission = self.store.get_mission(self.mission_id)
+        if mission["status"] != "RUNNING":
+            return False
+        if not self._await_capacity_data(context, selection, scheduler_config):
+            return False
         mission = self.store.get_mission(self.mission_id)
         if mission["status"] != "RUNNING":
             return False
@@ -2038,6 +2084,7 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         for command in store.pending_commands(mission_id):
             store.finish_command(command["id"], status="REJECTED", result={"error": "controller restarted; queued command was not replayed"})
         store.release_declined_tasks(mission_id)
+        store.release_interrupted_tasks(mission_id)
         mission = store.get_mission(mission_id)
         if mission["status"] in {"CREATED", "PAUSED", "STOPPED", "FAILED"}:
             store.set_mission_status(mission_id, "RUNNING")

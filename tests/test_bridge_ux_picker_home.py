@@ -129,17 +129,17 @@ def test_finished_mission_with_station_shows_muted_station_idle() -> None:
     assert [text for text, _ in picker.segment_lines(24, 100)[3][0]].count("●") == 0  # not marked live
 
 
-def test_stale_running_mission_shows_the_stale_marker_like_the_home_screen() -> None:
+def test_stale_running_mission_shows_interrupted_like_the_home_screen() -> None:
     picker = sw.MissionPicker([entry("c", "Stale", "RUNNING"), entry("b", "Fine", controller=True)])
     lines = [text for text, _ in picker.lines(24, 100)]
     stale_row = next(line for line in lines if "Stale" in line and "cccccccc" in line)
-    assert "● RUNNING   stale" in stale_row
+    assert "✕ INTERRUPTED" in stale_row and "stale" not in stale_row
     assert "stale" not in next(line for line in lines if "bbbbbbbb" in line)
     picker.key("KEY_DOWN")  # the selected row is drawn as one bar; look at the stale row unselected
     stale_segments = next(line for line, _s in picker.segment_lines(24, 100) if any("cccccccc" in text for text, _r in line))
-    assert (" stale", "warn") in stale_segments and ("● RUNNING  ", "warn") in stale_segments
+    assert any(text.startswith("✕ INTERRUPTED") and role == "warn" for text, role in stale_segments)
     only_stale = sw.MissionPicker([entry("c", "Stale", "RUNNING")])
-    assert "controller not running" in only_stale.lines(24, 100)[-2][0]
+    assert "controller stopped unexpectedly · llm-bridge start --mission cccccccc" in only_stale.lines(24, 100)[-2][0]
     assert "stale" not in "\n".join(t for t, _ in sw.MissionPicker([entry("b", "Fine", controller=True)]).lines(24, 100))
 
 
@@ -253,7 +253,7 @@ def test_picker_header_is_aligned_with_the_columns(width: int, stale: bool) -> N
     assert header.split()[:3] == ["ID", "Status", "Name"]
     body = lines[3]
     assert header.index("ID") == body.index("cccccccc")
-    assert header.index("Status") == body.index("● RUNNING")
+    assert header.index("Status") == body.index("✕ INTERRUPTED" if stale else "● RUNNING")
     assert header.index("Name") == body.index("Alpha")
     if width >= 76:
         assert header.index("Provider") == body.index("claude")

@@ -245,9 +245,9 @@ def test_stale_running_mission_is_marked_and_explained(tmp_path):
                      probe=lambda ident: ident.startswith("eeee"))
     grid = Grid()
     launcher._draw(grid, state)
-    assert "RUNNING   stale" in grid.row(6) and "Dead run" in grid.row(6) and "5h ago" in grid.row(6)
-    assert "stale" not in grid.row(7) and "stale" not in grid.row(8)
-    assert grid.row(32) == "controller not running · Enter opens controls, then type resume"
+    assert "✕ INTERRUPTED" in grid.row(6) and "Dead run" in grid.row(6) and "5h ago" in grid.row(6)
+    assert "INTERRUPTED" not in grid.row(7) and "INTERRUPTED" not in grid.row(8) and "stale" not in grid.row(6)
+    assert grid.row(32) == "controller stopped unexpectedly · llm-bridge start --mission dddddddd resumes it"
     state.selected = 2
     grid = Grid()
     launcher._draw(grid, state)
@@ -279,7 +279,7 @@ def test_status_roles_for_live_and_stale_rows_use_ok_and_warn(tmp_path, monkeypa
     state = Launcher(here, missions=items, installed=("codex",), probe=lambda ident: ident.startswith("alive"))
     launcher._draw(Recording(), state)
     assert seen[(6, "● RUNNING")] == roles["state_running"]
-    assert seen[(7, "● RUNNING")] == roles["warn"] and seen[(7, "stale")] == roles["warn"]
+    assert seen[(7, "✕ INTERRUPTED")] == roles["warn"]
 
 
 def test_detail_line_shows_route_rotation():

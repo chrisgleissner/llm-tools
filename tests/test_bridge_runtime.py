@@ -2176,7 +2176,7 @@ def test_force_stop_marks_uncertain_then_terminates_only_recorded_headless_group
             process.wait()
 
 
-def test_force_stop_refuses_unidentified_headless_process_and_leaves_stopping(tmp_path, monkeypatch, capsys) -> None:
+def test_force_stop_refuses_a_recorded_pid_it_cannot_identify_and_leaves_stopping(tmp_path, monkeypatch, capsys) -> None:
     import subprocess
     import sys
 
@@ -2188,15 +2188,30 @@ def test_force_stop_refuses_unidentified_headless_process_and_leaves_stopping(tm
     store.set_mission_status(mission["id"], "RUNNING")
     operation = store.begin_operation(task, iteration=1, station="codex")
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
-    store.mark_operation_running(operation)
+    store.mark_operation_running(operation, process_pid=process.pid)  # a pid with no start token cannot be verified
     try:
         assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 2
-        assert "no verifiable process identity" in capsys.readouterr().err
+        error = capsys.readouterr().err
+        assert f"could not confirm that provider process {process.pid} belongs to this mission; it was left running. Check with: ps -p {process.pid}" in error
+        assert "verifiable" not in error
         assert process.poll() is None
         assert store.get_mission(mission["id"])["status"] == "STOPPING"
     finally:
         os.killpg(process.pid, 9)
         process.wait()
+
+
+def test_force_stop_with_no_recorded_provider_process_stops_and_says_so(tmp_path, monkeypatch, capsys) -> None:
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path, config={"headless": True})
+    task = store.add_task(mission["id"], "active task")
+    store.set_mission_status(mission["id"], "RUNNING")
+    store.mark_operation_running(store.begin_operation(task, iteration=1, station="codex"))  # still waiting to launch
+    assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 0
+    assert f"Stopped · no provider process was running · mission {mission['id'][:8]} is STOPPED" in capsys.readouterr().out
+    assert store.get_mission(mission["id"])["status"] == "STOPPED"
 
 
 def test_detached_launch_never_accepts_a_stale_ready_file(tmp_path, monkeypatch) -> None:

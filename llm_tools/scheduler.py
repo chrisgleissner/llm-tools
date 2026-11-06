@@ -129,6 +129,10 @@ class SchedulerConfig:
     process_observer: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     # Internal Bridge callback used to interrupt long capacity waits promptly.
     should_interrupt_wait: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+    # Internal Bridge flag: the caller already waited out ``max_unavailable_wait``
+    # for undeterminable capacity before this launch, so the scheduler launches
+    # optimistically at once instead of starting a second full wait.
+    unavailable_wait_done: bool = field(default=False, repr=False, compare=False)
     command_argv_transform: Callable[[list[str]], list[str]] | None = field(default=None, repr=False, compare=False)
     # Internal environment additions supplied by a managed Bridge operation.
     env_overrides: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
@@ -908,7 +912,7 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
                 undetermined_since = now
             waited = now - undetermined_since
             max_wait = int(cfg.max_unavailable_wait)
-            if max_wait > 0 and waited >= max_wait:
+            if cfg.unavailable_wait_done or (max_wait > 0 and waited >= max_wait):
                 common.log_text(logs, f"usage undeterminable for {waited}s (reason={reason}); proceeding optimistically")
                 common.log_event(logs, "optimistic_proceed", {"reason": reason, "waited": waited, "max_unavailable_wait": max_wait})
                 return

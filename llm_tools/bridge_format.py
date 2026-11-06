@@ -34,6 +34,21 @@ def plain_reason(reason: Any) -> str:
     return _PLAIN_ROTATION_REASONS.get(text, text)
 
 
+_PLAIN_CAPACITY_REASONS = {
+    "not-authenticated": "is not signed in",
+    "missing-cli": "is not installed",
+    "unavailable": "has no usage data",
+    "inconclusive-usage": "has no usage data",
+    "stale-usage": "has only old usage data",
+}
+
+
+def plain_capacity_reason(reason: Any) -> str:
+    """Human wording for why a provider's capacity is unknown; other reasons pass through."""
+    text = "" if reason is None else str(reason)
+    return _PLAIN_CAPACITY_REASONS.get(text, text)
+
+
 NATIVE_STOP_HINT = "Stopping after the provider exits · exit the provider (e.g. /quit) or use stop --force"
 
 
@@ -154,7 +169,7 @@ def format_mission_list(missions: list[dict[str, Any]], now: float | None = None
     if not missions:
         return "No missions yet · create one with: llm-bridge mission create --prompt \"...\""
     rows = [
-        [short_id(item["id"]), str(item.get("status", "?")) + (" (no controller)" if no_controller(item) else ""), age(item.get("updated_at"), now), _clip(item.get("name", ""), _NAME_LIMIT), home_relative(item.get("cwd", ""))]
+        [short_id(item["id"]), (f"INTERRUPTED (was {item.get('status', '?')})" if no_controller(item) else str(item.get("status", "?"))), age(item.get("updated_at"), now), _clip(item.get("name", ""), _NAME_LIMIT), home_relative(item.get("cwd", ""))]
         for item in missions
     ]
     return table(["ID", "STATUS", "UPDATED", "NAME", "FOLDER"], rows)
@@ -365,6 +380,8 @@ def format_command_receipt(command: str, result: dict[str, Any], mission_id: str
         closed = "Station closed" if inner["station_status"] == "STOPPED" else "No station to close"
         return f"{closed} · mission {mid} is {mission.get('status', '?')}"
     if isinstance(inner.get("mission"), dict) and "mission_status" not in inner:
+        if inner.get("no_provider_process"):
+            return f"Stopped · no provider process was running · mission {mid} is {inner['mission'].get('status', '?')}"
         return f"Stop forced · mission {mid} is {inner['mission'].get('status', '?')}"
     if command == "station":
         viewed = (inner.get("config") or {}).get("viewed_station") or (result.get("payload") or {}).get("station") or inner.get("viewed_station", "?")
@@ -476,11 +493,20 @@ def format_waiting(waiting: dict[str, Any], mission_short: str, now: float | Non
         if entry.get("reset_epoch") is not None:
             parts.append(f"{entry['name']} resets in {countdown(entry['reset_epoch'] - moment)}")
         else:
-            parts.append(f"{entry['name']} {entry.get('reason') or 'unavailable'}")
+            parts.append(f"{entry['name']} {plain_capacity_reason(entry.get('reason')) if entry.get('reason') else 'is unavailable'}")
+    launch = waiting.get("launch_epoch")
     if not parts and isinstance(waiting.get("until_epoch"), (int, float)):
         parts.append(f"next provider in {countdown(waiting['until_epoch'] - moment)}")
     subject = "for capacity" if waiting.get("reason") == "capacity" else "for a usable provider"
-    return " · ".join([subject, *([", ".join(parts)] if parts else []), f"change providers with: llm-bridge rotation --mission {mission_short} --set LIST"])
+    tail = [f"change providers with: llm-bridge rotation --mission {mission_short} --set LIST"]
+    if isinstance(launch, (int, float)):
+        # The task has not started: no provider process runs until this deadline passes.
+        subject = "for capacity data"
+        clock = time.strftime("%H:%M", time.localtime(launch))
+        parts.append(f"launches anyway in {countdown(launch - moment)} (at {clock})")
+        if any(entry.get("reason") in {"not-authenticated", "missing-cli"} for entry in waiting.get("entries") or []):
+            tail.insert(0, f"check sign-in with: llm-bridge doctor")
+    return " · ".join([subject, *([", ".join(parts)] if parts else []), *tail])
 
 
 PROVIDER_DISPLAY_NAMES = {"claude": "Claude Code", "codex": "Codex", "copilot": "GitHub Copilot"}
@@ -547,6 +573,9 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
             command = f"llm-bridge task retry --mission {mid} --task {number}"
             message = f"task {number} is blocked, its provider run ended without a result · check llm-bridge events --mission {mid}, then {command}"
             kind = "blocked"
+            if (snapshot.get("lifecycle") or {}).get("interrupted_task_id") == current.get("id"):
+                command = f"llm-bridge start --mission {mid}"
+                message = f"task {number} was interrupted by stop --force · {command} runs it again"
             declined = declined_provider(snapshot, current)
             if declined:
                 command = f"llm-bridge start --mission {mid}"
@@ -586,7 +615,7 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
         controller_text = f"not started — run: llm-bridge start --mission {mid}"
     elif state == "STOPPED":
         controller_text = f"stopped — run: llm-bridge start --mission {mid}"
-    elif state == "PAUSED":
+    elif state == "PAUSED" and lifecycle.get("controller_running") is not False:
         controller_text = f"paused — run: llm-bridge resume --mission {mid}"
     elif state in FINISHED_MISSION_STATUSES:
         controller_text = "finished"
@@ -594,9 +623,12 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
         reason = lifecycle.get("failure_reason")
         controller_text = f"failed — {_clip(reason, 160)}" if reason else f"failed — reason not recorded; inspect with: llm-bridge events --mission {mid}"
     elif no_controller({"status": mission.get("status"), "controller_running": lifecycle.get("controller_running")}):
-        controller_text = f"not running — run: llm-bridge resume --mission {mid}"
+        controller_text = f"not running (stopped unexpectedly) — run: llm-bridge start --mission {mid}"
+    shown_state = f"{mission.get('status')} ({mode})"
+    if no_controller({"status": mission.get("status"), "controller_running": lifecycle.get("controller_running")}):
+        shown_state = f"INTERRUPTED (was {mission.get('status')}, {mode})"  # a mission with no live controller is not running
     lines = [
-        f"Mission     {short_id(mission['id'])} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · {mission.get('status')} ({mode})",
+        f"Mission     {short_id(mission['id'])} \"{_clip(mission.get('name', ''), _NAME_LIMIT)}\" · {shown_state}",
         f"Folder      {home_relative(mission.get('cwd', ''))}",
         f"Controller  {controller_text}",
     ]
@@ -614,6 +646,8 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     current = snapshot.get("current_task")
     if current:
         operation = f" · operation {context['operation_status']}" if context.get("executing_operation") else ""
+        if not operation and current.get("status") == "READY" and isinstance(snapshot.get("waiting"), dict):
+            operation = " · waiting to start, no provider is running"
         lines.append(f"Current     {format_task_line(current)}{operation}")
     else:
         lines.append("Current     none")
@@ -623,7 +657,10 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     total = sum(int(value) for value in counts.values())
     lines.append(f"Tasks       {total} total" + (": " + ", ".join(f"{count} {name}" for name, count in sorted((status_label(key), value) for key, value in counts.items())) if counts else ""))
     attention = snapshot.get("needs_you") or needs_attention(snapshot)
-    if attention and attention.get("kind") != "capacity":
+    waiting_now = snapshot.get("waiting") if isinstance(snapshot.get("waiting"), dict) else {}
+    # A provider that is not signed in (or not installed) will not recover by waiting: that needs the operator.
+    unfixable = [e for e in waiting_now.get("entries") or [] if e.get("reason") in {"not-authenticated", "missing-cli"}]
+    if attention and (attention.get("kind") != "capacity" or unfixable):
         lines.append(f"Needs you   {attention['message']}")
     hold = snapshot.get("hold")
     if isinstance(hold, dict) and hold.get("reason") == "review":

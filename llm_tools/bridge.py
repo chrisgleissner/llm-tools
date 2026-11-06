@@ -2656,6 +2656,7 @@ def _main(argv: list[str] | None = None) -> int:
                 # A mission that never started has nothing to force; stop never cancels.
                 result = {"mission_status": saved_status, "noop": True, "detail": fmt.nothing_to_stop(args.mission, saved_status)}
             elif args.command == "stop" and args.force:
+                provider_stopped = False
                 runtime = state_dir() / "runtime" / f"mission-{args.mission}"
                 with open_store() as store:
                     mission = store.get_mission(args.mission)
@@ -2668,7 +2669,7 @@ def _main(argv: list[str] | None = None) -> int:
                             (args.mission,),
                         )
                     ]
-                    store.reconcile_interrupted_operations(args.mission)
+                    store.reconcile_interrupted_operations(args.mission, cause="stop-force")
                 # Verifiers use their own process groups. Stop those validated
                 # identities before terminating the controller that owns them.
                 from .bridge_runtime import terminate_managed_processes
@@ -2684,6 +2685,7 @@ def _main(argv: list[str] | None = None) -> int:
                     backend = None
                     handle = None  # type: ignore[assignment]  # checked on the next line
                 if handle is not None and backend is not None:
+                    provider_stopped = bool(operations)
                     backend.stop(handle)
                 elif operations:
                     from .bridge_runtime import _terminate_owned_process_group
@@ -2691,10 +2693,16 @@ def _main(argv: list[str] | None = None) -> int:
                     for operation in operations:
                         process_pid = operation.get("process_pid")
                         process_start = operation.get("process_start")
-                        if not process_pid or not process_start:
-                            if operation.get("status") in {"INTENT", "PREPARED"}:
-                                continue
-                            raise RuntimeError("no verifiable process identity; mission remains STOPPING")
+                        if not process_pid:
+                            # No provider process was ever recorded (the operation is still
+                            # waiting to launch); the controller is stopped below.
+                            continue
+                        if not process_start:
+                            raise RuntimeError(
+                                f"could not confirm that provider process {process_pid} belongs to this mission; "
+                                f"it was left running. Check with: ps -p {process_pid}"
+                            )
+                        provider_stopped = True
                         _terminate_owned_process_group(int(process_pid), str(process_start))
                 # Stopping provider work and the tmux station is not enough:
                 # the detached controller itself owns the mission lock and
@@ -2734,7 +2742,7 @@ def _main(argv: list[str] | None = None) -> int:
                 with open_store() as store:
                     if store.get_mission(args.mission)["status"] == "STOPPING":
                         store.set_mission_status(args.mission, "STOPPED")
-                    result = {"mission": store.get_mission(args.mission)}
+                    result = {"mission": store.get_mission(args.mission), "no_provider_process": not provider_stopped}
             else:
                 result = commands.dispatch(commands.CommandRequest(f"mission.{args.command}", mission_id=args.mission))
                 if result.get("status") == "REJECTED" and not args.json:
