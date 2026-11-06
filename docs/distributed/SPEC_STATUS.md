@@ -292,6 +292,7 @@ negative tests remain incomplete unless explicitly recorded below.
 | DOG-008 | [x] | A live view enables `Take control`; it reconnects as a writer in the same terminal panel, and the end-to-end flow submits a long line followed immediately by Enter. `web/e2e/terminal.spec.ts::view, take control, single writer, copy and input paths` passes all four browser/device projects. |
 | DOG-009 | [x] | `llm-bridge screen --mission ID` emits a read-only provider-pane snapshot capped to 200 lines and 1,000 characters per line; `tests/test_bridge_switcher.py::test_screen_command_prints_bounded_provider_snapshot` covers JSON content and truncation. This local CLI command is intentionally excluded from REST because it returns terminal content; use the separately scoped terminal WebSocket to watch a remote provider. |
 | DOG-010 | [ ] | Structured provider questions and answer flow through CLI and console remain. |
+| DOG-012 | [x] | Failed sign-in reports a clear, non-enumerating username-or-password error and focuses/selects the password field; `web/e2e/auth-ux.spec.ts` covers the exact message, password focus, caps-lock state and rate-limit message. |
 | PAR-001 | [ ] | Mission list and `needs_you` visibility across CLI/web/API remain. |
 | PAR-002 | [ ] | Tasks, current run, events and capacity across CLI/web/API remain. |
 | PAR-003 | [~] | Start is available through CLI, REST and mission detail (`a created mission can be started from its detail page through the resource API`); browser configuration options beyond saved defaults and full parity evidence remain. |

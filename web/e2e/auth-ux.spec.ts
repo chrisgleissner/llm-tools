@@ -98,9 +98,12 @@ test.describe("sign-in", () => {
       return page.locator("#form-error").innerText();
     };
     const wrongPassword = await attempt("admin", "not the password!!");
+    const password = page.getByLabel("Password", { exact: true });
+    await expect(page.getByRole("alert")).toHaveText("Username or password is incorrect. Check both and try again.");
+    await expect(password).toBeFocused();
     const unknownUser = await attempt("nobody", "not the password!!");
     expect(unknownUser).toBe(wrongPassword);
-    expect(wrongPassword).toContain("username or password is not correct");
+    expect(wrongPassword).toBe("Username or password is incorrect. Check both and try again.");
     expect(wrongPassword).not.toMatch(/no such user|unknown user|does not exist/i);
   });
 
@@ -109,6 +112,12 @@ test.describe("sign-in", () => {
     await signOutViaUi(page);
     const pass = page.getByLabel("Password", { exact: true });
     await pass.focus();
+    await expect(page.locator("#password-caps")).toBeHidden();
+    await pass.evaluate((el) => {
+      const event = new KeyboardEvent("keydown", { key: "A", bubbles: true });
+      Object.defineProperty(event, "getModifierState", { value: (modifier: string) => modifier === "CapsLock" && false });
+      el.dispatchEvent(event);
+    });
     await expect(page.locator("#password-caps")).toBeHidden();
     await pass.evaluate((el) => el.dispatchEvent(new KeyboardEvent("keydown", { key: "A", modifierCapsLock: true, bubbles: true })));
     await expect(page.locator("#password-caps")).toBeVisible();
@@ -125,7 +134,7 @@ test.describe("sign-in", () => {
       await page.getByLabel("Username", { exact: true }).fill(user);
       await page.getByLabel("Password", { exact: true }).fill(`wrong password ${i}`);
       await page.getByRole("button", { name: "Sign in" }).click();
-      await expect(page.locator("#form-error")).toContainText("not correct");
+      await expect(page.locator("#form-error")).toContainText("incorrect");
     }
     // The sixth attempt is refused, whatever the user name.
     await page.getByLabel("Username", { exact: true }).fill("someone-else");
