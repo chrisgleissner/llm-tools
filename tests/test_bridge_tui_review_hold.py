@@ -27,12 +27,12 @@ def test_needs_you_row_names_the_review_commands_while_holding() -> None:
 
 def test_needs_you_row_is_unchanged_without_a_hold_and_for_other_verifying_tasks() -> None:
     snapshot = holding_snapshot(hold=None)
-    assert bridge_tui._needs_you_rows(snapshot) == ["task 1 awaits your approval — type /approve 1 (or F7 Actions)"]
+    assert bridge_tui._needs_you_rows(snapshot) == ["task 1 awaits your review · type /approve 1 (or F7 Actions)"]
     snapshot = holding_snapshot()
     snapshot["tasks"].append({"id": 13, "ordinal": 3, "status": "VERIFYING", "title": "third"})  # type: ignore[union-attr]
     assert bridge_tui._needs_you_rows(snapshot) == [
         "task 1 awaits your review · /approve 1 · /reject 1 reason · /continue",
-        "task 3 awaits your approval — type /approve 3 (or F7 Actions)",
+        "task 3 awaits your review · type /approve 3 (or F7 Actions)",
     ]
 
 

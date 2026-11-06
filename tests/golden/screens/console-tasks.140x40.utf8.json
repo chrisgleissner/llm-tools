@@ -44,7 +44,7 @@
     "",
     "",
     "› type a command · /help · Ctrl-K actions",
-    "Enter inspect · Ctrl-E add task · Ctrl-R amend · v view prompt · Ctrl-F find · ↑↓ select · Tab/F1-9 views · Ctrl-D exit · ? help"
+    "Enter inspect · ↑↓ select · Ctrl-E add task · Ctrl-R amend · v view prompt · Ctrl-F find · Tab/F1-9 views · Ctrl-D exit · ? help"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " · ", "dim"], [13, "▌", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " · ", "dim"], [39, "◆ NEEDS YOU", "state_review"]],
@@ -86,6 +86,6 @@
     [],
     [],
     [[0, "› ", "muted"], [2, "type a command · /help · Ctrl-K actions", "dim+dim"]],
-    [[0, "Enter", "key"], [5, " inspect", "muted"], [13, " · ", "dim"], [16, "Ctrl-E", "key"], [22, " add task", "muted"], [31, " · ", "dim"], [34, "Ctrl-R", "key"], [40, " amend", "muted"], [46, " · ", "dim"], [49, "v", "key"], [50, " view prompt", "muted"], [62, " · ", "dim"], [65, "Ctrl-F", "key"], [71, " find", "muted"], [76, " · ", "dim"], [79, "↑↓", "key"], [81, " select", "muted"], [88, " · ", "dim"], [91, "Tab/F1-9", "key"], [99, " views", "muted"], [105, " · ", "dim"], [108, "Ctrl-D", "key"], [114, " exit", "muted"], [119, " · ", "dim"], [122, "?", "key"], [123, " help", "muted"]]
+    [[0, "Enter", "key"], [5, " inspect", "muted"], [13, " · ", "dim"], [16, "↑↓", "key"], [18, " select", "muted"], [25, " · ", "dim"], [28, "Ctrl-E", "key"], [34, " add task", "muted"], [43, " · ", "dim"], [46, "Ctrl-R", "key"], [52, " amend", "muted"], [58, " · ", "dim"], [61, "v", "key"], [62, " view prompt", "muted"], [74, " · ", "dim"], [77, "Ctrl-F", "key"], [83, " find", "muted"], [88, " · ", "dim"], [91, "Tab/F1-9", "key"], [99, " views", "muted"], [105, " · ", "dim"], [108, "Ctrl-D", "key"], [114, " exit", "muted"], [119, " · ", "dim"], [122, "?", "key"], [123, " help", "muted"]]
   ]
 }

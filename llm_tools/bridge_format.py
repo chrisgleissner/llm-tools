@@ -16,6 +16,7 @@ from typing import Any
 from .bridge_states import FINISHED_MISSION_STATUSES, OPERATOR_DECLINED_EXIT_CODE, STARTED_MISSION_STATUSES
 from .bridge_vocab import mission_mode
 from .bridge_vocab import status_label
+from .bridge_wording import NEXT_NOTHING, approval_row, controller_hint, current_surface, finished_next, proposals_row
 
 # Internal rotation reasons (ralph_robin) and their plain-word display forms.
 # Only display text changes; event data and JSON keep the internal reason.
@@ -421,7 +422,7 @@ def format_command_receipt(command: str, result: dict[str, Any], mission_id: str
 
 def _event_time(event: dict[str, Any]) -> str:
     stamp = _parse_time(event.get("created_at"))
-    return datetime.fromtimestamp(stamp).strftime("%m-%d %H:%M:%S") if stamp is not None else "-"
+    return datetime.fromtimestamp(stamp).strftime("%Y-%m-%d %H:%M:%S") if stamp is not None else "-"
 
 
 def event_phrase(event: dict[str, Any]) -> str:
@@ -568,10 +569,6 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     awaiting = [int(task_number(task)) for task in tasks if task.get("status") == "VERIFYING" and task_number(task) is not None]
     if awaiting:
         first = awaiting[0]
-        if len(awaiting) == 1:
-            subject = f"task {first} awaits your review"
-        else:
-            subject = f"tasks {', '.join(str(n) for n in awaiting)} await your review"
         command = f"llm-bridge task approve --mission {mid} --task {first}"
         hold = snapshot.get("hold")
         if isinstance(hold, dict) and hold.get("reason") == "review":
@@ -580,10 +577,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
                 "kind": "approval", "tasks": awaiting, "command": command, "hold": True,
                 "message": f"task {held} awaits your review · /approve {held} or /reject {held} reason · /continue to start the next task now",
             }
-        return {
-            "kind": "approval", "tasks": awaiting, "command": command,
-            "message": f"{subject} · {command} (or reject: llm-bridge task reject --mission {mid} --task {first} --reason …)",
-        }
+        return {"kind": "approval", "tasks": awaiting, "command": command, "message": approval_row(current_surface(), awaiting, mid)}
     if mission.get("status") == "FAILED":
         reason = (snapshot.get("lifecycle") or {}).get("failure_reason")
         command = f"llm-bridge events --mission {mid}"
@@ -610,7 +604,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     pending = int((snapshot.get("proposal_counts") or {}).get("PENDING", 0))
     if pending:
         command = f"llm-bridge proposal list --mission {mid}"
-        return {"kind": "proposal", "tasks": [], "command": command, "message": f"{pending} proposed task{'s' if pending != 1 else ''} await your decision · {command}"}
+        return {"kind": "proposal", "tasks": [], "command": command, "message": proposals_row(current_surface(), pending, mid)}
     if isinstance(snapshot.get("waiting"), dict):
         command = f"llm-bridge rotation --mission {mid} --set LIST"
         return {"kind": "capacity", "tasks": [], "command": command, "message": "waiting for provider capacity · " + format_waiting(snapshot["waiting"], mid)}
@@ -637,10 +631,8 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     controller_text = str(controller) + heartbeat_text
     mid = short_id(mission["id"])
     state = str(mission.get("status"))
-    if state == "CREATED":
-        controller_text = f"not started — run: llm-bridge start --mission {mid}"
-    elif state == "STOPPED":
-        controller_text = f"stopped — run: llm-bridge start --mission {mid}"
+    if state in {"CREATED", "STOPPED"}:
+        controller_text = controller_hint(state, current_surface(), mid) or controller_text
     elif state == "PAUSED" and lifecycle.get("controller_running") is not False:
         controller_text = f"paused — run: llm-bridge resume --mission {mid}"
     elif state in FINISHED_MISSION_STATUSES:
@@ -670,6 +662,8 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     lines.append(f"Policy      {policy_label}")
     context = snapshot.get("station_context") or {}
     current = snapshot.get("current_task")
+    if current and current.get("status") in {"READY", "QUEUED"} and not isinstance(snapshot.get("waiting"), dict):
+        current = None  # nothing runs; the waiting task is the Next row
     if current:
         operation = f" · operation {context['operation_status']}" if context.get("executing_operation") else ""
         if not operation and current.get("status") == "READY" and isinstance(snapshot.get("waiting"), dict):
@@ -678,7 +672,7 @@ def format_status(snapshot: dict[str, Any], now: float | None = None) -> str:
     else:
         lines.append("Current     none")
     upcoming = next((task for task in snapshot.get("tasks", []) if task.get("status") in {"READY", "QUEUED"} and (not current or task.get("id") != current.get("id")) and task.get("origin", "operator") == "operator"), None)
-    lines.append(f"Next        {format_task_line(upcoming)}" if upcoming else "Next        none")
+    lines.append(f"Next        {format_task_line(upcoming)}" if upcoming else f"Next        {finished_next(state, current_surface(), mid) or NEXT_NOTHING}")
     counts = snapshot.get("task_counts") or {}
     total = sum(int(value) for value in counts.values())
     lines.append(f"Tasks       {total} total" + (": " + ", ".join(f"{count} {name}" for name, count in sorted((status_label(key), value) for key, value in counts.items())) if counts else ""))

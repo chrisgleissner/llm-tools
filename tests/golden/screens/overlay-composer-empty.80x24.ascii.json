@@ -28,7 +28,7 @@
     "",
     "",
     "",
-    "F2/Ctrl-S Save | Esc close (draft kept) | Ctrl-D Discard | 1 line"
+    "Ctrl-S Save | Esc close (draft kept) | Ctrl-X Discard | 1 line"
   ],
   "segments": [
     [[0, "Add task prompt | full source", "heading"]],
@@ -54,6 +54,6 @@
     [],
     [],
     [],
-    [[0, "F2/Ctrl-S Save | Esc close (draft kept) | Ctrl-D Discard | 1 line", "dim"]]
+    [[0, "Ctrl-S Save | Esc close (draft kept) | Ctrl-X Discard | 1 line", "dim"]]
   ]
 }

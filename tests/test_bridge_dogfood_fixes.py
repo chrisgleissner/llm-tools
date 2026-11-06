@@ -272,7 +272,7 @@ def test_format_helpers_flag_only_expected_controllers() -> None:
 
 def test_tui_controller_line_reports_missing_controller() -> None:
     snapshot = {"mission": {"status": "RUNNING"}, "lifecycle": {"controller_running": False}}
-    assert bridge_tui._controller_line(bridge_tui._bounded_snapshot(snapshot)) == "not running — type resume"
+    assert bridge_tui._controller_line(bridge_tui._bounded_snapshot(snapshot)) == "not running — type /resume"
     snapshot["lifecycle"]["controller_running"] = True
     assert bridge_tui._controller_line(bridge_tui._bounded_snapshot(snapshot)) == "no heartbeat recorded yet"
     snapshot["mission"]["status"] = "COMPLETED"

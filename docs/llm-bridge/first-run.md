@@ -23,7 +23,7 @@ This page records a walk-through of the Bridge first-run path as a new user woul
 | Typing the objective and moving to Start | operator pace | Before the changes below, Providers showed only `[1] codex`. |
 | Enter on Start | immediate | Claude Code's folder trust prompt, with `No, exit` preselected |
 | Answer `Yes, I trust this folder` | 7 s after Start (operator pace) | Claude wrote `hello.txt` ("Brewed for 4s") and asked to be exited with `/exit` |
-| `/exit` | 1 s | `Provider exited (status 0) · Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject.` |
+| `/exit` | 1 s | `Provider exited (status 0) · Task 1 ready for review · Ctrl-] B then /approve` |
 | `Ctrl-]` `B`, `/approve`, `y` | 15 s at operator pace | Controls with `task 1 awaits your review · type /approve 1`, a confirmation dialog, then `✓ COMPLETED`, `1/1 tasks completed` |
 | `Ctrl-]` `d`, `Ctrl-D` | immediate | `Detached from mission … the mission is completed` |
 

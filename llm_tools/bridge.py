@@ -802,6 +802,8 @@ def expand_reject_alias(words: list[str], waiting: Callable[[], list[int]]) -> t
     reason = " ".join(rest).strip()
     if not reason:
         return None, "error: usage: reject [TASK-NUMBER] REASON"
+    if reason.startswith("/") or re.match(r"\d+/[A-Za-z]", reason):
+        return None, "error: usage: reject [TASK-NUMBER] REASON · a reason cannot start with '/' (that looks like a command)"
     return ["task", "reject", "--task", task_id, f"--reason={reason}"], None
 
 
@@ -874,6 +876,10 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
 
         if command == "missions" and len(words) == 1:
             return TerminalAction(mission_id, None, "pick")
+        if command == "leave":
+            # Console name for "leave the provider terminal"; the shell command `detach` removes another terminal.
+            words = ["detach", *words[1:]]
+            command = "detach"
         if command == "finish" and "--help" not in words and "-h" not in words:
             from .bridge_finish import FinishError, finish_mission
 
@@ -986,6 +992,7 @@ def dispatch_console_command(mission_id: str, command_line: str) -> str | Termin
             rotation_before = rotation_label(saved.get("providers"), saved.get("routes"))
         env = os.environ.copy()
         env.pop(MANAGED_ENV, None)  # the console is the operator, whatever process started it
+        env["LLM_BRIDGE_SURFACE"] = "console"  # the child words its next steps as slash commands (bridge_wording)
         package_root = str(Path(__file__).resolve().parent.parent)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, (package_root, env.get("PYTHONPATH", ""))))
         result = subprocess.run(

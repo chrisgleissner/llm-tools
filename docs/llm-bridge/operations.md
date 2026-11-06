@@ -386,8 +386,8 @@ While holding, `status` prints `Needs you   task 1 awaits your review ·
 The snapshot carries `hold` (`{"reason": "review", "task_ordinal": 1, "tasks":
 [1], "since": ISO time}`, or `null`) and the same text in `needs_you` (`kind`
 `approval`, `hold: true`). In the station, the provider pane's footer after a
-clean provider exit reads `Provider exited (status 0) · Task 1 is waiting for
-your review. Ctrl-] then B, then /approve or /reject.`; tmux formats that
+clean provider exit reads `Provider exited (status 0) · Task 1 ready for
+review · Ctrl-] B then /approve` (`/reject` is listed in the controls); tmux formats that
 footer when the process exits, so the controller sets it before launching a
 native run (it is omitted when a verifier is configured or auto-continue is
 on). A provider pane that is still an empty placeholder shows the same
@@ -507,11 +507,12 @@ Keyboard and mouse operate those views:
 | Body Ctrl-E | Compose a new multiline task |
 | Tasks body Ctrl-R | Compose an amendment of the selected task |
 | Composer Ctrl-O | Open `$VISUAL` or `$EDITOR` |
-| Composer F2 / Ctrl-S | Save source; Enter inserts a newline |
+| Composer Ctrl-S | Save source; Enter inserts a newline (F-keys only switch views, so F2 is not Save) |
+| Composer Ctrl-X | Discard the draft; Escape or Ctrl-D closes it and keeps the draft |
 | Overview body `o` | Open the complete objective |
 | Actions `/` | Filter labelled actions; single click only selects |
 | Enter | Run the command in the input line |
-| Ctrl-P / Ctrl-N | Previous / next command history item |
+| Ctrl-P / Ctrl-N, or Up / Down in the focused input | Previous / next command history item |
 | Ctrl-U | Clear the input line |
 | Ctrl-K | Open Actions from any view, with the filter ready |
 | Ctrl-G | Focus the current command draft |
@@ -520,10 +521,10 @@ Keyboard and mouse operate those views:
 
 The composer keeps recoverable source in private state. Ctrl-O launches the
 external editor as argv on a private file; returning from that editor does not
-submit the task. F2/Ctrl-S explicitly saves the composed source. Escape closes
+submit the task. Ctrl-S explicitly saves the composed source. Escape or Ctrl-D closes
 the composer and keeps the draft (`Esc close (draft kept)`); Ctrl-E in the
 console reopens the newest kept task draft of the last 24 hours with `Restored
-draft from HH:MM · Ctrl-D discard`, while explicit discard is separate. An empty
+draft from HH:MM · Ctrl-X discard`; Ctrl-X is the only key that discards. An empty
 task composer shows dim guidance on the first line (title, description, optional
 `Acceptance:` list). The footer shows a line count, and the byte count only above
 80% of the 1 MiB limit. Help pages (`?`, `/help`) open as a word-wrapped page
@@ -537,7 +538,7 @@ Activity view, CLI status, and event history. The station follows terminal resiz
 events and is designed to remain usable down to 80 columns by 24 rows.
 
 For long initial objectives, Ctrl-E in the launcher opens the full-screen
-composer. Enter inserts a newline and F2/Ctrl-S saves to the form. Escape retains a
+composer. Enter inserts a newline and Ctrl-S saves to the form. Escape retains a
 private recovery draft that can be reopened with Ctrl-E. The interactive limit is
 1 MiB of UTF-8 source bytes; an oversized paste is rejected atomically. Use
 `mission create --file PATH` or `--file -` for larger inputs. In the document
@@ -1078,7 +1079,7 @@ in `tests/fuzz/`:
 
 Each target checks invariants: no exception, no write outside the window, no
 command dispatched except by an explicit Enter or a confirming Y (or a
-composer Ctrl-S/F2), a pasted block reaches its destination byte for byte, read
+composer Ctrl-S), a pasted block reaches its destination byte for byte, read
 only commands leave the database unchanged, store transitions follow a
 reference model, and wrapped or clipped rows never exceed the width in cells.
 

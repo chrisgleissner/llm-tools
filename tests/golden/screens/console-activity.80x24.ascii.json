@@ -28,7 +28,7 @@
     "  03:13:50  Waiting for capacity, resumes in 25m | claude 5h window exhausted",
     "",
     "> type a command | /help | Ctrl-K actions",
-    "PgUp older | PgDn newer | Ctrl-T hide bookkeeping | Up/Down scroll | ? help"
+    "PgUp older | PgDn newer | Ctrl-T hide bookkeeping | Ctrl-D exit | ? help"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [10, " | ", "dim"], [13, "|", "mission_1"], [14, " Release 2.0 hardening", "info"], [36, " | ", "dim"], [39, "# NEEDS YOU", "state_review"]],
@@ -54,6 +54,6 @@
     [[2, "03:13:50", "muted"], [10, "  Waiting for capacity, resumes ", "info"], [42, "in 25m", "muted"], [48, " | claude 5h window exhausted", "info"]],
     [],
     [[0, "> ", "muted"], [2, "type a command | /help | Ctrl-K actions", "dim+dim"]],
-    [[0, "PgUp", "key"], [4, " older", "muted"], [10, " | ", "dim"], [13, "PgDn", "key"], [17, " newer", "muted"], [23, " | ", "dim"], [26, "Ctrl-T", "key"], [32, " hide bookkeeping", "muted"], [49, " | ", "dim"], [52, "Up/Down", "key"], [59, " scroll", "muted"], [66, " | ", "dim"], [69, "?", "key"], [70, " help", "muted"]]
+    [[0, "PgUp", "key"], [4, " older", "muted"], [10, " | ", "dim"], [13, "PgDn", "key"], [17, " newer", "muted"], [23, " | ", "dim"], [26, "Ctrl-T", "key"], [32, " hide bookkeeping", "muted"], [49, " | ", "dim"], [52, "Ctrl-D", "key"], [58, " exit", "muted"], [63, " | ", "dim"], [66, "?", "key"], [67, " help", "muted"]]
   ]
 }
