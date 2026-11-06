@@ -143,8 +143,13 @@ test.describe("remote terminal with a real worker and tmux station", () => {
         await page.goto(url);
         await expect(page.locator("#terminal-open")).toBeEnabled({ timeout: 2000 });
       }).toPass({ timeout: 30_000 });
-      await page.locator("#terminal-open").click();
       const status = page.locator("#terminal-status");
+      // A presence update can disable the button between Playwright's enabled check and the click
+      // (seen once on firefox-desktop in CI: the status stayed idle). Click again until it leaves idle.
+      await expect(async () => {
+        await page.locator("#terminal-open").click();
+        await expect(status).not.toHaveAttribute("data-state", "idle", { timeout: 2000 });
+      }).toPass({ timeout: 20_000 });
       await expect(status).toContainText("--allow-terminal-view", { timeout: 20_000 });
       await expect(status).not.toHaveAttribute("data-state", "live");
       // The worker refused before sending any output, so nothing was ever written to the terminal.

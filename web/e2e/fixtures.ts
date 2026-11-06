@@ -110,8 +110,13 @@ export async function loginViaUi(page: Page, username = "admin", password = PASS
 
 /** WCAG 2.x A/AA axe scan in both colour schemes; fails on any violation and prints the details. */
 export async function expectAccessible(page: Page, label: string): Promise<void> {
+  // Buttons and chips fade their colours over 0.12 s. Switching the colour scheme starts that
+  // transition, and axe measuring contrast mid-fade reports colours no steady state has (seen in
+  // CI on #login-submit and the danger buttons). Settle styles before every scan.
+  await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; animation: none !important; }" });
   for (const scheme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: scheme });
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     const r = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
     const summary = r.violations.map((v) => `${v.impact} ${v.id}: ${v.help}\n  ${v.nodes.map((n) => n.target.join(" ")).join("\n  ")}`);
     expect(summary, `axe violations on ${label} (${scheme})`).toEqual([]);

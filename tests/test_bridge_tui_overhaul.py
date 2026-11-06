@@ -922,7 +922,12 @@ def test_real_control_view_renders_new_tabs_status_strip_and_actions(tmp_path, e
         backend.send_keys(handle, pane="provider", keys="\x1b")
         # curses waits ESCDELAY (1s) to tell a standalone Escape from an escape sequence; the redraw shows it was taken.
         wait_for(lambda: screen() != before_escape, "Escape was not processed")
-        backend.send_keys(handle, pane="provider", keys="\x1bOS")  # F4
+        # F4 can reach curses while it is still finishing the Escape redraw (seen on a slow ARM64 runner), and
+        # is then dropped. Sending it again is harmless: F4 on the Activity view stays on it.
+        for _attempt in range(3):
+            backend.send_keys(handle, pane="provider", keys="\x1bOS")  # F4
+            if _shared_wait_for(lambda: "[Activity]" in screen()[2], 4):
+                break
         wait_for(lambda: "[Activity]" in screen()[2])
         assert any("Task 1 added" in line for line in screen())
         assert not any("task-added" in line for line in screen())

@@ -128,7 +128,7 @@ fn ca_extensions_as_openssl_sees_them() {
         .output()
         .expect("the openssl command line tool is needed for this test");
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let text = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     assert!(
         text.contains("X509v3 Basic Constraints: critical\n") && text.contains("CA:TRUE, pathlen:0"),
         "{text}"

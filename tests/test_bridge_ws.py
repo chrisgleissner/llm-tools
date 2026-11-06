@@ -175,7 +175,15 @@ def test_handshake_rejects_oversized_or_truncated_responses():
         thread.join(5)
 
 
-@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl to create a test CA")
+def _openssl_can_make_a_ca() -> bool:
+    """OpenSSL 3 (not the LibreSSL that macOS ships, whose `-addext` handling differs) creates the test CA."""
+    if shutil.which("openssl") is None:
+        return False
+    version = subprocess.run(["openssl", "version"], capture_output=True, text=True, check=False).stdout
+    return version.startswith("OpenSSL ")
+
+
+@pytest.mark.skipif(not _openssl_can_make_a_ca(), reason="needs the OpenSSL 3 command line tool to create a test CA (macOS ships LibreSSL)")
 def test_wss_verifies_the_server_against_the_given_ca(tmp_path):
     def run(*args):
         subprocess.run(["openssl", *args], check=True, capture_output=True, cwd=tmp_path)

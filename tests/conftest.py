@@ -260,6 +260,20 @@ WINDOWS_NO_TMUX = "tmux and POSIX pseudo-terminals do not exist on Windows (docs
 WINDOWS_SKIPPED_MODULES: dict[str, str] = {}
 
 
+# The controller, verifier supervision, force-stop, native-session detection and the test harness's own
+# leak detector identify processes through Linux procfs (/proc/<pid>/stat, /proc/sys/kernel/random/boot_id,
+# /proc/<pid>/fd). macOS and Windows have no procfs, so the Bridge controller and worker are Linux-only
+# (docs/distributed/DECISIONS.md D8). Detected by feature, not by platform name.
+NO_PROCFS = not os.path.exists("/proc/self/stat")
+NO_PROCFS_REASON = "needs Linux procfs (/proc/<pid>/stat, boot_id) for process identity, which this platform lacks (docs/distributed/DECISIONS.md D8)"
+PROCFS_ONLY_MODULES = frozenset({
+    "test_bridge_force_stop", "test_bridge_process_scans", "test_bridge_runtime", "test_bridge_verifier",
+    "test_bridge_verifier_guard", "test_bridge_review_hold", "test_bridge_steering", "test_bridge_sessions",
+    "test_bridge_end_to_end", "test_bridge_completed_stop", "test_bridge_first_run_start", "test_bridge_native_e2e",
+    "test_process_hygiene", "test_distributed_offline",
+})
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_make_collect_report(collector: Any):
     """On Windows, a test module that imports a POSIX-only standard-library module is skipped with that reason."""
@@ -277,6 +291,8 @@ def pytest_make_collect_report(collector: Any):
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     manifest = _load_markers()
     for item in items:
+        if NO_PROCFS and Path(str(item.fspath)).stem in PROCFS_ONLY_MODULES:
+            item.add_marker(pytest.mark.skip(reason=NO_PROCFS_REASON))
         if _WINDOWS:
             reason = WINDOWS_SKIPPED_MODULES.get(Path(str(item.fspath)).stem)
             if reason:

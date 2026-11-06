@@ -113,7 +113,8 @@ Decision, from the facilities each component needs:
 |---|---|---|---|
 | Coordinator (`bridge-coordinator`), web interface | supported | supported | supported |
 | Remote client: `llm-bridge --target NAME COMMAND`, `remote login\|status\|logout`, `worker list` | supported | supported | supported |
-| Standalone Bridge, tmux station, console, controller, `worker` commands, `ralph-robin` suspend paths, `llm-sleep-soak` | supported | supported (no systemd suspend or RTC wake) | not supported |
+| Standalone Bridge, tmux station, console, `ralph-robin` suspend paths, `llm-sleep-soak` | supported | console and tmux station supported; no systemd suspend or RTC wake | not supported |
+| Mission controller, verifier supervision, force-stop, `worker run` | supported | not supported: process identity uses Linux procfs | not supported |
 
 Windows lacks tmux, POSIX pseudo-terminals, `curses`, `termios`, `fcntl` file locks and POSIX
 signals, which the station, console, controller and worker use. Porting them would mean a
@@ -134,7 +135,7 @@ location only the service account can read.
 
 The Python test suite skips on Windows only what needs a missing facility, centrally in
 `tests/conftest.py`: modules that import `curses`, `termios`, `fcntl` or `pty`, tests marked
-`tmux` or `pty`, and the modules in `WINDOWS_SKIPPED_MODULES`, each with its reason. Nothing is
+`tmux` or `pty`, the modules in `WINDOWS_SKIPPED_MODULES`, and (on any platform without `/proc`, so macOS as well) the modules in `PROCFS_ONLY_MODULES`, each with its reason. Nothing is
 skipped on Linux or macOS by that code. The evidence for each skip is the CI run listed in
 `SPEC_STATUS.md`.
 
