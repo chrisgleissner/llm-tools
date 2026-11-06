@@ -335,6 +335,11 @@ def _h_review_hold(ctx: _EventContext) -> str:
     return summary[:1].upper() + summary[1:] if summary else fallback
 
 
+@_humanizer(EventKind.MISSION_WAITING_FOR_OPERATOR)
+def _h_mission_waiting_for_operator(ctx: _EventContext) -> str:
+    return "Waiting for you · " + _text(ctx.data.get("summary") or ctx.data.get("reason") or "no task can run", 140)
+
+
 @_humanizer(EventKind.MISSION_COLOUR)
 def _h_mission_colour(ctx: _EventContext) -> str:
     value = ctx.data.get("value")

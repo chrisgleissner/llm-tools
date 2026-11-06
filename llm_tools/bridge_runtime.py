@@ -58,6 +58,8 @@ NATIVE_COMPLETION_NOTE = (
     "(for example /exit) so Bridge can verify the work."
 )
 _CHECKPOINT_LIMIT = 12000
+IDLE_POLL_SECONDS = 0.5  # first poll interval while no task can run
+IDLE_POLL_MAX_SECONDS = 4.0  # the interval doubles up to this while nothing changes
 _EVENT_LINE_LIMIT = 300
 
 
@@ -184,7 +186,7 @@ class BridgeMissionHooks:
     def _wait_signature(self) -> tuple[Any, ...]:
         """What an operator can change during a capacity wait: the rotation and the runnable tasks."""
         config = self.store.get_mission(self.mission_id)["config"]
-        ready = tuple(int(task["id"]) for task in self.store.ready_tasks(self.mission_id, limit=50))
+        ready = tuple(self.store.runnable_task_ids(self.mission_id, limit=50))  # read-only: a wait must not promote tasks or write
         return (str(config.get("providers", "")), str(config.get("routes", "")), ready)
 
     def on_wait(self, selection: dict[str, Any], target_epoch: int | None) -> None:
@@ -280,6 +282,8 @@ class BridgeMissionHooks:
         return self._store
 
     def before_iteration(self) -> dict[str, Any]:
+        idle_delay = IDLE_POLL_SECONDS
+        idle_state: tuple[Any, ...] | None = None
         while True:
             self._apply_pending_boundary_requests()
             mission = self.store.get_mission(self.mission_id)
@@ -299,8 +303,10 @@ class BridgeMissionHooks:
                 continue
             self._hold_message = ""
 
-            tasks = self.store.ready_tasks(self.mission_id, limit=1)
+            # A read-only look first: an idle controller must not take the write lock every poll.
+            tasks = self.store.ready_tasks(self.mission_id, limit=1) if self.store.runnable_task_ids(self.mission_id, limit=1) else []
             if tasks:
+                self._operator_wait_state = None
                 self._wait_baseline = None  # a wait that ended is over; scheduler waits must not compare against it
                 task = tasks[0]
                 current = self.store.begin_iteration(int(task["id"]))
@@ -364,10 +370,51 @@ class BridgeMissionHooks:
                 )
             }
             total = sum(counts.values())
-            if total and counts.get("COMPLETED", 0) == total:
+            completed, cancelled = counts.get("COMPLETED", 0), counts.get("CANCELLED", 0)
+            if completed and completed + cancelled == total:
                 self.store.set_mission_status(self.mission_id, "COMPLETED")
                 return {"action": "stop", "reason": "all tasks verified", "exit_code": 0}
-            time.sleep(0.5)
+            if total and cancelled == total:
+                self.store.set_mission_status(self.mission_id, "STOPPED")
+                return {"action": "stop", "reason": "every task was cancelled", "exit_code": 0}
+            # No task can run and the mission is not finished: an operator action (approve,
+            # retry, start, add a task) is the only thing that changes that. Say so once per
+            # distinct state, and poll less often the longer nothing changes.
+            state = self._record_operator_wait(counts)
+            idle_delay = IDLE_POLL_SECONDS if state != idle_state else min(IDLE_POLL_MAX_SECONDS, idle_delay * 2)
+            idle_state = state
+            time.sleep(idle_delay)
+
+    _operator_wait_state: tuple[Any, ...] | None = None
+
+    def _record_operator_wait(self, counts: dict[str, int]) -> tuple[Any, ...]:
+        """Record ``mission-waiting-for-operator`` when the set of unfinished tasks changed; return that set."""
+        rows = self.store.db.execute(
+            "SELECT ordinal,status FROM tasks WHERE mission_id=? AND status NOT IN ('COMPLETED','CANCELLED') "
+            "AND (origin!='agent-proposal' OR proposal_status='ACCEPTED') ORDER BY ordering,id LIMIT 20",
+            (self.mission_id,),
+        ).fetchall()
+        state = tuple((int(row["ordinal"]), str(row["status"])) for row in rows)
+        if state == self._operator_wait_state:
+            return state
+        self._operator_wait_state = state
+        short = self.mission_id[:8]
+        if not state:
+            reason, command = "the mission has no tasks", f"llm-bridge task add --mission {short} PROMPT"
+        else:
+            first = next((ordinal for ordinal, status in state if status in {"BLOCKED", "FAILED", "PAUSED"}), state[0][0])
+            reason = "no task can run: " + ", ".join(f"{count} {status.lower()}" for status, count in sorted(counts.items()) if status not in {"COMPLETED", "CANCELLED"})
+            if any(status == "VERIFYING" for _, status in state):
+                command = f"llm-bridge task approve --mission {short} --task {first}"
+            else:
+                command = f"llm-bridge task retry --mission {short} --task {first}"
+        self.store.record_runtime_event(self.mission_id, "mission-waiting-for-operator", {
+            "reason": reason,
+            "summary": f"{reason} · {command}",
+            "tasks": [{"ordinal": ordinal, "status": status} for ordinal, status in state],
+            "command": command,
+        })
+        return state
 
     def _apply_pending_boundary_requests(self) -> None:
         mission = self.store.get_mission(self.mission_id)
@@ -1686,6 +1733,24 @@ def _process_alive_but_unverifiable(process_pid: int) -> bool:
     return bool(tail and tail[0] != "Z")
 
 
+def provider_operations_to_check(store: BridgeStore, mission_id: str) -> list[dict[str, Any]]:
+    """Operations whose provider process may still be alive and must be checked before replacement work.
+
+    Unresolved operations, plus UNCERTAIN ones that kept a recorded process identity: a recovery that was
+    refused or failed part way marked its operations UNCERTAIN, and the next attempt must still see them.
+    A recorded identity that no longer matches a live process is skipped, so old rows cost one ``/proc`` read.
+    """
+    return [
+        dict(row)
+        for row in store.db.execute(
+            "SELECT * FROM operations WHERE mission_id=? AND (status IN ('INTENT','PREPARED','RUNNING') OR "
+            "(status='UNCERTAIN' AND process_pid IS NOT NULL AND process_start IS NOT NULL AND process_start!='')) "
+            "ORDER BY rowid DESC LIMIT 50",
+            (mission_id,),
+        )
+    ]
+
+
 def _terminate_owned_process_group(process_pid: int, process_start: str, *, timeout: float = 2.0) -> None:
     if process_pid < 2 or not process_start:
         raise PermissionError("refusing to signal a process whose persisted identity does not match")
@@ -2043,23 +2108,14 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         headless, native_tui = effective_headless, effective_native_tui
         providers = str(providers or mission["config"].get("providers", "claude,codex,opencode"))
         routes = str(mission["config"].get("routes", "")) if routes is None else str(routes)
-        interrupted = [
-            dict(row)
-            for row in store.db.execute(
-                "SELECT * FROM operations WHERE mission_id=? AND status IN ('INTENT','PREPARED','RUNNING')",
-                (mission_id,),
-            )
-        ]
+        interrupted = provider_operations_to_check(store, mission_id)
         interrupted_managed = store.unresolved_managed_processes(mission_id)
-        # Ownership is established before recovery. An unresolved operation is
-        # uncertain; its task is blocked and is never replayed automatically.
-        store.reconcile_interrupted_operations(mission_id)
-        if interrupted_managed:
-            terminate_managed_processes(store, mission_id)
         # A controller crash does not kill a native tmux pane or a detached
         # headless process group. Resolve those exact owned identities before
-        # creating a replacement controller/station, after first making the
-        # durable operation UNCERTAIN so recovery cannot replay it.
+        # creating a replacement controller/station. The checks run before the
+        # operations are marked UNCERTAIN: a refusal or a failed termination
+        # leaves them unresolved, so the next start repeats the check instead
+        # of finding nothing to check and starting replacement work.
         prior_handle: TerminalHandle | None = None
         if not prior_headless and shutil.which("tmux"):
             prior_handle = _open_existing(TmuxTerminalBackend(), runtime, mission_id)
@@ -2070,18 +2126,21 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             process_pid = operation.get("process_pid")
             process_start = operation.get("process_start")
             if process_pid and process_start and int(process_pid) not in terminated_pids:
-                current_identity = _process_start_token(int(process_pid))
-                if current_identity and current_identity != str(process_start):
-                    raise PermissionError(
-                        f"persisted provider pid {process_pid} now belongs to a different process; refusing recovery cleanup"
-                    )
-                if current_identity:
+                # A different start token at that PID means the recorded provider is gone and the PID
+                # was reused: there is nothing to signal, and the unrelated process is never touched.
+                if _process_start_token(int(process_pid)) == str(process_start):
                     _terminate_owned_process_group(int(process_pid), str(process_start))
                 terminated_pids.add(int(process_pid))
             elif operation["status"] == "RUNNING" and (prior_headless or prior_handle is None):
                 raise RuntimeError(
-                    f"cannot prove identity of surviving provider operation {operation['id']}; refusing to start replacement work"
+                    f"cannot prove identity of surviving provider operation {operation['id']}; refusing to start replacement work "
+                    f"· if no provider is running, acknowledge that with: llm-bridge stop --force --mission {mission_id[:8]}, then start again"
                 )
+        # Ownership is established before recovery. An unresolved operation is
+        # uncertain; its task is blocked and is never replayed automatically.
+        store.reconcile_interrupted_operations(mission_id)
+        if interrupted_managed:
+            terminate_managed_processes(store, mission_id)
         for command in store.pending_commands(mission_id):
             store.finish_command(command["id"], status="REJECTED", result={"error": "controller restarted; queued command was not replayed"})
         store.release_declined_tasks(mission_id)
@@ -2100,63 +2159,75 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             _write_controller_ready(ready, startup_token, mission["status"])
             return 0
 
-        # A start that names a different rotation changes the mission's saved
-        # rotation; record it so the Activity view shows the change.
-        store.set_rotation(mission_id, providers=providers, routes=routes, source="start")
-        mission = store.set_mission_config_values(
-            mission_id,
-            {"headless": headless, "native_tui": native_tui},
-            event_kind="controller-config",
-        )
-        prior_headless = bool(mission["config"].get("headless", False))
-
-        _install_frozen_tool_config(mission, runtime)
-        problem = rotation_problem(mission, providers, routes)
-        if problem:
-            record_controller_failure(store, mission_id, problem, f"llm-bridge rotation --mission {mission_id[:8]} --set LIST")
-            store.set_mission_status(mission_id, "FAILED")
-            print(f"controller failure: {problem}", file=sys.stderr, flush=True)
-            return 2
         backend: TmuxTerminalBackend | None = None
         handle: TerminalHandle | None = None
-        if not headless:
-            if not shutil.which("tmux"):
-                record_controller_failure(store, mission_id, "tmux is required for native mode; retry with --mode headless")
-                store.set_mission_status(mission_id, "FAILED")
-                raise RuntimeError("tmux is required for native mode; retry with --mode headless")
-            backend = TmuxTerminalBackend()
-            handle = _open_existing(backend, runtime, mission_id)
-            if handle is None:
-                controller_log = runtime / "controller.log"
-                controller_log.touch(mode=0o600, exist_ok=True)
-                os.chmod(controller_log, 0o600)
-                bridge_argv = rooted_module_argv("llm_tools.bridge", "console", "--mission", mission_id)
-                handle = backend.start(
-                    provider_argv=_provider_station_argv(native_tui, controller_log),
-                    bridge_argv=bridge_argv,
-                    picker_argv=rooted_module_argv("llm_tools.bridge", "missions", "--pick", "--from", mission_id),
-                    cwd=mission["cwd"],
-                    socket_path=mission_socket_path(mission_id),
-                    session_name=_session_name(mission_id),
-                    size=(120, 40),
-                    server_env=station_server_environment(mission["config"]),
-                )
+        try:
+            # A start that names a different rotation changes the mission's saved
+            # rotation; record it so the Activity view shows the change.
+            store.set_rotation(mission_id, providers=providers, routes=routes, source="start")
+            mission = store.set_mission_config_values(
+                mission_id,
+                {"headless": headless, "native_tui": native_tui},
+                event_kind="controller-config",
+            )
+            prior_headless = bool(mission["config"].get("headless", False))
 
-        if backend is not None and handle is not None:
-            try:
-                backend.set_detach_command(handle, station_detach_argv(mission_id))
-            except (OSError, RuntimeError, subprocess.SubprocessError):
-                pass  # without the hook a finished station is closed by `llm-bridge stop`
-        _write_controller_ready(ready, startup_token, "RUNNING", tmux=bool(handle))
-        actual_mode = "native" if native_tui else "headless" if headless else "autonomous"
-        store.record_runtime_event(mission_id, "controller-mode", {
-            "verified": True,
-            "actual_mode": actual_mode,
-            "controller_pid": os.getpid(),
-            "process_start": _process_start_token(os.getpid()) or None,
-            "runtime_source": _runtime_source_identity(),
-            **common.diagnostic_clock_fields(),
-        })
+            _install_frozen_tool_config(mission, runtime)
+            problem = rotation_problem(mission, providers, routes)
+            if problem:
+                record_controller_failure(store, mission_id, problem, f"llm-bridge rotation --mission {mission_id[:8]} --set LIST")
+                store.set_mission_status(mission_id, "FAILED")
+                print(f"controller failure: {problem}", file=sys.stderr, flush=True)
+                return 2
+            if not headless:
+                if not shutil.which("tmux"):
+                    record_controller_failure(store, mission_id, "tmux is required for native mode; retry with --mode headless")
+                    store.set_mission_status(mission_id, "FAILED")
+                    raise RuntimeError("tmux is required for native mode; retry with --mode headless")
+                backend = TmuxTerminalBackend()
+                handle = _open_existing(backend, runtime, mission_id)
+                if handle is None:
+                    controller_log = runtime / "controller.log"
+                    controller_log.touch(mode=0o600, exist_ok=True)
+                    os.chmod(controller_log, 0o600)
+                    bridge_argv = rooted_module_argv("llm_tools.bridge", "console", "--mission", mission_id)
+                    handle = backend.start(
+                        provider_argv=_provider_station_argv(native_tui, controller_log),
+                        bridge_argv=bridge_argv,
+                        picker_argv=rooted_module_argv("llm_tools.bridge", "missions", "--pick", "--from", mission_id),
+                        cwd=mission["cwd"],
+                        socket_path=mission_socket_path(mission_id),
+                        session_name=_session_name(mission_id),
+                        size=(120, 40),
+                        server_env=station_server_environment(mission["config"]),
+                    )
+
+            if backend is not None and handle is not None:
+                try:
+                    backend.set_detach_command(handle, station_detach_argv(mission_id))
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    pass  # without the hook a finished station is closed by `llm-bridge stop`
+            _write_controller_ready(ready, startup_token, "RUNNING", tmux=bool(handle))
+            actual_mode = "native" if native_tui else "headless" if headless else "autonomous"
+            store.record_runtime_event(mission_id, "controller-mode", {
+                "verified": True,
+                "actual_mode": actual_mode,
+                "controller_pid": os.getpid(),
+                "process_start": _process_start_token(os.getpid()) or None,
+                "runtime_source": _runtime_source_identity(),
+                **common.diagnostic_clock_fields(),
+            })
+        except BaseException as exc:
+            # The mission is RUNNING here: a failure of the setup must not leave it that way with no controller.
+            if store.get_mission(mission_id)["status"] in CONTROLLED_MISSION_STATUSES:
+                record_controller_failure(store, mission_id, controller_failure_reason(exc, runtime / "controller.log"))
+                store.set_mission_status(mission_id, "FAILED")
+            if backend is not None and handle is not None:
+                try:
+                    backend.stop(handle)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    pass  # the station is a courtesy of a mission that already failed
+            raise
         refresh_worker: CapacityRefreshWorker | None = None
         try:
             configured_routes = routes.split(",") if routes else providers.split(",")

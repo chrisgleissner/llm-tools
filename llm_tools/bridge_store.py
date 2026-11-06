@@ -367,6 +367,7 @@ class BridgeStore:
         self.db.execute("PRAGMA busy_timeout=10000")
         self._initialize()
         self._secure_sqlite_files()
+        self._files_secured = False  # the first write transaction secures once more, for files that write creates
 
     def _open_readonly(self) -> sqlite3.Connection | None:
         """A read-only connection to a database at the current schema, else ``None``."""
@@ -534,13 +535,25 @@ class BridgeStore:
         if column not in columns:
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    _files_secured = False
+
     def _secure_sqlite_files(self) -> None:
+        """Restrict the database and its WAL/shared-memory files to the owner.
+
+        Opening the store creates all three files and secures them; SQLite gives a recreated WAL file the
+        database file's mode, so one pass after this connection's first write is enough. Repeating the three
+        stat/chmod calls after every transaction cost an idle controller dozens of system calls per second.
+        """
+        if self._files_secured:
+            return
         for path in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
             try:
                 if path.exists():
                     path.chmod(0o600)
             except OSError:
                 pass
+        if not self.readonly:
+            self._files_secured = True
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -740,10 +753,12 @@ class BridgeStore:
                 raise TransitionError(mission_transition_message(mission_id, old, status))
             if status == "COMPLETED":
                 counts = self.db.execute(
-                    "SELECT COUNT(*) AS total, SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS completed FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')",
+                    "SELECT COUNT(*) AS total, SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) AS completed, "
+                    "SUM(CASE WHEN status='CANCELLED' THEN 1 ELSE 0 END) AS cancelled FROM tasks WHERE mission_id=? AND (origin='operator' OR proposal_status='ACCEPTED')",
                     (mission_id,),
                 ).fetchone()
-                if not counts["total"] or counts["total"] != counts["completed"]:
+                # A cancelled task is finished (the operator dropped it), but at least one task must have completed.
+                if not counts["completed"] or counts["total"] != counts["completed"] + counts["cancelled"]:
                     raise TransitionError("mission cannot complete while tasks are not complete")
             self.db.execute("UPDATE missions SET status=?,updated_at=? WHERE id=?", (status, utc_now(), mission_id))
             self._event(mission_id, "mission-status", {"from": old, "to": status})
@@ -965,6 +980,19 @@ class BridgeStore:
                 (mission_id, -1 if limit is None else max(0, int(limit))),
             )
             return self._task_dicts(rows.fetchall())
+
+    def runnable_task_ids(self, mission_id: str, *, limit: int | None = None) -> list[int]:
+        """IDs ``ready_tasks`` would return, in its order, without promoting or writing anything.
+
+        The controller's idle loop and capacity waits call this every poll; it takes no write lock.
+        """
+        rows = self.db.execute(
+            "SELECT t.id FROM tasks t WHERE t.mission_id=? AND t.status IN ('QUEUED','READY') AND (t.origin='operator' OR t.proposal_status='ACCEPTED') "
+            "AND NOT EXISTS (SELECT 1 FROM task_dependencies d JOIN tasks p ON p.id=d.depends_on WHERE d.task_id=t.id AND p.status!='COMPLETED') "
+            "ORDER BY t.priority DESC,t.ordering,t.id LIMIT ?",
+            (mission_id, -1 if limit is None else max(0, int(limit))),
+        )
+        return [int(row["id"]) for row in rows]
 
     _AMENDABLE_COLUMNS = {"prompt": "prompt", "title": "title", "priority": "priority", "acceptance": "acceptance_json"}
 
@@ -1303,7 +1331,7 @@ class BridgeStore:
         return self.get_task(int(op["task_id"]))
 
     def reconcile_interrupted_operations(self, mission_id: str, *, cause: str = "") -> int:
-        """Mark unresolved operations UNCERTAIN and block their tasks.
+        """Mark unresolved operations UNCERTAIN and block their tasks that are still queued, ready or running.
 
         ``cause`` names an operator action that interrupted them (``stop-force``).
         The event then says so, and ``release_interrupted_tasks`` can resume the
@@ -1320,7 +1348,8 @@ class BridgeStore:
                 task = self._task_row(int(op["task_id"]))
                 now = utc_now()
                 self.db.execute("UPDATE operations SET status='UNCERTAIN',updated_at=? WHERE id=?", (now, op["id"]))
-                self.db.execute("UPDATE tasks SET status='BLOCKED',updated_at=? WHERE id=?", (now, task["id"]))
+                # An operator's CANCELLED or PAUSED task (or one already past the run, VERIFYING or finished) keeps its status.
+                self.db.execute("UPDATE tasks SET status='BLOCKED',updated_at=? WHERE id=? AND status IN ('QUEUED','READY','RUNNING')", (now, task["id"]))
                 self._event(mission_id, "operation-uncertain", data, task_id=task["id"], operation_id=op["id"])
                 count += 1
         return count
@@ -2109,7 +2138,7 @@ class MissionLock:
             except BlockingIOError:
                 return True
             except OSError:
-                return False
+                return True  # e.g. ENOLCK: absence of a controller is not proven, so do not report one as gone
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
             return False
         finally:
