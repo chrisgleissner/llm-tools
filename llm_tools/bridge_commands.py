@@ -252,6 +252,23 @@ def _mission_settings_patch(store: BridgeStore | None, request: CommandRequest, 
     if all(params[name] is None for name in ("auto_continue", "teams", "token_spend", "suspend_when_rate_limited", "colour")):
         raise CommandFailure("invalid-argument", "mission.settings.patch requires at least one setting")
     cli = _cli()
+    # Validate the whole patch before writing any setting. A valid early field
+    # must not be committed when a later color or token policy is invalid.
+    from . import bridge_policy
+
+    if params["teams"] is not None or params["token_spend"] is not None:
+        with cli.open_store(readonly=True) as reader:
+            current = bridge_policy.effective_settings(reader.get_mission(request.mission_id).get("config"))
+        try:
+            bridge_policy.validate_settings(
+                current["teams_enabled"] if params["teams"] is None else params["teams"],
+                current["token_spend"] if params["token_spend"] is None else params["token_spend"],
+            )
+        except ValueError as exc:
+            raise CommandFailure("invalid-argument", str(exc)) from None
+    colour = params["colour"]
+    if colour is not None and not (colour == "auto" or (colour.isdigit() and 1 <= int(colour) <= cli.MISSION_COUNT)):
+        raise CommandFailure("invalid-argument", f"colour must be a number from 1 to {cli.MISSION_COUNT}, or auto")
     result: dict[str, Any] = {"schema_version": 1, "mission_id": request.mission_id}
     with cli.open_store() as writer:
         if params["auto_continue"] is not None:
@@ -270,7 +287,7 @@ def _mission_rotation(store: BridgeStore | None, request: CommandRequest, params
 
     assert request.mission_id is not None
     return dict(_cli()._rotation_result(argparse.Namespace(
-        mission=request.mission_id, set_list=params["set"], routes=params["routes"], providers=params["providers"])))
+        mission=request.mission_id, set_list=params.get("set"), routes=params.get("routes"), providers=params.get("providers"))))
 
 
 def _mission_agents(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -360,7 +377,13 @@ def _worker_restore(store: BridgeStore | None, request: CommandRequest, params: 
     from . import bridge_backup
     from .bridge_store import store_path
 
-    facts = bridge_backup.restore(Path(params["input"]), store_path=store_path())
+    raw_input = params["input"]
+    if len(raw_input.encode("utf-8", "replace")) > 4096 or "\x00" in raw_input:
+        raise CommandFailure("invalid-argument", "worker.restore input path is invalid or too long")
+    input_path = Path(raw_input).expanduser()
+    if not input_path.is_file():
+        raise CommandFailure("invalid-argument", "worker.restore input must name an existing backup file")
+    facts = bridge_backup.restore(input_path, store_path=store_path())
     # Local restore reports the source and retained database paths for the
     # operator. Those host paths must not cross the worker/coordinator boundary.
     return {key: facts[key] for key in ("missions", "schema_version", "last_event_id", "event_sequence")}

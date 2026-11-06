@@ -172,7 +172,7 @@ or --allow-restore opt-in. Creation and restore also need one or more
 --allow-root DIR paths; roots are resolved to real directories and requested
 paths must stay inside them, including through symlinks. These opt-ins default off. Worker-side
 checks remain authoritative even when an administrator requests an operation.
-llm-bridge worker status shows the enrolled policy; worker audit shows what
+Worker status shows the enrolled policy; worker audit shows what
 remote clients did on this worker.
 
 On the machine you type on (once):

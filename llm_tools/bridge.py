@@ -2533,6 +2533,9 @@ def _main(argv: list[str] | None = None) -> int:
                     result = commands.dispatch(commands.CommandRequest(f"proposal.{args.proposal_action}", {
                         "task_number": int(args.task), "task_id": None, "reason": str(getattr(args, "reason", "") or ""),
                     }, mission_id=args.mission))
+                    # Keep the established CLI JSON envelope while the shared typed
+                    # operation itself returns the task result used by REST/workers.
+                    result = {"status": "APPLIED", "result": result}
                 else:
                     prompt = read_verbatim(args.prompt_file) if args.prompt_file else args.prompt
                     result = commands.dispatch(commands.CommandRequest("proposal.create", {
@@ -2540,6 +2543,7 @@ def _main(argv: list[str] | None = None) -> int:
                         "priority": args.priority, "depends_on": _dependency_ids(store, args.mission, args.depends_on),
                         "acceptance": args.acceptance,
                     }, mission_id=args.mission))
+                    result = {"status": "APPLIED", "result": result}
             _print_result(result, bool(getattr(args, "json", False)), _proposal_text(args))
             return 0
         if args.command == "task":
@@ -2623,6 +2627,10 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "rotation":
             params = {"set": args.set_list, "routes": args.routes, "providers": args.providers}
             operation = "mission.rotation.put" if any(value is not None for value in params.values()) else "mission.rotation.get"
+            if operation == "mission.rotation.get":
+                params = {}
+            else:
+                params = {key: value for key, value in params.items() if value is not None}
             result = commands.dispatch(commands.CommandRequest(operation, params, mission_id=args.mission))
             _print_result(result, args.json, fmt.format_rotation)
             return 0

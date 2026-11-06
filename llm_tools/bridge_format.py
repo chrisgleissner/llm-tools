@@ -334,7 +334,7 @@ def format_proposals(proposals: list[dict[str, Any]]) -> str:
 
 
 def format_proposal_result(action: str, result: dict[str, Any]) -> str:
-    inner = result.get("result") if isinstance(result.get("result"), dict) and "payload" in result else result
+    inner = result.get("result") if isinstance(result.get("result"), dict) else result
     inner = inner if isinstance(inner, dict) else {}
     if action == "create":
         return f"Proposed {format_task_line(inner)}"

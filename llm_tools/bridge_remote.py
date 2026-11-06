@@ -490,7 +490,12 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
             if message:
                 print(f"llm-bridge: {target}: {message}", file=sys.stderr)
                 return code
-            return _print(envelope.get("result"), as_json, human)
+            value = envelope.get("result")
+            if request.operation in {"proposal.create", "proposal.accept", "proposal.reject"}:
+                # Preserve the public CLI's historical mutation receipt shape while
+                # the typed worker operation returns the domain task directly.
+                value = {"status": "APPLIED", "result": value}
+            return _print(value, as_json, human)
         if spec.mutating:
             raise ValueError("--target all supports read-only commands only")
         results: dict[str, Any] = {}
