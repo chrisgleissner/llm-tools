@@ -182,6 +182,7 @@ class EventKind(StrEnum):
     PROVIDER_HANDOFF = "provider-handoff"
     PROVIDER_HANDOFF_EXHAUSTED = "provider-handoff-exhausted"
     PROVIDER_HANDOFF_SELECTED = "provider-handoff-selected"
+    PROVIDER_ORPHANED = "provider-orphaned"
     PROVIDER_SELECTION = "provider-selection"
     PROVIDER_RESULT_DIAGNOSED = "provider-result-diagnosed"
     PROVIDER_SWITCHED = "provider-switched"

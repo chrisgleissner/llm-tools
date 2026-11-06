@@ -1247,7 +1247,9 @@ class ProgressGuard:
     def __init__(self) -> None:
         self.idle_timeout = int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600") or "600")
         self.question_idle_timeout = int(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30") or "30")
-        now = time.time()
+        # Elapsed-time checks use the monotonic clock so a wall-clock step (NTP,
+        # resume from suspend) cannot make a healthy run look stalled.
+        now = time.monotonic()
         self.last_progress = now
         self.question_seen_at: float | None = None
         self.provider_quota_diagnostic_seen = False
@@ -1258,33 +1260,42 @@ class ProgressGuard:
         *,
         structured_provider_error: bool = False,
         current_output: str = "",
+        from_stderr: bool = False,
     ) -> bool:
-        """Record fresh output. Returns True if an interactive prompt was seen."""
-        self.last_progress = time.time()
+        """Record fresh output. Returns True if an interactive prompt was seen.
+
+        ``from_stderr`` marks diagnostics from the error channel: they can show a
+        blocking prompt or a quota failure, but never arm or clear the pending
+        question, which is about what the model said on stdout.
+        """
+        self.last_progress = time.monotonic()
         if provider_quota_diagnostic(combined_tail, structured=structured_provider_error):
             self.provider_quota_diagnostic_seen = True
             if not has_explicit_prompt_cue(current_output or combined_tail):
                 # Quota diagnostics are provider failures, not evidence that a
                 # CLI is waiting for input. Keep the native exit status so
                 # Ralph can refresh capacity and Bridge can retry the task.
-                self.question_seen_at = None
+                if not from_stderr:
+                    self.question_seen_at = None
                 return False
         combined_tail = common.blocking_tail(combined_tail)
         if any(pattern.search(combined_tail) for pattern in common.BLOCKING_PROMPT_PATTERNS):
             return True
-        # Only treat the run as "waiting on a question" when the most recent
-        # output still ends in a question. If the model asked something and then
-        # resumed producing output, clear the pending-question state so we do not
-        # kill a provider that is actually making progress.
-        if common.QUESTION_LINE_RE.search(combined_tail[-4000:]):
-            self.question_seen_at = time.time()
+        if from_stderr:
+            return False
+        # The run counts as "waiting on a question" only while the most recent
+        # stdout line is a question. Any later output, including the tool
+        # activity marker, clears the pending question so a provider that asked
+        # something and then carried on is not killed.
+        if common.ends_with_question(combined_tail):
+            self.question_seen_at = time.monotonic()
         else:
             self.question_seen_at = None
         return False
 
     def overdue(self) -> str | None:
         """Return an abort reason when the run has stalled, else None."""
-        now = time.time()
+        now = time.monotonic()
         if self.idle_timeout > 0 and now - self.last_progress > self.idle_timeout:
             return f"no output progress for {self.idle_timeout}s"
         if (
@@ -1344,7 +1355,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                 combined_parts[0] = combined_parts[0][excess:]
                 retained_bytes -= excess
             output_truncated = True
-    start = time.time()
+    start = time.monotonic()
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
     exit_code = 124
     blocking = False
@@ -1352,14 +1363,18 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     guard = ProgressGuard()
 
     scan_buffer = b""
+    stderr_scan_buffer = b""
 
-    def scan_tail(scannable: bytes) -> bool:
-        nonlocal scan_buffer
+    def scan_tail(scannable: bytes, *, from_stderr: bool = False) -> bool:
+        nonlocal scan_buffer, stderr_scan_buffer
+        if from_stderr:
+            stderr_scan_buffer = (stderr_scan_buffer + scannable)[-8000:]
+            return guard.note_output(common.strip_ansi(stderr_scan_buffer.decode("utf-8", "replace")), from_stderr=True)
         scan_buffer = (scan_buffer + scannable)[-8000:]
         return guard.note_output(common.strip_ansi(scan_buffer.decode("utf-8", "replace")))
 
     while open_fds:
-        if time.time() - start > timeout:
+        if time.monotonic() - start > timeout:
             break
         reason = guard.overdue()
         if reason:
@@ -1387,7 +1402,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     stdout_buffer = b""
                 open_fds.pop(fd, None)
                 continue
-            guard.last_progress = time.time()
+            guard.last_progress = time.monotonic()
             if open_fds.get(fd) == "stdout":
                 stdout_buffer += chunk
                 if cfg.max_output_bytes > 0 and len(stdout_buffer) > cfg.max_output_bytes:
@@ -1417,7 +1432,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-                if scan_tail(chunk):
+                if scan_tail(chunk, from_stderr=True):
                     blocking = True
             if blocking:
                 break
@@ -1491,7 +1506,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
                 combined_parts[0] = combined_parts[0][excess:]
                 retained_bytes -= excess
             output_truncated = True
-    start = time.time()
+    start = time.monotonic()
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
     exit_code = 124
     blocking = False
@@ -1502,16 +1517,23 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     stdout_buffer = b""
     discard_stdout_line = False
     scan_buffer = b""
+    stderr_scan_buffer = b""
 
-    def scan_prompt(data: bytes, *, structured_provider_error: bool = False) -> bool:
-        nonlocal scan_buffer
+    def scan_prompt(data: bytes, *, structured_provider_error: bool = False, from_stderr: bool = False) -> bool:
+        nonlocal scan_buffer, stderr_scan_buffer
         if not data:
             return False
-        scan_buffer = (scan_buffer + data)[-8000:]
+        if from_stderr:
+            stderr_scan_buffer = (stderr_scan_buffer + data)[-8000:]
+            buffer = stderr_scan_buffer
+        else:
+            scan_buffer = (scan_buffer + data)[-8000:]
+            buffer = scan_buffer
         return guard.note_output(
-            common.strip_ansi(scan_buffer.decode("utf-8", "replace")),
+            common.strip_ansi(buffer.decode("utf-8", "replace")),
             structured_provider_error=structured_provider_error,
             current_output=common.strip_ansi(data.decode("utf-8", "replace")),
+            from_stderr=from_stderr,
         )
 
     def write_stdout(data: bytes) -> bool:
@@ -1537,7 +1559,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
         return scan_prompt(renderer.scannable, structured_provider_error=renderer.provider_error)
 
     while open_fds:
-        if time.time() - start > timeout:
+        if time.monotonic() - start > timeout:
             break
         reason = guard.overdue()
         if reason:
@@ -1559,7 +1581,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
                 if blocking:
                     break
                 continue
-            guard.last_progress = time.time()
+            guard.last_progress = time.monotonic()
             if open_fds.get(fd) == "stdout":
                 if renderer is None:
                     # Keep the raw-output path byte-for-byte for custom provider commands.
@@ -1606,7 +1628,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-                if scan_prompt(chunk):
+                if scan_prompt(chunk, from_stderr=True):
                     blocking = True
                     break
         if blocking:

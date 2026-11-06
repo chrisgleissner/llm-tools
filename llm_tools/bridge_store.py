@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from .bridge_states import (
     ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
-    HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, REOPENED_MISSION_STATUS, TASK_STATES, TASK_TRANSITIONS,
+    AUTONOMY_ABORT_EXIT_CODE, HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, REOPENED_MISSION_STATUS, TASK_STATES, TASK_TRANSITIONS,
 )
 from .bridge_vocab import mission_mode
 from .bridge_vocab import status_label
@@ -41,6 +41,13 @@ MAX_PROPOSALS_PER_OPERATION = 20
 # Retention of controller bookkeeping events (see BridgeStore.prune_plumbing_events).
 HEARTBEAT_RETENTION_SECONDS = 3600
 CAPACITY_REFRESH_FULL_SECONDS = 3600
+# Event kinds the controller writes on every pass of a capacity wait. Within the last hour all of
+# them are kept; older ones are thinned to the last row in each 10-minute bucket, like capacity refreshes.
+THINNED_EVENT_KINDS = ("capacity-refresh", "provider-wait", "provider-selection")
+# Finished commands are only the record of what was asked; the command-applied/-rejected events stay.
+COMMAND_RETENTION_SECONDS = 30 * 86400
+# Largest command result copied into a command-applied/-rejected event (the commands table keeps the whole result).
+COMMAND_EVENT_RESULT_BYTES = 4096
 
 
 def rotation_label(providers: Any, routes: Any) -> str:
@@ -698,6 +705,9 @@ class BridgeStore:
         canonical_cwd = str(Path(cwd).expanduser().resolve(strict=True))
         repo_root = repository_identity(canonical_cwd)
         mid = mission_id or uuid.uuid4().hex
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", mid) or mid in {".", ".."}:
+            # The id names lock files and runtime directories.
+            raise ValueError("invalid mission id: use letters, digits, '_', '.' and '-' only")
         now = utc_now()
         try:
             with self._transaction():
@@ -1103,6 +1113,19 @@ class BridgeStore:
         self._mission_row(mission_id)
         return [self.get_command(row[0]) for row in self.db.execute("SELECT id FROM commands INDEXED BY commands_mission_fifo WHERE mission_id=? AND status='QUEUED' ORDER BY rowid", (mission_id,))]
 
+    def _event_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        """The command result as the event records it: whole when small, else its short fields and a size.
+
+        ``task.add`` returns the task, prompt included; copying a large prompt
+        into the event would store it a second time. The commands table keeps
+        the complete result.
+        """
+        encoded = len(self._json(result).encode("utf-8"))
+        if encoded <= COMMAND_EVENT_RESULT_BYTES:
+            return result
+        short = {key: value for key, value in result.items() if isinstance(value, (bool, int, float)) or (isinstance(value, str) and len(value) <= 200)}
+        return {**short, "truncated": True, "result_bytes": encoded}
+
     def finish_command(self, command_id: str, *, status: str, result: dict[str, Any] | None = None) -> dict[str, Any]:
         status = status.upper()
         if status not in {"APPLIED", "REJECTED", "FAILED"}:
@@ -1118,7 +1141,7 @@ class BridgeStore:
                 action = json.loads(row["payload_json"]).get("action")
             except (ValueError, AttributeError):
                 action = None
-            data: dict[str, Any] = {"command_id": command_id, "result": result or {}}
+            data: dict[str, Any] = {"command_id": command_id, "result": self._event_result(result or {})}
             if action:
                 data["command"] = str(action)  # the queued event names it too; the outcome should say which command it was
             self._event(row["mission_id"], "command-" + status.lower(), data)
@@ -1416,8 +1439,13 @@ class BridgeStore:
                 released.append(int(task["ordinal"]))
         return released
 
-    def continue_task_after_provider_failure(self, operation_id: str, *, max_failures: int) -> dict[str, Any] | None:
+    def continue_task_after_provider_failure(self, operation_id: str, *, max_failures: int, max_autonomy_aborts: int = 0) -> dict[str, Any] | None:
         """Requeue known provider failures at a safe boundary, within a budget.
+
+        ``max_autonomy_aborts`` is how many runs per task that the scheduler's
+        own watchdog stopped (exit status 75: no progress, a question nobody
+        answered, a blocked prompt) may be handed to the next rotation entry.
+        The default of 0 never requeues one.
 
         This is deliberately separate from crash reconciliation: only an
         operation with a committed exit status can be handed to another route.
@@ -1439,6 +1467,22 @@ class BridgeStore:
                 return None
             if json.loads(task["pending_json"]) or not self._dependencies_complete(int(task["id"])):
                 return None
+            if op["exit_code"] == AUTONOMY_ABORT_EXIT_CODE:
+                aborts = int(self.db.execute(
+                    "SELECT COUNT(*) FROM operations WHERE task_id=? AND status='EXITED' AND exit_code=?",
+                    (task["id"], AUTONOMY_ABORT_EXIT_CODE),
+                ).fetchone()[0])
+                if aborts > max_autonomy_aborts:
+                    # The task stays BLOCKED for the operator; a second watchdog stop
+                    # on another route is not a transient false alarm.
+                    if max_autonomy_aborts > 0:
+                        self._event(op["mission_id"], "provider-handoff-exhausted", {
+                            "operation_id": operation_id,
+                            "exit_code": AUTONOMY_ABORT_EXIT_CODE,
+                            "autonomy_aborts": aborts,
+                            "max_autonomy_aborts": max_autonomy_aborts,
+                        }, task_id=task["id"], operation_id=operation_id)
+                    return None
             # A quota failure is recoverable: the capacity wait resumes the task
             # when credits return, so it must not use up the budget meant for
             # crashes and broken CLIs. Otherwise repeated quota windows would
@@ -1778,7 +1822,7 @@ class BridgeStore:
         chunk: int = 2000,
         budget_seconds: float = 1.0,
     ) -> dict[str, Any]:
-        """Bound the two event kinds the controller writes forever, and nothing else.
+        """Bound the event kinds the controller writes on a timer, and old finished commands.
 
         A heartbeat every 5 s and a capacity refresh every minute made up about
         92% of a mission's events (roughly 70 MB a week). Heartbeats older than
@@ -1803,7 +1847,7 @@ class BridgeStore:
             "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE mission_id=:mission AND kind='controller-heartbeat' AND created_at<:cutoff "
             "AND id<(SELECT MAX(id) FROM events WHERE mission_id=:mission AND kind='controller-heartbeat') ORDER BY id LIMIT :limit)"
         )
-        deleted = {"controller-heartbeat": 0, "capacity-refresh": 0}
+        deleted = {"controller-heartbeat": 0, **{kind: 0 for kind in THINNED_EVENT_KINDS}, "commands": 0}
         deadline = time.monotonic() + max(0.0, budget_seconds)
         complete = True
         while True:
@@ -1815,7 +1859,7 @@ class BridgeStore:
             if time.monotonic() >= deadline:
                 complete = False
                 break
-        if complete:
+        for kind in THINNED_EVENT_KINDS if complete else ():
             # Rows are visited in id order in windows of ``chunk`` rows. A row goes when the next
             # older-than-cutoff row falls in the same 10-minute bucket (the first 15 characters of
             # the UTC timestamp), so the last row of each bucket stays, and so does the newest row.
@@ -1823,17 +1867,33 @@ class BridgeStore:
             while True:
                 rows = self.db.execute(
                     "SELECT id,substr(created_at,1,15) FROM events INDEXED BY events_mission_kind_id "
-                    "WHERE mission_id=? AND kind='capacity-refresh' AND id>? AND created_at<? ORDER BY id LIMIT ?",
-                    (mission_id, last, capacity_before, int(chunk) + 1),
+                    "WHERE mission_id=? AND kind=? AND id>? AND created_at<? ORDER BY id LIMIT ?",
+                    (mission_id, kind, last, capacity_before, int(chunk) + 1),
                 ).fetchall()
                 doomed = [(int(rows[i][0]),) for i in range(len(rows) - 1) if rows[i][1] == rows[i + 1][1]]
                 if doomed:
                     with self._transaction():
                         self.db.executemany("DELETE FROM events WHERE id=?", doomed)
-                    deleted["capacity-refresh"] += len(doomed)
+                    deleted[kind] += len(doomed)
                 if len(rows) <= chunk:
                     break
                 last = int(rows[-1][0]) - 1
+                if time.monotonic() >= deadline:
+                    complete = False
+                    break
+            if not complete:
+                break
+        if complete:
+            commands_before = (moment - timedelta(seconds=COMMAND_RETENTION_SECONDS)).isoformat(timespec="seconds")
+            while True:
+                with self._transaction():
+                    count = max(0, self.db.execute(
+                        "DELETE FROM commands WHERE id IN (SELECT id FROM commands WHERE mission_id=? AND status<>'QUEUED' AND updated_at<? ORDER BY updated_at LIMIT ?)",
+                        (mission_id, commands_before, int(chunk)),
+                    ).rowcount)
+                deleted["commands"] += count
+                if count < chunk:
+                    break
                 if time.monotonic() >= deadline:
                     complete = False
                     break
@@ -2084,12 +2144,14 @@ class BridgeStore:
 class MissionLock:
     """Non-blocking lifetime flock for one mission process owner."""
 
-    def __init__(self, directory: str | Path, mission_id: str) -> None:
+    def __init__(self, directory: str | Path, mission_id: str, *, kind: str = "") -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", mission_id):
             raise ValueError("invalid mission id for lock")
         self.directory = Path(directory).expanduser().absolute()
         self.mission_id = mission_id
-        self.path = self.directory / f"mission-{mission_id}.lock"
+        # ``kind`` names a second lock for the same mission (the launcher's
+        # start lock); the default is the controller's lifetime lock.
+        self.path = self.directory / (f"mission-{mission_id}.{kind}.lock" if kind else f"mission-{mission_id}.lock")
         self._file: Any | None = None
 
     def acquire(self, timeout: float = 0.0, poll: float = 0.02) -> None:
@@ -2106,19 +2168,49 @@ class MissionLock:
         info = self.directory.stat()
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise PermissionError(f"mission lock directory must be owned by this user and private: {self.directory}")
-        self._file = self.path.open("a+")
-        os.chmod(self.path, 0o600)
-        deadline = time.monotonic() + max(0.0, timeout)
-        while True:
-            try:
-                fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    self._file.close()
-                    self._file = None
-                    raise
-                time.sleep(poll)
+        stream = self.path.open("a+")
+        try:
+            os.chmod(self.path, 0o600)
+            deadline = time.monotonic() + max(0.0, timeout)
+            while True:
+                try:
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(poll)
+        except BaseException:
+            # Only a lock that is really held is kept in ``_file``; a later
+            # acquire() must not mistake a half-opened file for ownership.
+            stream.close()
+            raise
+        self._file = stream
+
+    def write_owner(self, record: Mapping[str, Any]) -> None:
+        """Record who holds the lock, in the lock file itself, while holding it."""
+        if self._file is None:
+            raise RuntimeError("the lock is not held")
+        self._file.seek(0)
+        self._file.truncate(0)
+        self._file.write(json.dumps(dict(record), sort_keys=True) + "\n")
+        self._file.flush()
+        os.fsync(self._file.fileno())
+
+    @classmethod
+    def read_owner(cls, directory: str | Path, mission_id: str) -> dict[str, Any]:
+        """The identity record of the current holder; ``{}`` when the lock is free or has no record.
+
+        A record left by a holder that has since exited is never returned: the
+        lock must be held right now.
+        """
+        if not cls.is_held(directory, mission_id):
+            return {}
+        try:
+            record = json.loads(cls(directory, mission_id).path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return record if isinstance(record, dict) else {}
 
     @classmethod
     def is_held(cls, directory: str | Path, mission_id: str) -> bool:
