@@ -468,14 +468,14 @@ def _completed_mission(tmp_path, state, capsys, name="done"):
 def test_task_add_reopens_a_completed_mission(tmp_path, state, capsys) -> None:
     mid, _ = _completed_mission(tmp_path, state, capsys)
     out = _run(capsys, "task", "add", "--mission", mid, "--prompt", "follow-up work", "--title", "Follow-up")
-    assert out.splitlines() == ['Added task 2 "Follow-up" · QUEUED · priority 0', f"Mission reopened · start it with: llm-bridge start --mission {mid[:8]}"]
+    assert out.splitlines() == ['Added task 2 "Follow-up" · QUEUED · priority 0', f"Mission {mid[:8]} reopened · start it with: llm-bridge start --mission {mid[:8]}"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_mission(mid)["status"] == "STOPPED"
         reopened = [e for e in store.events(mid) if e["kind"] == "mission-reopened"]
         assert reopened and reopened[0]["data"] == {"from": "COMPLETED", "reason": "task-added", "to": "STOPPED"}
         assert reopened[0]["task_ordinal"] == 2
         store.set_mission_status(mid, "RUNNING")  # start can continue it
-    assert "Mission reopened" not in _run(capsys, "task", "add", "--mission", mid, "--prompt", "third")
+    assert "reopened" not in _run(capsys, "task", "add", "--mission", mid, "--prompt", "third")
 
 
 def test_task_add_to_a_cancelled_mission_says_so(tmp_path, state, capsys) -> None:
@@ -493,11 +493,14 @@ def test_read_only_commands_use_the_folders_finished_mission(tmp_path, state, ca
     assert "VERIFYING" not in _run(capsys, "task", "list") and "COMPLETED" in _run(capsys, "task", "list")
     assert _run(capsys, "task", "show", "--task", "1").startswith("task 1 ")
     assert "mission-created" in _run(capsys, "events")
-    # A command that changes things keeps the rule and says how to continue.
-    err = _run(capsys, "task", "add", "--prompt", "more", code=2)
+    # Commands other than task add that change things keep the rule and say how to continue.
+    err = _run(capsys, "resume", code=2)
     assert f"mission {mid[:8]} in folder" in err and "is finished (completed)" in err
-    assert f"llm-bridge task add --mission {mid[:8]}" in err and not LONG_ID.search(err)
+    assert f"llm-bridge task add --mission {mid[:8]}" in err and "reopens it" in err and not LONG_ID.search(err)
     assert "terminal mission" not in err
+    # task add reopens the folder's completed mission exactly as it does with --mission.
+    out = _run(capsys, "task", "add", "--prompt", "more")
+    assert f"Mission {mid[:8]} reopened · start it with: llm-bridge start" in out and not LONG_ID.search(out)
 
 
 def test_several_finished_missions_in_a_folder_are_listed(tmp_path, state, capsys, monkeypatch) -> None:

@@ -23,6 +23,7 @@ from .bridge_states import (
     ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
     HALTED_MISSION_STATUSES, MISSION_STATES, MISSION_TRANSITIONS, OPERATOR_DECLINED_EXIT_CODE, TASK_STATES, TASK_TRANSITIONS,
 )
+from .bridge_vocab import mission_mode
 
 
 if TYPE_CHECKING:
@@ -47,6 +48,12 @@ def rotation_label(providers: Any, routes: Any) -> str:
         return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
     return ",".join(names(routes) or names(providers))
+
+
+def _with_mode(config: dict[str, Any]) -> dict[str, Any]:
+    """The mission config with ``mode`` (native, background or headless) added next to the two saved booleans."""
+    config["mode"] = mission_mode(config)
+    return config
 
 
 class TransitionError(ValueError):
@@ -692,14 +699,14 @@ class BridgeStore:
 
     def get_mission(self, mission_id: str) -> dict[str, Any]:
         result = dict(self._mission_row(mission_id))
-        result["config"] = json.loads(result.pop("config_json"))
+        result["config"] = _with_mode(json.loads(result.pop("config_json")))
         return result
 
     def list_missions(self) -> list[dict[str, Any]]:
         result = []
         for row in self.db.execute("SELECT * FROM missions ORDER BY created_at,id"):
             item = dict(row)
-            item["config"] = json.loads(item.pop("config_json"))
+            item["config"] = _with_mode(json.loads(item.pop("config_json")))
             result.append(item)
         return result
 
@@ -1487,6 +1494,7 @@ class BridgeStore:
                 if marker not in markers:
                     markers.append(marker)
             config["released_reviews"] = markers[-200:]
+            config.pop("mode", None)  # derived on read from the two saved mode booleans, never stored
             self.db.execute("UPDATE missions SET config_json=?,updated_at=? WHERE id=?", (self._json(config), utc_now(), mission_id))
             self.sync_review_hold_events(mission_id)
         ordinals = hold["tasks"]

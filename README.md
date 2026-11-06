@@ -79,7 +79,7 @@ The form has no model setting, so the provider uses its own default. To try a pa
 The same flow from a script, with no terminal attached:
 
 ```bash
-llm-bridge mission create --file task.md --name demo --native
+llm-bridge mission create --file task.md --name demo --mode native
 llm-bridge start                       # the mission is inferred from the folder; on a terminal it opens the station
 llm-bridge status                      # after the provider exits, "Needs you" shows the approve command
 llm-bridge task output --task 1        # read what the provider did (pages on a terminal, --follow while it runs)

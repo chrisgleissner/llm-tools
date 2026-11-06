@@ -522,7 +522,7 @@ PALETTE_COMMANDS = tuple(action.command for action in ACTIONS)
 # Names used before the 1.3 rename stay accepted everywhere a view is named.
 # Words typed in the command line that switch view (the rest are CLI commands).
 _VIEW_COMMANDS = {
-    "overview": "Overview", "control": "Overview", "providers": "Providers", "activity": "Activity",
+    "overview": "Overview", "control": "Overview", "tasks": "Tasks", "orders": "Tasks", "providers": "Providers", "activity": "Activity",
     "sessions": "Sessions", "health": "Health", "actions": "Actions", "usage": "Usage", "agents": "Agents",
     "palette": "Actions", "log": "Activity", "systems": "Health", "stations": "Providers",
 }
@@ -3658,10 +3658,15 @@ class _ConsoleState:
         self.document_viewer = DocumentViewer(f"Bridge help · {topic[len('view:'):] if by_view else topic}", text)
 
     def _confirm_or_dispatch(self, command: str) -> bool:
+        typed = command
         command, problem = _expand_console_alias(command, self.snapshot)
         if problem is not None:
-            self.output.append(problem)
-            return False
+            # Like a command that fails after dispatch: the line is cleared (the caller does that when
+            # this returns True) and the refused command is the newest history entry for Up / Ctrl-P.
+            self.history.append(typed.strip())
+            self.history_index = None
+            self.output.append(f"{problem}{_SEP}↑ recalls the command")
+            return True
         reason = _confirmation_reason(command)
         if reason:
             self.confirm_command = command

@@ -235,7 +235,7 @@ def test_launcher_native_start_is_explicit_and_reopens_controls(tmp_path, monkey
             print(json.dumps({"mission": {"id": "m1"}}))
             return 0
         if args[0] == "start":
-            assert args == ["start", "--mission", "m1", "--native"]
+            assert args == ["start", "--mission", "m1", "--mode", "native"]
             return 0
         assert args == ["control", "--mission", "m1"]
         return 0

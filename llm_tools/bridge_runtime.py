@@ -1961,7 +1961,7 @@ def ralph_argv(mission: dict[str, Any], runtime: Path, *, providers: str, routes
     return argv
 
 
-def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool = False, providers: str | None = None, routes: str | None = None, startup_token: str = "") -> int:
+def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool = False, background: bool = False, providers: str | None = None, routes: str | None = None, startup_token: str = "") -> int:
     """Own one mission until it is completed, stopped, or requires recovery."""
     lock = _process_controller_lock(mission_id)
     try:
@@ -1988,6 +1988,8 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
             effective_headless, effective_native_tui = True, False
         elif native_tui:
             effective_headless, effective_native_tui = False, True
+        elif background:
+            effective_headless, effective_native_tui = False, False
         else:
             effective_headless, effective_native_tui = prior_headless, prior_native_tui
         headless, native_tui = effective_headless, effective_native_tui
@@ -2070,9 +2072,9 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
         handle: TerminalHandle | None = None
         if not headless:
             if not shutil.which("tmux"):
-                record_controller_failure(store, mission_id, "tmux is required for native mode; retry with --headless")
+                record_controller_failure(store, mission_id, "tmux is required for native mode; retry with --mode headless")
                 store.set_mission_status(mission_id, "FAILED")
-                raise RuntimeError("tmux is required for native mode; retry with --headless")
+                raise RuntimeError("tmux is required for native mode; retry with --mode headless")
             backend = TmuxTerminalBackend()
             handle = _open_existing(backend, runtime, mission_id)
             if handle is None:
@@ -2202,7 +2204,7 @@ def launch_controller(
     if native_tui and headless:
         raise ValueError("--headless and --native cannot be combined")
     if not headless and not shutil.which("tmux"):
-        raise RuntimeError("tmux is required for native mode; retry with --headless")
+        raise RuntimeError("tmux is required for native mode; retry with --mode headless")
     lock = _process_controller_lock(mission_id)
     try:
         lock.acquire(timeout=_LOCK_STARTUP_WAIT_SECONDS)
@@ -2254,6 +2256,8 @@ def launch_controller(
         command.append("--headless")
     if native_tui:
         command.append("--native")
+    if not headless and not native_tui:
+        command.append("--background")  # explicit, so a saved Native mode does not win over this start's Background
     with log_path.open("ab") as log:
         os.chmod(log_path, 0o600)
         proc = subprocess.Popen(command, cwd=mission["cwd"], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)

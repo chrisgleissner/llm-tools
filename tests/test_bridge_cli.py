@@ -443,7 +443,7 @@ def test_finished_mission_reports_proposal_rejection_and_takes_follow_up_tasks(t
         assert len(store.list_tasks(mission["id"])) == 2
 
     assert main(["task", "add", "--mission", mission["id"], "--prompt", "follow-up"]) == 0
-    assert "Mission reopened · start it with: llm-bridge start" in capsys.readouterr().out
+    assert f"Mission {mission['id'][:8]} reopened · start it with: llm-bridge start" in capsys.readouterr().out
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_mission(mission["id"])["status"] == "STOPPED"
         assert len(store.list_tasks(mission["id"])) == 3

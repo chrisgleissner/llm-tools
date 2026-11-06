@@ -64,11 +64,13 @@ def test_keys_help_states_osc52_clipboard_and_detach_choice() -> None:
 
 
 def test_quickstart_help_matches_default_rotation_slash_commands_and_detach() -> None:
-    from llm_tools.bridge import BUILTIN_PROVIDERS
+    from llm_tools.bridge import BUILTIN_PROVIDERS, resolved_default_rotation
 
     quickstart = " ".join(topic_text("quickstart").split())
     assert BUILTIN_PROVIDERS == "claude,codex,opencode"
-    assert "[ralph] wins over [defaults]" in quickstart and f"built-in {BUILTIN_PROVIDERS}" in quickstart
+    providers, routes = resolved_default_rotation()
+    assert (providers, routes) == (BUILTIN_PROVIDERS, "")  # the test environment has no llm-tools config
+    assert "[ralph] wins over [defaults]" in quickstart and f"that is providers {BUILTIN_PROVIDERS}." in quickstart
     assert "/start, /attach, /pause, /status and /approve [N]" in quickstart
     assert "Ctrl-] then d" in quickstart and "llm-bridge detach is different" in quickstart
     detach = " ".join(topic_text("detach").split())

@@ -14,6 +14,7 @@ from .bridge_store import BridgeStore
 from .bridge_events import recent_hidden_kinds
 from .bridge_projection import ProjectionParams, Snapshot
 from .bridge_states import ACTIVE_OPERATION_STATUSES
+from .bridge_vocab import mission_mode
 
 
 def _decode_event(row: Any) -> dict[str, Any]:
@@ -242,7 +243,7 @@ def _configured_stations(config: dict[str, Any]) -> dict[str, Any]:
         "routes": routes,
         "models": models,
         "efforts": efforts,
-        "configured_mode": "native" if config.get("native_tui") else ("headless" if config.get("headless") else "background"),
+        "configured_mode": mission_mode(config),
     }
 
 

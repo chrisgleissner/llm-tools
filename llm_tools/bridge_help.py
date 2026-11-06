@@ -23,7 +23,7 @@ First mission, from your project folder. Opening Bridge starts no provider.
 The same from a script, with no terminal attached (run inside the mission's folder,
 or add --mission ID):
 
-  llm-bridge mission create --file task.md --name demo --native
+  llm-bridge mission create --file task.md --name demo --mode native
   llm-bridge start                        starts provider work; may consume paid capacity
   llm-bridge status                       after the provider exits, "Needs you" shows the approve command
   llm-bridge task verify --task 1 --approve --evidence 'tests passed'
@@ -33,15 +33,18 @@ evidence before approving. Reopen a station with llm-bridge attach. Add more wor
 with llm-bridge task add --file next-task.md. Ctrl-] B opens Bridge and Ctrl-] P
 returns to the same provider process.
 
-Three modes. Native (--native) keeps the provider's own interactive terminal in a
-tmux station. Headless (--headless) runs the provider without a terminal, with
-no station and no tmux. Background, the default when neither flag is given, runs
-the provider without a terminal under a background controller and shows its
-activity log in a tmux station. Use --native or --headless, not both. The home
-form offers Native (recommended) and Headless.
-CLI defaults and saved modes remain compatible. CLI creation rotates over the providers (or routes) set in your
-llm-tools config ([ralph] wins over [defaults]); without such a config it uses
-the built-in claude,codex,opencode. --providers or --routes override either.
+Three modes, chosen with --mode native|background|headless on mission create
+and start. Native keeps the provider's own interactive terminal in a tmux
+station. Background runs the provider without a terminal under a background
+controller and shows its activity log in a tmux station. Headless runs the
+provider without a terminal, with no station and no tmux. Background is the
+default for the command line because it needs no terminal, so scripts behave the
+same everywhere; the home form offers all three and starts on Native, which is
+recommended when you work interactively. status shows a mission's mode.
+A new mission rotates over the providers (or routes) set in your llm-tools config
+([ralph] wins over [defaults]), limited to the providers enabled in [usage]; with
+neither it uses the built-in list. With your configuration that is @@DEFAULT_ROTATION@@.
+--providers or --routes override either.
 
 New missions use provider-native team guidance (teams on) and the Medium token
 spend preference by default. Set --teams on|off and --token-spend low|medium|high
@@ -87,16 +90,16 @@ Command line: slash commands such as /start, /attach, /approve [N] and /help are
 accepted exactly like the bare commands; Escape returns focus without side effects.
 
 Bridge body: F1-F9 select Overview, Tasks, Providers, Activity, Sessions, Health,
-Actions, Usage. Line 1 is a live status strip (provider, task, inactivity,
-capacity). Typing a view name (overview, providers, activity, sessions, health, actions,
-usage) switches to it; the older names orders, stations, log, systems and palette still
-work. Tab and Shift-Tab cycle views. Up/Down select; PgUp/PgDn page; Home/End select endpoints.
+Actions, Usage, Agents. Line 1 is a live status strip (provider, task, inactivity,
+capacity). Typing a view name (overview, tasks, providers, activity, sessions, health,
+actions, usage, agents) switches to it; the older names orders, stations, log, systems and
+palette still work. Tab and Shift-Tab cycle views. Up/Down select; PgUp/PgDn page; Home/End select endpoints.
 Enter opens the labelled selection. ? opens context help.
 Overview o opens the complete objective; Tasks v opens the complete prompt. Printable text starts
 a command; Ctrl-G focuses the retained draft; click the input to focus it.
 
 Command input: Left/Right move; Home/End or Ctrl-A/Ctrl-E move to endpoints.
-Backspace/Delete remove adjacent text. Ctrl-U clears. After a failed command the line stays empty; Up recalls it.
+Backspace/Delete remove adjacent text. Ctrl-U clears. After a command is refused or fails the line is empty and the command is in history; Ctrl-P recalls it.
 Ctrl-P/Ctrl-N recall history and restore the pre-history draft. Tab completes.
 Enter submits an explicit command. ? is ordinary input. Escape returns to the
 body with the draft retained. Ctrl-C cancels local editing first. Ctrl-D exits
@@ -135,9 +138,9 @@ mission is implied. Bare words do the same (start, pause, ...).
   /start /resume /pause /stop    start, continue or hold provider work
   /attach  /detach               open the provider terminal; Ctrl-] P returns
   /approve [N]  /reject N WHY    decide on a task that awaits approval
-  /status  /tasks  /proposals    print the current state
+  /status  /proposals            print the current state
   /missions  /home               switch to another mission (the mission picker)
-  /overview /tasks /providers /activity /health /actions /usage   open a view
+  /overview /tasks /providers /activity /health /actions /usage /agents   open a view
   /help [topic]                  this page; topics: keys, prompts, providers, states
 Keys: Ctrl-E add a task, Ctrl-R amend the selected task, Ctrl-K find an action,
 Tab completes, ? explains the current view, Ctrl-D leaves (the mission keeps running).
@@ -195,7 +198,7 @@ Do not paste multiline documents into the short command input. Complex emoji
 shaping depends on the terminal; common wide and combining characters are handled.
 
 Import without the interactive ceiling:
-  llm-bridge mission create --name demo --native --file prompt.md --cwd .
+  llm-bridge mission create --name demo --mode native --file prompt.md --cwd .
   llm-bridge task add --mission ID --file prompt.md --acceptance 'tests pass'
   llm-bridge task amend --mission ID --task 1 --file revised.md
 `--file -` reads stdin in the standalone CLI; the interactive console cannot read
@@ -209,7 +212,8 @@ changes source. Existing larger records remain readable/exportable.
 Editor: set VISUAL or EDITOR to an executable and arguments. No prompt is executed
 as shell text. Nonzero editor exit, failed save or late store rejection must retain
 the private draft. Use the recovery path shown in feedback; export it before
-retrying or creating a new mission. Terminal missions cannot accept new tasks.
+retrying or creating a new mission. Cancelled missions cannot accept new tasks;
+a completed one is reopened by the new task.
 Final authoritative validation still occurs when a durable mutation is applied.""",
     "markdown": """Read full source and Markdown
 
@@ -236,9 +240,10 @@ follow changes: scrolling up pauses, End resumes, and rotation/truncation is
 labelled. Without a TTY, view prints complete source; --follow requires a TTY.""",
     "providers": """Providers, routes and native stations
 
-Native supervises a real CLI in a private owned tmux station. Background (no
-flag) runs the provider without a terminal and shows its activity log in the
-station; Headless (--headless) runs it with no station and no tmux.
+Native supervises a real CLI in a private owned tmux station. Background (--mode
+background, the command-line default) runs the provider without a terminal and shows
+its activity log in the station; Headless (--mode headless) runs it with no station
+and no tmux.
 Opening, inspecting and attaching start no paid work. start/resume can run work.
 Selecting a station changes the viewed terminal, not routing of an invocation.
 Use configured providers/routes and safe-boundary steering for future launches.
@@ -259,7 +264,9 @@ Mission state is persisted intent; observed operations show what is executing.
 Pause during an invocation means 'Pausing after current invocation': work still
 runs until that boundary. Pause never suspends the host. ACTIVE requires a
 currently executing owned operation; Last selected is history, not execution.
-Completed missions have no active execution and cannot accept another task.
+Completed missions have no active execution. Adding a task to one (task add, with or
+without --mission) reopens it as STOPPED and says so; start continues it. Cancelled
+missions cannot accept tasks.
 
 Provider zero exit enters verification. Passing required verification and operator
 approval where configured establish completion. A native mission then holds
@@ -408,7 +415,13 @@ def is_known_topic(topic: str) -> bool:
 def topic_text(topic: str = "quickstart") -> str:
     key = " ".join(topic.strip().lower().split())
     if key in TOPICS:
-        return TOPICS[key]
+        text = TOPICS[key]
+        if "@@DEFAULT_ROTATION@@" in text:
+            from .bridge import resolved_default_rotation
+
+            providers, routes = resolved_default_rotation()
+            text = text.replace("@@DEFAULT_ROTATION@@", f"routes {routes}" if routes else f"providers {providers}")
+        return text
     parser = _command_path_parser(key)
     if parser is None:
         return f"Unknown help topic '{topic.strip() or '(empty)'}' · topics: {', '.join(TOPICS)} · or a command such as: task verify"
@@ -417,7 +430,7 @@ def topic_text(topic: str = "quickstart") -> str:
 
 COMMANDS: dict[str, tuple[str, str]] = {
     "mission": ("Save and inspect durable missions", "mission list"),
-    "mission create": ("Save an objective and its first task; no provider starts", "mission create --name demo --native --file prompt.md --cwd ."),
+    "mission create": ("Save an objective and its first task; no provider starts", "mission create --name demo --mode native --file prompt.md --cwd ."),
     "mission list": ("List saved missions; no state changes or provider work", "mission list --json"),
     "status": ("Inspect desired state, observed work and blockers", "status --mission ID"),
     "agents": ("Inspect current Bridge operations and provider-owned child agents; use --mission ID or --all-missions", "agents --all-missions --json"),
@@ -468,11 +481,11 @@ COMMANDS: dict[str, tuple[str, str]] = {
 
 def _mission_create_defaults() -> str:
     """The ``mission create`` default-rotation line; read from the llm-tools config only when help is formatted."""
-    from .bridge import default_rotation
+    from .bridge import resolved_default_rotation
 
-    providers, routes = default_rotation()
+    providers, routes = resolved_default_rotation()
     rotation = f"routes {routes}" if routes else f"providers {providers}"
-    return f"\nDefaults: cwd is the current directory; {rotation} (from your llm-tools config when set);\nscripted mode is Background unless --native/--headless is explicit."
+    return f"\nDefaults: cwd is the current directory; {rotation} (from your llm-tools config when set);\nmode is Background unless --mode says otherwise."
 
 
 def decorate_parser(parser: object) -> None:
@@ -544,6 +557,7 @@ def decorate_parser(parser: object) -> None:
                     "prompt_file": "read complete source from PATH; '-' reads stdin",
                     "prompt": "literal source; use --file for large documents",
                     "headless": "run without a terminal station",
+                    "mode": "how the provider runs",
                     "providers": "provider rotation order",
                     "routes": "configured launch/capacity route IDs",
                 }.get(action.dest, action.dest.replace("_", " "))
