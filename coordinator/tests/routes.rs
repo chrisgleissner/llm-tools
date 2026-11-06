@@ -17,7 +17,11 @@ fn routed_paths() -> BTreeSet<String> {
 }
 
 fn concrete(path: &str) -> String {
-    path.replace("{name}", "w1").replace("{id}", "x").replace("{session_id}", "s1")
+    path.replace("{name}", "w1")
+        .replace("{id}", "x")
+        .replace("{session_id}", "s1")
+        .replace("{action}", "pause")
+        .replace("{n}", "1")
 }
 
 fn refused_with(err: tokio_tungstenite::tungstenite::Error, status: u16) {
@@ -29,8 +33,13 @@ fn refused_with(err: tokio_tungstenite::tungstenite::Error, status: u16) {
 
 #[test]
 fn route_table_matches_the_router_definition() {
+    let routes: BTreeSet<(String, String)> = ROUTES
+        .iter()
+        .flat_map(|(path, methods, _, _)| methods.iter().map(|method| (path.to_string(), (*method).to_string())))
+        .collect();
+    let declared_count: usize = ROUTES.iter().map(|(_, methods, _, _)| methods.len()).sum();
+    assert_eq!(routes.len(), declared_count, "duplicate path/method policy in ROUTES");
     let table: BTreeSet<String> = ROUTES.iter().map(|(p, _, _, _)| p.to_string()).collect();
-    assert_eq!(table.len(), ROUTES.len(), "duplicate path in ROUTES");
     assert_eq!(
         routed_paths(),
         table,

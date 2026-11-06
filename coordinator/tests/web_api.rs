@@ -169,6 +169,74 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
     env.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let worker_secret = "worker-secret-for-mutation-test";
+    env.srv
+        .state
+        .db
+        .worker_add("build-1", &bridge_coordinator::auth::sha256_hex(worker_secret))
+        .unwrap();
+    let operations = [
+        "mission.pause",
+        "mission.stop",
+        "mission.cancel",
+        "mission.continue",
+        "task.add",
+        "task.amend",
+        "task.priority",
+        "task.reorder",
+        "task.dependency",
+        "task.verify",
+        "task.reject",
+    ];
+    let capabilities: Vec<Value> = operations.iter().map(|operation| json!({"operation":operation,"mutating":true})).collect();
+    let mut hello = serde_json::Map::new();
+    hello.insert("missions".into(), json!([{"id":"mission-1","name":"Example"}]));
+    env.srv
+        .state
+        .db
+        .worker_hello("build-1", "worker-id-mutation-test", &hello, &json!(capabilities))
+        .unwrap();
+
+    for (path, body, expected_operation) in [
+        ("/api/v1/missions/mission-1/pause?worker=build-1", json!({}), "mission.pause"),
+        (
+            "/api/v1/missions/mission-1/tasks?worker=build-1",
+            json!({"title":"A task","prompt":"Do the work","priority":3,"depends_on":[],"acceptance":[]}),
+            "task.add",
+        ),
+        (
+            "/api/v1/missions/mission-1/tasks/7/verify?worker=build-1",
+            json!({"approved":true,"evidence":"Reviewed output","expected_revision":3}),
+            "task.verify",
+        ),
+        (
+            "/api/v1/missions/mission-1/tasks/8/verify?worker=build-1",
+            json!({"approved":false,"reason":"Missing evidence","expected_revision":1}),
+            "task.reject",
+        ),
+    ] {
+        let (status, command) = api.post(path, body).await;
+        assert_eq!(status, 202, "{path}: {command}");
+        assert_eq!(command["operation"], expected_operation, "{path}: {command}");
+        assert_eq!(command["target"], "build-1");
+        assert_eq!(command["request"]["mission_id"], "mission-1");
+    }
+    let (status, command) = api
+        .send(
+            api.rb(Method::PATCH, "/api/v1/missions/mission-1/tasks/7?worker=build-1")
+                .json(&json!({"prompt":"Revised work","expected_revision":2})),
+        )
+        .await;
+    assert_eq!(status, 202, "{command}");
+    assert_eq!(command["operation"], "task.amend");
+    assert_eq!(command["request"]["params"]["task_number"], 7);
+    env.stop().await;
+}
+
 #[test]
 fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
     let dir = tmp_dir();

@@ -12,7 +12,7 @@ use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -1048,6 +1048,226 @@ async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -
     }
 }
 
+struct ResourceCommand {
+    headers: HeaderMap,
+    worker: String,
+    mission_id: String,
+    operation: String,
+    params: Map<String, Value>,
+    wait_ms: u64,
+}
+
+async fn resource_command(st: St, principal: Principal, ip: String, command: ResourceCommand) -> ApiResult {
+    let headers = command.headers;
+    let envelope = json!({
+        "target": command.worker,
+        "wait_ms": command.wait_ms,
+        "request": {
+            "schema_version": protocol::COMMAND_SCHEMA_VERSION,
+            "operation": command.operation,
+            "params": command.params,
+            "mission_id": command.mission_id,
+            "target": command.worker,
+            "request_id": format!("resource-{}", auth::random_token())
+        }
+    });
+    let bytes = Bytes::from(serde_json::to_vec(&envelope).expect("command JSON serializes"));
+    post_command(State(st), Authed(principal, ip), headers, Buffered { bytes, _permit: None }).await
+}
+
+fn resource_wait_ms(m: &Map<String, Value>) -> Result<u64, ApiError> {
+    match m.get("wait_ms") {
+        None => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .filter(|wait| *wait <= MAX_WAIT_MS)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "wait_ms must be an integer of at most 30000")),
+    }
+}
+
+async fn mission_action(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path((id, action)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &["wait_ms"])?;
+    let operation = match action.as_str() {
+        "pause" => "mission.pause",
+        "stop" => "mission.stop",
+        "cancel" => "mission.cancel",
+        "continue" => "mission.continue",
+        _ => return Err(err(StatusCode::NOT_FOUND, "not-found", "unknown mission action")),
+    };
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: id,
+            operation: operation.to_string(),
+            params: Map::new(),
+            wait_ms: resource_wait_ms(&m)?,
+        },
+    )
+    .await
+}
+
+async fn add_mission_task(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut m = parse_body(&body.bytes)?;
+    no_extra(&m, &["title", "prompt", "priority", "order", "depends_on", "acceptance", "wait_ms"])?;
+    let wait_ms = resource_wait_ms(&m)?;
+    m.remove("wait_ms");
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: id,
+            operation: "task.add".to_string(),
+            params: m,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn amend_mission_task(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path((id, task_number)): Path<(String, u64)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut m = parse_body(&body.bytes)?;
+    no_extra(&m, &["prompt", "priority", "order", "depends_on", "expected_revision", "wait_ms"])?;
+    let wait_ms = resource_wait_ms(&m)?;
+    m.remove("wait_ms");
+    let changes = ["prompt", "priority", "order", "depends_on"]
+        .into_iter()
+        .filter(|key| m.contains_key(*key))
+        .collect::<Vec<_>>();
+    if changes.len() != 1 {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "PATCH must set exactly one of prompt, priority, order or depends_on",
+        ));
+    }
+    let field = changes[0];
+    let operation = match field {
+        "prompt" => "task.amend",
+        "priority" => "task.priority",
+        "order" => "task.reorder",
+        _ => "task.dependency",
+    };
+    let mut params = Map::new();
+    params.insert("task_number".into(), json!(task_number));
+    params.append(&mut m);
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: id,
+            operation: operation.to_string(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
+async fn verify_mission_task(
+    State(st): State<St>,
+    Authed(p, ip): Authed,
+    Path((id, task_number)): Path<(String, u64)>,
+    Query(q): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    body: Buffered,
+) -> ApiResult {
+    let worker = q
+        .get("worker")
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "worker query parameter is required"))?;
+    if q.keys().any(|key| key != "worker") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let mut m = parse_body(&body.bytes)?;
+    no_extra(&m, &["approved", "evidence", "reason", "expected_revision", "wait_ms"])?;
+    let wait_ms = resource_wait_ms(&m)?;
+    m.remove("wait_ms");
+    let approved = match m.remove("approved") {
+        Some(Value::Bool(approved)) => approved,
+        _ => return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "approved must be true or false")),
+    };
+    let operation = if approved {
+        m.insert("approved".into(), Value::Bool(true));
+        "task.verify"
+    } else {
+        if !m.contains_key("reason") {
+            return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "reason is required when rejecting a task"));
+        }
+        "task.reject"
+    };
+    if approved {
+        m.remove("reason");
+    } else {
+        m.remove("evidence");
+    }
+    let mut params = Map::new();
+    params.insert("task_number".into(), json!(task_number));
+    params.append(&mut m);
+    resource_command(
+        st,
+        p,
+        ip,
+        ResourceCommand {
+            headers,
+            worker: worker.clone(),
+            mission_id: id,
+            operation: operation.to_string(),
+            params,
+            wait_ms,
+        },
+    )
+    .await
+}
+
 // ---------------------------------------------------------------- diagnostics
 
 fn rss_kib() -> Option<u64> {
@@ -1182,9 +1402,13 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
-    ("/api/v1/missions/{id}/tasks", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/events", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions/{id}/operations", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/{action}", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/tasks", &["GET"], Access::Authed, "read"),
+    ("/api/v1/missions/{id}/tasks", &["POST"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/tasks/{n}", &["PATCH"], Access::Authed, "operate"),
+    ("/api/v1/missions/{id}/tasks/{n}/verify", &["POST"], Access::Authed, "operate"),
     ("/api/v1/commands", &["POST"], Access::Authed, "operate"),
     ("/api/v1/commands/{id}", &["GET"], Access::Authed, "read"),
     ("/api/v1/events", &["GET"], Access::Authed, "read"),
@@ -1240,9 +1464,12 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/missions", get(list_missions))
-        .route("/api/v1/missions/{id}/tasks", get(mission_tasks))
         .route("/api/v1/missions/{id}/events", get(mission_events))
         .route("/api/v1/missions/{id}/operations", get(mission_operations))
+        .route("/api/v1/missions/{id}/{action}", post(mission_action))
+        .route("/api/v1/missions/{id}/tasks", get(mission_tasks).post(add_mission_task))
+        .route("/api/v1/missions/{id}/tasks/{n}", patch(amend_mission_task))
+        .route("/api/v1/missions/{id}/tasks/{n}/verify", post(verify_mission_task))
         .route("/api/v1/commands", post(post_command))
         .route("/api/v1/commands/{id}", get(get_command))
         .route("/api/v1/events", get(list_events))
