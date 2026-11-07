@@ -943,10 +943,11 @@ def run_fresh_attached(cfg: SchedulerConfig, argv: list[str], output_file: Path,
     # particular, SIGWINCH must reach `script` so it can resize its PTY child.
     # Bridge-managed headless/native work has its own explicit process-group
     # ownership path and does not use this attached launch mode.
+    common.touch_private_file(output_file)  # script(1) keeps the mode of an existing file
     proc = subprocess.Popen(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, env=provider_env(cfg))
     _record_popen_process(cfg, proc)
     return_code = proc.wait()
-    status_file.write_text(str(return_code), encoding="utf-8")
+    common.write_private_text(status_file, str(return_code))
     common.clean_capture_file(output_file)
     return return_code
 
@@ -1467,8 +1468,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     output_text = b"".join(combined_parts).decode("utf-8", "replace")
     if output_truncated:
         output_text = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n" + output_text
-    output_file.write_text(output_text, encoding="utf-8")
-    status_file.write_text(str(exit_code), encoding="utf-8")
+    common.write_private_text(output_file, output_text)
+    common.write_private_text(status_file, str(exit_code))
     return exit_code
 
 
@@ -1666,8 +1667,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     output_text = b"".join(combined_parts).decode("utf-8", "replace")
     if output_truncated:
         output_text = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n" + output_text
-    output_file.write_text(output_text, encoding="utf-8")
-    status_file.write_text(str(exit_code), encoding="utf-8")
+    common.write_private_text(output_file, output_text)
+    common.write_private_text(status_file, str(exit_code))
     diagnostic = common.provider_failure_diagnostic(
         output_text,
         int(native_exit_code if native_exit_code is not None else exit_code),
@@ -1681,9 +1682,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
         "provider_credit_diagnostic": provider_credit_diagnostic,
         "blocking_prompt": blocking,
     })
-    status_file.with_suffix(".diagnostic.json").write_text(
-        json.dumps(diagnostic, separators=(",", ":")), encoding="utf-8",
-    )
+    common.write_private_text(status_file.with_suffix(".diagnostic.json"), json.dumps(diagnostic, separators=(",", ":")))
     return exit_code
 
 
@@ -1695,8 +1694,8 @@ TMUX_PANE_CHECK_SECONDS = 10
 
 def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output_file: Path, status_file: Path) -> int:
     if not common.have_cmd("tmux"):
-        output_file.write_text("tmux not installed\n", encoding="utf-8")
-        status_file.write_text("127", encoding="utf-8")
+        common.write_private_text(output_file, "tmux not installed\n")
+        common.write_private_text(status_file, "127")
         return 127
     tmux_prefix = ["tmux", *( ["-S", cfg.tmux_socket] if cfg.tmux_socket else [] )]
 
@@ -1706,8 +1705,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     if ":" in cfg.tmux_target:
         session, window = cfg.tmux_target.split(":", 1)
         if not session or not window:
-            output_file.write_text(f"invalid tmux target: {cfg.tmux_target}\n", encoding="utf-8")
-            status_file.write_text("2", encoding="utf-8")
+            common.write_private_text(output_file, f"invalid tmux target: {cfg.tmux_target}\n")
+            common.write_private_text(status_file, "2")
             return 2
     else:
         session, window = cfg.tmux_target, "llm-scheduler"
@@ -1727,7 +1726,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     # A tmux pane inherits the server's environment, not ours; remove other providers' credentials there.
     for key in sorted(common.credential_variables_to_remove(os.environ, cfg.provider)):
         guard_exports += f"unset {shlex.quote(key)}\n"
-    cmd_file.write_text(
+    common.write_private_text(
+        cmd_file,
         "#!/usr/bin/env bash\n"
         f"# tmux target: {target}\n"
         "set -euo pipefail\n"
@@ -1738,15 +1738,14 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         "status=$?\n"
         f"printf %s \"$status\" > {shlex.quote(str(status_file))}\n"
         "exit \"$status\"\n",
-        encoding="utf-8",
     )
     cmd_file.chmod(0o700)
     invocation = f"bash {shlex.quote(str(cmd_file))}"
     owned_pane = bool(cfg.tmux_socket and cfg.tmux_pane)
     if tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
         if cfg.tmux_socket:
-            output_file.write_text("Bridge-owned tmux station is no longer available\n", encoding="utf-8")
-            status_file.write_text("143", encoding="utf-8")
+            common.write_private_text(output_file, "Bridge-owned tmux station is no longer available\n")
+            common.write_private_text(status_file, "143")
             return 143
         tmux(["new-session", "-d", "-s", session, "-n", window, invocation], check=False)
     elif owned_pane:
@@ -1765,8 +1764,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             if "llm-bridge-wait" in start_command:
                 pane_dead = "1"
         if pane_dead != "1":
-            output_file.write_text("Bridge provider pane is busy; refusing to replace a live native process\n", encoding="utf-8")
-            status_file.write_text(str(common.AUTONOMY_ABORT_STATUS), encoding="utf-8")
+            common.write_private_text(output_file, "Bridge provider pane is busy; refusing to replace a live native process\n")
+            common.write_private_text(status_file, str(common.AUTONOMY_ABORT_STATUS))
             return common.AUTONOMY_ABORT_STATUS
         if cfg.max_output_bytes > 0:
             pipe_command = common.argv_to_command_line([
@@ -1780,11 +1779,11 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         else:
             pipe_command = f"cat >> {shlex.quote(str(output_file))}"
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.touch()
+        common.touch_private_file(output_file)
         respawn = tmux(["respawn-pane", "-k", "-t", target, "-c", common.tmux_literal(cfg.cwd), f"sleep 0.1; {invocation}"], check=False)
         if respawn.returncode != 0:
-            output_file.write_text("could not respawn provider pane\n", encoding="utf-8")
-            status_file.write_text("127", encoding="utf-8")
+            common.write_private_text(output_file, "could not respawn provider pane\n")
+            common.write_private_text(status_file, "127")
             return 127
         if cfg.process_started is not None:
             pane_pid = tmux(["display-message", "-p", "-t", target, "#{pane_pid}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
@@ -1809,7 +1808,7 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             ended = cfg.process_observer()
             if ended:
                 # The observer has stopped the provider (for example after a usage-limit notice): end the run with its status.
-                status_file.write_text(str(ended), encoding="utf-8")
+                common.write_private_text(status_file, str(ended))
                 break
         if owned_pane:
             # A provider that finishes writes its status file, which the loop
@@ -1817,21 +1816,21 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             # that vanished without one, so they need not start tmux every second.
             station_gone = not common.unix_socket_accepts(cfg.tmux_socket) and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0
             if station_gone:
-                status_file.write_text("143", encoding="utf-8")
+                common.write_private_text(status_file, "143")
                 break
             if waited % TMUX_PANE_CHECK_SECONDS == TMUX_PANE_CHECK_SECONDS - 1:
                 pane_dead = tmux(["display-message", "-p", "-t", target, "#{pane_dead}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
                 if pane_dead == "1":
                     time.sleep(0.05)
                     if not status_file.is_file() or status_file.stat().st_size == 0:
-                        status_file.write_text("124", encoding="utf-8")
+                        common.write_private_text(status_file, "124")
                         break
         elif cfg.tmux_socket and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
-            status_file.write_text("143", encoding="utf-8")
+            common.write_private_text(status_file, "143")
             break
         else:
             pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-            output_file.write_text(pane.stdout, encoding="utf-8")
+            common.write_private_text(output_file, pane.stdout)
         time.sleep(1)
         waited += 1
     if owned_pane:
@@ -1840,9 +1839,9 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         common.clean_capture_file(output_file)
     else:
         pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-        output_file.write_text(pane.stdout, encoding="utf-8")
+        common.write_private_text(output_file, pane.stdout)
     if not status_file.is_file() or status_file.stat().st_size == 0:
-        status_file.write_text("124", encoding="utf-8")
+        common.write_private_text(status_file, "124")
     try:
         return int(status_file.read_text(encoding="utf-8").strip())
     except ValueError:
@@ -1864,9 +1863,9 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     else:
         status = run_fresh_headless(cfg, argv, output_file, status_file)
     if not status_file.is_file() or status_file.stat().st_size == 0:
-        status_file.write_text("124", encoding="utf-8")
+        common.write_private_text(status_file, "124")
     if not output_file.exists():
-        output_file.touch()
+        common.touch_private_file(output_file)
     try:
         status = int(status_file.read_text(encoding="utf-8").strip())
     except ValueError:

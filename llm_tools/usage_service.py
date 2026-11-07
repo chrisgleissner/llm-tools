@@ -640,6 +640,8 @@ Type=simple
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=10
+UMask=0077
+NoNewPrivileges=yes
 Environment=PYTHONUNBUFFERED=1
 {_systemd_assignment("PATH", path)}
 {_systemd_assignment("PYTHONPATH", root)}

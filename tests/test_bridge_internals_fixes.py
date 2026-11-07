@@ -232,18 +232,29 @@ def test_log_sink_keeps_draining_when_the_log_cannot_be_written(tmp_path, monkey
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(bridge_logs, "_append_rotating", full_disk)
-    seen: list[str] = []
-
-    def noticed() -> bool:
-        seen.append(capfd.readouterr().err)
-        return "not writable" in "".join(seen)
-
-    with capture_process_output(tmp_path / "controller.log", max_bytes=1024, rotations=1):
-        os.write(1, b"first\n")
-        assert wait_for(noticed, 5, message="the sink never reported the failed log write")
-        # The pipe must still have a reader; a dead reader makes this raise BrokenPipeError.
-        os.write(1, b"second\n")
-        os.write(2, b"third\n")
+    # The sink writes its notice to the descriptor 2 that exists when the capture starts. Point
+    # descriptor 2 at a file of this test for that moment and poll the file without modifying it.
+    # Polling capfd.readouterr() instead is not safe: it reads the capture file and then truncates
+    # it, so a notice that the sink thread writes between those two steps is deleted unread.
+    notices = tmp_path / "stderr-at-start.txt"
+    with capfd.disabled():
+        saved_stderr = os.dup(2)
+        with open(notices, "wb") as notice_file:
+            os.dup2(notice_file.fileno(), 2)
+        try:
+            with capture_process_output(tmp_path / "controller.log", max_bytes=1024, rotations=1):
+                os.write(1, b"first\n")
+                assert wait_for(
+                    lambda: "not writable" in notices.read_text(encoding="utf-8", errors="replace"),
+                    5,
+                    message="the sink never reported the failed log write",
+                )
+                # The pipe must still have a reader; a dead reader makes this raise BrokenPipeError.
+                os.write(1, b"second\n")
+                os.write(2, b"third\n")
+        finally:
+            os.dup2(saved_stderr, 2)
+            os.close(saved_stderr)
 
 
 def test_log_sink_drain_timeout_does_not_replace_the_result(tmp_path, monkeypatch, capfd) -> None:
