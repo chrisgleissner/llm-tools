@@ -103,6 +103,40 @@ def test_receive_timeout_returns_none():
     server.join()
 
 
+def test_send_does_not_inherit_the_short_receive_timeout():
+    """A write that blocks longer than the receive poll interval must not fail.
+
+    The worker polls with receive_text(timeout=0.5). Before the fix the socket
+    kept that timeout, so sendall raised TimeoutError whenever a write blocked
+    for more than 0.5 s, and the worker reconnected every few seconds on a
+    slow link.
+    """
+
+    class SlowSocket:
+        def __init__(self):
+            self.timeout = None
+            self.sent = b""
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def gettimeout(self):
+            return self.timeout
+
+        def sendall(self, data):
+            # A blocking write that takes longer than the receive timeout.
+            if self.timeout is not None and self.timeout < 1.0:
+                raise TimeoutError("The write operation timed out")
+            self.sent += data
+
+    sock = SlowSocket()
+    client = WebSocketClient(sock, max_message=1024)  # type: ignore[arg-type]
+    sock.settimeout(0.5)  # what receive_text(timeout=0.5) leaves behind
+    client.send_text("hello")
+    assert sock.sent
+    assert sock.timeout == 0.5  # the receive timeout is restored afterwards
+
+
 @pytest.mark.parametrize(
     ("frames", "message"),
     [

@@ -279,6 +279,42 @@ async fn redelivery_after_reconnect_and_generation() {
     stopped.await.unwrap();
 }
 
+/// The worker keeps one events batch in flight and treats the `pong` of a `ping` sent right after the
+/// batch as proof that the coordinator processed it. That holds only while a connection's messages are
+/// handled and answered in order, and while an accepted batch draws no reply at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pong_after_an_events_batch_confirms_the_batch_and_follows_its_nack() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let ev = |ids: &[u64]| ids.iter().map(|i| json!({"id": i, "kind": "test", "mission_id": "m1"})).collect::<Vec<_>>();
+
+    // accepted: the next message from the coordinator is the pong
+    fw.send("events", json!({"after": 0, "through": 3, "events": ev(&[1, 2, 3])})).await;
+    fw.send("ping", json!({})).await;
+    assert_eq!(fw.recv().await["type"], "pong");
+
+    // a batch that starts elsewhere is refused before the pong of the ping behind it, and only once
+    fw.send("events", json!({"after": 1, "through": 5, "events": ev(&[4, 5])})).await;
+    fw.send("ping", json!({})).await;
+    let nack = fw.recv().await;
+    assert_eq!(
+        (nack["type"].as_str(), nack["payload"]["expected_after"].as_u64()),
+        (Some("events.nack"), Some(3))
+    );
+    assert_eq!(fw.recv().await["type"], "pong");
+
+    // an empty batch that only moves the cursor past skipped ids is accepted
+    fw.send("events", json!({"after": 3, "through": 40, "events": []})).await;
+    fw.send("ping", json!({})).await;
+    assert_eq!(fw.recv().await["type"], "pong");
+    fw.send("events", json!({"after": 40, "through": 41, "events": ev(&[41])})).await;
+    fw.send("ping", json!({})).await;
+    assert_eq!(fw.recv().await["type"], "pong");
+    env.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn event_cursor_accept_and_nack() {
     let env = boot_with(|t| t.replace("max_events_per_worker = 50000", "max_events_per_worker = 4")).await;
