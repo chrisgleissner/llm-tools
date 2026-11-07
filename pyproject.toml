@@ -8,7 +8,7 @@ version = "1.4.0"
 description = "Local LLM CLI usage and scheduling tools"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["rich>=13.7,<15"]
+dependencies = ["rich>=13.7,<16"]
 license = {text = "Apache-2.0"}
 
 [project.scripts]
