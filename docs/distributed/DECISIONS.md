@@ -298,26 +298,35 @@ The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working t
 byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
 
 Addendum after merging the passkey, token-restriction and listener work (PR #50) into this branch.
-`web/budget.json` now allows 93000 raw / 33500 gzip of initial JavaScript and 41000 gzip of initial
-JavaScript plus CSS (the raw total cap of 124000 is unchanged). Same measurement method as above:
+The initial caps stay at 91000 raw / 31750 gzip (JavaScript) and 40000 gzip (JavaScript plus CSS).
+Same measurement method as above:
 
-| State | Initial JS raw | gzip | Initial total gzip |
-|---|---:|---:|---:|
-| Merge base | 88506 | 30848 | 38382 |
-| `main` with PR #50 (account page and passkey code load lazily) | 87052 | 31408 | 38992 |
-| This branch before the merge (already above its 91000 / 31750 caps: DOG-021 and later console work) | 92390 | 32176 | 39710 |
-| Merge with `passwordForm` still exported from `account.ts` | 102090 | 36331 | 43915 |
-| Merge with `passwordForm` moved to `password-form.ts` | 92638 | 33163 | 40747 |
+| State | Initial JS raw | gzip | Initial total gzip | Lazy raw | gzip |
+|---|---:|---:|---:|---:|---:|
+| Merge base | 88506 | 30848 | 38382 | | |
+| `main` with PR #50 (account page and passkey code load lazily) | 87052 | 31408 | 38992 | 365652 | 96411 |
+| This branch before the merge (already above its 91000 / 31750 caps) | 92390 | 32176 | 39710 | 352470 | 91000 |
+| Merge, `passwordForm` still exported from `account.ts` | 102090 | 36331 | 43915 | | |
+| Merge, `passwordForm` in `views/password-form.ts` | 92638 | 33163 | 40747 | 363929 | 95857 |
+| Merge, plus workers, sessions and usage views loaded on demand | 84299 | 30855 | 38439 | 373424 | 100498 |
 
-The forced password-change screen (`reset.ts`) is part of the first load and imported
-`passwordForm` from `account.ts`. PR #50 made the account page a lazy chunk and grew it by about 8 KB
-(API token restrictions, passkey list and re-enrolment). The static import pulled that whole module
-into the first load, which added 9.5 KB raw. `passwordForm` now lives in `views/password-form.ts`, so
-`account.ts` stays lazy and only the form is shared. What remains above the old caps is the sum of the
-two branches: this branch was already 1390 raw / 426 gzip bytes over its own caps before the merge, and
-PR #50 adds the passkey sign-in button, the canonical-origin link and the new API fields to the sign-in
-view and `api.ts` (+560 gzip bytes on `main`). The new caps leave 362 raw / 337 gzip / 253 total-gzip
-bytes of headroom.
+What moved:
+- `passwordForm` lives in `views/password-form.ts`. The forced password-change screen (`reset.ts`) is part
+  of the first load and imported it from `account.ts`, which pulled the whole lazy account page (API token
+  restrictions, passkey list and re-enrolment, about 8 KB) into the first load: +9.5 KB raw.
+- The router loads the workers, sessions, usage and account views with `import()` (`lazyView` in
+  `main.ts`). While a chunk loads the main area shows the existing `status-skeleton` block with
+  `aria-busy`; a route change during the load discards the result. The overview, missions list, mission
+  detail and diagnostics views stay in the first load. The mission detail view alone is 3.9 KB gzip
+  of the first load, but moving it, or the missions list, costs more lazy bytes than moving the three
+  smaller views and would delay the pages used most.
+
+Why the lazy caps rose (`jsRaw` 366000 to 374000, `jsGzip` 97000 to 101000): the merged code was
+already larger than the two old budgets together (initial 31750 plus lazy 97000 is 128750 gzip bytes;
+the merged build was 129020 before any split). Any code taken out of the first load therefore
+counts against the lazy caps. Code that leaves the first-load bundle also compresses worse as separate
+chunks: the three views take 8339 raw / 2308 gzip bytes out of the first load and add 9495 raw / 4641 gzip bytes to the lazy total (the difference is the chunk boundaries and the shared code each chunk now carries). The new lazy caps leave 576 raw / 502 gzip bytes of headroom.
+The initial caps leave 6701 raw / 895 gzip / 1561 total-gzip bytes.
 
 ## D19 Worker memory: no leak, per-process gate (PRD-007)
 
