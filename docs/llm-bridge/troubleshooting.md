@@ -291,6 +291,15 @@ operation in the request.
 The message lists the supported operations. Upgrade the older side so that
 both run the same llm-tools version.
 
+### unsupported-remote-option
+
+Exit 1 (as a command error). `mission create --target WORKER` was given an
+option that a worker cannot apply, such as `--auto-continue`,
+`--command-template` or a log-retention setting. The message names each option.
+
+Create the mission without those options, or create it on the worker itself and
+change the setting there with `llm-bridge mission set`.
+
 ### unsupported-version
 
 Exit 1 (as a command error). The request uses a command schema version this

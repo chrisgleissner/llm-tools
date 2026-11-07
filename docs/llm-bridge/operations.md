@@ -481,6 +481,8 @@ token_spend = "medium" # low | medium | high
 Override either choice for one mission with `mission create --teams on|off`
 and `--token-spend low|medium|high`. Change a saved mission with, for
 example, `llm-bridge mission set --mission ID --teams off --token-spend low`.
+`llm-bridge mission settings --mission ID` prints the saved settings (automatic
+continue, capacity-wait suspend, teams and token spend) without changing them.
 `llm-bridge status --json` reports `mission.execution_policy`; readable status
 and the station Overview show the effective settings. Explicit model, effort,
 authorization, and user prompt choices keep their existing precedence.
@@ -589,6 +591,10 @@ output with `--json`), for example
 `llm-bridge: unknown command 'stauts' · did you mean status? · llm-bridge --help
 lists commands`. Internal commands (`console`, `_controller`, `_station-gc`) are
 not listed or suggested.
+
+`llm-bridge screen --mission ID` prints the last 200 lines of a native
+provider's current terminal screen (each line cut at 1000 characters; `--json`
+adds a `truncated` flag). It reads the station and changes nothing.
 
 The Agents view shows roots across missions and exact parent-bound Codex children.
 Use `llm-bridge agents --mission ID` for one mission or `--all-missions` for the
