@@ -165,7 +165,7 @@ async function route(): Promise<void> {
     else if (path === "/usage") cleanup = await lazyView(main, generation, loadUsage, (v) => v.usage(main, new URLSearchParams(location.search)));
     else if (path === "/diagnostics") cleanup = await lazyView(main, generation, loadDiagnostics, (v) => v.diagnostics(main));
     else if (path === "/account") cleanup = await lazyView(main, generation, loadAccount, (v) => v.account(main, { me, signOut: () => void signOut(), onPasswordChanged: signedOut }));
-    else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the overview")));
+    else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the Inbox")));
   } catch {
     if (generation === routeGeneration) main.replaceChildren(h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => void route(), code: "chunk-load-failed" }));
   }
