@@ -1,7 +1,7 @@
 //! Authenticated and encrypted route- and filter-bound opaque list cursors.
 
 use base64::Engine;
-use rand::RngCore;
+use rand::TryRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -39,7 +39,7 @@ pub fn issue(key: &str, route: &str, filters: &str, offset: usize) -> String {
     let payload = serde_json::to_vec(&claims).expect("cursor claims serialize");
     let mut encrypted = payload;
     let mut nonce = [0u8; NONCE_BYTES];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    rand::rngs::SysRng.try_fill_bytes(&mut nonce).expect("operating system random source");
     let sealing_key =
         ring::aead::LessSafeKey::new(ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &encryption_key(key)).expect("AES key length is fixed"));
     sealing_key

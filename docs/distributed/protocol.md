@@ -90,6 +90,31 @@ so contiguity of ids is not required. The coordinator keeps one cursor per
 worker. A batch is accepted only when its `after` equals the stored cursor;
 otherwise the coordinator answers `events.nack` and the worker resends from
 `expected_after`. On `welcome` the worker resumes from the returned cursor.
+
+The coordinator sends nothing for an accepted batch. A worker therefore keeps
+at most one `events` message in flight and sends a `ping` immediately after it.
+The coordinator handles and answers one connection's messages in order, so the
+`pong` for that ping shows the batch was processed, and an `events.nack` for the
+batch arrives before that pong. The worker sends the next batch only after that
+pong. This needs no message beyond the ones above, so it works with every
+protocol v1 coordinator.
+
+A worker honours an `events.nack` only while a batch is in flight and only when
+`expected_after` differs from that batch's `after`. Otherwise the nack answers a
+batch that has already been replaced, and honouring it would resend data the
+coordinator has just accepted. A nack that is honoured replaces the in-flight
+batch, so one batch causes at most one rewind. An `expected_after` beyond the
+batch's `through` moves the worker forward to that cursor.
+
+Batches are bounded: at most 25 events and 16 KiB of serialized events (one
+larger event is still sent alone), and event traffic is held to a sustained
+20 KiB/s. A batch may carry fewer events than the ids it spans: the worker does
+not replicate `controller-heartbeat` events or any `capacity-refresh` that a
+newer refresh of the same mission has superseded. These are bookkeeping that
+the controller writes every few seconds; the coordinator does not interpret
+them and the console only lists them as hidden plumbing. The skipped ids still
+advance `through`, and a batch with no events and `through > after` is a
+valid way to move the cursor past them.
 The worker sends ordinary mission summaries only for mission IDs in an event
 batch. Every five seconds it checks active native missions for provider
 questions, and sends only summaries whose bounded `needs_you` value changed;

@@ -298,9 +298,12 @@ def test_control_messages_and_event_replication(state):
     assert batch is not None and batch.payload["after"] == 0
     decode(batch.encode())  # a valid protocol message
     through = batch.payload["through"]
-    assert session.next_events() is None
-    session.handle(Message("events.nack", "c", 1, {"expected_after": 0}))
-    assert session.next_events().payload["through"] == through
+    assert session.next_events() is None  # one batch in flight
+    session.handle(Message("events.nack", "c", 1, {"expected_after": 0}))  # names the batch's own start: stale
+    assert session.next_events() is None and session.inflight is not None
+    session.barrier_ping()
+    session.handle(Message("pong", "c", 1, {}))
+    assert session.cursor == through and session.inflight is None
 
 
 def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_path):
