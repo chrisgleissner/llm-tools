@@ -17,6 +17,45 @@ async fn tls_connect(env: &Env) -> tokio_rustls::client::TlsStream<TcpStream> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn split_listeners_share_the_global_connection_budget() {
+    let env = boot_with(|text| {
+        format!(
+            "{}\n[listener_groups]\nconsole_rest = \"127.0.0.1:0\"\nworker_channel = \"127.0.0.1:0\"\n",
+            text.replace("max_connections = 256", "max_connections = 1")
+                .replace("worker_reserve_connections = 16", "worker_reserve_connections = 0")
+        )
+    })
+    .await;
+    let worker_addr = env
+        .srv
+        .listeners
+        .iter()
+        .find(|(group, _)| *group == bridge_coordinator::config::ListenerGroup::WorkerChannel)
+        .unwrap()
+        .1;
+    let first = TcpStream::connect(env.addr).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut over_limit = TcpStream::connect(worker_addr).await.unwrap();
+    let mut buffer = [0u8; 8];
+    let result = tokio::time::timeout(Duration::from_secs(3), over_limit.read(&mut buffer))
+        .await
+        .expect("the shared cap must close the second listener's connection promptly");
+    assert!(matches!(result, Ok(0) | Err(_)), "{result:?}");
+    drop((first, over_limit));
+
+    let reopened = tokio::time::timeout(Duration::from_secs(3), async {
+        let tcp = TcpStream::connect(worker_addr).await.unwrap();
+        TlsConnector::from(env.tls.clone())
+            .connect(rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(), tcp)
+            .await
+    })
+    .await
+    .expect("a shared slot must be released when the original listener's client disconnects");
+    assert!(reopened.is_ok());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn connections_over_the_cap_are_closed_promptly() {
     let env = boot_with(|t| t.replace("max_connections = 256", "max_connections = 2")).await;
     let a = TcpStream::connect(env.addr).await.unwrap();

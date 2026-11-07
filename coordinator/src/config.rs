@@ -377,6 +377,13 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(dir).unwrap();
+
+        let lan_only = temp_config(&format!(
+            "{}\n[listener_groups]\nconsole_rest = \"0.0.0.0:8443\"\n",
+            config_text("127.0.0.1:8443", false)
+        ));
+        assert!(Config::load(&lan_only).unwrap_err().contains("lan_enabled"));
+        std::fs::remove_dir_all(lan_only).unwrap();
     }
 
     #[test]
