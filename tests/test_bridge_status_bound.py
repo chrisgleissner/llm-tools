@@ -113,6 +113,7 @@ def test_mission_summary_carries_counts_and_current_task_for_the_console(big_mis
     with BridgeStore(directory / "bridge.sqlite3") as store:
         summary = session._mission_summary(store, store.get_mission(mission_id))
     assert summary["task_counts"] == {"COMPLETED": 36, "QUEUED": 4}
+    assert summary["needs_kind"] == "capacity" and summary["needs_tasks"] == 0 and summary["current_task"] is None
     assert len(json.dumps(summary)) < 1024
     with BridgeStore(directory / "bridge.sqlite3") as store:
         store.set_mission_status(mission_id, "STOPPED")

@@ -221,7 +221,8 @@ function resourceResult(row: CommandRow): Record<string, unknown> {
 }
 
 export async function missionTasks(target: string, missionId: string, limit = 500, offset = 0): Promise<{ tasks: Array<Record<string, unknown>>; total: number; offset: number }> {
-  const q = new URLSearchParams({ worker: target, limit: String(limit), offset: String(offset), wait_ms: "10000" });
+  // The console lists tasks by title and never shows a prompt, so none travels over the worker link.
+  const q = new URLSearchParams({ worker: target, limit: String(limit), offset: String(offset), prompt_chars: "0", wait_ms: "10000" });
   const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/tasks?${q}`);
   return resourceResult(row) as { tasks: Array<Record<string, unknown>>; total: number; offset: number };
 }

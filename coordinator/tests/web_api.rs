@@ -355,6 +355,16 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
     let (status, status_command) = api.get("/api/v1/missions/mission-1?worker=build-1").await;
     assert_eq!(status, 202, "{status_command}");
     assert_eq!(status_command["operation"], "mission.status");
+    // The size controls of the bounded reads pass through; nothing else does.
+    let (status, sized) = api
+        .get("/api/v1/missions/mission-1?worker=build-1&task_limit=2&prompt_chars=80&event_limit=3")
+        .await;
+    assert_eq!(status, 202, "{sized}");
+    assert_eq!(sized["request"]["params"], json!({"task_limit":2,"prompt_chars":80,"event_limit":3}));
+    let (status, clipped) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=10&prompt_chars=0").await;
+    assert_eq!(status, 202, "{clipped}");
+    assert_eq!(clipped["request"]["params"], json!({"limit":10,"offset":0,"prompt_chars":0}));
+    assert_eq!(api.get("/api/v1/missions/mission-1?worker=build-1&limit=5").await.0, 400);
     env.stop().await;
 }
 
