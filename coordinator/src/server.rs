@@ -25,16 +25,20 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RunningServer {
     pub addr: SocketAddr,
+    pub listeners: Vec<(crate::config::ListenerGroup, SocketAddr)>,
     pub state: Arc<AppState>,
     shutdown: watch::Sender<bool>,
-    task: tokio::task::JoinHandle<()>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+    _data_dir_lock: std::fs::File,
 }
 
 impl RunningServer {
     /// Signal shutdown and wait for connections to drain (bounded by 10 s).
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
-        let _ = self.task.await;
+        for task in self.tasks {
+            let _ = task.await;
+        }
     }
 }
 
@@ -45,7 +49,7 @@ pub async fn start(data_dir: &Path) -> Result<RunningServer, String> {
 /// Like [`start`], with an explicit web directory that overrides `web_dir` in `config.toml`.
 pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<RunningServer, String> {
     let cfg = Config::load(data_dir)?;
-    let bind = cfg.checked_bind()?;
+    let binds = cfg.listener_binds()?;
     let configured = cfg.web_dir.as_ref().map(std::path::PathBuf::from);
     let web_dir = crate::web::resolve_web_dir(web_dir.map(Path::to_path_buf).or(configured).as_deref())?;
     let (tls_config, file_cert_resolver) = match (&cfg.tls_cert_file, &cfg.tls_key_file, &cfg.tls_cert_name) {
@@ -91,8 +95,19 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         }
     }
     let cursor_key = db.cursor_key().map_err(|e| format!("cannot load pagination cursor key: {e}"))?;
-    let listener = TcpListener::bind(bind).await.map_err(|e| format!("cannot bind {bind}: {e}"))?;
-    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    let mut listeners = Vec::with_capacity(binds.len());
+    for (group, bind) in binds {
+        let listener = TcpListener::bind(bind).await.map_err(|e| format!("cannot bind {bind}: {e}"))?;
+        let addr = listener.local_addr().map_err(|e| e.to_string())?;
+        listeners.push((group, addr, listener));
+    }
+    let addr = listeners
+        .iter()
+        .find(|(group, _, _)| *group == crate::config::ListenerGroup::ConsoleRest)
+        .or_else(|| listeners.first())
+        .map(|(_, addr, _)| *addr)
+        .ok_or("at least one listener is required")?;
+    let public_listeners = listeners.iter().map(|(group, addr, _)| (*group, *addr)).collect();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     if let Some(resolver) = file_cert_resolver {
         let mut shutdown = shutdown_rx.clone();
@@ -137,7 +152,6 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         shutdown: shutdown_rx.clone(),
         web_dir,
     });
-    let app = http::router(state.clone());
     let lock = crate::ops::lock_data_dir(data_dir)?;
     let limits = ConnLimits {
         max_connections: state.cfg.max_connections,
@@ -145,12 +159,28 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         reserve: state.cfg.worker_reserve_connections.min(state.cfg.max_connections / 4),
         http_idle: Duration::from_secs(state.cfg.http_idle_timeout_secs),
     };
-    let task = tokio::spawn(accept_loop(listener, tls, app, db, shutdown_rx, limits, lock));
+    let budget = Arc::new(ConnectionBudget::new(&limits));
+    let mut tasks = Vec::with_capacity(listeners.len());
+    for (index, (group, _, listener)) in listeners.into_iter().enumerate() {
+        let app = http::router_for_group(state.clone(), group);
+        tasks.push(tokio::spawn(accept_loop(ListenerTask {
+            listener,
+            tls: tls.clone(),
+            app,
+            db: db.clone(),
+            shutdown: shutdown_rx.clone(),
+            limits,
+            budget: budget.clone(),
+            maintenance_owner: index == 0,
+        })));
+    }
     Ok(RunningServer {
         addr,
+        listeners: public_listeners,
         state,
         shutdown: shutdown_tx,
-        task,
+        tasks,
+        _data_dir_lock: lock,
     })
 }
 
@@ -161,6 +191,33 @@ struct ConnLimits {
     /// Slots (part of `max_connections`) used only when the general slots are full.
     reserve: usize,
     http_idle: Duration,
+}
+
+struct ConnectionBudget {
+    slots: Arc<Semaphore>,
+    reserve: Arc<Semaphore>,
+    per_ip: Arc<IpCounts>,
+}
+
+struct ListenerTask {
+    listener: TcpListener,
+    tls: TlsAcceptor,
+    app: axum::Router,
+    db: Arc<Db>,
+    shutdown: watch::Receiver<bool>,
+    limits: ConnLimits,
+    budget: Arc<ConnectionBudget>,
+    maintenance_owner: bool,
+}
+
+impl ConnectionBudget {
+    fn new(limits: &ConnLimits) -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(limits.max_connections - limits.reserve)),
+            reserve: Arc::new(Semaphore::new(limits.reserve)),
+            per_ip: Arc::new(IpCounts::default()),
+        }
+    }
 }
 
 /// Live connection count per client address key (IPv6 by /64).
@@ -196,32 +253,31 @@ impl Drop for IpGuard {
     }
 }
 
-async fn accept_loop(
-    listener: TcpListener,
-    tls: TlsAcceptor,
-    app: axum::Router,
-    db: Arc<Db>,
-    mut shutdown: watch::Receiver<bool>,
-    limits: ConnLimits,
-    lock: std::fs::File,
-) {
-    let slots = Arc::new(Semaphore::new(limits.max_connections - limits.reserve));
-    let reserve = Arc::new(Semaphore::new(limits.reserve));
-    let per_ip = Arc::new(IpCounts::default());
+async fn accept_loop(task: ListenerTask) {
+    let ListenerTask {
+        listener,
+        tls,
+        app,
+        db,
+        mut shutdown,
+        limits,
+        budget,
+        maintenance_owner,
+    } = task;
     let mut conns: JoinSet<()> = JoinSet::new();
     let mut maintenance = tokio::time::interval(Duration::from_secs(3600));
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
-            _ = maintenance.tick() => { if let Err(e) = db.maintenance() { eprintln!("maintenance failed: {e}"); } }
+            _ = maintenance.tick(), if maintenance_owner => { if let Err(e) = db.maintenance() { eprintln!("maintenance failed: {e}"); } }
             Some(_) = conns.join_next(), if !conns.is_empty() => {}
             accepted = listener.accept() => {
                 let Ok((tcp, peer)) = accepted else { continue };
                 // Over a cap: drop the socket at once (the peer sees a close, not a hang).
-                let Some(ip_guard) = per_ip.take(crate::auth::addr_key(&peer.ip()), limits.per_ip) else { continue };
-                let (permit, tier) = if let Ok(p) = slots.clone().try_acquire_owned() {
+                let Some(ip_guard) = budget.per_ip.take(crate::auth::addr_key(&peer.ip()), limits.per_ip) else { continue };
+                let (permit, tier) = if let Ok(p) = budget.slots.clone().try_acquire_owned() {
                     (p, http::Tier::General)
-                } else if let Ok(p) = reserve.clone().try_acquire_owned() {
+                } else if let Ok(p) = budget.reserve.clone().try_acquire_owned() {
                     (p, http::Tier::Reserve)
                 } else {
                     continue
@@ -255,8 +311,4 @@ async fn accept_loop(
     if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
         conns.abort_all();
     }
-    // Release explicitly once the listener and connection drain have stopped. This is
-    // especially important for callers that restore the data directory immediately after
-    // awaiting shutdown on platforms with advisory file locks.
-    let _ = lock.unlock();
 }

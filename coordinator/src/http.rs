@@ -3018,6 +3018,21 @@ mod problem_tests {
         assert_eq!(body["detail"], "request id was reused");
         assert_eq!(body["error"]["code"], "request-id-conflict");
     }
+
+    #[test]
+    fn listener_groups_expose_only_their_route_families() {
+        use crate::config::ListenerGroup::*;
+        assert!(listener_group_allows(Combined, "/healthz"));
+        assert!(listener_group_allows(Combined, "/api/v1/worker/connect"));
+        assert!(listener_group_allows(ConsoleRest, "/api/v1/missions"));
+        assert!(!listener_group_allows(ConsoleRest, "/healthz"));
+        assert!(!listener_group_allows(ConsoleRest, "/api/v1/worker/connect"));
+        assert!(listener_group_allows(WorkerChannel, "/api/v1/worker/connect"));
+        assert!(listener_group_allows(WorkerChannel, "/api/v1/worker/terminal/abc"));
+        assert!(!listener_group_allows(WorkerChannel, "/api/v1/workers"));
+        assert!(listener_group_allows(Health, "/healthz"));
+        assert!(!listener_group_allows(Health, "/api/v1/health"));
+    }
 }
 
 fn route_matches(template: &str, path: &str) -> bool {
@@ -3034,7 +3049,15 @@ fn route_matches(template: &str, path: &str) -> bool {
 }
 
 pub fn router(st: St) -> Router {
-    Router::new()
+    build_router(st, None)
+}
+
+pub fn router_for_group(st: St, group: crate::config::ListenerGroup) -> Router {
+    build_router(st, Some(group))
+}
+
+fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
+    let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
@@ -3093,12 +3116,35 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/worker/connect", get(crate::ws_worker::connect))
         .route("/api/v1/terminal", get(crate::terminal::browser))
         .route("/api/v1/worker/terminal/{session_id}", get(crate::terminal::worker))
-        .fallback(static_files)
-        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .fallback(static_files);
+    let app = if let Some(group) = group {
+        app.layer(axum::middleware::from_fn_with_state(group, listener_group_gate))
+    } else {
+        app
+    };
+    app.layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::from_fn_with_state(st.clone(), reserve_gate))
         .layer(axum::middleware::from_fn(fetch_metadata_guard))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(st)
+}
+
+/// The listener groups are enforced before dispatch, including the SPA and API fallbacks.
+fn listener_group_allows(group: crate::config::ListenerGroup, path: &str) -> bool {
+    let worker_path = path == "/api/v1/worker" || path.starts_with("/api/v1/worker/");
+    match group {
+        crate::config::ListenerGroup::Combined => true,
+        crate::config::ListenerGroup::ConsoleRest => !worker_path && path != "/healthz",
+        crate::config::ListenerGroup::WorkerChannel => worker_path,
+        crate::config::ListenerGroup::Health => path == "/healthz",
+    }
+}
+
+async fn listener_group_gate(State(group): State<crate::config::ListenerGroup>, req: Request, next: axum::middleware::Next) -> Response {
+    if !listener_group_allows(group, req.uri().path()) {
+        return err(StatusCode::NOT_FOUND, "route-not-found", "route is not available on this listener").into_response();
+    }
+    next.run(req).await
 }
 
 pub fn with_peer(app: Router, peer: SocketAddr) -> Router {

@@ -52,6 +52,12 @@ worker protocol is `protocol.md`.
   exit). Logs go to stderr only; nothing is written outside the data directory
   (SQLite temporary storage is in memory). SIGTERM or SIGINT drains connections and
   exits within 10 s.
+- By default `bind` serves the console/REST API, worker channel and health endpoint together. To
+  split them, add `[listener_groups]` to `config.toml` and set any of `console_rest`,
+  `worker_channel` and `health` to `HOST:PORT`. Once one group is configured, only the listed
+  groups listen; omit a group to disable it. Each address follows the same loopback/LAN rule as
+  `bind`. Connection and per-address limits are shared across all listeners. The `info` command
+  reports the active groups; `health` checks the dedicated health listener when configured.
 - `bridge-coordinator info` prints the URLs (flagging any that the server
   certificate does not cover), bind address, LAN state, CA path and SHA-256
   fingerprint and whether an administrator exists.
@@ -232,7 +238,7 @@ and compatibility test are the reviewable contract for each release.
 | Limit | Default | Setting |
 |---|---|---|
 | Concurrent TCP connections, all kinds | 256; a connection over the cap is closed immediately after `accept` | `max_connections` |
-| Concurrent connections per client address (IPv6 counted by /64) | 32; over the cap is closed immediately. Behind a proxy or a published container port every client has the proxy's address: raise it | `max_connections_per_ip` |
+| Concurrent connections per client address (IPv6 counted by /64) | 32; over the cap is closed immediately. Behind a proxy or a published container port the connection cap sees the proxy address; authenticated rate limits use the trusted forwarding address when configured | `max_connections_per_ip` |
 
 ### Reverse proxy client addresses
 

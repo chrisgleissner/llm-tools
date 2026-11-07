@@ -60,7 +60,13 @@ pub fn in_container() -> bool {
 
 /// HTTPS URLs for the configured bind address, each with whether the certificate covers it.
 pub fn urls(dir: &Path, cfg: &Config) -> Result<Vec<(String, bool)>, String> {
-    let addr = cfg.bind_addr()?;
+    let listeners = cfg.listener_binds()?;
+    let Some((_, addr)) = listeners
+        .iter()
+        .find(|(group, _)| matches!(group, crate::config::ListenerGroup::Combined | crate::config::ListenerGroup::ConsoleRest))
+    else {
+        return Ok(vec![]);
+    };
     let port = std::env::var(crate::config::ENV_PUBLIC_PORT)
         .ok()
         .and_then(|p| p.trim().parse::<u16>().ok())
@@ -127,7 +133,21 @@ pub fn report(dir: &Path, with_trust_steps: bool) -> Result<String, String> {
         out += "  Other devices need BRIDGE_PUBLIC_NAMES (container/compose.yaml) set before `init`,\n  \
                 or `cert new-ca` after setting it.\n";
     }
-    out += &format!("Bind address:      {}\n", cfg.bind);
+    let listeners = cfg.listener_binds()?;
+    if listeners.len() == 1 && listeners[0].0 == crate::config::ListenerGroup::Combined {
+        out += &format!("Bind address:      {}\n", cfg.bind);
+    } else {
+        out += "Listener groups:\n";
+        for (group, address) in &listeners {
+            let name = match group {
+                crate::config::ListenerGroup::Combined => "combined",
+                crate::config::ListenerGroup::ConsoleRest => "console and REST API",
+                crate::config::ListenerGroup::WorkerChannel => "worker channel",
+                crate::config::ListenerGroup::Health => "health",
+            };
+            out += &format!("  {name}: {address}\n");
+        }
+    }
     out += &format!(
         "LAN access:        {}\n",
         if in_container() {
@@ -169,7 +189,12 @@ pub fn report(dir: &Path, with_trust_steps: bool) -> Result<String, String> {
 /// HTTPS GET `/healthz` on the configured bind address, verified against the local CA.
 pub async fn health(dir: &Path) -> Result<(), String> {
     let cfg = Config::load(dir)?;
-    let addr = cfg.bind_addr()?;
+    let listeners = cfg.listener_binds()?;
+    let addr = listeners
+        .iter()
+        .find(|(group, _)| matches!(group, crate::config::ListenerGroup::Combined | crate::config::ListenerGroup::Health))
+        .map(|(_, address)| *address)
+        .ok_or_else(|| "health listener is disabled in listener_groups".to_string())?;
     let ip = if addr.ip().is_unspecified() {
         if addr.is_ipv4() {
             IpAddr::from([127, 0, 0, 1])

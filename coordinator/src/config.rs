@@ -9,6 +9,8 @@ use std::path::Path;
 pub struct Config {
     /// Listen address. Non-loopback needs `lan_enabled = true` (NET-003).
     pub bind: String,
+    /// Optional route-group listeners. If any is set, only the explicitly listed groups listen.
+    pub listener_groups: ListenerGroups,
     pub lan_enabled: bool,
     /// Minimum TLS version. TLS 1.2 is an explicit compatibility opt-in.
     pub min_tls: String,
@@ -54,10 +56,27 @@ pub struct Config {
     pub max_token_lifetime_days: u32,
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ListenerGroups {
+    pub console_rest: Option<String>,
+    pub worker_channel: Option<String>,
+    pub health: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListenerGroup {
+    Combined,
+    ConsoleRest,
+    WorkerChannel,
+    Health,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             bind: "127.0.0.1:8443".into(),
+            listener_groups: ListenerGroups::default(),
             lan_enabled: false,
             min_tls: "1.3".into(),
             max_events_per_worker: 50_000,
@@ -109,6 +128,12 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
     # Listen address. A non-loopback address is refused unless lan_enabled = true.\n\
     bind = \"{bind}\"\n\
     lan_enabled = {lan_enabled}\n\
+    # Optional split listeners. If any value is set, only listed groups are exposed;\n\
+    # unlisted groups are disabled. With all three omitted, `bind` serves every group.\n\
+    # [listener_groups]\n\
+    # console_rest = \"127.0.0.1:8443\"\n\
+    # worker_channel = \"127.0.0.1:8444\"\n\
+    # health = \"127.0.0.1:8445\"\n\
     # Minimum TLS version. Keep 1.3 unless an older client requires TLS 1.2.\n\
     min_tls = \"{}\"\n\
     # Stored events per worker; oldest are deleted first.\n\
@@ -251,7 +276,7 @@ impl Config {
         if !(1..=3650).contains(&cfg.max_token_lifetime_days) {
             return Err("max_token_lifetime_days must be between 1 and 3650".into());
         }
-        cfg.bind_addr()?;
+        cfg.listener_binds()?;
         Ok(cfg)
     }
 
@@ -268,6 +293,32 @@ impl Config {
             ));
         }
         Ok(addr)
+    }
+
+    pub fn listener_binds(&self) -> Result<Vec<(ListenerGroup, SocketAddr)>, String> {
+        let groups = [
+            (ListenerGroup::ConsoleRest, self.listener_groups.console_rest.as_deref()),
+            (ListenerGroup::WorkerChannel, self.listener_groups.worker_channel.as_deref()),
+            (ListenerGroup::Health, self.listener_groups.health.as_deref()),
+        ];
+        if groups.iter().all(|(_, address)| address.is_none()) {
+            return Ok(vec![(ListenerGroup::Combined, self.checked_bind()?)]);
+        }
+        let mut binds = Vec::new();
+        for (group, address) in groups {
+            if let Some(address) = address {
+                let addr = address
+                    .parse::<SocketAddr>()
+                    .map_err(|e| format!("invalid listener address {address:?}: {e}"))?;
+                if !addr.ip().is_loopback() && !self.lan_enabled {
+                    return Err(format!(
+                        "refusing to bind {addr}: it is not a loopback address and lan_enabled is not set to true in config.toml"
+                    ));
+                }
+                binds.push((group, addr));
+            }
+        }
+        Ok(binds)
     }
 }
 
@@ -306,6 +357,26 @@ mod tests {
         let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("trusted_proxies = []", "trusted_proxies = [\"10.0.0.1\"]"));
         assert!(Config::load(&invalid).unwrap_err().contains("valid IPv4 or IPv6 CIDRs"));
         std::fs::remove_dir_all(invalid).unwrap();
+    }
+
+    #[test]
+    fn listener_groups_default_to_combined_and_enable_only_explicit_groups_when_split() {
+        let defaults = Config::default().listener_binds().unwrap();
+        assert_eq!(defaults, vec![(ListenerGroup::Combined, "127.0.0.1:8443".parse().unwrap())]);
+
+        let dir = temp_config(&format!(
+            "{}\n[listener_groups]\nworker_channel = \"127.0.0.1:9444\"\nhealth = \"127.0.0.1:9445\"\n",
+            config_text("127.0.0.1:8443", false)
+        ));
+        let config = Config::load(&dir).unwrap();
+        assert_eq!(
+            config.listener_binds().unwrap(),
+            vec![
+                (ListenerGroup::WorkerChannel, "127.0.0.1:9444".parse().unwrap()),
+                (ListenerGroup::Health, "127.0.0.1:9445".parse().unwrap()),
+            ]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

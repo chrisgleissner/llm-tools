@@ -196,6 +196,17 @@ connection limits in `coordinator.md`. Every request still needs the administrat
 token or a worker token, but you should also restrict who can reach the port.
 Never expose the port to the internet.
 
+### Remote access
+
+Use a VPN such as WireGuard or Tailscale first. If a reverse proxy terminates TLS, keep the
+coordinator bound to loopback and configure `trusted_proxies` with only the proxy's exact IP or
+CIDR; the proxy must discard incoming `Forwarded` and `X-Forwarded-For` values before setting its
+own. The coordinator shares connection caps across listeners and trusts forwarding headers only
+from those configured peers. Split listeners can keep the worker channel or health endpoint off
+the browser-facing address by setting `[listener_groups]` in `config.toml`. Direct Internet
+exposure is not supported until the `exposure = "internet"` preconditions in the security
+requirements are implemented.
+
 Firewall examples (documentation only; the installer does not change firewall
 settings). Replace `192.168.1.0/24` with your LAN subnet.
 

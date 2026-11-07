@@ -156,7 +156,15 @@ async fn run(args: Args) -> Result<(), String> {
         }
         ["serve"] => {
             let srv = server::start_with(&dir, args.web_dir.as_deref()).await?;
-            eprintln!("bridge-coordinator listening on https://{}", srv.addr);
+            for (group, addr) in &srv.listeners {
+                let label = match group {
+                    config::ListenerGroup::Combined => "all routes",
+                    config::ListenerGroup::ConsoleRest => "console and REST API",
+                    config::ListenerGroup::WorkerChannel => "worker channel",
+                    config::ListenerGroup::Health => "health",
+                };
+                eprintln!("bridge-coordinator {label} listening on https://{addr}");
+            }
             #[cfg(unix)]
             {
                 let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
