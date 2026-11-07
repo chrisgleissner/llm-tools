@@ -1,75 +1,87 @@
-/* Legacy shell (header, side bar, tab bar, account menu). WP-1 replaces it with the rail, header and user menu. */
-/* ---------------------------------------------------------------- shell */
-.shell { min-height: 100vh; min-height: 100dvh; padding-inline: env(safe-area-inset-left) env(safe-area-inset-right); }
+/* Shell (spec 7): fixed header, one navigation element laid out as labelled rail, icon rail, bottom bar or header links, "as of" banner. */
+@media (min-width: 80rem) { :root { --rail-w: 208px; } }
+.shell { min-block-size: 100vh; min-block-size: 100svh; padding-block-start: var(--head-h); }
 .top {
-  position: sticky; top: 0; z-index: 20; height: var(--head-h);
-  display: flex; align-items: center; gap: var(--sp-3); padding: 0 var(--sp-4);
-  background: var(--surface-1); border-bottom: 1px solid var(--border);
+  position: fixed; inset: 0 0 auto; z-index: 30; block-size: var(--head-h); display: flex; align-items: center; gap: var(--sp-2);
+  padding-inline: max(var(--sp-2), env(safe-area-inset-left)) max(var(--gutter), env(safe-area-inset-right));
+  background: var(--surface-1); border-block-end: 1px solid var(--border);
 }
-.brand { min-width: var(--control-h); white-space: nowrap; display: inline-flex; align-items: center; gap: var(--sp-2); font-weight: 700; color: var(--text); text-decoration: none; font-size: var(--fs-lg); min-height: var(--control-h); }
-.brand .icon { color: var(--accent); }
-.top .spacer { flex: 1 1 auto; }
-.tools { display: flex; align-items: center; gap: var(--sp-2); }
-.layout { display: block; }
-.side { display: none; }
-.side ul, .tabbar ul { list-style: none; margin: 0; padding: 0; }
-.side a, .tabbar a, .tabbar button {
-  display: flex; align-items: center; gap: var(--sp-3); color: var(--text); text-decoration: none;
-  min-height: var(--control-h); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-2); font: inherit;
-}
-@media (hover: hover) { .side a:hover, .tabbar a:hover { background: var(--surface-3); } }
-.side a[aria-current="page"] { background: var(--accent-tint); color: var(--accent-strong); font-weight: 600; }
-main { max-width: 1120px; margin: 0 auto; padding: var(--sp-4) var(--sp-4) calc(var(--tab-h) + var(--sp-6)); }
+.brand { flex: none; display: inline-flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h); padding-inline: var(--sp-2); color: var(--text); font-weight: 700; font-size: var(--fs-lg); text-decoration: none; white-space: nowrap; overflow-wrap: normal; }
+@media (min-width: 80rem) { .brand { inline-size: calc(var(--rail-w) - var(--sp-2)); } }
+@media (max-width: 24.99rem), (min-width: 48rem) and (max-width: 79.99rem) { .brand-text { display: none; } }
+.search-open { flex: 0 1 26rem; justify-content: flex-start; color: var(--text-muted); background: var(--surface-2); border-color: transparent; font-weight: 400; min-inline-size: var(--control-h); }
+.search-open .so-text { flex: 1; text-align: start; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 47.99rem), (pointer: coarse) { .search-open kbd { display: none; } }
+@media (max-width: 47.99rem) { .search-open { flex: none; padding: 0; } .search-open .so-text { display: none; } }
 
-.tabbar {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; height: var(--tab-h);
-  padding-bottom: env(safe-area-inset-bottom);
-  background: var(--surface-1); border-top: 1px solid var(--border);
-}
-.tabbar ul { display: grid; grid-template-columns: repeat(5, 1fr); height: 100%; }
-.tabbar li { min-width: 0; }
-.tabbar a, .tabbar button {
-  flex-direction: column; justify-content: center; gap: 2px; width: 100%; height: 100%; min-height: var(--control-h);
-  font-size: 0.75rem; border: 0; background: none; border-radius: 0; cursor: pointer; padding: var(--sp-1);
-}
-.tabbar a[aria-current="page"] { color: var(--accent-strong); font-weight: 600; background: var(--accent-tint); }
-.tabbar .icon { width: 24px; height: 24px; }
+/* capacity chips: neutral text and a small meter */
+.cap-chips { flex: 1 1 0; min-inline-size: 0; display: flex; justify-content: flex-end; gap: var(--sp-2); }
+.cap-chip { display: inline-flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h-sm); padding-inline: var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-pill); color: var(--text); font-size: var(--fs-sm); text-decoration: none; white-space: nowrap; }
+.meter { inline-size: 2rem; block-size: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.meter i { display: block; block-size: 100%; inline-size: var(--v); background: var(--text-muted); }
+@media (hover: hover) { .cap-chip:hover { background: var(--surface-3); } }
 
-@media (min-width: 960px) {
-  .layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); }
-  .side { display: block; position: sticky; top: var(--head-h); align-self: start; height: calc(100vh - var(--head-h)); padding: var(--sp-4) var(--sp-3); border-right: 1px solid var(--border); background: var(--surface-1); }
-  .side a { margin-bottom: var(--sp-1); }
-  .tabbar { display: none; }
-  main { padding-bottom: var(--sp-7); width: 100%; }
+/* connection: a dot, labelled only when not live; the banner is a status region under the header */
+.conn { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-muted); white-space: nowrap; overflow-wrap: normal; }
+.conn .dot { inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--icon-idle); }
+.conn[data-s="live"] .dot { background: var(--icon-done); }
+.conn[data-s="reconnecting"] .dot { background: var(--alert-attention-bar); }
+.conn[data-s="offline"] .dot { background: var(--icon-offline); }
+.conn-wrap { position: sticky; inset-block-start: var(--head-h); z-index: 25; }
+.conn-banner:not(:empty) { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--gutter); background: var(--surface-2); border-block-end: 1px solid var(--border-strong); font-size: var(--fs-sm); }
+.conn-banner .age { color: var(--text-muted); }
+
+/* user menu */
+#account-button { max-inline-size: 11rem; }
+#account-button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+@media (max-width: 79.99rem) { #account-button > span { display: none; } #account-button { padding: 0; } }
+
+/* navigation: bottom bar by default */
+.main-nav { position: fixed; z-index: 28; inset: auto 0 0; padding-block-end: env(safe-area-inset-bottom); background: var(--surface-1); border-block-start: 1px solid var(--border); }
+.main-nav ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); block-size: var(--tab-h); }
+.main-nav li { position: relative; min-inline-size: 0; }
+.main-nav a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; block-size: 100%; color: var(--text); font-size: var(--fs-xs); line-height: var(--lh-xs); text-decoration: none; white-space: nowrap; overflow-wrap: normal; }
+.main-nav a[aria-current="page"] { background: var(--accent-tint); color: var(--accent-strong); font-weight: 600; }
+.nav-count { position: absolute; inset: 4px 6px auto auto; display: grid; place-items: center; min-inline-size: 1.25rem; block-size: 1.25rem; padding-inline: 4px; border-radius: var(--r-pill); background: var(--alert-attention-bg); color: var(--alert-attention-fg); font-size: var(--fs-xs); font-weight: 600; pointer-events: none; }
+@media (max-width: 47.99rem) and (max-aspect-ratio: 3/2) { body[data-kb] .main-nav { display: none; } }
+@media (hover: hover) { .main-nav a:hover { background: var(--surface-3); } }
+
+/* content */
+.shell > main { max-inline-size: 90rem; margin-inline: auto; padding: var(--space-section) var(--gutter); }
+.shell > main:has([data-pane="session"]) { max-inline-size: none; }
+@media (max-width: 47.99rem) { .shell > main { padding-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom) + var(--sp-4)); } }
+[data-kb-row]:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+/* the rail from 48rem; labelled from 80rem */
+@media (min-width: 48rem) {
+  .shell { padding-inline-start: var(--rail-w); }
+  .main-nav { inset: var(--head-h) auto 0 0; inline-size: var(--rail-w); padding: var(--sp-2) 0; border-block-start: 0; border-inline-end: 1px solid var(--border); overflow-y: auto; }
+  .main-nav ul { display: flex; flex-direction: column; gap: 2px; block-size: auto; padding-inline: var(--sp-2); }
+  .main-nav a { flex-direction: row; justify-content: center; block-size: 40px; border-radius: var(--r-2); }
+  .nav-label { display: none; }
+}
+@media (min-width: 80rem) {
+  .main-nav a { justify-content: flex-start; gap: var(--sp-3); padding-inline: var(--sp-3); }
+  .nav-label { display: inline; }
 }
 
-.conn { white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-md); padding: 2px 10px; min-height: 28px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-1); }
-.conn .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); }
-.conn.live .dot { background: var(--icon-done); }
-.conn.reconnecting .dot { background: var(--alert-attention-fg); }
-.conn.offline .dot { background: var(--danger); }
-/* account menu */
-.account { position: relative; }
-.account-btn { padding: 0 var(--sp-3) 0 var(--sp-1) !important; gap: var(--sp-2); }
-.avatar { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: var(--fs-md); text-transform: uppercase; }
-.account-panel {
-  position: absolute; right: 0; top: calc(100% + var(--sp-2)); width: min(86vw, 300px); z-index: 40;
-  background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-2); box-shadow: var(--e2); padding: var(--sp-2);
+/* landscape phone: one 40 px line, the navigation links sit in the header, no bottom bar */
+@media (min-aspect-ratio: 3/2) and (max-height: 32rem) {
+  :root { --head-h: 40px; --tab-h: 0px; }
+  .shell { padding-inline-start: 0; }
+  .brand-text, .cap-chips, .search-open { display: none; }
+  .brand { position: relative; z-index: 31; }
+  .top { justify-content: flex-end; }
+  .main-nav { inset: 0 auto auto calc(var(--sp-2) + 2.5rem + env(safe-area-inset-left)); inline-size: auto; block-size: var(--head-h); padding: 0; background: none; border: 0; overflow: visible; }
+  .main-nav ul { flex-direction: row; gap: 0; padding: 0; block-size: 100%; }
+  .main-nav a { block-size: 100%; padding-inline: var(--sp-3); border-radius: 0; }
+  .main-nav .icon, .nav-count { display: none; }
+  .nav-label { display: inline; }
 }
-.account-panel .who { padding: var(--sp-2) var(--sp-3); border-bottom: 1px solid var(--border); margin-bottom: var(--sp-2); }
-.account-panel .item { display: flex; align-items: center; gap: var(--sp-3); width: 100%; min-height: var(--control-h); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-1); border: 0; background: none; color: var(--text); font: inherit; text-align: left; text-decoration: none; cursor: pointer; }
-@media (hover: hover) { .account-panel .item:hover { background: var(--surface-3); } }
-.username-label { max-width: 10ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (min-aspect-ratio: 3/2) and (max-height: 32rem) and (pointer: coarse) { :root { --head-h: 44px; } }
 
-@media (max-width: 600px) {
-  main { padding-left: var(--sp-3); padding-right: var(--sp-3); }
-  .top { padding: 0 var(--sp-3); gap: var(--sp-2); }
-  .username-label { display: none; }
-  .conn { padding: 2px 8px; }
-}
-@media (max-width: 420px) {
-  /* Keep the header on one line on the narrowest phones: the logo stays, its name stays available to screen readers. */
-  .brand-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  .account-btn .icon { display: none; }
-  .account-btn { padding: 0 var(--sp-1) !important; }
-}
+/* browser notification opt-in: a card that floats, so it never moves the page */
+.notify-offer { position: fixed; z-index: 26; inset-inline-start: calc(var(--rail-w) + var(--gutter)); inset-block-end: var(--sp-3); max-inline-size: 22rem; padding: var(--sp-3) var(--sp-4); box-shadow: var(--e1); }
+.notify-offer p { margin: 0; font-size: var(--fs-sm); }
+.notify-offer .actions { margin: var(--sp-2) 0 0; }
+@media (max-width: 47.99rem) { .notify-offer { inset-inline: var(--sp-3); inset-block-end: calc(var(--tab-h) + 5rem + env(safe-area-inset-bottom)); max-inline-size: none; } }

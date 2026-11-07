@@ -28,11 +28,6 @@ export const signInAttempt = async (page: Page) => {
   await page.getByRole("button", { name: "Sign in" }).click();
 };
 export const nav = async (page: Page, name: string) => {
-  const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true });
-  if (await link.isVisible()) await link.click();
-  else {
-    await page.locator("#more-button").click();
-    await page.locator("#more-sheet").getByRole("link", { name, exact: true }).click();
-  }
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true }).click();
 };
 

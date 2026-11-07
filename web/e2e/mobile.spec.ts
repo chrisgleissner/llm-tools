@@ -93,36 +93,32 @@ test("every page, menu and dialog fits the screen with large targets", async ({ 
   await fits("dialog.dialog");
   await audit(page, "confirmation dialog");
   await page.locator("#dialog-cancel").click();
-  // Account menu, shortcut help and the phone's More sheet.
+  // User menu (a bottom sheet on a phone), shortcut help and the command palette.
   await page.locator("#account-button").click();
-  await audit(page, "account menu");
+  await audit(page, "user menu");
   await page.locator("#menu-shortcuts").click();
   await fits("#shortcut-help");
   await audit(page, "shortcut help");
   await page.keyboard.press("Escape");
-  if (isNarrow(page)) {
-    await page.locator("#more-button").click();
-    await fits("#more-sheet");
-    await audit(page, "more sheet");
-    expect(await page.locator("#more-sheet a").count()).toBeGreaterThanOrEqual(3);
-  }
+  await page.locator("#palette-open").click();
+  await fits("#palette");
+  await audit(page, "command palette");
 });
 
-test("on a phone the navigation is a bottom tab bar within thumb reach; on desktop it is a side bar", async ({ page, coord }) => {
+test("on a phone the navigation is a bottom bar within thumb reach; on desktop it is a rail", async ({ page, coord }) => {
   await setupViaUi(page, coord);
-  const bar = page.locator(".tabbar");
-  const side = page.locator(".side");
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(nav.getByRole("link")).toHaveCount(5);
+  const box = (await nav.boundingBox())!;
+  const vp = page.viewportSize()!;
   if (isNarrow(page)) {
-    await expect(bar).toBeVisible();
-    await expect(side).toBeHidden();
-    const box = await bar.boundingBox();
-    const vp = page.viewportSize()!;
-    expect(box!.y + box!.height).toBeCloseTo(vp.height, 0);
-    expect(box!.height).toBeGreaterThanOrEqual(56);
-    await expect(bar.getByRole("link")).toHaveCount(4);
+    expect(box.y + box.height).toBeCloseTo(vp.height, 0);
+    expect(box.height).toBeGreaterThanOrEqual(56);
+    expect(box.width).toBeCloseTo(vp.width, 0);
   } else {
-    await expect(side).toBeVisible();
-    await expect(bar).toBeHidden();
+    expect(box.x).toBeLessThanOrEqual(1);
+    expect(box.height).toBeGreaterThan(vp.height / 2);
+    expect(box.width).toBeLessThan(vp.width / 4);
   }
 });
 
