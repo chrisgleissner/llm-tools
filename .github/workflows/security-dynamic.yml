@@ -118,10 +118,13 @@ jobs:
           --report junit --report-dir "$RUNNER_TEMP/schemathesis"
 
       - name: Run the ZAP OpenAPI API scan
-        # ZAP's memory Insights auto-stop triggers under the container limit; keep Insights
-        # in reports but let the scan finish so the alert report is evaluated by our gate.
+        # The runtime and OpenAPI schema both bound arbitrary JSON nesting to eight levels,
+        # keeping ZAP's recursive Swagger parser within its tested memory budget. Keep Insights
+        # auto-stop disabled so its 95% warning does not pre-empt the alert report is evaluated by our gate.
+        # Bypass runner proxies for the scanner's localhost control API.
         run: >-
           docker run --rm --network host
+          -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1
           -v "$GITHUB_WORKSPACE:/zap/wrk/:rw"
           zaproxy/zap-stable:2.17.0
           zap-api-scan.py
@@ -135,6 +138,7 @@ jobs:
       - name: Run the ZAP console baseline scan
         run: >-
           docker run --rm --network host
+          -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1
           -v "$GITHUB_WORKSPACE:/zap/wrk/:rw"
           zaproxy/zap-stable:2.17.0
           zap-baseline.py

@@ -173,7 +173,7 @@ fields and on newly required fields.
 
 Mutation requests with a body must use `Content-Type: application/json` (UTF-8
 is accepted); other media types receive `415 unsupported-media-type`.
-Bodies are limited to 1 MiB, 16 nested levels, 64 KiB UTF-8 strings, 1,000
+Bodies are limited to 1 MiB, 8 nested levels, 64 KiB UTF-8 strings, 1,000
 items per array, and 128 fields per object (field names are limited to 128
 bytes). These bounds are described by the generated OpenAPI request schema.
 The API does not enable CORS. `OPTIONS` preflight requests receive `405` and no

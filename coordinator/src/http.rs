@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_BODY: usize = 1024 * 1024;
-pub const MAX_JSON_DEPTH: usize = 16;
+pub const MAX_JSON_DEPTH: usize = 8;
 pub const MAX_JSON_STRING_BYTES: usize = 64 * 1024;
 pub const MAX_JSON_ARRAY_ITEMS: usize = 1000;
 pub const MAX_JSON_OBJECT_FIELDS: usize = 128;
