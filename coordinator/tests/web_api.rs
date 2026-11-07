@@ -207,6 +207,7 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
     assert_eq!(created["token"]["scopes"], json!(["read", "operate"]));
     assert!(created["token"]["created_at"].as_str().unwrap().ends_with('Z'));
     assert!(created["token"]["expires_at"].as_str().unwrap().ends_with('Z'));
+    assert!(created["token"]["last_address"].is_null());
     let mut bearer = env.api();
     bearer.bearer = Some(secret.to_string());
     assert_eq!(bearer.get("/api/v1/missions").await.0, 200, "prefixed bearer token authenticates");
@@ -239,6 +240,7 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
     assert_eq!(token["id"], created["token"]["id"]);
     assert_eq!(token["scopes"], json!(["read", "operate"]));
     assert!(token["last_used"].as_str().is_some_and(|value| value.ends_with('Z')));
+    assert_eq!(token["last_address"], "127.0.0.1");
     assert!(token.get("secret").is_none() && token.get("token_hash").is_none());
     let legacy = listed["tokens"].as_array().unwrap().iter().find(|t| t["name"] == "legacy-token").unwrap();
     assert!(legacy["id"].is_null(), "legacy token has no public token ID");
@@ -250,6 +252,72 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
         .unwrap()
         .iter()
         .any(|t| t["name"] == "automation"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_last_use_address_uses_only_configured_trusted_proxy_headers() {
+    let env = boot_with(|t| t.replace("trusted_proxies = []", "trusted_proxies = [\"127.0.0.1/32\"]")).await;
+    let admin = env.admin().await;
+    let (status, created) = admin.post("/api/v1/tokens", json!({"name":"address-check","scopes":["read"]})).await;
+    assert_eq!(status, 201, "{created}");
+    let mut client = env.api();
+    client.bearer = Some(created["secret"].as_str().unwrap().to_string());
+    let response = client
+        .rb(Method::GET, "/api/v1/auth/state")
+        .header("x-forwarded-for", "198.51.100.27")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.json::<Value>().await.unwrap()["authenticated"], true);
+    let listed = admin.get("/api/v1/tokens").await.1;
+    let token = listed["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|token| token["name"] == "address-check")
+        .unwrap();
+    assert_eq!(token["last_address"], "198.51.100.27");
+    let audit = env.srv.state.db.audit_list(20).unwrap();
+    assert!(audit.iter().any(|event| {
+        event["actor"] == "token:address-check"
+            && event["action"] == "token.use"
+            && event["remote"] == "198.51.100.27"
+            && event["detail"].as_str().is_some_and(|detail| detail.contains("scopes=read"))
+    }));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn token_mutation_budget_keys_on_trusted_client_address() {
+    let env = boot_with(|t| {
+        t.replace("trusted_proxies = []", "trusted_proxies = [\"127.0.0.1/32\"]")
+            .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2")
+    })
+    .await;
+    let admin = env.admin().await;
+    let (_, token_a) = admin.post("/api/v1/tokens", json!({"name":"automation-a","scopes":["admin"]})).await;
+    let (_, token_b) = admin.post("/api/v1/tokens", json!({"name":"automation-b","scopes":["admin"]})).await;
+    for (name, token, address) in [
+        ("created-a", token_a["secret"].as_str().unwrap(), "198.51.100.27"),
+        ("created-b", token_b["secret"].as_str().unwrap(), "203.0.113.42"),
+    ] {
+        let mut client = env.api();
+        client.bearer = Some(token.to_string());
+        let response = client
+            .rb(Method::POST, "/api/v1/tokens")
+            .header("x-forwarded-for", address)
+            .json(&json!({"name":name,"scopes":["read"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            201,
+            "different trusted client address {address} has a separate budget"
+        );
+    }
     env.stop().await;
 }
 

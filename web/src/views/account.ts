@@ -59,7 +59,10 @@ function tokenManagement(): HTMLElement {
             status.textContent = err instanceof api.ApiError ? err.message : "Could not revoke token.";
           }
         });
-        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, `Last used ${token.last_used ? new Date(token.last_used).toLocaleString() : "never"}`), revoke));
+        const lastUsed = token.last_used
+          ? `Last used ${new Date(token.last_used).toLocaleString()} from ${token.last_address ?? "unknown address"}`
+          : "Not used yet";
+        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, lastUsed), revoke));
       }
       if (!result.tokens.length) rows.append(h("li", { class: "muted" }, "No API tokens yet."));
     } catch (err) {

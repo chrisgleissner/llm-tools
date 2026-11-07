@@ -442,6 +442,12 @@
               "null"
             ]
           },
+          "last_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "last_used": {
             "type": [
               "string",

@@ -47,6 +47,7 @@ struct TokenInfo {
     scopes: Vec<String>,
     created_at: String,
     last_used: Option<String>,
+    last_address: Option<String>,
     expires_at: Option<String>,
 }
 
@@ -719,6 +720,8 @@ mod tests {
         );
         assert_eq!(schema["properties"]["expires_days"]["maximum"], 3650);
         assert_eq!(schema["additionalProperties"], false);
+        let response = &doc["components"]["schemas"]["TokenInfo"]["properties"];
+        assert_eq!(response["last_address"]["type"], json!(["string", "null"]));
     }
 
     #[test]

@@ -190,6 +190,7 @@ pub struct ApiTokenInfo {
     pub scopes: Vec<String>,
     pub created_at: i64,
     pub last_used: Option<i64>,
+    pub last_address: Option<String>,
     pub expires_at: Option<i64>,
 }
 
@@ -237,7 +238,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -282,6 +283,8 @@ const MIGRATE_V10: &str = "
 ALTER TABLE api_tokens ADD COLUMN token_id TEXT;
 CREATE UNIQUE INDEX api_tokens_token_id ON api_tokens(token_id) WHERE token_id IS NOT NULL;
 ";
+/// Version 11: expose the address of a token's most recent use to administrators.
+const MIGRATE_V11: &str = "ALTER TABLE api_tokens ADD COLUMN last_address TEXT;";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -389,6 +392,13 @@ impl Db {
             })? > 0;
             let alter = if has_table { MIGRATE_V10 } else { "" };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 10; COMMIT;"))?;
+        }
+        if version < 11 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='api_tokens'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let alter = if has_table { MIGRATE_V11 } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 11; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -715,7 +725,7 @@ impl Db {
     }
     pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
         let c = self.c();
-        let mut st = c.prepare("SELECT name, token_id, scopes, created_at, last_used, expires_at FROM api_tokens ORDER BY name")?;
+        let mut st = c.prepare("SELECT name, token_id, scopes, created_at, last_used, last_address, expires_at FROM api_tokens ORDER BY name")?;
         let rows = st.query_map([], |r| {
             let scopes_json: String = r.get(2)?;
             Ok(ApiTokenInfo {
@@ -724,10 +734,23 @@ impl Db {
                 scopes: serde_json::from_str(&scopes_json).unwrap_or_default(),
                 created_at: r.get(3)?,
                 last_used: r.get(4)?,
-                expires_at: r.get(5)?,
+                last_address: r.get(5)?,
+                expires_at: r.get(6)?,
             })
         })?;
         rows.collect()
+    }
+    /// Record a bounded token-use projection. Repeated calls from the same address update only
+    /// the timestamp at the existing low-write touch interval.
+    pub fn api_token_record_use(&self, name: &str, address: &str) -> R<()> {
+        let now = crate::now();
+        let touch_before = now - TOUCH_EVERY_SECS;
+        self.c().execute(
+            "UPDATE api_tokens SET last_address=?, last_used=CASE WHEN last_used IS NULL OR last_used<=? THEN ? ELSE last_used END
+             WHERE name=? AND (last_address IS NOT ? OR last_used IS NULL OR last_used<=?)",
+            params![address, touch_before, now, name, address, touch_before],
+        )?;
+        Ok(())
     }
     pub fn token_revoke(&self, name: &str) -> R<bool> {
         Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)

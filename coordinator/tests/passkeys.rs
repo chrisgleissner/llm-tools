@@ -25,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 10);
+    assert_eq!(SCHEMA_VERSION, 11);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),
@@ -62,6 +62,32 @@ fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
         .unwrap()
         .is_none());
     drop(db);
+    remove_database(&path);
+}
+
+#[test]
+fn schema_10_tokens_migrate_with_empty_last_use_addresses() {
+    let path = db_path();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE api_tokens(
+            name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL,
+            last_used INTEGER, scopes TEXT NOT NULL, expires_at INTEGER, token_id TEXT);
+         INSERT INTO api_tokens(name, token_hash, created_at, last_used, scopes, expires_at, token_id)
+            VALUES('legacy', 'hash', 10, 20, '[\"read\"]', 30, '0123456789abcdef');
+         PRAGMA user_version = 10;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let db = Db::open(&path).unwrap();
+    let tokens = db.api_tokens_list().unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].name, "legacy");
+    assert_eq!(tokens[0].token_id.as_deref(), Some("0123456789abcdef"));
+    assert_eq!(tokens[0].last_used, Some(20));
+    assert_eq!(tokens[0].last_address, None);
+    assert_eq!(tokens[0].expires_at, Some(30));
     remove_database(&path);
 }
 

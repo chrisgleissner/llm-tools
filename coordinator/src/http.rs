@@ -352,6 +352,15 @@ pub fn origin_ok(headers: &HeaderMap, cfg: &Config) -> bool {
 
 pub struct Authed(pub Principal, pub String);
 
+fn resolved_client_address(parts: &Parts, state: &St) -> String {
+    let Some(peer) = parts.extensions.get::<Peer>().map(|p| p.0.ip()) else {
+        return String::new();
+    };
+    let forwarded = parts.headers.get("forwarded").and_then(|v| v.to_str().ok());
+    let x_forwarded_for = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    crate::client_ip::resolve(peer, forwarded, x_forwarded_for, &state.cfg.trusted_proxies).to_string()
+}
+
 impl Principal {
     pub fn actor(&self) -> String {
         match self {
@@ -405,7 +414,7 @@ impl FromRequestParts<St> for Authed {
                 *required
             };
             if !scopes::grants(granted, required) {
-                let remote = parts.extensions.get::<Peer>().map(|peer| peer.0.ip().to_string()).unwrap_or_default();
+                let remote = resolved_client_address(parts, st);
                 let request_id = parts
                     .headers
                     .get("idempotency-key")
@@ -424,7 +433,7 @@ impl FromRequestParts<St> for Authed {
                 return Err(err(StatusCode::FORBIDDEN, "insufficient-scope", format!("token requires scope {required}")));
             }
         }
-        let remote = parts.extensions.get::<Peer>().map(|p| p.0.ip().to_string()).unwrap_or_default();
+        let remote = resolved_client_address(parts, st);
         if let Principal::Token { name, scopes: granted } = &principal {
             let request_id = parts
                 .headers
@@ -440,12 +449,9 @@ impl FromRequestParts<St> for Authed {
                 clean(request_id)
             );
             st.db.audit_checked(&format!("token:{name}"), "token.use", &detail, &remote)?;
+            st.db.api_token_record_use(name, &remote)?;
             if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
-                let address_key = parts
-                    .extensions
-                    .get::<Peer>()
-                    .map(|peer| auth::addr_key(&peer.0.ip()))
-                    .unwrap_or_else(|| "unknown".to_string());
+                let address_key = client_key(&remote);
                 let keys = [
                     (format!("token:{name}"), st.cfg.mutation_limit_per_token),
                     (format!("address:{address_key}"), st.cfg.mutation_limit_per_address),
@@ -472,12 +478,7 @@ pub struct Remote(pub String);
 impl FromRequestParts<St> for Remote {
     type Rejection = std::convert::Infallible;
     async fn from_request_parts(parts: &mut Parts, state: &St) -> Result<Self, Self::Rejection> {
-        let remote = parts.extensions.get::<Peer>().map(|p| p.0.ip());
-        let Some(peer) = remote else { return Ok(Remote(String::new())) };
-        let forwarded = parts.headers.get("forwarded").and_then(|v| v.to_str().ok());
-        let x_forwarded_for = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
-        let client = crate::client_ip::resolve(peer, forwarded, x_forwarded_for, &state.cfg.trusted_proxies);
-        Ok(Remote(client.to_string()))
+        Ok(Remote(resolved_client_address(parts, state)))
     }
 }
 
@@ -522,7 +523,7 @@ async fn healthz() -> Response {
     json_ok(StatusCode::OK, json!({"status": "ok"}))
 }
 
-async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
+async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote) -> ApiResult {
     let admin = st.db.admin_get()?;
     let setup_required = admin.is_none();
     let configured_origin = match (st.cfg.public_origin.clone(), admin.as_ref()) {
@@ -555,20 +556,35 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
             "default": {"idle_secs": crate::db::session_policy(false).0, "absolute_secs": crate::db::session_policy(false).1},
         },
     });
-    if let Ok(Principal::Session {
-        csrf,
-        remember,
-        expires_at,
-        idle_secs,
-        ..
-    }) = authenticate(&st, &headers)
-    {
-        body["authenticated"] = json!(true);
-        body["csrf_token"] = json!(csrf);
-        body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
-        body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
-    } else if matches!(authenticate(&st, &headers), Ok(Principal::Token { .. })) {
-        body["authenticated"] = json!(true);
+    match authenticate(&st, &headers) {
+        Ok(Principal::Session {
+            csrf,
+            remember,
+            expires_at,
+            idle_secs,
+            ..
+        }) => {
+            body["authenticated"] = json!(true);
+            body["csrf_token"] = json!(csrf);
+            body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
+            body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
+        }
+        Ok(Principal::Token { name, scopes: granted }) => {
+            let request_id = headers
+                .get("idempotency-key")
+                .or_else(|| headers.get("x-request-id"))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+            let detail = format!(
+                "method=GET path=/api/v1/auth/state scopes={} request_id={}",
+                granted.join(","),
+                clean(request_id)
+            );
+            st.db.audit_checked(&format!("token:{name}"), "token.use", &detail, &ip)?;
+            st.db.api_token_record_use(&name, &ip)?;
+            body["authenticated"] = json!(true);
+        }
+        Err(_) => {}
     }
     Ok(json_ok(StatusCode::OK, body))
 }
@@ -1124,6 +1140,7 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
                 "scopes": t.scopes,
                 "created_at": timestamp(Some(t.created_at)),
                 "last_used": timestamp(t.last_used),
+                "last_address": t.last_address,
                 "expires_at": timestamp(t.expires_at)
             })
         })
@@ -1200,7 +1217,7 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
     Ok(json_ok(
         StatusCode::CREATED,
         json!({
-            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "expires_at": timestamp(expires_at)},
+            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "last_address": Value::Null, "expires_at": timestamp(expires_at)},
             "secret": secret
         }),
     ))

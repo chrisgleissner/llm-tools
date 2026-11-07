@@ -135,7 +135,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS.map((entry, i) =>
     opts.providerQuestion && i === 0 ? { ...entry, mission: { ...entry.mission, needs_you: providerNeedsYou } } : { ...entry, mission: { ...entry.mission } },
   );
-  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
+  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; last_address: string | null; expires_at: string | null }> = [];
   await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
     streamSocket = ws;
   });
@@ -254,7 +254,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });
     if (path === "/tokens" && method === "POST") {
       const body = JSON.parse(req.postData() ?? "{}") as { name: string; scopes: string[]; expires_days: number };
-      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null };
+      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, last_address: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null };
       tokens.push(token);
       return json(route, 201, { token, secret: "lbr_pat_mock-secret" });
     }

@@ -294,6 +294,7 @@ test.describe("account menu and password change", () => {
     await expect(secret).toContainText(/^.{30,}$/);
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Not used yet");
     await page.getByRole("button", { name: "Revoke automation-key" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
     await expect(secret).toHaveCount(1);

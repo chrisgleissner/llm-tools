@@ -49,6 +49,7 @@ export interface ApiTokenInfo {
   scopes: string[];
   created_at: string;
   last_used: string | null;
+  last_address: string | null;
   expires_at: string | null;
 }
 
