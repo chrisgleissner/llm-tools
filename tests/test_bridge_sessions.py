@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from llm_tools.bridge_sessions import (
     discover_owned_codex_root_session,
     new_session_argv,
     parse_session_metadata,
+    pending_operator_questions,
     resume_argv,
 )
 from llm_tools.bridge_runtime import _process_start_token
@@ -103,6 +105,42 @@ def test_claude_session_identity_requires_structured_init_record(tmp_path: Path)
     assert identity == NativeSessionIdentity("claude", CLAUDE_ID, cwd, "claude:system.init")
     assert parse_session_metadata("claude", {**record, "session_id": CODEX_ID}, cwd=tmp_path) is not None
     assert parse_session_metadata("claude", {**record, "subtype": "message"}, cwd=tmp_path) is None
+
+
+def test_claude_ask_user_question_reads_only_pending_documented_tool_input(tmp_path: Path, monkeypatch) -> None:
+    cwd = str(tmp_path.resolve())
+    config = tmp_path / "claude-config"
+    project = config / "projects" / re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+    project.mkdir(parents=True)
+    transcript = project / f"{CLAUDE_ID}.jsonl"
+    records = [
+        {"type": "system", "subtype": "init", "session_id": CLAUDE_ID, "cwd": cwd},
+        {"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": "toolu-question-1", "name": "AskUserQuestion",
+            "input": {"questions": [{
+                "header": "Deploy", "question": "Deploy this release now?",
+                "options": [
+                    {"label": "Yes", "description": "Start the deployment."},
+                    {"label": "No", "description": "Keep the release staged."},
+                ],
+            }]},
+        }]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu-question-1", "content": "PRIVATE_ANSWER"}]}},
+    ]
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    transcript.write_text("".join(json.dumps(row) + "\n" for row in records[:2]), encoding="utf-8")
+
+    pending = pending_operator_questions("claude", CLAUDE_ID, cwd=cwd)
+    assert pending == [{
+        "header": "Deploy", "question": "Deploy this release now?",
+        "options": [
+            {"label": "Yes", "description": "Start the deployment."},
+            {"label": "No", "description": "Keep the release staged."},
+        ],
+    }]
+    with transcript.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(records[2]) + "\n")
+    assert pending_operator_questions("claude", CLAUDE_ID, cwd=cwd) == []
 
 
 def test_resume_argv_uses_exact_id_only_when_installed_help_advertises_support(tmp_path: Path, monkeypatch) -> None:

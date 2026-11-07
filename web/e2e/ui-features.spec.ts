@@ -21,7 +21,7 @@ test.describe("workers page", () => {
     await expectAccessible(page, "worker added dialog");
     await result.getByRole("button", { name: "Done" }).click();
     const row = page.locator('tr[data-worker="build-1"]');
-    await expect(row.getByText("offline", { exact: true })).toBeVisible();
+    await expect(row.locator('[data-label="State"]')).toContainText("offline");
     // Duplicate names are refused inline.
     await page.locator("#add-worker-button").click();
     await page.getByRole("dialog", { name: "Add a worker" }).getByLabel("Worker name").fill("build-1");
@@ -78,7 +78,7 @@ test.describe("keyboard shortcuts", () => {
 test.describe("with a seeded worker", () => {
   test.skip(!havePython, "repo .venv python is missing");
 
-  test("overview shows live counts, attention items and recent activity; missions can be searched, filtered, sorted and paged", async ({ page, coord }) => {
+  test("overview shows live counts, attention items and recent activity; missions can be searched, filtered, sorted and paged", async ({ page, coord, browserName, isMobile }) => {
     const w = await startSeededWorker(coord, { missions: 30 });
     try {
       await setupViaUi(page, coord);
@@ -94,6 +94,14 @@ test.describe("with a seeded worker", () => {
       await expect(page.locator('[data-tile="failed-tasks"] .tile-value')).toHaveText("1");
       await expectAccessible(page, "overview with attention items");
       await expectNoHorizontalScroll(page);
+
+      const approvalLink = attention.locator('li[data-attention="mission"]').filter({ hasText: "task waiting for approval" }).getByRole("link");
+      const approvalMission = await approvalLink.getAttribute("href");
+      const findStarted = Date.now();
+      await approvalLink.click();
+      await expect(page.locator(".page-head h1")).toContainText("Parser refactor 00");
+      const findElapsedMs = Date.now() - findStarted;
+      if (browserName === "chromium") console.log(`UX task find approval: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${findElapsedMs} ms`);
 
       // Missions: paged (25 per page), searchable, filterable, sortable; the state is in the URL.
       await navTo(page, "Missions");
@@ -130,6 +138,24 @@ test.describe("with a seeded worker", () => {
       await expect(first.locator("time .rel")).toHaveText(/ago|just now|never/);
       await expect(first.locator("time .abs")).toHaveText(/^\d{4}-\d\d-\d\d \d\d:\d\d$/);
       await expectAccessible(page, "missions list");
+
+      expect(approvalMission).toBeTruthy();
+      await page.goto(new URL(approvalMission!, page.url()).toString());
+      const approvalTask = page.locator("#tasks-table tbody tr", { hasText: "Implement it" });
+      await expect(approvalTask).toBeVisible();
+      const approveStarted = Date.now();
+      await approvalTask.getByRole("button", { name: "Approve task 2" }).click();
+      await page.locator("#dialog-confirm").click();
+      await expect(page.locator(".toast", { hasText: "Approve task 2" })).toBeVisible();
+      const approveElapsedMs = Date.now() - approveStarted;
+      if (browserName === "chromium") console.log(`UX task approve: ${isMobile ? "Pixel 4" : "1440x900"}, two clicks, ${approveElapsedMs} ms`);
+
+      await page.goto("/");
+      const workerStarted = Date.now();
+      await navTo(page, "Workers");
+      await expect(page.locator('#workers-table tbody tr[data-worker="seed-worker"] [data-label="State"]')).toContainText("online");
+      const workerElapsedMs = Date.now() - workerStarted;
+      if (browserName === "chromium") console.log(`UX task worker health: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${workerElapsedMs} ms`);
     } finally {
       w.cleanup();
     }
@@ -176,4 +202,60 @@ test.describe("with a seeded worker", () => {
       w.cleanup();
     }
   });
+});
+
+test("mission activity humanizes, filters, and collapses system events", async ({ page }) => {
+  const { mockApp, MISSION_PATH } = await import("./mock");
+  const mock = await mockApp(page, { auth: "in", terminalClose: true });
+  await page.goto("/");
+  const overviewActivity = page.locator("#activity");
+  await expect(overviewActivity).toContainText("Mission created");
+  await expect(overviewActivity).toContainText("Command queued: task.verify");
+  await expect(overviewActivity).toContainText("Selected codex (gpt-5)");
+  await expect(overviewActivity).not.toContainText("Controller heartbeat");
+  await page.getByRole("button", { name: /Show \d+ system events/ }).click();
+  await expect(overviewActivity).toContainText("controller alive");
+
+  await page.goto(MISSION_PATH);
+  const events = page.locator("#events-list");
+  await expect(events).toContainText("Terminal opened");
+  await expect(events).toContainText("Terminal closed · Terminal closed by test");
+  await expect(events).toContainText("Mission created");
+  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
+  await expect(events).not.toContainText("do-not-render-this");
+  await expect(events).toContainText("Command queued: task.verify");
+  await expect(events).toContainText("Selected codex (gpt-5)");
+  await expect(events.locator('a[href="/api/v1/commands/safe-request-01"]')).toHaveText("Command details");
+  await expect(events).not.toContainText("controller alive");
+  await page.getByRole("button", { name: /Show \d+ system events/ }).click();
+  await expect(events).toContainText("controller alive");
+
+  await page.getByLabel("Filter events").selectOption("provider");
+  await expect(events).toContainText("Started provider · codex · Task 2 · gpt-5");
+  await expect(events).not.toContainText("Task status changed");
+  await page.getByLabel("Filter events").selectOption("all");
+  await page.getByLabel("Filter by event kind").selectOption("task-status");
+  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
+  await expect(events).not.toContainText("Write a regression test");
+  await page.getByLabel("Filter by event kind").selectOption("task-added");
+  await expect(events).toContainText("Task added · Task 3 · Write a regression test");
+  await expect(events).not.toContainText("RUNNING → VERIFYING");
+  await page.getByLabel("Filter by event kind").selectOption("all");
+  mock.emitStream({ type: "worker", worker: "alpha", state: "offline" });
+  await expect(events).toContainText("Worker offline · alpha");
+  await page.getByLabel("Filter events").selectOption("terminal");
+  await expect(events).toContainText("Terminal opened");
+  await expect(events).not.toContainText("Worker offline");
+  await page.getByLabel("Filter by event kind").selectOption("terminal-closed");
+  await expect(events).toContainText("Terminal closed · Terminal closed by test");
+  await expect(events).not.toContainText("Terminal opened");
+  await page.getByLabel("Filter by event kind").selectOption("all");
+  await page.getByLabel("Filter events").selectOption("worker");
+  await expect(events).toContainText("Worker offline · alpha");
+  await expect(events).not.toContainText("Terminal opened");
+  await page.getByLabel("Filter events").selectOption("all");
+  await page.getByLabel("Filter by event kind").selectOption("all");
+  await page.getByLabel("Filter events").selectOption("task");
+  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
+  await expect(events).not.toContainText("Started provider");
 });

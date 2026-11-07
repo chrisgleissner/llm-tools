@@ -91,7 +91,7 @@ export function workers(root: HTMLElement): () => void {
           "table",
           { id: "workers-table", class: "rt" },
           h("caption", { class: "sr-only" }, "Workers"),
-          h("thead", {}, h("tr", {}, ...["Name", "State", "Last seen", "Version", "Platform", "Missions", "Actions"].map((t) => h("th", { scope: "col" }, t)))),
+          h("thead", {}, h("tr", {}, ...["Name", "Host", "Address", "State", "Last seen", "Version", "Platform", "Missions", "Actions"].map((t) => h("th", { scope: "col" }, t)))),
           h(
             "tbody",
             {},
@@ -103,6 +103,8 @@ export function workers(root: HTMLElement): () => void {
                 "tr",
                 { "data-worker": w.name },
                 h("th", { scope: "row", "data-label": "Name" }, h("span", { class: "cell-stack" }, h("span", {}, w.name), w.id ? idChip(w.id, "worker ID") : null)),
+                h("td", { "data-label": "Host" }, w.host_name || "unknown"),
+                h("td", { "data-label": "Address" }, w.remote_address || "offline"),
                 h("td", { "data-label": "State" }, h("span", { class: `badge w-${st}` }, st)),
                 h("td", { "data-label": "Last seen" }, w.last_seen ? timeEl(w.last_seen) : h("span", {}, "never")),
                 h("td", { "data-label": "Version" }, w.versions.software ?? "-"),

@@ -1,6 +1,8 @@
 export interface WorkerInfo {
   name: string;
   id: string;
+  host_name: string | null;
+  remote_address: string | null;
   state: "online" | "offline";
   last_seen: number | null;
   generation: number;
@@ -16,6 +18,7 @@ export interface MissionInfo {
   status: string;
   folder: string;
   updated_at: string | null;
+  needs_you?: { kind: string; message: string; command?: string } | null;
 }
 
 export interface MissionEntry {
@@ -39,6 +42,19 @@ export interface CommandRow {
   operation: string;
   state: "pending" | "sent" | "acked" | "done";
   result: { outcome?: string; result?: Record<string, unknown> | null; error?: { code: string; message: string } | null } | null;
+}
+
+export interface ApiTokenInfo {
+  name: string;
+  scopes: string[];
+  created_at: string;
+  last_used: string | null;
+  expires_at: string | null;
+}
+
+export interface ApiTokenCreated {
+  token: ApiTokenInfo;
+  secret: string;
 }
 
 export class ApiError extends Error {
@@ -65,8 +81,8 @@ export function onUnauthorized(fn: () => void): void {
   unauthorizedHandler = fn;
 }
 
-async function request<T>(method: string, path: string, body?: unknown, quiet401 = false): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
+async function request<T>(method: string, path: string, body?: unknown, quiet401 = false, extraHeaders: Record<string, string> = {}): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json", ...extraHeaders };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET") headers["X-CSRF-Token"] = csrfToken;
   let res: Response;
@@ -159,18 +175,87 @@ export interface MutationResult {
  * `accepted` (queued, not yet confirmed), `rejected` (the worker refused), `failed` (never carried
  * out) or `uncertain` (the connection broke after the request may have been delivered).
  */
-export async function mutate(target: string, operation: string, missionId: string | null, params: Record<string, unknown> = {}, waitMs = 10000): Promise<MutationResult> {
-  let row: CommandRow;
+export async function mutateMission(target: string, operation: string, missionId: string, params: Record<string, unknown> = {}, waitMs = 10000): Promise<MutationResult> {
+  const action = operation.slice("mission.".length);
+  const q = new URLSearchParams({ worker: target });
+  const base = `/api/v1/missions/${encodeURIComponent(missionId)}`;
   try {
-    row = await request<CommandRow>("POST", "/api/v1/commands", { target, wait_ms: waitMs, request: commandRequest(operation, missionId, params) });
+    const row = await request<CommandRow>("POST", `${base}/${action}?${q}`, { ...params, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() });
+    if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
+    const result = row.result;
+    if (result?.outcome === "uncertain") return { outcome: "uncertain", message: result.error?.message ?? "The worker could not confirm the command outcome." };
+    if (result?.outcome === "rejected" || result?.outcome === "failed" || result?.error)
+      return { outcome: "rejected", message: result.error?.message ?? `The worker reported: ${result.outcome ?? "failure"}.` };
+    return { outcome: "applied", message: result?.error?.message ?? "" };
   } catch (e) {
     if (e instanceof ApiError && e.status === 0) return { outcome: "uncertain", message: "The connection broke while sending the request; it may have reached the coordinator." };
     if (e instanceof ApiError && e.status >= 500) return { outcome: "uncertain", message: e.message };
     return { outcome: e instanceof ApiError && e.status === 422 ? "rejected" : "failed", message: e instanceof ApiError ? e.message : "Unexpected error." };
   }
-  if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
-  const r = row.result;
-  const known = r?.outcome === "applied" || r?.outcome === "accepted" || r?.outcome === "rejected" || r?.outcome === "failed" || r?.outcome === "uncertain";
-  const outcome = known ? (r?.outcome as MutationResult["outcome"]) : r?.error ? "failed" : "applied";
-  return { outcome, message: r?.error?.message ?? "" };
+}
+
+function resourceResult(row: CommandRow): Record<string, unknown> {
+  if (row.state !== "done") throw new ApiError(202, "pending", "The worker has not answered yet; the command stays queued.");
+  const result = row.result;
+  if (result?.error) throw new ApiError(422, result.error.code, result.error.message);
+  if (result?.outcome && ["rejected", "failed", "uncertain"].includes(result.outcome))
+    throw new ApiError(422, result.outcome, `The worker reported: ${result.outcome}.`);
+  return result?.result ?? {};
+}
+
+export async function missionTasks(target: string, missionId: string, limit = 500, offset = 0): Promise<{ tasks: Array<Record<string, unknown>>; total: number; offset: number }> {
+  const q = new URLSearchParams({ worker: target, limit: String(limit), offset: String(offset), wait_ms: "10000" });
+  const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/tasks?${q}`);
+  return resourceResult(row) as { tasks: Array<Record<string, unknown>>; total: number; offset: number };
+}
+
+export async function missionStatus(target: string, missionId: string): Promise<Record<string, unknown>> {
+  const q = new URLSearchParams({ worker: target, wait_ms: "10000" });
+  const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}?${q}`);
+  return resourceResult(row);
+}
+
+export async function missionEvents(target: string, missionId: string, after: number, limit: number): Promise<{ events: Array<Record<string, unknown>> }> {
+  const q = new URLSearchParams({ worker: target, after: String(after), limit: String(limit), wait_ms: "10000" });
+  const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/events?${q}`);
+  return resourceResult(row) as { events: Array<Record<string, unknown>> };
+}
+
+/** Send task changes through the resource routes while preserving durable command outcomes. */
+export async function mutateTask(
+  target: string,
+  missionId: string,
+  taskNumber: number,
+  operation: string,
+  params: Record<string, unknown>,
+  waitMs = 10000,
+): Promise<MutationResult> {
+  const q = new URLSearchParams({ worker: target });
+  const base = `/api/v1/missions/${encodeURIComponent(missionId)}/tasks/${taskNumber}`;
+  let method = "POST";
+  let path: string;
+  const body: Record<string, unknown> = { ...params, wait_ms: waitMs };
+  delete (body as Record<string, unknown>).task_id;
+  if (operation === "task.verify" || operation === "task.reject") {
+    path = `${base}/verify?${q}`;
+    if (operation === "task.reject") body.approved = false;
+  } else if (operation === "task.amend" || operation === "task.priority" || operation === "task.reorder" || operation === "task.dependency") {
+    method = "PATCH";
+    path = `${base}?${q}`;
+  } else {
+    const action = operation.slice("task.".length);
+    path = `${base}/${action}?${q}`;
+  }
+  try {
+    const row = await request<CommandRow>(method, path, body, false, { "Idempotency-Key": requestId() });
+    if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
+    const result = row.result;
+    const known = result?.outcome === "applied" || result?.outcome === "accepted" || result?.outcome === "rejected" || result?.outcome === "failed" || result?.outcome === "uncertain";
+    const outcome = known ? (result?.outcome as MutationResult["outcome"]) : result?.error ? "failed" : "applied";
+    return { outcome, message: result?.error?.message ?? "" };
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 0) return { outcome: "uncertain", message: "The connection broke while sending the request; it may have reached the coordinator." };
+    if (e instanceof ApiError && e.status >= 500) return { outcome: "uncertain", message: e.message };
+    return { outcome: e instanceof ApiError && e.status === 422 ? "rejected" : "failed", message: e instanceof ApiError ? e.message : "Unexpected error." };
+  }
 }

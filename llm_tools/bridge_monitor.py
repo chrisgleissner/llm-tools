@@ -356,6 +356,39 @@ def project_snapshot(
     # reviewed task before it starts the next one: {"reason": "review",
     # "task_ordinal", "tasks", "since"}; ``None`` otherwise.
     snapshot["hold"] = {key: value for key, value in hold.items() if key not in {"marker", "task_id"}} if hold else None
+    mission = snapshot.get("mission") or {}
+    current_task = snapshot.get("current_task")
+    context = snapshot.get("station_context") or {}
+    if (
+        mission.get("status") == "RUNNING"
+        and isinstance(current_task, dict)
+        and current_task.get("status") == "RUNNING"
+        and (mission.get("config") or {}).get("native_tui") is True
+        and context.get("executing_operation") is not None
+    ):
+        provider = str(context.get("last_launched_station") or "")
+        executing_id = context.get("executing_operation")
+        operations = snapshot.get("operations") or []
+        active_operation = next(
+            (item for item in operations if isinstance(item, dict) and item.get("id") == executing_id),
+            None,
+        ) if isinstance(operations, list) else None
+        session_id = active_operation.get("native_session_id") if isinstance(active_operation, dict) else None
+        mission_cwd = mission.get("cwd")
+        try:
+            from . import bridge, terminal
+
+            provider_wait = terminal.read_native_provider_wait(
+                mission_id,
+                provider,
+                bridge._load_handle,
+                session_id=session_id if isinstance(session_id, str) else None,
+                cwd=mission_cwd if isinstance(mission_cwd, str) else None,
+            )
+        except Exception:  # Best-effort observation must not break status reads.
+            provider_wait = None
+        if provider_wait is not None:
+            snapshot["provider_wait"] = provider_wait
     snapshot["needs_you"] = needs_attention(cast("dict[str, Any]", snapshot))  # a TypedDict is a plain dict at run time
     return snapshot
 

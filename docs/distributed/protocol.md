@@ -46,12 +46,12 @@ with WebSocket code 1002 and reason `unsupported version`. Only version 1 exists
 
 | Type | Direction | Payload |
 |---|---|---|
-| `hello` | worker → coordinator | `worker_id`, `name`, `software_version`, `protocol_versions`, `platform`, `capabilities` (the `operation_catalog()` output), `missions` (id, name, status, cwd basename, updated_at), `event_cursor` (highest local event id). |
+| `hello` | worker → coordinator | `worker_id`, `name`, `software_version`, `protocol_versions`, `platform`, `capabilities` (the `operation_catalog()` output), `missions` (id, name, status, cwd basename, updated_at; active native missions may include bounded `needs_you`), `event_cursor` (highest local event id). |
 | `welcome` | coordinator → worker | `generation`, `protocol_version`, `event_cursor` (highest event id the coordinator has stored for this worker). |
 | `command` | coordinator → worker | A `CommandRequest` object. |
 | `command.ack` | worker → coordinator | `request_id`, `status`: `received` or `duplicate`. Acknowledges delivery only. |
 | `command.result` | worker → coordinator | A `CommandResult` object. |
-| `events` | worker → coordinator | `after`, `through`, `events` (ascending by id). |
+| `events` | worker → coordinator | `after`, `through`, `events` (ascending by id), optional `mission_cursor` and changed `missions` summaries. A summary-only update has an empty event list and `through == after`; workers use this bounded path to replicate a newly pending provider question that has no Bridge database event. |
 | `events.nack` | coordinator → worker | `expected_after`: the coordinator's stored cursor; the worker resends from there. |
 | `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
 | `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
@@ -84,6 +84,13 @@ so contiguity of ids is not required. The coordinator keeps one cursor per
 worker. A batch is accepted only when its `after` equals the stored cursor;
 otherwise the coordinator answers `events.nack` and the worker resends from
 `expected_after`. On `welcome` the worker resumes from the returned cursor.
+The worker sends ordinary mission summaries only for mission IDs in an event
+batch. Every five seconds it checks active native missions for provider
+questions, and sends only summaries whose bounded `needs_you` value changed;
+it does not resend the full inventory with every task event or heartbeat. The
+coordinator applies summary upserts and cursors atomically. `needs_you` contains
+only the existing status projection's provider message and answer command, not
+terminal content or transcript records.
 
 ## Generation fencing (PROTO-010)
 

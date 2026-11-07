@@ -93,6 +93,59 @@ pub struct RateLimiter {
     entries: Mutex<HashMap<String, Entry>>,
 }
 
+/// Fixed-window request budget for authenticated mutations. Unlike the login limiter, admitted
+/// requests consume the budget regardless of their outcome. Keys are namespaced by the caller.
+pub struct MutationLimiter {
+    window: Duration,
+    max_keys: usize,
+    entries: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+impl MutationLimiter {
+    pub fn new(window: Duration, max_keys: usize) -> Self {
+        Self {
+            window,
+            max_keys,
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Reserve each supplied key atomically, returning the longest retry delay if any budget is
+    /// exhausted. The caller should use separate namespaced keys for token and address budgets.
+    pub fn check(&self, keys: &[(String, usize)]) -> Option<u64> {
+        let now = Instant::now();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries.retain(|_, hits| {
+            while hits.front().is_some_and(|at| now.duration_since(*at) >= self.window) {
+                hits.pop_front();
+            }
+            !hits.is_empty()
+        });
+        let missing = keys.iter().filter(|(key, _)| !entries.contains_key(key)).count();
+        if entries.len().saturating_add(missing) > self.max_keys {
+            return Some(self.window.as_secs().max(1));
+        }
+        let mut retry_after = 0;
+        for (key, limit) in keys {
+            let Some(hits) = entries.get(key) else { continue };
+            if hits.len() >= *limit {
+                if let Some(oldest) = hits.front() {
+                    let wait = self.window.saturating_sub(now.duration_since(*oldest));
+                    let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+                    retry_after = retry_after.max(seconds.max(1));
+                }
+            }
+        }
+        if retry_after > 0 {
+            return Some(retry_after);
+        }
+        for (key, _) in keys {
+            entries.entry(key.clone()).or_default().push_back(now);
+        }
+        None
+    }
+}
+
 /// An admitted attempt. Dropping it without calling [`Attempt::succeed`] or [`Attempt::release`]
 /// records a failure, so an abandoned request (client gone mid-verification) still counts.
 pub struct Attempt<'a> {

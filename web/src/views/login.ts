@@ -73,6 +73,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
   capsWarning(pass);
   const sp = opts.sessionPolicy;
   const remember = h("input", { type: "checkbox", id: "remember", name: "remember" });
+  const progress = h("p", { class: "hint login-progress", id: "login-progress", role: "status", "aria-live": "polite", "aria-atomic": "true", hidden: true });
   const rememberHint = sp
     ? `Leave this off on a shared computer: you are signed out after ${minutes(sp.default.idle_secs)} without activity or ${minutes(sp.default.absolute_secs)} at most, and when the browser closes. On, you stay signed in for up to ${minutes(sp.remembered.absolute_secs)}, until ${minutes(sp.remembered.idle_secs)} pass without activity.`
     : "Leave this off on a shared computer.";
@@ -88,6 +89,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     h("label", { class: "check", for: "remember" }, remember, h("span", {}, "Remember this device")),
     h("p", { class: "hint", id: "remember-hint" }, rememberHint),
     error,
+    progress,
     h("div", { class: "actions" }, submit),
   );
   remember.setAttribute("aria-describedby", "remember-hint");
@@ -124,11 +126,16 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     }
     submit.disabled = true;
     submit.classList.add("busy");
+    submit.textContent = "Signing in…";
+    progress.textContent = "Signing in…";
+    progress.hidden = false;
     try {
       await api.login(user.input.value, pass.input.value, remember.checked);
       opts.onDone(`Signed in as ${user.input.value}.`);
     } catch (err) {
       submit.classList.remove("busy");
+      progress.hidden = true;
+      progress.textContent = "";
       if (err instanceof api.ApiError && err.status === 429) {
         blockedUntil = Date.now() + (err.retryAfter ?? 60) * 1000;
         tick();
@@ -138,9 +145,11 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
         return;
       }
       submit.disabled = false;
-      if (err instanceof api.ApiError && err.status === 401) error.textContent = "The username or password is not correct. Check both and try again.";
+      submit.textContent = label;
+      if (err instanceof api.ApiError && err.status === 401) error.textContent = "Username or password is incorrect. Check both and try again.";
       else if (err instanceof api.ApiError && err.status === 0) error.textContent = "Cannot reach the coordinator. Check your network connection and try again.";
       else error.textContent = err instanceof api.ApiError ? err.message : "Unexpected error. Try again.";
+      pass.input.focus();
       pass.input.select();
     }
   });

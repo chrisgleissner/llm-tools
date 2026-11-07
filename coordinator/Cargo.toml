@@ -23,6 +23,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio", "
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+ring = "0.17.14"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,7 +33,10 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
+webauthn-rs = { version = "0.6.2", default-features = false, features = ["resident-key-support", "danger-allow-state-serialisation"] }
+url = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+utoipa = { version = "6.0.0", default-features = false, features = ["macros"] }
 
 [dev-dependencies]
 # Plain tungstenite client over our own tokio-rustls stream (no TLS feature, so no second crypto provider).

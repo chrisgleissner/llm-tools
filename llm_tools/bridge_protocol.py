@@ -26,13 +26,13 @@ _ENVELOPE_FIELDS = {"v", "type", "id", "worker_id", "generation", "payload"}
 MESSAGE_FIELDS: dict[str, tuple[frozenset[str], frozenset[str]]] = {
     "hello": (
         frozenset({"worker_id", "name", "software_version", "protocol_versions", "platform", "capabilities", "missions", "event_cursor"}),
-        frozenset(),
+        frozenset({"host_name", "worker_policy"}),
     ),
     "welcome": (frozenset({"generation", "protocol_version", "event_cursor"}), frozenset()),
     "command": (frozenset({"schema_version", "operation", "params", "mission_id", "target", "request_id"}), frozenset()),
     "command.ack": (frozenset({"request_id", "status"}), frozenset()),
     "command.result": (frozenset({"schema_version", "request_id", "operation", "outcome", "result", "error"}), frozenset()),
-    "events": (frozenset({"after", "through", "events"}), frozenset()),
+    "events": (frozenset({"after", "through", "events"}), frozenset({"mission_cursor", "missions"})),
     "events.nack": (frozenset({"expected_after"}), frozenset()),
     "terminal.open": (frozenset({"session_id", "mission_id", "mode", "cols", "rows"}), frozenset()),
     "terminal.close": (frozenset({"session_id"}), frozenset()),
@@ -100,6 +100,12 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
             if event_id <= previous or event_id > through:
                 raise ProtocolError("invalid-message", "event ids must ascend within (after, through]")
             previous = event_id
+        if "missions" in payload:
+            missions = payload["missions"]
+            if not isinstance(missions, list) or len(missions) > 10_000 or any(not isinstance(m, dict) for m in missions):
+                raise ProtocolError("invalid-message", "missions must be a list of at most 10000 objects")
+        if "mission_cursor" in payload and _int(payload["mission_cursor"], "mission_cursor") > through:
+            raise ProtocolError("invalid-message", "mission_cursor must not be greater than through")
         if through < after:
             raise ProtocolError("invalid-message", "through must not be below after")
     elif kind == "events.nack":
@@ -113,6 +119,17 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         _int(payload["event_cursor"], "event_cursor")
         if not isinstance(payload["capabilities"], list) or not isinstance(payload["missions"], list):
             raise ProtocolError("invalid-message", "hello: capabilities and missions must be lists")
+        host_name = payload.get("host_name")
+        if host_name is not None and (not isinstance(host_name, str) or not host_name or len(host_name.encode("utf-8")) > 255 or any(ord(char) < 32 or ord(char) == 127 for char in host_name)):
+            raise ProtocolError("invalid-message", "hello: host_name must be 1-255 bytes without control characters")
+        policy = payload.get("worker_policy")
+        if policy is not None:
+            flags = ("allow_control", "allow_terminal_view", "allow_create", "allow_power", "allow_restore")
+            if not isinstance(policy, dict) or any(not isinstance(policy.get(key), bool) for key in flags):
+                raise ProtocolError("invalid-message", "hello: worker_policy must contain boolean opt-in fields")
+            roots = policy.get("allow_root")
+            if not isinstance(roots, list) or len(roots) > 32 or any(not isinstance(root, str) or not root or len(root.encode("utf-8")) > 4096 for root in roots):
+                raise ProtocolError("invalid-message", "hello: worker_policy.allow_root must contain at most 32 paths of 1-4096 bytes")
     elif kind.startswith("terminal."):
         if not isinstance(payload["session_id"], str) or not _ID.fullmatch(payload["session_id"]):
             raise ProtocolError("invalid-message", "session_id must be 1-128 characters of [A-Za-z0-9_.-]")

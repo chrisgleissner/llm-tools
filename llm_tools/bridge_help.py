@@ -166,8 +166,14 @@ On a worker (once):
   llm-bridge worker enroll --coordinator wss://HOST:8443 --name build-1 --token-file T --ca-file ca.pem
   llm-bridge worker install-service      (or: llm-bridge worker run)
 A worker is read-only unless enrolled with --allow-control. Terminals are shared
-only with --allow-terminal-view or --allow-control. llm-bridge worker audit
-shows what remote clients did on this worker.
+only with --allow-terminal-view or --allow-control. Remote mission creation,
+power operations and restore each need their own --allow-create, --allow-power
+or --allow-restore opt-in. Creation and restore also need one or more
+--allow-root DIR paths; roots are resolved to real directories and requested
+paths must stay inside them, including through symlinks. These opt-ins default off. Worker-side
+checks remain authoritative even when an administrator requests an operation.
+Worker status shows the enrolled policy; worker audit shows what
+remote clients did on this worker.
 
 On the machine you type on (once):
   llm-bridge remote login --coordinator https://HOST:8443 --token-file T --ca-file ca.pem

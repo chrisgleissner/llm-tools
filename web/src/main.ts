@@ -21,6 +21,7 @@ let disposeShell: () => void = () => {};
 let me: api.AuthState | null = null;
 let returnTo = "";
 let welcome = "";
+let routeGeneration = 0;
 
 applyTheme(savedTheme());
 startClock();
@@ -65,6 +66,7 @@ async function signOut(): Promise<void> {
 }
 
 async function route(): Promise<void> {
+  const generation = ++routeGeneration;
   cleanup();
   cleanup = () => {};
   disposeShell();
@@ -77,6 +79,7 @@ async function route(): Promise<void> {
     app.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "Coordinator unreachable"), h("p", { role: "alert" }, e instanceof api.ApiError ? e.message : "Error"), h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onclick: () => void route() }, "Retry")))));
     return;
   }
+  if (generation !== routeGeneration) return;
   authed = state.authenticated;
   me = state;
   if (!state.authenticated) {

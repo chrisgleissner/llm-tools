@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 REGISTER = Path(__file__).resolve().parents[1] / "docs" / "distributed" / "SPEC_STATUS.md"
+FINAL_REPORT = REGISTER.with_name("FINAL_REPORT.md")
 
 # Prefix and highest number of each ID group in the distributed Bridge specification.
 SPEC_GROUPS = {
@@ -17,6 +18,7 @@ SPEC_GROUPS = {
     "NET": 10, "AUTH": 10, "SEC": 9, "WEB": 12, "DATA": 7, "OPS": 5, "TEST": 17, "QUAL": 10, "CONV": 12,
     "PI-FLASH": 13, "PI-BOOT": 5, "PI-HARD": 6, "PI-SYS": 6, "PI-WEAR": 10, "PI-UPD": 9,
     "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6,
+    "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 14, "PAR": 14,
 }
 SPEC_EXPLICIT_IDS = {"PI-DEPLOY-000"}
 SPEC_OMITTED_IDS = {"PI-FLASH-008", "PI-FLASH-009"}
@@ -62,6 +64,15 @@ def test_verified_and_blocked_rows_carry_evidence() -> None:
     for identifier, status, evidence in register_rows():
         if status in {"[x]", "[!]"}:
             assert evidence, f"{identifier} is {status} without evidence or blocker"
+
+
+def test_final_report_counts_match_the_register() -> None:
+    counts = Counter(status for _, status, _ in register_rows())
+    labels = {"[x]": "Verified", "[~]": "Incomplete", "[!]": "Blocked", "[ ]": "Not started"}
+    report = FINAL_REPORT.read_text(encoding="utf-8")
+    for status, label in labels.items():
+        assert f"| {label} `[{status[1]}]` | {counts[status]} |" in report
+    assert f"| **Total** | **{sum(counts.values())}** |" in report
 
 
 def test_numeric_prefix_id_is_not_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

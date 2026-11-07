@@ -4,13 +4,17 @@
 pub mod auth;
 pub mod certs;
 pub mod config;
+pub mod cursor;
 pub mod db;
 pub mod http;
 pub mod hub;
 pub mod init;
 pub mod netinfo;
+pub mod openapi;
 pub mod ops;
+pub mod passkeys;
 pub mod protocol;
+pub mod scopes;
 pub mod server;
 pub mod terminal;
 pub mod web;

@@ -210,10 +210,18 @@ docker compose -f container/compose.yaml up -d                       # listens o
 docker compose -f container/compose.yaml exec coordinator bridge-coordinator worker add build-1   # prints the worker token once; save it as token.txt
 llm-bridge worker enroll --name build-1 --coordinator wss://localhost:8443 --token-file token.txt --ca-file ca.pem
 llm-bridge worker install-service
-docker compose -f container/compose.yaml exec coordinator bridge-coordinator token create laptop   # prints an API token; save it as api-token.txt
+docker compose -f container/compose.yaml exec coordinator bridge-coordinator token create laptop --scope read --scope operate --scope terminal:view   # prints token once; save as api-token.txt
 llm-bridge remote login --coordinator https://localhost:8443 --token-file api-token.txt --ca-file ca.pem
 llm-bridge --target build-1 mission list
 ```
+
+`--name` is optional; without it, enrolment uses the machine's short host name.
+The coordinator's Workers page and `llm-bridge worker list` show the host name
+and the current connection address.
+
+When an idle native Codex or Claude Code session asks a structured question,
+Bridge shows its question and choices in `needs_you` and the web console. Open
+the mission terminal and take control to answer in the provider's own interface.
 
 A worker is read-only for remote clients by default. `--allow-terminal-view` at
 enrolment also shares mission terminals for viewing, and `--allow-control` allows
@@ -221,6 +229,13 @@ changes and terminal input. `--target local` (the default) runs on this host; an
 unknown or offline target fails and never falls back to local execution. Copy
 `ca.pem` and `setup-token` out of the coordinator as described in the install guide.
 The same command line is shown by `llm-bridge help distributed`.
+
+Remote mission creation, machine power operations and restore each require the
+separate `--allow-create`, `--allow-power` and `--allow-restore` enrolment flags.
+Creation and restore also require repeatable `--allow-root DIR` entries. Each
+root must be an existing directory; enrolment stores its resolved real path,
+and the worker checks requested paths after resolving symlinks. All four opt-ins
+default off, and the worker enforces them even for coordinator administrators.
 
 Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64
 support every role. macOS ARM64 and Intel support the coordinator, the web interface,
@@ -237,7 +252,8 @@ Documentation: [install](./docs/distributed/install.md) (container and native
 install, certificate trust, backup, recovery, Raspberry Pi Zero 2 W target profile),
 [operations](./docs/distributed/operations.md) (worker service, audit log, backup,
 troubleshooting), [coordinator](./docs/distributed/coordinator.md) (configuration,
-HTTP API, limits), [protocol](./docs/distributed/protocol.md),
+HTTP API, limits), [API examples and reference](./docs/distributed/api.md),
+[protocol](./docs/distributed/protocol.md),
 [threat model](./docs/distributed/threat-model.md) and
 [benchmarks](./docs/distributed/benchmarks.md).
 

@@ -212,12 +212,26 @@ def test_native_stop_with_active_provider_explains_how_to_finish(tmp_path, state
     out = _out(capsys, "stop", "--mission", mid)
     assert out.splitlines()[0] == f"Stop requested · mission {mid[:8]} is STOPPING"
     assert bridge_format.NATIVE_STOP_HINT in out
-    assert "exit the provider (e.g. /quit) or use stop --force" in out
+    assert "llm-bridge stop --force --mission <id>" in out
+    assert "finish" not in out
     status = _out(capsys, "status", "--mission", mid)
     assert bridge_format.NATIVE_STOP_HINT in status
     # The JSON receipt carries the same explanation for the console.
     reply = json.loads(dispatch_console_command(mid, "stop"))
     assert reply["result"]["detail"] == bridge_format.NATIVE_STOP_HINT
+
+
+def test_paused_native_stop_guidance_names_the_force_command(tmp_path, state, capsys, monkeypatch) -> None:
+    mid = _create(tmp_path, capsys, "--native")["mission"]["id"]
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        store.set_mission_status(mid, "RUNNING")
+        operation = store.begin_operation(1, iteration=1, station="codex")
+        store.mark_operation_running(operation, process_pid=os.getpid(), process_start="t")
+        store.set_mission_status(mid, "PAUSED")
+    monkeypatch.setattr(bridge, "controller_running", lambda _mission_id: True)
+    out = _out(capsys, "stop", "--mission", mid)
+    assert "llm-bridge stop --force --mission <id>" in out
+    assert "llm-bridge finish" not in out
 
 
 def test_non_native_stop_has_no_provider_wait_hint(tmp_path, state, capsys) -> None:

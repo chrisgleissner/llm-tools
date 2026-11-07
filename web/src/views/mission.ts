@@ -2,10 +2,11 @@ import * as api from "../api";
 import type { BridgeEvent } from "../api";
 import { button, debounce, emptyState, fill, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
 import { icon } from "../icons";
+import { currentWorkSummary } from "../current-work";
 import { isStale, onStream, store, subscribe, worker } from "../store";
 import type { TerminalPanel } from "../terminal";
 import { announce, confirmDialog } from "../ui";
-import { humanKind } from "./overview";
+import { eventCategory, humanizeEvent, isPlumbing, transitionSummary, type EventCategory } from "../event-humanizer";
 
 const TASK_PAGE = 25;
 const TASK_FETCH = 500;
@@ -28,11 +29,13 @@ const STATUS_ORDER = ["RUNNING", "VERIFYING", "BLOCKED", "READY", "QUEUED", "PAU
 
 export function missionDetail(root: HTMLElement, workerName: string, missionId: string): () => void {
   const header = h("div", { class: "page-head" });
+  const workBox = h("section", { id: "mission-current-work", "aria-label": "Current work" });
+  const actionBox = h("div", { id: "mission-actions", class: "row-actions" });
   const statusBox = h("section", { "aria-labelledby": "ms-status", id: "mission-status" });
   const taskBox = h("section", { "aria-labelledby": "ms-tasks", id: "mission-tasks" });
   const eventBox = h("section", { "aria-labelledby": "ms-events", id: "mission-events" });
   const termBox = h("div", { id: "terminal-slot" });
-  root.append(header, statusBox, taskBox, eventBox, termBox);
+  root.append(header, workBox, termBox, actionBox, statusBox, taskBox, eventBox);
 
   let snapshot: Record<string, unknown> | null = null;
   let snapshotError = "";
@@ -46,14 +49,36 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   let tOrder: "asc" | "desc" = "asc";
   let taskOffset = 0;
   let events: BridgeEvent[] = [];
+  let liveEvents: BridgeEvent[] = [];
   let eventShown = EVENT_PAGE;
   let eventStart = 0; // lowest cursor already requested
   let eventError = "";
+  let eventFilter: "all" | EventCategory = "all";
+  let eventKindFilter = "all";
+  let showPlumbing = false;
+  let liveEventId = 0;
   let disposed = false;
   let termPanel: TerminalPanel | null = null;
 
   const entry = () => store.missions.find((m) => m.worker === workerName && m.mission.id === missionId);
   const online = () => store.conn === "live" && worker(workerName)?.state === "online";
+  const isRunning = () => String((snapshot?.["mission"] as Record<string, unknown> | undefined)?.["status"] ?? entry()?.mission.status ?? "").toUpperCase() === "RUNNING";
+
+  function renderCurrentWork(): void {
+    const needs = snapshot?.["needs_you"] as { message?: string } | null | undefined;
+    fill(workBox,
+      h("h2", { class: "sr-only" }, "Current work"),
+      h("div", { class: `current-work${needs ? " needs-you" : ""}`, "data-current-work": "true" },
+        h("div", { class: "current-work-copy" },
+          h("p", { class: "eyebrow" }, needs ? "Needs your attention" : isRunning() ? "Working now" : "Mission status"),
+          h("strong", { class: "current-work-title" }, currentWorkSummary(snapshot ?? {})),
+          needs && needs.message ? h("p", { class: "attention-copy" }, needs.message) : null,
+        ),
+        h("a", { class: "btn small", href: "#terminal-region" }, "View live output (read only)"),
+      ),
+    );
+    if (termPanel && isRunning()) termPanel.openReadOnly();
+  }
 
   // The terminal code (xterm.js) is the bulk of the bundle: load it only on this page.
   void import("../terminal").then(({ terminalPanel }) => {
@@ -61,6 +86,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     termPanel = terminalPanel(workerName, missionId);
     termBox.append(termPanel.element);
     termPanel.setAvailable(online());
+    if (isRunning()) termPanel.openReadOnly();
   });
 
   // ---- actions
@@ -69,7 +95,9 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       announce(`${label}: the worker is offline.`, "failed");
       return;
     }
-    const r = await api.mutate(workerName, operation, missionId, task ? { task_id: task.id, expected_revision: task.revision, ...params } : params);
+    const r = task
+      ? await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params })
+      : await api.mutateMission(workerName, operation, missionId, params);
     announce(`${label}.`, r.outcome, r.message);
     await Promise.all([loadTasks(), loadSnapshot()]);
   }
@@ -108,7 +136,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const e = entry();
     const m = e?.mission;
     const stale = e ? isStale(e) : !online();
-    const mb = (label: string, op: string, danger = false) =>
+    const mb = (label: string, op: string, danger = false, kind = "") =>
       button(
         label,
         () =>
@@ -119,7 +147,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
             }
             await run(`${label} mission`, op, {});
           })(),
-        { kind: danger ? "danger" : "", disabled: !online(), title: online() ? undefined : "Worker is offline" },
+        { kind: `${danger ? "danger" : kind} small`.trim(), disabled: !online(), title: online() ? undefined : "Worker is offline" },
       );
     fill(
       header,
@@ -132,15 +160,28 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         stale ? h("span", { class: "badge stale", title: "Worker offline or data may be out of date" }, "stale") : null,
         h("span", { class: "muted" }, ` worker `),
         h("a", { href: "/workers" }, workerName),
+        worker(workerName)?.host_name ? h("span", { class: "muted small" }, ` · ${worker(workerName)?.host_name}${worker(workerName)?.remote_address ? ` · ${worker(workerName)?.remote_address}` : ""}`) : null,
         m?.folder ? h("span", { class: "muted" }, ` - ${m.folder}`) : null,
       ),
       h("p", { class: "meta muted small" }, "Mission ID ", idChip(missionId, "mission ID")),
-      h("div", { class: "row-actions" }, mb("Pause mission", "mission.pause"), mb("Continue", "mission.continue"), mb("Cancel mission", "mission.cancel", true)),
-      !online() ? h("p", { class: "notice", role: "status" }, "The worker is not connected. Actions are disabled and the data below may be out of date.") : null,
     );
+    const actions = [
+      m && ["CREATED", "STOPPED"].includes(m.status) ? mb("Start mission", "mission.start", false, "primary") : null,
+      mb("Pause mission", "mission.pause"),
+      mb("Continue", "mission.continue"),
+      mb("Cancel mission", "mission.cancel", true),
+      !online() ? h("p", { class: "notice", role: "status" }, "The worker is not connected. Actions are disabled and the data below may be out of date.") : null,
+    ].flatMap((node) => node ? [node] : []);
+    actionBox.replaceChildren(...actions);
   }
 
   function renderStatus(): void {
+    renderCurrentWork();
+    const loadingStatus = online()
+      ? h("div", { class: "status-skeleton" },
+          h("p", { class: "sr-only", role: "status" }, "Loading mission status"),
+        )
+      : h("p", { class: "muted" }, "Waiting for worker data...");
     const rows: Array<[string, Node | string]> = [];
     if (snapshot) {
       const mission = (snapshot["mission"] ?? {}) as Record<string, unknown>;
@@ -159,7 +200,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       snapshotError
         ? h("p", { class: "notice", role: "status" }, snapshotError)
         : !snapshot
-          ? h("p", { class: "muted" }, "Loading...")
+          ? loadingStatus
           : h("table", { class: "kv" }, h("caption", { class: "sr-only" }, "Mission status"), h("tbody", {}, ...rows.map(([k, v]) => h("tr", {}, h("th", { scope: "row" }, k), h("td", {}, v))))),
     );
   }
@@ -277,32 +318,58 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   }, 200);
 
   function renderEvents(): void {
-    const newest = [...events].reverse();
-    const visible = newest.slice(0, eventShown);
+    const allEvents = [...events, ...liveEvents];
+    const newest = [...allEvents].reverse();
+    const categoryEvents = newest.filter((event) =>
+      (eventFilter === "all" || eventCategory(event.kind) === eventFilter)
+      && (eventKindFilter === "all" || event.kind === eventKindFilter),
+    );
+    const hiddenPlumbing = categoryEvents.filter((event) => isPlumbing(event.kind));
+    const filtered = categoryEvents.filter((event) => showPlumbing || !isPlumbing(event.kind));
+    const visible = filtered.slice(0, eventShown);
+    const filter = h("select", { id: "event-filter", "aria-label": "Filter events", onchange: (event: Event) => {
+      eventFilter = (event.currentTarget as HTMLSelectElement).value as typeof eventFilter;
+      eventShown = EVENT_PAGE;
+      renderEvents();
+    } },
+      ...(["all", "task", "command", "worker", "terminal", "provider", "system"] as const).map((category) =>
+        h("option", { value: category, selected: eventFilter === category }, category === "all" ? "All event types" : `${category[0]!.toUpperCase()}${category.slice(1)} events`)),
+    );
+    const kinds = [...new Set(allEvents.map((event) => event.kind))].sort();
+    const kindFilter = h("select", { id: "event-kind-filter", "aria-label": "Filter by event kind", onchange: (event: Event) => {
+      eventKindFilter = (event.currentTarget as HTMLSelectElement).value;
+      eventShown = EVENT_PAGE;
+      renderEvents();
+    } },
+      h("option", { value: "all", selected: eventKindFilter === "all" }, "All event kinds"),
+      ...kinds.map((kind) => h("option", { value: kind, selected: eventKindFilter === kind }, humanizeEvent({ kind, task_id: null, data: {} }))),
+    );
+    const toggle = hiddenPlumbing.length ? button(
+      showPlumbing ? `Hide ${hiddenPlumbing.length} system events` : `Show ${hiddenPlumbing.length} system events`,
+      () => { showPlumbing = !showPlumbing; renderEvents(); },
+    ) : null;
     fill(
       eventBox,
-      h("h2", { id: "ms-events" }, "Events"),
+      h("h2", { id: "ms-events" }, "Activity"),
+      h("div", { class: "event-controls" }, filter, kindFilter, toggle),
       eventError ? h("p", { class: "notice", role: "status" }, eventError) : null,
-      events.length === 0
+      allEvents.length === 0
         ? h("p", { class: "muted" }, "No events loaded.")
-        : h(
-            "ol",
-            { class: "events", reversed: true, id: "events-list" },
-            ...visible.map((e) =>
-              h(
-                "li",
-                {},
-                h("span", { class: "ev-kind" }, humanKind(e.kind)),
-                e.task_id != null ? h("span", { class: "muted small" }, ` task ${e.task_id}`) : null,
-                h("div", {}, timeEl(e.created_at)),
-                Object.keys(e.data ?? {}).length ? h("code", { class: "ev-data" }, JSON.stringify(e.data).slice(0, 200)) : null,
-              ),
+        : visible.length === 0
+          ? h("p", { class: "muted" }, "No events match this filter.")
+          : h("ol", { class: "events", reversed: true, id: "events-list" },
+              ...visible.map((event) => h(
+                "li", { class: isPlumbing(event.kind) ? "event-plumbing" : "" },
+                h("span", { class: "ev-kind" }, humanizeEvent(event)),
+                transitionSummary(event.data ?? {}) ? h("span", { class: "transition-summary" }, transitionSummary(event.data ?? {})!) : null,
+                event.kind.startsWith("command-") && typeof event.data?.["request_id"] === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(event.data["request_id"])
+                  ? h("a", { class: "event-command-link", href: `/api/v1/commands/${encodeURIComponent(event.data["request_id"])}` }, "Command details")
+                  : null,
+                h("div", {}, timeEl(event.created_at)),
+              )),
             ),
-          ),
-      h(
-        "div",
-        { class: "actions" },
-        newest.length > eventShown ? button("Show more", () => { eventShown += EVENT_PAGE; renderEvents(); }) : null,
+      h("div", { class: "actions" },
+        filtered.length > eventShown ? button("Show more", () => { eventShown += EVENT_PAGE; renderEvents(); }) : null,
         eventStart > 0 ? button("Load older events", () => void loadOlderEvents()) : null,
       ),
     );
@@ -316,8 +383,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       return;
     }
     try {
-      const row = await api.command(workerName, "mission.status", missionId, {});
-      snapshot = (row.result?.result ?? null) as Record<string, unknown> | null;
+      snapshot = await api.missionStatus(workerName, missionId);
       snapshotError = snapshot ? "" : "The worker returned no status.";
     } catch (e) {
       snapshotError = e instanceof api.ApiError ? e.message : "Cannot load status.";
@@ -332,9 +398,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       return;
     }
     try {
-      const row = await api.command(workerName, "task.list", missionId, { limit: TASK_FETCH, offset: 0 });
-      const r = (row.result?.result ?? {}) as { tasks?: Task[]; total?: number };
-      tasks = r.tasks ?? [];
+      const r = await api.missionTasks(workerName, missionId, TASK_FETCH, 0);
+      tasks = (r.tasks ?? []) as unknown as Task[];
       taskTotal = r.total ?? tasks.length;
       taskError = "";
       taskLoaded = true;
@@ -344,14 +409,20 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     if (!disposed) renderTasks();
   }
 
-  const normalize = (raw: Record<string, unknown>): BridgeEvent => raw as unknown as BridgeEvent;
+  const normalize = (raw: Record<string, unknown>): BridgeEvent => {
+    const nested = raw["event"];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      return { ...(nested as Record<string, unknown>), id: Number(raw["id"] ?? (nested as Record<string, unknown>)["id"]) } as unknown as BridgeEvent;
+    }
+    return raw as unknown as BridgeEvent;
+  };
 
   async function loadEvents(): Promise<void> {
     const cursor = worker(workerName)?.event_cursor ?? 0;
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
-      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${eventStart}&limit=1000`);
-      events = r.events.map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
+      const r = await api.missionEvents(workerName, missionId, eventStart, 1000);
+      events = r.events.map(normalize).filter((e) => e.mission_id === missionId);
       eventError = "";
     } catch (e) {
       eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
@@ -363,8 +434,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const upto = eventStart;
     const from = Math.max(0, upto - EVENT_WINDOW);
     try {
-      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${from}&limit=${EVENT_WINDOW}`);
-      const older = r.events.filter((x) => x.id <= upto).map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
+      const r = await api.missionEvents(workerName, missionId, from, EVENT_WINDOW);
+      const older = r.events.filter((x) => Number(x["id"]) <= upto).map(normalize).filter((e) => e.mission_id === missionId);
       events = [...older, ...events];
       eventStart = from;
       eventShown += older.length;
@@ -375,6 +446,24 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   }
 
   const offStream = onStream((msg) => {
+    // Coordinator worker-state broadcasts and terminal-relay statuses are live-only; neither is in /api/v1/events.
+    if (msg.type === "worker" && msg.worker === workerName && (msg.state === "online" || msg.state === "offline")) {
+      liveEvents = [...liveEvents, {
+        id: -(++liveEventId), mission_id: missionId, task_id: null,
+        kind: `worker-${msg.state}`, data: { name: workerName }, created_at: new Date().toISOString(),
+      }];
+      renderEvents();
+      return;
+    }
+    if (msg.type === "terminal" && msg.worker === workerName && msg.mission_id === missionId) {
+      const kind = msg.state === "opened" ? "terminal-opened" : msg.state === "mode-changed" ? "terminal-mode-changed" : msg.state === "refused" ? "terminal-refused" : "terminal-closed";
+      liveEvents = [...liveEvents, {
+        id: -(++liveEventId), mission_id: missionId, task_id: null, kind,
+        data: { mode: msg.mode ?? "view", reason: msg.reason ?? "" }, created_at: new Date().toISOString(),
+      }];
+      renderEvents();
+      return;
+    }
     if (msg.type === "event" && msg.worker === workerName && msg.events) {
       const mine = msg.events.filter((e) => e["mission_id"] === missionId).map(normalize);
       if (mine.length) {
@@ -383,7 +472,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         renderEvents();
         void loadTasks();
         void loadSnapshot();
-        announce(`New event: ${humanKind(mine[mine.length - 1]?.kind ?? "update")}`);
+        announce(`New event: ${humanizeEvent(mine[mine.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
       }
     }
   });
@@ -398,6 +487,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     renderTasks();
     const now = online();
     termPanel?.setAvailable(now);
+    if (isRunning()) termPanel?.openReadOnly();
     if (now && !wasOnline) {
       void loadTasks();
       void loadSnapshot();

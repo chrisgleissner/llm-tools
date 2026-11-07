@@ -41,6 +41,8 @@ _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 PING_INTERVAL = 20.0
 SILENCE_LIMIT = 60.0
 EVENT_BATCH = 200
+MISSION_QUESTION_REFRESH_SECS = 5.0
+MAX_QUESTION_MISSIONS_PER_REFRESH = 64
 
 
 class WorkerConfigError(ValueError):
@@ -56,6 +58,10 @@ class WorkerConfig:
     allow_control: bool
     max_generation: int = 0
     allow_terminal_view: bool = False  # read-only workers stream terminals only with this opt-in
+    allow_create: bool = False
+    allow_roots: tuple[str, ...] = ()
+    allow_power: bool = False
+    allow_restore: bool = False
 
     @property
     def terminal_view(self) -> bool:
@@ -65,7 +71,9 @@ class WorkerConfig:
     def public(self) -> dict[str, Any]:
         """Configuration without the token, for status output and logs (AUTH-010)."""
         return {"worker_id": self.worker_id, "name": self.name, "coordinator_url": self.coordinator_url,
-                "allow_control": self.allow_control, "allow_terminal_view": self.terminal_view, "max_generation": self.max_generation}
+                "allow_control": self.allow_control, "allow_terminal_view": self.terminal_view, "max_generation": self.max_generation,
+                "allow_create": self.allow_create, "allow_root": list(self.allow_roots), "allow_power": self.allow_power,
+                "allow_restore": self.allow_restore}
 
 
 def worker_dir(env: dict[str, str] | None = None) -> Path:
@@ -147,8 +155,116 @@ def read_audit(limit: int = 50, env: dict[str, str] | None = None) -> list[dict[
     return entries[-limit:] if limit > 0 else []
 
 
+def status_public(env: dict[str, str] | None = None, *, service_state: str | None = None) -> dict[str, Any]:
+    """Worker enrollment plus best-effort service and last coordinator connection state."""
+    config = load_config(env)
+    if service_state is None:
+        import shutil
+        import subprocess
+
+        unit = service_unit_path(env)
+        if not unit.exists():
+            service_state = "not-installed"
+        elif not shutil.which("systemctl"):
+            service_state = "unknown"
+        else:
+            try:
+                check = subprocess.run(
+                    ["systemctl", "--user", "is-active", f"{SERVICE_NAME}.service"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                service_state = "active" if check.returncode == 0 and check.stdout.strip() == "active" else "inactive"
+            except (OSError, subprocess.SubprocessError):
+                service_state = "unknown"
+    connection_events = [
+        entry for entry in read_audit(200, env)
+        if entry.get("action") in {"connection.accepted", "connection.ended", "connection.refused"}
+    ]
+    latest = connection_events[-1] if connection_events else None
+    connected = bool(latest and latest.get("action") == "connection.accepted" and service_state == "active")
+    last_connected = next((entry.get("ts") for entry in reversed(connection_events) if entry.get("action") == "connection.accepted"), None)
+    if connected:
+        connection_state = "connected"
+    elif latest and latest.get("action") in {"connection.ended", "connection.refused"}:
+        connection_state = "disconnected"
+    elif last_connected:
+        connection_state = "last-connected"
+    else:
+        connection_state = "not-connected"
+    return {
+        **config.public(),
+        "connection_state": connection_state,
+        "last_connected_at": last_connected,
+        "service_state": service_state,
+    }
+
+
+def default_worker_name() -> str:
+    """A short, command-safe default derived from this machine's host name."""
+    short = platform.node().split(".", 1)[0].casefold()
+    name = re.sub(r"[^a-z0-9]+", "-", short).strip("-")[:63].strip("-")
+    return name if _NAME.fullmatch(name) else "worker"
+
+
+def _canonical_roots(roots: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Resolve allowed roots once and require real, existing directories."""
+    if len(roots) > 32:
+        raise WorkerConfigError("at most 32 --allow-root paths may be enrolled")
+    result: list[str] = []
+    for root in roots:
+        try:
+            canonical = Path(root).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise WorkerConfigError(f"allowed root cannot be resolved: {root!r}") from exc
+        if not canonical.is_dir():
+            raise WorkerConfigError(f"allowed root is not a directory: {canonical}")
+        value = str(canonical)
+        if len(value.encode("utf-8")) > 4096:
+            raise WorkerConfigError("allowed root path exceeds 4096 UTF-8 bytes")
+        if value not in result:
+            result.append(value)
+    return tuple(result)
+
+
+def _stored_roots(value: Any) -> tuple[str, ...]:
+    """Validate the serialized shape; path identity is rechecked at authorization time."""
+    if not isinstance(value, list) or not all(isinstance(root, str) for root in value):
+        if value in (None, ()):
+            return ()
+        raise WorkerConfigError("worker allowed roots must be a list of paths")
+    result: list[str] = []
+    for root in value:
+        path = Path(root)
+        if not path.is_absolute() or str(path) != root:
+            raise WorkerConfigError(f"enrolled allowed root is not an absolute canonical path: {root!r}")
+        if root not in result:
+            result.append(root)
+    return tuple(result)
+
+
+def _path_allowed(path: str, roots: tuple[str, ...]) -> bool:
+    """Check a path against canonical roots after resolving existing symlinks."""
+    if not roots:
+        return False
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+        for root in roots:
+            canonical_root = Path(root).resolve(strict=True)
+            if canonical_root != Path(root):
+                continue  # the enrolled root has since become a symlink or moved
+            candidate.relative_to(canonical_root)
+            return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return False
+
+
 def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None,
-           allow_terminal_view: bool = False) -> WorkerConfig:
+           allow_terminal_view: bool = False, allow_create: bool = False, allow_roots: tuple[str, ...] | list[str] = (),
+           allow_power: bool = False, allow_restore: bool = False) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""
     if not _NAME.fullmatch(name):
         raise WorkerConfigError("worker name must be lowercase letters, digits and '-' (at most 63)")
@@ -156,6 +272,11 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         raise WorkerConfigError("coordinator URL must start with wss:// (workers never connect without TLS)")
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
         raise WorkerConfigError("worker token must be 32-256 URL-safe characters, as printed by the coordinator")
+    roots = _canonical_roots(allow_roots)
+    if allow_create and not roots:
+        raise WorkerConfigError("--allow-create requires at least one --allow-root")
+    if allow_restore and not roots:
+        raise WorkerConfigError("--allow-restore requires at least one --allow-root")
     directory = worker_dir(env)
     try:
         previous = load_config(env)
@@ -167,10 +288,12 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         if "-----BEGIN CERTIFICATE-----" not in ca_pem:
             raise WorkerConfigError("CA file is not a PEM certificate")
         _atomic_private_write(directory / CA_FILE, ca_pem)
-    config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation, allow_terminal_view)
+    config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation, allow_terminal_view,
+                          allow_create, roots, allow_power, allow_restore)
     _save(config, env)
     audit("enroll", env, worker_id=worker_id, name=name, coordinator_url=coordinator_url, allow_control=allow_control,
-          allow_terminal_view=allow_terminal_view, ca_file=ca_pem is not None)
+          allow_terminal_view=allow_terminal_view, allow_create=allow_create, allow_root_count=len(roots),
+          allow_power=allow_power, allow_restore=allow_restore, ca_file=ca_pem is not None)
     return config
 
 
@@ -186,6 +309,9 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
             worker_id=str(value["worker_id"]), name=str(value["name"]), coordinator_url=str(value["coordinator_url"]),
             token=str(value["token"]), allow_control=bool(value["allow_control"]), max_generation=int(value.get("max_generation", 0)),
             allow_terminal_view=bool(value.get("allow_terminal_view", False)),
+            allow_create=bool(value.get("allow_create", False)),
+            allow_roots=_stored_roots(value.get("allow_roots", [])),
+            allow_power=bool(value.get("allow_power", False)), allow_restore=bool(value.get("allow_restore", False)),
         )
     except FileNotFoundError:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
@@ -314,29 +440,95 @@ class WorkerSession:
         self.terminal_launcher = terminal_launcher
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
+        self.last_question_refresh = 0.0
+        self.last_question_mission_id: str | None = None
+        self.mission_questions: dict[str, dict[str, str] | None] = {}
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
         return Message(kind, self.config.worker_id, self.generation, payload)
 
     def hello(self) -> Message:
         with self.open_store() as store:
-            missions = [
-                {"id": row["id"], "name": row.get("name") or "", "status": row["status"], "folder": Path(str(row["cwd"])).name,
-                 "updated_at": row.get("updated_at")}
-                for row in store.list_missions()
-            ]
+            missions = [self._mission_summary(store, row) for row in store.list_missions()]
             cursor = store.last_event_id()
-        allowed = {spec["operation"] for spec in commands.operation_catalog() if self.config.allow_control or not spec["mutating"]}
-        return Message("hello", self.config.worker_id, 0, {
+        allowed = {
+            spec["operation"] for spec in commands.operation_catalog()
+            if (not spec["mutating"] or self.config.allow_control
+                or (spec["operation"] == "mission.create" and self.config.allow_create)
+                or (spec["operation"] == "mission.suspend_until_credits" and self.config.allow_power)
+                or (spec["operation"] == "worker.restore" and self.config.allow_restore))
+            and (spec["operation"] != "mission.create" or self.config.allow_create)
+            and (spec["operation"] != "mission.suspend_until_credits" or self.config.allow_power)
+            and (spec["operation"] != "worker.restore" or self.config.allow_restore)
+        }
+        payload: dict[str, Any] = {
             "worker_id": self.config.worker_id,
             "name": self.config.name,
             "software_version": self.software_version,
             "protocol_versions": list(SUPPORTED_VERSIONS),
             "platform": {"system": platform.system(), "machine": platform.machine(), "python": platform.python_version()},
             "capabilities": [spec for spec in commands.operation_catalog() if spec["operation"] in allowed],
+            "worker_policy": {"allow_control": self.config.allow_control, "allow_terminal_view": self.config.terminal_view,
+                              "allow_create": self.config.allow_create, "allow_root": list(self.config.allow_roots),
+                              "allow_power": self.config.allow_power, "allow_restore": self.config.allow_restore},
             "missions": missions,
             "event_cursor": cursor,
-        })
+        }
+        host_name = platform.node().strip()
+        if host_name and len(host_name.encode("utf-8")) <= 255 and not any(ord(char) < 32 or ord(char) == 127 for char in host_name):
+            payload["host_name"] = host_name
+        return Message("hello", self.config.worker_id, 0, payload)
+
+    def _provider_question(self, store: BridgeStore, mission_id: str) -> dict[str, str] | None:
+        """Project the existing bounded status decision for one active native mission."""
+        try:
+            from .bridge_monitor import project_snapshot
+
+            needs = project_snapshot(store, mission_id, task_limit=1).get("needs_you")
+        except Exception:  # noqa: BLE001 - observation must never stop worker replication
+            return None
+        if not isinstance(needs, dict) or needs.get("kind") != "provider":
+            return None
+        message = needs.get("message")
+        command = needs.get("command")
+        if not isinstance(message, str) or not message or not isinstance(command, str) or not command:
+            return None
+        return {"kind": "provider", "message": message[:2048], "command": command[:512]}
+
+    def _mission_summary(self, store: BridgeStore, row: dict[str, Any]) -> dict[str, Any]:
+        mission_id = str(row["id"])
+        summary: dict[str, Any] = {
+            "id": mission_id,
+            "name": row.get("name") or "",
+            "status": row["status"],
+            "folder": Path(str(row["cwd"])).name,
+            "updated_at": row.get("updated_at"),
+        }
+        config = row.get("config")
+        if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
+            question = self._provider_question(store, mission_id)
+            summary["needs_you"] = question
+            self.mission_questions[mission_id] = question
+        elif mission_id in self.mission_questions:
+            # Event-driven summaries clear a question when its mission leaves RUNNING.
+            summary["needs_you"] = None
+            self.mission_questions.pop(mission_id, None)
+        return summary
+
+    def _question_refresh_batch(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Select a bounded, rotating slice so large inventories are not starved."""
+        ordered = sorted(rows, key=lambda row: str(row["id"]))
+        if not ordered:
+            return []
+        if self.last_question_mission_id is not None:
+            start = next(
+                (index for index, row in enumerate(ordered) if str(row["id"]) > self.last_question_mission_id),
+                0,
+            )
+            ordered = ordered[start:] + ordered[:start]
+        batch = ordered[:MAX_QUESTION_MISSIONS_PER_REFRESH]
+        self.last_question_mission_id = str(batch[-1]["id"])
+        return batch
 
     def error(self, code: str, text: str, in_reply_to: str | None = None) -> Message:
         payload: dict[str, Any] = {"code": code, "message": text}
@@ -416,7 +608,10 @@ class WorkerSession:
             with self.open_store() as store:
                 duplicate = store.command_exists(request.request_id)
         ack = self.message("command.ack", {"request_id": request.request_id, "status": "duplicate" if duplicate else "received"})
-        if spec is not None and spec.mutating and not self.config.allow_control:
+        policy_error = self._policy_error(request, spec)
+        if policy_error is not None:
+            result = commands.CommandResult(request.request_id, request.operation, "rejected", error=policy_error)
+        elif spec is not None and spec.mutating and not self.config.allow_control and not self._specific_mutation_opted_in(request.operation):
             result = commands.CommandResult(request.request_id, request.operation, "rejected",
                                             error=commands.CommandError("forbidden", "this worker accepts read-only remote operations"))
         else:
@@ -426,17 +621,84 @@ class WorkerSession:
                        outcome=result.outcome, error=result.error.code if result.error else None, duplicate=duplicate)
         return [ack, self.message("command.result", result.to_json())]
 
+    def _policy_error(self, request: commands.CommandRequest, spec: commands.OperationSpec | None) -> commands.CommandError | None:
+        """Enforce local worker opt-ins even when the coordinator advertises a command."""
+        operation = request.operation.casefold()
+        if operation in {"mission.create", "create"}:
+            if not self.config.allow_create:
+                return commands.CommandError("forbidden", "this worker has not opted in to remote mission creation")
+            cwd = request.params.get("cwd")
+            if not isinstance(cwd, str) or not _path_allowed(cwd, self.config.allow_roots):
+                return commands.CommandError("forbidden", "mission creation must use a path inside an enrolled allowed root")
+        if operation in {"worker.restore", "restore"}:
+            if not self.config.allow_restore:
+                return commands.CommandError("forbidden", "this worker has not opted in to remote restore")
+            source = request.params.get("input")
+            if not isinstance(source, str) or not _path_allowed(source, self.config.allow_roots):
+                return commands.CommandError("forbidden", "restore input must be inside an enrolled allowed root")
+        if operation in {"mission.suspend_until_credits", "power"} or re.search(r"(?:^|[._-])(?:power|poweroff|poweron|suspend|shutdown|reboot)(?:[._-]|$)", operation):
+            if not self.config.allow_power:
+                return commands.CommandError("forbidden", "this worker has not opted in to remote power operations")
+        # Starting an existing mission can execute provider work in its local
+        # checkout. If roots were enrolled, keep that execution inside them.
+        if operation == "mission.start" and self.config.allow_roots and request.mission_id:
+            with self.open_store() as store:
+                mission = store.get_mission(request.mission_id)
+            cwd = mission.get("cwd") if mission else None
+            if not isinstance(cwd, str) or not _path_allowed(cwd, self.config.allow_roots):
+                return commands.CommandError("forbidden", "mission is outside this worker's enrolled allowed roots")
+        return None
+
+    def _specific_mutation_opted_in(self, operation: str) -> bool:
+        """The three explicit API-016 opt-ins authorize their own mutation families."""
+        return ((operation == "mission.create" and self.config.allow_create)
+                or (operation == "mission.suspend_until_credits" and self.config.allow_power)
+                or (operation == "worker.restore" and self.config.allow_restore))
+
     def next_events(self) -> Message | None:
         """The next event batch after the coordinator's cursor, or ``None`` when up to date."""
         if self.cursor is None:
             return None
         with self.open_store() as store:
             events = store.events_since(self.cursor, limit=min(EVENT_BATCH, MAX_EVENTS_PER_BATCH))
-        if not events:
-            return None
-        after = self.cursor
-        self.cursor = int(events[-1]["id"])
-        return self.message("events", {"after": after, "through": self.cursor, "events": events})
+            moment = time.monotonic()
+            refresh_questions = moment - self.last_question_refresh >= MISSION_QUESTION_REFRESH_SECS
+            if not events and not refresh_questions:
+                return None
+            after = self.cursor
+            if events:
+                self.cursor = int(events[-1]["id"])
+            # Ordinary summaries remain event-scoped. A small, periodic scan of
+            # active native missions catches provider questions, which can arrive
+            # without a Bridge database event.
+            event_mission_ids = {
+                str(event["mission_id"]) for event in events
+                if isinstance(event.get("mission_id"), str) and event["mission_id"]
+            }
+            candidate_rows: dict[str, dict[str, Any]] = {
+                mission_id: row for mission_id in sorted(event_mission_ids)
+                if (row := store.get_mission(mission_id))
+            }
+            if refresh_questions:
+                self.last_question_refresh = moment
+                active_native = [
+                    row for row in store.list_missions()
+                    if row.get("status") == "RUNNING" and isinstance(row.get("config"), dict)
+                    and row["config"].get("native_tui") is True
+                ]
+                active_native = self._question_refresh_batch(active_native)
+                candidate_rows.update({str(row["id"]): row for row in active_native})
+            missions: list[dict[str, Any]] = []
+            for mission_id, row in candidate_rows.items():
+                previous = self.mission_questions.get(mission_id)
+                summary = self._mission_summary(store, row)
+                current = self.mission_questions.get(mission_id)
+                if mission_id in event_mission_ids or current != previous:
+                    missions.append(summary)
+            if not events and not missions:
+                return None
+        return self.message("events", {"after": after, "through": self.cursor, "events": events,
+                                        "mission_cursor": self.cursor, "missions": missions})
 
 
 Connector = Callable[[WorkerConfig], Any]

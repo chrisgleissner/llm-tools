@@ -64,7 +64,7 @@ docker compose cp coordinator:/data/ca.pem .                   # import into bro
 docker compose cp coordinator:/data/setup-token .              # create the administrator in the browser
 docker compose exec coordinator bridge-coordinator info
 docker compose exec coordinator bridge-coordinator worker add build-1     # prints the worker token once
-docker compose exec coordinator bridge-coordinator token create laptop    # API token for llm-bridge remote login (expires in 90 days; --expires-days N)
+docker compose exec coordinator bridge-coordinator token create laptop --scope read --scope operate    # API token for llm-bridge remote login (expires in 90 days; add terminal:view only if needed)
 docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
 docker compose exec coordinator bridge-coordinator cert renew             # new server certificate; names must be within the CA's name constraints (see "Trusting the certificate")
 docker compose exec coordinator bridge-coordinator backup --output /data/backup-2026-11-05.sqlite3
@@ -98,6 +98,16 @@ loopback-only publishing, administrator setup, worker add and token create throu
 `llm-bridge --target` commands, backup, restore refused while running and done while
 stopped, password reset, certificate renewal, restart with data kept, and stop in
 0.3 s.
+
+### Enable passkeys (optional)
+
+1. Create `container/tailscale.env` with `TS_AUTHKEY=...`, `BRIDGE_TAILSCALE_CERT_NAME=bridge.<tailnet>.ts.net`, `BRIDGE_COORDINATOR_TLS_CERT_FILE=/certs/bridge.crt`, and `BRIDGE_COORDINATOR_TLS_KEY_FILE=/certs/bridge.key`; protect it with `chmod 600 container/tailscale.env`.
+2. From the repository root, run `cd container` then `docker compose --env-file tailscale.env --profile tailscale up -d`; use both flags for future Compose commands.
+3. Install the Tailscale app on your phone and join the same tailnet.
+4. The renewer obtains a certificate after Tailscale connects and renews it every 60 days; the coordinator switches to valid replacement files for new handshakes without restart.
+5. Open `https://bridge.<tailnet>.ts.net:8443` once the renewer has created the certificate.
+
+If you already have a trusted certificate and hostname, supply those files instead; no domain provider integration is required.
 
 ## Windows
 
@@ -460,6 +470,25 @@ Recommended settings:
 - The Pi has no battery-backed clock. Keep time synchronization enabled and verify it
   after boot. Build the ARM64 image on another machine with `container/build.sh --oci`
   and load it on the Pi; do not compile on the device.
+
+### Verify a published image
+
+Release tags publish a multi-architecture image, sign its digest with the GitHub
+Actions identity, attach build provenance, and upload a CycloneDX SBOM. Replace
+`OWNER`, `REPO`, `VERSION`, and `sha256:DIGEST` with the release values:
+
+```sh
+IMAGE=ghcr.io/OWNER/REPO/coordinator
+cosign verify "$IMAGE@sha256:DIGEST" \
+  --certificate-identity-regexp="https://github.com/OWNER/REPO/.github/workflows/container-release.yml@refs/tags/.*" \
+  --certificate-oidc-issuer=https://token.actions.githubusercontent.com
+gh attestation verify "oci://$IMAGE:VERSION" --repo OWNER/REPO
+gh run download RUN_ID -n coordinator-container-cyclonedx-VERSION
+```
+
+The first command checks the signature for the exact digest and the expected release
+workflow identity. The second verifies GitHub's provenance attestation; download the
+SBOM artifact from the same release workflow run.
 
 Verification commands for the deployed container:
 

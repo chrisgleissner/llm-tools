@@ -205,6 +205,12 @@ impl Api {
 pub fn caps() -> Value {
     json!([
         {"operation": "mission.list", "summary": "list", "mutating": false, "needs_mission": false, "params": {}},
+        {"operation": "mission.status", "summary": "status", "mutating": false, "needs_mission": true, "params": {}},
+        {"operation": "task.show", "summary": "show", "mutating": false, "needs_mission": true, "params": {"task_number": {"type": "int", "required": false}}},
+        {"operation": "task.list", "summary": "list tasks", "mutating": false, "needs_mission": true, "params": {"limit": {"type": "int"}, "offset": {"type": "int"}}},
+        {"operation": "mission.events", "summary": "events", "mutating": false, "needs_mission": true, "params": {"after": {"type": "int"}, "limit": {"type": "int"}}},
+        {"operation": "session.list", "summary": "operations", "mutating": false, "needs_mission": false, "params": {"mission": {"type": "str"}, "limit": {"type": "int"}, "offset": {"type": "int"}}},
+        {"operation": "task.amend", "summary": "amend", "mutating": true, "needs_mission": true, "params": {"task_number": {"type": "int", "required": false}, "prompt": {"type": "str", "required": true}}},
         {"operation": "task.add", "summary": "add", "mutating": true, "needs_mission": true, "params": {"title": {"type": "str", "required": true}}}
     ])
 }
@@ -238,7 +244,7 @@ impl Fw {
         };
         fw.send(
             "hello",
-            json!({"worker_id": worker_id, "name": "w1", "software_version": "test", "protocol_versions": [1],
+            json!({"worker_id": worker_id, "name": "w1", "host_name": "test-host", "software_version": "test", "protocol_versions": [1],
             "platform": {"system": "Linux"}, "capabilities": caps(),
             "missions": [{"id": "m1", "name": "mission", "status": "running", "folder": "proj", "updated_at": null}], "event_cursor": cursor}),
         )

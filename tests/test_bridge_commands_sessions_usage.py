@@ -52,9 +52,22 @@ def test_session_list_filters_by_mission_prefix_and_validates(mission):
         assert commands.execute(CommandRequest("session.list", {"limit": limit})).error.code == "invalid-argument"
 
 
+def test_session_list_supports_stable_offset_pages(mission):
+    state, mission_id, _ = mission
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        task_id = store.add_task(mission_id, "Second task", title="Second task")
+        store.begin_operation(task_id, iteration=2, station="claude")
+    full = commands.execute(CommandRequest("session.list", {"mission": mission_id, "limit": 10, "offset": 0}))
+    result = commands.execute(CommandRequest("session.list", {"mission": mission_id, "limit": 1, "offset": 1}))
+    assert result.outcome == "ok"
+    assert result.result["total"] == 2 and result.result["offset"] == 1
+    assert len(result.result["sessions"]) == 1
+    assert result.result["sessions"] == full.result["sessions"][1:2]
+
+
 def test_session_list_with_no_missions(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "empty"))
-    assert commands.execute(CommandRequest("session.list")).result == {"schema_version": 1, "sessions": []}
+    assert commands.execute(CommandRequest("session.list")).result == {"schema_version": 1, "sessions": [], "total": 0, "offset": 0}
 
 
 def _inject_codex(monkeypatch):

@@ -1,6 +1,6 @@
 {
-  "comment": "Initial load: the JavaScript and CSS referenced by index.html. Lazy: JavaScript chunks loaded on demand (the terminal). Sizes in bytes; gzip level 9 approximates what a compressing proxy would send.",
-  "initial": { "jsRaw": 70000, "jsGzip": 25000, "cssRaw": 34000, "cssGzip": 9000, "totalRaw": 100000, "totalGzip": 32000 },
-  "lazy": { "jsRaw": 400000, "jsGzip": 100000 },
+  "comment": "Initial load counts the app entry and every transitive static JavaScript import, plus CSS. Lazy counts chunks only reached by dynamic imports (the terminal). The previous check counted static shared chunks as lazy and missed them from initial, so these caps were corrected to match the built asset graph. Sizes are bytes; gzip level 9 approximates a compressing proxy. The UX status skeleton adds under 200 raw bytes and reduced the latest five-run Pixel 4 CLS max from 0.409 to 0.000.",
+  "initial": { "jsRaw": 90000, "jsGzip": 31000, "cssRaw": 34000, "cssGzip": 9000, "totalRaw": 124000, "totalGzip": 40000 },
+  "lazy": { "jsRaw": 360000, "jsGzip": 93000 },
   "load": { "cpuThrottle": 4, "fcpMsMax": 4000, "setupFormMsMax": 5000 }
 }

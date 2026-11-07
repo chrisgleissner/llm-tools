@@ -1,5 +1,13 @@
 # Distributed Bridge decisions
 
+## PK-003 WebAuthn core
+
+Use `webauthn-rs` 0.6.2 (Kanidm, MPL-2.0) for server-side WebAuthn verification. It pulls `rsa 0.10.0-rc.19` through `crypto-glue 0.2.2`, which cargo audit and cargo deny flag for RUSTSEC-2023-0071 (Marvin timing attack); the advisory has no fixed RSA version. The 0.6.2 stack has no feature to remove RSA while preserving its verifier. Its 0.5.5 maintenance line removes `rsa`, but replaces it with system OpenSSL crypto and a dynamic OpenSSL runtime dependency, breaking the coordinator's static `FROM scratch` image and cross-target build. Keep 0.6.2 and narrowly ignore the advisory because the coordinator uses only RSA public-key signature verification for authenticator assertions; it creates, stores, signs with and decrypts with no RSA private key. The exact ignore is applied in both audit tools and must be revisited if that call path or dependency changes.
+
+The library exposes typed registration/authentication state and credential types, verifies origins/RP IDs and authenticator assertions, and documents that ceremony state must be persisted. The coordinator serializes that state only in its private SQLite database, with a single-use session/setup-bound challenge row capped at five minutes. The `danger-allow-state-serialisation` feature is required because the library deliberately gates persistence of in-flight ceremony state behind an explicit opt-in; the state remains private and is never returned to a client.
+
+The coordinator now wires registration and assertion start/finish routes through the library and persists the returned passkeys and verifier state. This is still partial: `start_passkey_registration` hardcodes `require_resident_key(false)` and the wrapper exposes no general resident-key option. The alternate resident-key helper requires direct attestation and rejects synchronized authenticators, so it does not satisfy the requested profile. Do not mutate the generated options as a workaround: the verifier state would not match what it can actually validate. Expose a configurable no-attestation/required-resident-key method through a maintained upstream version or a narrow vendored wrapper before claiming this requirement. Canonical-origin configuration, AAGUID extraction, and fixed-vector ceremony verification plus explicit ES256/Ed25519/RS256 policy verification also remain. The exact RUSTSEC-2023-0071 exception is limited to this reviewed public-key-only call path; do not broaden it to other advisories.
+
 Only consequential decisions. Architecture contracts for standalone Bridge stay in
 `docs/llm-bridge/architecture.md`.
 
@@ -145,4 +153,83 @@ skips the modules in `PROCFS_ONLY_MODULES` and `PROCFS_ONLY_TESTS`, each with it
 skips tests marked `tmux` or `pty` and the console tests in `MACOS_SKIPPED_TESTS`, because the
 console and station are not supported there. Nothing is skipped on Linux by that code. The evidence for each skip is the CI run listed in
 `SPEC_STATUS.md`.
+
+## D9 API token scopes (API-005)
+
+New coordinator API tokens default to `read`; the operator grants `operate`, `terminal:view`,
+`terminal:write` and `admin` explicitly with repeatable `--scope` flags. Tokens already in the
+database migrate to `admin`, preserving their former full access. Each authenticated route carries
+its scope policy in `http::ROUTES`, and the `Authed` extractor enforces the policy for bearer tokens;
+browser sessions retain their existing CSRF and Origin checks and full operator access. The route
+integration test exercises every authenticated route against each token scope.
+
+## D10 OpenAPI generation (API-009)
+
+Use `utoipa` 6 for compile-time schemas of the coordinator's Rust response types,
+then generate the operation list from `http::ROUTES`, the same route policy table
+used by authorization tests. This keeps the published route and scope list tied
+to server policy without introducing a separate handwritten endpoint inventory.
+The coordinator serves the JSON and a small script-free HTML reference; no CDN
+or renderer bundle is needed. `coordinator/src/bin/openapi.rs` regenerates the
+checked-in snapshot, and a Rust test compares the generated value to it.
+
+## D11 OpenAPI v1 compatibility baseline (API-011)
+
+Because the coordinator had no released OpenAPI document before this follow-up, the first
+published v1 contract is `docs/distributed/openapi-v1-baseline.json`. A standard-library
+compatibility checker compares the generated snapshot with that baseline and rejects removed
+paths, operations or fields and newly required fields. Breaking changes require a new API
+version; the checker treats a version change as a new compatibility line. This gives future
+changes a stable gate without inventing a pre-existing published contract.
+
+## D12 Bounded mutation budgets (SEC2-010)
+
+Authenticated mutation budgets default to 30 requests per token and 120 per client address in a
+rolling 60-second window. Keep those defaults configurable within 1–10,000. This lets deployments
+and stress tests tune the address budget without changing enforcement logic. The offline queue
+stress harness raises only its configured address budget and uses one portable loopback address;
+the coordinator hardening test still checks the production defaults. This avoids relying on
+Linux's implicit `127/8` routing, which macOS runners do not provide.
+
+## D13 JSON nesting limit and scanner compatibility (SEC2-003, SEC2-016)
+
+Keep arbitrary JSON bodies to four nested levels, reflected by the runtime validator and the
+generated OpenAPI schema. ZAP 2.17.0's Swagger/OpenAPI model deserializer recursively expands the
+bounded JSON `anyOf` references. Sixteen levels exhausted its 4 GiB CI heap; a later local scan of
+the full API document showed that eight levels still grew the ZAP JVM past 12 GiB before report
+generation. An earlier eight-level test against a static fixture only proved that ZAP could import
+the schema; it did not exercise the full API document. Four levels sharply bounds that expansion
+while retaining the documented per-level string, array and object bounds and allowing the typed
+operation payloads. Keep the runtime and OpenAPI limits generated from the same constant; do not
+mask schema growth by raising scanner heap size. Validate the full document in the pinned scanner
+before increasing this limit.
+
+The runner proxy also intercepted ZAP's own Python client's calls to its localhost control API;
+the CI log showed `ProxyError` for `http://localhost:<port>`. Both scanner containers now set
+upper- and lower-case `NO_PROXY` entries for localhost and 127.0.0.1 so that control traffic stays
+inside the container/network namespace.
+
+## D14 Reviewed xterm.js inline-style CSP exception (SEC2-002, SEC2-016)
+
+Keep `style-src 'unsafe-inline'` on the console while xterm.js requires runtime-injected styles.
+Do not weaken `script-src 'self'` or the API CSP. ZAP reports this as plugin 10055, medium, on the
+console pages. `scripts/check_zap_reports.py` accepts only that exact alert in the console JSON and
+only when each instance shows the expected policy (`default-src 'self'`, `script-src 'self'`, and
+the xterm inline-style directive). `docs/distributed/review-findings.md` records the evidence and
+residual risk. Other CSP findings and all other medium-or-higher alerts remain failures.
+
+## D15 Read-only, resource-bounded Schemathesis run (API-012, SEC2-016)
+
+Repeated hosted scan runs stopped during Schemathesis about three minutes after its 47-operation
+coverage phase, with no runner system log and no coordinator log artifact because cancellation
+skipped finalization. The OpenAPI contract includes mutations that can start paid work, change
+credentials or settings, create/revoke tokens and workers, restore backups, or suspend a worker.
+Those state changes are exercised by authored coordinator/worker integration tests; keep the
+automated property-based run on GET operations and WebSocket upgrades out of band. Run one worker,
+cap its address space at 4 GiB, bound the fuzz phase to 120 seconds and wrap it in a 180-second
+timeout. After a successful run, verify that coordinator health still responds. This keeps the
+CI check useful for read-path status/schema/5xx defects without allowing fuzzed writes to change
+deployment state or exceed the runner budget. A local pinned run selected 23 read operations,
+passed 4,201 generated cases across coverage, fuzzing and stateful phases in 30 seconds, and left
+the coordinator healthy. Revisit the scan scope if authored mutation coverage changes.
 

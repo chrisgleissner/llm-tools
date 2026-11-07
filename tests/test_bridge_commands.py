@@ -31,6 +31,54 @@ def test_catalog_lists_every_operation_with_typed_parameters():
     assert set(catalog) == set(commands.OPERATIONS)
     assert catalog["mission.events"]["params"] == {"after": {"type": "int", "required": False}, "limit": {"type": "int", "required": False}}
     assert catalog["mission.pause"]["mutating"] is True and catalog["mission.list"]["mutating"] is False
+    assert catalog["mission.start"]["params"] == {
+        "headless": {"type": "bool", "required": False},
+        "native_tui": {"type": "bool", "required": False},
+        "providers": {"type": "str", "required": False},
+        "routes": {"type": "str", "required": False},
+    }
+
+
+def test_mission_settings_colour_uses_the_typed_patch_and_get_path(mission):
+    _, mission_id = mission
+    before = commands.execute(CommandRequest("mission.settings.get", mission_id=mission_id))
+    assert before.outcome == "ok" and before.result["colour"] is None
+    changed = commands.execute(CommandRequest("mission.settings.patch", {
+        "colour": "4", "auto_continue": None, "teams": None, "token_spend": None, "suspend_when_rate_limited": None,
+    }, mission_id=mission_id))
+    assert changed.outcome == "applied" and changed.result["colour"] == 4
+    after = commands.execute(CommandRequest("mission.settings.get", mission_id=mission_id))
+    assert after.result["colour"] == 4
+
+
+def test_mission_steer_dispatches_every_supported_kind_through_the_shared_operator(mission, monkeypatch):
+    _, mission_id = mission
+    seen = []
+    monkeypatch.setattr(bridge, "_apply_operator_command", lambda _store, _mission, payload, **_kwargs: seen.append(dict(payload)) or {"kind": payload["kind"]})
+    kinds = ("replace", "review", "verify", "pause-after-iteration", "stop-after-task", "handoff")
+    for kind in kinds:
+        result = commands.execute(CommandRequest("mission.steer", {"kind": kind, "task": None, "task_id": None, "route": "codex", "prompt": "steering"}, mission_id=mission_id))
+        assert result.outcome == "applied" and result.result["kind"] == kind
+    assert [payload["kind"] for payload in seen] == list(kinds)
+
+
+def test_mission_start_operation_uses_worker_controller_with_typed_options(mission, monkeypatch):
+    _, mission_id = mission
+    seen = {}
+    monkeypatch.setattr(bridge, "controller_running", lambda _mission_id: False)
+    monkeypatch.setattr(bridge, "require_launchable_rotation", lambda *args, **kwargs: seen.update(rotation=(args, kwargs)))
+
+    def start(_mission_id, **kwargs):
+        seen["start"] = kwargs
+        return 0
+
+    monkeypatch.setattr(bridge, "start_mission", start)
+    result = commands.execute(
+        CommandRequest("mission.start", {"headless": True, "providers": "codex"}, mission_id=mission_id, request_id="start-1")
+    )
+    assert result.outcome == "applied"
+    assert result.result == {"exit_code": 0, "mission_id": mission_id}
+    assert seen["start"] == {"headless": True, "native_tui": None, "providers": "codex", "routes": ""}
 
 
 @pytest.mark.parametrize(
@@ -179,8 +227,18 @@ def test_cli_mission_controls_route_through_the_command_layer(mission, capsys, m
     assert main(["continue", "--mission", mission_id]) == 2
     assert main(["cancel", "--mission", mission_id, "--json"]) == 0
     assert main(["stop", "--mission", mission_id, "--json"]) == 0
+    assert main(["stop", "--mission", mission_id, "--force", "--json"]) == 0
     capsys.readouterr()
-    assert seen == ["mission.pause", "mission.continue", "mission.cancel", "mission.stop"]
+    assert seen == ["mission.pause", "mission.continue", "mission.cancel", "mission.stop", "mission.stop"]
+
+
+def test_force_stop_is_a_typed_mission_operation(mission, monkeypatch):
+    _, mission_id = mission
+    seen = []
+    monkeypatch.setattr(bridge, "_force_stop_mission", lambda requested: seen.append(requested) or {"mission_status": "STOPPED"})
+    result = commands.execute(CommandRequest("mission.stop", {"force": True}, mission_id=mission_id))
+    assert result.result == {"mission_status": "STOPPED"}
+    assert seen == [mission_id]
 
 
 def _first_task(state, mission_id):
@@ -262,6 +320,32 @@ def test_remote_style_references_resolve_on_the_worker(mission):
     assert commands.execute(CommandRequest("mission.status", mission_id="zz")).error.code == "invalid-argument"
 
 
+def test_task_dependency_options_resolve_mission_local_numbers(mission, tmp_path, capsys):
+    state, mission_id = mission
+    # Advance the global task IDs so ordinal 1 is not also database task ID 1.
+    assert main(["mission", "create", "--prompt", "Other mission", "--cwd", str(tmp_path), "--providers", "codex", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "add", "--mission", mission_id, "--prompt", "Second task", "--json"]) == 0
+    capsys.readouterr()
+    assert main(["task", "add", "--mission", mission_id, "--prompt", "Third task", "--depends-on", "1", "--json"]) == 0
+    capsys.readouterr()
+    with BridgeStore(state / "bridge.sqlite3", readonly=True) as store:
+        third = store.task_by_ordinal(mission_id, 3)
+        assert third["depends_on_ordinals"] == [1]
+
+    added = commands.execute(CommandRequest("task.dependency", {
+        "task_number": 2, "depends_on_number": 1,
+    }, mission_id=mission_id))
+    assert added.outcome == "applied", added.to_json()
+    with BridgeStore(state / "bridge.sqlite3", readonly=True) as store:
+        second = store.task_by_ordinal(mission_id, 2)
+        assert second["depends_on_ordinals"] == [1]
+    missing = commands.execute(CommandRequest("task.dependency", {
+        "task_number": 2, "depends_on_number": 99,
+    }, mission_id=mission_id))
+    assert missing.outcome == "rejected" and missing.error.code == "not-found"
+
+
 def test_proposal_operations_list_and_decide_by_task_number(mission, capsys, monkeypatch):
     state, mission_id = mission
     with BridgeStore(state / "bridge.sqlite3") as store:
@@ -283,10 +367,11 @@ def test_proposal_operations_list_and_decide_by_task_number(mission, capsys, mon
     real = commands.dispatch
     monkeypatch.setattr(commands, "dispatch", lambda request: seen.append(request.operation) or real(request))
     assert main(["proposal", "reject", "--mission", mission_id, "--task", "3", "--reason", "no", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["result"]["proposal_status"] == "REJECTED"
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["result"]["proposal_status"] == "REJECTED"
     assert main(["proposal", "list", "--mission", mission_id, "--status", "ALL", "--json"]) == 0
     assert len(json.loads(capsys.readouterr().out)["proposals"]) == 2
-    assert seen == ["proposal.decide", "proposal.list"]
+    assert seen == ["proposal.reject", "proposal.list"]
     again = commands.execute(CommandRequest("proposal.decide", {"task_number": 2, "accept": False}, mission_id=mission_id))
     assert again.outcome == "rejected"
 

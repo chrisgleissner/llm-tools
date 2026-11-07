@@ -14,6 +14,150 @@ fn init_with(hostname: &str, ip: &str) -> std::path::PathBuf {
     dir
 }
 
+#[tokio::test]
+async fn tls13_is_the_default_and_tls12_requires_explicit_opt_in() {
+    use rustls::pki_types::{pem::PemObject, ServerName};
+    use rustls::version::TLS12;
+    use rustls::ClientConfig;
+    use std::sync::Arc;
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
+
+    fn client(ca: &[u8], versions: &[&'static rustls::SupportedProtocolVersion]) -> Arc<ClientConfig> {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(ca) {
+            roots.add(cert.unwrap()).unwrap();
+        }
+        Arc::new(
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(versions)
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
+
+    let dir = init_with("localhost", "127.0.0.1");
+    let provider = certs::provider();
+    assert!(!provider.cipher_suites.is_empty());
+    assert!(provider.cipher_suites.iter().all(|suite| {
+        let name = format!("{:?}", suite.suite());
+        name.contains("GCM") || name.contains("CHACHA20")
+    }));
+    let default = certs::load_server_config(&dir, "1.3").unwrap();
+    assert!(!default.session_storage.can_cache(), "server sessions must not be resumable");
+    assert!(!default.ticketer.enabled(), "TLS tickets must be disabled");
+    assert_eq!(default.send_tls13_tickets, 0);
+    assert_eq!(default.max_early_data_size, 0, "0-RTT must remain disabled");
+
+    let ca = std::fs::read(dir.join("ca.pem")).unwrap();
+    let tls12_client = TlsConnector::from(client(&ca, &[&TLS12]));
+    let server = bridge_coordinator::server::start(&dir).await.unwrap();
+    let stream = TcpStream::connect(server.addr).await.unwrap();
+    assert!(tls12_client.connect(ServerName::try_from("localhost").unwrap(), stream).await.is_err());
+    server.stop().await;
+
+    common::edit_config(&dir, |text| text.replace("min_tls = \"1.3\"", "min_tls = \"1.2\""));
+    let compatible = bridge_coordinator::certs::load_server_config(&dir, "1.2").unwrap();
+    assert_eq!(compatible.max_early_data_size, 0);
+    let server = bridge_coordinator::server::start(&dir).await.unwrap();
+    let stream = TcpStream::connect(server.addr).await.unwrap();
+    let tls = tls12_client.connect(ServerName::try_from("localhost").unwrap(), stream).await.unwrap();
+    assert_eq!(tls.get_ref().1.protocol_version(), Some(rustls::ProtocolVersion::TLSv1_2));
+    server.stop().await;
+    common::edit_config(&dir, |text| text.replace("min_tls = \"1.2\"", "min_tls = \"1.1\""));
+    assert!(bridge_coordinator::config::Config::load(&dir).unwrap_err().contains("min_tls"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn configured_certificate_files_reload_for_new_tls_handshakes() {
+    use rustls::pki_types::{pem::PemObject, ServerName};
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
+
+    let dir = tmp_dir();
+    bridge_coordinator::init::init(
+        &dir,
+        &Sans {
+            hostnames: vec!["localhost".into(), "bridge.tail.test".into()],
+            ips: vec!["127.0.0.1".parse().unwrap()],
+        },
+    )
+    .unwrap();
+    let cert_path = dir.join("mounted-cert.pem");
+    let key_path = dir.join("mounted-key.pem");
+    let ca_key = std::fs::read_to_string(dir.join("ca.key")).unwrap();
+    let config_path = dir.join("config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap().replace("8443", "0");
+    config.push_str(&format!(
+        "\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_cert_name = \"bridge.tail.test\"\n",
+        cert_path, key_path
+    ));
+    std::fs::write(&config_path, config).unwrap();
+
+    let server = bridge_coordinator::server::start(&dir).await.unwrap();
+    let roots = common::client_tls(&std::fs::read(dir.join("ca.pem")).unwrap());
+    let connector = TlsConnector::from(roots);
+    async fn presented_cert(connector: &TlsConnector, addr: std::net::SocketAddr, name: &'static str) -> Vec<u8> {
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let tls = connector.connect(ServerName::try_from(name).unwrap(), stream).await.unwrap();
+        tls.get_ref().1.peer_certificates().unwrap()[0].as_ref().to_vec()
+    }
+    let first = presented_cert(&connector, server.addr, "localhost").await;
+    let internal_expected: Vec<u8> = rustls::pki_types::CertificateDer::pem_slice_iter(&std::fs::read(dir.join("server.pem")).unwrap())
+        .next()
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let (cert_a, key_a) = certs::issue_unchecked(&ca_key, vec!["bridge.tail.test".into()]).unwrap();
+    let expected_a: Vec<u8> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_a.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    std::fs::write(&cert_path, cert_a).unwrap();
+    std::fs::write(&key_path, key_a).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            if presented_cert(&connector, server.addr, "bridge.tail.test").await == expected_a {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("file-backed certificate should replace the internal-CA fallback");
+
+    let (cert_b, key_b) = certs::issue_unchecked(&ca_key, vec!["bridge.tail.test".into()]).unwrap();
+    let expected: Vec<u8> = rustls::pki_types::CertificateDer::pem_slice_iter(cert_b.as_bytes())
+        .next()
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    std::fs::write(&cert_path, cert_b).unwrap();
+    std::fs::write(&key_path, key_b).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let got = presented_cert(&connector, server.addr, "bridge.tail.test").await;
+            if got == expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("replacement certificate should be used on a subsequent handshake");
+    assert_eq!(first, internal_expected, "LAN SNI continues to receive the internal-CA certificate");
+    assert_eq!(presented_cert(&connector, server.addr, "localhost").await, internal_expected);
+    assert_ne!(expected_a, expected);
+    server.stop().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn issue(dir: &std::path::Path, name: &str) -> String {
     let key = std::fs::read_to_string(dir.join("ca.key")).unwrap();
     certs::issue_unchecked(&key, vec![name.to_string()]).unwrap().0
@@ -95,7 +239,7 @@ fn new_ca_replaces_the_ca_and_keeps_the_old_one() {
     assert!(accepted(&dir, "other.example"));
     assert!(!accepted(&dir, "coord.example.test"), "the new CA covers the new names only");
     // The server loads and the files are private.
-    certs::load_server_config(&dir).unwrap();
+    certs::load_server_config(&dir, "1.3").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

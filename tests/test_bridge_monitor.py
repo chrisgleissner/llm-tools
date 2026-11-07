@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -46,6 +47,33 @@ def test_projection_includes_only_bounded_recent_amendment_history(tmp_path) -> 
         task = project_snapshot(store, mission["id"], task_limit=1)["tasks"][0]
         assert [entry["revision"] for entry in task["amendments"]] == [9, 8, 7, 6, 5]
         assert task["amendments"][0]["changes"] == {"prompt": "revision 9"}
+
+
+def test_native_provider_idle_prompt_surfaces_bounded_needs_you_without_screen_text(tmp_path, monkeypatch) -> None:
+    from llm_tools import terminal
+
+    with BridgeStore(tmp_path / "bridge.sqlite3") as store:
+        mission = store.create_mission("native wait", "objective", cwd=tmp_path, config={"native_tui": True})
+        task_id = store.add_task(mission["id"], "inspect the device")
+        store.set_mission_status(mission["id"], "RUNNING")
+        operation_id = store.begin_operation(task_id, iteration=1, station="codex")
+        store.mark_operation_running(operation_id, process_pid=42, process_start="test-start")
+        monkeypatch.setattr(terminal, "read_native_provider_wait", lambda mid, provider, load_handle, **_kwargs: {
+            "provider": "Codex", "idle_seconds": 73, "question_count": 1,
+            "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
+        })
+
+        snapshot = project_snapshot(store, mission["id"])
+
+    assert snapshot["provider_wait"] == {
+        "provider": "Codex", "idle_seconds": 73, "question_count": 1,
+        "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
+    }
+    assert snapshot["needs_you"]["kind"] == "provider"
+    assert "Codex asks: Choose a path" in snapshot["needs_you"]["message"]
+    assert "1. Proceed; 2. Wait" in snapshot["needs_you"]["message"]
+    assert snapshot["needs_you"]["command"] == f"llm-bridge attach --mission {mission['id'][:8]}"
+    assert "inspect the device" not in json.dumps(snapshot["needs_you"])
 
 
 def test_pending_proposals_are_counted_separately_from_runnable_tasks(tmp_path) -> None:

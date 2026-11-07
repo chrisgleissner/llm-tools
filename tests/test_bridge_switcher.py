@@ -382,6 +382,26 @@ def test_finish_refuses_dead_pane_and_missing_station(state: Path, tmp_path: Pat
         finish_mission(mission_id, backend=FakeBackend(), store=store)
 
 
+def test_screen_command_prints_bounded_provider_snapshot(state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    with BridgeStore(state / "bridge.sqlite3") as store:
+        mission_id = str(store.create_mission("Native", "obj", cwd=tmp_path, initial_prompt="obj", config={"native_tui": True})["id"])
+
+    class Backend:
+        def capture(self, handle: Any, *, pane: str) -> str:
+            assert handle == HANDLE and pane == "provider"
+            return "x" * 1001 + "\nquestion?\n"
+
+    import llm_tools.terminal as terminal
+
+    monkeypatch.setattr(bridge, "_load_handle", lambda _mission_id: HANDLE)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", Backend)
+    assert bridge.main(["screen", "--mission", mission_id, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mission_id"] == mission_id
+    assert payload["screen"] == "x" * 1000 + "\nquestion?"
+    assert payload["truncated"] is True
+
+
 def test_cli_finish_reports_json_and_errors(state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     store, mission_id, task_id, _op = running_native(state, tmp_path, "codex")
     result = bridge_finish.FinishResult(mission_id, "codex", task_id, "/quit", "VERIFYING", "Provider exited · task 1 is now VERIFYING")
