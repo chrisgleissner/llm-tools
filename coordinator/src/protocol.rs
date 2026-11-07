@@ -8,6 +8,18 @@ pub const MAX_EVENTS_PER_BATCH: usize = 500;
 pub const MAX_MISSIONS_PER_HELLO: usize = 5000;
 pub const COMMAND_SCHEMA_VERSION: u64 = 1;
 
+/// Event kinds that never change a mission summary (the worker writes them every few seconds
+/// for its own bookkeeping). Mirrors `bridge_worker.HEARTBEAT_KINDS`; a Python test keeps them equal.
+pub const HEARTBEAT_KINDS: [&str; 2] = ["controller-heartbeat", "capacity-refresh"];
+
+/// Whether `events` is a non-empty batch made only of heartbeat kinds.
+pub fn heartbeat_only(events: &[Value]) -> bool {
+    !events.is_empty()
+        && events
+            .iter()
+            .all(|e| e.get("kind").and_then(Value::as_str).is_some_and(|k| HEARTBEAT_KINDS.contains(&k)))
+}
+
 const ENVELOPE: [&str; 6] = ["v", "type", "id", "worker_id", "generation", "payload"];
 
 #[derive(Debug, Clone)]
