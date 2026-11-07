@@ -2431,7 +2431,11 @@ def run_controller(mission_id: str, *, headless: bool = False, native_tui: bool 
                 terminate_active_provider_groups(store, mission_id)
             store.reconcile_interrupted_operations(mission_id)
             current = store.get_mission(mission_id)
-            if current["status"] in CONTROLLED_MISSION_STATUSES:
+            # An error after the operator asked to stop is a consequence of the stop, not a mission
+            # failure: `stop --force` marks the running operation UNCERTAIN and removes its station
+            # while this controller may still be launching it, so the launch raises. The cleanup below
+            # completes the requested STOPPING -> STOPPED transition; the error stays in the controller log.
+            if current["status"] in CONTROLLED_MISSION_STATUSES and current["status"] != "STOPPING":
                 record_controller_failure(store, mission_id, controller_failure_reason(exc, runtime / "controller.log"))
                 store.set_mission_status(mission_id, "FAILED")
             print(f"controller failure: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)

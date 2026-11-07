@@ -2436,6 +2436,35 @@ def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
         lock.release()
 
 
+# How long `stop --force` lets a controller that is already stopping the mission finish its own cleanup.
+CONTROLLER_STOP_COMPLETION_WAIT_SECONDS = 3.0
+
+
+def _controller_completed_stop(mission_id: str) -> bool:
+    """Whether the mission's controller has itself finished the stop that `stop --force` requested.
+
+    The controller reacts to the STOPPING status by removing the station and recording STOPPED. When
+    that happens between the force-stop's snapshot of the operations and its station lookup, the
+    station is gone and the snapshot's operation has no recorded process: the controller already
+    stopped the provider, so there is nothing left to terminate and nothing unverified to refuse.
+    """
+    deadline = time.monotonic() + CONTROLLER_STOP_COMPLETION_WAIT_SECONDS
+    while True:
+        with open_store() as store:
+            if store.get_mission(mission_id)["status"] == "STOPPED":
+                return True
+        lock = MissionLock(state_dir() / "locks", mission_id)
+        try:
+            lock.acquire()
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        else:
+            lock.release()
+            return False  # no controller is running, so nobody will finish the stop
+
+
 def _force_stop_mission(mission_id: str) -> dict[str, Any]:
     """Terminate only the controller and provider processes owned by this mission."""
     with open_store() as store:
@@ -2486,6 +2515,8 @@ def _force_stop_mission(mission_id: str) -> dict[str, Any]:
                 # waiting to launch); the controller is stopped below.
                 continue
             if not process_start:
+                if _controller_completed_stop(mission_id):
+                    break  # the controller already stopped the provider and recorded STOPPED
                 raise RuntimeError(
                     f"could not confirm that provider process {process_pid} belongs to this mission; "
                     f"it was left running. Check with: ps -p {process_pid}"
