@@ -91,7 +91,7 @@ def exit_activity_text(code: Any) -> str | None:
     return known[2] if known else None
 
 
-NATIVE_STOP_HINT = "Stopping after the provider exits · exit the provider (e.g. /quit) or use stop --force"
+NATIVE_STOP_HINT = "Stopping after the provider exits · if it stays open, run `llm-bridge stop --force --mission <id>`"
 
 
 def nothing_to_pause(status: str, mission_id: Any = None) -> str:
@@ -492,7 +492,7 @@ def format_proposals(proposals: list[dict[str, Any]], *, total: int | None = Non
 
 
 def format_proposal_result(action: str, result: dict[str, Any]) -> str:
-    inner = result.get("result") if isinstance(result.get("result"), dict) and "payload" in result else result
+    inner = result.get("result") if isinstance(result.get("result"), dict) else result
     inner = inner if isinstance(inner, dict) else {}
     if action == "create":
         return f"Proposed {format_task_line(inner)}"
@@ -730,7 +730,7 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """What the operator has to do next, from a status snapshot, or ``None``.
 
     Returns ``{"kind", "message", "command", "tasks"}``. ``kind`` is one of
-    ``approval``, ``failed``, ``blocked``, ``operator``, ``proposal`` or ``capacity``;
+    ``approval``, ``failed``, ``blocked``, ``operator``, ``proposal``, ``capacity`` or ``provider``;
     ``command`` is the CLI line that resolves it and ``tasks`` the task
     numbers involved.
     """
@@ -784,6 +784,28 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(snapshot.get("waiting"), dict):
         command = f"llm-bridge rotation --mission {mid} --set LIST"
         return {"kind": "capacity", "tasks": [], "command": command, "message": "waiting for provider capacity · " + format_waiting(snapshot["waiting"], mid)}
+    provider_wait = snapshot.get("provider_wait")
+    if isinstance(provider_wait, dict):
+        provider = _clip(provider_wait.get("provider") or "Provider", 40)
+        command = f"llm-bridge attach --mission {mid}"
+        question_count = provider_wait.get("question_count")
+        if isinstance(question_count, int) and 1 <= question_count <= 32:
+            noun = "question" if question_count == 1 else "questions"
+            questions = provider_wait.get("questions")
+            question_item = questions[0] if isinstance(questions, list) and questions and isinstance(questions[0], dict) else None
+            question = question_item.get("question") if question_item else None
+            options = question_item.get("options") if question_item else None
+            if isinstance(question, str) and isinstance(options, list) and options and all(isinstance(option, str) for option in options):
+                choices = "; ".join(f"{index}. {_clip(option, 200)}" for index, option in enumerate(options[:8], 1))
+                message = f"{provider} asks: {_clip(question, 800)} · Choices: {choices} · take control of the terminal to answer: {command}"
+            else:
+                message = f"{provider} has {question_count} queued {noun} · take control of the terminal and press Shift+Left to answer: {command}"
+        else:
+            message = f"{provider} is waiting for your input at its terminal prompt · attach with: {command}"
+        return {
+            "kind": "provider", "tasks": [], "command": command,
+            "message": message,
+        }
     return None
 
 

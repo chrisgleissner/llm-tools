@@ -33,9 +33,10 @@ const AUDIT_KEEP: i64 = 100_000;
 const SCHEMA: &str = "
 CREATE TABLE workers(
   name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, worker_id TEXT,
-  generation INTEGER NOT NULL DEFAULT 0, event_cursor INTEGER NOT NULL DEFAULT 0,
+  generation INTEGER NOT NULL DEFAULT 0, event_cursor INTEGER NOT NULL DEFAULT 0, mission_cursor INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL, last_seen INTEGER, hello_at INTEGER, last_event_at INTEGER,
-  software_version TEXT, protocol_versions TEXT, platform TEXT, capabilities TEXT);
+  software_version TEXT, protocol_versions TEXT, platform TEXT, capabilities TEXT,
+  host_name TEXT, remote_address TEXT, worker_policy TEXT);
 CREATE TABLE missions(
   worker TEXT NOT NULL REFERENCES workers(name) ON DELETE CASCADE, mission_id TEXT NOT NULL, info TEXT NOT NULL,
   PRIMARY KEY(worker, mission_id)) WITHOUT ROWID;
@@ -53,7 +54,8 @@ CREATE TABLE sessions(
   token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL,
   expires_at INTEGER NOT NULL);
 CREATE TABLE api_tokens(
-  name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_used INTEGER);
+  name TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_used INTEGER,
+  scopes TEXT NOT NULL DEFAULT '[\"admin\"]');
 CREATE TABLE audit(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
   detail TEXT NOT NULL, remote TEXT NOT NULL);
@@ -64,12 +66,37 @@ pub struct Db {
     path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebauthnChallengeRow {
+    pub principal_id: String,
+    pub binding: String,
+    pub kind: String,
+    pub state: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasskeyCredentialRow {
+    pub credential_id: String,
+    pub principal_id: String,
+    pub credential: String,
+    pub user_name: String,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+    pub aaguid: Option<String>,
+    pub transports: String,
+    pub backup_eligible: bool,
+    pub backed_up: bool,
+    pub sign_count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerRow {
     pub name: String,
     pub worker_id: Option<String>,
     pub generation: u64,
     pub event_cursor: u64,
+    pub mission_cursor: u64,
     pub last_seen: Option<i64>,
     pub hello_at: Option<i64>,
     pub last_event_at: Option<i64>,
@@ -77,6 +104,9 @@ pub struct WorkerRow {
     pub protocol_versions: Option<Value>,
     pub platform: Option<Value>,
     pub capabilities: Option<Value>,
+    pub host_name: Option<String>,
+    pub remote_address: Option<String>,
+    pub worker_policy: Option<Value>,
 }
 
 impl WorkerRow {
@@ -123,6 +153,16 @@ pub enum EventsOutcome {
     Nack { expected: u64 },
 }
 
+pub struct EventBatch<'a> {
+    pub worker: &'a str,
+    pub after: u64,
+    pub through: u64,
+    pub events: &'a [Value],
+    pub mission_cursor: Option<u64>,
+    pub missions: Option<&'a [Value]>,
+    pub max: u64,
+}
+
 pub enum HelloOutcome {
     Ok { generation: u64, cursor: u64 },
     WorkerIdMismatch,
@@ -137,12 +177,27 @@ pub struct Session {
     pub idle_secs: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ApiToken {
+    pub name: String,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiTokenInfo {
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub created_at: i64,
+    pub last_used: Option<i64>,
+    pub expires_at: Option<i64>,
+}
+
 fn json_col(s: Option<String>) -> Option<Value> {
     s.and_then(|s| serde_json::from_str(&s).ok())
 }
 
 const WCOLS: &str =
-    "name, worker_id, generation, event_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities";
+    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities, host_name, remote_address, worker_policy";
 
 fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
     Ok(WorkerRow {
@@ -150,13 +205,17 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
         worker_id: r.get(1)?,
         generation: r.get::<_, i64>(2)? as u64,
         event_cursor: r.get::<_, i64>(3)? as u64,
-        last_seen: r.get(4)?,
-        hello_at: r.get(5)?,
-        last_event_at: r.get(6)?,
-        software_version: r.get(7)?,
-        protocol_versions: json_col(r.get(8)?),
-        platform: json_col(r.get(9)?),
-        capabilities: json_col(r.get(10)?),
+        mission_cursor: r.get::<_, i64>(4)? as u64,
+        last_seen: r.get(5)?,
+        hello_at: r.get(6)?,
+        last_event_at: r.get(7)?,
+        software_version: r.get(8)?,
+        protocol_versions: json_col(r.get(9)?),
+        platform: json_col(r.get(10)?),
+        capabilities: json_col(r.get(11)?),
+        host_name: r.get(12)?,
+        remote_address: r.get(13)?,
+        worker_policy: json_col(r.get(14)?),
     })
 }
 
@@ -177,7 +236,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -193,6 +252,24 @@ CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 /// idle and absolute lifetime). Sessions that exist at migration keep the original, longer policy.
 /// The statement list is built in code because a database may not have a `sessions` table yet.
 const MIGRATE_V3_COLUMN: &str = "ALTER TABLE sessions ADD COLUMN remember INTEGER NOT NULL DEFAULT 1;";
+const MIGRATE_V4_COLUMN: &str = "ALTER TABLE workers ADD COLUMN mission_cursor INTEGER NOT NULL DEFAULT 0;";
+const MIGRATE_V5_COLUMN: &str = "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT '[\"admin\"]';";
+const MIGRATE_V7_COLUMN: &str = "ALTER TABLE workers ADD COLUMN worker_policy TEXT;";
+/// Version 8: short-lived, session-bound WebAuthn ceremony state and passkey credentials.
+const MIGRATE_V8: &str = "
+CREATE TABLE webauthn_challenges(
+  id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, binding TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('registration','authentication')),
+  state TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  CHECK(expires_at > created_at AND expires_at <= created_at + 300));
+CREATE INDEX webauthn_challenges_expiry ON webauthn_challenges(expires_at);
+CREATE TABLE passkeys(
+  credential_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, credential TEXT NOT NULL,
+  user_name TEXT NOT NULL, created_at INTEGER NOT NULL, last_used INTEGER,
+  aaguid TEXT, transports TEXT NOT NULL DEFAULT '[]', backup_eligible INTEGER NOT NULL DEFAULT 0,
+  backed_up INTEGER NOT NULL DEFAULT 0, sign_count INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX passkeys_principal ON passkeys(principal_id);
+";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -233,6 +310,63 @@ impl Db {
             let alter = if has_column || !has_table { "" } else { MIGRATE_V3_COLUMN };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 3; COMMIT;"))?;
         }
+        if version < 4 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_column = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='mission_cursor'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let alter = if has_column || !has_table { "" } else { MIGRATE_V4_COLUMN };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 4; COMMIT;"))?;
+        }
+        if version < 5 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='api_tokens'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_column = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('api_tokens') WHERE name='scopes'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let alter = if has_column || !has_table { "" } else { MIGRATE_V5_COLUMN };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 5; COMMIT;"))?;
+        }
+        if version < 6 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_host = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='host_name'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let has_address = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='remote_address'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let mut alter = String::new();
+            if has_table && !has_host {
+                alter.push_str("ALTER TABLE workers ADD COLUMN host_name TEXT;");
+            }
+            if has_table && !has_address {
+                alter.push_str("ALTER TABLE workers ADD COLUMN remote_address TEXT;");
+            }
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 6; COMMIT;"))?;
+        }
+        if version < 7 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let has_column = has_table
+                && conn.query_row("SELECT COUNT(*) FROM pragma_table_info('workers') WHERE name='worker_policy'", [], |r| {
+                    r.get::<_, i64>(0)
+                })? > 0;
+            let alter = if has_table && !has_column { MIGRATE_V7_COLUMN } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 7; COMMIT;"))?;
+        }
+        if version < 8 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V8} PRAGMA user_version = 8; COMMIT;"))?;
+        }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -242,6 +376,119 @@ impl Db {
 
     pub(crate) fn c(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Persist server-side ceremony state for at most five minutes. Binding is an opaque
+    /// session/setup-token identifier, never a browser supplied value.
+    pub fn webauthn_challenge_put(&self, id: &str, row: &WebauthnChallengeRow) -> R<()> {
+        let now = crate::now();
+        if id.is_empty()
+            || row.principal_id.is_empty()
+            || row.binding.is_empty()
+            || !matches!(row.kind.as_str(), "registration" | "authentication")
+            || row.expires_at <= now
+            || row.expires_at > now + 300
+        {
+            return Err(rusqlite::Error::InvalidParameterName("invalid WebAuthn challenge bounds".into()));
+        }
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", [now])?;
+        tx.execute(
+            "INSERT INTO webauthn_challenges(id,principal_id,binding,kind,state,created_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+            params![id, row.principal_id, row.binding, row.kind, row.state, now, row.expires_at],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Consume once, only for the matching principal and session/setup binding. Expired
+    /// challenges are deleted; a mismatched caller cannot invalidate another session's challenge.
+    pub fn webauthn_challenge_take(&self, id: &str, principal: &str, binding: &str, kind: &str) -> R<Option<WebauthnChallengeRow>> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let row = tx
+            .query_row(
+                "SELECT principal_id,binding,kind,state,created_at,expires_at FROM webauthn_challenges WHERE id=?",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let result = if let Some((p, b, k, state, created, expires)) = row {
+            let now = crate::now();
+            if expires <= now || expires > created + 300 {
+                tx.execute("DELETE FROM webauthn_challenges WHERE id=?", [id])?;
+                None
+            } else if p == principal && b == binding && k == kind {
+                tx.execute("DELETE FROM webauthn_challenges WHERE id=?", [id])?;
+                Some(WebauthnChallengeRow {
+                    principal_id: p,
+                    binding: b,
+                    kind: k,
+                    state,
+                    expires_at: expires,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn passkey_put(&self, row: &PasskeyCredentialRow) -> R<()> {
+        self.c().execute("INSERT INTO passkeys(credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            params![row.credential_id,row.principal_id,row.credential,row.user_name,row.created_at,row.last_used,row.aaguid,row.transports,row.backup_eligible as i64,row.backed_up as i64,row.sign_count])?;
+        Ok(())
+    }
+
+    pub fn passkeys_for_principal(&self, principal: &str) -> R<Vec<PasskeyCredentialRow>> {
+        let c = self.c();
+        let mut stmt = c.prepare("SELECT credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count FROM passkeys WHERE principal_id=? ORDER BY created_at,credential_id")?;
+        let rows = stmt
+            .query_map([principal], |r| {
+                Ok(PasskeyCredentialRow {
+                    credential_id: r.get(0)?,
+                    principal_id: r.get(1)?,
+                    credential: r.get(2)?,
+                    user_name: r.get(3)?,
+                    created_at: r.get(4)?,
+                    last_used: r.get(5)?,
+                    aaguid: r.get(6)?,
+                    transports: r.get(7)?,
+                    backup_eligible: r.get::<_, i64>(8)? != 0,
+                    backed_up: r.get::<_, i64>(9)? != 0,
+                    sign_count: r.get(10)?,
+                })
+            })?
+            .collect();
+        rows
+    }
+
+    pub fn passkey_update(&self, row: &PasskeyCredentialRow) -> R<bool> {
+        Ok(self.c().execute(
+            "UPDATE passkeys SET credential=?,last_used=?,backup_eligible=?,backed_up=?,sign_count=? WHERE credential_id=? AND principal_id=?",
+            params![
+                row.credential,
+                row.last_used,
+                row.backup_eligible as i64,
+                row.backed_up as i64,
+                row.sign_count,
+                row.credential_id,
+                row.principal_id
+            ],
+        )? == 1)
     }
 
     // ---- admin ----
@@ -347,9 +594,19 @@ impl Db {
     // ---- api tokens ----
     /// `expires_at` is a Unix time; `None` never expires.
     pub fn token_create(&self, name: &str, hash: &str, expires_at: Option<i64>) -> R<bool> {
+        self.token_create_scoped(name, hash, expires_at, &["read".to_string()])
+    }
+    /// Create a token with the explicitly granted API scopes.
+    pub fn token_create_scoped(&self, name: &str, hash: &str, expires_at: Option<i64>, scopes: &[String]) -> R<bool> {
         Ok(self.c().execute(
-            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at) VALUES(?,?,?,?)",
-            params![name, hash, crate::now(), expires_at],
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes) VALUES(?,?,?,?,?)",
+            params![
+                name,
+                hash,
+                crate::now(),
+                expires_at,
+                serde_json::to_string(scopes).unwrap_or_else(|_| "[]".into())
+            ],
         )? == 1)
     }
     /// (name, expires_at) of every API token, by name.
@@ -359,18 +616,35 @@ impl Db {
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect();
         rows
     }
+    pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT name, scopes, created_at, last_used, expires_at FROM api_tokens ORDER BY name")?;
+        let rows = st.query_map([], |r| {
+            let scopes_json: String = r.get(1)?;
+            Ok(ApiTokenInfo {
+                name: r.get(0)?,
+                scopes: serde_json::from_str(&scopes_json).unwrap_or_default(),
+                created_at: r.get(2)?,
+                last_used: r.get(3)?,
+                expires_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
     pub fn token_revoke(&self, name: &str) -> R<bool> {
         Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)
     }
     /// Name of the unexpired API token with this hash, touching `last_used` at most every `TOUCH_EVERY_SECS`.
-    pub fn token_lookup(&self, hash: &str) -> R<Option<String>> {
+    pub fn token_lookup(&self, hash: &str) -> R<Option<ApiToken>> {
         let c = self.c();
-        let row: Option<(String, Option<i64>, Option<i64>)> = c
-            .query_row("SELECT name, last_used, expires_at FROM api_tokens WHERE token_hash=?", params![hash], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
+        let row: Option<(String, Option<i64>, Option<i64>, String)> = c
+            .query_row(
+                "SELECT name, last_used, expires_at, scopes FROM api_tokens WHERE token_hash=?",
+                params![hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
             .optional()?;
-        let Some((name, last, expires_at)) = row else { return Ok(None) };
+        let Some((name, last, expires_at, scopes_json)) = row else { return Ok(None) };
         let now = crate::now();
         if expires_at.is_some_and(|e| now >= e) {
             return Ok(None);
@@ -378,7 +652,8 @@ impl Db {
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
-        Ok(Some(name))
+        let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
+        Ok(Some(ApiToken { name, scopes }))
     }
 
     // ---- known addresses ----
@@ -448,6 +723,15 @@ impl Db {
         let rows = st.query_map([], worker_row)?.collect();
         rows
     }
+    /// Stable database-local HMAC key used to sign opaque pagination cursors.
+    pub fn cursor_key(&self) -> R<String> {
+        let c = self.c();
+        c.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('cursor_hmac_key',?1)",
+            params![crate::auth::random_token()],
+        )?;
+        c.query_row("SELECT value FROM meta WHERE key='cursor_hmac_key'", [], |row| row.get(0))
+    }
     /// Record that a worker was seen now. A connected worker's heartbeat calls this every ping;
     /// `min_interval` skips the update while the stored value is younger than that many seconds,
     /// so an idle connection does not commit (and fsync) a transaction per ping. An UPDATE that
@@ -461,8 +745,22 @@ impl Db {
         Ok(())
     }
 
+    /// Record the final disconnect time and clear the address of the closed socket.
+    pub fn worker_disconnected(&self, name: &str) -> R<()> {
+        self.c()
+            .execute("UPDATE workers SET last_seen=?, remote_address=NULL WHERE name=?", params![crate::now(), name])?;
+        Ok(())
+    }
+
     /// Record a validated hello: bind the stable worker id, bump the persisted generation, replace the mission index.
-    pub fn worker_hello(&self, name: &str, worker_id: &str, hello: &serde_json::Map<String, Value>, capabilities: &Value) -> R<HelloOutcome> {
+    pub fn worker_hello(
+        &self,
+        name: &str,
+        worker_id: &str,
+        hello: &serde_json::Map<String, Value>,
+        capabilities: &Value,
+        remote_address: &str,
+    ) -> R<HelloOutcome> {
         let mut c = self.c();
         let tx = c.transaction()?;
         let row: Option<(Option<String>, i64, i64)> = tx
@@ -488,8 +786,8 @@ impl Db {
             params![name, generation],
         )?;
         let text = |k: &str| hello.get(k).map(|v| v.to_string());
-        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, software_version=?, protocol_versions=?, platform=?, capabilities=? WHERE name=?",
-            params![worker_id, generation, now, now, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), name])?;
+        tx.execute("UPDATE workers SET worker_id=?, generation=?, last_seen=?, hello_at=?, mission_cursor=?, software_version=?, protocol_versions=?, platform=?, capabilities=?, host_name=?, remote_address=?, worker_policy=? WHERE name=?",
+            params![worker_id, generation, now, now, cursor, hello.get("software_version").and_then(Value::as_str), text("protocol_versions"), text("platform"), capabilities.to_string(), hello.get("host_name").and_then(Value::as_str), remote_address, text("worker_policy"), name])?;
         tx.execute("DELETE FROM missions WHERE worker=?", params![name])?;
         if let Some(missions) = hello.get("missions").and_then(Value::as_array) {
             for m in missions {
@@ -516,7 +814,16 @@ impl Db {
     }
 
     // ---- events ----
-    pub fn events_store(&self, worker: &str, after: u64, through: u64, events: &[Value], max: u64) -> R<EventsOutcome> {
+    pub fn events_store(&self, batch: EventBatch<'_>) -> R<EventsOutcome> {
+        let EventBatch {
+            worker,
+            after,
+            through,
+            events,
+            mission_cursor,
+            missions,
+            max,
+        } = batch;
         let mut c = self.c();
         let tx = c.transaction()?;
         let cursor: i64 = tx.query_row("SELECT event_cursor FROM workers WHERE name=?", params![worker], |r| r.get(0))?;
@@ -530,10 +837,23 @@ impl Db {
                 params![worker, id, e.to_string()],
             )?;
         }
+        if let Some(missions) = missions {
+            for mission in missions {
+                if let Some(id) = mission.get("id").and_then(Value::as_str) {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO missions(worker, mission_id, info) VALUES(?,?,?)",
+                        params![worker, id, mission.to_string()],
+                    )?;
+                }
+            }
+        }
         tx.execute(
             "UPDATE workers SET event_cursor=?, last_event_at=? WHERE name=?",
             params![through as i64, crate::now(), worker],
         )?;
+        if let Some(mission_cursor) = mission_cursor {
+            tx.execute("UPDATE workers SET mission_cursor=?1 WHERE name=?2", params![mission_cursor as i64, worker])?;
+        }
         tx.execute(
             "DELETE FROM events WHERE worker=?1 AND id <= (SELECT id FROM events WHERE worker=?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
             params![worker, max as i64],
@@ -632,10 +952,15 @@ impl Db {
 
     // ---- audit and maintenance ----
     pub fn audit(&self, actor: &str, action: &str, detail: &str, remote: &str) {
-        let _ = self.c().execute(
+        let _ = self.audit_checked(actor, action, detail, remote);
+    }
+
+    pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
+        self.c().execute(
             "INSERT INTO audit(ts, actor, action, detail, remote) VALUES(?,?,?,?,?)",
             params![crate::now(), actor, action, detail, remote],
-        );
+        )?;
+        Ok(())
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
         let c = self.c();
@@ -663,6 +988,7 @@ impl Db {
             params![now - COMPLETED_COMMAND_KEEP_SECS],
         )?;
         c.execute("DELETE FROM known_addrs WHERE last_success < ?", params![now - KNOWN_ADDR_SECS])?;
+        c.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", params![now])?;
         c.execute("DELETE FROM api_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?", params![now])?;
         c.execute("DELETE FROM audit WHERE id <= (SELECT COALESCE(MAX(id),0) FROM audit) - ?", params![AUDIT_KEEP])?;
         Ok(())

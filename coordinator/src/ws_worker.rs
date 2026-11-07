@@ -1,7 +1,7 @@
 //! Worker WebSocket endpoint `/api/v1/worker/connect` (protocol.md).
 
 use crate::auth::sha256_hex;
-use crate::db::{CommandRow, EventsOutcome, HelloOutcome};
+use crate::db::{CommandRow, EventBatch, EventsOutcome, HelloOutcome};
 use crate::http::{Peer, St};
 use crate::hub::{ConnHandle, Outbound, PendingGuard, OUTBOUND_QUEUE};
 use crate::protocol::{self, Message, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
@@ -164,7 +164,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
     };
     drop(pending);
     let worker_id = hello.worker_id.clone();
-    let (generation, cursor) = match st.db.worker_hello(&name, &worker_id, &hello.payload, &caps) {
+    let (generation, cursor) = match st.db.worker_hello(&name, &worker_id, &hello.payload, &caps, &remote) {
         Ok(HelloOutcome::Ok { generation, cursor }) => (generation, cursor),
         Ok(HelloOutcome::WorkerIdMismatch) => {
             let _ = send(
@@ -295,7 +295,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         let _ = socket.send(close_frame(code, reason)).await;
     }
     if st.hub.unregister(&name, conn_id) {
-        let _ = st.db.worker_seen(&name, 0);
+        let _ = st.db.worker_disconnected(&name);
         st.hub
             .publish(json!({"type": "worker", "worker": name, "state": "offline", "generation": generation}));
     }
@@ -345,7 +345,21 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             let p = &m.payload;
             let (after, through) = (p["after"].as_u64().unwrap_or(0), p["through"].as_u64().unwrap_or(0));
             let events = p["events"].as_array().cloned().unwrap_or_default();
-            match st.db.events_store(name, after, through, &events, st.cfg.max_events_per_worker).map_err(db)? {
+            let missions = p.get("missions").and_then(Value::as_array).cloned();
+            let mission_cursor = p.get("mission_cursor").and_then(Value::as_u64);
+            match st
+                .db
+                .events_store(EventBatch {
+                    worker: name,
+                    after,
+                    through,
+                    events: &events,
+                    mission_cursor,
+                    missions: missions.as_deref(),
+                    max: st.cfg.max_events_per_worker,
+                })
+                .map_err(db)?
+            {
                 EventsOutcome::Accepted { cursor, stored } => {
                     if stored > 0 {
                         st.hub.publish(json!({"type": "event", "worker": name, "cursor": cursor, "events": events}));

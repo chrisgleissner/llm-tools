@@ -1,7 +1,7 @@
 //! Security hardening: login rate limiting, slow and oversized bodies, connection caps,
 //! worker pre-hello limits, generation handling and API token lifetime.
 mod common;
-use bridge_coordinator::auth::{addr_key, RateLimiter};
+use bridge_coordinator::auth::{addr_key, MutationLimiter, RateLimiter};
 use common::*;
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -92,6 +92,20 @@ fn ipv6_clients_are_keyed_by_their_64() {
     assert_ne!(addr_key(&a), addr_key(&c));
     let mapped: IpAddr = "::ffff:192.0.2.1".parse().unwrap();
     assert_eq!(addr_key(&mapped), "192.0.2.1");
+}
+
+#[test]
+fn mutation_limiter_enforces_token_and_address_budgets_with_retry_delay() {
+    let limiter = MutationLimiter::new(Duration::from_secs(60), 8);
+    let token = ("token:automation".to_string(), 2);
+    let address = ("address:192.0.2.1".to_string(), 3);
+    let keys = [token.clone(), address.clone()];
+    assert_eq!(limiter.check(&keys), None);
+    assert_eq!(limiter.check(&keys), None);
+    assert_eq!(limiter.check(&keys), Some(60));
+    // A rejected combined request must not consume budget on the still-available address key.
+    assert_eq!(limiter.check(&[("address:192.0.2.1".to_string(), 3)]), None);
+    assert_eq!(limiter.check(&[("address:192.0.2.1".to_string(), 3)]), Some(60));
 }
 
 #[test]
@@ -213,7 +227,9 @@ fn authed_post_head(env: &Env, api: &Api, path: &str, length: usize) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn buffered_large_bodies_are_bounded() {
-    let env = boot_with(set("request_body_timeout_secs", "3")).await;
+    // Leave enough time for the final TLS handshake under the slower Windows CI runner; the
+    // test checks the immediate body-slot refusal, not the timeout value itself.
+    let env = boot_with(set("request_body_timeout_secs", "10")).await;
     let api = env.admin().await;
     let slots = env.srv.state.big_bodies.clone();
     assert_eq!(slots.available_permits(), 8);
@@ -240,7 +256,7 @@ async fn buffered_large_bodies_are_bounded() {
     assert_eq!(api.get("/api/v1/workers").await.0, 200);
     // The stalled bodies time out and release their permits.
     for mut s in held {
-        let (text, closed) = read_to_close(&mut s, Duration::from_secs(8)).await;
+        let (text, closed) = read_to_close(&mut s, Duration::from_secs(15)).await;
         assert!(closed && text.starts_with("HTTP/1.1 408"), "{text}");
     }
     assert_eq!(slots.available_permits(), 8);
@@ -468,7 +484,7 @@ async fn expired_api_tokens_are_refused() {
     let now = bridge_coordinator::now();
     for (name, expires) in [("expired", Some(now - 1)), ("future", Some(now + 3600)), ("forever", None)] {
         let hash = bridge_coordinator::auth::sha256_hex(name);
-        assert!(db.token_create(name, &hash, expires).unwrap());
+        assert!(db.token_create_scoped(name, &hash, expires, &["admin".into()]).unwrap());
     }
     assert_eq!(bearer(&env, "expired").get("/api/v1/workers").await.0, 401);
     assert_eq!(bearer(&env, "future").get("/api/v1/workers").await.0, 200);
@@ -481,7 +497,8 @@ async fn password_change_revokes_api_tokens_unless_kept() {
     let env = boot().await;
     let mut api = env.admin().await;
     let db = &env.srv.state.db;
-    db.token_create("ci", &bridge_coordinator::auth::sha256_hex("ci-secret"), None).unwrap();
+    db.token_create_scoped("ci", &bridge_coordinator::auth::sha256_hex("ci-secret"), None, &["admin".into()])
+        .unwrap();
     assert_eq!(bearer(&env, "ci-secret").get("/api/v1/workers").await.0, 200);
     let new1 = "another long password 1";
     let (st, body) = api
@@ -550,7 +567,7 @@ fn version_1_database_is_migrated_in_place() {
     }
     let db = bridge_coordinator::db::Db::open(&path).unwrap();
     let hello = serde_json::Map::new();
-    match db.worker_hello("w1", "wid", &hello, &json!([])).unwrap() {
+    match db.worker_hello("w1", "wid", &hello, &json!([]), "192.0.2.10").unwrap() {
         bridge_coordinator::db::HelloOutcome::Ok { generation, .. } => assert_eq!(generation, 8),
         _ => panic!("hello refused"),
     }
@@ -559,6 +576,7 @@ fn version_1_database_is_migrated_in_place() {
         vec![("old".to_string(), None)],
         "existing tokens keep working and do not expire"
     );
+    assert_eq!(db.token_lookup("h2").unwrap().unwrap().scopes, vec!["admin"]);
     let v: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))

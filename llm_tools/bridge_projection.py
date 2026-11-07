@@ -96,5 +96,6 @@ class Snapshot(TypedDict, total=False):
     last_meaningful_progress: dict[str, Any] | None
     hold: dict[str, Any] | None
     awaiting_answer: dict[str, Any] | None
+    provider_wait: dict[str, Any]
     needs_you: Any
     usage: dict[str, Any]

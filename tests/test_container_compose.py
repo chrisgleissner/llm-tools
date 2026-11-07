@@ -35,3 +35,28 @@ def test_low_write_override_replaces_the_whole_logging_block_and_slows_health_ch
     assert "    logging: !override\n      driver: ${BRIDGE_LOG_DRIVER:-journald}\n" in text
     assert "interval: ${BRIDGE_HEALTHCHECK_INTERVAL:-5m}" in text
     assert "max-size" not in text.split("services:", 1)[1]
+
+
+def test_tailscale_profile_is_opt_in_and_persists_its_state() -> None:
+    text = (CONTAINER / "compose.yaml").read_text(encoding="utf-8")
+    service = text.split("  tailscale:\n", 1)[1].split("\nvolumes:\n  bridge-data:", 1)[0]
+    assert 'profiles: ["tailscale"]' in service
+    assert "network_mode: service:coordinator" in service
+    assert "TS_STATE_DIR: /var/lib/tailscale" in service
+    assert "TS_AUTH_ONCE: \"true\"" in service
+    assert "tailscale-state:/var/lib/tailscale" in service
+    assert "tailscale-certs:/certs" in service
+    assert "ports:" not in service
+    assert "BRIDGE_COORDINATOR_TLS_CERT_FILE: ${BRIDGE_COORDINATOR_TLS_CERT_FILE:-}" in text
+    assert "BRIDGE_COORDINATOR_TLS_KEY_FILE: ${BRIDGE_COORDINATOR_TLS_KEY_FILE:-}" in text
+    renewer = text.split("  tailscale-cert-renewer:\n", 1)[1].split("\nvolumes:\n  bridge-data:", 1)[0]
+    assert "5184000" in renewer and ".last-renewed" in renewer
+    assert "bridge.crt.next" in renewer and "bridge.key.next" in renewer
+
+    guide = (CONTAINER.parent / "docs/distributed/install.md").read_text(encoding="utf-8")
+    section = guide.split("### Enable passkeys (optional)\n", 1)[1].split("\n## ", 1)[0]
+    assert "chmod 600 container/tailscale.env" in section
+    assert "--profile tailscale up -d" in section
+    assert "BRIDGE_TAILSCALE_CERT_NAME" in section and "BRIDGE_COORDINATOR_TLS_KEY_FILE" in section
+    assert "without restart" in section
+    assert "trusted certificate and hostname" in section

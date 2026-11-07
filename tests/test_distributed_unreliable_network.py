@@ -69,8 +69,18 @@ class Link:
     def reconnected_since(self, accepted: int) -> bool:
         return self.proxy.accepted > accepted and self.online()
 
-    def submit(self, request: CommandRequest, *, wait_ms: int = 0) -> tuple[int, dict]:
-        return self.coordinator.request("POST", "/api/v1/commands", {"target": "ws", "request": request.to_json(), "wait_ms": wait_ms})
+    def submit(
+        self,
+        request: CommandRequest,
+        *,
+        wait_ms: int = 0,
+        token: str | None = None,
+        source_ip: str | None = None,
+    ) -> tuple[int, dict]:
+        return self.coordinator.request(
+            "POST", "/api/v1/commands", {"target": "ws", "request": request.to_json(), "wait_ms": wait_ms},
+            token=token, source_ip=source_ip,
+        )
 
     def command_state(self, request_id: str) -> str | None:
         status, body = self.coordinator.request("GET", f"/api/v1/commands/{request_id}")
@@ -243,13 +253,14 @@ def test_commands_submitted_while_the_link_flaps_are_applied_exactly_once(link):
     flapper = threading.Thread(target=flap, daemon=True)
     count = 60
     ids = [f"flap-{index}" for index in range(count)]
+    tokens = link.coordinator.mutation_tokens(2)
     with link.store() as store:
         tasks_before = len(store.list_tasks(link.mission_id))
     flapper.start()
     try:
         def submit(index: int) -> int:
             request = CommandRequest("task.add", mission_id=link.mission_id, target="ws", request_id=ids[index], params={"prompt": f"flap task {index}"})
-            return link.submit(request)[0]
+            return link.submit(request, token=tokens[index % len(tokens)])[0]
 
         with ThreadPoolExecutor(6) as pool:
             statuses = list(pool.map(submit, range(count)))
@@ -275,10 +286,11 @@ def test_commands_submitted_while_the_link_flaps_are_applied_exactly_once(link):
 def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
     link.proxy.cut()
     wait_for(link.offline, timeout=RECONNECT_BOUND, interval=0.05)
+    tokens = link.coordinator.mutation_tokens(34)
 
     def submit(index: int) -> int:
         request = CommandRequest("mission.list", target="ws", request_id=f"queue-{index}")
-        return link.submit(request)[0]
+        return link.submit(request, token=tokens[index % len(tokens)], source_ip="127.0.0.1")[0]
 
     with ThreadPoolExecutor(16) as pool:
         statuses = list(pool.map(submit, range(MAX_OPEN_COMMANDS + 1)))
@@ -289,7 +301,11 @@ def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
     depths = diagnostics["command_queue_depths"]["ws"]
     assert status == 200 and sum(depths.values()) <= MAX_OPEN_COMMANDS and depths.get("pending") == MAX_OPEN_COMMANDS, depths
     assert link.session.outbox.maxsize == OUTBOX_BOUND and link.session.outbox.qsize() <= OUTBOX_BOUND
-    status, body = link.submit(CommandRequest("mission.list", target="ws", request_id="queue-over"))
+    queue_full_token = link.coordinator.run("token", "create", "queue-over", "--scope", "admin")
+    status, body = link.submit(
+        CommandRequest("mission.list", target="ws", request_id="queue-over"),
+        token=queue_full_token, source_ip="127.0.0.1",
+    )
     assert status == 429 and body["error"]["code"] == "queue-full"
 
     link.proxy.restore()
@@ -300,7 +316,11 @@ def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
         return not snapshot["command_queue_depths"].get("ws")
 
     wait_for(drained, timeout=60, interval=0.25, message="the command queue did not drain after recovery")
-    status, _ = link.submit(CommandRequest("mission.list", target="ws", request_id="queue-after"), wait_ms=int(scaled(10) * 1000))
+    queue_after_token = link.coordinator.run("token", "create", "queue-after", "--scope", "admin")
+    status, _ = link.submit(
+        CommandRequest("mission.list", target="ws", request_id="queue-after"), wait_ms=int(scaled(10) * 1000),
+        token=queue_after_token, source_ip="127.0.0.1",
+    )
     assert status == 200  # the queue accepts work again
 
 

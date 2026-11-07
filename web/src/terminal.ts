@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { button, h } from "./dom";
 import { announce } from "./ui";
+import { publishStreamMessage } from "./store";
 
 export type TermState = "idle" | "connecting" | "live" | "reconnecting" | "ended";
 
@@ -15,6 +16,8 @@ export interface TerminalPanel {
   element: HTMLElement;
   /** Enable or disable the open buttons (worker offline). */
   setAvailable(available: boolean): void;
+  /** Connect in view-only mode without moving focus or requesting terminal input. */
+  openReadOnly(): void;
   dispose(): void;
 }
 
@@ -101,6 +104,7 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
   let paneCols = 0;
   let paneRows = 0;
   let follow = true; // keep the newest output in view until the user scrolls up
+  let activityOpened = false;
 
   function setState(next: TermState, detail = ""): void {
     state = next;
@@ -111,14 +115,16 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
     status.dataset["state"] = next;
     status.dataset["mode"] = mode;
     closeBtn.hidden = next === "idle" || next === "ended";
+    openView.hidden = next === "live";
+    openWrite.hidden = next === "live" && mode === "write";
     updateButtons();
     paintKeys();
   }
 
   function updateButtons(): void {
-    const busy = state === "connecting" || state === "live" || state === "reconnecting";
-    openView.disabled = busy || !available;
-    openWrite.disabled = busy || !available;
+    const busy = state === "connecting" || state === "reconnecting";
+    openView.disabled = busy || state === "live" || !available;
+    openWrite.disabled = busy || (state === "live" && mode === "write") || !available;
   }
 
   function paintKeys(): void {
@@ -159,7 +165,22 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
   function ensureTerminal(): Terminal {
     if (term) return term;
     host.hidden = false;
-    const t = new Terminal({ cols: 80, rows: 24, scrollback: 2000, convertEol: false, cursorBlink: true, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: window.matchMedia("(max-width: 720px)").matches ? 13 : 14, allowProposedApi: false });
+    const t = new Terminal({
+      cols: 80,
+      rows: 24,
+      scrollback: 2000,
+      convertEol: false,
+      cursorBlink: true,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+      fontSize: window.matchMedia("(max-width: 720px)").matches ? 13 : 14,
+      allowProposedApi: false,
+      // The xterm defaults use ANSI red that is too dim on its black background at WCAG AA.
+      theme: {
+        background: "#0b0f14", foreground: "#e6edf3", cursor: "#e6edf3", selectionBackground: "#264f78",
+        black: "#484f58", red: "#ff7b72", green: "#7ee787", yellow: "#e3b341", blue: "#79c0ff", magenta: "#d2a8ff", cyan: "#76e3ea", white: "#f0f6fc",
+        brightBlack: "#6e7681", brightRed: "#ffa198", brightGreen: "#aff5b4", brightYellow: "#f2cc60", brightBlue: "#a5d6ff", brightMagenta: "#e2c5ff", brightCyan: "#b3f0ff", brightWhite: "#ffffff",
+      },
+    });
     fit = new FitAddon();
     t.loadAddon(fit);
     t.open(host);
@@ -230,6 +251,13 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
         reason = typeof f.reason === "string" ? f.reason : "";
         paneCols = f.cols;
         paneRows = f.rows;
+        // The browser sees this worker status over the scoped terminal relay; it is live activity, not event history.
+        if (!activityOpened) {
+          activityOpened = true;
+          publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: "opened", mode, reason });
+        } else if (was !== `${mode}|${reason}`) {
+          publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: "mode-changed", mode, reason });
+        }
         if (t.cols !== f.cols || t.rows !== f.rows) {
           t.resize(f.cols, f.rows);
           // Shrinking the pane can leave the scroll position mid-buffer; keep following the tail unless the user scrolled away.
@@ -242,7 +270,10 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
         if (was !== `${mode}|${reason}`) announce(mode === "write" ? "Terminal: you have control." : `Terminal: view only${reason ? ` (${reason})` : ""}.`);
         if (mode === "write") t.focus();
       } else if (f.t === "x") {
-        endSession(typeof f.reason === "string" && f.reason ? f.reason : "The session ended.");
+        const endReason = typeof f.reason === "string" && f.reason ? f.reason : "The session ended.";
+        publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: activityOpened ? "closed" : "refused", mode, reason: endReason });
+        activityOpened = false;
+        endSession(endReason);
       }
     };
     socket.onclose = () => {
@@ -275,8 +306,26 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
     announce(`Terminal ended: ${why}`);
   }
 
-  function start(m: "view" | "write"): void {
-    if (state === "connecting" || state === "live" || state === "reconnecting") return;
+  function start(m: "view" | "write", focus = true): void {
+    if (state === "connecting" || state === "reconnecting") return;
+    if (state === "live") {
+      if (m !== "write" || mode !== "view" || !ws) return;
+      requested = "write";
+      const previous = ws;
+      ws = null;
+      setState("connecting", "Requesting control...");
+      let reopened = false;
+      const reopen = (): void => {
+        if (reopened || disposed || state !== "connecting" || requested !== "write") return;
+        reopened = true;
+        window.clearTimeout(timer);
+        connect();
+      };
+      previous.addEventListener("close", reopen, { once: true });
+      timer = window.setTimeout(reopen, 500);
+      previous.close(1000, "requesting control");
+      return;
+    }
     requested = m;
     mode = "view";
     reason = "";
@@ -286,8 +335,10 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
     setState("connecting");
     connect();
     // xterm.js does not paint while the terminal is outside the viewport, so bring it into view.
-    host.scrollIntoView({ block: "nearest" });
-    term?.focus();
+    if (focus) {
+      host.scrollIntoView({ block: "nearest" });
+      term?.focus();
+    }
   }
 
   function stop(why: string): void {
@@ -307,6 +358,9 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
     setAvailable(a: boolean): void {
       available = a;
       updateButtons();
+    },
+    openReadOnly(): void {
+      if (available && state === "idle") start("view", false);
     },
     dispose(): void {
       disposed = true;

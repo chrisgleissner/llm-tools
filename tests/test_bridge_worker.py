@@ -18,6 +18,24 @@ from llm_tools.bridge_store import BridgeStore
 TOKEN = "t" * 40
 
 
+def test_worker_status_reports_connection_and_service_state_without_token(monkeypatch, capsys):
+    config = worker.WorkerConfig("worker-id", "build-1", "wss://coordinator.example/api/v1/worker/connect", TOKEN, False)
+    monkeypatch.setattr(worker, "load_config", lambda _env=None: config)
+    monkeypatch.setattr(worker, "read_audit", lambda _limit=50, _env=None: [
+        {"ts": "2026-11-06T14:00:00Z", "action": "connection.accepted", "generation": 2},
+    ])
+    status = worker.status_public(service_state="active")
+    assert status["connection_state"] == "connected"
+    assert status["last_connected_at"] == "2026-11-06T14:00:00Z"
+    assert status["service_state"] == "active"
+    assert "token" not in status and TOKEN not in json.dumps(status)
+    monkeypatch.setattr(worker, "status_public", lambda: status)
+    assert main(["worker", "status"]) == 0
+    output = capsys.readouterr().out
+    assert "Worker build-1 · connected to the coordinator" in output
+    assert "Worker service: active" in output
+
+
 @pytest.fixture
 def state(tmp_path, monkeypatch, capsys):
     directory = tmp_path / "state"
@@ -69,15 +87,40 @@ def test_enrolment_is_private_validated_and_hides_the_token(state, capsys):
     assert worker.unenroll() is True and worker.unenroll() is False
 
 
-def test_hello_reports_inventory_and_only_permitted_operations(state):
+def test_worker_opt_ins_default_off_and_roots_are_canonical(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    root = tmp_path / "workspace"
+    root.mkdir()
+    alias = tmp_path / "workspace-alias"
+    alias.symlink_to(root, target_is_directory=True)
+    config = worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True, allow_roots=[str(alias), str(root)])
+    assert config.allow_create is False and config.allow_power is False and config.allow_restore is False
+    assert config.allow_roots == (str(root.resolve()),)
+    assert worker.load_config().allow_roots == (str(root.resolve()),)
+    assert config.public()["allow_root"] == [str(root.resolve())]
+    with pytest.raises(worker.WorkerConfigError, match="cannot be resolved"):
+        worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True, allow_roots=[str(tmp_path / "missing")])
+    with pytest.raises(worker.WorkerConfigError, match="requires at least one"):
+        worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True, allow_create=True)
+
+
+def test_hello_reports_inventory_and_only_permitted_operations(state, monkeypatch):
     directory, mission_id = state
     session, _ = _session(directory, allow_control=False)
+    monkeypatch.setattr(worker.platform, "node", lambda: "test-host.example")
     hello = decode(session.hello().encode())
     assert hello.payload["missions"][0]["id"] == mission_id
+    assert hello.payload["host_name"] == "test-host.example"
     assert hello.payload["event_cursor"] > 0
     operations = {spec["operation"] for spec in hello.payload["capabilities"]}
     assert "mission.status" in operations and not any(spec["mutating"] for spec in hello.payload["capabilities"])
     assert "token" not in session.hello().encode()
+
+
+@pytest.mark.parametrize(("hostname", "expected"), [("Pi-Lab.Example", "pi-lab"), ("host_name", "host-name"), ("!!!", "worker")])
+def test_default_worker_name_uses_short_safe_hostname(monkeypatch, hostname, expected):
+    monkeypatch.setattr(worker.platform, "node", lambda: hostname)
+    assert worker.default_worker_name() == expected
 
 
 def test_generation_fencing(state):
@@ -118,6 +161,130 @@ def test_read_only_worker_refuses_mutations(state):
         assert store.get_mission(mission_id)["status"] == "CREATED"
 
 
+def test_admin_commands_cannot_bypass_worker_opt_ins(state, tmp_path):
+    directory, _ = state
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlink_escape = allowed / "escape"
+    try:
+        symlink_escape.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        symlink_escape = None
+    disabled = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                             allow_roots=[str(allowed)])
+    disabled_session = worker.WorkerSession(disabled, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    _welcome(disabled_session)
+    _, denied_create = _command(disabled_session, CommandRequest("mission.create", {"cwd": str(allowed)}))
+    assert denied_create.payload["outcome"] == "rejected"
+    assert denied_create.payload["error"]["code"] == "forbidden"
+
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True,
+                           allow_create=True, allow_roots=[str(allowed)])
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    _welcome(session, generation=2)
+    requests = [
+        CommandRequest("mission.create", {"cwd": str(outside)}),
+        CommandRequest("machine.poweroff"),
+        CommandRequest("worker.restore", {"input": str(allowed / "backup.db")}),
+    ]
+    if symlink_escape is not None:
+        requests.append(CommandRequest("mission.create", {"cwd": str(symlink_escape), "trust_folder": True}))
+    for request in requests:
+        _, result = _command(session, request)
+        assert result.payload["outcome"] == "rejected"
+        assert result.payload["error"]["code"] == "forbidden"
+
+
+def test_allowed_root_recheck_and_worker_status_expose_opt_ins(state, tmp_path, monkeypatch):
+    directory, _ = state
+    root = tmp_path / "root"
+    root.mkdir()
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=False,
+                           allow_create=True, allow_roots=[str(root)], allow_power=True, allow_restore=True)
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    request = CommandRequest("mission.create", {"cwd": str(root)})
+    assert session._policy_error(request, None) is None
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escape = root / "escape"
+    try:
+        escape.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        escape = None
+    if escape is not None:
+        assert session._policy_error(CommandRequest("mission.create", {"cwd": str(escape)}), None) is not None
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    root.rename(tmp_path / "old-root")
+    try:
+        root.symlink_to(moved, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pass
+    else:
+        assert session._policy_error(request, None) is not None
+    status = worker.status_public(service_state="inactive")
+    assert status["allow_create"] and status["allow_power"] and status["allow_restore"]
+    assert status["allow_root"] == [str(root)]
+
+
+def test_worker_typed_create_power_and_restore_require_local_opt_ins(state, tmp_path, monkeypatch):
+    directory, _ = state
+    root = tmp_path / "approved"
+    root.mkdir()
+    (root / "backup.db").write_bytes(b"placeholder")
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=True, allow_roots=[str(root)])
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    hello = session.hello()
+    operations = {item["operation"] for item in hello.payload["capabilities"]}
+    assert "mission.create" not in operations and "mission.suspend_until_credits" not in operations and "worker.restore" not in operations
+    _welcome(session)
+    _, denied = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root)}))
+    assert denied.payload["error"]["code"] == "forbidden"
+    _, denied = _command(session, CommandRequest("mission.suspend_until_credits", mission_id="x"))
+    assert denied.payload["error"]["code"] == "forbidden"
+    _, denied = _command(session, CommandRequest("worker.restore", {"input": str(root / "backup.db")}))
+    assert denied.payload["error"]["code"] == "forbidden"
+
+    config = worker.enroll("ws-1", "wss://coord.home.arpa:8443", TOKEN, ca_pem=None, allow_control=False,
+                           allow_create=True, allow_roots=[str(root)], allow_power=True, allow_restore=True)
+    session = worker.WorkerSession(config, open_store=lambda: BridgeStore(directory / "bridge.sqlite3"), software_version="9.9")
+    operations = {item["operation"] for item in session.hello().payload["capabilities"]}
+    assert {"mission.create", "mission.suspend_until_credits", "worker.restore"} <= operations
+    _welcome(session, generation=2)
+    _, created = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root), "providers": "codex", "trust_folder": True}))
+    assert created.payload["outcome"] == "applied"
+    assert created.payload["result"]["mission"]["cwd"] == str(root)
+    assert created.payload["result"]["mission"]["config"]["trust_folder"] is True
+
+    _, unsupported = _command(session, CommandRequest("mission.create", {"prompt": "new work", "cwd": str(root), "verifier_argv": ["true"]}))
+    assert unsupported.payload["error"]["code"] == "unsupported-remote-option"
+
+    power_calls = []
+    monkeypatch.setattr("llm_tools.bridge_power.suspend_until_credits", lambda mission_id: power_calls.append(mission_id) or {"ok": True})
+    _, suspended = _command(session, CommandRequest("mission.suspend_until_credits", mission_id=created.payload["result"]["mission"]["id"]))
+    assert suspended.payload["outcome"] == "applied" and power_calls
+
+    restore_calls = []
+    restore_details = {
+        "restored_from": str(root / "backup.db"),
+        "previous_database": str(directory / "bridge.sqlite3.before-restore-secret"),
+        "missions": 1,
+        "schema_version": 10,
+        "last_event_id": 42,
+        "event_sequence": 43,
+    }
+    monkeypatch.setattr("llm_tools.bridge_backup.restore", lambda source, **kwargs: restore_calls.append(str(source)) or restore_details)
+    _, restored = _command(session, CommandRequest("worker.restore", {"input": str(root / "backup.db")}))
+    assert restored.payload["outcome"] == "applied" and restore_calls == [str(root / "backup.db")]
+    assert restored.payload["result"] == {"missions": 1, "schema_version": 10, "last_event_id": 42, "event_sequence": 43}
+    serialized_result = json.dumps(restored.payload["result"])
+    assert str(root) not in serialized_result and str(directory) not in serialized_result
+    _, escaped = _command(session, CommandRequest("worker.restore", {"input": str(tmp_path / "outside.db")}))
+    assert escaped.payload["error"]["code"] == "forbidden"
+
+
 def test_control_messages_and_event_replication(state):
     directory, _ = state
     session, _ = _session(directory)
@@ -134,6 +301,70 @@ def test_control_messages_and_event_replication(state):
     assert session.next_events() is None
     session.handle(Message("events.nack", "c", 1, {"expected_after": 0}))
     assert session.next_events().payload["through"] == through
+
+
+def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_path):
+    directory, first_id = state
+    session, _ = _session(directory)
+    hello = session.hello()
+    _welcome(session, cursor=hello.payload["event_cursor"])
+    assert hello.payload["missions"][0]["id"] == first_id
+
+    # The mission is created after hello while this same worker session stays online.
+    second_cwd = tmp_path / "second"
+    second_cwd.mkdir()
+    assert main(["mission", "create", "--prompt", "Second objective", "--cwd", str(second_cwd), "--providers", "codex", "--json"]) == 0
+    batch = session.next_events()
+    assert batch is not None
+    summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
+    assert first_id not in summaries and len(summaries) == 1
+    assert batch.payload["mission_cursor"] == batch.payload["through"]
+    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at"} for mission in summaries.values())
+
+
+def test_worker_replicates_new_provider_question_without_a_database_event(state, monkeypatch):
+    directory, mission_id = state
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        mission = store.get_mission(mission_id)
+        config = {**mission["config"], "native_tui": True}
+        store.db.execute("UPDATE missions SET status='RUNNING',config_json=? WHERE id=?", (json.dumps(config), mission_id))
+    question = {"kind": "provider", "command": f"llm-bridge attach --mission {mission_id[:8]}",
+                "message": "Codex asks: Should I reconnect? · Choices: 1. Yes; 2. No · take control of the terminal to answer"}
+    observed = {"needs": None}
+    monkeypatch.setattr("llm_tools.bridge_monitor.project_snapshot", lambda *_args, **_kwargs: {"needs_you": observed["needs"]})
+    session, _ = _session(directory)
+    hello = session.hello()
+    _welcome(session, cursor=hello.payload["event_cursor"])
+    assert hello.payload["missions"][0]["needs_you"] is None
+
+    # request_user_input can be pending without a Bridge SQLite event.
+    observed["needs"] = question
+    session.last_question_refresh = 0.0
+    batch = session.next_events()
+
+    assert batch is not None
+    assert batch.payload["events"] == []
+    assert batch.payload["after"] == batch.payload["through"]
+    assert len(batch.payload["missions"]) == 1
+    summary = batch.payload["missions"][0]
+    assert summary["id"] == mission_id and summary["status"] == "RUNNING"
+    assert summary["needs_you"] == question
+    decode(batch.encode())
+
+
+def test_periodic_question_scan_rotates_beyond_its_bounded_batch(monkeypatch):
+    monkeypatch.setattr(worker, "MAX_QUESTION_MISSIONS_PER_REFRESH", 3)
+    session = object.__new__(worker.WorkerSession)
+    session.last_question_mission_id = None
+    rows = [{"id": f"mission-{index:02d}"} for index in range(7)]
+
+    first = session._question_refresh_batch(rows)
+    second = session._question_refresh_batch(rows)
+    third = session._question_refresh_batch(rows)
+
+    assert [row["id"] for row in first] == ["mission-00", "mission-01", "mission-02"]
+    assert [row["id"] for row in second] == ["mission-03", "mission-04", "mission-05"]
+    assert [row["id"] for row in third] == ["mission-06", "mission-00", "mission-01"]
 
 
 class FakeConnection:
@@ -216,20 +447,38 @@ def test_run_drops_a_silent_coordinator(state, monkeypatch):
 def test_worker_cli(state, tmp_path, capsys, monkeypatch):
     token_file = tmp_path / "token"
     token_file.write_text(TOKEN + "\n")
+    monkeypatch.setattr(worker.platform, "node", lambda: "Test-Host.Example")
     assert main(["worker", "status"]) == 2
     assert "not enrolled" in capsys.readouterr().err
-    assert main(["worker", "enroll", "--name", "ws", "--coordinator", "wss://c:8443", "--token-file", str(token_file)]) == 0
-    assert "remote control read-only" in capsys.readouterr().out
+    assert main(["worker", "enroll", "--coordinator", "wss://c:8443", "--token-file", str(token_file)]) == 0
+    enrolled = capsys.readouterr().out
+    assert "Enrolled worker test-host" in enrolled and "remote control read-only" in enrolled
     assert main(["worker", "status", "--json"]) == 0
     out = capsys.readouterr().out
-    assert json.loads(out)["name"] == "ws" and TOKEN not in out
-    assert main(["worker", "status"]) == 0 and "allow_control: False" in capsys.readouterr().out
+    assert json.loads(out)["name"] == "test-host" and TOKEN not in out
+    assert main(["worker", "status"]) == 0 and "Remote access: read-only" in capsys.readouterr().out
     started = []
     monkeypatch.setattr(worker, "run", lambda session, connect, stop, log: started.append(session.config.name))
-    assert main(["worker", "run"]) == 0 and started == ["ws"]
+    assert main(["worker", "run"]) == 0 and started == ["test-host"]
     capsys.readouterr()
     assert main(["worker", "unenroll"]) == 0 and "removed" in capsys.readouterr().out
     assert main(["worker", "unenroll"]) == 0 and "not enrolled" in capsys.readouterr().out
+
+
+def test_worker_cli_enrollment_opt_in_flags_and_status(state, tmp_path, capsys):
+    token_file = tmp_path / "token"
+    token_file.write_text(TOKEN)
+    root1, root2 = tmp_path / "one", tmp_path / "two"
+    root1.mkdir()
+    root2.mkdir()
+    assert main(["worker", "enroll", "--name", "ws", "--coordinator", "wss://c:1", "--token-file", str(token_file),
+                 "--allow-create", "--allow-root", str(root1), "--allow-root", str(root2), "--allow-power", "--allow-restore", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["allow_create"] and output["allow_power"] and output["allow_restore"]
+    assert output["allow_root"] == [str(root1.resolve()), str(root2.resolve())]
+    assert main(["worker", "status"]) == 0
+    rendered = capsys.readouterr().out
+    assert "Remote creation: allowed" in rendered and str(root1.resolve()) in rendered and "Remote power: allowed" in rendered
 
 
 def test_audit_records_security_actions_without_secrets(state, capsys, monkeypatch):

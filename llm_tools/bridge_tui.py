@@ -1694,6 +1694,22 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
     pending = _dict(data.get("proposal_counts")).get("PENDING")
     if isinstance(pending, (int, float)) and pending:
         rows.append(proposals_row("console", int(pending)))
+    provider_wait = _dict(data.get("provider_wait"))
+    question_count = provider_wait.get("question_count")
+    if isinstance(question_count, (int, float)) and 1 <= question_count <= 32:
+        provider = _text(provider_wait.get("provider") or "Provider", 40)
+        mission_id = _text(_dict(data.get("mission")).get("id") or "?", 64)
+        attach = f"llm-bridge attach --mission {mission_id}"
+        questions = provider_wait.get("questions")
+        first = questions[0] if isinstance(questions, list) and questions and isinstance(questions[0], dict) else None
+        question = first.get("question") if first else None
+        options = first.get("options") if first else None
+        if isinstance(question, str) and isinstance(options, list) and options and all(isinstance(option, str) for option in options):
+            choices = "; ".join(f"{index}. {_text(option, 200)}" for index, option in enumerate(options[:8], 1))
+            rows.append(f"{provider} asks: {_text(question, 800)} — choices: {choices} — take control of the terminal to answer: {attach}")
+        else:
+            noun = "question" if question_count == 1 else "questions"
+            rows.append(f"{provider} has {int(question_count)} queued {noun} — take control of the terminal and press Shift+Left to answer: {attach}")
     from .bridge_format import declined_message, declined_provider
 
     stuck = []

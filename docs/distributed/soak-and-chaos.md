@@ -160,7 +160,7 @@ Reading of the results:
 
 PRD-007 forbids unbounded growth, so the first soak finding (controller memory growing by 20 to 56 KB per
 completed task) was investigated before any bound was set. This section records what was measured, what was
-fixed and why the gate is what it is. Decision D9 in `DECISIONS.md` summarises it.
+fixed and why the gate is what it is. Decision D16 in `DECISIONS.md` summarises it.
 
 **Method.** `scripts/soak_sampler.py` writes one CSV row per process every 30 s (resident and anonymous
 memory, threads, descriptors) for every controller and worker of a run, and `scripts/soak_plot.py` draws it

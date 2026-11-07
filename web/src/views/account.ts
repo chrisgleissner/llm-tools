@@ -10,6 +10,103 @@ export interface AccountOpts {
   onPasswordChanged: () => void;
 }
 
+function tokenManagement(): HTMLElement {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "api-tokens-title" });
+  const status = h("p", { role: "status", "aria-live": "polite" });
+  const rows = h("ul", { class: "token-list", "aria-label": "API tokens" });
+  const oneTime = h("div", { class: "token-secret", hidden: true, "aria-live": "polite" });
+  const name = field("api-token-name", "Token name", "text", { autocomplete: "off", maxlength: 63, required: true });
+  const scopeNames = ["read", "operate", "terminal:view", "terminal:write", "admin"] as const;
+  const scopeInputs = scopeNames.map((scope, i) => {
+    const input = h("input", { type: "checkbox", id: `token-scope-${i}`, value: scope, checked: scope === "read" });
+    return { scope, input, label: h("label", { class: "check", for: input.id }, input, h("span", {}, scope)) };
+  });
+  const expiry = h(
+    "select",
+    { id: "api-token-expiry", name: "expires_days", "aria-label": "Token expiry" },
+    h("option", { value: "30" }, "30 days"),
+    h("option", { value: "90", selected: true }, "90 days"),
+    h("option", { value: "365" }, "1 year"),
+    h("option", { value: "0" }, "Never"),
+  );
+  const create = h("button", { type: "submit", class: "btn primary" }, "Create token");
+  const form = h(
+    "form",
+    { class: "token-create", id: "api-token-form", novalidate: true },
+    h("h3", {}, "Create an API token"),
+    name.wrap,
+    h("fieldset", {}, h("legend", {}, "Permissions"), ...scopeInputs.map((x) => x.label)),
+    h("label", { for: "api-token-expiry" }, "Expires after"),
+    expiry,
+    h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
+    status,
+    create,
+  );
+  const refresh = async (): Promise<void> => {
+    try {
+      const result = await api.get<{ tokens: api.ApiTokenInfo[] }>("/api/v1/tokens");
+      rows.replaceChildren();
+      for (const token of result.tokens) {
+        const revoke = h("button", { class: "btn small", type: "button", "aria-label": `Revoke ${token.name}` }, "Revoke");
+        revoke.addEventListener("click", async () => {
+          revoke.disabled = true;
+          try {
+            await api.del(`/api/v1/tokens/${encodeURIComponent(token.name)}`);
+            status.textContent = `Token ${token.name} revoked.`;
+            await refresh();
+          } catch (err) {
+            revoke.disabled = false;
+            status.textContent = err instanceof api.ApiError ? err.message : "Could not revoke token.";
+          }
+        });
+        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, `Last used ${token.last_used ? new Date(token.last_used).toLocaleString() : "never"}`), revoke));
+      }
+      if (!result.tokens.length) rows.append(h("li", { class: "muted" }, "No API tokens yet."));
+    } catch (err) {
+      rows.replaceChildren(h("li", { class: "form-error", role: "alert" }, err instanceof api.ApiError ? err.message : "Could not load API tokens."));
+    }
+  };
+  oneTime.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-copy-token]");
+    if (button) {
+      const secret = oneTime.querySelector("code")?.textContent ?? "";
+      if (!navigator.clipboard) status.textContent = "Clipboard access is unavailable in this browser.";
+      else void navigator.clipboard.writeText(secret).then(() => { status.textContent = "Token copied."; });
+    }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    status.textContent = "";
+    const scopes = scopeInputs.filter((x) => x.input.checked).map((x) => x.scope);
+    if (!name.input.value.trim() || !scopes.length) {
+      status.textContent = "Enter a name and select at least one permission.";
+      return;
+    }
+    create.disabled = true;
+    try {
+      const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", {
+        name: name.input.value.trim(), scopes, expires_days: Number(expiry.value),
+      });
+      oneTime.hidden = false;
+      oneTime.replaceChildren(
+        h("p", {}, `Copy this secret for ${created.token.name}. It will not be shown again.`),
+        h("pre", {}, h("code", {}, created.secret)),
+        h("button", { type: "button", class: "btn", "data-copy-token": "" }, "Copy token"),
+      );
+      status.textContent = `Token ${created.token.name} created.`;
+      name.input.value = "";
+      await refresh();
+    } catch (err) {
+      status.textContent = err instanceof api.ApiError ? err.message : "Could not create token.";
+    } finally {
+      create.disabled = false;
+    }
+  });
+  section.append(h("h2", { id: "api-tokens-title" }, "API tokens"), h("p", { class: "muted" }, "Use tokens for scripts and tools. Grant only the permissions they need."), rows, form, oneTime);
+  void refresh();
+  return section;
+}
+
 export function account(root: HTMLElement, opts: AccountOpts): () => void {
   const me = opts.me;
   const policy = me?.password_policy ?? DEFAULT_POLICY;
@@ -79,6 +176,6 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
     h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "account-signout", onclick: opts.signOut }, "Sign out")),
     exp ? h("p", { class: "muted small" }, `That is ${relFromMs(exp.getTime()).replace("in ", "in about ")}.`) : null,
   );
-  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form));
+  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement());
   return () => {};
 }

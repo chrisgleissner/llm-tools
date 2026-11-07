@@ -1,0 +1,28 @@
+# Sanitized Codex TUI screen while a structured question (request_user_input) is pending.
+# Captured 2026-11-06 with tmux capture-pane from a native Bridge mission; paths and addresses generic.
+
+State 1: question collapsed under the composer (provider idle, waiting):
+
+• Queued follow-up inputs
+  ? 1 question
+    shift+← to answer
+› Ask Codex to do anything
+  GPT-6-Luna high · ~/dev/<worktree> · <branch>
+  ? for shortcuts
+
+State 2: after shift+Left, the question is expanded:
+
+• Queued follow-up inputs
+  Please unplug the Pi's data/power USB cable, wait 10 seconds, and reconnect it. It stopped answering on Wi-Fi
+  after the requested DHCP renewal; its hostname change is saved, but the interface has not returned. I cannot
+  switch USB power under the mission's power rule. Reply when it is powered again.
+  › 1. I'll reconnect it now
+    2. I can't reconnect it right now
+    3. Other
+  enter submit   ^] skip   shift+→ main prompt
+
+With two questions the header reads "? 2 questions" and the expanded view shows "1 of 2" above the question title,
+and the hint line adds "shift+← next question". While the provider is still working the composer area shows
+"• Working (... • esc to interrupt)" above "• Queued follow-up inputs".
+Codex also records each pending question in its session JSONL (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) as a
+request_user_input tool call; prefer that structured source over screen scraping where the session file is known.

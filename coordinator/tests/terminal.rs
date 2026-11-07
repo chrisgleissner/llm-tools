@@ -247,7 +247,7 @@ async fn browser_upgrade_is_authenticated_and_origin_checked() {
     env.srv
         .state
         .db
-        .token_create("ci", &bridge_coordinator::auth::sha256_hex(bearer), None)
+        .token_create_scoped("ci", &bridge_coordinator::auth::sha256_hex(bearer), None, &["terminal:view".into()])
         .unwrap();
     let mut b = env.ws(q, &[("authorization", &format!("Bearer {bearer}"))]).await.expect("token upgrade");
     let open = control(&mut fw, "terminal.open").await;

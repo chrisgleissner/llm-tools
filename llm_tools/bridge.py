@@ -820,7 +820,7 @@ def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) ->
             elif args.task_action == "reorder":
                 payload.update(action="task.reorder", order=args.value)
             elif args.task_action == "dependencies":
-                payload.update(action="task.dependency", depends_on=int(store.task_by_ordinal(args.mission, args.add)["id"]))
+                payload.update(action="task.dependency", depends_on_number=args.add)
             else:
                 payload["action"] = "task." + args.task_action
             params = {name: value for name, value in payload.items() if name != "action"}
@@ -1570,6 +1570,9 @@ def _build_parser(
     mission_set.add_argument("--token-spend", choices=("low", "medium", "high"), help="set token spend preference")
     mission_set.add_argument("--suspend-when-rate-limited", choices=("on", "off"), help="on: suspend at an idle capacity wait when no Bridge operation is active; off: wait awake (default)")
     _add_json_arg(mission_set)
+    mission_settings = mission_sub.add_parser("settings", help="show a mission's saved execution settings")
+    _add_mission_arg(mission_settings, default_mission)
+    _add_json_arg(mission_settings)
     colour = mission_sub.add_parser("colour", aliases=["color"], help="pin the mission's identity colour (1-8) or return to the automatic one")
     _add_mission_arg(colour, default_mission)
     colour.add_argument("value", metavar="N|auto", help=f"colour number 1-{MISSION_COUNT} ({', '.join(f'{n} {name}' for n, name in enumerate(MISSION_HUE_NAMES, 1))}) or auto")
@@ -1578,6 +1581,10 @@ def _build_parser(
     status = sub.add_parser("status")
     _add_mission_arg(status, default_mission)
     _add_json_arg(status)
+
+    screen = sub.add_parser("screen", help="read a bounded snapshot of a native provider's current screen")
+    _add_mission_arg(screen, default_mission)
+    _add_json_arg(screen)
 
     agents = sub.add_parser("agents", help="inspect live Bridge provider operations and native Codex child agents")
     agent_scope = agents.add_mutually_exclusive_group()
@@ -1737,12 +1744,16 @@ def _build_parser(
     worker = sub.add_parser("worker", help="optional: connect this host to a Bridge coordinator (off unless enrolled and run)")
     worker_sub = worker.add_subparsers(dest="worker_action", required=True)
     worker_enroll = worker_sub.add_parser("enroll", help="store the coordinator URL, CA and worker token for this host")
-    worker_enroll.add_argument("--name", required=True, help="worker name used as the remote target, for example workstation")
+    worker_enroll.add_argument("--name", help="worker name used as the remote target (default: short host name)")
     worker_enroll.add_argument("--coordinator", required=True, metavar="URL", help="coordinator base URL, for example wss://bridge.home.arpa:8443 (https:// is accepted for the same coordinator)")
     worker_enroll.add_argument("--token-file", required=True, metavar="PATH", help="file holding the worker token printed by the coordinator ('-' reads stdin)")
     worker_enroll.add_argument("--ca-file", metavar="PATH", help="coordinator CA certificate (PEM); default: the system trust store")
     worker_enroll.add_argument("--allow-control", action="store_true", help="accept mutating remote commands and terminal input; without it the worker is read-only remotely")
     worker_enroll.add_argument("--allow-terminal-view", action="store_true", help="let a read-only worker stream its mission terminals for viewing (implied by --allow-control)")
+    worker_enroll.add_argument("--allow-create", action="store_true", help="allow remote mission creation (requires a path inside an enrolled --allow-root)")
+    worker_enroll.add_argument("--allow-root", action="append", default=[], metavar="DIR", help="canonical directory allowed for remote creation and restore inputs; repeat as needed")
+    worker_enroll.add_argument("--allow-power", action="store_true", help="allow remote machine power operations")
+    worker_enroll.add_argument("--allow-restore", action="store_true", help="allow remote restore operations (requires an enrolled --allow-root)")
     _add_json_arg(worker_enroll)
     worker_status = worker_sub.add_parser("status", help="show this host's enrolment without the token")
     _add_json_arg(worker_status)
@@ -2425,6 +2436,108 @@ def _stop_terminal_mission_station(mission_id: str) -> dict[str, Any]:
         lock.release()
 
 
+def _force_stop_mission(mission_id: str) -> dict[str, Any]:
+    """Terminate only the controller and provider processes owned by this mission."""
+    with open_store() as store:
+        saved_status = str(store.get_mission(mission_id)["status"])
+    if saved_status == "CREATED":
+        # A mission that never started has nothing to force; stop never cancels.
+        return {"mission_status": saved_status, "noop": True, "detail": fmt.nothing_to_stop(mission_id, saved_status)}
+    provider_stopped = False
+    runtime = state_dir() / "runtime" / f"mission-{mission_id}"
+    with open_store() as store:
+        mission = store.get_mission(mission_id)
+        if mission["status"] in STARTED_MISSION_STATUSES:
+            store.set_mission_status(mission_id, "STOPPING")
+        from .bridge_runtime import provider_operations_to_check
+
+        # Includes UNCERTAIN operations that kept a process identity, so a second `stop --force`
+        # retries a termination that failed the first time.
+        operations = provider_operations_to_check(store, mission_id)
+        store.reconcile_interrupted_operations(mission_id, cause="stop-force")
+    # Verifiers use their own process groups. Stop those validated
+    # identities before terminating the controller that owns them.
+    from .bridge_runtime import terminate_managed_processes
+
+    with open_store() as store:
+        terminate_managed_processes(store, mission_id)
+    try:
+        from .terminal import TmuxTerminalBackend
+
+        backend = TmuxTerminalBackend()
+        handle = _load_handle(mission_id)
+    except (OSError, RuntimeError):
+        backend = None
+        handle = None  # type: ignore[assignment]  # checked on the next line
+    if handle is not None and backend is not None:
+        provider_stopped = any(operation["status"] != "UNCERTAIN" for operation in operations)
+        backend.stop(handle)
+    elif operations:
+        from .bridge_runtime import _process_start_token, _terminate_owned_process_group
+
+        for operation in operations:
+            process_pid = operation.get("process_pid")
+            process_start = operation.get("process_start")
+            current_token = _process_start_token(int(process_pid)) if process_pid else ""
+            if process_pid and process_start and current_token and current_token != str(process_start):
+                continue  # the recorded provider is gone and its PID was reused: nothing to signal
+            if not process_pid:
+                # No provider process was ever recorded (the operation is still
+                # waiting to launch); the controller is stopped below.
+                continue
+            if not process_start:
+                raise RuntimeError(
+                    f"could not confirm that provider process {process_pid} belongs to this mission; "
+                    f"it was left running. Check with: ps -p {process_pid}"
+                )
+            provider_stopped = True
+            _terminate_owned_process_group(int(process_pid), str(process_start))
+    # Stopping provider work and the tmux station is not enough:
+    # the detached controller itself owns the mission lock and
+    # must be terminated before STOPPED is authoritative.
+    ready = runtime / "controller-ready.json"
+    try:
+        controller = json.loads(ready.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        controller = {}
+    # The identity the controller wrote into its lock file while
+    # holding it wins: the ready file can be missing or stale.
+    controller = MissionLock.read_owner(state_dir() / "locks", mission_id) or controller
+    controller_pid = int(controller.get("pid", 0) or 0)
+    controller_start = str(controller.get("process_start", ""))
+    if controller_pid > 1 and controller_start:
+        from .bridge_runtime import _process_start_token, _terminate_owned_process_group
+
+        current_start = _process_start_token(controller_pid)
+        reused = bool(current_start) and current_start != controller_start
+        if reused and MissionLock.is_held(state_dir() / "locks", mission_id):
+            # The PID is someone else's, yet a process still owns the mission: its identity is unknown.
+            raise RuntimeError("controller PID no longer matches its persisted identity; mission remains STOPPING")
+        if current_start and not reused:
+            _terminate_owned_process_group(controller_pid, controller_start)
+    # The lock, not the ready file, is the controller-liveness
+    # authority. Do not claim STOPPED until ownership is released.
+    deadline = time.monotonic() + 3.0
+    released = False
+    while time.monotonic() < deadline:
+        lock = MissionLock(state_dir() / "locks", mission_id)
+        try:
+            lock.acquire()
+        except BlockingIOError:
+            time.sleep(0.05)
+            continue
+        else:
+            lock.release()
+            released = True
+            break
+    if not released:
+        raise RuntimeError("controller still owns the mission lock; mission remains STOPPING")
+    with open_store() as store:
+        if store.get_mission(mission_id)["status"] == "STOPPING":
+            store.set_mission_status(mission_id, "STOPPED")
+        return {"mission": store.get_mission(mission_id), "no_provider_process": not provider_stopped}
+
+
 def _task_text(args: argparse.Namespace) -> Callable[[Any], str]:
     action = args.task_action
     if action == "list":
@@ -2602,17 +2715,18 @@ def _worker_command(args: argparse.Namespace) -> int:
     if args.worker_action == "enroll":
         token = read_verbatim(args.token_file, "--token-file").strip()
         ca_pem = read_verbatim(args.ca_file, "--ca-file") if args.ca_file else None
-        config = worker.enroll(args.name, _coordinator_url(args.coordinator, "wss"), token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
-                               allow_terminal_view=bool(args.allow_terminal_view))
+        config = worker.enroll(args.name or worker.default_worker_name(), _coordinator_url(args.coordinator, "wss"), token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
+                               allow_terminal_view=bool(args.allow_terminal_view), allow_create=bool(args.allow_create),
+                               allow_roots=tuple(args.allow_root), allow_power=bool(args.allow_power), allow_restore=bool(args.allow_restore))
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
                       f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
         return 0
     if args.worker_action == "status":
-        _print_result(worker.load_config().public(), args.json, lambda value: "\n".join(f"{key}: {value[key]}" for key in sorted(value)))
+        _print_result(worker.status_public(), args.json, _format_worker_status)
         return 0
     if args.worker_action == "audit":
-        entries = worker.read_audit(args.limit)
-        _print_result({"entries": entries}, args.json, lambda value: "\n".join(
+        result = commands.dispatch(commands.CommandRequest("worker.audit", {"limit": args.limit}))
+        _print_result(result, args.json, lambda value: "\n".join(
             " ".join([str(entry.get("ts", "?")), str(entry.get("action", "?"))] + [f"{key}={entry[key]}" for key in sorted(entry) if key not in {"ts", "action"} and entry[key] is not None])
             for entry in value["entries"]) or "No worker audit entries.")
         return 0
@@ -2658,6 +2772,28 @@ def _coordinator_url(raw: str, scheme: str) -> str:
     if separator and head.lower() in {"https", "wss"}:
         return f"{scheme}://{rest.rstrip('/')}"
     return text
+
+
+def _format_worker_status(value: dict[str, Any]) -> str:
+    connection = {
+        "connected": "connected to the coordinator",
+        "disconnected": "disconnected from the coordinator",
+        "last-connected": "last connection ended or is unavailable",
+        "not-connected": "not connected yet",
+    }.get(str(value.get("connection_state")), "connection state unknown")
+    lines = [f"Worker {value.get('name', 'unknown')} · {connection}", f"Coordinator: {value.get('coordinator_url', 'unknown')}"]
+    last_connected = value.get("last_connected_at")
+    if last_connected:
+        lines.append(f"Last connected: {last_connected}")
+    lines.append(f"Worker service: {value.get('service_state', 'unknown')}")
+    lines.append(f"Remote access: {'control and terminal' if value.get('allow_control') else 'read-only'}")
+    lines.append(f"Remote creation: {'allowed' if value.get('allow_create') else 'disabled'}")
+    roots = value.get("allow_root", [])
+    lines.append("Allowed roots: " + (", ".join(str(root) for root in roots) if roots else "none"))
+    lines.append(f"Remote power: {'allowed' if value.get('allow_power') else 'disabled'}")
+    lines.append(f"Remote restore: {'allowed' if value.get('allow_restore') else 'disabled'}")
+    lines.append(f"Worker ID: {str(value.get('worker_id', ''))[:8]}")
+    return "\n".join(lines)
 
 
 def _remote_command(args: argparse.Namespace) -> int:
@@ -2860,6 +2996,20 @@ def _main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(source)
                 return 0
             return run_document(source, title=f"Artifact · {path.name}", path=path, follow=args.follow)
+        if args.command == "screen":
+            from .terminal import TmuxTerminalBackend
+
+            handle = _load_handle(args.mission)
+            content = TmuxTerminalBackend().capture(handle, pane="provider")
+            all_lines = content.splitlines()
+            lines = all_lines[-200:]
+            clipped = [line[:1000] for line in lines]
+            captured = "\n".join(clipped)
+            if args.json:
+                print(json.dumps({"schema_version": 1, "mission_id": args.mission, "screen": captured, "truncated": len(all_lines) > 200 or any(len(line) > 1000 for line in lines)}, ensure_ascii=False))
+            else:
+                print(captured)
+            return 0
         if args.command == "_controller":
             from .bridge_runtime import run_controller
             from .bridge_logs import capture_process_output
@@ -3006,23 +3156,20 @@ def _main(argv: list[str] | None = None) -> int:
             return _print_missions(args)
         if args.command == "gc":
             from . import bridge_switcher
-
-            with open_store() as store:
-                entries = bridge_switcher.collect_entries(store)
-            results = bridge_switcher.gc_stations(entries)
+            result = commands.dispatch(commands.CommandRequest("worker.gc"))
             if args.json:
-                _json_print(bridge_switcher.gc_json(results))
+                _json_print(result)
             else:
-                print(bridge_switcher.format_gc(results))
+                print(bridge_switcher.format_gc(result["stations"]))
             return 0
         if args.command == "finish":
-            from .bridge_finish import FinishError, finish_mission
+            from .bridge_finish import FinishError
 
             try:
-                finished = finish_mission(args.mission)
+                finished = commands.dispatch(commands.CommandRequest("mission.finish", mission_id=args.mission))
             except FinishError as exc:
                 return _fail(str(exc), "wrong-state", EXIT_WRONG_STATE, args.json)
-            _print_result(finished.as_json(), args.json, lambda value: value["detail"])
+            _print_result(finished, args.json, lambda value: value["detail"])
             return 0
         if args.command == "mission":
             if args.mission_action == "list" and not args.json:
@@ -3033,19 +3180,24 @@ def _main(argv: list[str] | None = None) -> int:
                     _warn_existing_folder_mission(store, args)
                     result = _create_mission_with_task(store, args, prompt, config)
                 elif args.mission_action == "set":
-                    if not any((args.auto_continue, args.teams, args.token_spend, args.suspend_when_rate_limited)):
-                        raise ValueError("mission set requires --auto-continue, --teams, --token-spend, or --suspend-when-rate-limited")
-                    result = {"schema_version": 1, "mission_id": args.mission}
-                    if args.auto_continue is not None:
-                        result.update(_set_mission_auto_continue(store, args.mission, args.auto_continue == "on"))
-                    if args.teams is not None or args.token_spend is not None:
-                        result.update(_set_mission_policy(store, args.mission, teams=args.teams, token_spend=args.token_spend))
-                    if args.suspend_when_rate_limited is not None:
-                        result.update(_set_mission_suspend_when_rate_limited(store, args.mission, args.suspend_when_rate_limited == "on"))
+                    result = commands.dispatch(commands.CommandRequest("mission.settings.patch", {
+                        "auto_continue": None if args.auto_continue is None else args.auto_continue == "on",
+                        "teams": None if args.teams is None else args.teams == "on",
+                        "token_spend": args.token_spend,
+                        "suspend_when_rate_limited": None if args.suspend_when_rate_limited is None else args.suspend_when_rate_limited == "on",
+                        "colour": None,
+                    }, mission_id=args.mission))
                     _print_result(result, bool(getattr(args, "json", False)), lambda value: value["detail"])
                     return 0
+                elif args.mission_action == "settings":
+                    result = commands.dispatch(commands.CommandRequest("mission.settings.get", mission_id=args.mission))
+                    _print_result(result, bool(getattr(args, "json", False)), lambda value: f"Auto-continue {'on' if value['auto_continue'] else 'off'} · capacity-wait suspend {'on' if value['suspend_when_rate_limited'] else 'off'} · teams {'on' if value['execution_policy']['teams_enabled'] else 'off'} · token spend {value['execution_policy']['token_spend']}")
+                    return 0
                 elif args.mission_action in {"colour", "color"}:
-                    result = _set_mission_colour(store, args.mission, args.value)
+                    result = commands.dispatch(commands.CommandRequest("mission.settings.patch", {
+                        "auto_continue": None, "teams": None, "token_spend": None,
+                        "suspend_when_rate_limited": None, "colour": args.value,
+                    }, mission_id=args.mission))
                     _print_result(result, bool(getattr(args, "json", False)), fmt.format_mission_colour)
                     return 0
                 else:
@@ -3062,13 +3214,12 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, fmt.format_status)
             return 0
         if args.command == "agents":
-            from .bridge_agents import build_agent_map, format_agent_map
+            from .bridge_agents import format_agent_map
 
-            with open_store(readonly=True) as store:
-                agent_mission = args.agent_mission
-                if _managed_session() and not args.agent_all_missions and agent_mission is None:
-                    agent_mission = os.environ.get(MANAGED_MISSION_ENV)
-                result = build_agent_map(store, mission_id=agent_mission)
+            agent_mission = args.agent_mission
+            if _managed_session() and not args.agent_all_missions and agent_mission is None:
+                agent_mission = os.environ.get(MANAGED_MISSION_ENV)
+            result = commands.dispatch(commands.CommandRequest("mission.agents", {"mission": agent_mission}))
             if args.json:
                 _json_print(result)
             else:
@@ -3094,21 +3245,20 @@ def _main(argv: list[str] | None = None) -> int:
                 if args.proposal_action == "list":
                     result = commands.dispatch(commands.CommandRequest("proposal.list", {"status": args.status, "limit": args.limit, "after": args.after}, mission_id=args.mission))
                 elif args.proposal_action in {"accept", "reject"}:
-                    result = commands.dispatch(commands.CommandRequest("proposal.decide", {
-                        "task_number": int(args.task), "accept": args.proposal_action == "accept", "reason": str(getattr(args, "reason", "") or ""),
+                    result = commands.dispatch(commands.CommandRequest(f"proposal.{args.proposal_action}", {
+                        "task_number": int(args.task), "task_id": None, "reason": str(getattr(args, "reason", "") or ""),
                     }, mission_id=args.mission))
+                    # Keep the established CLI JSON envelope while the shared typed
+                    # operation itself returns the task result used by REST/workers.
+                    result = {"status": "APPLIED", "result": result}
                 else:
                     prompt = prompt_from(args)
-                    payload = {
-                        "action": "task.propose",
-                        "source_operation_id": args.source_operation_id,
-                        "prompt": prompt,
-                        "title": args.title,
-                        "priority": args.priority,
-                        "depends_on": _dependency_ids(store, args.mission, args.depends_on),
+                    result = commands.dispatch(commands.CommandRequest("proposal.create", {
+                        "source_operation_id": args.source_operation_id, "prompt": prompt, "title": args.title,
+                        "priority": args.priority, "depends_on": _dependency_ids(store, args.mission, args.depends_on),
                         "acceptance": args.acceptance,
-                    }
-                    result = _apply_operator_command(store, args.mission, payload)
+                    }, mission_id=args.mission))
+                    result = {"status": "APPLIED", "result": result}
             if isinstance(result, dict) and result.get("status") == "REJECTED":
                 return _fail_rejected(result, "proposal command rejected", bool(getattr(args, "json", False)))
             if args.proposal_action == "list" and isinstance(result, dict):
@@ -3154,103 +3304,8 @@ def _main(argv: list[str] | None = None) -> int:
                 saved_status = str(saved["status"])
             if args.command == "cancel" and saved_status not in FINISHED_MISSION_STATUSES and not _confirm_cancel(args, fmt.short_id(args.mission), fmt.clipped_name(saved.get("name", ""))):
                 return 2
-            if args.command == "stop" and args.force and saved_status == "CREATED":
-                # A mission that never started has nothing to force; stop never cancels.
-                result = {"mission_status": saved_status, "noop": True, "detail": fmt.nothing_to_stop(args.mission, saved_status)}
-            elif args.command == "stop" and args.force:
-                provider_stopped = False
-                runtime = state_dir() / "runtime" / f"mission-{args.mission}"
-                with open_store() as store:
-                    mission = store.get_mission(args.mission)
-                    if mission["status"] in STARTED_MISSION_STATUSES:
-                        store.set_mission_status(args.mission, "STOPPING")
-                    from .bridge_runtime import provider_operations_to_check
-
-                    # Includes UNCERTAIN operations that kept a process identity, so a second `stop --force`
-                    # retries a termination that failed the first time.
-                    operations = provider_operations_to_check(store, args.mission)
-                    store.reconcile_interrupted_operations(args.mission, cause="stop-force")
-                # Verifiers use their own process groups. Stop those validated
-                # identities before terminating the controller that owns them.
-                from .bridge_runtime import terminate_managed_processes
-
-                with open_store() as store:
-                    terminate_managed_processes(store, args.mission)
-                try:
-                    from .terminal import TmuxTerminalBackend
-
-                    backend = TmuxTerminalBackend()
-                    handle = _load_handle(args.mission)
-                except (OSError, RuntimeError):
-                    backend = None
-                    handle = None  # type: ignore[assignment]  # checked on the next line
-                if handle is not None and backend is not None:
-                    provider_stopped = any(operation["status"] != "UNCERTAIN" for operation in operations)
-                    backend.stop(handle)
-                elif operations:
-                    from .bridge_runtime import _process_start_token, _terminate_owned_process_group
-
-                    for operation in operations:
-                        process_pid = operation.get("process_pid")
-                        process_start = operation.get("process_start")
-                        current_token = _process_start_token(int(process_pid)) if process_pid else ""
-                        if process_pid and process_start and current_token and current_token != str(process_start):
-                            continue  # the recorded provider is gone and its PID was reused: nothing to signal
-                        if not process_pid:
-                            # No provider process was ever recorded (the operation is still
-                            # waiting to launch); the controller is stopped below.
-                            continue
-                        if not process_start:
-                            raise RuntimeError(
-                                f"could not confirm that provider process {process_pid} belongs to this mission; "
-                                f"it was left running. Check with: ps -p {process_pid}"
-                            )
-                        provider_stopped = True
-                        _terminate_owned_process_group(int(process_pid), str(process_start))
-                # Stopping provider work and the tmux station is not enough:
-                # the detached controller itself owns the mission lock and
-                # must be terminated before STOPPED is authoritative.
-                ready = runtime / "controller-ready.json"
-                try:
-                    controller = json.loads(ready.read_text(encoding="utf-8"))
-                except (OSError, ValueError, json.JSONDecodeError):
-                    controller = {}
-                # The identity the controller wrote into its lock file while
-                # holding it wins: the ready file can be missing or stale.
-                controller = MissionLock.read_owner(state_dir() / "locks", args.mission) or controller
-                controller_pid = int(controller.get("pid", 0) or 0)
-                controller_start = str(controller.get("process_start", ""))
-                if controller_pid > 1 and controller_start:
-                    from .bridge_runtime import _process_start_token, _terminate_owned_process_group
-
-                    current_start = _process_start_token(controller_pid)
-                    reused = bool(current_start) and current_start != controller_start
-                    if reused and MissionLock.is_held(state_dir() / "locks", args.mission):
-                        # The PID is someone else's, yet a process still owns the mission: its identity is unknown.
-                        raise RuntimeError("controller PID no longer matches its persisted identity; mission remains STOPPING")
-                    if current_start and not reused:
-                        _terminate_owned_process_group(controller_pid, controller_start)
-                # The lock, not the ready file, is the controller-liveness
-                # authority. Do not claim STOPPED until ownership is released.
-                deadline = time.monotonic() + 3.0
-                released = False
-                while time.monotonic() < deadline:
-                    lock = MissionLock(state_dir() / "locks", args.mission)
-                    try:
-                        lock.acquire()
-                    except BlockingIOError:
-                        time.sleep(0.05)
-                        continue
-                    else:
-                        lock.release()
-                        released = True
-                        break
-                if not released:
-                    raise RuntimeError("controller still owns the mission lock; mission remains STOPPING")
-                with open_store() as store:
-                    if store.get_mission(args.mission)["status"] == "STOPPING":
-                        store.set_mission_status(args.mission, "STOPPED")
-                    result = {"mission": store.get_mission(args.mission), "no_provider_process": not provider_stopped}
+            if args.command == "stop" and args.force:
+                result = commands.dispatch(commands.CommandRequest("mission.stop", {"force": True}, mission_id=args.mission))
             else:
                 result = commands.dispatch(commands.CommandRequest(f"mission.{args.command}", mission_id=args.mission))
                 if result.get("status") == "REJECTED":
@@ -3318,21 +3373,21 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("station", value, args.mission))
             return 0
         if args.command == "rotation":
-            result = _rotation_result(args)
+            params = {"set": args.set_list, "routes": args.routes, "providers": args.providers}
+            operation = "mission.rotation.put" if any(value is not None for value in params.values()) else "mission.rotation.get"
+            if operation == "mission.rotation.get":
+                params = {}
+            else:
+                params = {key: value for key, value in params.items() if value is not None}
+            result = commands.dispatch(commands.CommandRequest(operation, params, mission_id=args.mission))
             _print_result(result, args.json, fmt.format_rotation)
             return 0
         if args.command == "steer":
             prompt = read_verbatim(args.prompt_file) if args.prompt_file else str(args.prompt or "")
-            with open_store() as store:
-                named = args.task is not None or args.task_by_id is not None
-                steer_task_id = int(_resolve_task(store, args.mission, args.task, args.task_by_id)["id"]) if named else None
-                result = _apply_operator_command(store, args.mission, {
-                    "action": "steer",
-                    "kind": args.kind,
-                    "task_id": steer_task_id,
-                    "route": args.route,
-                    "prompt": prompt,
-                })
+            result = commands.dispatch(commands.CommandRequest("mission.steer", {
+                "kind": args.kind, "task": args.task, "task_id": args.task_by_id,
+                "route": args.route, "prompt": prompt,
+            }, mission_id=args.mission))
             if result.get("status") == "REJECTED":
                 return _fail_rejected(result, "steering rejected", args.json)
             _print_result(result, args.json, lambda value: fmt.format_command_receipt("steer", value, args.mission))

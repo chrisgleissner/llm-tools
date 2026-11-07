@@ -36,6 +36,19 @@ def test_needs_you_row_is_unchanged_without_a_hold_and_for_other_verifying_tasks
     ]
 
 
+def test_needs_you_explains_how_to_answer_a_codex_queued_question() -> None:
+    snapshot = {
+        "mission": {"id": "mission-123"},
+        "provider_wait": {
+            "provider": "Codex", "question_count": 2,
+            "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
+        },
+    }
+    assert bridge_tui._needs_you_rows(snapshot) == [
+        "Codex asks: Choose a path — choices: 1. Proceed; 2. Wait — take control of the terminal to answer: llm-bridge attach --mission mission-123"
+    ]
+
+
 def test_status_strip_shows_the_review_hold_and_degrades_to_fit() -> None:
     text, role = bridge_tui._status_strip(holding_snapshot(), 0)
     assert text == "task 1 awaits your review · /approve 1 · /reject 1 reason · /continue" and role == "warn"

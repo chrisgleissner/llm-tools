@@ -1,19 +1,22 @@
 import * as api from "../api";
 import type { BridgeEvent, MissionEntry } from "../api";
-import { emptyState, h, keepFocus, relTime, timeEl } from "../dom";
+import { button, emptyState, h, keepFocus, relTime, timeEl } from "../dom";
 import { icon, type IconName } from "../icons";
+import { currentWorkSummary } from "../current-work";
 import { onStream, store, subscribe, worker, workerState } from "../store";
+import { humanizeEvent, isPlumbing, transitionSummary } from "../event-humanizer";
 
 const MAX_SNAPSHOTS = 12;
 const ACTIVE = new Set(["CREATED", "RUNNING", "PAUSED", "STOPPING"]);
-const NOISE = /heartbeat|refresh|progress|prompt-assembled|controller-(mode|config|ownership)|command-(queued|applied)|plumbing|operation-(process|prepared)|station-observation|events-pruned/;
+
 
 interface Snapshot {
   worker: string;
   id: string;
   name: string;
   counts: Record<string, number>;
-  needs: { kind?: string; tasks?: number[] } | null;
+  needs: { kind?: string; tasks?: number[]; message?: string } | null;
+  nowDoing: string;
 }
 
 interface ActivityItem {
@@ -24,10 +27,6 @@ interface ActivityItem {
 const link = (e: { worker: string; id: string; name: string }) => h("a", { href: `/missions/${encodeURIComponent(e.worker)}/${encodeURIComponent(e.id)}` }, e.name || e.id);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-export function humanKind(kind: string): string {
-  const t = kind.replace(/[-_.]/g, " ");
-  return t.charAt(0).toUpperCase() + t.slice(1);
-}
 
 export function overview(root: HTMLElement): () => void {
   const body = h("div", {});
@@ -39,6 +38,9 @@ export function overview(root: HTMLElement): () => void {
   let checked = 0;
   let eligible = 0;
   let activity: ActivityItem[] = [];
+  let liveActivity: ActivityItem[] = [];
+  let liveEventId = 0;
+  let showPlumbing = false;
   let activityLoaded = false;
   let disposed = false;
   let lastKey = "";
@@ -62,9 +64,8 @@ export function overview(root: HTMLElement): () => void {
         const i = next++;
         const m = picked[i] as MissionEntry;
         try {
-          const row = await api.command(m.worker, "mission.status", m.mission.id, {}, 8000);
-          const r = (row.result?.result ?? {}) as { task_counts?: Record<string, number>; needs_you?: Snapshot["needs"] };
-          results[i] = { worker: m.worker, id: m.mission.id, name: m.mission.name, counts: r.task_counts ?? {}, needs: r.needs_you ?? null };
+          const r = await api.missionStatus(m.worker, m.mission.id);
+          results[i] = { worker: m.worker, id: m.mission.id, name: m.mission.name, counts: (r["task_counts"] as Record<string, number> | undefined) ?? {}, needs: (r["needs_you"] as Snapshot["needs"]) ?? m.mission.needs_you ?? null, nowDoing: currentWorkSummary(r) };
         } catch {
           results[i] = null;
         }
@@ -87,37 +88,51 @@ export function overview(root: HTMLElement): () => void {
         try {
           const after = Math.max(0, w.event_cursor - 80);
           const r = await api.get<{ events: Array<{ id: number; event: BridgeEvent }> }>(`/api/v1/events?worker=${encodeURIComponent(w.name)}&after=${after}&limit=200`);
-          for (const x of r.events) if (!NOISE.test(x.event.kind)) items.push({ worker: w.name, event: { ...x.event, id: x.id } });
+          for (const x of r.events) items.push({ worker: w.name, event: { ...x.event, id: x.id } });
         } catch {
           /* the list simply stays shorter */
         }
       }),
     );
     if (disposed) return;
-    activity = items.sort((a, b) => Date.parse(b.event.created_at) - Date.parse(a.event.created_at) || b.event.id - a.event.id).slice(0, 8);
+    activity = [...liveActivity, ...items].sort((a, b) => Date.parse(b.event.created_at) - Date.parse(a.event.created_at) || b.event.id - a.event.id).slice(0, 80);
     activityLoaded = true;
     render();
   }
 
   function attention(): HTMLElement {
-    const rows: Array<{ level: "warn" | "bad"; icon: IconName; text: Array<Node | string>; id: string }> = [];
+    const rows: HTMLElement[] = [];
     for (const s of snapshots) {
       const approvals = (s.counts["VERIFYING"] ?? 0) + (s.needs?.kind === "approval" && !s.counts["VERIFYING"] ? (s.needs.tasks?.length ?? 0) : 0);
-      if (approvals) rows.push({ level: "warn", icon: "clock", id: "approval", text: [`${plural(approvals, "task")} waiting for approval in `, link(s)] });
-      if (s.counts["FAILED"]) rows.push({ level: "bad", icon: "alert", id: "failed-task", text: [`${plural(s.counts["FAILED"], "failed task")} in `, link(s)] });
-      if (s.counts["BLOCKED"]) rows.push({ level: "warn", icon: "ban", id: "blocked-task", text: [`${plural(s.counts["BLOCKED"], "blocked task")} in `, link(s)] });
-      if (s.needs && s.needs.kind === "capacity") rows.push({ level: "warn", icon: "usage", id: "capacity", text: ["Provider capacity is limiting ", link(s)] });
+      const details: Array<{ id: string; text: string }> = [];
+      if (approvals) details.push({ id: "approval", text: `${plural(approvals, "task")} waiting for approval` });
+      if (s.counts["FAILED"]) details.push({ id: "failed-task", text: plural(s.counts["FAILED"], "failed task") });
+      if (s.counts["BLOCKED"]) details.push({ id: "blocked-task", text: plural(s.counts["BLOCKED"], "blocked task") });
+      if (s.needs?.kind === "capacity") details.push({ id: "capacity", text: "Provider capacity is limiting this mission" });
+      if (s.needs?.kind === "provider") details.push({ id: "provider-wait", text: s.needs.message ?? "A provider is waiting for your input" });
+      if (details.length) {
+        const severe = Boolean(s.counts["FAILED"]);
+        const mainIcon: IconName = s.needs?.kind === "provider" ? "terminal" : severe ? "alert" : approvals ? "clock" : s.needs?.kind === "capacity" ? "usage" : "ban";
+        rows.push(h("li", { class: severe ? "bad" : "warn", "data-attention": "mission" },
+          icon(mainIcon, 20),
+          h("span", { class: "attention-details" }, ...details.map((item, i) => item.id === "provider-wait" || i === details.length - 1
+            ? h("span", { "data-attention": item.id }, item.text, " in ", link(s))
+            : h("span", { "data-attention": item.id }, item.text, ", "))),
+        ));
+      }
     }
-    for (const m of store.missions) if (m.mission.status.toUpperCase() === "FAILED") rows.push({ level: "bad", icon: "alert", id: "failed-mission", text: ["Mission ", link({ worker: m.worker, id: m.mission.id, name: m.mission.name }), " failed"] });
+    for (const m of store.missions) if (m.mission.status.toUpperCase() === "FAILED") rows.push(h("li", { class: "bad", "data-attention": "failed-mission" }, icon("alert", 20), h("span", { class: "grow" }, "Mission ", link({ worker: m.worker, id: m.mission.id, name: m.mission.name }), " failed")));
     for (const w of store.workers) {
-      if (workerState(w) !== "online") rows.push({ level: "warn", icon: "workers", id: "stale-worker", text: [h("a", { href: "/workers" }, w.name), ` is ${workerState(w)}; last seen ${relTime(w.last_seen)}.`] });
+      if (workerState(w) !== "online") rows.push(h("li", { class: "warn", "data-attention": "stale-worker" }, icon("workers", 20), h("span", { class: "grow" }, h("a", { href: "/workers" }, w.name), ` is ${workerState(w)}; last seen ${relTime(w.last_seen)}.`)));
     }
     if (rows.length === 0)
       return h("ul", { class: "attention", id: "attention" }, h("li", { class: "ok", "data-attention": "none" }, icon("checkCircle", 20), h("span", { class: "grow" }, store.loaded && (snapshotsLoaded || eligible === 0) ? "Nothing needs your attention." : "Checking...")));
-    return h("ul", { class: "attention", id: "attention" }, ...rows.map((r) => h("li", { class: r.level, "data-attention": r.id }, icon(r.icon, 20), h("span", { class: "grow" }, ...r.text))));
+    return h("ul", { class: "attention", id: "attention" }, ...rows);
   }
 
   const render = () => {
+    const hiddenPlumbing = activity.filter((item) => isPlumbing(item.event.kind));
+    const visibleActivity = (showPlumbing ? activity : activity.filter((item) => !isPlumbing(item.event.kind))).slice(0, 8);
     if (disposed) return;
     const online = store.workers.filter((w) => workerState(w) === "online").length;
     const counts = new Map<string, number>();
@@ -133,6 +148,20 @@ export function overview(root: HTMLElement): () => void {
     const failed = taskTotals["FAILED"] ?? 0;
     const staleNote = checked < eligible ? `checked ${checked} of ${eligible} active missions` : `${plural(store.missions.filter((m) => ACTIVE.has(m.mission.status.toUpperCase())).length, "active mission")}`;
     keepFocus(body, () => body.replaceChildren(
+      store.loaded && store.workers.length > 0
+        ? h("section", { "aria-labelledby": "ov-attn" }, h("h2", { id: "ov-attn" }, "Needs attention"), attention())
+        : h("span", { hidden: true }),
+      store.loaded && store.workers.length === 0
+        ? emptyState({
+            icon: "workers",
+            title: "No workers yet",
+            text: h("span", {}, "A worker runs your missions on a machine and reports to this coordinator. Add the first one to get started."),
+            action: h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/workers" }, icon("plus", 18), "Add a worker")),
+          })
+        : h("span", { hidden: true }),
+      store.loaded && store.workers.length > 0 && store.missions.length === 0
+        ? h("section", { class: "notice info", "aria-label": "Next step" }, h("strong", {}, "Next: create a mission on a worker."), h("p", {}, "Run ", h("code", {}, "llm-bridge mission create"), " on an enrolled worker. Its status and live output will appear here."))
+        : h("span", { hidden: true }),
       h(
         "section",
         { "aria-label": "Summary", class: "tiles" },
@@ -141,32 +170,38 @@ export function overview(root: HTMLElement): () => void {
         tile("Awaiting approval", num(approvals), staleNote, "/missions", approvals ? "warn" : ""),
         tile("Failed tasks", num(failed), staleNote, "/missions?status=FAILED,RUNNING", failed ? "bad" : ""),
       ),
-      store.loaded && store.workers.length === 0
-        ? emptyState({
-            icon: "workers",
-            title: "No workers yet",
-            text: h("span", {}, "A worker runs your missions on a machine and reports to this coordinator. Add the first one to get started."),
-            action: h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/workers" }, icon("plus", 18), "Add a worker")),
-          })
-        : h(
+      store.workers.length > 0
+        ? h(
             "div",
             { class: "grid-2" },
-            h("section", { "aria-labelledby": "ov-attn" }, h("h2", { id: "ov-attn" }, "Needs attention"), attention()),
+            h("section", { "aria-labelledby": "ov-running" },
+              h("h2", { id: "ov-running" }, "Running now"),
+              snapshots.filter((s) => store.missions.some((m) => m.worker === s.worker && m.mission.id === s.id && m.mission.status.toUpperCase() === "RUNNING")).length
+                ? h("ul", { class: "running-list" }, ...snapshots.filter((s) => store.missions.some((m) => m.worker === s.worker && m.mission.id === s.id && m.mission.status.toUpperCase() === "RUNNING")).map((s) => h("li", {}, h("span", { class: "activity-dot", "aria-hidden": "true" }), link(s), h("span", { class: "muted small" }, s.nowDoing))))
+                : h("p", { class: "muted", id: "running-empty" }, snapshotsLoaded ? "No missions are running right now." : "Checking active missions..."),
+            ),
             h(
               "section",
               { "aria-labelledby": "ov-activity" },
               h("h2", { id: "ov-activity" }, "Recent activity"),
+              hiddenPlumbing.length ? h("div", { class: "event-controls" }, button(
+                showPlumbing ? `Hide ${hiddenPlumbing.length} system events` : `Show ${hiddenPlumbing.length} system events`,
+                () => { showPlumbing = !showPlumbing; render(); },
+              )) : null,
               activity.length === 0
                 ? h("p", { class: "muted", id: "activity-empty" }, activityLoaded ? "No activity recorded yet." : "Loading...")
+                : visibleActivity.length === 0
+                  ? h("p", { class: "muted", id: "activity-empty" }, "No operator activity recorded yet.")
                 : h(
                     "ul",
                     { class: "timeline", id: "activity" },
-                    ...activity.map((a) =>
-                      h("li", {}, h("strong", {}, humanKind(a.event.kind)), " ", h("span", { class: "muted" }, `on ${missionName(a.worker, a.event.mission_id)} (${a.worker})`), h("div", {}, timeEl(a.event.created_at))),
+                    ...visibleActivity.map((a) =>
+                      h("li", {}, h("strong", {}, humanizeEvent(a.event)), transitionSummary(a.event.data) ? h("span", { class: "transition-summary" }, transitionSummary(a.event.data)!) : null, " ", h("span", { class: "muted" }, a.event.mission_id ? `on ${missionName(a.worker, a.event.mission_id)} (${a.worker})` : `on worker ${a.worker}`), h("div", {}, timeEl(a.event.created_at))),
                     ),
                   ),
             ),
-          ),
+          )
+        : h("span", { hidden: true }),
       h(
         "section",
         { "aria-labelledby": "ov-status" },
@@ -196,7 +231,17 @@ export function overview(root: HTMLElement): () => void {
       schedule();
     }
   });
-  const unStream = onStream((m) => m.type === "event" && schedule(1200));
+  const unStream = onStream((m) => {
+    if (m.type === "event") schedule(1200);
+    if (m.type === "worker" && m.worker && (m.state === "online" || m.state === "offline")) {
+      liveActivity = [{
+        worker: m.worker,
+        event: { id: -(++liveEventId), mission_id: "", task_id: null, kind: `worker-${m.state}`, data: { name: m.worker }, created_at: new Date().toISOString() },
+      }, ...liveActivity].slice(0, 8);
+      activity = [...liveActivity, ...activity.filter((a) => a.event.mission_id)].slice(0, 8);
+      render();
+    }
+  });
   lastKey = key();
   render();
   if (store.loaded) schedule(0);

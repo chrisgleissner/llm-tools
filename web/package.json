@@ -8,7 +8,8 @@
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "test:e2e": "playwright test",
-    "pretest:e2e": "npm run build"
+    "pretest:e2e": "npm run build",
+    "test:event-phrases": "python3 test_event_phrases.py"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",

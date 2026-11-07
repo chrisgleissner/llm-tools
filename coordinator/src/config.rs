@@ -11,6 +11,8 @@ pub struct Config {
     /// Listen address. Non-loopback needs `lan_enabled = true` (NET-003).
     pub bind: String,
     pub lan_enabled: bool,
+    /// Minimum TLS version. TLS 1.2 is an explicit compatibility opt-in.
+    pub min_tls: String,
     pub max_events_per_worker: u64,
     /// Extra exact Origin values accepted for cookie-authenticated writes
     /// (the default is `https://<Host header>`).
@@ -18,6 +20,12 @@ pub struct Config {
     /// Directory with the built web interface (`index.html`, `app.js`, ...). Unset: `web` next to
     /// the executable, else `/usr/share/bridge-coordinator/web`.
     pub web_dir: Option<String>,
+    /// Optional operator-managed TLS certificate and key. When both are set, the
+    /// server watches these files and uses a valid replacement on new handshakes.
+    pub tls_cert_file: Option<String>,
+    pub tls_key_file: Option<String>,
+    /// Exact SNI hostname for the operator-managed identity; all other names use the internal CA.
+    pub tls_cert_name: Option<String>,
     /// Total concurrent TCP connections; further connections are closed immediately (NET-010).
     pub max_connections: usize,
     /// Concurrent TCP connections from one client address (IPv6 clients counted by /64).
@@ -34,6 +42,10 @@ pub struct Config {
     pub ws_ping_interval_secs: u64,
     /// Close a browser WebSocket that has sent nothing (not even a pong) for this many seconds.
     pub ws_idle_timeout_secs: u64,
+    /// Authenticated mutation budget per token in a rolling 60-second window.
+    pub mutation_limit_per_token: usize,
+    /// Authenticated mutation budget per client address in a rolling 60-second window.
+    pub mutation_limit_per_address: usize,
 }
 
 impl Default for Config {
@@ -41,9 +53,13 @@ impl Default for Config {
         Config {
             bind: "127.0.0.1:8443".into(),
             lan_enabled: false,
+            min_tls: "1.3".into(),
             max_events_per_worker: 50_000,
             allowed_origins: vec![],
             web_dir: None,
+            tls_cert_file: None,
+            tls_key_file: None,
+            tls_cert_name: None,
             max_connections: 256,
             max_connections_per_ip: 32,
             worker_reserve_connections: 16,
@@ -51,6 +67,8 @@ impl Default for Config {
             http_idle_timeout_secs: 30,
             ws_ping_interval_secs: 30,
             ws_idle_timeout_secs: 90,
+            mutation_limit_per_token: 30,
+            mutation_limit_per_address: 120,
         }
     }
 }
@@ -77,31 +95,37 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
     let d = Config::default();
     format!(
         "# bridge-coordinator configuration. Every key has a built-in default; the environment\n\
-# variables BRIDGE_COORDINATOR_BIND and BRIDGE_COORDINATOR_LAN_ENABLED override bind and\n\
-# lan_enabled at start-up.\n\
-# Listen address. A non-loopback address is refused unless lan_enabled = true.\n\
-bind = \"{bind}\"\n\
-lan_enabled = {lan_enabled}\n\
-# Stored events per worker; oldest are deleted first.\n\
-max_events_per_worker = {}\n\
-# Extra exact Origin values accepted for cookie-authenticated writes.\n\
-allowed_origins = []\n\
-# Directory with the built web interface; default: web next to the executable, then\n\
-# /usr/share/bridge-coordinator/web.\n\
-# web_dir = \"/path/to/web\"\n\
-# Total concurrent TCP connections; excess connections are closed immediately.\n\
-max_connections = {}\n\
-# Concurrent connections from one client address (IPv6 clients by /64).\n\
-max_connections_per_ip = {}\n\
-# Connection slots kept for workers with a valid token when the others are full.\n\
-worker_reserve_connections = {}\n\
-# Seconds to receive a complete request body (slow-body limit).\n\
-request_body_timeout_secs = {}\n\
-# Seconds to wait for the next request header on an idle HTTP connection.\n\
-http_idle_timeout_secs = {}\n\
-# Browser WebSockets (/stream, /terminal): server ping interval and inactivity close.\n\
-ws_ping_interval_secs = {}\n\
-ws_idle_timeout_secs = {}\n",
+    # variables BRIDGE_COORDINATOR_BIND and BRIDGE_COORDINATOR_LAN_ENABLED override bind and\n\
+    # lan_enabled at start-up.\n\
+    # Listen address. A non-loopback address is refused unless lan_enabled = true.\n\
+    bind = \"{bind}\"\n\
+    lan_enabled = {lan_enabled}\n\
+    # Minimum TLS version. Keep 1.3 unless an older client requires TLS 1.2.\n\
+    min_tls = \"{}\"\n\
+    # Stored events per worker; oldest are deleted first.\n\
+    max_events_per_worker = {}\n\
+    # Extra exact Origin values accepted for cookie-authenticated writes.\n\
+    allowed_origins = []\n\
+    # Directory with the built web interface; default: web next to the executable, then\n\
+    # /usr/share/bridge-coordinator/web.\n\
+    # web_dir = \"/path/to/web\"\n\
+    # Total concurrent TCP connections; excess connections are closed immediately.\n\
+    max_connections = {}\n\
+    # Concurrent connections from one client address (IPv6 clients by /64).\n\
+    max_connections_per_ip = {}\n\
+    # Connection slots kept for workers with a valid token when the others are full.\n\
+    worker_reserve_connections = {}\n\
+    # Seconds to receive a complete request body (slow-body limit).\n\
+    request_body_timeout_secs = {}\n\
+    # Seconds to wait for the next request header on an idle HTTP connection.\n\
+    http_idle_timeout_secs = {}\n\
+    # Browser WebSockets (/stream, /terminal): server ping interval and inactivity close.\n\
+    ws_ping_interval_secs = {}\n\
+    ws_idle_timeout_secs = {}\n\
+    # Authenticated mutation budget per token and client address per rolling 60 seconds.\n\
+    mutation_limit_per_token = {}\n\
+    mutation_limit_per_address = {}\n",
+        d.min_tls,
         d.max_events_per_worker,
         d.max_connections,
         d.max_connections_per_ip,
@@ -109,7 +133,9 @@ ws_idle_timeout_secs = {}\n",
         d.request_body_timeout_secs,
         d.http_idle_timeout_secs,
         d.ws_ping_interval_secs,
-        d.ws_idle_timeout_secs
+        d.ws_idle_timeout_secs,
+        d.mutation_limit_per_token,
+        d.mutation_limit_per_address
     )
 }
 
@@ -160,5 +186,32 @@ impl Config {
             ));
         }
         Ok(addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config(text: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("bridge-config-test-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+        dir
+    }
+
+    #[test]
+    fn mutation_limits_default_and_are_bounded() {
+        let defaults = Config::default();
+        assert_eq!((defaults.mutation_limit_per_token, defaults.mutation_limit_per_address), (30, 120));
+
+        let valid = temp_config(&config_text("127.0.0.1:8443", false));
+        assert_eq!(Config::load(&valid).unwrap().mutation_limit_per_token, 30);
+        std::fs::remove_dir_all(valid).unwrap();
+
+        let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 0"));
+        assert!(Config::load(&invalid).unwrap_err().contains("mutation limits"));
+        std::fs::remove_dir_all(invalid).unwrap();
     }
 }

@@ -48,11 +48,44 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     let bind = cfg.checked_bind()?;
     let configured = cfg.web_dir.as_ref().map(std::path::PathBuf::from);
     let web_dir = crate::web::resolve_web_dir(web_dir.map(Path::to_path_buf).or(configured).as_deref())?;
-    let tls = TlsAcceptor::from(crate::certs::load_server_config(data_dir)?);
+    let (tls_config, file_cert_resolver) = match (&cfg.tls_cert_file, &cfg.tls_key_file, &cfg.tls_cert_name) {
+        (Some(cert), Some(key), Some(name)) => {
+            let (server_config, resolver) = crate::certs::load_reloading_file_server_config(cert.into(), key.into(), name.clone(), data_dir, &cfg.min_tls)?;
+            (server_config, Some(resolver))
+        }
+        _ => (crate::certs::load_server_config(data_dir, &cfg.min_tls)?, None),
+    };
+    let tls = TlsAcceptor::from(tls_config);
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
+    let cursor_key = db.cursor_key().map_err(|e| format!("cannot load pagination cursor key: {e}"))?;
     let listener = TcpListener::bind(bind).await.map_err(|e| format!("cannot bind {bind}: {e}"))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    if let Some(resolver) = file_cert_resolver {
+        let mut shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut last_error: Option<String> = None;
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        match resolver.reload_if_changed() {
+                            Err(error) if last_error.as_ref() != Some(&error) => {
+                                eprintln!("TLS file certificate reload deferred: {error}");
+                                last_error = Some(error);
+                            }
+                            Ok(_) => last_error = None,
+                            _ => {}
+                        }
+                    }
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() { break; }
+                    }
+                }
+            }
+        });
+    }
     let dummy_hash = tokio::task::spawn_blocking(|| crate::auth::hash_password("dummy password for unknown users"))
         .await
         .map_err(|e| e.to_string())?;
@@ -62,8 +95,10 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         cfg,
         data_dir: data_dir.to_path_buf(),
         limiter: RateLimiter::new(5, Duration::from_secs(60), 4096),
+        mutation_limiter: crate::auth::MutationLimiter::new(Duration::from_secs(60), 4096),
         started: Instant::now(),
         dummy_hash,
+        cursor_key,
         argon_slots: Semaphore::new(2),
         big_bodies: Arc::new(Semaphore::new(http::BIG_BODY_SLOTS)),
         shutdown: shutdown_rx.clone(),
@@ -135,7 +170,7 @@ async fn accept_loop(
     db: Arc<Db>,
     mut shutdown: watch::Receiver<bool>,
     limits: ConnLimits,
-    _lock: std::fs::File,
+    lock: std::fs::File,
 ) {
     let slots = Arc::new(Semaphore::new(limits.max_connections - limits.reserve));
     let reserve = Arc::new(Semaphore::new(limits.reserve));
@@ -187,4 +222,8 @@ async fn accept_loop(
     if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
         conns.abort_all();
     }
+    // Release explicitly once the listener and connection drain have stopped. This is
+    // especially important for callers that restore the data directory immediately after
+    // awaiting shutdown on platforms with advisory file locks.
+    let _ = lock.unlock();
 }

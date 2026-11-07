@@ -22,7 +22,7 @@ test("wrong password shows an error; correct password signs in; logout ends the 
   await page.getByLabel("Username", { exact: true }).fill("admin");
   await page.getByLabel("Password", { exact: true }).fill("wrong password!!");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.locator("#form-error")).toContainText("The username or password is not correct");
+  await expect(page.locator("#form-error")).toContainText("Username or password is incorrect. Check both and try again.");
   await loginViaUi(page);
   await signOutViaUi(page);
   await expect(page).toHaveURL(/\/login$/);
@@ -54,7 +54,7 @@ test("workers added with the CLI are listed as offline", async ({ page, coord })
   await expect(rows).toHaveCount(2);
   for (const name of ["alpha", "beta"]) {
     const row = page.locator(`tr[data-worker="${name}"]`);
-    await expect(row.getByText("offline", { exact: true })).toBeVisible();
+    await expect(row.locator('[data-label="State"]')).toContainText("offline");
     await expect(row).toContainText("never");
   }
   await expectNoHorizontalScroll(page);

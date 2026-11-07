@@ -233,7 +233,11 @@ async fn csrf_origin_and_bearer_tokens() {
 
     // bearer API token: no CSRF or Origin needed, and revocable
     let tok = bridge_coordinator::auth::random_token();
-    env.srv.state.db.token_create("cli", &bridge_coordinator::auth::sha256_hex(&tok), None).unwrap();
+    env.srv
+        .state
+        .db
+        .token_create_scoped("cli", &bridge_coordinator::auth::sha256_hex(&tok), None, &["admin".into()])
+        .unwrap();
     let mut bearer = env.api();
     bearer.bearer = Some(tok.clone());
     assert_eq!(bearer.post("/api/v1/workers", json!({"name": "w-bearer"})).await.0, 201);
@@ -260,7 +264,9 @@ async fn body_limit_and_placeholder() {
     let env = boot().await;
     let api = env.admin().await;
     let big = "x".repeat(1024 * 1024 + 10);
-    let (st, _) = api.send(api.rb(Method::POST, "/api/v1/workers").body(big)).await;
+    let (st, _) = api
+        .send(api.rb(Method::POST, "/api/v1/workers").header("content-type", "application/json").body(big))
+        .await;
     assert_eq!(st, 413);
     let r = api.bare(Method::GET, "/").send().await.unwrap();
     assert_eq!(r.status(), 200);

@@ -4,6 +4,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
 use rustls::pki_types::pem::PemObject;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 fn submit(id: &str) -> Value {
@@ -27,6 +28,12 @@ async fn worker_authentication() {
     let (_, list) = api.get("/api/v1/workers").await;
     assert_eq!(list["workers"][0]["state"], "online");
     assert_eq!(list["workers"][0]["id"], "wid1");
+    assert_eq!(list["workers"][0]["host_name"], "test-host");
+    assert_eq!(list["workers"][0]["remote_address"], "127.0.0.1");
+    let (detail_status, detail) = api.get("/api/v1/workers/w1").await;
+    assert_eq!(detail_status, 200, "{detail}");
+    assert_eq!(detail["host_name"], "test-host");
+    assert_eq!(detail["remote_address"], "127.0.0.1");
     // The stored last_seen is written only every ten minutes; a connected worker still reads as seen now.
     env.srv.state.db.worker_age("w1", 1).unwrap();
     let (_, list) = api.get("/api/v1/workers").await;
@@ -40,12 +47,109 @@ async fn worker_authentication() {
     let (st, _) = api.send(api.rb(Method::DELETE, "/api/v1/workers/w1")).await;
     assert_eq!(st, 200);
     assert_eq!(fw.expect_close().await, Some(1008));
+    let (_, offline_detail) = api.get("/api/v1/workers/w1").await;
+    assert!(offline_detail["remote_address"].is_null());
     let err = Fw::raw(&env, &token).await.expect_err("revoked");
     assert!(format!("{err:?}").contains("401"));
     assert_eq!(api.get("/api/v1/workers").await.1["workers"].as_array().unwrap().len(), 0);
     let audit = env.srv.state.db.audit_list(50).unwrap();
     assert!(audit.iter().any(|r| r["action"] == "worker.add") && audit.iter().any(|r| r["action"] == "worker.revoke"));
     assert!(!audit.iter().any(|r| r.to_string().contains(&token)));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_disconnect_clears_active_peer_address_but_keeps_enrolment() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    assert_eq!(api.get("/api/v1/workers/w1").await.1["remote_address"], "127.0.0.1");
+
+    fw.ws.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let worker = api.get("/api/v1/workers/w1").await.1;
+            if worker["state"] == "offline" {
+                assert!(worker["remote_address"].is_null(), "{worker}");
+                assert_eq!(worker["host_name"], "test-host");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker disconnect is reflected");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn event_batch_updates_mission_inventory_and_caught_up_status() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+
+    fw.send(
+        "events",
+        json!({
+            "after": 0,
+            "through": 4,
+            "mission_cursor": 4,
+            "events": [
+                {"id": 1, "mission_id": "m1", "kind": "mission-status", "data": {"to": "PAUSED"}},
+                {"id": 2, "mission_id": "m2", "kind": "mission-created", "data": {}},
+                {"id": 3, "mission_id": "m3", "kind": "mission-status", "data": {"to": "RUNNING"}},
+                {"id": 4, "mission_id": "m4", "kind": "mission-status", "data": {"to": "STOPPED"}}
+            ],
+            "missions": [
+                {"id": "m1", "name": "mission", "status": "PAUSED", "folder": "proj", "updated_at": "2026-11-06T12:00:00+00:00"},
+                {"id": "m2", "name": "created while connected", "status": "CREATED", "folder": "new", "updated_at": "2026-11-06T12:00:00+00:00"},
+                {"id": "m3", "name": "started while connected", "status": "RUNNING", "folder": "active", "updated_at": "2026-11-06T12:00:00+00:00"},
+                {"id": "m4", "name": "stopped while connected", "status": "STOPPED", "folder": "done", "updated_at": "2026-11-06T12:00:00+00:00"}
+            ]
+        }),
+    )
+    .await;
+    fw.barrier().await;
+
+    let (_, list) = api.get("/api/v1/missions").await;
+    let missions = list["missions"].as_array().unwrap();
+    assert_eq!(missions.len(), 4, "{list}");
+    assert_eq!(missions[0]["mission"]["status"], "PAUSED");
+    assert_eq!(missions[1]["mission"]["id"], "m2");
+    assert_eq!(missions[2]["mission"]["status"], "RUNNING");
+    assert_eq!(missions[3]["mission"]["status"], "STOPPED");
+    assert!(missions.iter().all(|mission| mission["stale"] == false), "{list}");
+
+    // A provider question may appear without a local Bridge event. The worker
+    // can replicate just that changed mission summary with an empty event batch.
+    fw.send(
+        "events",
+        json!({
+            "after": 4,
+            "through": 4,
+            "mission_cursor": 4,
+            "events": [],
+            "missions": [{
+                "id": "m3", "name": "started while connected", "status": "RUNNING", "folder": "active",
+                "updated_at": "2026-11-06T12:00:00+00:00",
+                "needs_you": {"kind": "provider", "message": "Codex asks: Reconnect?", "command": "llm-bridge attach --mission m3"}
+            }]
+        }),
+    )
+    .await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    let active = list["missions"].as_array().unwrap().iter().find(|m| m["mission"]["id"] == "m3").unwrap();
+    assert_eq!(active["mission"]["needs_you"]["message"], "Codex asks: Reconnect?");
+
+    // An event-only legacy batch advances the event cursor but cannot claim its mission
+    // inventory is current, so the coordinator accurately marks the copy stale.
+    fw.send("events", json!({"after": 4, "through": 5, "events": [{"id": 5}]})).await;
+    fw.barrier().await;
+    let (_, list) = api.get("/api/v1/missions").await;
+    assert!(list["missions"].as_array().unwrap().iter().all(|mission| mission["stale"] == true), "{list}");
     env.stop().await;
 }
 
@@ -223,6 +327,25 @@ async fn request_id_idempotence_and_refusals() {
     assert_eq!(fw.recv().await["payload"]["request_id"], "same");
     fw.barrier().await; // no second delivery queued before the pong
                         // same id, different payload: conflict
+    let keyed = api
+        .rb(reqwest::Method::POST, "/api/v1/commands")
+        .header("Idempotency-Key", "header-key")
+        .json(&submit("body-key-a"));
+    let response = keyed.send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 202);
+    assert_eq!(response.headers()["location"], "/api/v1/commands/header-key");
+    let first: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(first["request_id"], "header-key");
+    assert_eq!(fw.recv().await["payload"]["request_id"], "header-key");
+    fw.barrier().await;
+    let retry = api
+        .rb(reqwest::Method::POST, "/api/v1/commands")
+        .header("Idempotency-Key", "header-key")
+        .json(&submit("body-key-b"));
+    let (status, second) = api.send(retry).await;
+    assert_eq!(status, 202);
+    assert_eq!(first["created_at"], second["created_at"]);
+    fw.barrier().await;
     let mut other = submit("same");
     other["request"]["params"] = json!({"title": "different"});
     let (st, body) = api.post("/api/v1/commands", other).await;
@@ -289,6 +412,13 @@ async fn frame_limits_and_malformed_messages() {
     assert_eq!(fw.recv().await["payload"]["code"], "unsupported-message");
     fw.send("ping", json!({"extra": 1})).await;
     assert_eq!(fw.recv().await["payload"]["code"], "invalid-message", "unknown payload fields are rejected");
+    fw.send("events", json!({"after": 0, "through": 1, "mission_cursor": 2, "events": [{"id": 1}]}))
+        .await;
+    assert_eq!(
+        fw.recv().await["payload"]["code"],
+        "invalid-message",
+        "mission cursor cannot exceed the batch cursor"
+    );
     fw.send("hello", json!({})).await;
     assert_eq!(fw.recv().await["payload"]["code"], "invalid-message");
     fw.generation = 99;
@@ -374,13 +504,15 @@ async fn tls_versions_and_suites() {
             let tcp = TcpStream::connect(addr).await.unwrap();
             let s = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
                 .connect(rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(), tcp)
-                .await
-                .unwrap();
-            format!("{:?}", s.get_ref().1.negotiated_cipher_suite().unwrap().suite())
+                .await?;
+            Ok::<String, std::io::Error>(format!("{:?}", s.get_ref().1.negotiated_cipher_suite().unwrap().suite()))
         }
     };
-    assert!(connect(&[&rustls::version::TLS13]).await.starts_with("TLS13_"));
-    assert!(connect(&[&rustls::version::TLS12]).await.starts_with("TLS_ECDHE_"));
+    assert!(connect(&[&rustls::version::TLS13]).await.unwrap().starts_with("TLS13_"));
+    assert!(
+        connect(&[&rustls::version::TLS12]).await.is_err(),
+        "TLS 1.2 requires an explicit compatibility opt-in"
+    );
     let _ = Method::GET;
     env.stop().await;
 }

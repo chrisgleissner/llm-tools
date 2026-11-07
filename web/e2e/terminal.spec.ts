@@ -106,6 +106,13 @@ test.describe("remote terminal with a real worker and tmux station", () => {
       await openTerminal(page, "#terminal-open");
       await expect(status).toHaveAttribute("data-mode", "view", { timeout: 20_000 });
       await expectScreen(page, "echo:second");
+      await page.locator("#terminal-control").click();
+      await expect(status).toHaveAttribute("data-mode", "write", { timeout: 20_000 });
+      const longLine = "immediate-enter-".repeat(12);
+      await page.locator("#terminal-host .xterm-helper-textarea").focus();
+      await page.keyboard.type(longLine);
+      await page.keyboard.press("Enter");
+      await expectScreen(page, `echo:${longLine}`);
     } finally {
       st.cleanup();
     }

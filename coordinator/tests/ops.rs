@@ -355,16 +355,22 @@ fn token_create_sets_expiry_and_password_reset_revokes_tokens() {
     assert!(run(&["init", "--data-dir", d, "--hostname", "a.test"], None).status.success());
     Db::open(&db_path(&dir)).unwrap().admin_create("admin", "old-hash").unwrap();
     let now = bridge_coordinator::now();
-    for (name, args, days) in [
-        ("default", vec![], Some(90)),
-        ("short", vec!["--expires-days", "3"], Some(3)),
-        ("forever", vec!["--expires-days", "0"], None),
+    for (name, args, days, wanted_scopes) in [
+        ("default", vec![], Some(90), vec!["read"]),
+        ("short", vec!["--expires-days", "3"], Some(3), vec!["read"]),
+        ("forever", vec!["--expires-days", "0"], None, vec!["read"]),
+        (
+            "ops",
+            vec!["--scope", "operate", "--scope", "terminal:view"],
+            Some(90),
+            vec!["operate", "terminal:view"],
+        ),
     ] {
         let mut a = vec!["token", "create", name, "--data-dir", d];
         a.extend(args);
         let o = run(&a, None);
         assert!(o.status.success(), "{}", text(&o));
-        assert!(text(&o).contains("full administrator power"), "{}", text(&o));
+        assert!(text(&o).contains("token scopes"), "{}", text(&o));
         let db = Db::open(&db_path(&dir)).unwrap();
         let tokens = db.tokens_list().unwrap();
         let expires = tokens.iter().find(|(n, _)| n == name).unwrap().1;
@@ -375,7 +381,13 @@ fn token_create_sets_expiry_and_password_reset_revokes_tokens() {
             }
             None => assert_eq!(expires, None, "{name} never expires"),
         }
+        let token = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let record = db.token_lookup(&bridge_coordinator::auth::sha256_hex(&token)).unwrap().unwrap();
+        assert_eq!(record.scopes, wanted_scopes);
     }
+    assert!(!run(&["token", "create", "bad-scope", "--scope", "unknown", "--data-dir", d], None)
+        .status
+        .success());
     assert!(!run(&["token", "create", "bad", "--expires-days", "soon", "--data-dir", d], None)
         .status
         .success());
@@ -385,9 +397,9 @@ fn token_create_sets_expiry_and_password_reset_revokes_tokens() {
         Some("a long enough password\n"),
     );
     assert!(o.status.success(), "{}", text(&o));
-    assert_eq!(Db::open(&db_path(&dir)).unwrap().tokens_list().unwrap().len(), 3, "kept on request");
+    assert_eq!(Db::open(&db_path(&dir)).unwrap().tokens_list().unwrap().len(), 4, "kept on request");
     let o = run(&["admin", "reset-password", "--data-dir", d], Some("a long enough password\n"));
-    assert!(o.status.success() && text(&o).contains("3 API token(s) revoked"), "{}", text(&o));
+    assert!(o.status.success() && text(&o).contains("4 API token(s) revoked"), "{}", text(&o));
     assert!(Db::open(&db_path(&dir)).unwrap().tokens_list().unwrap().is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }

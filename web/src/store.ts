@@ -16,12 +16,15 @@ const listeners = new Set<Listener>();
 const streamListeners = new Set<(msg: StreamMessage) => void>();
 
 export interface StreamMessage {
-  type: "worker" | "event" | "command";
+  type: "worker" | "event" | "command" | "terminal";
   worker?: string;
   state?: string;
   cursor?: number;
   events?: Array<Record<string, unknown>>;
   command?: api.CommandRow;
+  mission_id?: string;
+  mode?: string;
+  reason?: string;
 }
 
 export function subscribe(fn: Listener): () => void {
@@ -31,6 +34,9 @@ export function subscribe(fn: Listener): () => void {
 export function onStream(fn: (msg: StreamMessage) => void): () => void {
   streamListeners.add(fn);
   return () => streamListeners.delete(fn);
+}
+export function publishStreamMessage(msg: StreamMessage): void {
+  for (const listener of [...streamListeners]) listener(msg);
 }
 function emit(): void {
   for (const l of [...listeners]) l();
@@ -105,7 +111,7 @@ function connect(): void {
     } else if (msg.type === "event") {
       scheduleRefresh();
     }
-    for (const l of [...streamListeners]) l(msg);
+    publishStreamMessage(msg);
   };
   sock.onclose = () => {
     if (ws !== sock) return;

@@ -1,6 +1,6 @@
 // Deterministic API for screenshot and accessibility tests: every /api/v1 call is answered from fixed data and the
 // clock is fixed. The page itself is the real built application served by the real coordinator.
-import type { Page, Route } from "@playwright/test";
+import type { Page, Route, WebSocketRoute } from "@playwright/test";
 
 export const NOW = new Date("2026-11-05T12:00:00Z");
 const nowS = Math.floor(NOW.getTime() / 1000);
@@ -18,6 +18,10 @@ export interface MockOptions {
   sessionRemembered?: boolean;
   /** Answer the terminal WebSocket with a fixed provider screen (used for the site screenshots). */
   terminalScreen?: boolean;
+  /** End the terminal session after its actual opened status frame. */
+  terminalClose?: boolean;
+  /** A typed, text-free Codex question indication for Needs attention. */
+  providerQuestion?: boolean;
 }
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
@@ -35,9 +39,9 @@ const platform = { system: "Linux", machine: "x86_64", python: "3.12.3" };
 const caps = [{ operation: "mission.status", mutating: false }, { operation: "task.pause", mutating: true }];
 
 export const WORKERS = [
-  { name: "alpha", id: "5f2c9d1e-7a41-4c6b-9a7e-0d3b1f6a2c11", state: "online", last_seen: nowS - 20, generation: 3, event_cursor: 40, versions: { software: "0.9.2", protocol: [1] }, platform, capabilities: caps },
-  { name: "beta", id: "b81e44a0-2f5d-4e0c-8f1a-6c7d90e5a3d2", state: "offline", last_seen: nowS - 7200, generation: 1, event_cursor: 12, versions: { software: "0.9.1", protocol: [1] }, platform, capabilities: caps },
-  { name: "gamma", id: "c0de1234-aaaa-4bbb-8ccc-1234567890ab", state: "online", last_seen: nowS - 5, generation: 2, event_cursor: 7, versions: { software: "0.9.2", protocol: [1] }, platform: { ...platform, system: "Darwin", machine: "arm64" }, capabilities: caps },
+  { name: "alpha", id: "5f2c9d1e-7a41-4c6b-9a7e-0d3b1f6a2c11", host_name: "build-node", remote_address: "203.0.113.10", state: "online", last_seen: nowS - 20, generation: 3, event_cursor: 40, versions: { software: "0.9.2", protocol: [1] }, platform, capabilities: caps },
+  { name: "beta", id: "b81e44a0-2f5d-4e0c-8f1a-6c7d90e5a3d2", host_name: "docs-node", remote_address: null, state: "offline", last_seen: nowS - 7200, generation: 1, event_cursor: 12, versions: { software: "0.9.1", protocol: [1] }, platform, capabilities: caps },
+  { name: "gamma", id: "c0de1234-aaaa-4bbb-8ccc-1234567890ab", host_name: "mac-builder", remote_address: "203.0.113.12", state: "online", last_seen: nowS - 5, generation: 2, event_cursor: 7, versions: { software: "0.9.2", protocol: [1] }, platform: { ...platform, system: "Darwin", machine: "arm64" }, capabilities: caps },
 ];
 
 const mk = (n: number, worker: string, name: string, status: string, folder: string, ago: number) => ({
@@ -56,6 +60,7 @@ export const MISSIONS = [
   mk(8, "alpha", "Document the HTTP API", "STOPPED", "docs", 8 * 3600),
 ];
 export const MISSION_PATH = `/missions/alpha/${MISSIONS[0]!.mission.id}`;
+export const MISSION_START_PATH = `/missions/alpha/${MISSIONS[5]!.mission.id}`;
 
 const TASKS = [
   { id: 1, ordinal: 1, title: "Plan the change", status: "COMPLETED", priority: 0, revision: 4 },
@@ -66,9 +71,18 @@ const TASKS = [
   { id: 6, ordinal: 6, title: "Tag the release", status: "PAUSED", priority: 0, revision: 2 },
 ];
 
-const EVENTS = ["mission-started", "task-status", "provider-selection", "verification-requested", "task-status", "operation-finished"].map((kind, i) => ({
+const EVENTS = [
+  ["mission-created", null, { name: "Refactor the parser" }],
+  ["task-added", 3, { title: "Write a regression test" }],
+  ["task-status", 2, { from: "RUNNING", to: "VERIFYING", private_value: "do-not-render-this" }],
+  ["provider-selection", 2, { provider: "codex", model: "gpt-5" }],
+  ["command-queued", null, { command: "task.verify", request_id: "safe-request-01" }],
+  ["operation-running", 2, { route_id: "codex", model: "gpt-5" }],
+  ["operation-exited", 2, { exit_code: 0, task_status: "VERIFYING" }],
+  ["controller-heartbeat", null, { controller_state: "RUNNING" }],
+].map(([kind, task_id, data], i) => ({
   id: 40 - i,
-  event: { mission_id: MISSIONS[0]!.mission.id, task_id: i % 2 ? 2 : null, kind, data: i === 1 ? { from: "RUNNING", to: "VERIFYING" } : {}, created_at: iso(120 + i * 600) },
+  event: { mission_id: MISSIONS[0]!.mission.id, task_id, kind, data, created_at: iso(120 + i * 600) },
 }));
 
 const SESSIONS = [
@@ -98,20 +112,34 @@ function json(route: Route, status: number, body: unknown, headers: Record<strin
 export interface Mock {
   /** Switch what /auth/state reports (used to simulate an expired session). */
   setAuth(mode: AuthMode): void;
+  terminalInputCount(): number;
+  emitStream(message: Record<string, unknown>): void;
 }
 
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
+  let terminalInputs = 0;
+  let streamSocket: WebSocketRoute | null = null;
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
-  const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS;
-  await page.routeWebSocket(/\/api\/v1\/stream/, () => {
-    /* connected, silent: the page shows "Live" */
+  const providerNeedsYou = { kind: "provider", tasks: [], message: "Codex asks: Should I continue? · Choices: 1. Continue; 2. Stop · take control of the terminal to answer", command: "llm-bridge attach --mission 01a1b2c3" };
+  const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS.map((entry, i) =>
+    opts.providerQuestion && i === 0 ? { ...entry, mission: { ...entry.mission, needs_you: providerNeedsYou } } : { ...entry, mission: { ...entry.mission } },
+  );
+  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
+  await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
+    streamSocket = ws;
   });
   await page.routeWebSocket(/\/api\/v1\/terminal/, (ws) => {
-    if (!opts.terminalScreen) return;
-    ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "write", reason: "" }));
-    ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
+    ws.onMessage((message) => {
+      if (typeof message !== "string") return;
+      try { if ((JSON.parse(message) as { t?: string }).t === "i") terminalInputs += 1; } catch { /* ignore malformed test frames */ }
+    });
+    setTimeout(() => {
+      ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "view", reason: "" }));
+      if (opts.terminalScreen) ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
+      if (opts.terminalClose) ws.send(JSON.stringify({ t: "x", reason: "Terminal closed by test" }));
+    }, 50);
   });
   await page.route("**/api/v1/**", async (route) => {
     const req = route.request();
@@ -151,8 +179,62 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const limit = Number(url.searchParams.get("limit") ?? list.length);
       return json(route, 200, { missions: list.slice(offset, offset + limit), total: list.length, offset, statuses: facets });
     }
-    if (path === "/events") return json(route, 200, { events: [...EVENTS].reverse() });
+    const missionAction = path.match(/^\/missions\/([^/]+)\/(start|resume|pause|stop|cancel|continue)$/);
+    if (missionAction && method === "POST") {
+      const operation = `mission.${missionAction[2]}`;
+      const current = missions.find((mission) => mission.mission.id === missionAction[1]);
+      if (current) {
+        const status = missionAction[2] === "start" || missionAction[2] === "resume" || missionAction[2] === "continue" ? "RUNNING"
+          : missionAction[2] === "pause" ? "PAUSED" : missionAction[2] === "stop" ? "STOPPED" : "CANCELLED";
+        current.mission.status = status;
+      }
+      return json(route, 200, { request_id: "resource-mock", target: url.searchParams.get("worker"), operation, state: "done", result: { outcome: "applied", result: { mission: current?.mission ?? null }, error: null } });
+    }
+    const missionResource = path.match(/^\/missions\/([^/]+)$/);
+    if (missionResource && method === "GET") {
+      const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
+      const isProviderQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
+    }
+    if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.events", state: "done", result: { outcome: "ok", result: { schema_version: 1, events: [...EVENTS].reverse() }, error: null } });
+    }
+    const taskRoute = path.match(/^\/missions\/([^/]+)\/tasks(?:\/(\d+)(?:\/([a-z-]+))?)?$/);
+    if (taskRoute) {
+      let operation = "task.list";
+      let result: unknown = { tasks: TASKS, total: TASKS.length, offset: 0 };
+      if (method === "POST") {
+        operation = taskRoute[3] === "verify"
+          ? (JSON.parse(req.postData() ?? "{}").approved === false ? "task.reject" : "task.verify")
+          : taskRoute[3] ? `task.${taskRoute[3]}` : "task.add";
+        result = { status: "APPLIED" };
+      } else if (method === "PATCH") {
+        const body = JSON.parse(req.postData() ?? "{}") as Record<string, unknown>;
+        operation = "task." + ("prompt" in body ? "amend" : "priority" in body ? "priority" : "order" in body ? "reorder" : "dependency");
+        result = { status: "APPLIED" };
+      }
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: operation === "task.list" ? "ok" : "applied", result, error: null } });
+    }
+    if (path === "/events") {
+      const target = url.searchParams.get("worker");
+      const missionIds = new Set(missions.filter((mission) => !target || mission.worker === target).map((mission) => mission.mission.id));
+      return json(route, 200, { events: [...EVENTS].filter((row) => missionIds.has(row.event.mission_id)).reverse() });
+    }
     if (path === "/diagnostics") return json(route, 200, DIAG);
+    if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });
+    if (path === "/tokens" && method === "POST") {
+      const body = JSON.parse(req.postData() ?? "{}") as { name: string; scopes: string[]; expires_days: number };
+      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null };
+      tokens.push(token);
+      return json(route, 201, { token, secret: "lbr_pat_mock-secret" });
+    }
+    if (path.startsWith("/tokens/") && method === "DELETE") {
+      const name = decodeURIComponent(path.slice("/tokens/".length));
+      const i = tokens.findIndex((token) => token.name === name);
+      if (i >= 0) tokens.splice(i, 1);
+      return json(route, i >= 0 ? 200 : 404, { ok: i >= 0 });
+    }
     if (path === "/commands" && method === "POST") {
       const body = JSON.parse(req.postData() ?? "{}") as { target: string; request: { operation: string; request_id: string } };
       const op = body.request.operation;
@@ -168,5 +250,9 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     return json(route, 404, { error: { code: "not-found", message: `unmocked ${method} ${path}` } });
   });
-  return { setAuth: (m) => void (auth = m) };
+  return {
+    setAuth: (m) => void (auth = m),
+    terminalInputCount: () => terminalInputs,
+    emitStream: (message) => streamSocket?.send(JSON.stringify(message)),
+  };
 }

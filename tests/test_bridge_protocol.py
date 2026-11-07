@@ -25,6 +25,7 @@ VALID = [
     Message("command.ack", "w-1", 2, {"request_id": "r1", "status": "duplicate"}),
     Message("command.result", "w-1", 2, {"schema_version": 1, "request_id": "r1", "operation": "mission.list", "outcome": "ok", "result": {}, "error": None}),
     Message("events", "w-1", 2, {"after": 4, "through": 9, "events": [{"id": 5}, {"id": 9}]}),
+    Message("events", "w-1", 2, {"after": 4, "through": 9, "events": [{"id": 9}], "missions": [{"id": "m1"}]}),
     Message("events.nack", "w-1", 2, {"expected_after": 4}),
     Message("ping", "w-1", 2, {}),
     Message("error", "w-1", 2, {"code": "x", "message": "y", "in_reply_to": "m-0"}),
@@ -35,6 +36,23 @@ VALID = [
 def test_valid_messages_round_trip(message):
     assert decode(message.encode()) == message
     assert decode(message.encode().encode()) == message
+
+
+def test_hello_without_optional_host_name_remains_compatible():
+    hello = next(message for message in VALID if message.type == "hello")
+    decoded = decode(hello.encode())
+    assert "host_name" not in decoded.payload
+
+
+def test_hello_worker_policy_is_validated_and_backward_compatible():
+    base = dict(VALID[0].payload)
+    base["worker_policy"] = {"allow_control": True, "allow_terminal_view": True, "allow_create": False,
+                             "allow_root": ["/srv/work"], "allow_power": False, "allow_restore": False}
+    decoded = decode(Message("hello", "w-1", 0, base).encode())
+    assert decoded.payload["worker_policy"] == base["worker_policy"]
+    base["worker_policy"] = {"allow_create": "yes", "allow_root": []}
+    with pytest.raises(ProtocolError, match="worker_policy"):
+        decode(Message("hello", "w-1", 0, base).encode())
 
 
 @pytest.mark.parametrize(
@@ -56,12 +74,15 @@ def test_valid_messages_round_trip(message):
         (json.dumps(_message("events", {"after": 5, "through": 4, "events": []})), "invalid-message"),
         (json.dumps(_message("events", {"after": 0, "through": 1, "events": "x"})), "invalid-message"),
         (json.dumps(_message("events", {"after": 0, "through": 1, "events": [1]})), "invalid-message"),
+        (json.dumps(_message("events", {"after": 0, "through": 1, "events": [{"id": 1}], "missions": {}})), "invalid-message"),
+        (json.dumps(_message("events", {"after": 0, "through": 1, "events": [{"id": 1}], "mission_cursor": 2})), "invalid-message"),
         (json.dumps(_message("events.nack", {"expected_after": "1"})), "invalid-message"),
         (json.dumps(_message("welcome", {"generation": 0, "protocol_version": 1, "event_cursor": 0})), "invalid-message"),
         (json.dumps(_message("welcome", {"generation": 1, "protocol_version": 9, "event_cursor": 0})), "unsupported-version"),
         (json.dumps(_message("command.ack", {"request_id": "r", "status": "done"})), "invalid-message"),
         (json.dumps(_message("command", {**CommandRequest("x").to_json(), "schema_version": 9})), "unsupported-version"),
         (json.dumps(_message("hello", {**VALID[0].payload, "missions": {}})), "invalid-message"),
+        (json.dumps(_message("hello", {**VALID[0].payload, "host_name": "bad\nhost"})), "invalid-message"),
         (json.dumps(_message("error", {"code": 1, "message": "m"})), "invalid-message"),
         ("x" * (proto.MAX_MESSAGE_BYTES + 1), "message-too-large"),
     ],

@@ -70,7 +70,8 @@ test.describe("first-run registration", () => {
     await expect(page.getByRole("button", { name: "Create administrator" })).toBeEnabled();
   });
 
-  test("success is shown and leads straight into the signed-in app", async ({ page, coord }) => {
+  test("success is shown and leads straight into the signed-in app", async ({ page, coord, browserName, isMobile }) => {
+    const started = Date.now();
     await page.goto("/");
     await page.getByLabel("Setup token").fill(coord.setupToken());
     await page.getByLabel("Administrator username").fill("operator");
@@ -78,6 +79,8 @@ test.describe("first-run registration", () => {
     await page.getByLabel("Repeat password").fill(PASSWORD);
     await page.getByRole("button", { name: "Create administrator" }).click();
     await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    const elapsedMs = Date.now() - started;
+    if (browserName === "chromium") console.log(`UX task first sign-in: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${elapsedMs} ms`);
     await expect(page.locator(".toast.applied")).toContainText("Setup complete. You are signed in as operator");
     await expect(page.locator("#account-button")).toContainText("operator");
     // The first-run state is gone for good.
@@ -87,6 +90,25 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("slow password sign-in shows visible announced progress until the server responds", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await signOutViaUi(page);
+    await page.route("**/api/v1/auth/login", async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.continue();
+    });
+    await page.getByLabel("Username", { exact: true }).fill("admin");
+    await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
+    await page.getByRole("button", { name: "Sign in" }).click();
+
+    const progress = page.locator("#login-progress");
+    await expect(progress).toBeVisible();
+    await expect(progress).toHaveText("Signing in…");
+    await expect(progress).toHaveAttribute("aria-live", "polite");
+    await expect(page.getByRole("button", { name: "Signing in…" })).toBeDisabled();
+    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  });
+
   test("wrong credentials give the same message for a wrong password and an unknown user", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await signOutViaUi(page);
@@ -98,9 +120,12 @@ test.describe("sign-in", () => {
       return page.locator("#form-error").innerText();
     };
     const wrongPassword = await attempt("admin", "not the password!!");
+    const password = page.getByLabel("Password", { exact: true });
+    await expect(page.getByRole("alert")).toHaveText("Username or password is incorrect. Check both and try again.");
+    await expect(password).toBeFocused();
     const unknownUser = await attempt("nobody", "not the password!!");
     expect(unknownUser).toBe(wrongPassword);
-    expect(wrongPassword).toContain("username or password is not correct");
+    expect(wrongPassword).toBe("Username or password is incorrect. Check both and try again.");
     expect(wrongPassword).not.toMatch(/no such user|unknown user|does not exist/i);
   });
 
@@ -109,6 +134,12 @@ test.describe("sign-in", () => {
     await signOutViaUi(page);
     const pass = page.getByLabel("Password", { exact: true });
     await pass.focus();
+    await expect(page.locator("#password-caps")).toBeHidden();
+    await pass.evaluate((el) => {
+      const event = new KeyboardEvent("keydown", { key: "A", bubbles: true });
+      Object.defineProperty(event, "getModifierState", { value: (modifier: string) => modifier === "CapsLock" && false });
+      el.dispatchEvent(event);
+    });
     await expect(page.locator("#password-caps")).toBeHidden();
     await pass.evaluate((el) => el.dispatchEvent(new KeyboardEvent("keydown", { key: "A", modifierCapsLock: true, bubbles: true })));
     await expect(page.locator("#password-caps")).toBeVisible();
@@ -125,7 +156,7 @@ test.describe("sign-in", () => {
       await page.getByLabel("Username", { exact: true }).fill(user);
       await page.getByLabel("Password", { exact: true }).fill(`wrong password ${i}`);
       await page.getByRole("button", { name: "Sign in" }).click();
-      await expect(page.locator("#form-error")).toContainText("not correct");
+      await expect(page.locator("#form-error")).toContainText("incorrect");
     }
     // The sixth attempt is refused, whatever the user name.
     await page.getByLabel("Username", { exact: true }).fill("someone-else");
@@ -236,5 +267,22 @@ test.describe("account menu and password change", () => {
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await expect(page.locator("#login-notice")).toContainText("Every session was signed out");
     await loginViaUi(page, "admin", "another long passphrase");
+  });
+
+  test("API tokens can be scoped, shown once, listed and revoked from account settings", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await navTo(page, "Account");
+    await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
+    await page.getByLabel("Token name").fill("automation-key");
+    await page.getByLabel("read", { exact: true }).uncheck();
+    await page.getByLabel("operate", { exact: true }).check();
+    await page.getByRole("button", { name: "Create token" }).click();
+    const secret = page.locator(".token-secret code");
+    await expect(secret).toContainText(/^.{30,}$/);
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
+    await page.getByRole("button", { name: "Revoke automation-key" }).click();
+    await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
+    await expect(secret).toHaveCount(1);
   });
 });

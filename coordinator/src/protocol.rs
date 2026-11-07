@@ -43,13 +43,13 @@ fn fields(kind: &str) -> Option<(&'static [&'static str], &'static [&'static str
                 "missions",
                 "event_cursor",
             ],
-            &[],
+            &["host_name", "worker_policy"],
         ),
         "welcome" => (&["generation", "protocol_version", "event_cursor"], &[]),
         "command" => (&["schema_version", "operation", "params", "mission_id", "target", "request_id"], &[]),
         "command.ack" => (&["request_id", "status"], &[]),
         "command.result" => (&["schema_version", "request_id", "operation", "outcome", "result", "error"], &[]),
-        "events" => (&["after", "through", "events"], &[]),
+        "events" => (&["after", "through", "events"], &["mission_cursor", "missions"]),
         "events.nack" => (&["expected_after"], &[]),
         "ping" | "pong" => (&[], &[]),
         "terminal.open" => (&["session_id", "mission_id", "mode", "cols", "rows"], &[]),
@@ -150,6 +150,19 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
                     return perr("invalid-message", "event ids must ascend within (after, through]");
                 }
                 previous = id;
+            }
+            if let Some(missions) = p.get("missions") {
+                let Some(missions) = missions.as_array().filter(|m| m.len() <= 10_000) else {
+                    return perr("invalid-message", "missions must be a list of at most 10000 objects");
+                };
+                if missions.iter().any(|m| !m.is_object()) {
+                    return perr("invalid-message", "each mission snapshot must be an object");
+                }
+            }
+            if let Some(mission_cursor) = p.get("mission_cursor") {
+                if uint(Some(mission_cursor), "mission_cursor", 0)? > through {
+                    return perr("invalid-message", "mission_cursor must not be greater than through");
+                }
             }
             if through < after {
                 return perr("invalid-message", "through must not be below after");
@@ -285,6 +298,38 @@ pub fn check_hello(msg: &Message) -> Result<Value, ProtocolError> {
             return perr("invalid-message", format!("hello: {k} must be a string"));
         }
     }
+    if let Some(host) = p.get("host_name") {
+        if !host
+            .as_str()
+            .is_some_and(|value| !value.is_empty() && value.len() <= 255 && !value.chars().any(char::is_control))
+        {
+            return perr("invalid-message", "hello: host_name must be 1-255 bytes without control characters");
+        }
+    }
+    if let Some(policy) = p.get("worker_policy") {
+        let Some(policy) = policy.as_object() else {
+            return perr("invalid-message", "hello: worker_policy must be an object");
+        };
+        for key in ["allow_control", "allow_terminal_view", "allow_create", "allow_power", "allow_restore"] {
+            if !policy.get(key).is_some_and(Value::is_boolean) {
+                return perr("invalid-message", format!("hello: worker_policy.{key} must be boolean"));
+            }
+        }
+        let roots = policy.get("allow_root").and_then(Value::as_array).ok_or_else(|| ProtocolError {
+            code: "invalid-message",
+            message: "hello: worker_policy.allow_root must be a list".into(),
+        })?;
+        if roots.len() > 32
+            || roots
+                .iter()
+                .any(|root| !root.as_str().is_some_and(|text| !text.is_empty() && text.len() <= 4096))
+        {
+            return perr(
+                "invalid-message",
+                "hello: worker_policy.allow_root must contain at most 32 paths of 1-4096 bytes",
+            );
+        }
+    }
     if !p["platform"].is_object() {
         return perr("invalid-message", "hello: platform must be an object");
     }
@@ -302,4 +347,52 @@ pub fn check_hello(msg: &Message) -> Result<Value, ProtocolError> {
         return perr("invalid-message", "hello: too many missions");
     }
     Ok(Value::Array(caps.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hello_payload(host_name: Option<&str>) -> Value {
+        let mut payload = json!({
+            "worker_id": "worker-1",
+            "name": "worker-1",
+            "software_version": "1.0",
+            "protocol_versions": [PROTOCOL_VERSION],
+            "platform": {},
+            "capabilities": [],
+            "missions": [],
+            "event_cursor": 0
+        });
+        if let Some(host) = host_name {
+            payload["host_name"] = json!(host);
+        }
+        payload
+    }
+
+    #[test]
+    fn hello_accepts_optional_host_name_and_older_workers() {
+        for host_name in [None, Some("build-host")] {
+            let raw = encode("hello", "worker-1", 0, hello_payload(host_name));
+            let decoded = decode(raw.as_bytes()).expect("compatible hello");
+            assert_eq!(decoded.payload.get("host_name").and_then(Value::as_str), host_name);
+        }
+    }
+
+    #[test]
+    fn hello_validates_and_preserves_optional_worker_policy() {
+        let mut payload = hello_payload(None);
+        let policy = json!({"allow_control":true,"allow_terminal_view":true,"allow_create":false,
+            "allow_root":["/srv/work"],"allow_power":false,"allow_restore":false});
+        payload["worker_policy"] = policy.clone();
+        let decoded = decode(encode("hello", "worker-1", 0, payload).as_bytes()).expect("valid policy");
+        assert_eq!(check_hello(&decoded).unwrap(), json!([]));
+        assert_eq!(decoded.payload["worker_policy"], policy);
+
+        let mut malformed = hello_payload(None);
+        malformed["worker_policy"] = json!({"allow_create":"yes","allow_root":[]});
+        let decoded = decode(encode("hello", "worker-1", 0, malformed).as_bytes()).expect("envelope parse");
+        let error = check_hello(&decoded).unwrap_err();
+        assert_eq!(error.code, "invalid-message");
+    }
 }

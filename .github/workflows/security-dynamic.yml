@@ -1,0 +1,203 @@
+name: dynamic security scans
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  api-and-console:
+    name: Schemathesis and OWASP ZAP
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/rust-toolchain
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Build the coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+
+      - name: Install pinned Schemathesis
+        run: python -m pip install --disable-pip-version-check schemathesis==4.33.1
+
+      - name: Start an isolated coordinator with a short-lived admin token
+        shell: bash
+        run: |
+          set -euo pipefail
+          data="$RUNNER_TEMP/bridge-security-scan"
+          bin="$GITHUB_WORKSPACE/coordinator/target/release/bridge-coordinator"
+          "$bin" --data-dir "$data" --bind 127.0.0.1:18443 --hostname localhost --ip 127.0.0.1 init
+          # This isolated test instance must let Schemathesis reach each operation instead of
+          # consuming the production mutation budget with its generated cases.
+          python - "$data/config.toml" <<'PY'
+          import sys
+          from pathlib import Path
+
+          config = Path(sys.argv[1])
+          text = config.read_text(encoding="utf-8")
+          text = text.replace("mutation_limit_per_token = 30", "mutation_limit_per_token = 10000")
+          text = text.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 10000")
+          config.write_text(text, encoding="utf-8")
+          PY
+          token=$("$bin" --data-dir "$data" token create security-scan --scope admin --expires-days 1)
+          echo "::add-mask::$token"
+          echo "SCAN_TOKEN=$token" >> "$GITHUB_ENV"
+          BRIDGE_COORDINATOR_DATA_DIR="$data" "$bin" --data-dir "$data" serve >"$RUNNER_TEMP/bridge-security-scan.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/bridge-security-scan.pid"
+          for attempt in $(seq 1 45); do
+            if curl --silent --show-error --fail --cacert "$data/ca.pem" https://localhost:18443/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/bridge-security-scan.log"
+          exit 1
+
+      - name: Prepare writable ZAP report directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/zap-reports"
+          chmod 0777 "$RUNNER_TEMP/zap-reports"
+
+      - name: Scan TLS policy with testssl.sh
+        run: |
+          git init "$RUNNER_TEMP/testssl-src"
+          git -C "$RUNNER_TEMP/testssl-src" remote add origin https://github.com/testssl/testssl.sh.git
+          git -C "$RUNNER_TEMP/testssl-src" fetch --depth 1 origin 4f17be931a9d60f3f987975aea8221f1a8eaf7aa
+          git -C "$RUNNER_TEMP/testssl-src" checkout --detach FETCH_HEAD
+          "$RUNNER_TEMP/testssl-src/testssl.sh" --quiet --warnings off --severity CRITICAL \
+            --add-ca "$RUNNER_TEMP/bridge-security-scan/ca.pem" \
+            --jsonfile-pretty "$RUNNER_TEMP/testssl-report.json" localhost:18443
+          TLS_SCAN_REPORT="$RUNNER_TEMP/testssl-report.json" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report = json.loads(Path(os.environ["TLS_SCAN_REPORT"]).read_text(encoding="utf-8"))
+          findings = []
+
+          def visit(value):
+              if isinstance(value, dict):
+                  severity = str(value.get("severity", "")).upper()
+                  if severity in {"MEDIUM", "HIGH", "CRITICAL"} and "id" in value:
+                      findings.append((severity, str(value.get("id")), str(value.get("finding", ""))))
+                  for child in value.values():
+                      visit(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      visit(child)
+
+          visit(report)
+          if findings:
+              for severity, check_id, finding in findings:
+                  print(f"testssl {severity}: {check_id}: {finding}")
+              raise SystemExit(f"{len(findings)} TLS findings at medium severity or above")
+          print("testssl found no medium-or-higher TLS findings")
+          PY
+
+      - name: Fuzz every documented API operation
+        # Fuzz read operations only. Writes can start paid work, revoke workers/tokens,
+        # suspend or restore a worker, or change credentials; authored Rust/Python tests cover
+        # those operations with controlled state. Exclude WebSocket upgrade routes as well.
+        # Keep the scanner single-worker, under a 4 GiB address-space limit, and time-bounded.
+        # Report coordinator death or a resource timeout as an actionable failed step.
+        shell: bash
+        run: |
+          set -uo pipefail
+          ulimit -v 4194304
+          set +e
+          timeout --signal=TERM --kill-after=15s 180s st run docs/distributed/openapi.json \
+            --url https://localhost:18443 \
+            --tls-verify "$RUNNER_TEMP/bridge-security-scan/ca.pem" \
+            --header "Authorization: Bearer $SCAN_TOKEN" \
+            --workers 1 \
+            --max-time 120 \
+            --max-examples 10 \
+            --max-failures 10 \
+            --request-timeout 10 \
+            --exclude-method POST --exclude-method PUT --exclude-method PATCH --exclude-method DELETE \
+            --exclude-checks positive_data_acceptance \
+            --exclude-path-regex '^/api/v1/(stream|terminal|worker/connect|worker/terminal/.*)$' \
+            --report junit --report-dir "$RUNNER_TEMP/schemathesis"
+          scan_status=$?
+          set -e
+          if [ "$scan_status" -ne 0 ]; then
+            if [ "$scan_status" -eq 124 ] || [ "$scan_status" -eq 137 ]; then
+              echo "::error::Schemathesis exceeded its 180-second / 4-GiB resource budget (exit $scan_status)"
+            else
+              echo "::error::Schemathesis exited with status $scan_status"
+            fi
+            echo "--- coordinator log ---"
+            cat "$RUNNER_TEMP/bridge-security-scan.log"
+            exit "$scan_status"
+          fi
+          if ! curl --silent --show-error --fail --cacert "$RUNNER_TEMP/bridge-security-scan/ca.pem" \
+            https://localhost:18443/healthz >/dev/null; then
+            echo "::error::Coordinator stopped responding during Schemathesis; see coordinator log above"
+            cat "$RUNNER_TEMP/bridge-security-scan.log"
+            exit 1
+          fi
+
+      - name: Run the ZAP OpenAPI API scan
+        # The runtime and OpenAPI schema both bound arbitrary JSON nesting to four levels,
+        # keeping ZAP's recursive Swagger parser within its tested memory budget. Keep Insights
+        # This prevents the memory warning from stopping ZAP; the alert report is evaluated by our gate.
+        # Bypass runner proxies for the scanner's localhost control API.
+        run: >-
+          docker run --rm --network host
+          -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1
+          -v "$RUNNER_TEMP/zap-reports:/zap/wrk/:rw"
+          zaproxy/zap-stable:2.17.0
+          zap-api-scan.py
+          -t https://localhost:18443/api/v1/openapi.json
+          -f openapi
+          -J zap-api-report.json
+          -r zap-api-report.html
+          -I
+          -z "-config connection.sslInsecure=true -config insights.exitAuto=false"
+
+      - name: Run the ZAP console baseline scan
+        run: >-
+          docker run --rm --network host
+          -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1
+          -v "$RUNNER_TEMP/zap-reports:/zap/wrk/:rw"
+          zaproxy/zap-stable:2.17.0
+          zap-baseline.py
+          -t https://localhost:18443/
+          -J zap-console-report.json
+          -r zap-console-report.html
+          -I
+          -z "-config connection.sslInsecure=true -config insights.exitAuto=false"
+
+      - name: Fail on medium or high ZAP alerts
+        run: python scripts/check_zap_reports.py "$RUNNER_TEMP/zap-reports"
+
+      - name: Keep scan reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dynamic-security-reports
+          path: |
+            ${{ runner.temp }}/schemathesis/
+            ${{ runner.temp }}/zap-reports/
+            ${{ runner.temp }}/testssl-report.json
+            ${{ runner.temp }}/bridge-security-scan.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Stop the isolated coordinator
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/bridge-security-scan.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/bridge-security-scan.pid")" 2>/dev/null || true
+          fi

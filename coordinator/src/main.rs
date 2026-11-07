@@ -4,7 +4,7 @@ use bridge_coordinator::admin_reset;
 use bridge_coordinator::certs::{self, Sans};
 use bridge_coordinator::config;
 use bridge_coordinator::db::Db;
-use bridge_coordinator::{auth, db_path, ops, protocol, server};
+use bridge_coordinator::{auth, db_path, ops, protocol, scopes, server};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -34,9 +34,8 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   cert new-ca [--hostname NAME]... [--ip ADDR]...  (new name-constrained CA and server certificate;
                                                     the old CA is kept as ca.pem.old-<UTC>)
   cert install --cert FILE --key FILE
-  token create NAME [--expires-days N] | token revoke NAME
-                                (default 90 days, 0 = never expires; a token has full
-                                 administrator power)
+  token create NAME [--scope SCOPE]... [--expires-days N] | token revoke NAME
+                                (default scope read, default expiry 90 days, 0 = never)
 --data-dir defaults to $BRIDGE_COORDINATOR_DATA_DIR, then /var/lib/bridge-coordinator.
 Environment: BRIDGE_COORDINATOR_BIND (host:port) and BRIDGE_COORDINATOR_LAN_ENABLED (true/false)
 override config.toml.";
@@ -55,6 +54,7 @@ struct Args {
     input: Option<PathBuf>,
     bind: Option<String>,
     expires_days: Option<u32>,
+    scopes: Vec<String>,
     keep_api_tokens: bool,
     temporary: bool,
     username: Option<String>,
@@ -73,6 +73,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         input: None,
         bind: None,
         expires_days: None,
+        scopes: vec![],
         keep_api_tokens: false,
         temporary: false,
         username: None,
@@ -97,6 +98,7 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                 let v = value("--expires-days")?;
                 a.expires_days = Some(v.parse().map_err(|_| format!("--expires-days must be a whole number of days, not {v:?}"))?);
             }
+            "--scope" => a.scopes.push(value("--scope")?),
             "--keep-api-tokens" => a.keep_api_tokens = true,
             "--temporary" => a.temporary = true,
             "--username" => a.username = Some(value("--username")?),
@@ -220,9 +222,23 @@ async fn run(args: Args) -> Result<(), String> {
             }
             let days = args.expires_days.unwrap_or(DEFAULT_TOKEN_DAYS);
             let expires_at = (days > 0).then(|| bridge_coordinator::now() + i64::from(days) * 86_400);
+            let token_scopes = if args.scopes.is_empty() {
+                vec![scopes::READ.to_string()]
+            } else {
+                args.scopes.clone()
+            };
+            if token_scopes.iter().any(|scope| !scopes::valid(scope)) {
+                return Err(format!("unknown token scope; choose from {}", scopes::ALL.join(", ")));
+            }
+            if token_scopes.iter().collect::<std::collections::BTreeSet<_>>().len() != token_scopes.len() {
+                return Err("token scopes must not be repeated".into());
+            }
             let db = open_db(&dir)?;
             let token = auth::random_token();
-            if !db.token_create(name, &auth::sha256_hex(&token), expires_at).map_err(|e| e.to_string())? {
+            if !db
+                .token_create_scoped(name, &auth::sha256_hex(&token), expires_at, &token_scopes)
+                .map_err(|e| e.to_string())?
+            {
                 return Err(format!("token {name} already exists"));
             }
             let detail = if days == 0 {
@@ -231,11 +247,7 @@ async fn run(args: Args) -> Result<(), String> {
                 format!("{name} (expires in {days} days)")
             };
             db.audit("cli", "token.create", &detail, "local");
-            if days == 0 {
-                eprintln!("note: this token never expires and has full administrator power; revoke it with `token revoke {name}`");
-            } else {
-                eprintln!("note: this token has full administrator power and expires in {days} days");
-            }
+            eprintln!("note: token scopes: {}", token_scopes.join(", "));
             println!("{token}");
             Ok(())
         }

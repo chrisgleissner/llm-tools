@@ -1,7 +1,17 @@
 // Bundles src/ into dist/ with esbuild: hashed app-HASH.js / app-HASH.css and an index.html that references them.
 import { build } from "esbuild";
-import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { basename } from "node:path";
+import { spawnSync } from "node:child_process";
+
+// Windows' Python lacks curses, and the container image build stages only the checked-in web
+// tree. The artifact is regenerated in source checkouts and drift-checked by the Python tests.
+if (process.platform === "win32" || !existsSync("../llm_tools/bridge_tui.py")) {
+  if (!existsSync("src/event-phrases.generated.ts")) throw new Error("missing generated TUI event phrases");
+} else {
+  const phraseGeneration = spawnSync("python3", ["generate_event_phrases.py"], { encoding: "utf8" });
+  if (phraseGeneration.status !== 0) throw new Error(`cannot generate TUI event phrases: ${phraseGeneration.stderr || phraseGeneration.error}`);
+}
 
 rmSync("dist", { recursive: true, force: true });
 mkdirSync("dist", { recursive: true });

@@ -43,8 +43,10 @@ worker protocol is `protocol.md`.
     `config.toml`; a non-loopback bind also writes `lan_enabled = true`
     (or the value of `BRIDGE_COORDINATOR_LAN_ENABLED` when set). The default bind is
     `127.0.0.1:8443`.
-- `bridge-coordinator serve --data-dir DIR` serves HTTPS (rustls; TLS 1.3 and
-  1.2 with AEAD suites only). It refuses to start when the bind address is not
+- `bridge-coordinator serve --data-dir DIR` serves HTTPS (rustls; TLS 1.3 by
+  default, with TLS 1.2 and AEAD suites only when `min_tls = "1.2"` is explicitly
+  set for an older client). Session resumption tickets and 0-RTT are disabled. It
+  refuses to start when the bind address is not
   loopback and `lan_enabled = true` is not set (NET-003). It holds an exclusive
   lock on `DIR/coordinator.lock` while running (released by the kernel on any
   exit). Logs go to stderr only; nothing is written outside the data directory
@@ -110,6 +112,11 @@ worker protocol is `protocol.md`.
   - `BRIDGE_COORDINATOR_PUBLIC_PORT`: port in the printed URLs when it differs from
     the bind port (a published container port). `compose.yaml` sets it from
     `BRIDGE_PORT`.
+  - `BRIDGE_COORDINATOR_TLS_CERT_FILE`, `BRIDGE_COORDINATOR_TLS_KEY_FILE` and
+    `BRIDGE_COORDINATOR_TLS_CERT_NAME`: optional operator-file certificate, private key
+    and exact SNI hostname. The file identity is served only for that hostname; other
+    names continue using the internal CA. Valid replacement pairs are picked up for
+    new TLS handshakes without restarting the server.
   - `BRIDGE_COORDINATOR_CONTAINER`: set by the container image. Network exposure is
     then decided by the published port, not by `lan_enabled`.
 
@@ -140,13 +147,22 @@ worker protocol is `protocol.md`.
   server certificate from the existing CA (names must be within the CA's name
   constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
   installs administrator-provided files.
-- `bridge-coordinator token create NAME [--expires-days N]` prints an API token for the
-  remote CLI; stored hashed, revocable with `token revoke NAME`. The token expires
-  after 90 days by default; `--expires-days 0` creates one that never expires. The
-  expiry is checked on every use. An API token has full administrator power (see
-  `threat-model.md`).
+- `bridge-coordinator token create NAME [--scope SCOPE]... [--expires-days N]` prints an API
+  token once; only its SHA-256 hash and grants are stored, and `token revoke NAME` revokes it.
+  New tokens default to `read`; repeat `--scope` for `operate`, `terminal:view`, `terminal:write`
+  or `admin`. `admin` grants every scope. Tokens expire after 90 days by default;
+  `--expires-days 0` creates one that never expires. Existing tokens are migrated to `admin`
+  so their previous permissions remain unchanged.
 
 ## HTTP API (all under `/api/v1`, JSON)
+
+The generated OpenAPI 3.1 description is served at `/api/v1/openapi.json`; a
+script-free reference page is served locally at `/api/docs`. The document is
+generated from the route policy table and Rust response schemas, and its
+committed snapshot is checked in CI. See the [API reference and examples](api.md)
+for resource requests, CLI parity decisions and curl walkthroughs. Resource
+routes adapt to the existing typed command layer; `/commands` remains available
+for low-level clients.
 
 Public:
 
@@ -163,12 +179,23 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
 | POST | `/auth/password` | `{current, new}`; deletes every session. While `password_change_required` is true, every request made with a session cookie except this one, `/auth/logout` and `GET /auth/state` is answered with `403` and error code `password-change-required`. API tokens are not affected. A successful change clears the flag and the reset notice. |
-| GET | `/workers` | name, id, state (`online`/`offline`), last_seen, versions, platform, capabilities. |
+| POST | `/auth/passkeys/registration/start` | Browser session plus CSRF and exact Origin required; `{name}` returns a five-minute, session-bound registration challenge and WebAuthn creation options. Only HTTPS DNS origins are supported; IP origins are refused. |
+| POST | `/auth/passkeys/registration/finish` | Browser session plus CSRF and the same Origin required; `{challenge_id, credential}` verifies once and stores the passkey. |
+| POST | `/auth/passkeys/assertion/start` | Public sign-in start, exact HTTPS DNS Origin required; `{}` returns assertion options and sets a short-lived, single-use HttpOnly browser ticket. No registered credentials returns 404. |
+| POST | `/auth/passkeys/assertion/finish` | `{challenge_id, credential}` plus the browser ticket and same Origin; verifies UV and creates a normal short-lived session cookie. |
+| GET | `/workers` | name, stable id, state (`online`/`offline`), last_seen, versions, platform, capabilities, enrolled host name, and the active connection's peer address. The address is null while offline. |
+| GET | `/workers/{name}` | The same safe worker summary fields as the list route. |
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
-| GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (1-500; without it every match is returned) and `offset`. The reply adds `total` (matches before paging), `offset` and `statuses` (match counts per status, ignoring the status filter). |
-| POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. A command for an offline worker is queued with `state: pending` and delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. Same `request_id` returns the existing journal entry. |
+| GET | `/tokens` | Token name, scopes, creation, last-use and expiry metadata. Requires an administrator session or an `admin` token. |
+| POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry). Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
+| DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
+| GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). A mission may include bounded `needs_you: {kind, message, command}` when its native provider is waiting on a structured question; the message contains only question/choice text and the local answer command. Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (default 100, maximum 500), `cursor`, or legacy `offset`. The reply adds `total`, `offset`, `next_cursor` and `statuses` (match counts per status, ignoring the status filter). Cursors are authenticated and encrypted, opaque, bound to the normalized filters and sort order, and cannot be combined with `offset`; use the returned `next_cursor` unchanged to fetch the next page. |
+| POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
+| GET | `/missions/{id}/tasks?worker=&limit=&cursor=` | Typed `task.list`; default limit 50, maximum 1000. Returns a command result with `next_cursor` when another page exists. |
+| GET | `/missions/{id}/events?worker=&limit=&cursor=` | Typed `mission.events`; default limit 50, maximum 1000. Legacy `after` remains available. |
+| GET | `/missions/{id}/operations?worker=&limit=&cursor=` | Typed `session.list`; default limit 100, maximum 1000; returns metadata only. |
 | GET | `/events?worker=&after=&limit=` | Stored events, ascending. |
 | GET | `/stream` | WebSocket; pushes `worker`, `event` and `command` updates. |
 | GET | `/terminal?worker=&mission=&mode=view\|write&cols=&rows=` | WebSocket for one remote terminal session. Session cookie (with exact Origin) or API token. The coordinator opens the session on the worker with `terminal.open` and relays the frames of `protocol.md` (Terminal sessions) unchanged after validation; the frame and backlog bounds are specified there and the session counts are in the limits table below (over the cap: `x` frame, close 1013). Each open is audited as `terminal.open`. The worker, not the coordinator, decides the writer role. |
@@ -178,8 +205,67 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 Every state-changing request authenticated by cookie needs header
 `X-CSRF-Token` equal to the session's token and an `Origin` equal to the
 coordinator's own origin; WebSocket upgrades check `Origin` too (AUTH-007).
+Cookie requests carrying Fetch Metadata must be `same-origin`, with the single
+exception of a top-level `GET` navigation to a console HTML page; cross-site API,
+asset and WebSocket requests are rejected. Requests with no Fetch Metadata remain
+usable by non-browser clients and are still subject to authentication, exact
+Origin and CSRF rules where applicable.
 Bearer API tokens are not subject to CSRF checks because browsers never send
 them automatically.
+
+API errors are RFC 9457 problem details (`application/problem+json`) with a
+stable type URI derived from the existing error code. The nested `error` object
+is retained for the current web client. Unknown API paths return a problem
+response; unsupported methods return 405 with an `Allow` header.
+
+## Public API contract and compatibility
+
+Use a token in the `Authorization: Bearer` header over HTTPS. New tokens default
+to `read`; mission and task changes need `operate`; terminal viewing and control
+need `terminal:view` and `terminal:write`; worker administration, token
+management and diagnostics need `admin`. The browser console uses its session
+cookie and CSRF token; worker channel routes accept only that worker's credential.
+Bearer credentials are never accepted in URLs. `/tokens` and `/diagnostics` are
+admin-only even though their methods are `GET`.
+
+For a mission or task action that creates a durable worker command, send an
+`Idempotency-Key` that is unique to the intended action. The coordinator stores
+it as the durable command request ID; retrying the same key replays its stored
+outcome. An offline worker returns `202 Accepted` and a
+`Location` pointing at `/api/v1/commands/{request_id}`. Poll that resource until
+the command is terminal. If the outcome is `uncertain`, treat it as unknown and
+inspect mission state before deciding what to do next; it is not a success receipt.
+
+Task reads return an `ETag` with the task revision when the worker answers
+synchronously. Send that value in `If-Match` on an amend or verification request.
+The coordinator passes it to the worker as `expected_revision`; a stale revision
+returns `412 Precondition Failed`. A body revision and header must agree.
+
+Lists have stable sorting and bounded pages. Mission lists default to 100 entries
+and cap at 500; task and event lists default to 50, and operation lists to 100,
+each with a maximum of 1000. Prefer the opaque `cursor` and the returned
+`next_cursor`; reuse it unchanged with the same worker, mission, resource and
+filters. Cursors are authenticated and encrypted. `offset` and event `after`
+parameters are retained for compatibility where documented. All timestamps are
+RFC 3339 UTC.
+
+Errors use `application/problem+json`. The stable problem `type` and `code`
+identify the existing coordinator error. Common statuses include `401` for a
+missing/invalid credential, `403` for a missing scope, `409` for a conflicting
+state, `412` for a stale task revision, `415` for a non-JSON mutation body, and
+`429` for a rate limit. Bearer-authenticated mutations allow 30 requests per
+token and 120 per client address in each rolling 60-second window. A limited
+request includes `Retry-After`. Every bearer use and mutation is audited with
+token metadata and request ID; the secret itself is never logged. Cookie-session
+mutations and public passkey ceremony requests also consume the per-address
+budget, without a per-token budget.
+
+Within `/api/v1`, additive fields and operations may be introduced without a
+version change. A breaking change requires `/api/v2`. Before retiring a v1
+operation, responses will include `Deprecation` and `Sunset` headers and the API
+reference will state the replacement and removal date. The sunset date will be
+at least 90 days after the deprecation notice. The generated OpenAPI document
+and compatibility test are the reviewable contract for each release.
 
 ## Limits and timeouts (COORD-004, NET-010)
 
@@ -202,6 +288,12 @@ them automatically.
 | Stored events per worker | 50 000, oldest deleted first (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | 7 days | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
+| Bearer mutations | 30 per token and 120 per client address by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | `mutation_limit_per_token`, `mutation_limit_per_address` (1–10,000) |
+
+Every bearer-authenticated API request also writes an audit row with the token name,
+granted scopes, method, path, client address and supplied request ID. The bearer
+secret is never recorded. Mutation counters are in memory and reset on coordinator
+restart.
 
 Login rate limiting. Before the body is read and before Argon2 runs, a login reserves
 one attempt for the client address under the limiter lock. Attempts still in progress

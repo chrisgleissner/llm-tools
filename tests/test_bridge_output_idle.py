@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_tui
+from llm_tools import bridge_tui, terminal
 from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend
 from tests.conftest import wait_for as _shared_wait_for
 
@@ -29,12 +30,180 @@ def _running_snapshot(idle: int | None = None, status: str = "RUNNING") -> dict[
     return snapshot
 
 
+def test_native_provider_wait_requires_stable_prompt_and_returns_no_screen_content(monkeypatch) -> None:
+    screen = "sentinel private output\n? for shortcuts\n\n›\n"
+    readings = iter([(100, screen), (101, "provider is making progress\n? for shortcuts\n\n›\n"), (102, None), (103, None)])
+
+    class FakeBackend:
+        def pane_activity_screen(self, handle, *, pane, seen_epoch, start_line):
+            assert pane == "provider" and start_line == -24
+            return next(readings)
+
+    mission_id = "native-prompt-test"
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    load_handle = lambda _mission_id: object()
+
+    assert terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=100) is None
+    assert terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=120) is None
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=179)
+    assert waiting is None  # recent provider output restarted the quiet interval
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", load_handle, now=181)
+    assert waiting == {"provider": "Codex", "idle_seconds": 61}
+    assert "sentinel" not in str(waiting)
+
+
 def test_idle_phrase_threshold_and_rounding() -> None:
     assert bridge_tui._idle_phrase({}) == ""
     assert bridge_tui._idle_phrase({"output_idle_seconds": 29}) == ""
     assert bridge_tui._idle_phrase({"output_idle_seconds": "x"}) == ""
     assert bridge_tui._idle_phrase({"output_idle_seconds": 30}) == "no output for 30s"
     assert bridge_tui._idle_phrase({"output_idle_seconds": 59.9}) == "no output for 59s"
+
+
+def test_codex_queued_question_count_surfaces_terminal_answer_steps_without_question_text(monkeypatch) -> None:
+    capture = Path(__file__).parent / "fixtures" / "codex-question-tui-capture.txt"
+    text = capture.read_text(encoding="utf-8")
+    screen = text.split("State 1: question collapsed under the composer (provider idle, waiting):\n", 1)[1].split(
+        "State 2:", 1
+    )[0]
+    assert "? 1 question" in screen and "shift+← to answer" in screen
+    readings = iter([(200, screen), (201, screen)])
+
+    class FakeBackend:
+        def pane_activity_screen(self, handle, *, pane, seen_epoch, start_line):
+            return next(readings)
+
+    mission_id = "codex-question-count"
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=100)
+    assert waiting is None
+    waiting = terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=161)
+    assert waiting == {"provider": "Codex", "idle_seconds": 61, "question_count": 1}
+    assert "Please unplug the Pi's data/power USB cable" not in str(waiting)
+    assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 33 questions") == 0
+    assert terminal._codex_queued_question_count("Queued follow-up inputs\n? 1 question\n• Working (turn 4)") == 0
+    assert terminal._codex_queued_question_count("Queued follow-up inputs\n1 of 2\nQuestion text") == 2
+
+
+def test_codex_expanded_question_capture_extracts_only_question_and_choices(monkeypatch) -> None:
+    capture = Path(__file__).parent / "fixtures" / "codex-question-tui-capture.txt"
+    text = capture.read_text(encoding="utf-8")
+    expanded = text.split("State 2: after shift+Left, the question is expanded:\n", 1)[1].split(
+        "With two questions", 1
+    )[0]
+
+    expected = [{
+        "question": "Please unplug the Pi's data/power USB cable, wait 10 seconds, and reconnect it. It stopped answering on Wi-Fi after the requested DHCP renewal; its hostname change is saved, but the interface has not returned. I cannot switch USB power under the mission's power rule. Reply when it is powered again.",
+        "options": ["I'll reconnect it now", "I can't reconnect it right now", "Other"],
+    }]
+    assert terminal._codex_queued_questions(expanded) == expected
+
+    readings = iter([(300, expanded), (301, expanded)])
+
+    class FakeBackend:
+        def pane_activity_screen(self, handle, *, pane, seen_epoch, start_line):
+            return next(readings)
+
+    mission_id = "codex-expanded-question"
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    try:
+        waiting = terminal.read_native_provider_wait(mission_id, "codex", lambda _id: object(), now=100)
+        assert waiting is not None
+        assert waiting["idle_seconds"] == 0
+        assert waiting["questions"] == expected
+        assert "hostname change" in str(waiting["questions"])
+    finally:
+        terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+
+
+def test_codex_structured_question_is_visible_on_the_first_status_read(tmp_path, monkeypatch) -> None:
+    capture = Path(__file__).parent / "fixtures" / "codex-question-tui-capture.txt"
+    captured = capture.read_text(encoding="utf-8")
+    collapsed = captured.split("State 1: question collapsed under the composer (provider idle, waiting):\n", 1)[1].split(
+        "State 2:", 1
+    )[0]
+    expanded = captured.split("State 2: after shift+Left, the question is expanded:\n", 1)[1].split(
+        "With two questions", 1
+    )[0]
+    expected = terminal._codex_queued_questions(expanded)[0]
+    cwd = tmp_path / "mission"
+    cwd.mkdir()
+    codex_home = tmp_path / "codex-home"
+    sessions = codex_home / "sessions" / "2026" / "11" / "06"
+    sessions.mkdir(parents=True)
+    session_id = "12345678-1234-4234-8234-123456789abc"
+    call = {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call", "name": "request_user_input", "call_id": "call-question-1",
+            "arguments": json.dumps({"questions": [{"question": expected["question"], "options": [
+                {"label": label, "description": ""} for label in expected["options"]
+            ]}]}),
+        },
+    }
+    records = [
+        {"type": "session_meta", "payload": {"id": session_id, "cwd": str(cwd.resolve())}},
+        call,
+    ]
+    (sessions / f"rollout-{session_id}.jsonl").write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    class FakeBackend:
+        def pane_activity_screen(self, handle, *, pane, seen_epoch, start_line):
+            assert pane == "provider" and start_line == -24
+            return (300, collapsed)
+
+    mission_id = "codex-question-first-status"
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+    monkeypatch.setattr(terminal, "TmuxTerminalBackend", FakeBackend)
+    waiting = terminal.read_native_provider_wait(
+        mission_id, "codex", lambda _id: object(), session_id=session_id, cwd=str(cwd), now=100,
+    )
+
+    assert waiting is not None
+    assert waiting["question_count"] == 1
+    assert waiting["questions"] == [expected]
+    assert "I'll reconnect it now" in json.dumps(waiting)
+    from llm_tools import bridge_tui
+    from llm_tools.bridge_format import needs_attention
+
+    snapshot = {"mission": {"id": session_id}, "provider_wait": waiting}
+    snapshot["needs_you"] = needs_attention(snapshot)
+    assert "Please unplug the Pi's data/power USB cable" in snapshot["needs_you"]["message"]
+    assert "take control of the terminal to answer" in snapshot["needs_you"]["message"]
+    rows = bridge_tui._needs_you_rows(snapshot)
+    assert rows and "Please unplug the Pi's data/power USB cable" in rows[0]
+    terminal._PROVIDER_PROMPT_SEEN.pop(mission_id, None)
+
+
+def test_codex_question_capture_ignores_collapsed_or_working_state() -> None:
+    collapsed = "• Queued follow-up inputs\n  ? 1 question\n    shift+← to answer\n› Ask Codex to do anything"
+    working = "• Working (turn 5)\n• Queued follow-up inputs\n  Expanded but must not surface"
+
+    assert terminal._codex_queued_questions(collapsed) == []
+    assert terminal._codex_queued_questions(working) == []
+
+
+def test_codex_question_needs_you_explains_live_terminal_answer() -> None:
+    from llm_tools.bridge_format import needs_attention
+
+    result = needs_attention({
+        "mission": {"id": "mission-123"},
+        "provider_wait": {
+            "provider": "Codex", "idle_seconds": 61, "question_count": 1,
+            "questions": [{"question": "Choose a path", "options": ["Proceed", "Wait"]}],
+        },
+    })
+    assert result == {
+        "kind": "provider",
+        "tasks": [],
+        "command": "llm-bridge attach --mission mission-",
+        "message": "Codex asks: Choose a path · Choices: 1. Proceed; 2. Wait · take control of the terminal to answer: llm-bridge attach --mission mission-",
+    }
+    assert "SENTINEL" not in str(result)
     assert bridge_tui._idle_phrase({"output_idle_seconds": 60}) == "no output for 1m"
     assert bridge_tui._idle_phrase({"output_idle_seconds": 119}) == "no output for 1m"
     assert bridge_tui._idle_phrase({"output_idle_seconds": 125}) == "no output for 2m"
