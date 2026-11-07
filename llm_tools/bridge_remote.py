@@ -157,14 +157,39 @@ class Client:
         """Use the resource route when one exists; return ``None`` for legacy-only operations."""
         mission = request.mission_id
         op = request.operation
-        if mission is None and op not in {"mission.create", "worker.restore", "mission.agents", "worker.doctor", "worker.audit", "worker.gc"}:
+        if mission is None and op not in {"mission.create", "mission.list", "worker.restore", "mission.agents", "worker.doctor", "worker.audit", "worker.gc"}:
             return None
         base = f"/api/v1/missions/{urllib.parse.quote(mission, safe='')}" if mission is not None else ""
         params = dict(request.params)
         worker_query = urllib.parse.urlencode({"worker": target})
         headers = {"Idempotency-Key": request.request_id}
         wait_ms = int(wait * 1000)
-        if op == "mission.create":
+        if op == "mission.list":
+            # The resource list intentionally omits per-mission configuration. Preserve the
+            # typed command path for --include-config, which has no public REST equivalent.
+            if params.get("include_config"):
+                return None
+            missions: list[dict[str, Any]] = []
+            cursor: str | None = None
+            while True:
+                query_values = {"worker": target, "limit": 1000}
+                if cursor:
+                    query_values["cursor"] = cursor
+                status, body = self.call("GET", f"/api/v1/missions?{urllib.parse.urlencode(query_values)}", timeout=wait + 15)
+                if status != 200:
+                    raise RemoteError(_api_error(status, body))
+                if not isinstance(body, dict) or not isinstance(body.get("missions"), list):
+                    raise RemoteError("coordinator returned an unexpected mission page")
+                for row in body["missions"]:
+                    if not isinstance(row, dict) or not isinstance(row.get("mission"), dict):
+                        raise RemoteError("coordinator returned an unexpected mission row")
+                    missions.append(dict(row["mission"]))
+                next_cursor = body.get("next_cursor")
+                if not isinstance(next_cursor, str) or not next_cursor:
+                    break
+                cursor = next_cursor
+            return {"outcome": "ok", "result": {"missions": missions}, "error": None}
+        elif op == "mission.create":
             status, body = self.call("POST", "/api/v1/missions", {**params, "worker": target, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
         elif op == "worker.restore":
             status, body = self.call("POST", f"/api/v1/workers/{urllib.parse.quote(target, safe='')}/restore", {**params, "wait_ms": wait_ms}, timeout=wait + 15, headers=headers)
