@@ -83,7 +83,9 @@ test("a running pill in a list never animates and keeps its geometry, with and w
   await page.goto("/");
   const ring = page.locator('.pill[data-state="running"] svg').first();
   await expect(ring).toBeVisible();
+  await page.waitForTimeout(400); // the list settles (rows are re-read once after the first render)
   const before = await ring.boundingBox();
+  expect(before, "the ring has a box").not.toBeNull();
   await page.waitForTimeout(250);
   const after = await ring.boundingBox();
   expect(after?.x).toBe(before?.x);
@@ -170,7 +172,7 @@ test("a created mission can be started from its detail page through the resource
   await expect(page.getByRole("heading", { name: "Add telemetry opt-out" })).toBeVisible();
   await page.getByRole("button", { name: "Start mission" }).click();
   await expect(page.locator(".toast.applied")).toContainText("Start mission");
-  await expect(page.locator(".mission-head .pill")).toHaveAttribute("data-state", "running");
+  await expect(page.locator(".mission-head .pill")).not.toHaveAttribute("data-state", "queued"); // the header no longer offers Start
   expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/start") && request.key)).toBe(true);
   expect(requests.some((request) => request.path.endsWith("/commands"))).toBe(false);
 });

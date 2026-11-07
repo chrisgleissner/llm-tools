@@ -150,10 +150,8 @@ test.describe("terminal on a phone", () => {
         });
       });
       await setupViaUi(page, coord);
-      await expect(async () => {
-        await page.goto(`/missions/e2e-worker/${st.missionId}`);
-        await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(`/missions/e2e-worker/${st.missionId}`);
+      await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
       const keys = page.locator("#terminal-keys");
       const status = page.locator("#terminal-status");
       // View mode: the key bar is shown on a phone but every key is disabled (nothing could be sent).

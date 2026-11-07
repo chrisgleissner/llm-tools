@@ -84,12 +84,12 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--
 
 /* ---------------------------------------------------------------- state pill (spec 5.2) */
 .pill {
-  display: inline-flex; align-items: center; gap: 6px; block-size: 28px; padding-inline: var(--sp-3) 10px; border-radius: var(--r-pill);
-  font-size: var(--fs-xs); line-height: var(--lh-xs); font-weight: 600; white-space: nowrap; overflow-wrap: normal;
+  display: inline-flex; align-items: center; gap: 6px; min-block-size: 28px; padding-inline: var(--sp-3) 10px; border-radius: var(--r-pill); max-inline-size: 100%;
+  font-size: var(--fs-xs); line-height: var(--lh-xs); font-weight: 600; overflow-wrap: normal;
   background: var(--surface-2); color: var(--text);
 }
 .pill .icon { inline-size: 16px; block-size: 16px; }
-.pill.dense { block-size: 24px; }
+.pill.dense { min-block-size: 24px; }
 .pill[data-tier="alert"][data-state="needs-approval"], .pill[data-tier="alert"][data-state="needs-input"] { background: var(--alert-attention-bg); color: var(--alert-attention-fg); }
 .pill[data-tier="alert"][data-state="failed"] { background: var(--alert-failed-bg); color: var(--alert-failed-fg); }
 .pill[data-state="running"] .icon { color: var(--icon-running); }
@@ -140,7 +140,8 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--
 
 /* ---------------------------------------------------------------- toasts (spec 6.4) */
 .toasts { position: fixed; inset-inline-end: var(--sp-3); inset-block-end: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-2); inline-size: min(calc(100vw - 2 * var(--sp-3)), 400px); z-index: 70; }
-@media (max-width: 47.99rem) { .toasts { inset-block-end: calc(var(--tab-h) + var(--sp-3) + env(safe-area-inset-bottom)); } }
+/* On a phone the toasts sit under the header: the bottom edge holds the composer and the navigation bar, which a toast must not cover. */
+@media (max-width: 47.99rem) { .toasts { inset-block: calc(var(--head-h) + var(--sp-2)) auto; } }
 .toast { display: flex; align-items: flex-start; gap: var(--sp-3); background: var(--surface-1); border: 1px solid var(--border); border-inline-start: 4px solid var(--accent); padding: var(--sp-3); border-radius: var(--r-2); box-shadow: var(--e1); }
 .toast-icon { color: var(--accent); padding-block-start: 2px; }
 .toast-text { flex: 1 1 auto; min-inline-size: 0; }

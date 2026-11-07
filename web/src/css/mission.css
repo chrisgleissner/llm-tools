@@ -105,12 +105,16 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
   .head-actions [data-action="pause"] > span, .head-actions [data-action="stop"] > span { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   body[data-kb] .crumbs, body[data-kb] .mission-answer, body[data-kb] .head-actions, body[data-kb] .head-state, body[data-kb] .mission-tabs { display: none; }
 }
-/* Below the two-pane layout the session takes the height under the header and tabs, but never less than the pane's own chrome (status, toolbar, composer, key bar) plus a few terminal rows */
+/* Below the two-pane layout the session takes the height under the header and tabs. */
 @media (max-width: 59.99rem) {
-  .mission-session > [data-pane] { block-size: max(26rem, calc(100svh - var(--head-h) - var(--tab-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: 0; }
+  .mission-session > [data-pane] { block-size: max(14rem, calc(100svh - var(--head-h) - var(--tab-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: 0; }
 }
+/* A very small viewport (400% zoom): the page scrolls, and the pane keeps room for its own chrome (status, toolbar, composer, key bar) plus a few terminal rows. */
+@media (max-width: 59.99rem) and (max-height: 30rem) and (max-width: 24rem) { .mission-session > [data-pane] { block-size: 26rem; } }
+/* On a phone the header actions fit one row: Reject moves to the menu. */
+@media (max-width: 29.99rem) { .head-actions [data-action="reject"] { display: none; } }
 @media (min-width: 48rem) and (max-width: 59.99rem) {
-  .mission-session > [data-pane] { block-size: max(26rem, calc(100svh - var(--head-h) - var(--mission-above, 14rem) - var(--sp-5))); }
+  .mission-session > [data-pane] { block-size: max(18rem, calc(100svh - var(--head-h) - var(--mission-above, 14rem) - var(--sp-5))); }
 }
 
 /* Session and side column side by side */

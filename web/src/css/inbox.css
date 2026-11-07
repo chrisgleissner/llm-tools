@@ -39,7 +39,7 @@
 /* Below 36rem the title shares the first line with the pill (Missions) or gets its own full-width line (Inbox). */
 @container (max-width: 36rem) {
   .mrow, .mrow[data-layout="cells"] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "pill title menu" "sub sub menu" "actions actions actions"; padding-block: 4px; }
-  .mrow > .pill { block-size: 24px; }
+  .mrow > .pill { min-block-size: 24px; }
   .mrow[data-layout="cells"] { padding-block: 1px; }
   .mrow[data-layout="stack"] { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "pill menu" "title title" "sub sub"; }
   .mrow.has-actions { grid-template-areas: "pill pill" "title title" "sub sub" "actions menu"; }

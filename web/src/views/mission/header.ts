@@ -143,6 +143,12 @@ function menuItems(m: HeaderModel, hd: HeaderHandlers): MenuItem[] {
   const finished = m.status === "COMPLETED" || m.status === "CANCELLED";
   const items: MenuItem[] = [];
   if (!finished && m.status === "RUNNING") items.push({ label: "Run next task now", onSelect: hd.runNext, disabled: Boolean(why), reason: why });
+  // On a phone the header keeps Approve, Pause and Stop in one row; Reject is here (and on the task row).
+  const awaiting = !finished && m.state.id === "needs-approval" ? approvalOrdinals(m) : [];
+  if (awaiting.length === 1) {
+    const t = m.tasks.find((x) => x.ordinal === awaiting[0]);
+    items.push({ label: `Reject task ${awaiting[0]}`, danger: true, onSelect: () => t && hd.reject(t), disabled: Boolean(why) || !t, reason: why || (t ? "" : "Loading the task list") });
+  }
   items.push({ label: "Copy mission ID", onSelect: () => hd.copy(m.missionId, "mission ID") });
   if (m.folder) items.push({ label: "Copy folder path", onSelect: () => hd.copy(m.folder, "folder path") });
   if (!finished) items.push({ label: "Cancel mission", danger: true, onSelect: hd.cancel, disabled: Boolean(why), reason: why });

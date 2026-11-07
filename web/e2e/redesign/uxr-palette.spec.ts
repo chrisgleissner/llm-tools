@@ -66,6 +66,7 @@ uxr({ t: "T25", uxr: ["UXR-021"], needs: [...NEEDS, "WP-4", "WP-5"] }, "every ke
 uxr({ t: "T25", uxr: ["UXR-021", "UXR-046"], needs: [...NEEDS, "WP-2", "WP-3"] }, "mission page shortcuts: c focuses the composer, p pauses", async ({ page }) => {
   const app = await openApp(page, { auth: "in", dataset: "dense" }, "/missions");
   await page.goto(MISSION_URL);
+  await page.locator("[data-composer]").waitFor(); // the shortcut answers once the page has mounted its session pane
   await page.keyboard.press("c");
   // The field when it takes typing; while the pane is view-only or connecting, Take control or the pane itself (spec 8.2): focus is inside the session pane either way.
   await expect.poll(() => page.evaluate(() => Boolean(document.activeElement?.closest('[data-composer], [data-pane="session"]'))), { message: "focus moves into the session pane" }).toBe(true);

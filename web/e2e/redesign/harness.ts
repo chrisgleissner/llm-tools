@@ -216,7 +216,7 @@ export async function reflowProblems(page: Page): Promise<string[]> {
       const r = e.getBoundingClientRect();
       if (r.height > free) continue; // taller than the space between the bars: cannot avoid them at this zoom
       const hit = barRects().find((b) => b.left < r.right && b.right > r.left && b.top < r.bottom && b.bottom > r.top);
-      if (hit) out.push(`${label(e)} is under a fixed bar even when centred in the viewport`);
+      if (hit) out.push(`${label(e)} is under a fixed bar even when centred in the viewport (element ${Math.round(r.top)}-${Math.round(r.bottom)}, bar ${Math.round(hit.top)}-${Math.round(hit.bottom)}, scrolled ${Math.round(window.scrollY)})`);
     }
     // 3. The page has enough room at its end for the last element to scroll fully above the bottom bar.
     window.scrollTo(0, document.documentElement.scrollHeight);

@@ -18,7 +18,7 @@ const BETA_RUNNING = `/missions/beta/${MISSIONS[4]!.mission.id}`;
 
 const SCREEN_LIST: MissionScreen[] = [
   // Dense: every task state, eight activity rows, a task awaiting approval.
-  { name: "mission-detail", variant: "dense", mock: IN, path: MISSION_PATH, run: async (p) => { await header(p); await showTab(p, "Tasks"); await expect(p.locator('[data-entity^="task:"]')).toHaveCount(5); await expect(p.locator('[data-l0="mission.header"] [data-action="approve"]')).toBeVisible(); } },
+  { name: "mission-detail-dense", variant: "dense", mock: IN, path: MISSION_PATH, run: async (p) => { await header(p); await showTab(p, "Tasks"); await expect(p.locator('[data-entity^="task:"]')).toHaveCount(5); await expect(p.locator('[data-l0="mission.header"] [data-action="approve"]')).toBeVisible(); } },
   // Sparse: a calm running mission with three tasks.
   { name: "mission-detail-sparse", variant: "sparse", mock: { auth: "in", dataset: "dense" }, path: DENSE_CALM_URL, run: async (p) => { await header(p); await showTab(p, "Tasks"); await expect(p.locator('[data-entity^="task:"]')).toHaveCount(2); await expect(p.locator('[data-l0="mission.header"] [data-action="pause"]')).toBeVisible(); } },
   // Empty: a created mission has no session and no activity yet.

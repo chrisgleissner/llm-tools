@@ -4,7 +4,7 @@ html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   scroll-padding-top: calc(var(--head-h) + 8px);
-  scroll-padding-bottom: calc(var(--tab-h) + var(--composer-h, 0px) + 8px);
+  scroll-padding-bottom: calc(var(--tab-h) + 8px);
 }
 body {
   margin: 0;
@@ -41,7 +41,8 @@ li > :focus-visible, [role="row"] :focus-visible, .term-host :focus-visible, .xt
 
 /* Truncation rule (spec 6.3): wrap first, clamp once. */
 .clamp-2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
-.nowrap { white-space: nowrap; overflow-wrap: normal; min-width: 0; }
+/* A short field is not broken inside a word; it may move to the next line between words when the line is too narrow (200% text, text spacing). */
+.nowrap { overflow-wrap: normal; word-break: keep-all; min-width: 0; }
 .long-text { overflow-wrap: anywhere; }
 
 /* Reduced motion: no animation anywhere (the durations are also zero in tokens.css). */

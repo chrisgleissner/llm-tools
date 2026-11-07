@@ -137,6 +137,7 @@ test.describe("with a seeded worker", () => {
 
       expect(approvalMission).toBeTruthy();
       await page.goto(new URL(approvalMission!, page.url()).toString());
+      await showTab(page, "Tasks");
       const approvalTask = page.locator('[data-entity^="task:"]', { hasText: "Implement it" });
       await expect(approvalTask).toBeVisible();
       const approveStarted = Date.now();
@@ -169,6 +170,8 @@ test.describe("with a seeded worker", () => {
       await expect(rows.first()).toBeVisible({ timeout: 20_000 });
       await expect(rows).toHaveCount(5);
       await expect(rows.filter({ hasText: "Implement it" })).toBeVisible();
+      // The pane reports that no station runs for this seeded mission; wait for that announcement, so it cannot replace the copy confirmation below.
+      await expect(page.locator("#live-status")).toContainText(/Terminal ended/, { timeout: 30_000 });
       // Copy the mission ID from the header menu: the clipboard holds the full ID, the live region says so; no toast opens.
       await page.locator(".mission-head").getByRole("button", { name: /more|actions/i }).last().click();
       await page.getByRole("menuitem", { name: "Copy mission ID" }).click();
