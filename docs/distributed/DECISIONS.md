@@ -402,7 +402,7 @@ Per-chunk figures (raw / gzip) and the package that added each one:
 | command palette | 4496 / 1992 | WP-1 |
 | `views/diagnostics` | 2891 / 1401 | WP-0 moved it; WP-5 |
 | `views/reset` | 1389 / 734 | WP-0 |
-| four re-export shims | 1000 / 740 | esbuild |
+| three re-export shims | 725 / 537 | esbuild |
 
 The session pane itself is part of the terminal chunk (xterm.js plus `session.ts`, `composer.ts`); the page reserves its box
 with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until that chunk arrives. Route CSS: `auth`
