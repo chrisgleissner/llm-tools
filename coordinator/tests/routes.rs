@@ -179,7 +179,20 @@ async fn openapi_route_is_public_and_matches_the_runtime_generator() {
     assert!(body["paths"]["/api/docs"]["get"].is_object());
     let (status, html) = api.get("/api/docs").await;
     assert_eq!(status, 200);
-    assert!(html.as_str().unwrap().contains("/api/v1/openapi.json"));
+    let html = html.as_str().unwrap();
+    assert!(html.contains("/api/v1/openapi.json"));
+    assert!(!html.to_ascii_lowercase().contains("<script"), "the reference must stay script-free");
+    assert!(!html.to_ascii_lowercase().contains("<style"), "the reference must not use inline styling");
+    assert!(!html.contains("https://"), "the reference must not load or link to remote assets");
+    let operations = body["paths"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(serde_json::Value::as_object)
+        .flat_map(|methods| methods.keys())
+        .filter(|method| matches!(method.as_str(), "get" | "post" | "patch" | "put" | "delete" | "head" | "options"))
+        .count();
+    assert_eq!(html.matches("<tr><td>").count(), operations, "the reference lists every documented operation");
     env.stop().await;
 }
 
