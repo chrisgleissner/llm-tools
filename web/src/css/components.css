@@ -13,7 +13,6 @@
   .btn.ghost:hover:not(:disabled) { background: var(--surface-3); }
   .btn.primary:hover:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--on-accent); }
   .btn.danger.solid:hover:not(:disabled) { background: var(--danger-strong); }
-  .chip:hover { background: var(--surface-3); }
   .menu-item:hover:not(:disabled) { background: var(--surface-3); }
   .disclosure > summary:hover { background: var(--surface-3); }
 }
@@ -69,14 +68,9 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--
 /* ---------------------------------------------------------------- panels, cards, chips */
 .panel, .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-3); box-shadow: var(--e0); }
 .card { padding: var(--sp-4) var(--sp-5); margin: var(--sp-3) 0; }
-.card.narrow { inline-size: 100%; max-inline-size: 440px; }
 .card h2:first-child { margin-block-start: 0; }
-.chips, .plain { list-style: none; padding: 0; margin: 0; }
-.chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.plain { list-style: none; padding: 0; margin: 0; }
 .plain li { padding: var(--sp-1) 0; }
-.chip { display: inline-flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h); padding: 0 var(--sp-3); border-radius: var(--r-pill); border: 1px solid var(--border-strong); background: var(--surface-1); color: var(--text); font: inherit; font-size: var(--fs-md); cursor: pointer; }
-.chip[aria-pressed="true"] { background: var(--accent-tint); border-color: var(--accent); color: var(--accent-strong); font-weight: 600; }
-.chip .n { color: var(--text-muted); }
 .idchip { display: inline-flex; align-items: center; gap: var(--sp-1); }
 .ts { display: inline-flex; flex-direction: column; line-height: 1.3; }
 .ts .abs { font-size: var(--fs-xs); color: var(--text-muted); }

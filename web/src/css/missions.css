@@ -7,4 +7,7 @@
   .selects select { inline-size: 100%; min-inline-size: 0; padding-inline: var(--sp-2); }
   #sort-select { grid-column: 1 / -1; }
 }
+@media (max-width: 21.99rem) {
+  #sort-select { display: none; } /* 320 px: the two filters and the first four rows fit the fold, the sort keeps its default */
+}
 [data-section="finished"] { margin-block-start: var(--sp-4); }

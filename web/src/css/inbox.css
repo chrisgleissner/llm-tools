@@ -31,7 +31,7 @@
 .row-title { grid-area: title; display: flex; align-items: center; min-block-size: var(--target); min-inline-size: 0; color: var(--text); font-weight: 500; text-decoration: none; }
 @media (hover: hover) { .row-title:hover { text-decoration: underline; } }
 .row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
-.row-reason { flex: 1 1 10rem; min-inline-size: 0; }
+.row-reason { flex: 1 1 7rem; min-inline-size: 0; }
 .row-reason + .row-reason { flex-basis: 100%; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }

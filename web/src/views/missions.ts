@@ -188,7 +188,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     need.textContent = pending && need2.n === 0 ? "Checking..." : need2.n ? `${need2.text} ${need2.n === 1 && !need2.partial ? "needs" : "need"} you` : "None need you";
     need.title = need2.note;
     what.textContent = `${open} active`;
-    next.textContent = items.length === 0 ? "Create a mission" : "Open one to see its session";
+    next.textContent = items.length === 0 ? "Create a mission" : "Open one for details";
     live.textContent = `${shown.length} mission${shown.length === 1 ? "" : "s"} shown.`;
 
     if (items.length === 0 && !filtered()) {

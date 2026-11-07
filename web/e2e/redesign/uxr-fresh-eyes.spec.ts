@@ -109,7 +109,7 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F8: Evidence opens for t
   await expect(page.locator('[data-l0="mission.header"] [data-q="what"]'), "the header sentence carries the verifier result").toContainText("Verifier: cargo test exited 0: 128 passed, 0 failed");
   await page.goto("/");
   const row = page.locator('[data-section="needs-you"] [data-entity^="mission:"]', { has: page.locator('[data-action="approve"]') }).first();
-  await expect(row, "the approval row says what it rests on").toContainText("Verifier: cargo test exited 0");
+  await expect(row, "the approval row says what it rests on").toContainText("verifier: cargo test exited 0");
   await row.locator('[data-action="approve"]').click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toContainText("Verifier: cargo test exited 0: 128 passed, 0 failed");

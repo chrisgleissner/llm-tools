@@ -199,7 +199,7 @@ export const lastLine = (e: MissionEntry): string => lines.get(keyOf(e))?.line ?
 export function taskOf(item: Item): number | null {
   const fromAttention = item.attention?.tasks?.[0];
   if (typeof fromAttention === "number") return fromAttention;
-  return failedAt.get(stamp(item))?.ordinal ?? workOf(item.entry)?.task?.ordinal ?? null;
+  return failedAt.get(stamp(item)) ?? workOf(item.entry)?.task?.ordinal ?? null;
 }
 
 // ---------------------------------------------------------------- text
@@ -219,7 +219,7 @@ const COMMAND_HINT = /llm-bridge|^(type|run:|inspect|check|change providers)\b|^
 export const messageParts = (message: string | null | undefined): string[] => (message ?? "").split(/\s+·\s+/).map((p) => p.trim()).filter((p) => p && !COMMAND_HINT.test(p)).map(capital);
 
 /** A task of a failed mission, read from its task list (the worker's attention for a failed mission names no task). */
-const failedAt = new Map<string, { ordinal: number; title: string }>();
+const failedAt = new Map<string, number>();
 /** A cached read belongs to one state of the mission: a retry or a new run changes `updated_at`, and the read is made again. */
 const stamp = (item: Item): string => `${item.key}@${item.entry.mission.updated_at}`;
 /** The verifier and change summary of a task that awaits approval, so the row says whether it is safe to approve. */
@@ -229,7 +229,7 @@ const evidenceKey = (item: Item): string => `${item.key}#${taskOf(item)}@${item.
 /** The failing task of a failed row, from the attention or the task list: Retry needs its number. */
 export const failedTaskOf = (item: Item): number | null => {
   const n = item.attention?.tasks?.[0];
-  return typeof n === "number" ? n : (failedAt.get(stamp(item))?.ordinal ?? null);
+  return typeof n === "number" ? n : (failedAt.get(stamp(item)) ?? null);
 };
 
 /**
@@ -243,14 +243,14 @@ export function reasonLines(item: Item): string[] {
     const failed = failedAt.get(stamp(item));
     if (state.id === "failed" && failed) {
       const rest = parts.filter((p) => !/^(mission|task \d+) failed$/i.test(p));
-      parts = [`Task ${failed.ordinal} failed`, ...(rest.length ? rest : failed.title ? [failed.title] : [])];
+      parts = [`Task ${failed} failed`, ...rest];
     }
     if (parts.length === 0) {
       parts = [state.id === "failed" && item.entry.mission.status.toUpperCase() === "FAILED" ? "The mission failed." : state.detail ? capital(state.detail) : state.id === "needs-approval" ? "A task is waiting for approval." : state.id === "needs-input" ? "The provider is waiting for you." : "A task failed."];
     }
     const line = state.id === "needs-approval" ? evidenceAt.get(evidenceKey(item)) : undefined;
-    // A provider question is shown as the question, then its choices; any other message is one line (an approval adds what it rests on).
-    return attention?.kind === "provider" ? parts : [parts.join(" - "), ...(line ? [line] : [])];
+    // A provider question is shown as the question, then its choices; any other message is one line (an approval adds what it rests on, after the reason, so a clamp cuts the verifier text first).
+    return attention?.kind === "provider" ? parts : [[parts.join(" - "), line].filter(Boolean).join(" - ")];
   }
   if (state.id === "running") {
     const line = lastLine(item.entry);
@@ -281,7 +281,7 @@ export async function loadRowEvidence(items: Item[], stop: () => boolean = () =>
           searched.add(stamp(i));
           const list = (await api.missionTasks(w, m.id, 500, 0)).tasks as Array<Record<string, unknown>>;
           const t = list.find((x) => x["status"] === "FAILED") ?? list.find((x) => x["status"] === "BLOCKED");
-          if (t && typeof t["ordinal"] === "number") failedAt.set(stamp(i), { ordinal: t["ordinal"], title: typeof t["title"] === "string" ? t["title"] : "" });
+          if (t && typeof t["ordinal"] === "number") failedAt.set(stamp(i), t["ordinal"]);
         } else evidenceAt.set(evidenceKey(i), evidenceLine(await readEvidence(w, m.id, taskOf(i) as number, false)));
         notify();
       } catch {
@@ -433,7 +433,7 @@ export function missionRow(item: Item, o: RowOptions): HTMLElement {
       h("span", { class: "cell nowrap", "data-cell": "worker", title: e.worker }, e.worker),
       h("span", { class: "cell num nowrap", "data-cell": "updated", title: "Time since the last update" }, updated))
     : h("div", { class: "row-sub" },
-      ...reasons.map((line) => h("span", { class: "row-reason clamp-2" }, line)),
+      ...reasons.map((line) => h("span", { class: "row-reason clamp-2", title: line, style: item.state.id === "needs-approval" ? "-webkit-line-clamp:1;flex-basis:100%" : null }, line)),
       h("span", { class: "row-meta" }, ...[providerLabel(e), e.worker, updated ? `updated ${updated}` : ""].filter(Boolean).map((part) => h("span", { class: "nowrap" }, part))));
   const pill = h("span", { class: "pill", "data-state": item.state.id, "data-tier": item.state.tier }, icon(item.state.icon, 16), item.state.label);
   const actions = o.actions ? inlineActions(item, () => o.done?.(item)) : [];

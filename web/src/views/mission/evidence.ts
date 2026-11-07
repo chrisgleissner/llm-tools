@@ -85,8 +85,8 @@ export async function readEvidence(workerName: string, missionId: string, ordina
   return e;
 }
 
-/** One line for a row: "Verifier: cargo test exited 0 - 2 files, +5 -2" (or that no verifier result exists). */
-export const evidenceLine = (e: Evidence): string => `${e.verifier ? `Verifier: ${e.verifier}` : "No verifier result"} - ${e.changes}`;
+/** One line for a row: the size of the change first, then the verifier: "2 files, +5 -2 - verifier: cargo test exited 0" (or that no verifier result exists). */
+export const evidenceLine = (e: Evidence): string => `${e.changes} - ${e.verifier ? `verifier: ${e.verifier}` : "no verifier result"}`;
 
 export interface EvidenceView {
   /** Fills with the summary once the reads finish. */
