@@ -66,3 +66,40 @@ export function transitionSummary(data: Record<string, unknown>): string | null 
   const safe = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z][A-Za-z _-]{0,31}$/.test(v);
   return safe(from) && safe(to) ? `${from} → ${to}` : null;
 }
+
+/**
+ * How much attention an event deserves. Milestones are what the operator reads by default (task transitions, verification,
+ * approvals, mission lifecycle, handoffs, failures, provider waits). Details (commands, operations, terminal and worker
+ * connection, provider selection) appear under "All activity". Plumbing (heartbeats, capacity refreshes, bookkeeping) is
+ * counted, hidden by default, never toasted and never counted in totals.
+ */
+export type EventClass = "milestone" | "detail" | "plumbing";
+
+const MILESTONES = new Set([
+  "mission-created", "mission-status", "mission-reopened", "mission-waiting-for-operator",
+  "task-added", "task-status", "task-verified", "task-rejected", "task-awaiting-answer", "task-proposed",
+  "task-proposal-accepted", "task-proposal-rejected", "task-evidence-recorded",
+  "provider-wait", "provider-usage-limit", "provider-switched", "provider-handoff", "provider-handoff-exhausted", "provider-handoff-selected",
+  "operation-uncertain", "operation-aborted-before-launch", "controller-exited-unexpectedly", "controller-failed",
+  "review-hold", "review-hold-released", "suspend-outcome",
+]);
+
+export function eventClass(kind: string): EventClass {
+  if (isPlumbing(kind)) return "plumbing";
+  if (MILESTONES.has(kind) || kind.startsWith("verification-")) return "milestone";
+  return "detail";
+}
+
+/** Fields of `event.data` that `humanizeEvent` reads. The per-row "Raw" disclosure shows these and nothing else. */
+export const RAW_EVENT_FIELDS = ["from", "to", "route", "provider", "station", "route_id", "model", "selected_model", "reason", "rotation_reason", "name", "command", "exit_code", "title"] as const;
+
+/** The allowlisted, scalar fields of an event's data, each clipped to a safe length. Other fields are never rendered. */
+export function allowedEventData(data: Record<string, unknown> | null | undefined): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {};
+  for (const key of RAW_EVENT_FIELDS) {
+    const v = data?.[key];
+    if (typeof v === "string") out[key] = v.replace(/[\r\n\t]/g, " ").slice(0, 200);
+    else if (typeof v === "number" || typeof v === "boolean") out[key] = v;
+  }
+  return out;
+}

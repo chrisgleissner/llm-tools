@@ -1,4 +1,5 @@
 import { icon, type IconName } from "./icons";
+import { deriveState, shortId, type DerivedState } from "./state";
 
 type Child = Node | string | number | null | undefined | false;
 type Attrs = Record<string, string | number | boolean | EventListener | null | undefined>;
@@ -123,22 +124,59 @@ export function startClock(): void {
 
 // ---- small components
 
+/** The one state pill: icon shape plus label, nothing else inside (spec 5.2). The detail text belongs next to it in `.pill-meta`. */
+export function statePill(state: DerivedState, opts: { dense?: boolean; live?: boolean } = {}): HTMLElement {
+  return h(
+    "span",
+    { class: opts.dense ? "pill dense" : "pill", "data-state": state.id, "data-tier": state.tier, "data-live": opts.live ? "focus" : null },
+    icon(state.icon, 16),
+    state.label,
+  );
+}
+
+/** Transitional shim for the pages that still call it: a mission or task status shown as a state pill. Deleted when the last page package lands. */
 export function statusBadge(status: string): HTMLElement {
-  return h("span", { class: `badge s-${status.toLowerCase()}` }, status.toLowerCase());
+  return statePill(deriveState({ entity: "task", status }));
 }
 
 export interface ButtonOpts {
+  /** Space separated modifier classes: `primary`, `ghost`, `danger`, `danger solid`, `small`. */
   kind?: string;
   disabled?: boolean;
+  /** Why the button is disabled, in words ("This worker allows viewing only"). It becomes the title and the accessible description. */
+  reason?: string;
   title?: string;
   icon?: IconName;
   label?: string;
+  /** Value of `data-action` (approve, reject, pause, stop, resume, start, retry, take-control, answer, open). */
+  action?: string;
+  id?: string;
 }
 
 export function button(label: string, onclick: () => void, opts: ButtonOpts = {}): HTMLButtonElement {
-  const b = h("button", { type: "button", class: `btn ${opts.kind ?? ""}`.trim(), disabled: opts.disabled, title: opts.title, "aria-label": opts.label }, opts.icon ? icon(opts.icon, 18) : null, label ? h("span", {}, label) : null);
+  const disabled = opts.disabled || Boolean(opts.reason);
+  const b = h(
+    "button",
+    { type: "button", id: opts.id, class: `btn ${opts.kind ?? ""}`.trim(), disabled, title: opts.reason || opts.title, "aria-label": opts.label, "data-action": opts.action },
+    opts.icon ? icon(opts.icon, 18) : null,
+    label ? h("span", {}, label) : null,
+  );
   b.addEventListener("click", onclick);
   return b;
+}
+
+/** Marks a button as working: `aria-busy`, the leading icon is replaced by a ring and the label stays. */
+export function setBusy(b: HTMLButtonElement, busy: boolean): void {
+  if (busy === (b.getAttribute("aria-busy") === "true")) return;
+  if (busy) {
+    b.setAttribute("aria-busy", "true");
+    const ring = icon("ring", 18);
+    ring.classList.add("ring");
+    b.prepend(ring);
+  } else {
+    b.removeAttribute("aria-busy");
+    b.querySelector(":scope > svg.ring")?.remove();
+  }
 }
 
 export function iconButton(name: IconName, label: string, onclick: () => void, extra = ""): HTMLButtonElement {
@@ -147,8 +185,8 @@ export function iconButton(name: IconName, label: string, onclick: () => void, e
   return b;
 }
 
-/** Callback set by `ui.ts` so this module need not import it (avoids a cycle). */
-export const hooks: { toast: (message: string) => void } = { toast: () => {} };
+/** Callbacks set by `ui.ts` so this module need not import it (avoids a cycle). `say` speaks to screen readers without a toast. */
+export const hooks: { toast: (message: string) => void; say: (message: string) => void } = { toast: () => {}, say: () => {} };
 
 export async function copyText(text: string): Promise<boolean> {
   try {
@@ -170,27 +208,93 @@ export async function copyText(text: string): Promise<boolean> {
   }
 }
 
+/** Copy confirmation is inline (a check icon for 1.5 s) and spoken through the live region; it never opens a toast. */
 export function copyButton(text: string, what: string): HTMLButtonElement {
   const b = iconButton("copy", `Copy ${what}`, () => {
     void copyText(text).then((ok) => {
-      hooks.toast(ok ? `Copied ${what}.` : `Could not copy ${what}; select it and copy manually.`);
+      hooks.say(ok ? `Copied ${what}.` : `Could not copy ${what}; select it and copy manually.`);
       if (ok) {
         b.replaceChildren(icon("check", 20));
-        window.setTimeout(() => b.replaceChildren(icon("copy", 20)), 1500);
+        b.classList.add("check-flash");
+        window.setTimeout(() => {
+          b.replaceChildren(icon("copy", 20));
+          b.classList.remove("check-flash");
+        }, 1500);
       }
     });
   }, "copy");
   return b;
 }
 
-/** A short form of an identifier with the full value in the title and a copy button. */
+/** A shortened identifier with the full value in the title and a copy button. */
 export function idChip(id: string, what = "ID"): HTMLElement {
-  const short = id.length > 12 ? id.slice(0, 8) : id;
-  return h("span", { class: "idchip" }, h("code", { title: id }, short), copyButton(id, what));
+  return h("span", { class: "idchip" }, h("code", { title: id }, shortId(id)), copyButton(id, what));
 }
 
-export function emptyState(opts: { icon: IconName; title: string; text: Child; action?: Node }): HTMLElement {
-  return h("div", { class: "empty" }, h("div", { class: "empty-icon" }, icon(opts.icon, 32)), h("h2", {}, opts.title), h("p", { class: "muted" }, opts.text), opts.action ?? null);
+/** Teaches what will appear and why it is empty: icon, title, one sentence, then one primary action or a copyable command. */
+export function emptyState(opts: { icon: IconName; title: string; text: Child; action?: Node; command?: string }): HTMLElement {
+  return h(
+    "div",
+    { class: "empty" },
+    h("div", { class: "empty-icon" }, icon(opts.icon, 24)),
+    h("h2", {}, opts.title),
+    h("p", { class: "muted" }, opts.text),
+    opts.command ? h("p", {}, h("code", {}, opts.command), copyButton(opts.command, "command")) : null,
+    opts.action ?? null,
+  );
+}
+
+/** A block of placeholder rows with the geometry of the final rows, so the page does not shift when data arrives. */
+export function skeleton(rows = 3): HTMLElement {
+  return h("div", { class: "skeleton", "aria-hidden": "true", "data-skeleton": true }, ...Array.from({ length: rows }, () => h("div", { class: "skeleton-row" })));
+}
+
+/**
+ * Shows `skeleton(rows)` in `target` only if loading takes longer than `delayMs` (150 ms). Call the returned function when the real content
+ * is ready; it cancels the timer and removes the skeleton if it was shown.
+ */
+export function deferSkeleton(target: Element, rows = 3, delayMs = 150): () => void {
+  let node: HTMLElement | null = null;
+  const timer = window.setTimeout(() => {
+    node = skeleton(rows);
+    target.append(node);
+  }, delayMs);
+  return () => {
+    window.clearTimeout(timer);
+    node?.remove();
+    node = null;
+  };
+}
+
+/** An inline error in plain words with a Retry button and a muted technical code (never a raw status line). */
+export function errorBlock(opts: { message: string; retry?: () => void; code?: string }): HTMLElement {
+  return h(
+    "div",
+    { class: "error-block", role: "alert" },
+    h("p", {}, opts.message),
+    opts.code ? h("p", { class: "code" }, opts.code) : null,
+    opts.retry ? h("div", { class: "actions" }, button("Retry", opts.retry, { icon: "refresh" })) : null,
+  );
+}
+
+/** Native `<details>` disclosure with the count in the label ("Completed (3)"); it needs no script. */
+export function disclosure(label: string, body: Node | Node[], opts: { count?: number; open?: boolean; id?: string; onToggle?: (open: boolean) => void } = {}): HTMLDetailsElement {
+  const d = h(
+    "details",
+    { class: "disclosure", id: opts.id, open: opts.open },
+    h("summary", {}, label, opts.count === undefined ? null : h("span", { class: "count" }, `(${opts.count})`)),
+    h("div", { class: "disclosure-body" }, ...(Array.isArray(body) ? body : [body])),
+  );
+  if (opts.onToggle) d.addEventListener("toggle", () => opts.onToggle?.(d.open));
+  return d;
+}
+
+/**
+ * Truncate once (spec 6.3): text wraps and is clamped to two lines by one element; the full text is in `title`. Never put one
+ * of these inside another clamped or ellipsized element.
+ */
+export function clamped(text: string, tag: "span" | "div" | "h2" | "h3" | "a" = "span", attrs: Attrs = {}): HTMLElement {
+  return h(tag, { class: "clamp-2", title: text, ...attrs }, text);
 }
 
 export function pager(label: string, offset: number, size: number, total: number, go: (offset: number) => void): HTMLElement {

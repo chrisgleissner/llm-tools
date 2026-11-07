@@ -12,13 +12,22 @@ export interface WorkerInfo {
   capabilities: Array<{ operation: string; mutating?: boolean }> | null;
 }
 
+/** What the operator has to do next, from the mission status projection (`bridge_format.needs_attention`). */
+export interface NeedsYou {
+  kind: string;
+  message: string;
+  command?: string;
+  /** Task numbers involved (the tasks awaiting approval, the failed task). */
+  tasks?: number[];
+}
+
 export interface MissionInfo {
   id: string;
   name: string;
   status: string;
   folder: string;
   updated_at: string | null;
-  needs_you?: { kind: string; message: string; command?: string } | null;
+  needs_you?: NeedsYou | null;
 }
 
 export interface MissionEntry {
@@ -153,10 +162,16 @@ export const setup = (setup_token: string, username: string, password: string) =
 export const logout = () => request<unknown>("POST", "/api/v1/auth/logout", {}, true);
 export const changePassword = (current: string, next: string) => request<unknown>("POST", "/api/v1/auth/password", { current, new: next });
 
+/** Request ids this browser generated. A stream event that carries one of them is the echo of the operator's own action and must not be toasted a second time. */
+export const ownRequests = new Set<string>();
+
 function requestId(): string {
   const b = new Uint8Array(12);
   crypto.getRandomValues(b);
-  return "web-" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  const id = "web-" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  ownRequests.add(id);
+  if (ownRequests.size > 200) ownRequests.delete(ownRequests.values().next().value as string);
+  return id;
 }
 
 export type CommandOutcomeKind = "ok" | "accepted" | "applied" | "rejected" | "failed" | "uncertain";
@@ -268,4 +283,122 @@ export async function mutateTask(
     if (e instanceof ApiError && e.status >= 500) return { outcome: "uncertain", message: e.message };
     return { outcome: e instanceof ApiError && e.status === 422 ? "rejected" : "failed", message: e instanceof ApiError ? e.message : "Unexpected error." };
   }
+}
+
+// ---- typed wrappers for the mission workspace and the header (PRD-037 WP-0)
+
+export type SteerKind = "replace" | "review" | "verify" | "pause-after-iteration" | "stop-after-task" | "handoff";
+
+export interface SteerRequest {
+  kind: SteerKind;
+  /** Task number the steering applies to (review, verify, replace). */
+  task?: number;
+  /** Provider route for a handoff. */
+  route?: string;
+  prompt?: string;
+}
+
+/** Queue typed steering for a mission (`mission.steer`). It never types into the terminal; free text goes through the live session. */
+export const steer = (target: string, missionId: string, request: SteerRequest): Promise<MutationResult> =>
+  mutateMission(target, "mission.steer", missionId, { ...request });
+
+export interface UsageScope {
+  scope: string;
+  model: string;
+  remaining_percent: number | null;
+  used_percent: number | null;
+  reset_epoch: number | null;
+  guidance: string | null;
+}
+
+export interface UsageProvider {
+  provider: string;
+  available: boolean;
+  reason: string | null;
+  ready: boolean;
+  scopes: UsageScope[];
+}
+
+export interface UsageSnapshot {
+  available?: boolean;
+  reason?: string | null;
+  observed_at?: string | number | null;
+  source?: string | null;
+  providers?: UsageProvider[];
+}
+
+/** `usage.snapshot` of one worker: provider capacity as `llm-usage` reports it. */
+export async function usageSnapshot(target: string): Promise<UsageSnapshot> {
+  const row = await command(target, "usage.snapshot", null, {});
+  return (row.result?.result ?? {}) as UsageSnapshot;
+}
+
+/** Result of `task.diff` and `task.output`: `available: false` carries a plain-words `message` and a short `reason`. */
+export interface TaskEvidence {
+  available?: boolean;
+  reason?: string;
+  message?: string;
+  text?: string;
+  truncated?: boolean;
+  [key: string]: unknown;
+}
+
+/** `task.show` through its resource route; the object holds the task fields the worker reports (status, revision, verifier evidence). */
+export async function taskShow(target: string, missionId: string, taskNumber: number): Promise<Record<string, unknown>> {
+  const q = new URLSearchParams({ worker: target, wait_ms: "10000" });
+  const row = await request<CommandRow>("GET", `/api/v1/missions/${encodeURIComponent(missionId)}/tasks/${taskNumber}?${q}`);
+  return resourceResult(row);
+}
+
+export async function taskDiff(target: string, missionId: string, taskNumber: number): Promise<TaskEvidence> {
+  const row = await command(target, "task.diff", missionId, { task_number: taskNumber });
+  return (row.result?.result ?? {}) as TaskEvidence;
+}
+
+export async function taskOutput(target: string, missionId: string, taskNumber: number): Promise<TaskEvidence> {
+  const row = await command(target, "task.output", missionId, { task_number: taskNumber });
+  return (row.result?.result ?? {}) as TaskEvidence;
+}
+
+export interface NewTask {
+  prompt: string;
+  title?: string;
+  priority?: number;
+  depends_on?: number[];
+}
+
+/** `task.add` through the resource route, with an idempotency key so a retried request cannot add the task twice. */
+export async function addTask(target: string, missionId: string, task: NewTask, waitMs = 10000): Promise<MutationResult> {
+  const q = new URLSearchParams({ worker: target });
+  try {
+    const row = await request<CommandRow>("POST", `/api/v1/missions/${encodeURIComponent(missionId)}/tasks?${q}`, { ...task, wait_ms: waitMs }, false, { "Idempotency-Key": requestId() });
+    if (row.state !== "done") return { outcome: "accepted", message: "Queued for the worker." };
+    const result = row.result;
+    if (result?.error) return { outcome: "rejected", message: result.error.message };
+    const o = result?.outcome;
+    if (o === "rejected" || o === "failed" || o === "uncertain" || o === "accepted") return { outcome: o, message: "" };
+    return { outcome: "applied", message: "" };
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 0) return { outcome: "uncertain", message: "The connection broke while sending the request; it may have reached the coordinator." };
+    if (e instanceof ApiError && e.status >= 500) return { outcome: "uncertain", message: e.message };
+    return { outcome: e instanceof ApiError && e.status === 422 ? "rejected" : "failed", message: e instanceof ApiError ? e.message : "Unexpected error." };
+  }
+}
+
+/**
+ * Run a mutation with an optimistic update: `apply` changes the page at once (for example the state pill), `run` sends the
+ * request, and `rollback` restores the previous view when the worker rejected or could not carry the change out.
+ * `accepted` (queued) and `applied` keep the optimistic view; `uncertain` also keeps it, because the request may have taken effect,
+ * and the next refresh reconciles it. The caller shows the toast for a failure from the returned result.
+ */
+export async function optimisticMutation(apply: () => void, rollback: () => void, run: () => Promise<MutationResult>): Promise<MutationResult> {
+  apply();
+  let result: MutationResult;
+  try {
+    result = await run();
+  } catch {
+    result = { outcome: "failed", message: "Unexpected error." };
+  }
+  if (result.outcome === "rejected" || result.outcome === "failed") rollback();
+  return result;
 }

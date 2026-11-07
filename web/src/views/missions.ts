@@ -1,8 +1,8 @@
 import * as api from "../api";
-import { debounce, emptyState, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
+import { debounce, emptyState, h, idChip, pager, searchBox, sortHeader, statePill, timeEl } from "../dom";
 import { icon } from "../icons";
 import { currentWorkSummary } from "../current-work";
-import { isStale, store, subscribe } from "../store";
+import { missionState, store, subscribe } from "../store";
 
 const PAGE = 25;
 type Sort = "updated" | "name" | "status" | "worker";
@@ -210,7 +210,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
                 { "data-mission": m.mission.id },
                 h("th", { scope: "row", "data-label": "Mission" }, h("span", { class: "cell-stack" }, h("a", { class: "cell-link", href: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(m.mission.id)}` }, m.mission.name || m.mission.id), idChip(m.mission.id, "mission ID"), nowDoing.has(`${m.worker}/${m.mission.id}`) ? h("span", { class: "now-doing" }, h("span", { class: "activity-dot", "aria-hidden": "true" }), nowDoing.get(`${m.worker}/${m.mission.id}`)!) : null, m.mission.needs_you?.kind === "provider" && m.mission.needs_you.message ? h("span", { class: "mission-needs-you", "data-needs-you": "provider" }, m.mission.needs_you.message, h("a", { href: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(m.mission.id)}` }, "Open mission to answer")) : null)),
                 h("td", { "data-label": "Worker" }, m.worker),
-                h("td", { "data-label": "Status" }, h("span", {}, statusBadge(m.mission.status), isStale(m) ? h("span", { class: "badge stale", title: "Worker offline or data may be out of date" }, "stale") : null)),
+                h("td", { "data-label": "Status" }, h("span", { "data-entity": `mission:${m.worker}/${m.mission.id}` }, statePill(missionState(m)))),
                 h("td", { "data-label": "Folder" }, m.mission.folder),
                 h("td", { "data-label": "Updated" }, timeEl(m.mission.updated_at)),
               ),
@@ -240,7 +240,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   // The coordinator pushes changes through the store; re-run the query when the mission list changes.
   let last = "";
   const un = subscribe(() => {
-    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, isStale(m)]), store.workers.length]);
+    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, missionState(m).id]), store.workers.length]);
     if (k !== last) {
       last = k;
       reload();

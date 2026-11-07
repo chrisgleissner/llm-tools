@@ -1,6 +1,6 @@
 import * as api from "../api";
 import type { BridgeEvent, MissionEntry } from "../api";
-import { button, emptyState, h, keepFocus, relTime, timeEl } from "../dom";
+import { button, emptyState, h, keepFocus, relTime, statusBadge, timeEl } from "../dom";
 import { icon, type IconName } from "../icons";
 import { currentWorkSummary } from "../current-work";
 import { onStream, store, subscribe, worker, workerState } from "../store";
@@ -208,7 +208,7 @@ export function overview(root: HTMLElement): () => void {
         h("h2", { id: "ov-status" }, "Missions by status"),
         counts.size === 0
           ? h("p", { class: "muted" }, store.loaded ? "No missions reported yet." : "Loading...")
-          : h("ul", { class: "chips" }, ...[...counts].sort().map(([s, n]) => h("li", {}, h("a", { class: "chip", href: `/missions?status=${encodeURIComponent(s)}` }, h("span", { class: `badge s-${s.toLowerCase()}` }, s.toLowerCase()), h("span", { class: "n" }, String(n)))))),
+          : h("ul", { class: "chips" }, ...[...counts].sort().map(([s, n]) => h("li", {}, h("a", { class: "chip", href: `/missions?status=${encodeURIComponent(s)}` }, statusBadge(s), h("span", { class: "n" }, String(n)))))),
       ),
       h("p", { class: "muted small", id: "ov-health" }, diag ? `Coordinator healthy: up ${Math.round(Number(diag["uptime_seconds"] ?? 0) / 60)} min, v${String(diag["version"] ?? "?")}.` : diagError ? `Coordinator: ${diagError}` : "Checking the coordinator..."),
     ));

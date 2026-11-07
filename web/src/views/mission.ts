@@ -1,11 +1,11 @@
 import * as api from "../api";
 import type { BridgeEvent } from "../api";
-import { button, debounce, emptyState, fill, h, idChip, pager, searchBox, sortHeader, statusBadge, timeEl } from "../dom";
+import { button, debounce, emptyState, fill, h, idChip, pager, searchBox, sortHeader, statePill, statusBadge, timeEl } from "../dom";
 import { icon } from "../icons";
 import { currentWorkSummary } from "../current-work";
-import { isStale, onStream, store, subscribe, worker } from "../store";
+import { missionState, onStream, store, subscribe, worker } from "../store";
 import type { TerminalPanel } from "../terminal";
-import { announce, confirmDialog } from "../ui";
+import { announceStreamEvent, announce, confirmDialog } from "../ui";
 import { eventCategory, humanizeEvent, isPlumbing, transitionSummary, type EventCategory } from "../event-humanizer";
 
 const TASK_PAGE = 25;
@@ -135,7 +135,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   function renderHeader(): void {
     const e = entry();
     const m = e?.mission;
-    const stale = e ? isStale(e) : !online();
+    const state = e ? missionState(e, { needsYou: snapshot?.["needs_you"] as api.NeedsYou | null | undefined, taskCounts: snapshot?.["task_counts"] as Record<string, number> | undefined }) : null;
     const mb = (label: string, op: string, danger = false, kind = "") =>
       button(
         label,
@@ -156,8 +156,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       h(
         "p",
         { class: "meta" },
-        m ? statusBadge(m.status) : null,
-        stale ? h("span", { class: "badge stale", title: "Worker offline or data may be out of date" }, "stale") : null,
+        state ? statePill(state) : null,
+        state?.detail ? h("span", { class: "pill-meta" }, ` ${state.detail}`) : null,
         h("span", { class: "muted" }, ` worker `),
         h("a", { href: "/workers" }, workerName),
         worker(workerName)?.host_name ? h("span", { class: "muted small" }, ` · ${worker(workerName)?.host_name}${worker(workerName)?.remote_address ? ` · ${worker(workerName)?.remote_address}` : ""}`) : null,
@@ -472,7 +472,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
         renderEvents();
         void loadTasks();
         void loadSnapshot();
-        announce(`New event: ${humanizeEvent(mine[mine.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
+        const last = mine[mine.length - 1] ?? { kind: "update", task_id: null, data: {} };
+        announceStreamEvent(last, `New event: ${humanizeEvent(last)}`);
       }
     }
   });
@@ -480,7 +481,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   let viewKey = "";
   const offStore = subscribe(() => {
     const e = entry();
-    const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}`;
+    const key = `${online()}|${e?.mission.status}|${e ? missionState(e).id : ""}|${e?.mission.name}`;
     if (key === viewKey) return;
     viewKey = key;
     renderHeader();

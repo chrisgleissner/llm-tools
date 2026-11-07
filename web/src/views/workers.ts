@@ -1,7 +1,7 @@
 import * as api from "../api";
-import { button, copyButton, emptyState, field, h, idChip, keepFocus, timeEl } from "../dom";
+import { button, copyButton, emptyState, field, h, idChip, keepFocus, statePill, timeEl } from "../dom";
 import { icon } from "../icons";
-import { refresh, store, subscribe, workerState } from "../store";
+import { refresh, store, subscribe, workerDerived } from "../store";
 import { announce, confirmDialog, openPanel } from "../ui";
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -97,15 +97,14 @@ export function workers(root: HTMLElement): () => void {
             {},
             ...store.workers.map((w) => {
               const n = store.missions.filter((m) => m.worker === w.name).length;
-              const st = workerState(w);
               const plat = w.platform ? [w.platform["system"], w.platform["machine"]].filter(Boolean).join(" ") : "-";
               return h(
                 "tr",
-                { "data-worker": w.name },
+                { "data-worker": w.name, "data-entity": `worker:${w.name}` },
                 h("th", { scope: "row", "data-label": "Name" }, h("span", { class: "cell-stack" }, h("span", {}, w.name), w.id ? idChip(w.id, "worker ID") : null)),
                 h("td", { "data-label": "Host" }, w.host_name || "unknown"),
                 h("td", { "data-label": "Address" }, w.remote_address || "offline"),
-                h("td", { "data-label": "State" }, h("span", { class: `badge w-${st}` }, st)),
+                h("td", { "data-label": "State" }, statePill(workerDerived(w))),
                 h("td", { "data-label": "Last seen" }, w.last_seen ? timeEl(w.last_seen) : h("span", {}, "never")),
                 h("td", { "data-label": "Version" }, w.versions.software ?? "-"),
                 h("td", { "data-label": "Platform" }, plat || "-"),
