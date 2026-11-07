@@ -2,7 +2,7 @@
 
 Summary: the optional distributed mode for LLM Bridge is implemented on
 `feat/distributed-bridge` (pull request #30). Its original 169 specification IDs and operator
-addenda 2 to 7 remain verified. The unified register now has 283 IDs, including tracking
+addenda 2 to 7 remain verified. The unified register now has 284 IDs, including tracking
 requirements, the physical Pi work and the release-readiness group `PRD` (open); current in-progress and blocked rows are listed below.
 CI run 42181869238 on c81ccde is green on every job,
 across Linux x86-64 and ARM64, macOS ARM64 and Intel, and Windows x86-64 and ARM64.
@@ -70,10 +70,10 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 | Status | Count |
 |---|---:|
 | Verified `[x]` | 232 |
-| Incomplete `[~]` | 21 |
+| Incomplete `[~]` | 22 |
 | Blocked `[!]` | 6 |
 | Not started `[ ]` | 24 |
-| **Total** | **283** |
+| **Total** | **284** |
 
 The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete.
 ## 3. Test results and coverage
