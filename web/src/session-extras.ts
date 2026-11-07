@@ -2,6 +2,7 @@
 // confirmation and the transcript text. A separate chunk keeps them out of the terminal chunk's size budget.
 import type { Terminal } from "@xterm/xterm";
 import { h } from "./dom";
+export { runSteer } from "./steer";
 import { confirmDialog } from "./ui";
 
 export const transcriptText = (t: Terminal): string => {
@@ -24,51 +25,26 @@ export interface Mode {
 }
 
 /**
- * Full screen: the pane covers the viewport and the shell chrome is removed (CSS on `body[data-session-fs]`). Leave with the button,
- * Back or Escape; focus returns to the button. `keepEscape` says when Escape belongs to the terminal.
+ * Full screen: the pane covers the viewport and the shell chrome is removed (CSS on `body[data-session-fs]`). Leave with the button
+ * or Escape; focus returns to the button. `keepEscape` says when Escape belongs to the terminal.
  */
 export function fullScreen(button: HTMLButtonElement, keepEscape: () => boolean): Mode & { set(on: boolean): void; on(): boolean } {
-  let on = false;
-  let pushed = false;
-  let expecting = false; // our own history.back() is in flight
-  const set = (next: boolean): void => {
-    if (next === on) return;
-    on = next;
+  const set = (on: boolean): void => {
     document.body.toggleAttribute("data-session-fs", on);
     button.querySelector("span")!.textContent = on ? "Exit full screen" : "Expand";
     button.setAttribute("aria-label", on ? "Exit full screen" : "Expand to full screen");
     button.setAttribute("aria-pressed", String(on));
-    if (on) {
-      history.pushState({ sessionFs: true }, "");
-      pushed = true;
-    } else if (pushed) {
-      pushed = false;
-      expecting = true;
-      document.body.setAttribute("data-session-back", ""); // tells the guard in session-box.ts to swallow the popstate of our own back()
-      history.back();
-    }
     button.focus({ preventScroll: true });
   };
+  const on = (): boolean => document.body.hasAttribute("data-session-fs");
   const onKey = (e: KeyboardEvent): void => {
-    if (e.key === "Escape" && on && !document.querySelector("dialog[open], .menu-popover") && !keepEscape()) set(false);
+    if (e.key === "Escape" && on() && !document.querySelector("dialog[open], .menu-popover") && !keepEscape()) set(false);
   };
-  const onPop = (): void => {
-    document.body.removeAttribute("data-session-back");
-    if (expecting) {
-      expecting = false;
-      button.focus({ preventScroll: true });
-    } else {
-      pushed = false; // Back leaves full screen
-      set(false);
-    }
-  };
-  document.addEventListener("session-pop", onPop);
   document.addEventListener("keydown", onKey);
   return {
     set,
-    on: () => on,
+    on,
     dispose(): void {
-      document.removeEventListener("session-pop", onPop);
       document.removeEventListener("keydown", onKey);
       document.body.removeAttribute("data-session-fs");
     },
@@ -153,7 +129,7 @@ export function keyBar(bar: HTMLElement, io: KeyIo): { enable(on: boolean, why: 
   const more = h("button", { type: "button", class: "btn more", id: "key-more", "aria-label": "More keys", "aria-expanded": "false", "aria-controls": "terminal-keys-more" }, "...");
   more.addEventListener("mousedown", (e) => e.preventDefault());
   more.addEventListener("click", () => more.setAttribute("aria-expanded", String((extra.hidden = !extra.hidden) === false)));
-  add(extra, [["left", "\u2190", "Arrow left", "D"], ["right", "\u2192", "Arrow right", "C"], ["pipe", "|", "", "|"], ["tilde", "~", "", "~"], ["slash", "/", "", "/"], ["dash", "-", "", "-"], ["pgup", "PgUp", "PgUp, page up", "\x1b[5~"], ["pgdn", "PgDn", "PgDn, page down", "\x1b[6~"]]);
+  add(extra, [["left", "\u2190", "Arrow left", "D"], ["right", "\u2192", "Arrow right", "C"], ["pgup", "PgUp", "PgUp, page up", "\x1b[5~"], ["pgdn", "PgDn", "PgDn, page down", "\x1b[6~"]]);
   bar.append(more, extra);
   return {
     enable(on, why): void {

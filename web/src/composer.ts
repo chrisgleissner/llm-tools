@@ -71,7 +71,7 @@ export function composer(o: ComposerOpts): Composer {
 
   const stops: Array<() => void> = [];
   // Fetched when the composer mounts, so a dialog opens in the same task as the click that chose the item.
-  const loading = import("./steer");
+  const loading = import("./session-extras");
   const steer = (kind: api.SteerKind, label: string): void => void loading.then((m) => m.runSteer({ ...o, chips, own: (stop) => stops.push(stop) }, kind, label));
   const steerMenu = menu({ label: "Steer the mission", text: "Steer" }, KINDS.map(([kind, label]) => ({ label, id: `steer-${kind}`, onSelect: () => steer(kind, label) })));
   // The menu builds its items when it opens; tag them with the steering kind they send.

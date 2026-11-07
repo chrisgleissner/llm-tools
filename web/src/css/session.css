@@ -1,6 +1,8 @@
 /* Session pane (spec 8.2). --session-h sets the height (the mission page may override it); the reserved box has the same size. */
-.session-pane, .session-reserve { --session-h: calc(100svh - var(--head-h) - 11rem); block-size: var(--session-h); min-block-size: 18rem; border: 1px solid var(--border); border-radius: var(--r-3); background: var(--surface-1); }
-@media (max-width: 47.99rem) { .session-pane, .session-reserve { --session-h: calc(100svh - var(--head-h) - var(--tab-h) - 7rem); border-inline: 0; border-radius: 0; } }
+/* #terminal-slot is the mount point of the pages that insert the pane after first paint: it holds the pane's final size, so mounting shifts nothing. */
+.session-pane, .session-reserve, #terminal-slot { --session-h: calc(100svh - var(--head-h) - 11rem); block-size: var(--session-h); min-block-size: 18rem; }
+.session-pane, .session-reserve { border: 1px solid var(--border); border-radius: var(--r-3); background: var(--surface-1); }
+@media (max-width: 47.99rem) { .session-pane, .session-reserve, #terminal-slot { --session-h: calc(100svh - var(--head-h) - var(--tab-h) - 7rem); } .session-pane, .session-reserve { border-inline: 0; border-radius: 0; } }
 .session-reserve { background: var(--surface-2); }
 .session-pane { display: grid; grid: auto minmax(0, 1fr) auto auto auto / minmax(0, 1fr); overflow: hidden; }
 .session-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-2); padding: var(--sp-1) var(--sp-2); border-block-end: 1px solid var(--border); }
@@ -27,5 +29,5 @@ body[data-session-fs] :is(header, nav, aside, footer, .top, .side, .tabbar, .pag
 body[data-session-fs] .session-pane { position: fixed; inset: 0; z-index: 60; block-size: 100svh; border: 0; border-radius: 0; }
 /* Soft keyboard open on a touch device: the pane takes the visible height (--vvh on iOS) below the collapsed header. */
 @media (pointer: coarse), (max-width: 47.99rem) { body[data-kb]:not([data-session-fs]) .session-pane { position: fixed; inset: var(--head-h) 0 auto; z-index: 25; block-size: calc(var(--vvh, 100svh) - var(--head-h)); min-block-size: 0; } }
-@media (orientation: landscape) and (max-height: 520px) { .session-pane, .session-reserve { --session-h: calc(100svh - 3rem); min-block-size: 0; } .composer-note { display: none; } .composer, .session-bar { padding-block: 0; } }
+@media (orientation: landscape) and (max-height: 520px) { .session-pane, .session-reserve, #terminal-slot { --session-h: calc(100svh - 3rem); min-block-size: 0; } .composer-note { display: none; } .composer, .session-bar { padding-block: 0; } }
 @media (max-width: 47.99rem) { .term-status { flex-basis: 100%; } }

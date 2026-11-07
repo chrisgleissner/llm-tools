@@ -13,15 +13,9 @@ export interface SteerTarget {
   own(stop: () => void): void;
 }
 
-/** The event that shows queued steering was applied (see bridge_runtime). Review and replace have no dedicated event. */
-const APPLIED: Record<api.SteerKind, string> = {
-  "pause-after-iteration": "steering-pause-applied",
-  "stop-after-task": "steering-stop-task-applied",
-  verify: "steering-verify-applied",
-  handoff: "steering-handoff-consumed",
-  review: "task-added",
-  replace: "task-status",
-};
+/** The event that shows queued steering was applied (see bridge_runtime); review and replace are seen as a new task or a task change. */
+const applied = (kind: api.SteerKind): RegExp =>
+  new RegExp(kind === "review" ? "^task-added$" : kind === "replace" ? "^task-status$" : `^steering-${kind.replace("-after-iteration", "").replace("-after-task", "-task")}-(applied|consumed)$`);
 const WHAT = {
   review: (n: number) => `review of task ${n}`,
   verify: (n: number) => `verify task ${n} when the run exits`,
@@ -33,11 +27,12 @@ const field = (id: string, label: string, control: HTMLElement): HTMLElement => 
 
 /** A chip for queued steering; it goes away when the event that applies it arrives. There is no retract operation, so it has no Undo. */
 function chip(o: SteerTarget, kind: api.SteerKind, text: string): void {
+  const done = applied(kind);
   const node = h("span", { class: "queued-chip" }, `Queued: ${text}`);
   o.chips.append(node);
   o.chips.hidden = false;
   const stop = onStream((msg) => {
-    if (msg.type !== "event" || !(msg.events ?? []).some((e) => (e["mission_id"] ?? o.missionId) === o.missionId && e["kind"] === APPLIED[kind])) return;
+    if (msg.type !== "event" || !(msg.events ?? []).some((e) => (e["mission_id"] ?? o.missionId) === o.missionId && done.test(String(e["kind"])))) return;
     node.remove();
     o.chips.hidden = !o.chips.childElementCount;
     stop();
