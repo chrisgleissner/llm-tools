@@ -213,13 +213,19 @@ impl RateLimiter {
                     if let Some(until) = e.blocked_until.filter(|until| *until > now) {
                         return Err(Self::retry_seconds(until.duration_since(now)).max(1));
                     }
-                    if e.failures.len() + e.in_flight >= self.limit {
+                    if e.failures.len() >= self.limit {
                         e.strikes = e.strikes.saturating_add(1).max(1);
                         e.strike_expires = Some(now + Duration::from_secs(3600));
                         let multiplier = 1u32 << e.strikes.saturating_sub(1).min(6);
                         let backoff = self.window.max(Duration::from_secs(1)).saturating_mul(multiplier).min(Duration::from_secs(900));
                         e.blocked_until = Some(now + backoff);
                         return Err(Self::retry_seconds(backoff).max(1));
+                    }
+                    if e.failures.len() + e.in_flight >= self.limit {
+                        // In-flight attempts are reserved capacity, not evidence of a failed
+                        // sign-in. Refuse excess work without installing a persistent lockout:
+                        // one of the active attempts may succeed and free the slot immediately.
+                        return Err(Self::retry_seconds(self.window).max(1));
                     }
                 }
                 None => new_keys += 1,
