@@ -112,6 +112,31 @@ def test_worker_tls_context_rejects_missing_enrolled_client_identity(state):
         worker.tls_context()
 
 
+def test_worker_tls_context_loads_the_enrolled_client_identity(state, monkeypatch):
+    directory, _ = state
+    cert = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+    worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=False,
+                  client_cert_pem=cert, client_key_pem=key)
+
+    class TlsContext:
+        minimum_version = None
+        loaded_identity = None
+
+        def load_cert_chain(self, *, certfile, keyfile):
+            self.loaded_identity = (certfile, keyfile)
+
+    context = TlsContext()
+    monkeypatch.setattr(worker.ssl, "create_default_context", lambda cafile=None: context)
+
+    assert worker.tls_context() is context
+    assert context.minimum_version == worker.ssl.TLSVersion.TLSv1_2
+    assert context.loaded_identity == (
+        str(directory / "worker" / worker.CLIENT_CERT_FILE),
+        str(directory / "worker" / worker.CLIENT_KEY_FILE),
+    )
+
+
 def test_worker_token_rotation_preserves_opt_ins_and_client_identity(state, monkeypatch):
     directory, _ = state
     cert = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
