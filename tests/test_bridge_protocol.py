@@ -80,7 +80,7 @@ def test_hello_worker_policy_is_validated_and_backward_compatible():
         (json.dumps(_message("welcome", {"generation": 0, "protocol_version": 1, "event_cursor": 0})), "invalid-message"),
         (json.dumps(_message("welcome", {"generation": 1, "protocol_version": 9, "event_cursor": 0})), "unsupported-version"),
         (json.dumps(_message("command.ack", {"request_id": "r", "status": "done"})), "invalid-message"),
-        (json.dumps(_message("command", {**CommandRequest("x").to_json(), "schema_version": 9})), "unsupported-version"),
+        (json.dumps(_message("command", {**CommandRequest("x", request_id="r1").to_json(), "schema_version": 9})), "unsupported-version"),
         (json.dumps(_message("hello", {**VALID[0].payload, "missions": {}})), "invalid-message"),
         (json.dumps(_message("hello", {**VALID[0].payload, "host_name": "bad\nhost"})), "invalid-message"),
         (json.dumps(_message("error", {"code": 1, "message": "m"})), "invalid-message"),
