@@ -52,7 +52,20 @@ export const WORKERS = [
 const mk = (n: number, worker: string, name: string, status: string, folder: string, ago: number) => ({
   worker,
   stale: worker === "beta",
-  mission: { id: `${String(n).padStart(2, "0")}a1b2c3d4e5f60718293a4b5c6d7e8f90`.slice(0, 32), name, status, folder, updated_at: iso(ago) },
+  mission: {
+    id: `${String(n).padStart(2, "0")}a1b2c3d4e5f60718293a4b5c6d7e8f90`.slice(0, 32),
+    name,
+    status,
+    folder,
+    updated_at: iso(ago),
+    ...(n === 1 ? {
+      task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 },
+      current_task: { ordinal: 2, title: "Implement the new tokenizer" },
+      station: "codex",
+      model: "gpt-5",
+      needs_you: { kind: "approval", tasks: [2], message: "task 2 awaits approval" },
+    } : {}),
+  },
 });
 export const MISSIONS = [
   mk(1, "alpha", "Refactor the parser", "RUNNING", "parser", 95),
