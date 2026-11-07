@@ -309,8 +309,8 @@ a.tile:hover { border-color: var(--accent); }
 .badge.w-online, .badge.s-running, .badge.s-completed { background: var(--okbg); color: var(--ok); border-color: var(--ok); }
 .badge.w-offline, .badge.s-failed, .badge.s-cancelled { background: var(--dangbg); color: var(--danger); border-color: var(--danger); }
 .badge.w-stale, .badge.stale, .badge.s-paused, .badge.s-blocked, .badge.s-verifying, .badge.s-stopping { background: var(--warnbg); color: var(--warn); border-color: var(--warn); }
-.badge.s-running { position: relative; }
-.badge.s-running::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: currentColor; vertical-align: 1px; animation: pulse 1.8s ease-in-out infinite; }
+.badge.s-running, .badge.w-online { position: relative; }
+.badge.s-running::after, .badge.w-online::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 6px; border-radius: 50%; background: currentColor; vertical-align: 1px; animation: pulse 1.8s ease-in-out infinite; }
 .current-work { display: flex; align-items: center; justify-content: space-between; gap: var(--sp4); padding: var(--sp3) var(--sp4); border: 1px solid var(--border); border-left: 4px solid var(--info); border-radius: var(--rad-md); background: var(--surface); }
 .current-work.needs-you { border-left-color: var(--warn); }
 .current-work-copy { min-width: 0; }
@@ -452,7 +452,7 @@ pre.cmd { background: var(--surf2); border-radius: var(--rad-md); padding: var(-
   .btn, .chip { transition: background-color 0.12s, border-color 0.12s; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .conn.reconnecting .dot, .btn.busy::after, .badge.s-running::after, .activity-dot { animation: none; }
+  .conn.reconnecting .dot, .btn.busy::after, .badge.s-running::after, .badge.w-online::after, .activity-dot { animation: none; }
 }
 
 @media (max-width: 420px) {

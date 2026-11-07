@@ -55,7 +55,12 @@ test.describe("with a connected worker", () => {
       await setupViaUi(page, coord);
       // Workers: online.
       await navTo(page, "Workers");
-      await expect(page.locator('tr[data-worker="e2e-worker"]').getByText("online", { exact: true })).toBeVisible({ timeout: 20_000 });
+      const online = page.locator('tr[data-worker="e2e-worker"] .badge.w-online');
+      await expect(online).toHaveText("online", { timeout: 20_000 });
+      await expect.poll(() => online.evaluate((el) => getComputedStyle(el, "::after").animationName)).toBe("pulse");
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      await expect.poll(() => online.evaluate((el) => getComputedStyle(el, "::after").animationName)).toBe("none");
+      await page.emulateMedia({ reducedMotion: "no-preference" });
       // Missions index: shows the mission, not stale.
       await navTo(page, "Missions");
       const link = page.getByRole("link", { name: "Browser E2E mission" });
