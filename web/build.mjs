@@ -15,7 +15,20 @@ if (process.platform === "win32" || !existsSync("../llm_tools/bridge_tui.py")) {
 
 rmSync("dist", { recursive: true, force: true });
 mkdirSync("dist", { recursive: true });
+// The xterm.js stylesheet is only needed on a mission page: it is its own hashed file that the terminal chunk loads, so it stays out of the first load.
+const xtermCss = await build({
+  entryPoints: { xterm: "node_modules/@xterm/xterm/css/xterm.css" },
+  bundle: true,
+  minify: true,
+  outdir: "dist",
+  entryNames: "[name]-[hash]",
+  metafile: true,
+  logLevel: "warning",
+});
+const xtermFile = Object.keys(xtermCss.metafile.outputs).map((p) => basename(p)).find((f) => f.endsWith(".css"));
+if (!xtermFile) throw new Error("esbuild produced no xterm css output");
 const result = await build({
+  define: { __XTERM_CSS__: JSON.stringify(`/${xtermFile}`) },
   entryPoints: { app: "src/main.ts" },
   bundle: true,
   minify: true,

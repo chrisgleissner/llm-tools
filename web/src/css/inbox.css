@@ -1,0 +1,30 @@
+/* Legacy Overview rules (tiles, attention list, running list), deleted by WP-4 when the Inbox replaces the page. */
+.tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
+@media (min-width: 720px) { .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-2); padding: var(--sp-3) var(--sp-4); text-decoration: none; color: var(--text); display: block; }
+@media (hover: hover) { a.tile:hover { border-color: var(--accent); } }
+.tile-value { font-size: var(--fs-display); font-weight: 700; line-height: 1.2; }
+.tile-label { font-weight: 600; font-size: var(--fs-md); }
+.tile.warn .tile-value { color: var(--alert-attention-fg); }
+.tile.bad .tile-value { color: var(--danger); }
+.grid-2 { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 960px) { .grid-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+.attention { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--sp-2); }
+.attention li { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--r-2); background: var(--surface-1); min-height: var(--control-h); }
+.attention-details { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-1); min-width: 0; }
+.attention-details > span[data-attention] { display: inline-block; padding-right: var(--sp-1); }
+.attention li.warn { border-left-color: var(--alert-attention-fg); }
+.attention li.bad { border-left-color: var(--danger); }
+.attention li.ok { border-left-color: var(--icon-done); }
+.attention li > .icon { color: var(--text-muted); }
+.attention li .grow { flex: 1 1 auto; min-width: 0; }
+.timeline { list-style: none; margin: 0; padding: 0; }
+.timeline li { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
+.timeline li:last-child { border-bottom: 0; }
+.running-list { list-style: none; display: grid; gap: var(--sp-2); padding: 0; }
+.running-list li { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
+.running-list li > a { flex: none; }
+.running-list li > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-dot { flex: none; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--icon-running); }
+.now-doing { display: flex; align-items: baseline; gap: var(--sp-2); color: var(--text-muted); font-size: var(--fs-md); font-weight: 400; }
+.mission-needs-you { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-2); color: var(--alert-attention-fg); font-size: var(--fs-md); font-weight: 600; white-space: normal; }

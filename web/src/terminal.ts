@@ -3,9 +3,14 @@
 // browser -> server {t:"i",d} (input, write mode only) and {t:"r",cols,rows} (resize, write mode only).
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+
 import { button, h } from "./dom";
 import { announce } from "./ui";
 import { publishStreamMessage } from "./store";
+import { ensureXtermCss } from "./xterm-css";
+
+// The stylesheet loads before this module finishes evaluating, so the terminal never measures or paints without its CSS.
+await ensureXtermCss();
 
 export type TermState = "idle" | "connecting" | "live" | "reconnecting" | "ended";
 

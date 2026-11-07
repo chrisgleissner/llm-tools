@@ -1,0 +1,13 @@
+/* Terminal region and key bar. WP-2 replaces this with the session pane. */
+.term-region { margin-top: var(--sp-5); }
+.term-status { margin: var(--sp-2) 0; font-weight: 600; }
+.term-host { background: var(--term-bg); border: 1px solid var(--border-strong); border-radius: var(--r-2); padding: var(--sp-2); height: min(60vh, 36rem); min-height: 12rem; overflow: auto; }
+.term-host .xterm:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
+.keybar { display: none; gap: var(--sp-2); flex-wrap: wrap; margin: var(--sp-2) 0; }
+.keybar.on { display: flex; }
+.keybar .btn { flex: 1 1 var(--control-h); min-width: var(--control-h); padding: 0 var(--sp-2); font-family: var(--mono); }
+.keybar .btn[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+@media (orientation: landscape) and (max-height: 520px) {
+  .term-host { height: calc(100dvh - 160px); min-height: 8rem; }
+  .top { position: static; }
+}

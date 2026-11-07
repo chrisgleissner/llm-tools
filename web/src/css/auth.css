@@ -1,0 +1,28 @@
+/* Sign-in, first-run setup, password and token pages (WP-5). Legacy rules kept as they were. */
+main.auth { max-width: none; min-height: 100vh; min-height: 100dvh; padding: var(--sp-5) var(--sp-4); display: flex; align-items: center; justify-content: center; }
+.token-list { display: grid; gap: var(--sp-2); list-style: none; margin: var(--sp-3) 0 var(--sp-5); padding: 0; }
+.token-list li { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--sp-3); }
+.token-list li .btn { margin-left: auto; }
+.token-create { display: grid; gap: var(--sp-3); max-width: 520px; }
+.token-create fieldset { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-1); padding: var(--sp-3); }
+.token-secret { margin-top: var(--sp-4); border-left: 4px solid var(--accent); padding: var(--sp-3); background: var(--surface-2); }
+.token-secret pre { overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.auth-card { width: 100%; max-width: 460px; }
+.auth-head { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-2); }
+.auth-head .icon { color: var(--accent); }
+.auth-head h1 { margin: 0; font-size: var(--fs-xl); }
+.steps { margin: var(--sp-2) 0; padding-left: var(--sp-5); }
+.steps li { margin: var(--sp-1) 0; }
+/* ---------------------------------------------------------------- password strength meter */
+.meter { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-1); margin-top: var(--sp-2); }
+.meter i { height: 6px; border-radius: 3px; background: var(--surface-2); border: 1px solid var(--border); }
+.meter[data-level="1"] i:nth-child(-n+1) { background: var(--danger); border-color: var(--danger); }
+.meter[data-level="2"] i:nth-child(-n+2) { background: var(--alert-attention-fg); border-color: var(--alert-attention-fg); }
+.meter[data-level="3"] i:nth-child(-n+3), .meter[data-level="4"] i:nth-child(-n+4) { background: var(--icon-done); border-color: var(--icon-done); }
+.policy { list-style: none; margin: var(--sp-2) 0; padding: 0; font-size: var(--fs-md); }
+.policy li { display: flex; align-items: center; gap: var(--sp-2); padding: 2px 0; }
+.policy li .icon { color: var(--text-muted); }
+.policy li.met .icon { color: var(--icon-done); }
+.caps-warning { display: flex; align-items: center; gap: var(--sp-2); color: var(--alert-attention-fg); font-weight: 600; font-size: var(--fs-md); margin: 0; }
+.caps-warning[hidden] { display: none; }
+@media (max-width: 600px) { .card { padding: var(--sp-4); } }

@@ -1,0 +1,20 @@
+/* Legacy mission page rules, deleted by WP-3 as the page moves to the workspace layout. */
+.events { padding-left: 0; list-style: none; margin: 0; }
+.events li { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
+.ev-kind { font-weight: 600; }
+.ev-data { display: block; color: var(--text-muted); white-space: pre-wrap; word-break: break-all; }
+.current-work { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); padding: var(--sp-3) var(--sp-4); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--r-2); background: var(--surface-1); }
+.current-work.needs-you { border-left-color: var(--alert-attention-fg); }
+.current-work-copy { min-width: 0; }
+.current-work .eyebrow { margin: 0 0 var(--sp-1); color: var(--text-muted); font-size: var(--fs-md); font-weight: 650; }
+.current-work-title { display: block; overflow-wrap: anywhere; }
+.current-work p { margin-top: var(--sp-1); margin-bottom: 0; }
+.current-work .attention-copy { color: var(--alert-attention-fg); font-weight: 600; }
+.transition-summary { display: inline-block; margin-left: var(--sp-2); padding: 1px 6px; border-radius: var(--r-1); background: var(--surface-2); color: var(--text); font-size: var(--fs-md); font-weight: 600; }
+.status-skeleton { min-height: 26rem; background: repeating-linear-gradient(to bottom, var(--surface-2) 0 .85rem, transparent .85rem 3.25rem) left top / 42% 100% no-repeat, repeating-linear-gradient(to bottom, var(--surface-2) 0 .85rem, transparent .85rem 3.25rem) right top / 48% 100% no-repeat; }
+table.kv { max-width: 640px; border: 1px solid var(--border); }
+table.kv th { width: 40%; font-weight: 600; background: none; font-size: inherit; white-space: normal; }
+.event-controls { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: var(--sp-2) 0; }
+.event-controls select { min-height: var(--control-h); }
+.events li.event-plumbing { color: var(--text-muted); }
+
