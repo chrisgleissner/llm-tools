@@ -33,9 +33,9 @@ jobs:
       - name: Install pinned cross-build tools
         run: python -m pip install cargo-zigbuild==0.24.1 ziglang==0.17.1
       - uses: ./.github/actions/rust-toolchain
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.11.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.5.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -81,7 +81,7 @@ jobs:
           IMAGE: ${{ steps.build.outputs.image }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: "$RUNNER_TEMP/syft $IMAGE@$DIGEST -o cyclonedx-json=container.cdx.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coordinator-container-cyclonedx-${{ github.ref_name }}
           path: container.cdx.json
