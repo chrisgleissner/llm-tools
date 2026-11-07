@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import pwd
 import shutil
+import sqlite3
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from llm_tools import bridge_worker as worker
 from llm_tools.bridge_commands import CommandRequest
 from llm_tools.bridge_store import BridgeStore
 from tests.conftest import scaled, wait_for
@@ -28,13 +30,18 @@ from tests.distributed_harness import requires_coordinator, running_system
 pytestmark = [requires_coordinator]
 
 N = 1000
-# Measured on an x86-64 host (ext4 on NVMe, release build, 2026-11-05); see benchmarks.md. The
-# bounds are about 2.5 times the measured figure, rounded, so that a change that adds a write
-# per event (a second index, an audit row, per-event checkpoint) fails and normal variation does not.
-EVENTS_WRITE_BYTES_BOUND = 1536 * 1024  # measured 0.54 MiB for 1000 events (545-573 bytes/event, about one database byte written per byte stored)
+# Measured on an x86-64 host (ext4 on NVMe, release build, 2026-11-05 and 2026-11-07); see
+# benchmarks.md. The bounds are about 2.5 times the measured figure, rounded, so that a change
+# that adds a write per event (per-event commit or checkpoint) fails and normal variation does not.
+# The 1000 events are committed to the worker's store at once, so the coordinator receives them as
+# five batches of 200 whatever the timing. The database growth figures are taken with the
+# write-ahead log emptied (``_checkpoint``), so they count the pages the events occupy. Extra
+# writes that rewrite pages already in the file (a commit per event) do not grow the file; the
+# ``write_bytes`` bound catches those (13 KiB/event with a commit per event added temporarily).
+EVENTS_WRITE_BYTES_BOUND = 1536 * 1024  # measured 0.60-0.64 MiB for 1000 events (631-668 bytes/event; 545-573 on the 2026-11-05 run)
 COMMANDS_WRITE_BYTES_BOUND = 150 * 1024 * 1024  # measured 66-67 MiB for 1000 commands (68 KiB/command: five committed transactions each, a few 4 KiB pages per commit)
-DB_GROWTH_BYTES_PER_EVENT_BOUND = 1024  # measured 527-552 bytes/event of file growth; benchmarks.md has 557-558 over 10 000 events
-DIAGNOSTICS_GROWTH_BYTES_PER_EVENT_BOUND = 2048
+DB_GROWTH_BYTES_PER_EVENT_BOUND = 920  # measured 369 bytes/event of main file growth after a checkpoint (30 of 30 runs)
+DIAGNOSTICS_GROWTH_BYTES_PER_EVENT_BOUND = 920  # db_bytes after the same checkpoint: page_count * page_size, measured 369 bytes/event
 # Idle: a connected worker, pinged every 20 s. Authenticated API polling is deliberately excluded
 # because every bearer-token use must become an audit row and is measured by an API contract test.
 # Measured 0 bytes over 50 s (2026-11-05). Before the heartbeat throttle (ws_worker.rs
@@ -42,7 +49,7 @@ DIAGNOSTICS_GROWTH_BYTES_PER_EVENT_BOUND = 2048
 # about 2.2 MiB per worker-hour. The bound allows one small commit (a throttled last_seen or
 # last_used touch landing in the window) and nothing per ping.
 IDLE_SECONDS = 50
-IDLE_WRITE_BYTES_BOUND = 8 * 1024  # db_bytes counts pages not yet checkpointed twice (page_count and the WAL file)
+IDLE_WRITE_BYTES_BOUND = 8 * 1024
 
 
 def _write_bytes(pid: int) -> int:
@@ -79,8 +86,35 @@ def _block_backed_dir() -> Path:
 
 
 def _database_bytes(data: Path) -> int:
-    """Size of the coordinator database: main file plus write-ahead log (the shared-memory index is a constant 32 KiB and is left out)."""
+    """Size of the coordinator database files: main file plus write-ahead log (the shared-memory index is a constant 32 KiB and is left out).
+
+    Callers checkpoint first (``_checkpoint``), so the log is empty and this is the main file alone.
+    """
     return sum(path.stat().st_size for path in data.iterdir() if path.is_file() and path.name.endswith((".sqlite3", ".sqlite3-wal", ".db", ".db-wal")))
+
+
+def _checkpoint(data: Path) -> None:
+    """Move every page of the coordinator database from the write-ahead log into the main file and empty the log.
+
+    The log file is append-only until a checkpoint: a page rewritten by each of several commits
+    occupies a frame for every one of them, and the file does not shrink when a checkpoint
+    copies it into the main file. The file sizes, and ``db_bytes`` in the diagnostics (page count
+    plus log size), therefore depend on how many transactions the coordinator used, which depends on
+    how the replication batches fall. Measured with the log emptied first, the size is the number of
+    pages the events occupy, whatever the commit pattern. This test's own connection performs the
+    checkpoint; it writes nothing the coordinator process is charged for.
+    """
+    database = next(path for path in data.iterdir() if path.name.endswith((".sqlite3", ".db")))
+    connection = sqlite3.connect(database, timeout=0)
+    try:
+        def emptied() -> bool:
+            busy, _, _ = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()  # busy is 1 while a coordinator connection still reads the log
+            return busy == 0
+
+        wait_for(emptied, timeout=15, interval=0.05, message="the coordinator database log could not be checkpointed")
+    finally:
+        connection.close()
+    assert not any(path.stat().st_size for path in data.iterdir() if path.name.endswith("-wal")), "the log is not empty after a TRUNCATE checkpoint"
 
 
 @pytest.fixture
@@ -103,22 +137,33 @@ def _synced(system, store_path: Path) -> None:
 
 
 def test_one_thousand_replicated_events_stay_within_the_write_and_growth_bounds(tmp_path, monkeypatch, capsys, block_dir):
+    # The bounds below were measured with batches of 200 events. The coordinator commits one transaction
+    # per batch, and the worker's production batches (25 events, 16 KiB, 20 KiB/s) are deliberately small
+    # for slow links, which multiplies the commits and the write-ahead log pages written per event. Pin
+    # the batch shape here so that this test keeps measuring the coordinator's cost per stored event.
+    monkeypatch.setattr(worker, "EVENT_BATCH", 200)
+    monkeypatch.setattr(worker, "EVENT_BATCH_BYTES", 1024 * 1024)
+    monkeypatch.setattr(worker, "EVENT_RATE_BYTES_PER_SECOND", 1e9)
     with running_system(tmp_path, monkeypatch, capsys, allow_control=False, data_dir=block_dir / "coordinator") as system:
         store_path = system.state / "bridge.sqlite3"
         _synced(system, store_path)
         pid = system.coordinator.process.pid
         data = system.coordinator.data
         writes_before = _write_bytes(pid)
+        _checkpoint(data)
         status, body = system.coordinator.request("GET", "/api/v1/diagnostics")
         assert status == 200
         db_before = body["db_bytes"]
         files_before = _database_bytes(data)
         assert files_before > 0, [path.name for path in data.iterdir()]
         with BridgeStore(store_path) as store:
+            store.db.execute("BEGIN IMMEDIATE")  # one commit: the worker sees all events at once and sends them in batches of 200, not in whatever sizes its polling happens to catch
             for index in range(N):
                 store.record_runtime_event(system.mission_id, "storage-probe", {"n": index, "text": "x" * 100})
+            store.db.execute("COMMIT")
         _synced(system, store_path)
         written = _write_bytes(pid) - writes_before
+        _checkpoint(data)
         status, body = system.coordinator.request("GET", "/api/v1/diagnostics")
         files_after = _database_bytes(data)
         growth_files = (files_after - files_before) / N

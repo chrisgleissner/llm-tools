@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -32,6 +33,7 @@ from typing import Any, Callable
 from . import bridge_commands as commands
 from .bridge_protocol import MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
 from .bridge_store import BridgeStore, default_state_dir, store_path
+from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
 CA_FILE = "coordinator-ca.pem"
@@ -40,7 +42,15 @@ AUDIT_MAX_BYTES = 1024 * 1024  # one rotation is kept: audit.jsonl.1
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 PING_INTERVAL = 20.0
 SILENCE_LIMIT = 60.0
-EVENT_BATCH = 200
+EVENT_BATCH = 25  # events per batch
+EVENT_BATCH_BYTES = 16 * 1024  # serialized event bytes per batch (one oversized event still goes alone)
+EVENT_SCAN_ROWS = 400  # database rows read per batch, including rows that are not replicated
+EVENT_RATE_BYTES_PER_SECOND = 20 * 1024  # sustained upper bound for event traffic
+# Bookkeeping the controller writes every few seconds. The coordinator never reads either kind, and the
+# web console lists them only as hidden plumbing, so a heartbeat is not replicated and only the newest
+# capacity refresh of each mission is.
+UNREPLICATED_EVENT_KINDS = frozenset({EventKind.CONTROLLER_HEARTBEAT.value})
+LATEST_ONLY_EVENT_KINDS = frozenset({EventKind.CAPACITY_REFRESH.value})
 MISSION_QUESTION_REFRESH_SECS = 5.0
 MAX_QUESTION_MISSIONS_PER_REFRESH = 64
 
@@ -424,8 +434,24 @@ def tls_context(env: dict[str, str] | None = None) -> ssl.SSLContext:
     return context
 
 
+@dataclass(frozen=True)
+class InFlightBatch:
+    """The one events batch sent but not yet known to be processed by the coordinator."""
+
+    seq: int
+    after: int
+    through: int
+
+
 class WorkerSession:
-    """Protocol state for one worker; pure apart from the store and the config file."""
+    """Protocol state for one worker; pure apart from the store and the config file.
+
+    Event replication keeps at most one batch in flight. ``cursor`` is the last position the
+    coordinator is known to have stored. After a batch is sent, ``barrier_ping`` sends a ``ping``;
+    the coordinator handles one connection's messages in order, so its ``pong`` proves the batch was
+    processed, and any ``events.nack`` for it arrived before that pong. No coordinator support
+    beyond protocol v1 is needed.
+    """
 
     def __init__(self, config: WorkerConfig, *, open_store: Callable[[], BridgeStore], software_version: str,
                  save: Callable[[WorkerConfig], None] = _save, terminal_launcher: "TerminalLauncher | None" = None,
@@ -436,7 +462,12 @@ class WorkerSession:
         self.software_version = software_version
         self.save = save
         self.generation = 0
-        self.cursor: int | None = None  # coordinator's event cursor; None until welcome
+        self.cursor: int | None = None  # coordinator's confirmed event cursor; None until welcome
+        self.clock: Callable[[], float] = lambda: time.monotonic()
+        self.inflight: InFlightBatch | None = None
+        self.send_not_before = 0.0  # rate cap: no batch before this clock reading
+        self.batch_seq = 0
+        self.pending_pongs: deque[int] = deque(maxlen=64)  # per ping sent: the batch it fences, or 0
         self.terminal_launcher = terminal_launcher
         self.outbox: queue.Queue[Message] = queue.Queue(maxsize=1024)  # messages from terminal threads
         self.close_reason: str | None = None  # set when the connection must be dropped after the replies
@@ -548,6 +579,8 @@ class WorkerSession:
             self.save(self.config)  # durable before any command of this generation is accepted
             self.generation = generation
             self.cursor = int(message.payload["event_cursor"])
+            self.inflight, self.send_not_before = None, 0.0
+            self.pending_pongs.clear()
             self.audit("connection.accepted", generation=generation)
             return []
         if message.type == "error":
@@ -557,9 +590,10 @@ class WorkerSession:
         if message.type == "ping":
             return [self.message("pong", {})]
         if message.type == "pong":
+            self._pong()
             return []
         if message.type == "events.nack":
-            self.cursor = int(message.payload["expected_after"])
+            self._nack(int(message.payload["expected_after"]))
             return []
         if message.type == "terminal.open":
             return self._terminal_open(dict(message.payload))
@@ -655,19 +689,76 @@ class WorkerSession:
                 or (operation == "mission.suspend_until_credits" and self.config.allow_power)
                 or (operation == "worker.restore" and self.config.allow_restore))
 
+    def ping(self, fences: int = 0) -> Message:
+        """A ``ping``; ``fences`` is the batch sequence number its ``pong`` will confirm (0 for a keepalive)."""
+        self.pending_pongs.append(fences)
+        return self.message("ping", {})
+
+    def barrier_ping(self) -> Message:
+        """The ping that follows the batch just returned by ``next_events``."""
+        return self.ping(self.inflight.seq if self.inflight else 0)
+
+    def _pong(self) -> None:
+        fenced = self.pending_pongs.popleft() if self.pending_pongs else 0
+        if fenced and self.inflight is not None and self.inflight.seq == fenced:
+            self.cursor, self.inflight = self.inflight.through, None
+
+    def _nack(self, expected_after: int) -> None:
+        """Rewind to the coordinator's cursor, once per in-flight batch.
+
+        A nack that arrives with no batch in flight, or that names the position the in-flight batch
+        already starts from, answers an earlier batch that has since been superseded. Honouring it
+        would resend data the coordinator is about to accept.
+        """
+        if self.inflight is None or expected_after == self.inflight.after:
+            return
+        self.cursor, self.inflight = expected_after, None
+
+    def _replicable_events(self, store: BridgeStore, after: int) -> tuple[list[dict[str, Any]], int]:
+        """The next bounded batch of events and the cursor it advances to.
+
+        Heartbeats and superseded capacity refreshes are skipped but still advance the cursor, so
+        the returned cursor can exceed the last returned event.
+        """
+        selected: list[dict[str, Any]] = []
+        size, through = 0, after
+        newest_refresh: dict[str, int] = {}
+        for event in store.events_since(after, limit=min(EVENT_SCAN_ROWS, 1000)):
+            kind, mission_id = event.get("kind"), event.get("mission_id")
+            if kind in UNREPLICATED_EVENT_KINDS:
+                through = int(event["id"])
+                continue
+            if kind in LATEST_ONLY_EVENT_KINDS and isinstance(mission_id, str) and mission_id:
+                if mission_id not in newest_refresh:
+                    newest_refresh[mission_id] = store.latest_event_id(mission_id, (str(kind),))
+                if int(event["id"]) < newest_refresh[mission_id]:
+                    through = int(event["id"])
+                    continue
+            weight = len(json.dumps(event, separators=(",", ":")))
+            if selected and (len(selected) >= min(EVENT_BATCH, MAX_EVENTS_PER_BATCH) or size + weight > EVENT_BATCH_BYTES):
+                break
+            selected.append(event)
+            size += weight
+            through = int(event["id"])
+        return selected, through
+
     def next_events(self) -> Message | None:
-        """The next event batch after the coordinator's cursor, or ``None`` when up to date."""
-        if self.cursor is None:
+        """The next event batch after the coordinator's cursor, or ``None``.
+
+        ``None`` while a batch is in flight, while the rate cap holds the next batch back, and when
+        there is nothing new.
+        """
+        if self.cursor is None or self.inflight is not None:
+            return None
+        moment = self.clock()
+        if moment < self.send_not_before:
             return None
         with self.open_store() as store:
-            events = store.events_since(self.cursor, limit=min(EVENT_BATCH, MAX_EVENTS_PER_BATCH))
-            moment = time.monotonic()
+            events, through = self._replicable_events(store, self.cursor)
             refresh_questions = moment - self.last_question_refresh >= MISSION_QUESTION_REFRESH_SECS
-            if not events and not refresh_questions:
+            if through == self.cursor and not refresh_questions:
                 return None
             after = self.cursor
-            if events:
-                self.cursor = int(events[-1]["id"])
             # Ordinary summaries remain event-scoped. A small, periodic scan of
             # active native missions catches provider questions, which can arrive
             # without a Bridge database event.
@@ -695,10 +786,14 @@ class WorkerSession:
                 current = self.mission_questions.get(mission_id)
                 if mission_id in event_mission_ids or current != previous:
                     missions.append(summary)
-            if not events and not missions:
+            if through == after and not missions:
                 return None
-        return self.message("events", {"after": after, "through": self.cursor, "events": events,
-                                        "mission_cursor": self.cursor, "missions": missions})
+        batch = self.message("events", {"after": after, "through": through, "events": events,
+                                         "mission_cursor": through, "missions": missions})
+        self.batch_seq += 1
+        self.inflight = InFlightBatch(self.batch_seq, after, through)
+        self.send_not_before = moment + len(batch.encode()) / EVENT_RATE_BYTES_PER_SECOND
+        return batch
 
 
 Connector = Callable[[WorkerConfig], Any]
@@ -769,6 +864,7 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
         try:
             connection = connect(session.config)
             session.generation, session.cursor, session.close_reason = 0, None, None
+            session.inflight = None
             connection.send_text(session.hello().encode())
             last_heard = last_ping = time.monotonic()
             while not stop.is_set():
@@ -794,10 +890,12 @@ def run(session: WorkerSession, connect: Connector, *, stop: threading.Event, lo
                 batch = session.next_events()
                 if batch is not None:
                     connection.send_text(batch.encode())
+                    connection.send_text(session.barrier_ping().encode())
+                    last_ping = now
                 if now - last_heard > SILENCE_LIMIT:
                     raise TimeoutError("coordinator silent")
                 if now - last_ping > PING_INTERVAL and session.generation:
-                    connection.send_text(session.message("ping", {}).encode())
+                    connection.send_text(session.ping().encode())
                     last_ping = now
         except Exception as exc:  # noqa: BLE001 - every failure leads to a bounded reconnect
             log(f"worker connection ended: {type(exc).__name__}: {str(exc)[:200]}")
