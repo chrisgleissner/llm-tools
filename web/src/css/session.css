@@ -8,7 +8,7 @@
 .pane-menu { margin-inline-start: auto; }
 .session-main { position: relative; min-block-size: 0; background: var(--term-bg); }
 .term-host, .transcript { position: absolute; inset: 0; margin: 0; padding: var(--sp-2); overflow: auto; background: var(--term-bg); color: var(--term-fg); }
-.transcript { font: var(--fs-md)/var(--lh-md) var(--mono); white-space: pre-wrap; }
+.transcript { font: var(--fs-md) var(--mono); white-space: pre-wrap; }
 .xterm:focus-within { outline: 2px solid var(--focus); }
 .term-host.pan { mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent); }
 .jump { position: absolute; inset: auto var(--sp-3) var(--sp-2) auto }
@@ -16,7 +16,7 @@
 .composer-field { flex: 1 1 8rem; min-block-size: var(--control-h); max-block-size: 6.25rem; resize: none; field-sizing: content; }
 .composer .menu-popover { inset-block: auto calc(100% + var(--sp-1)); }
 .queued-chip { border: 1px solid var(--alert-attention-bar); border-radius: var(--r-pill); background: var(--alert-attention-bg); color: var(--alert-attention-fg); padding: 2px var(--sp-3); }
-.keybar { display: flex; flex-wrap: wrap; gap: 2px; min-block-size: var(--control-h); padding: 0 var(--sp-1) var(--sp-1); }
+.keybar { display: flex; flex-wrap: wrap; gap: 2px; min-block-size: var(--control-h); padding: 0 var(--sp-1); }
 .keybar-row { display: flex; flex-wrap: wrap; flex: 1 0 100%; gap: 2px; }
 .key, .more { flex: 1 1 var(--control-h); min-inline-size: var(--control-h); padding: 0; font-family: var(--mono); }
 .key[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
@@ -28,4 +28,4 @@ body[data-session-fs] .session-pane { position: fixed; inset: 0; z-index: 60; bl
 /* Soft keyboard open on a touch device: the pane takes the visible height (--vvh on iOS) below the collapsed header. */
 @media (pointer: coarse), (max-width: 47.99rem) { body[data-kb]:not([data-session-fs]) .session-pane { position: fixed; inset: var(--head-h) 0 auto; z-index: 25; block-size: calc(var(--vvh, 100svh) - var(--head-h)); min-block-size: 0; } }
 @media (orientation: landscape) and (max-height: 520px) { .session-pane, .session-reserve { --session-h: calc(100svh - 3rem); min-block-size: 0; } .composer-note { display: none; } .composer, .session-bar { padding-block: 0; } }
-body[data-kb] .tabbar { display: none; }
+@media (max-width: 47.99rem) { .term-status { flex-basis: 100%; } }

@@ -85,7 +85,7 @@ export function composer(o: ComposerOpts): Composer {
     set(v): void {
       const wasTyping = !input.disabled;
       input.disabled = !v.canType;
-      input.placeholder = v.canType ? "Type to the session. Enter sends, Shift+Enter adds a line." : "Take control to type";
+      input.placeholder = v.canType ? "Message the session" : "";
       sendBtn.disabled = !v.canType || !input.value.trim();
       take.hidden = !v.offerControl;
       take.disabled = Boolean(v.takeReason);
