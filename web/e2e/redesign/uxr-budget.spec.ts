@@ -58,7 +58,7 @@ uxrStatic({ t: "T39", uxr: ["UXR-039"], needs: ["WP-0"] }, "lazy route chunks (a
   // Lazy route stylesheets: every .css in dist except the app stylesheet and the one the terminal chunk loads.
   if (b["cssRaw"] !== undefined) {
     const terminalSource = read(biggest).toString("utf8");
-    const lazyCss = readdirSync(dist).filter((f) => f.endsWith(".css") && f !== graph().css && !terminalSource.includes(f));
+    const lazyCss = readdirSync(dist).filter((f) => f.endsWith(".css") && f !== graph().css && !f.startsWith("xterm-") && !terminalSource.includes(f));
     const css = lazyCss.reduce((a, f) => ({ raw: a.raw + size(f).raw, gzip: a.gzip + size(f).gzip }), { raw: 0, gzip: 0 });
     expect(css.raw, `lazy route css raw (budget ${b["cssRaw"]})`).toBeLessThanOrEqual(b["cssRaw"] ?? 0);
     expect(css.gzip, `lazy route css gzip (budget ${b["cssGzip"] ?? 0})`).toBeLessThanOrEqual(b["cssGzip"] ?? Infinity);

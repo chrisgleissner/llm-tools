@@ -9,6 +9,8 @@ import {
 } from "../rows";
 
 type Sort = "state" | "updated" | "name";
+/** How long the first list render waits for the status of the missions that need one. */
+const HOLD_MS = 700;
 const SORTS: Array<[Sort, string]> = [
   ["state", "Needs you first"],
   ["updated", "Recently updated"],
@@ -36,6 +38,8 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   let cancelSkeleton: (() => void) | null = null;
   let renderTimer = 0;
   let order = new Map<string, number>();
+  let released = false;
+  let heldSince = 0;
   let detailTimer = 0;
 
   const need = h("span", { "data-q": "need-me" });
@@ -144,6 +148,18 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
       return;
     }
     const items = reply.missions.map(itemOf);
+    // The first rows are drawn when the status of the missions that need one has arrived (at most HOLD_MS, nothing shown meanwhile), so a row that turns
+    // out to need the operator is not inserted above rows that are already on screen.
+    if (!released) {
+      heldSince ||= Date.now();
+      if (attentionPending(reply.missions) && Date.now() - heldSince < HOLD_MS) {
+        fetchDetails(false, items.filter(matches));
+        window.clearTimeout(renderTimer);
+        renderTimer = window.setTimeout(render, 100);
+        return;
+      }
+      released = true;
+    }
     stateBox.querySelector(".skeleton")?.remove();
     renderControls(items);
     const shown = items.filter(matches);
@@ -151,12 +167,11 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     const done = shown.filter((i) => sectionOf(i.state) === "finished");
     const byUpdated = (a: Item, b: Item) => updatedMs(b) - updatedMs(a);
     const byName = (a: Item, b: Item) => a.entry.mission.name.localeCompare(b.entry.mission.name) || byUpdated(a, b);
-    // The first render orders by state and recency. After that the rows keep their places (rows that are new come first, newest first): a refresh
-    // or a status read does not move rows under the reader. Changing the search, a filter or the sort orders again.
+    // Rows are ordered by state; within a state they keep the places they have on screen (rows that are new come first, newest first), so a refresh
+    // does not shuffle rows under the reader. Changing the search, a filter or the sort orders again.
     const place = (i: Item): number => order.get(i.key) ?? -1;
-    const byState = (a: Item, b: Item) => stateOrder(a.state) - stateOrder(b.state) || byUpdated(a, b);
-    const byPlace = (a: Item, b: Item) => place(a) - place(b) || byUpdated(a, b);
-    const compare = sort === "name" ? byName : sort === "updated" ? byUpdated : order.size === 0 ? byState : byPlace;
+    const byState = (a: Item, b: Item) => stateOrder(a.state) - stateOrder(b.state) || place(a) - place(b) || byUpdated(a, b);
+    const compare = sort === "name" ? byName : sort === "updated" ? byUpdated : byState;
     active.sort(compare);
     order = new Map(active.map((i, n) => [i.key, n]));
     done.sort(sort === "name" ? byName : byUpdated);

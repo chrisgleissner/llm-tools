@@ -54,10 +54,8 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
-      await expect(async () => {
-        await page.goto(url);
-        await expect(page.locator("#terminal-control")).toBeEnabled({ timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(url);
+      await expect(page.locator("#terminal-control")).toBeEnabled({ timeout: 30_000 });
       // A running mission is watched read-only on arrival, with no click.
       await expect(page.locator("#terminal-status")).toHaveAttribute("data-mode", "view");
 
@@ -134,10 +132,8 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
-      await expect(async () => {
-        await page.goto(url);
-        await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(url);
+      await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
       const status = page.locator("#terminal-status");
       await openTerminal(page, "#terminal-control"); // asking for control is answered with a view-only grant
       await expect(status).toHaveAttribute("data-mode", "view");
@@ -157,10 +153,8 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     try {
       await setupViaUi(page, coord);
       const url = `/missions/e2e-worker/${st.missionId}`;
-      await expect(async () => {
-        await page.goto(url);
-        await expect(page.locator("#terminal-status")).not.toHaveAttribute("data-state", "idle", { timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(url);
+      await expect(page.locator("#terminal-status")).not.toHaveAttribute("data-state", "idle", { timeout: 30_000 });
       const status = page.locator("#terminal-status");
       await expect(status).toContainText("--allow-terminal-view", { timeout: 20_000 });
       await expect(status).not.toHaveAttribute("data-state", "live");
@@ -175,10 +169,8 @@ test.describe("remote terminal with a real worker and tmux station", () => {
     const st = await startStation(coord, "control");
     try {
       await setupViaUi(page, coord);
-      await expect(async () => {
-        await page.goto(`/missions/e2e-worker/${st.missionId}`);
-        await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 2000 });
-      }).toPass({ timeout: 30_000 });
+      await page.goto(`/missions/e2e-worker/${st.missionId}`);
+      await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 30_000 });
       await st.stopWorker();
       await expect(page.locator("#terminal-open")).toBeDisabled({ timeout: 20_000 });
     } finally {
