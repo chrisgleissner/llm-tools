@@ -233,6 +233,10 @@ and compatibility test are the reviewable contract for each release.
 |---|---|---|
 | Concurrent TCP connections, all kinds | 256; a connection over the cap is closed immediately after `accept` | `max_connections` |
 | Concurrent connections per client address (IPv6 counted by /64) | 32; over the cap is closed immediately. Behind a proxy or a published container port every client has the proxy's address: raise it | `max_connections_per_ip` |
+
+### Reverse proxy client addresses
+
+The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP peer belongs to a CIDR in `trusted_proxies` (empty by default). Configure only the addresses of proxies that remove client-supplied forwarding headers and set their own. The coordinator accepts at most 2 KiB and 16 hops, walks the chain from the direct proxy toward the client, and falls back to the TCP peer if parsing fails. These headers affect client-address rate limits and audit metadata; they do not change request authentication or origin checks. Do not trust a proxy network shared with untrusted clients.
 | Worker reserve | 16 of the 256 slots (at most a quarter of `max_connections`) are used only after the other slots are full. A connection in the reserve has a 5 s handshake and header limit and may only carry `/api/v1/worker/*` with a valid worker token; any other request gets 503 and the connection is closed. Unauthenticated clients that fill the general slots therefore cannot stop workers from reconnecting | `worker_reserve_connections` |
 | TLS handshake | 10 s | fixed |
 | Wait for the next HTTP request header (keep-alive idle and slow-header limit) | 30 s | `http_idle_timeout_secs` |

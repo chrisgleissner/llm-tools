@@ -16,6 +16,8 @@ pub struct Config {
     /// Extra exact Origin values accepted for cookie-authenticated writes
     /// (the default is `https://<Host header>`).
     pub allowed_origins: Vec<String>,
+    /// Proxy CIDRs allowed to supply the real client address in Forwarded/X-Forwarded-For.
+    pub trusted_proxies: Vec<String>,
     /// Directory with the built web interface (`index.html`, `app.js`, ...). Unset: `web` next to
     /// the executable, else `/usr/share/bridge-coordinator/web`.
     pub web_dir: Option<String>,
@@ -60,6 +62,7 @@ impl Default for Config {
             min_tls: "1.3".into(),
             max_events_per_worker: 50_000,
             allowed_origins: vec![],
+            trusted_proxies: vec![],
             web_dir: None,
             tls_cert_file: None,
             tls_key_file: None,
@@ -112,6 +115,7 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
     max_events_per_worker = {}\n\
     # Extra exact Origin values accepted for cookie-authenticated writes.\n\
     allowed_origins = []\n\
+    trusted_proxies = []\n\
     # Canonical HTTPS DNS origin for passkeys; omit to bind it at first registration.\n\
     # public_origin = \"https://bridge.example.test\"\n\
     # Directory with the built web interface; default: web next to the executable, then\n\
@@ -224,6 +228,9 @@ impl Config {
         if cfg.max_events_per_worker == 0 {
             return Err("max_events_per_worker must be at least 1".into());
         }
+        if cfg.trusted_proxies.len() > 64 || cfg.trusted_proxies.iter().any(|cidr| !crate::client_ip::valid_cidr(cidr)) {
+            return Err("trusted_proxies must contain at most 64 valid IPv4 or IPv6 CIDRs".into());
+        }
         if cfg.max_connections == 0
             || cfg.max_connections_per_ip == 0
             || cfg.request_body_timeout_secs == 0
@@ -288,6 +295,17 @@ mod tests {
         let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 0"));
         assert!(Config::load(&invalid).unwrap_err().contains("mutation limits"));
         let _ = std::fs::remove_dir_all(invalid);
+    }
+
+    #[test]
+    fn trusted_proxy_configuration_is_bounded_and_requires_cidrs() {
+        let valid = temp_config(&config_text("127.0.0.1:8443", false).replace("trusted_proxies = []", "trusted_proxies = [\"10.0.0.0/8\", \"2001:db8::/32\"]"));
+        assert_eq!(Config::load(&valid).unwrap().trusted_proxies.len(), 2);
+        std::fs::remove_dir_all(valid).unwrap();
+
+        let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("trusted_proxies = []", "trusted_proxies = [\"10.0.0.1\"]"));
+        assert!(Config::load(&invalid).unwrap_err().contains("valid IPv4 or IPv6 CIDRs"));
+        std::fs::remove_dir_all(invalid).unwrap();
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod certs;
+pub mod client_ip;
 pub mod config;
 pub mod cursor;
 pub mod db;

@@ -469,10 +469,15 @@ impl FromRequestParts<St> for Authed {
 }
 
 pub struct Remote(pub String);
-impl<S: Send + Sync> FromRequestParts<S> for Remote {
+impl FromRequestParts<St> for Remote {
     type Rejection = std::convert::Infallible;
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        Ok(Remote(parts.extensions.get::<Peer>().map(|p| p.0.ip().to_string()).unwrap_or_default()))
+    async fn from_request_parts(parts: &mut Parts, state: &St) -> Result<Self, Self::Rejection> {
+        let remote = parts.extensions.get::<Peer>().map(|p| p.0.ip());
+        let Some(peer) = remote else { return Ok(Remote(String::new())) };
+        let forwarded = parts.headers.get("forwarded").and_then(|v| v.to_str().ok());
+        let x_forwarded_for = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+        let client = crate::client_ip::resolve(peer, forwarded, x_forwarded_for, &state.cfg.trusted_proxies);
+        Ok(Remote(client.to_string()))
     }
 }
 
