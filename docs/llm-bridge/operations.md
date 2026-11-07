@@ -998,6 +998,10 @@ the migrated schema matches a freshly created one. Versions 7 to 9 and 1, 4 and 
 were never committed as source, so their fixtures are derived; `MANIFEST.json`
 says how each was made.
 
+To back up the database, restore it on another host or remove llm-tools
+completely, see [uninstall.md](uninstall.md): it lists every file, unit and
+socket llm-tools creates and the command that removes each.
+
 See `llm-bridge --help` and the command-specific `--help` output for all
 available CLI operations.
 

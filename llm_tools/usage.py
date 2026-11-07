@@ -3084,8 +3084,8 @@ def statusline_mode() -> None:
     obj = common.read_json_text(text)
     if isinstance(obj, dict) and (obj.get("rate_limits") is not None or obj.get("rateLimits") is not None):
         cache = common.usage_cache_dir() / "claude-status.json"
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+        common.make_private_dirs(cache.parent)
+        common.atomic_write_text(cache, text + ("\n" if not text.endswith("\n") else ""))  # names working folders and session ids: owner only
     five = None
     week = None
     if isinstance(obj, dict):
