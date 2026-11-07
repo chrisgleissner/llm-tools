@@ -1148,8 +1148,14 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
         None => 90,
         Some(value) => value
             .as_u64()
-            .filter(|days| *days <= 3650)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "expires_days must be an integer from 0 to 3650"))?,
+            .filter(|days| *days == 0 || *days <= st.cfg.max_token_lifetime_days as u64)
+            .ok_or_else(|| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid-request",
+                    format!("expires_days must be 0 or no more than {}", st.cfg.max_token_lifetime_days),
+                )
+            })?,
     };
     let expires_at = (days > 0).then(|| crate::now() + (days as i64) * 86_400);
     let secret = auth::random_token();

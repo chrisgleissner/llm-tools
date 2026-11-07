@@ -89,7 +89,8 @@ worker protocol is `protocol.md`.
     then decided by the published port, not by `lan_enabled`.
 
   All other settings are keys of `config.toml`: `bind`, `lan_enabled`,
-  `max_events_per_worker`, `allowed_origins` (extra exact `Origin` values accepted for
+  `max_events_per_worker`, `max_token_lifetime_days` (maximum expiry for newly created API tokens,
+  default 3650 days), `allowed_origins` (extra exact `Origin` values accepted for
   cookie-authenticated writes), `web_dir` (default: `web` next to the executable, then
   `/usr/share/bridge-coordinator/web`) and the limit keys in the table below. All
   defaults are defined in `config.rs` (`Config::default`); `init` generates
@@ -106,8 +107,9 @@ worker protocol is `protocol.md`.
 - `bridge-coordinator token create NAME [--scope SCOPE]... [--expires-days N]` prints an API
   token once; only its SHA-256 hash and grants are stored, and `token revoke NAME` revokes it.
   New tokens default to `read`; repeat `--scope` for `operate`, `terminal:view`, `terminal:write`
-  or `admin`. `admin` grants every scope. Tokens expire after 90 days by default;
-  `--expires-days 0` creates one that never expires. Existing tokens are migrated to `admin`
+  or `admin`. `admin` grants every scope. Tokens expire after 90 days by default, and configured
+  `max_token_lifetime_days` caps explicit expiry values; `--expires-days 0` creates a token with
+  no expiry for LAN use. Existing tokens are migrated to `admin`
   so their previous permissions remain unchanged.
 
 ## HTTP API (all under `/api/v1`, JSON)
@@ -144,7 +146,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
 | GET | `/tokens` | Token name, scopes, creation, last-use and expiry metadata. Requires an administrator session or an `admin` token. |
-| POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry). Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
+| POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
 | DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
 | GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). A mission may include bounded `needs_you: {kind, message, command}` when its native provider is waiting on a structured question; the message contains only question/choice text and the local answer command. Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (default 100, maximum 500), `cursor`, or legacy `offset`. The reply adds `total`, `offset`, `next_cursor` and `statuses` (match counts per status, ignoring the status filter). Cursors are authenticated and encrypted, opaque, bound to the normalized filters and sort order, and cannot be combined with `offset`; use the returned `next_cursor` unchanged to fetch the next page. |
 | POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |

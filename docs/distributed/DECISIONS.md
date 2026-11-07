@@ -267,3 +267,15 @@ tests assert required resident keys, conditional mediation and an empty allow li
 checks the fixed user handle, registered credential ID and user-verification flag; valid
 cryptographic vectors for that path remain required under PK-011.
 
+## D18 Configurable API token lifetime ceiling (SEC2-009)
+
+Keep the existing 90-day default and allow a deployment to lower or raise the explicit
+expiry ceiling through `max_token_lifetime_days`, bounded to 1–3650 days. Preserve
+`expires_days = 0` for non-expiring LAN tokens for compatibility. When Internet exposure is
+implemented, its startup precondition must reject that value and enforce the 90-day ceiling.
+
+In the code: `coordinator/src/config.rs` defines and validates the setting;
+`coordinator/src/http.rs::create_token` enforces it. Boundary tests live in
+`coordinator/src/config.rs::tests::api_token_lifetime_default_is_ten_years_and_config_is_bounded`
+and `coordinator/tests/web_api.rs::token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry`.
+

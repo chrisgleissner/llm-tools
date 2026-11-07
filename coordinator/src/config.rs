@@ -48,6 +48,8 @@ pub struct Config {
     pub mutation_limit_per_token: usize,
     /// Authenticated mutation budget per client address in a rolling 60-second window.
     pub mutation_limit_per_address: usize,
+    /// Maximum lifetime for a newly-created API token, in days (0/no expiry remains LAN-only).
+    pub max_token_lifetime_days: u32,
 }
 
 impl Default for Config {
@@ -72,6 +74,7 @@ impl Default for Config {
             ws_idle_timeout_secs: 90,
             mutation_limit_per_token: 30,
             mutation_limit_per_address: 120,
+            max_token_lifetime_days: 3650,
         }
     }
 }
@@ -129,7 +132,9 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
     ws_idle_timeout_secs = {}\n\
     # Authenticated mutation budget per token and client address per rolling 60 seconds.\n\
     mutation_limit_per_token = {}\n\
-    mutation_limit_per_address = {}\n",
+    mutation_limit_per_address = {}\n\
+    # Maximum lifetime for newly created API tokens, in days (up to ten years).\n\
+    max_token_lifetime_days = {}\n",
         d.min_tls,
         d.max_events_per_worker,
         d.max_connections,
@@ -140,7 +145,8 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
         d.ws_ping_interval_secs,
         d.ws_idle_timeout_secs,
         d.mutation_limit_per_token,
-        d.mutation_limit_per_address
+        d.mutation_limit_per_address,
+        d.max_token_lifetime_days
     )
 }
 
@@ -235,6 +241,9 @@ impl Config {
         if !(1..=10_000).contains(&cfg.mutation_limit_per_token) || !(1..=10_000).contains(&cfg.mutation_limit_per_address) {
             return Err("mutation limits must be between 1 and 10000 per 60 seconds".into());
         }
+        if !(1..=3650).contains(&cfg.max_token_lifetime_days) {
+            return Err("max_token_lifetime_days must be between 1 and 3650".into());
+        }
         cfg.bind_addr()?;
         Ok(cfg)
     }
@@ -278,6 +287,18 @@ mod tests {
 
         let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 0"));
         assert!(Config::load(&invalid).unwrap_err().contains("mutation limits"));
+        std::fs::remove_dir_all(invalid).unwrap();
+    }
+
+    #[test]
+    fn api_token_lifetime_default_is_ten_years_and_config_is_bounded() {
+        assert_eq!(Config::default().max_token_lifetime_days, 3650);
+        let valid = temp_config(&config_text("127.0.0.1:8443", false).replace("max_token_lifetime_days = 3650", "max_token_lifetime_days = 30"));
+        assert_eq!(Config::load(&valid).unwrap().max_token_lifetime_days, 30);
+        std::fs::remove_dir_all(valid).unwrap();
+
+        let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("max_token_lifetime_days = 3650", "max_token_lifetime_days = 0"));
+        assert!(Config::load(&invalid).unwrap_err().contains("max_token_lifetime_days"));
         std::fs::remove_dir_all(invalid).unwrap();
     }
 

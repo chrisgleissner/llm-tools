@@ -217,6 +217,26 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry() {
+    let env = boot_with(|t| t.replace("max_token_lifetime_days = 3650", "max_token_lifetime_days = 1")).await;
+    let api = env.admin().await;
+    let (status, body) = api.post("/api/v1/tokens", json!({"name":"too-long","scopes":["read"],"expires_days":2})).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["code"], "invalid-request");
+
+    let (status, body) = api.post("/api/v1/tokens", json!({"name":"one-day","scopes":["read"],"expires_days":1})).await;
+    assert_eq!(status, 201, "{body}");
+    assert!(body["token"]["expires_at"].as_str().is_some());
+
+    let (status, body) = api
+        .post("/api/v1/tokens", json!({"name":"local-forever","scopes":["read"],"expires_days":0}))
+        .await;
+    assert_eq!(status, 201, "{body}");
+    assert!(body["token"]["expires_at"].is_null());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn passkey_registration_start_is_bound_to_https_named_origin_and_session() {
     let origin = "https://bridge.example.test";
     let env = boot_with(|t| t.replace("allowed_origins = []", "allowed_origins = [\"https://bridge.example.test\"]")).await;
