@@ -379,6 +379,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     if (auth !== "in") return json(route, 401, { error: { code: "unauthorized", message: "authentication required" } });
     if (path === "/workers" && method === "GET") return json(route, 200, { workers });
+    if (path === "/workers" && method === "POST") return json(route, 201, { name: String(body?.["name"] ?? "new-worker"), token: "lbr_wrk_mock-enrolment-token" });
     if (path === "/missions") {
       const q = (url.searchParams.get("q") ?? "").toLowerCase();
       const status = (url.searchParams.get("status") ?? "").split(",").filter(Boolean).map((s) => s.toUpperCase());

@@ -106,6 +106,17 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   let transcriptTimer = 0;
   let available = true;
   let disposed = false;
+  /** A focus request that arrived while neither the message field nor Take control could take focus. */
+  let wantFocus = false;
+  const settleFocus = (): boolean => {
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== element) return true; // the operator moved on: do not take focus back
+    if (input.focus()) return true;
+    const take = element.querySelector<HTMLElement>("#terminal-control:not(:disabled)");
+    if (!take) return false;
+    take.focus();
+    return true;
+  };
   let paneCols = 0;
   let paneRows = 0;
   let follow = true; // keep the newest output in view until the user scrolls up
@@ -145,6 +156,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
       hint: controlling || (live && !takeReason),
     });
     keys?.enable(controlling, "Take control to use the keys");
+    if (wantFocus && settleFocus()) wantFocus = false;
     renderMenu();
     followBtn.disabled = transcriptBtn.disabled = !term;
   }
@@ -443,8 +455,13 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   return {
     element,
     focusComposer(): void {
-      // The field when it takes typing, else Take control, else (still connecting, or not allowed) the pane itself.
-      if (!input.focus()) (element.querySelector<HTMLElement>("#terminal-control:not(:disabled)") ?? element).focus();
+      // The field when it takes typing, else Take control, else (still connecting, or not allowed) the pane itself; a pane that is still
+      // connecting moves focus to the field or Take control as soon as one can take it (an "Answer" link opens the page before the socket is up).
+      if (input.focus()) return;
+      const take = element.querySelector<HTMLElement>("#terminal-control:not(:disabled)");
+      if (take) return take.focus();
+      wantFocus = true;
+      element.focus();
     },
     takeControl(): void {
       start("write");

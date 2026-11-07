@@ -46,7 +46,18 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   let session: SessionHandle | null = null;
   let sessionMounting = false;
   let sessionKind = "none";
-  let focusWhenMounted = false;
+  // A deep link from an "Answer" row or a notification (`?focus=composer`) lands with the focus in the session pane: the message field when the
+  // operator holds control, else Take control (spec 8.3), so the answer is one key press away. The parameter is consumed once.
+  let focusWhenMounted = new URLSearchParams(location.search).get("focus") === "composer";
+  if (focusWhenMounted) {
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete("focus");
+      history.replaceState(history.state, "", url.pathname + url.search);
+    } catch {
+      /* the address bar is a convenience */
+    }
+  }
   let headSignature = "";
 
   // ---- derived facts
