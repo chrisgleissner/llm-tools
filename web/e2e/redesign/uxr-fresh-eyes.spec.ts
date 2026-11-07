@@ -124,7 +124,13 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F9: an approval hint tha
   // The status projection still says "awaiting approval" while the task list (read separately) shows both tasks queued.
   app.setNeeds(MISSIONS[5]!.mission.id, { kind: "approval", tasks: [2], message: "task 2 awaits your review" });
   app.setTasks(MISSIONS[5]!.mission.id, ["QUEUED", "QUEUED"]);
+  const id = MISSIONS[5]!.mission.id;
+  const reads = (suffix: string) => app.requests().filter((r) => r.method === "GET" && r.path === `/missions/${id}${suffix}`).length;
+  const [statusBefore, tasksBefore] = [reads(""), reads("/tasks")];
   await page.reload();
+  // Both reads must have been answered before the header is judged: until then it shows only what the list says.
+  await expect.poll(() => [reads("") > statusBefore, reads("/tasks") > tasksBefore], { message: "the status and the task list were read again" }).toEqual([true, true]);
+  await page.waitForTimeout(500);
   await expect(header.locator(".pill").first()).toContainText("Queued");
   await expect(header.locator('[data-action="approve"]'), "Approve is not offered for a task that is not awaiting it").toHaveCount(0);
 });
@@ -139,7 +145,7 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS] }, "F9: after Pause the runn
 });
 
 // ---- F37: disabled controls keep 4.5:1 in both themes (measured, not judged by eye) --------------------------------------
-uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS, "WP-2"] }, "F37: disabled Send, Take control and keys have a text contrast of at least 4.5:1 in light and dark", async ({ page }) => {
+uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS, "WP-2"] }, "F37: disabled Send, Take control and keys have a text contrast of at least 4.5:1 in light and dark", async ({ page }, info) => {
   await openApp(page, { ...LIVE, control: "deny" }, MISSION_URL);
   await expect(page.locator("[data-composer]")).toContainText("This worker allows viewing only");
   await page.addStyleTag({ content: "*, *::before, *::after { transition: none !important; animation: none !important; }" }); // measure at rest, not mid-transition
@@ -169,6 +175,8 @@ uxr({ t: "T47", uxr: ["UXR-040"], needs: [...NEEDS, "WP-2"] }, "F37: disabled Se
       }
       return out;
     });
+    info.annotations.push({ type: `contrast ${scheme}`, description: JSON.stringify(ratios) });
+    console.log(`CONTRAST ${scheme} ${JSON.stringify(ratios)}`);
     expect(Object.keys(ratios).length, `${scheme}: disabled controls were measured`).toBeGreaterThan(0);
     for (const [name, ratio] of Object.entries(ratios)) expect(ratio, `${scheme}: ${name} contrast ${ratio.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
   }
