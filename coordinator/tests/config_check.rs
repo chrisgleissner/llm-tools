@@ -20,8 +20,9 @@ const STRICT: CheckOptions = CheckOptions {
     check_paths: true,
 };
 
-const ALL_KEYS: &str = "bind, lan_enabled, max_events_per_worker, allowed_origins, web_dir, max_connections, max_connections_per_ip, \
-worker_reserve_connections, request_body_timeout_secs, http_idle_timeout_secs, ws_ping_interval_secs, ws_idle_timeout_secs";
+const ALL_KEYS: &str = "bind, lan_enabled, min_tls, max_events_per_worker, allowed_origins, web_dir, tls_cert_file, tls_key_file, tls_cert_name, \
+max_connections, max_connections_per_ip, worker_reserve_connections, request_body_timeout_secs, http_idle_timeout_secs, ws_ping_interval_secs, \
+ws_idle_timeout_secs, mutation_limit_per_token, mutation_limit_per_address";
 
 const ROWS: &[Row] = &[
     Row {
@@ -185,6 +186,33 @@ const ROWS: &[Row] = &[
             "config error: max_connection = 3: unknown key; did you mean \"max_connections\"?; fix: rename it to max_connections, or remove it",
             "config error: BRIDGE_COORDINATOR_LAN_ENABLED = \"2\": not a boolean; fix: set it to true or false (1, 0, yes, no, on and off are also accepted)",
         ],
+    },
+    Row {
+        name: "min_tls other than 1.3 or 1.2 is refused",
+        config: "min_tls = \"1.1\"\n",
+        env: &[],
+        errors: &["config error: min_tls = \"1.1\": must be \"1.3\" or \"1.2\"; fix: write min_tls = \"1.3\" (default)"],
+    },
+    Row {
+        name: "mutation limits outside 1 to 10000 are refused",
+        config: "mutation_limit_per_token = 0\nmutation_limit_per_address = 10001\n",
+        env: &[],
+        errors: &[
+            "config error: mutation_limit_per_address = 10001: mutation limits must be between 1 and 10000 per 60 seconds; fix: use a whole number from 1 to 10000 (default 120)",
+            "config error: mutation_limit_per_token = 0: mutation limits must be between 1 and 10000 per 60 seconds; fix: use a whole number from 1 to 10000 (default 30)",
+        ],
+    },
+    Row {
+        name: "an operator TLS identity needs the certificate, the key and the name together",
+        config: "tls_cert_file = \"/etc/bridge/cert.pem\"\n",
+        env: &[],
+        errors: &["config error: tls_cert_file = <partly set>: tls_cert_file, tls_key_file and tls_cert_name must be configured together; fix: set all three (in config.toml or BRIDGE_COORDINATOR_TLS_CERT_FILE, _KEY_FILE and _CERT_NAME), or none"],
+    },
+    Row {
+        name: "an operator TLS identity set completely through the file is valid",
+        config: "tls_cert_file = \"/etc/bridge/cert.pem\"\ntls_key_file = \"/etc/bridge/key.pem\"\ntls_cert_name = \"bridge.example.ts.net\"\n",
+        env: &[],
+        errors: &[],
     },
 ];
 
