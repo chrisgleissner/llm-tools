@@ -391,6 +391,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/auth/password` |
 | `POST /api/v1/auth/passkeys/registration/start` |
 | `POST /api/v1/auth/passkeys/registration/finish` |
+| `GET /api/v1/auth/passkeys` |
 | `POST /api/v1/auth/passkeys/assertion/start` |
 | `POST /api/v1/auth/passkeys/assertion/finish` |
 | `GET /api/v1/workers` |
