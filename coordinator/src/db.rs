@@ -171,6 +171,7 @@ pub enum HelloOutcome {
 }
 
 pub struct Session {
+    pub principal_id: String,
     pub csrf: String,
     pub token_hash: String,
     pub remember: bool,
@@ -181,6 +182,7 @@ pub struct Session {
 #[derive(Debug, Clone)]
 pub struct ApiToken {
     pub name: String,
+    pub principal_id: String,
     pub scopes: Vec<String>,
     pub allowed_cidrs: Vec<String>,
     pub allowed_workers: Vec<String>,
@@ -189,6 +191,7 @@ pub struct ApiToken {
 #[derive(Debug, Clone)]
 pub struct ApiTokenInfo {
     pub name: String,
+    pub principal_id: String,
     pub token_id: Option<String>,
     pub scopes: Vec<String>,
     pub created_at: i64,
@@ -197,6 +200,19 @@ pub struct ApiTokenInfo {
     pub expires_at: Option<i64>,
     pub allowed_cidrs: Vec<String>,
     pub allowed_workers: Vec<String>,
+    pub sender_constraint_kind: Option<String>,
+    pub sender_constraint_id: Option<String>,
+}
+
+pub struct ApiTokenCreate<'a> {
+    pub name: &'a str,
+    pub token_id: &'a str,
+    pub secret_hash: &'a str,
+    pub principal_id: &'a str,
+    pub expires_at: Option<i64>,
+    pub scopes: &'a [String],
+    pub allowed_cidrs: &'a [String],
+    pub allowed_workers: &'a [String],
 }
 
 fn json_col(s: Option<String>) -> Option<Value> {
@@ -244,7 +260,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -311,12 +327,15 @@ CREATE UNIQUE INDEX workers_pending_token_hash ON workers(pending_token_hash) WH
 const MIGRATE_V15: &str = "ALTER TABLE api_tokens ADD COLUMN allowed_workers TEXT NOT NULL DEFAULT '[]';";
 /// Version 16: salted device fingerprints for new-device sign-in notices; never stores user agents.
 const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL, last_success INTEGER NOT NULL, PRIMARY KEY(principal_id, fingerprint_hash)); CREATE INDEX known_login_devices_recent ON known_login_devices(principal_id, last_success DESC);";
+/// Version 17: durable principal ownership for security records and reserved sender-binding
+/// columns for future DPoP/mTLS constrained API tokens.
+const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, username TEXT UNIQUE, role TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('system',NULL,'system',0); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('admin',NULL,'admin',0);";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 
 type R<T> = rusqlite::Result<T>;
-type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String, String);
+type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String, String, String);
 
 impl Db {
     pub fn open(path: &Path) -> R<Db> {
@@ -452,6 +471,38 @@ impl Db {
         }
         if version < 16 {
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V16} PRAGMA user_version = 16; COMMIT;"))?;
+        }
+        if version < 17 {
+            let has_table = |table: &str| -> R<bool> {
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)", [table], |row| {
+                    row.get(0)
+                })
+            };
+            let has_column = |table: &str, column: &str| -> R<bool> {
+                let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+                let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                let present = columns.filter_map(Result::ok).any(|name| name == column);
+                Ok(present)
+            };
+            let mut alter = String::new();
+            for (table, column, declaration) in [
+                ("sessions", "principal_id", "TEXT NOT NULL DEFAULT 'admin'"),
+                ("api_tokens", "principal_id", "TEXT NOT NULL DEFAULT 'admin'"),
+                ("audit", "principal_id", "TEXT NOT NULL DEFAULT 'system'"),
+                ("api_tokens", "sender_constraint_kind", "TEXT"),
+                ("api_tokens", "sender_constraint_id", "TEXT"),
+            ] {
+                if has_table(table)? && !has_column(table, column)? {
+                    alter.push_str(&format!("ALTER TABLE {table} ADD COLUMN {column} {declaration};\n"));
+                }
+            }
+            if has_table("admin")? {
+                alter.push_str("INSERT INTO principals(id,username,role,created_at) SELECT 'admin',username,'admin',created_at FROM admin WHERE 1 ON CONFLICT(id) DO UPDATE SET username=excluded.username,created_at=excluded.created_at;\n");
+                if has_table("audit")? {
+                    alter.push_str("UPDATE audit SET principal_id='admin' WHERE actor=(SELECT username FROM admin WHERE id=1);\n");
+                }
+            }
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V17_BASE} {alter} PRAGMA user_version = 17; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -659,10 +710,36 @@ impl Db {
             .optional()
     }
     pub fn admin_create(&self, username: &str, hash: &str) -> R<bool> {
-        Ok(self.c().execute(
+        let now = crate::now();
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let inserted = tx.execute(
             "INSERT OR IGNORE INTO admin(id, username, password_hash, created_at) VALUES(1,?,?,?)",
-            params![username, hash, crate::now()],
-        )? == 1)
+            params![username, hash, now],
+        )? == 1;
+        if inserted {
+            tx.execute(
+                "INSERT INTO principals(id,username,role,created_at) VALUES('admin',?,'admin',?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,created_at=excluded.created_at",
+                params![username, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+    pub fn admin_principal_id(&self) -> R<Option<String>> {
+        self.c()
+            .query_row("SELECT id FROM principals WHERE role='admin' ORDER BY created_at,id LIMIT 1", [], |r| r.get(0))
+            .optional()
+    }
+    pub fn principals_list(&self) -> R<Vec<Value>> {
+        let c = self.c();
+        let mut stmt = c.prepare("SELECT id,username,role,created_at FROM principals ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(json!({"id":r.get::<_,String>(0)?,"username":r.get::<_,Option<String>>(1)?,"role":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?}))
+            })?
+            .collect();
+        rows
     }
     /// Set the password and delete every session in one transaction. Unless `keep_api_tokens`,
     /// every API token is revoked in the same transaction; returns how many were revoked.
@@ -682,25 +759,28 @@ impl Db {
         self.session_create_with(token_hash, csrf, true)
     }
     pub fn session_create_with(&self, token_hash: &str, csrf: &str, remember: bool) -> R<()> {
+        self.session_create_for("admin", token_hash, csrf, remember)
+    }
+    pub fn session_create_for(&self, principal_id: &str, token_hash: &str, csrf: &str, remember: bool) -> R<()> {
         let now = crate::now();
         let (_, absolute) = session_policy(remember);
         self.c().execute(
-            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember) VALUES(?,?,?,?,?,?)",
-            params![token_hash, csrf, now, now, now + absolute, remember],
+            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id) VALUES(?,?,?,?,?,?,?)",
+            params![token_hash, csrf, now, now, now + absolute, remember, principal_id],
         )?;
         Ok(())
     }
     pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
         let now = crate::now();
         let c = self.c();
-        let row: Option<(String, i64, i64, bool)> = c
+        let row: Option<(String, i64, i64, bool, String)> = c
             .query_row(
-                "SELECT csrf, last_seen, expires_at, remember FROM sessions WHERE token_hash=?",
+                "SELECT csrf, last_seen, expires_at, remember,principal_id FROM sessions WHERE token_hash=?",
                 params![token_hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0, r.get(4)?)),
             )
             .optional()?;
-        let Some((csrf, last_seen, expires_at, remember)) = row else {
+        let Some((csrf, last_seen, expires_at, remember, principal_id)) = row else {
             return Ok(None);
         };
         let (idle_secs, _) = session_policy(remember);
@@ -712,6 +792,7 @@ impl Db {
             c.execute("UPDATE sessions SET last_seen=? WHERE token_hash=?", params![now, token_hash])?;
         }
         Ok(Some(Session {
+            principal_id,
             csrf,
             token_hash: token_hash.to_string(),
             remember,
@@ -758,7 +839,7 @@ impl Db {
     /// Create a token with the explicitly granted API scopes.
     pub fn token_create_scoped(&self, name: &str, hash: &str, expires_at: Option<i64>, scopes: &[String]) -> R<bool> {
         Ok(self.c().execute(
-            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes) VALUES(?,?,?,?,?)",
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes,principal_id) VALUES(?,?,?,?,?,'admin')",
             params![
                 name,
                 hash,
@@ -781,29 +862,30 @@ impl Db {
         scopes: &[String],
         allowed_cidrs: &[String],
     ) -> R<bool> {
-        self.token_create_identified_with_restrictions(name, token_id, secret_hash, expires_at, scopes, allowed_cidrs, &[])
+        self.token_create_identified_with_restrictions(ApiTokenCreate {
+            name,
+            token_id,
+            secret_hash,
+            principal_id: "admin",
+            expires_at,
+            scopes,
+            allowed_cidrs,
+            allowed_workers: &[],
+        })
     }
-    pub fn token_create_identified_with_restrictions(
-        &self,
-        name: &str,
-        token_id: &str,
-        secret_hash: &str,
-        expires_at: Option<i64>,
-        scopes: &[String],
-        allowed_cidrs: &[String],
-        allowed_workers: &[String],
-    ) -> R<bool> {
+    pub fn token_create_identified_with_restrictions(&self, token: ApiTokenCreate<'_>) -> R<bool> {
         Ok(self.c().execute(
-            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id, allowed_cidrs, allowed_workers) VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id, allowed_cidrs, allowed_workers,principal_id) VALUES(?,?,?,?,?,?,?,?,?)",
             params![
-                name,
-                secret_hash,
+                token.name,
+                token.secret_hash,
                 crate::now(),
-                expires_at,
-                serde_json::to_string(scopes).unwrap_or_else(|_| "[]".into()),
-                token_id,
-                serde_json::to_string(allowed_cidrs).unwrap_or_else(|_| "[]".into()),
-                serde_json::to_string(allowed_workers).unwrap_or_else(|_| "[]".into())
+                token.expires_at,
+                serde_json::to_string(token.scopes).unwrap_or_else(|_| "[]".into()),
+                token.token_id,
+                serde_json::to_string(token.allowed_cidrs).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(token.allowed_workers).unwrap_or_else(|_| "[]".into()),
+                token.principal_id
             ],
         )? == 1)
     }
@@ -817,20 +899,22 @@ impl Db {
     pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
         let c = self.c();
         let mut st = c.prepare(
-            "SELECT name, token_id, scopes, created_at, last_used, last_address, expires_at, allowed_cidrs, allowed_workers FROM api_tokens ORDER BY name",
+            "SELECT name, principal_id, token_id, scopes, created_at, last_used, last_address, expires_at, allowed_cidrs, allowed_workers, sender_constraint_kind, sender_constraint_id FROM api_tokens ORDER BY name",
         )?;
         let rows = st.query_map([], |r| {
-            let scopes_json: String = r.get(2)?;
             Ok(ApiTokenInfo {
                 name: r.get(0)?,
-                token_id: r.get(1)?,
-                scopes: serde_json::from_str(&scopes_json).unwrap_or_default(),
-                created_at: r.get(3)?,
-                last_used: r.get(4)?,
-                last_address: r.get(5)?,
-                expires_at: r.get(6)?,
-                allowed_cidrs: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
-                allowed_workers: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                principal_id: r.get(1)?,
+                token_id: r.get(2)?,
+                scopes: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+                created_at: r.get(4)?,
+                last_used: r.get(5)?,
+                last_address: r.get(6)?,
+                expires_at: r.get(7)?,
+                allowed_cidrs: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                allowed_workers: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
+                sender_constraint_kind: r.get(10)?,
+                sender_constraint_id: r.get(11)?,
             })
         })?;
         rows.collect()
@@ -861,7 +945,7 @@ impl Db {
         let c = self.c();
         let now = crate::now();
         let mut stmt = c.prepare(
-            "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers FROM api_tokens WHERE token_id IS NULL ORDER BY name",
+            "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers,principal_id FROM api_tokens WHERE token_id IS NULL ORDER BY name",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -872,19 +956,20 @@ impl Db {
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
             ))
         })?;
         let mut matched = None;
         for row in rows {
-            let (name, stored_hash, last, expires_at, scopes_json, cidrs_json, workers_json) = row?;
+            let (name, stored_hash, last, expires_at, scopes_json, cidrs_json, workers_json, principal_id) = row?;
             let matches = crate::auth::ct_eq(hash, &stored_hash);
             let unexpired = expires_at.is_none_or(|expires| now < expires);
             if matches & unexpired {
-                matched = Some((name, last, scopes_json, cidrs_json, workers_json));
+                matched = Some((name, last, scopes_json, cidrs_json, workers_json, principal_id));
             }
         }
         drop(stmt);
-        let Some((name, last, scopes_json, cidrs_json, workers_json)) = matched else {
+        let Some((name, last, scopes_json, cidrs_json, workers_json, principal_id)) = matched else {
             return Ok(None);
         };
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
@@ -893,6 +978,7 @@ impl Db {
         let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
         Ok(Some(ApiToken {
             name,
+            principal_id,
             scopes,
             allowed_cidrs: serde_json::from_str(&cidrs_json).unwrap_or_default(),
             allowed_workers: serde_json::from_str(&workers_json).unwrap_or_default(),
@@ -904,12 +990,12 @@ impl Db {
         let c = self.c();
         let row: Option<IdentifiedTokenRow> = c
             .query_row(
-                "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers FROM api_tokens WHERE token_id=?",
+                "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers,principal_id FROM api_tokens WHERE token_id=?",
                 params![token_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )
             .optional()?;
-        let Some((name, stored_hash, last, expires_at, scopes_json, cidrs_json, workers_json)) = row else {
+        let Some((name, stored_hash, last, expires_at, scopes_json, cidrs_json, workers_json, principal_id)) = row else {
             return Ok(None);
         };
         if !crate::auth::ct_eq(secret_hash, &stored_hash) || expires_at.is_some_and(|e| crate::now() >= e) {
@@ -922,6 +1008,7 @@ impl Db {
         let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
         Ok(Some(ApiToken {
             name,
+            principal_id,
             scopes,
             allowed_cidrs: serde_json::from_str(&cidrs_json).unwrap_or_default(),
             allowed_workers: serde_json::from_str(&workers_json).unwrap_or_default(),
@@ -1358,8 +1445,8 @@ impl Db {
 
     pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
         self.c().execute(
-            "INSERT INTO audit(ts, actor, action, detail, remote) VALUES(?,?,?,?,?)",
-            params![crate::now(), actor, action, detail, remote],
+            "INSERT INTO audit(ts, actor, action, detail, remote,principal_id) VALUES(?,?,?,?,?,COALESCE((SELECT id FROM principals WHERE username=?),CASE WHEN ?='admin' THEN 'admin' WHEN substr(?,1,6)='token:' THEN (SELECT principal_id FROM api_tokens WHERE name=substr(?,7)) ELSE 'system' END))",
+            params![crate::now(), actor, action, detail, remote, actor, actor, actor, actor],
         )?;
         Ok(())
     }

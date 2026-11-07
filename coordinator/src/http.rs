@@ -279,6 +279,7 @@ fn no_extra(m: &Map<String, Value>, allowed: &[&str]) -> Result<(), ApiError> {
 
 pub enum Principal {
     Session {
+        principal_id: String,
         token_hash: String,
         csrf: String,
         remember: bool,
@@ -287,6 +288,7 @@ pub enum Principal {
     },
     Token {
         name: String,
+        principal_id: String,
         scopes: Vec<String>,
         allowed_cidrs: Vec<String>,
         allowed_workers: Vec<String>,
@@ -326,6 +328,7 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
         return match token_record {
             Some(token) => Ok(Principal::Token {
                 name: token.name,
+                principal_id: token.principal_id,
                 scopes: token.scopes,
                 allowed_cidrs: token.allowed_cidrs,
                 allowed_workers: token.allowed_workers,
@@ -337,6 +340,7 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
     let hash = auth::sha256_hex(&cookie);
     match st.db.session_get(&hash)? {
         Some(s) => Ok(Principal::Session {
+            principal_id: s.principal_id,
             token_hash: hash,
             csrf: s.csrf,
             remember: s.remember,
@@ -373,6 +377,12 @@ fn resolved_client_address(parts: &Parts, state: &St) -> String {
 }
 
 impl Principal {
+    pub fn principal_id(&self) -> &str {
+        match self {
+            Principal::Session { principal_id, .. } | Principal::Token { principal_id, .. } => principal_id,
+        }
+    }
+
     pub fn actor(&self) -> String {
         match self {
             Principal::Session { .. } => "admin".into(),
@@ -853,7 +863,12 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     }
     remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_with(&auth::sha256_hex(&token), &csrf, remember)?;
+    st.db.session_create_for(
+        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
+        &auth::sha256_hex(&token),
+        &csrf,
+        remember,
+    )?;
     st.db.audit(&username, "login.success", "", &ip);
     let mut r = json_ok(StatusCode::OK, json!({"csrf_token": csrf}));
     r.headers_mut().insert(
@@ -1255,7 +1270,12 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     st.db.passkey_update(&records[index])?;
     remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_with(&auth::sha256_hex(&token), &csrf, false)?;
+    st.db.session_create_for(
+        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
+        &auth::sha256_hex(&token),
+        &csrf,
+        false,
+    )?;
     st.db.audit(
         &username,
         "passkey.authentication.success",
@@ -1484,15 +1504,16 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
         .map(hex::encode)
         .expect("URL-safe token generator output decodes");
     let secret = format!("lbr_pat_{token_id}_{token_secret}");
-    if !st.db.token_create_identified_with_restrictions(
+    if !st.db.token_create_identified_with_restrictions(crate::db::ApiTokenCreate {
         name,
-        &token_id,
-        &auth::sha256_hex(&token_secret),
+        token_id: &token_id,
+        secret_hash: &auth::sha256_hex(&token_secret),
+        principal_id: p.principal_id(),
         expires_at,
-        &scopes,
-        &allowed_cidrs,
-        &allowed_workers,
-    )? {
+        scopes: &scopes,
+        allowed_cidrs: &allowed_cidrs,
+        allowed_workers: &allowed_workers,
+    })? {
         return Err(err(StatusCode::CONFLICT, "token-exists", "a token with this name already exists"));
     }
     let detail = format!(

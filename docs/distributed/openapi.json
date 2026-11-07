@@ -497,9 +497,7 @@
         "required": [
           "name",
           "scopes",
-          "created_at",
-          "allowed_cidrs",
-          "allowed_workers"
+          "created_at"
         ],
         "type": "object"
       },

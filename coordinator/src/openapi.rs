@@ -49,7 +49,9 @@ struct TokenInfo {
     last_used: Option<String>,
     last_address: Option<String>,
     expires_at: Option<String>,
+    #[schema(required = false)]
     allowed_cidrs: Vec<String>,
+    #[schema(required = false)]
     allowed_workers: Vec<String>,
 }
 
@@ -748,6 +750,8 @@ mod tests {
         assert_eq!(response["last_address"]["type"], json!(["string", "null"]));
         assert_eq!(response["allowed_cidrs"]["type"], "array");
         assert_eq!(response["allowed_workers"]["type"], "array");
+        let required = doc["components"]["schemas"]["TokenInfo"]["required"].as_array().unwrap();
+        assert!(!required.iter().any(|field| field == "allowed_cidrs" || field == "allowed_workers"));
     }
 
     #[test]

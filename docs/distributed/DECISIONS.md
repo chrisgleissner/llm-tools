@@ -304,3 +304,25 @@ In the code: `coordinator/src/certs.rs` owns the trait and both current provider
 `coordinator/src/server.rs` selects a provider from the validated config. Existing file-reload
 and TLS tests cover the provider implementations.
 
+## D21 Stable principal ownership and sender binding extension points (SEC2-019)
+
+Use a durable `principals` table with stable IDs (`admin` and `system` today) and role metadata.
+Sessions, API tokens and audit rows point to the principal ID rather than deriving ownership from
+the current administrator display name. Keep DPoP or mutual-TLS token sender constraints as two
+nullable typed fields until a sender-constrained credential is actually implemented; do not imply
+that bearer tokens are sender-constrained today.
+
+In the code: schema migration 17 adds the principal registry and ownership fields in
+`coordinator/src/db.rs`; `coordinator/tests/principals.rs` verifies new records, and
+`coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place` verifies legacy rows.
+
+## D22 Allow the bundled webpki trust data license (SEC2-015)
+
+Allow `CDLA-Permissive-2.0` in the Rust license audit because `reqwest` reaches `webpki-roots`,
+which bundles root-certificate data. The official license permits use, modification and sharing;
+if the data is redistributed, the license text must accompany it. Keep this explicit allow narrow
+to the license identifier and retain `cargo deny`'s default deny for all other unknown licenses.
+
+In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
+[the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
+
