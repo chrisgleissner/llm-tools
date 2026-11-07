@@ -879,7 +879,7 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
         user_name: stored.credential_name.unwrap_or_else(|| "Passkey".into()),
         created_at: crate::now(),
         last_used: None,
-        aaguid: None,
+        aaguid: crate::passkeys::aaguid_from_attestation_object(body.credential.response.attestation_object.as_ref()),
         transports,
         backup_eligible: false,
         backed_up: false,

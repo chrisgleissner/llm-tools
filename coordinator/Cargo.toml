@@ -33,6 +33,7 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = "0.23"
 hex = "0.4"
+serde_cbor_2 = "0.13"
 webauthn-rs = { version = "0.6.2", default-features = false, features = ["resident-key-support", "conditional-ui", "danger-allow-state-serialisation"] }
 url = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }

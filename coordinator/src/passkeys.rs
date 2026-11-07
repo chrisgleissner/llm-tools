@@ -103,6 +103,32 @@ pub fn finish_registration(wa: &Webauthn, state: &CeremonyState, credential: &Re
     wa.finish_passkey_registration(credential, state).map_err(|e| e.to_string())
 }
 
+/// Read an AAGUID from a registration response after `finish_registration` has validated it.
+/// `none` attestation commonly supplies the all-zero AAGUID; preserve that value because it
+/// means the authenticator intentionally withheld its model identity.
+pub fn aaguid_from_attestation_object(attestation_object: &[u8]) -> Option<String> {
+    const MAX_ATTESTATION_BYTES: usize = 4096;
+    const ATT_DATA_FLAG: u8 = 0x40;
+    if attestation_object.len() > MAX_ATTESTATION_BYTES {
+        return None;
+    }
+    let decoded: serde_cbor_2::Value = serde_cbor_2::from_slice(attestation_object).ok()?;
+    let map = match decoded {
+        serde_cbor_2::Value::Map(map) => map,
+        _ => return None,
+    };
+    let auth_data = match map.get(&serde_cbor_2::Value::Text("authData".into()))? {
+        serde_cbor_2::Value::Bytes(bytes) => bytes,
+        _ => return None,
+    };
+    if auth_data.len() < 55 || auth_data.get(32).is_none_or(|flags| flags & ATT_DATA_FLAG == 0) {
+        return None;
+    }
+    let raw = &auth_data[37..53];
+    let hex = hex::encode(raw);
+    Some(format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]))
+}
+
 pub fn begin_authentication(wa: &Webauthn, credentials: &[Passkey]) -> Result<(RequestChallengeResponse, CeremonyState), String> {
     let _ = credentials;
     let (options, state) = wa.start_discoverable_authentication().map_err(|e| e.to_string())?;
@@ -130,6 +156,49 @@ pub fn finish_authentication(
                 .map_err(|e| e.to_string())
         }
         CeremonyState::Registration(_) => Err("wrong WebAuthn ceremony type".into()),
+    }
+}
+
+#[cfg(test)]
+mod aaguid_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn attestation(auth_data: Vec<u8>) -> Vec<u8> {
+        let mut map = BTreeMap::new();
+        map.insert(serde_cbor_2::Value::Text("authData".into()), serde_cbor_2::Value::Bytes(auth_data));
+        serde_cbor_2::to_vec(&serde_cbor_2::Value::Map(map)).unwrap()
+    }
+
+    #[test]
+    fn reads_the_aaguid_from_attested_authenticator_data() {
+        let mut auth_data = vec![0; 32];
+        auth_data.push(0x41);
+        auth_data.extend([0; 4]);
+        auth_data.extend([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        auth_data.extend([0, 1, 0x42]);
+        assert_eq!(
+            aaguid_from_attestation_object(&attestation(auth_data)),
+            Some("00112233-4455-6677-8899-aabbccddeeff".into())
+        );
+    }
+
+    #[test]
+    fn preserves_zero_aaguid_and_rejects_missing_or_unbounded_attestation_data() {
+        let mut auth_data = vec![0; 32];
+        auth_data.push(0x41);
+        auth_data.extend([0; 4 + 16 + 3]);
+        assert_eq!(
+            aaguid_from_attestation_object(&attestation(auth_data)),
+            Some("00000000-0000-0000-0000-000000000000".into())
+        );
+
+        let mut no_attested_data = vec![0; 32];
+        no_attested_data.push(0x01);
+        no_attested_data.extend([0; 4 + 16 + 3]);
+        assert_eq!(aaguid_from_attestation_object(&attestation(no_attested_data)), None);
+        assert_eq!(aaguid_from_attestation_object(&[0; 4097]), None);
+        assert_eq!(aaguid_from_attestation_object(&[0xff]), None);
     }
 }
 
