@@ -1,20 +1,123 @@
-/* Legacy mission page rules, deleted by WP-3 as the page moves to the workspace layout. */
-.events { padding-left: 0; list-style: none; margin: 0; }
-.events li { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
-.ev-kind { font-weight: 600; }
-.ev-data { display: block; color: var(--text-muted); white-space: pre-wrap; word-break: break-all; }
-.current-work { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); padding: var(--sp-3) var(--sp-4); border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--r-2); background: var(--surface-1); }
-.current-work.needs-you { border-left-color: var(--alert-attention-fg); }
-.current-work-copy { min-width: 0; }
-.current-work .eyebrow { margin: 0 0 var(--sp-1); color: var(--text-muted); font-size: var(--fs-md); font-weight: 650; }
-.current-work-title { display: block; overflow-wrap: anywhere; }
-.current-work p { margin-top: var(--sp-1); margin-bottom: 0; }
-.current-work .attention-copy { color: var(--alert-attention-fg); font-weight: 600; }
-.transition-summary { display: inline-block; margin-left: var(--sp-2); padding: 1px 6px; border-radius: var(--r-1); background: var(--surface-2); color: var(--text); font-size: var(--fs-md); font-weight: 600; }
-.status-skeleton { min-height: 26rem; background: repeating-linear-gradient(to bottom, var(--surface-2) 0 .85rem, transparent .85rem 3.25rem) left top / 42% 100% no-repeat, repeating-linear-gradient(to bottom, var(--surface-2) 0 .85rem, transparent .85rem 3.25rem) right top / 48% 100% no-repeat; }
-table.kv { max-width: 640px; border: 1px solid var(--border); }
-table.kv th { width: 40%; font-weight: 600; background: none; font-size: inherit; white-space: normal; }
-.event-controls { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: var(--sp-2) 0; }
-.event-controls select { min-height: var(--control-h); }
-.events li.event-plumbing { color: var(--text-muted); }
+/* Mission detail (PRD-037 WP-3, spec 8.1). Layout: header, segmented views below 60rem, session pane beside a side column at 60rem and up. */
+main:has(> .mission-wrap) { max-inline-size: none; }
+.mission-wrap { container: mission / inline-size; }
+.mission-page {
+  display: grid; gap: var(--sp-2) var(--sp-4);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "head" "tabs" "panel" "about";
+}
+.mission-head { grid-area: head; min-inline-size: 0; display: flex; flex-direction: column; gap: var(--sp-1); }
+.mission-tabs { grid-area: tabs; }
+.mission-session, .mission-side { grid-area: panel; min-inline-size: 0; min-block-size: 0; }
+.mission-about { grid-area: about; min-inline-size: 0; }
+.mission-page[data-tab="session"] .mission-side,
+.mission-page[data-tab="tasks"] .mission-session,
+.mission-page[data-tab="activity"] .mission-session { display: none; }
+.mission-page[data-tab="session"] .panel-activity,
+.mission-page[data-tab="tasks"] .panel-activity,
+.mission-page[data-tab="activity"] .panel-tasks { display: none; }
 
+/* Header */
+.crumbs { font-size: var(--fs-sm); }
+.back { display: inline-flex; align-items: center; gap: var(--sp-1); min-block-size: var(--target); color: var(--text-muted); text-decoration: none; }
+.back .icon { display: none; }
+.head-main { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--sp-2) var(--sp-4); }
+.head-id { flex: 1 1 18rem; min-inline-size: 0; }
+.head-id h1 { margin: 0 0 var(--sp-1); }
+.head-state { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.mission-answer { margin: var(--sp-1) 0 0; color: var(--text-muted); }
+.mission-answer [data-q] { margin-inline-end: var(--sp-1); }
+.head-meta { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--sp-2); }
+.head-meta .sep { color: var(--text-muted); }
+.head-note { margin: 0; }
+@media (hover: hover) { .back:hover { color: var(--text); } }
+
+/* Segmented control: the mission views and the activity detail */
+.seg { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--border-strong); border-radius: var(--r-2); background: var(--surface-2); }
+.seg.small { inline-size: auto; }
+.seg-btn {
+  flex: 1 1 0; min-inline-size: 0; min-block-size: var(--control-h); padding: 0 var(--sp-3); border: 0; border-radius: var(--r-1);
+  background: transparent; color: var(--text); font: inherit; font-weight: 500; cursor: pointer; white-space: nowrap;
+}
+.seg-btn[aria-selected="true"], .seg-btn[aria-pressed="true"] { background: var(--surface-1); font-weight: 600; box-shadow: inset 0 0 0 1px var(--border-strong); }
+.seg-btn .n { color: var(--text-muted); font-weight: 400; }
+@media (hover: hover) { .seg-btn:hover { background: var(--surface-3); } }
+
+/* Panels */
+.panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.panel-title { margin: 0; font-size: var(--fs-lg); line-height: var(--lh-lg); }
+.panel-title .count { color: var(--text-muted); font-weight: 400; }
+.tasks-panel { container: tasks / inline-size; }
+.add-task { display: flex; flex-direction: column; gap: var(--sp-1); }
+.add-task textarea { min-block-size: 4.5rem; }
+.add-task .actions { margin: var(--sp-1) 0 0; }
+
+/* TaskRow */
+.task-list { list-style: none; margin: 0; padding: 0; }
+.task-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "ord main actions";
+  align-items: start; gap: var(--sp-1) var(--sp-3); padding: var(--sp-2) var(--sp-1); border-block-end: 1px solid var(--border); min-block-size: 4rem;
+}
+.task-row.selected { background: var(--accent-tint); }
+.task-ord { grid-area: ord; color: var(--text-muted); min-inline-size: 1.5ch; text-align: end; padding-block-start: var(--sp-1); }
+.task-main { grid-area: main; min-inline-size: 0; }
+.task-title { color: var(--text); text-decoration: none; font-weight: 500; min-block-size: var(--target); padding-block: 2px; }
+.task-title[aria-current="true"] { text-decoration: underline; text-underline-offset: 3px; }
+.task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.task-actions { grid-area: actions; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--sp-1); }
+@container tasks (max-width: 22rem) {
+  .task-row { grid-template-areas: "ord main" ". actions"; grid-template-columns: auto minmax(0, 1fr); }
+  .task-actions { justify-content: flex-start; }
+}
+@media (hover: hover) { .task-title:hover { text-decoration: underline; } }
+
+/* Evidence */
+.evidence { border: 1px solid var(--border); border-radius: var(--r-2); background: var(--surface-1); padding: var(--sp-3); }
+.evidence h3 { margin: 0 0 var(--sp-2); font-size: var(--fs-md); line-height: var(--lh-md); }
+.evidence-body p { margin: var(--sp-1) 0; }
+.evidence-files { list-style: none; margin: var(--sp-1) 0; padding: 0; }
+.evidence-files li { padding: 2px 0; }
+pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); background: var(--surface-2); border-radius: var(--r-1); font: var(--fs-xs)/var(--lh-xs) var(--mono); overflow: auto; white-space: pre; max-block-size: 16rem; }
+
+/* Activity */
+.events { list-style: none; margin: 0; padding: 0; }
+.event-row { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 0 var(--sp-2); padding: var(--sp-2) 0; border-block-end: 1px solid var(--border); }
+.event-row > time, .event-row > span:first-child { grid-column: 1; grid-row: 1 / span 3; color: var(--text-muted); font-size: var(--fs-xs); white-space: nowrap; overflow-wrap: normal; padding-block-start: 2px; }
+.event-row > :not(:first-child) { grid-column: 2; }
+.ev-phrase { font-weight: 500; }
+.events.plumbing .ev-phrase { font-weight: 400; color: var(--text-muted); }
+.task-chip { justify-self: start; color: var(--text-muted); font-size: var(--fs-xs); }
+.raw > summary { display: inline-flex; align-items: center; min-block-size: var(--target); color: var(--text-muted); font-size: var(--fs-xs); cursor: pointer; }
+.raw-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px var(--sp-3); margin: 0 0 var(--sp-2); font-size: var(--fs-xs); }
+.raw-fields dd { margin: 0; }
+.plumbing-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.about-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-1) var(--sp-4); margin: 0; }
+.about-fields dd { margin: 0; display: flex; align-items: center; }
+
+/* Phones: back chevron, two-line answer, no meta line (About has it), compact header while the keyboard is open */
+@media (max-width: 47.99rem) {
+  .back { color: var(--accent); }
+  .back .icon { display: inline; }
+  .mission-answer { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+  .head-meta { display: none; }
+  .head-actions { inline-size: 100%; }
+  body[data-kb] .crumbs, body[data-kb] .mission-answer, body[data-kb] .head-actions, body[data-kb] .head-state, body[data-kb] .mission-tabs { display: none; }
+}
+
+/* Session and side column side by side */
+@container mission (min-width: 60rem) {
+  .mission-page {
+    grid-template-columns: minmax(0, 1fr) minmax(20rem, 26rem);
+    grid-template-areas: "head head" "session tabs" "session panel" "session about";
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    block-size: calc(100svh - var(--head-h) - var(--sp-4) - var(--sp-7));
+    min-block-size: 28rem;
+  }
+  .mission-session { grid-area: session; }
+  .mission-session > [data-pane] { block-size: 100%; }
+  .mission-page[data-tab] .mission-session, .mission-page[data-tab] .mission-side { display: block; }
+  .mission-side { overflow-y: auto; }
+  .tab-session { display: none; }
+  .mission-answer { margin-block-end: var(--sp-1); }
+}
