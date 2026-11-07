@@ -529,7 +529,7 @@ def test_short_soak_with_real_coordinator_workers_and_fake_providers(tmp_path):
     report_path = tmp_path / "report.json"
     started = time.monotonic()
     code = bridge_soak.main([
-        "--duration", str(int(scaled(45))), "--workers", "2", "--missions", "4", "--sample-seconds", "5", "--limit-every", "20", "--limit-seconds", "8",
+        "--duration", str(int(scaled(45))), "--workers", "2", "--missions", "4", "--sample-seconds", "5", "--warmup-seconds", "10", "--limit-every", "20", "--limit-seconds", "8",
         "--settle-seconds", str(int(scaled(60))), "--command-rate", "3", "--backlog", "10", "--run-dir", str(tmp_path / "run"), "--report", str(report_path),
     ])
     report = json.loads(report_path.read_text())
