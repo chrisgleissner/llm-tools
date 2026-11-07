@@ -340,3 +340,15 @@ In the code: `coordinator/src/db.rs::audit_checked` appends, `audit_chain_valid`
 `coordinator/tests/web_api.rs::security_audit_api_is_admin_only_and_detects_tampering` and
 `coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place`.
 
+## D24 Public session IDs are independent of browser credentials (SEC2-008)
+
+Use an independent random identifier for session listing and revocation. Do not expose the
+session cookie or its stored credential hash to let an administrator identify or revoke a row.
+Legacy rows receive random public IDs during migration; authorization always scopes lookup and
+deletion to the authenticated principal.
+
+In the code: schema migration 19 and `Db::session_list_for` / `Db::session_revoke_for` in
+`coordinator/src/db.rs`; the route handlers are in `coordinator/src/http.rs`.
+`coordinator/tests/web_api.rs::browser_sessions_can_list_and_revoke_only_their_principals_sessions`
+and `coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place` cover the behavior.
+

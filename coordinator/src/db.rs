@@ -272,7 +272,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 19;
 pub const MAX_AUDIT_ROWS: i64 = 10_000;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
@@ -561,6 +561,28 @@ impl Db {
             tx.pragma_update(None, "user_version", 18)?;
             tx.commit()?;
         }
+        if version < 19 {
+            let has_sessions: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions')", [], |row| {
+                row.get(0)
+            })?;
+            if has_sessions {
+                let has_session_id: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name='session_id')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let tx = conn.transaction()?;
+                if !has_session_id {
+                    tx.execute_batch("ALTER TABLE sessions ADD COLUMN session_id TEXT;")?;
+                    tx.execute("UPDATE sessions SET session_id=lower(hex(randomblob(16))) WHERE session_id IS NULL", [])?;
+                }
+                tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS sessions_public_id ON sessions(session_id) WHERE session_id IS NOT NULL;")?;
+                tx.pragma_update(None, "user_version", 19)?;
+                tx.commit()?;
+            } else {
+                conn.pragma_update(None, "user_version", 19)?;
+            }
+        }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -821,11 +843,54 @@ impl Db {
     pub fn session_create_for(&self, principal_id: &str, token_hash: &str, csrf: &str, remember: bool) -> R<()> {
         let now = crate::now();
         let (_, absolute) = session_policy(remember);
+        let session_id = crate::auth::random_token();
         self.c().execute(
-            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id) VALUES(?,?,?,?,?,?,?)",
-            params![token_hash, csrf, now, now, now + absolute, remember, principal_id],
+            "INSERT INTO sessions(token_hash, csrf, created_at, last_seen, expires_at, remember,principal_id,session_id) VALUES(?,?,?,?,?,?,?,?)",
+            params![token_hash, csrf, now, now, now + absolute, remember, principal_id, session_id],
         )?;
         Ok(())
+    }
+    pub fn session_list_for(&self, principal_id: &str, current_token_hash: &str) -> R<Vec<Value>> {
+        let now = crate::now();
+        let (idle_secs, _) = session_policy(true);
+        let (short_idle_secs, _) = session_policy(false);
+        let c = self.c();
+        let mut stmt = c.prepare(
+            "SELECT session_id,created_at,last_seen,expires_at,remember,token_hash=?2 FROM sessions
+             WHERE principal_id=?1 AND expires_at>?3 AND
+               ((remember=1 AND last_seen>?4) OR (remember=0 AND last_seen>?5))
+             ORDER BY last_seen DESC,session_id LIMIT 100",
+        )?;
+        let rows = stmt.query_map(params![principal_id, current_token_hash, now, now - idle_secs, now - short_idle_secs], |row| {
+            Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                "created_at": row.get::<_, i64>(1)?,
+                "last_seen": row.get::<_, i64>(2)?,
+                "expires_at": row.get::<_, i64>(3)?,
+                "remember": row.get::<_, i64>(4)? != 0,
+                "current": row.get::<_, bool>(5)?,
+            }))
+        })?;
+        rows.collect()
+    }
+    pub fn session_revoke_for(&self, principal_id: &str, session_id: &str) -> R<Option<String>> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let token_hash = tx
+            .query_row(
+                "SELECT token_hash FROM sessions WHERE principal_id=?1 AND session_id=?2",
+                params![principal_id, session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if token_hash.is_some() {
+            tx.execute(
+                "DELETE FROM sessions WHERE principal_id=?1 AND session_id=?2",
+                params![principal_id, session_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(token_hash)
     }
     pub fn session_get(&self, token_hash: &str) -> R<Option<Session>> {
         let now = crate::now();

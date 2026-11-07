@@ -352,6 +352,9 @@ test.describe("account menu and password change", () => {
     await setupViaUi(page, coord);
     await navTo(page, "Account");
     await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
+    const sessions = page.getByRole("list", { name: "Active sessions" });
+    await expect(sessions).toContainText("This device");
+    await expect(sessions.getByRole("button", { name: /Current session/ })).toBeDisabled();
     await page.getByLabel("Token name").fill("automation-key");
     await page.getByLabel("read", { exact: true }).uncheck();
     await page.getByLabel("operate", { exact: true }).check();

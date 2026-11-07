@@ -126,6 +126,48 @@ function tokenManagement(): HTMLElement {
   return section;
 }
 
+function activeSessions(): HTMLElement {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "active-sessions-title" });
+  const status = h("p", { role: "status", "aria-live": "polite" }, "Loading sessions…");
+  const rows = h("ul", { class: "token-list", "aria-label": "Active sessions" });
+  const refresh = async (): Promise<void> => {
+    try {
+      const result = await api.get<{ sessions: Array<{ id: string; created_at: string; last_seen: string; expires_at: string; remember: boolean; current: boolean }> }>("/api/v1/auth/sessions");
+      rows.replaceChildren(...result.sessions.map((session) => {
+        const created = new Date(session.created_at).toLocaleString();
+        const revoke = h("button", { class: "btn small", type: "button", "aria-label": `Revoke session created ${created}` }, "Revoke");
+        revoke.disabled = session.current;
+        if (session.current) revoke.setAttribute("aria-label", `Current session created ${created}`);
+        revoke.addEventListener("click", async () => {
+          revoke.disabled = true;
+          try {
+            await api.del(`/api/v1/auth/sessions/${encodeURIComponent(session.id)}`);
+            window.dispatchEvent(new Event("bridge-security-notification"));
+            status.textContent = "Session revoked.";
+            await refresh();
+          } catch (error) {
+            revoke.disabled = false;
+            status.textContent = error instanceof api.ApiError ? error.message : "Could not revoke session.";
+          }
+        });
+        return h("li", {}, h("strong", {}, session.current ? "This device" : "Other device"),
+          h("span", {}, session.remember ? "Remembered device" : "Browser session"),
+          h("span", {}, `Signed in ${created}`),
+          h("span", {}, `Last active ${new Date(session.last_seen).toLocaleString()}`),
+          h("span", {}, `Expires ${new Date(session.expires_at).toLocaleString()}`), revoke);
+      }));
+      if (!result.sessions.length) rows.append(h("li", { class: "muted" }, "No active sessions."));
+      status.textContent = "";
+    } catch (error) {
+      status.textContent = error instanceof api.ApiError ? error.message : "Could not load sessions.";
+    }
+  };
+  section.append(h("h2", { id: "active-sessions-title" }, "Active sessions"),
+    h("p", { class: "muted" }, "Review signed-in browsers and revoke sessions you no longer use. The current session cannot revoke itself here; use Sign out."), status, rows);
+  void refresh();
+  return section;
+}
+
 function passkeyReenrollment(): HTMLElement {
   const section = h("section", { class: "card narrow", "aria-labelledby": "passkey-reenroll-title" });
   const current = field("passkey-reenroll-password", "Current password", "password", { autocomplete: "current-password", required: true });
@@ -331,7 +373,7 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
     }
   }).catch(() => {});
   const activity = securityActivity();
-  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement(),
+  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), activeSessions(), tokenManagement(),
     activity.element, me?.passkey_canonical_origin ? passkeyList() : h("div", {}),
     me?.passkey_canonical_origin ? passkeyReenrollment() : h("div", {}), passkeyGuidance);
   return activity.dispose;

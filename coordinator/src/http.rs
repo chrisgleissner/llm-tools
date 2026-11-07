@@ -1390,6 +1390,40 @@ async fn logout(State(st): State<St>, Authed(p, ip): Authed) -> ApiResult {
     Ok(r)
 }
 
+async fn list_sessions(State(st): State<St>, Authed(p, _): Authed) -> ApiResult {
+    let Principal::Session { principal_id, token_hash, .. } = p else {
+        return Err(unauthorized());
+    };
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"sessions": st.db.session_list_for(&principal_id, &token_hash)?}),
+    ))
+}
+
+async fn revoke_session(State(st): State<St>, Authed(p, ip): Authed, Path(id): Path<String>) -> ApiResult {
+    let actor = p.actor();
+    let Principal::Session { principal_id, token_hash, .. } = p else {
+        return Err(unauthorized());
+    };
+    if !(id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
+        || (32..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+    {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "session not found"));
+    }
+    let revoked_hash = st.db.session_revoke_for(&principal_id, &id)?;
+    let Some(revoked_hash) = revoked_hash else {
+        return Err(err(StatusCode::NOT_FOUND, "not-found", "session not found"));
+    };
+    st.db.audit(&actor, "session.revoke", &format!("session {id}"), &ip);
+    let mut response = json_ok(StatusCode::OK, json!({"ok":true}));
+    if revoked_hash == token_hash {
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, session_cookie("", Some(0)).parse().expect("cookie"));
+    }
+    Ok(response)
+}
+
 async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &["current", "new", "keep_api_tokens"])?;
@@ -3454,6 +3488,8 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys", &["GET"], Access::Session, ""),
+    ("/api/v1/auth/sessions", &["GET"], Access::Session, ""),
+    ("/api/v1/auth/sessions/{id}", &["DELETE"], Access::Session, ""),
     ("/api/v1/auth/passkeys/re-enroll", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/assertion/start", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
@@ -3682,6 +3718,8 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/passkeys", get(list_passkeys))
+        .route("/api/v1/auth/sessions", get(list_sessions))
+        .route("/api/v1/auth/sessions/{id}", delete(revoke_session))
         .route(
             "/api/v1/auth/passkeys/registration/start",
             post(passkey_register_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),

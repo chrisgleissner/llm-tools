@@ -6,6 +6,12 @@ small local reference at `/api/docs`. API tokens are sent only in the
 for mission and task changes; worker administration and diagnostics require
 `admin`. Token secrets are shown once by `bridge-coordinator token create`.
 
+Browser sessions are available only to the signed-in browser session:
+`GET /api/v1/auth/sessions` lists at most 100 active sessions for that principal,
+including a flag for the current browser. `DELETE /api/v1/auth/sessions/{id}`
+revokes one of those sessions. The public session ID is random and distinct from
+the session credential hash; session credentials are never returned.
+
 `GET /api/v1/workers` and `GET /api/v1/workers/{name}` include the hostname
 reported at enrolment and the peer address of the active worker connection. The
 address is null while the worker is offline; forwarded headers do not affect it.
@@ -27,7 +33,7 @@ The CLI/TUI and web console show the question and choices; take control of the
 mission terminal and use the provider's own UI to answer. Terminal input stays
 on the scoped WebSocket.
 
-The current version uses the durable `POST /api/v1/commands` adapter. A command
+The low-level `POST /api/v1/commands` adapter remains available. A command
 request has a caller-chosen `request_id`; retrying the same request ID returns
 the journal entry rather than applying the operation again. `Idempotency-Key`
 may supply that ID and takes precedence over the request body's value. If a worker is
@@ -35,8 +41,8 @@ offline, the command remains queued and the response has state `pending` and a
 `Location` header for its command record.
 `GET /api/v1/commands/{request_id}` retrieves its outcome. A completed command
 can still report `uncertain`; clients must not treat that as success. Resource
-endpoints, `Idempotency-Key`, `If-Match`, opaque cursor pagination and the
-remaining CLI parity operations are being added in this follow-up.
+endpoints, `Idempotency-Key`, `If-Match` and opaque cursor pagination share this
+durable command journal. Remaining CLI parity decisions are tracked below.
 
 Worker-owned mission resources take the worker name as a required `worker` query
 parameter because mission IDs are unique only within a worker. `GET
@@ -408,6 +414,8 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/auth/passkeys/registration/start` |
 | `POST /api/v1/auth/passkeys/registration/finish` |
 | `GET /api/v1/auth/passkeys` |
+| `GET /api/v1/auth/sessions` |
+| `DELETE /api/v1/auth/sessions/{id}` |
 | `POST /api/v1/auth/passkeys/assertion/start` |
 | `POST /api/v1/auth/passkeys/assertion/finish` |
 | `POST /api/v1/auth/passkeys/re-enroll` |

@@ -45,6 +45,58 @@ async fn mutation_bodies_require_json_content_type() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_sessions_can_list_and_revoke_only_their_principals_sessions() {
+    let env = boot().await;
+    let first = env.admin().await;
+    let first_cookie = first.cookie.clone().unwrap();
+    let (second, second_cookie) = login_with(&env, None).await;
+    let (status, body) = first.get("/api/v1/auth/sessions").await;
+    assert_eq!(status, 200, "{body}");
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    let current = sessions.iter().find(|session| session["current"] == true).unwrap();
+    let other = sessions.iter().find(|session| session["current"] == false).unwrap();
+    let other_id = other["id"].as_str().unwrap();
+    assert_eq!(other_id.len(), 43);
+    assert!(!body.to_string().contains(&first_cookie));
+    assert!(!body.to_string().contains(&second_cookie));
+
+    let foreign_cookie = bridge_coordinator::auth::random_token();
+    env.srv
+        .state
+        .db
+        .session_create_for(
+            "another-principal",
+            &bridge_coordinator::auth::sha256_hex(&foreign_cookie),
+            "foreign-csrf",
+            true,
+        )
+        .unwrap();
+    let foreign_id = env.srv.state.db.session_list_for("another-principal", "").unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        first.send(first.rb(Method::DELETE, &format!("/api/v1/auth/sessions/{foreign_id}"))).await.0,
+        404
+    );
+
+    let (status, result) = first.send(first.rb(Method::DELETE, &format!("/api/v1/auth/sessions/{other_id}"))).await;
+    assert_eq!(status, 200, "{result}");
+    assert_eq!(result["ok"], true);
+    let (status, remaining) = first.get("/api/v1/auth/sessions").await;
+    assert_eq!(status, 200, "{remaining}");
+    assert_eq!(remaining["sessions"].as_array().unwrap().len(), 1);
+    assert_eq!(remaining["sessions"][0]["id"], current["id"]);
+    assert_eq!(
+        second.get("/api/v1/auth/sessions").await.0,
+        401,
+        "the revoked browser session must no longer authenticate"
+    );
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn command_rejects_control_characters_in_mission_identifiers() {
     let env = boot().await;
     let api = env.admin().await;

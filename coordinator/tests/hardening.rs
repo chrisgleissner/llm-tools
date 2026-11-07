@@ -658,6 +658,11 @@ fn version_1_database_is_migrated_in_place() {
         .query_row("SELECT principal_id FROM audit WHERE action='old-action'", [], |row| row.get(0))
         .unwrap();
     assert_eq!(session_principal, "admin");
+    let migrated_session_id: String = connection
+        .query_row("SELECT session_id FROM sessions WHERE token_hash='old-session'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(migrated_session_id.len(), 32, "legacy sessions receive a distinct public identifier");
+    assert_ne!(migrated_session_id, "old-session", "the cookie hash is not exposed as the session identifier");
     assert_eq!(audit_principal, "admin");
     assert!(
         db.audit_chain_valid().unwrap(),

@@ -170,6 +170,8 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
 | POST | `/auth/password` | `{current, new}`; deletes every session. |
+| GET | `/auth/sessions` | Browser session only; lists at most 100 active sessions for its principal, with created/last-seen/expiry times and a `current` flag. Public IDs are random and independent of session credential hashes. |
+| DELETE | `/auth/sessions/{id}` | Browser session only; revokes an active session belonging to the same principal. |
 | POST | `/auth/passkeys/registration/start` | Browser session plus CSRF and exact Origin required; `{name}` returns a five-minute, session-bound registration challenge and WebAuthn creation options. Only HTTPS DNS origins are supported; IP origins are refused. `public_origin` may be configured in `config.toml`; otherwise the first completed registration binds and persists it. Existing credentials without a recorded origin require this setting before startup. |
 | POST | `/auth/passkeys/registration/finish` | Browser session plus CSRF and the same Origin required; `{challenge_id, credential}` verifies once and stores the passkey. |
 | GET | `/auth/passkeys` | Browser session only; lists credential handle, operator label, AAGUID, creation and last-use times, and backup/synced state. It omits credential data and signature counters. |

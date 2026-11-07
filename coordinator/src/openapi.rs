@@ -147,6 +147,14 @@ fn response_schema(path: &str, method: &str) -> Value {
             "additionalProperties":true
         });
     }
+    if path == "/api/v1/auth/sessions" && method == "GET" {
+        return json!({"type":"object","required":["sessions"],"properties":{"sessions":{"type":"array","maxItems":100,"items":{
+            "type":"object","required":["id","created_at","last_seen","expires_at","remember","current"],"additionalProperties":false,
+            "properties":{"id":{"type":"string","minLength":32,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"},
+                "created_at":{"type":"string","format":"date-time"},"last_seen":{"type":"string","format":"date-time"},
+                "expires_at":{"type":"string","format":"date-time"},"remember":{"type":"boolean"},"current":{"type":"boolean"}}
+        }}},"additionalProperties":false});
+    }
     if path == "/api/v1/workers" && method == "GET" {
         return json!({"type":"object","required":["workers"],"properties":{"workers":{"type":"array","items":{
             "type":"object","required":["name","state","last_seen"],"properties":{
@@ -799,6 +807,22 @@ mod tests {
         let parameters = operation["parameters"].as_array().unwrap();
         assert!(parameters.iter().any(|param| param["name"] == "cursor" && param["in"] == "query"));
         assert!(parameters.iter().any(|param| param["name"] == "limit" && param["schema"]["maximum"] == 500));
+    }
+
+    #[test]
+    fn active_session_management_is_session_only_and_documents_public_timestamps() {
+        let doc = openapi_value();
+        let list = &doc["paths"]["/api/v1/auth/sessions"]["get"];
+        let revoke = &doc["paths"]["/api/v1/auth/sessions/{id}"]["delete"];
+        assert!(list.is_object());
+        assert!(revoke.is_object());
+        assert_eq!(list["security"][0]["cookieSession"], json!([]));
+        let schema = &list["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["properties"]["sessions"]["maxItems"], 100);
+        for field in ["created_at", "last_seen", "expires_at"] {
+            assert_eq!(schema["properties"]["sessions"]["items"]["properties"][field]["format"], "date-time");
+        }
+        assert!(schema["properties"]["sessions"]["items"]["properties"]["id"]["pattern"].is_string());
     }
 
     #[test]
