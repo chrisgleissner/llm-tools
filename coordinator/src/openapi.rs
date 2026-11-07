@@ -271,7 +271,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "required":["username","password"],
                 "properties":{
                     "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
-                    "password":{"type":"string","minLength":12,"maxLength":256},
+                    "password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},
                     "remember":{"type":"boolean"}
                 }
             }}}
@@ -297,8 +297,8 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "additionalProperties":false,
                 "required":["current","new"],
                 "properties":{
-                    "current":{"type":"string","minLength":12,"maxLength":256},
-                    "new":{"type":"string","minLength":12,"maxLength":256},
+                    "current":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},
+                    "new":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256},
                     "keep_api_tokens":{"type":"boolean"}
                 }
             }}}
@@ -314,7 +314,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 "properties":{
                     "setup_token":{"type":"string","minLength":1,"maxLength":256},
                     "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
-                    "password":{"type":"string","minLength":12,"maxLength":256}
+                    "password":{"type":"string","minLength":crate::auth::MIN_PASSWORD_LEN,"maxLength":256}
                 }
             }}}
         });
@@ -713,6 +713,8 @@ mod tests {
         assert_eq!(schema["required"], json!(["current", "new"]));
         assert_eq!(schema["properties"]["current"]["type"], "string");
         assert_eq!(schema["properties"]["new"]["type"], "string");
+        assert_eq!(schema["properties"]["current"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
+        assert_eq!(schema["properties"]["new"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
         assert_eq!(schema["properties"]["keep_api_tokens"]["type"], "boolean");
         assert_eq!(schema["additionalProperties"], false);
     }
@@ -724,7 +726,7 @@ mod tests {
         assert_eq!(schema["required"], json!(["setup_token", "username", "password"]));
         assert_eq!(schema["properties"]["setup_token"]["type"], "string");
         assert_eq!(schema["properties"]["username"]["type"], "string");
-        assert_eq!(schema["properties"]["password"]["minLength"], 12);
+        assert_eq!(schema["properties"]["password"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
         assert_eq!(schema["additionalProperties"], false);
     }
 

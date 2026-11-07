@@ -771,7 +771,7 @@
                 "properties": {
                   "password": {
                     "maxLength": 256,
-                    "minLength": 12,
+                    "minLength": 15,
                     "type": "string"
                   },
                   "remember": {
@@ -2650,7 +2650,7 @@
                 "properties": {
                   "current": {
                     "maxLength": 256,
-                    "minLength": 12,
+                    "minLength": 15,
                     "type": "string"
                   },
                   "keep_api_tokens": {
@@ -2658,7 +2658,7 @@
                   },
                   "new": {
                     "maxLength": 256,
-                    "minLength": 12,
+                    "minLength": 15,
                     "type": "string"
                   }
                 },
@@ -2895,7 +2895,7 @@
                 "properties": {
                   "password": {
                     "maxLength": 256,
-                    "minLength": 12,
+                    "minLength": 15,
                     "type": "string"
                   },
                   "setup_token": {
