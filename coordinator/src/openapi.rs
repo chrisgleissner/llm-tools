@@ -35,8 +35,8 @@ struct CommandOutcome {
     operation: String,
     #[schema(value_type = Option<Object>)]
     result: Option<Value>,
-    created_at: i64,
-    updated_at: i64,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -563,6 +563,9 @@ pub fn openapi_value() -> Value {
         "additionalProperties":true,
         "properties":{"next_cursor":{"type":["string","null"],"maxLength":2048,"description":"Opaque continuation cursor for task, event, or operation list results."}}
     });
+    for field in ["created_at", "updated_at"] {
+        doc["components"]["schemas"]["CommandOutcome"]["properties"][field] = json!({"type":"string","format":"date-time"});
+    }
     for depth in 0..=MAX_JSON_DEPTH {
         doc["components"]["schemas"][format!("BoundedJsonValueDepth{depth}")] = bounded_value_schema(depth);
     }
@@ -641,6 +644,10 @@ mod tests {
             assert!(ROUTES.iter().any(|(declared, _, _, _)| declared == path));
         }
         assert!(doc["components"]["schemas"]["ProblemDetails"].is_object());
+        for field in ["created_at", "updated_at"] {
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["type"], "string");
+            assert_eq!(doc["components"]["schemas"]["CommandOutcome"]["properties"][field]["format"], "date-time");
+        }
         let mission_list = &doc["paths"]["/api/v1/missions"]["get"];
         let params = mission_list["parameters"].as_array().expect("mission list query parameters");
         let cursor = params

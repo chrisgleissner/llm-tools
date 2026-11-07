@@ -2813,10 +2813,7 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
         return Ok(response);
     }
     let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
-    let mut value = row.to_json();
-    if status == StatusCode::OK {
-        add_next_page_cursor(&st, &row, &mut value);
-    }
+    let value = command_response_json(&st, &row);
     let mut response = json_ok(status, value);
     if status == StatusCode::ACCEPTED {
         response.headers_mut().insert(
@@ -2870,13 +2867,17 @@ fn add_next_page_cursor(st: &St, row: &CommandRow, response: &mut Value) {
     result.insert("next_cursor".into(), json!(next_cursor));
 }
 
+fn command_response_json(st: &St, row: &CommandRow) -> Value {
+    let mut value = row.to_json();
+    value["created_at"] = json!(timestamp(Some(row.created_at)).expect("command timestamps are present"));
+    value["updated_at"] = json!(timestamp(Some(row.updated_at)).expect("command timestamps are present"));
+    add_next_page_cursor(st, row, &mut value);
+    value
+}
+
 async fn get_command(State(st): State<St>, _a: Authed, Path(id): Path<String>) -> ApiResult {
     match st.db.command_get(&id)? {
-        Some(r) => {
-            let mut value = r.to_json();
-            add_next_page_cursor(&st, &r, &mut value);
-            Ok(json_ok(StatusCode::OK, value))
-        }
+        Some(row) => Ok(json_ok(StatusCode::OK, command_response_json(&st, &row))),
         None => Err(err(StatusCode::NOT_FOUND, "unknown-command", "no such request_id")),
     }
 }

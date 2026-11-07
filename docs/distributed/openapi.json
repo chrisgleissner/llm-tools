@@ -183,8 +183,8 @@
       "CommandOutcome": {
         "properties": {
           "created_at": {
-            "format": "int64",
-            "type": "integer"
+            "format": "date-time",
+            "type": "string"
           },
           "mutating": {
             "type": "boolean"
@@ -227,8 +227,8 @@
             "type": "string"
           },
           "updated_at": {
-            "format": "int64",
-            "type": "integer"
+            "format": "date-time",
+            "type": "string"
           }
         },
         "required": [

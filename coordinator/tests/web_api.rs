@@ -1320,6 +1320,8 @@ async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
     assert_eq!(status, 200);
     assert_eq!(stored["state"], "done");
     assert_eq!(stored["result"]["outcome"], "uncertain");
+    assert!(stored["created_at"].as_str().unwrap().ends_with('Z'));
+    assert!(stored["updated_at"].as_str().unwrap().ends_with('Z'));
     env.stop().await;
 }
 
