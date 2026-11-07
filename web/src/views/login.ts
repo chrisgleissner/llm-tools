@@ -6,6 +6,9 @@ import { announce } from "../ui";
 
 export type NoticeKind = "expired" | "signed-out" | "changed" | "info";
 
+/** Where the steps for a forgotten password are written down. */
+const RESET_DOCS_URL = "https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md#locked-out-or-forgot-the-password";
+
 export interface LoginOpts {
   setupRequired: boolean;
   policy?: api.PasswordPolicy;
@@ -91,6 +94,14 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     error,
     progress,
     h("div", { class: "actions" }, submit),
+    h(
+      "p",
+      { class: "hint", id: "forgot-password-hint" },
+      "Forgot the password? Over SSH on the coordinator host run ",
+      h("code", {}, "llm-bridge-coordinator reset-password"),
+      ". See ",
+      h("a", { href: RESET_DOCS_URL, target: "_blank", rel: "noopener noreferrer" }, "Locked out or forgot the password"),
+    ),
   );
   remember.setAttribute("aria-describedby", "remember-hint");
   let timer = 0;

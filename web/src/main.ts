@@ -9,6 +9,7 @@ import { loginView, type NoticeKind } from "./views/login";
 import { missionDetail } from "./views/mission";
 import { missions } from "./views/missions";
 import { overview } from "./views/overview";
+import { forcedChangeView, resetNotice } from "./views/reset";
 import { sessions } from "./views/sessions";
 import { usage } from "./views/usage";
 import { workers } from "./views/workers";
@@ -53,6 +54,11 @@ function toLogin(n: { kind: NoticeKind; text: string } | null): void {
 }
 api.onUnauthorized(() => {
   if (authed) toLogin({ kind: "expired", text: "Your session expired or was ended. Sign in again to continue." });
+});
+
+// A 403 `password-change-required` from any call means a temporary password is still in place: show the change screen.
+api.onPasswordChangeRequired(() => {
+  if (authed) void route();
 });
 
 async function signOut(): Promise<void> {
@@ -104,6 +110,14 @@ async function route(): Promise<void> {
     });
     return;
   }
+  if (state.password_change_required) {
+    stopLive();
+    forcedChangeView(app, state, {
+      onChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }),
+      signOut: () => void signOut(),
+    });
+    return;
+  }
   if (path === "/login") return go("/", true);
   startLive();
   void refresh().catch(() => {});
@@ -127,6 +141,9 @@ async function route(): Promise<void> {
   else if (path === "/diagnostics") cleanup = diagnostics(main);
   else if (path === "/account") cleanup = account(main, { me, signOut: () => void signOut(), onPasswordChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }) });
   else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the overview")));
+  const reset = state.password_reset_notice;
+  const box = reset ? resetNotice(reset) : null;
+  if (box) main.prepend(box);
   const heading = main.querySelector("h1");
   if (heading) document.title = `${heading.textContent ?? ""} - LLM Bridge`;
   main.focus({ preventScroll: true });
