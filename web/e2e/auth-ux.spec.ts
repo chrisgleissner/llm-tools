@@ -90,6 +90,27 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("passkey re-enrolment requires a password and explicit reset confirmation", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await page.route("**/api/v1/auth/state", async (route) => {
+      const response = await route.fetch();
+      const state = await response.json();
+      state.passkey_canonical_origin = "https://old.example.test";
+      await route.fulfill({ response, json: state });
+    });
+    await page.goto("/account");
+    await page.getByLabel("Current password", { exact: true }).last().fill(PASSWORD);
+    const confirmation = page.getByLabel("I understand this removes every registered passkey.");
+    await confirmation.check();
+    await page.route("**/api/v1/auth/passkeys/re-enroll", async (route) => {
+      const body = route.request().postDataJSON();
+      expect(body).toEqual({ current_password: PASSWORD, new_origin: new URL(page.url()).origin, confirm: true });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, origin: body.new_origin, registration_required: true }) });
+    });
+    await page.getByRole("button", { name: "Reset passkeys for this address" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Passkeys were removed" })).toContainText("Register a new passkey");
+  });
+
   test("creating a token produces a dismissible security banner", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await page.goto("/account");

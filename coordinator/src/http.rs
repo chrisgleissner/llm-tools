@@ -813,6 +813,14 @@ struct AssertFinishBody {
     credential: webauthn_rs::prelude::PublicKeyCredential,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasskeyReenrollBody {
+    current_password: String,
+    new_origin: String,
+    confirm: bool,
+}
+
 async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let Principal::Session { token_hash, .. } = p else {
         return Err(err(
@@ -939,6 +947,58 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
         StatusCode::CREATED,
         json!({"ok":true,"credential_id":row.credential_id,"name":row.user_name}),
     ))
+}
+
+async fn passkey_reenroll(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session { .. } = p else {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "session-required",
+            "passkey re-enrolment requires a browser session",
+        ));
+    };
+    let m = parse_body(&body.bytes)?;
+    let body: PasskeyReenrollBody = serde_json::from_value(Value::Object(m)).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "current_password, new_origin and confirm are required",
+        )
+    })?;
+    if !body.confirm {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "confirmation-required",
+            "confirm that all passkeys will be removed",
+        ));
+    }
+    let request_origin = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if !origin_ok(&headers, &st.cfg) || body.new_origin != request_origin {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "bad-origin",
+            "new_origin must be the exact allowed HTTPS request origin",
+        ));
+    }
+    let origin = crate::passkeys::canonical_origin(&body.new_origin)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-origin", "passkeys require a canonical HTTPS DNS origin"))?;
+    if origin != body.new_origin {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-origin", "new_origin must be canonical"));
+    }
+    if body.current_password.len() > auth::MAX_PASSWORD_LEN {
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    let Some((username, password_hash)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if !verify_blocking(&st, body.current_password, password_hash).await {
+        st.db.audit(&username, "passkey.reenrol.failure", "current password did not verify", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    st.db.passkey_rebind_origin(&username, &origin)?;
+    st.db.audit(&username, "passkey.origin.reenrolled", &clean(&origin), &ip);
+    security_notification(&st, &username, "passkey_origin_reenrolled");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true,"origin":origin,"registration_required":true})))
 }
 
 async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
@@ -2966,6 +3026,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/login", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/re-enroll", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/assertion/start", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
     ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
@@ -3161,6 +3222,10 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
             post(passkey_register_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
         )
         .route("/api/v1/auth/passkeys/registration/finish", post(passkey_register_finish))
+        .route(
+            "/api/v1/auth/passkeys/re-enroll",
+            post(passkey_reenroll).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
+        )
         .route(
             "/api/v1/auth/passkeys/assertion/start",
             post(passkey_assert_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),

@@ -178,6 +178,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       new_sign_in_address: "A sign-in came from a new address.",
       api_token_created: "An API token was created.",
       repeated_sign_in_failures: "Repeated sign-in failures were blocked.",
+      passkey_origin_reenrolled: "Passkeys were reset for a new trusted address.",
     };
     security.replaceChildren(...items.map((item) => {
       const row = h("div", { class: "security-notice-row" },

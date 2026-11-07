@@ -520,14 +520,16 @@ mod tests {
 
     #[test]
     fn internet_exposure_names_each_missing_static_precondition() {
-        let mut ready = Config::default();
-        ready.exposure = Exposure::Internet;
-        ready.max_token_lifetime_days = 90;
-        ready.tls_terminator = true;
-        ready.mutation_limit_per_token = 10;
-        ready.mutation_limit_per_address = 60;
-        ready.max_connections = 128;
-        ready.security_webhook_url = Some("https://notify.example.test/events".into());
+        let ready = Config {
+            exposure: Exposure::Internet,
+            max_token_lifetime_days: 90,
+            tls_terminator: true,
+            mutation_limit_per_token: 10,
+            mutation_limit_per_address: 60,
+            max_connections: 128,
+            security_webhook_url: Some("https://notify.example.test/events".into()),
+            ..Config::default()
+        };
         assert!(ready.validate_internet_static().is_ok());
 
         let mut bad = ready.clone();

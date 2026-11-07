@@ -112,7 +112,9 @@ export const get = <T>(path: string): Promise<T> => request<T>("GET", path);
 export const del = <T>(path: string): Promise<T> => request<T>("DELETE", path);
 export async function post<T>(path: string, body: unknown = {}): Promise<T> {
   const result = await request<T>("POST", path, body);
-  if (path === "/api/v1/tokens") window.dispatchEvent(new Event("bridge-security-notification"));
+  if (path === "/api/v1/tokens" || path === "/api/v1/auth/passkeys/re-enroll") {
+    window.dispatchEvent(new Event("bridge-security-notification"));
+  }
   return result;
 }
 
@@ -122,6 +124,14 @@ export async function securityNotifications(): Promise<SecurityNotification[]> {
 }
 export async function dismissSecurityNotification(id: string): Promise<void> {
   await del<{ ok: boolean }>(`/api/v1/security/notifications/${encodeURIComponent(id)}`);
+}
+
+export function reenrollPasskeys(currentPassword: string, confirm: boolean): Promise<{ ok: boolean; origin: string; registration_required: boolean }> {
+  return post("/api/v1/auth/passkeys/re-enroll", {
+    current_password: currentPassword,
+    new_origin: location.origin,
+    confirm,
+  });
 }
 
 export interface PasswordPolicy {

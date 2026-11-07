@@ -110,6 +110,41 @@ function tokenManagement(): HTMLElement {
   return section;
 }
 
+function passkeyReenrollment(): HTMLElement {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "passkey-reenroll-title" });
+  const current = field("passkey-reenroll-password", "Current password", "password", { autocomplete: "current-password", required: true });
+  const confirm = h("input", { id: "passkey-reenroll-confirm", type: "checkbox", required: true });
+  const status = h("p", { role: "status", "aria-live": "polite" });
+  const submit = h("button", { class: "btn danger", type: "submit" }, "Reset passkeys for this address");
+  const form = h("form", { novalidate: true },
+    h("p", { class: "muted" }, "To change the trusted address, open this page at the new HTTPS address. All existing passkeys will be removed and must be registered again; your password remains available."),
+    current.wrap,
+    h("label", { class: "check", for: confirm.id }, confirm, h("span", {}, "I understand this removes every registered passkey.")),
+    status,
+    submit,
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    status.textContent = "";
+    if (!current.input.value || !confirm.checked) {
+      status.textContent = "Enter your current password and confirm the passkey reset.";
+      return;
+    }
+    submit.disabled = true;
+    try {
+      const result = await api.reenrollPasskeys(current.input.value, confirm.checked);
+      current.input.value = "";
+      status.textContent = `Passkeys were removed. Register a new passkey for ${result.origin}.`;
+    } catch (error) {
+      status.textContent = error instanceof api.ApiError ? error.message : "Could not reset passkeys.";
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  section.append(h("h2", { id: "passkey-reenroll-title" }, "Change passkey address"), form);
+  return section;
+}
+
 export function account(root: HTMLElement, opts: AccountOpts): () => void {
   const me = opts.me;
   const policy = me?.password_policy ?? DEFAULT_POLICY;
@@ -195,6 +230,7 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       );
     }
   }).catch(() => {});
-  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement(), passkeyGuidance);
+  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement(),
+    me?.passkey_canonical_origin ? passkeyReenrollment() : h("div", {}), passkeyGuidance);
   return () => {};
 }

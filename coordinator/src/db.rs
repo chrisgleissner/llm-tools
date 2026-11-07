@@ -584,6 +584,19 @@ impl Db {
         Ok(allowed)
     }
 
+    /// Explicit password-confirmed re-enrolment: clear every credential and switch the RP origin
+    /// in one transaction so no credential remains bound to the previous RP ID.
+    pub fn passkey_rebind_origin(&self, principal: &str, origin: &str) -> R<()> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM passkeys WHERE principal_id=?", [principal])?;
+        tx.execute(
+            "INSERT INTO auth_policy(principal_id,passkey_origin) VALUES(?,?) ON CONFLICT(principal_id) DO UPDATE SET passkey_origin=excluded.passkey_origin",
+            params![principal, origin],
+        )?;
+        tx.commit()
+    }
+
     pub fn passkey_origin(&self, principal: &str) -> R<Option<String>> {
         self.c()
             .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [principal], |r| r.get(0))

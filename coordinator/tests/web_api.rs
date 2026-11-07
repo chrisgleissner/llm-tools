@@ -58,6 +58,52 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn passkey_origin_reenrollment_requires_password_and_atomically_clears_credentials() {
+    let env = boot_with(|text| text.replace("allowed_origins = []", "allowed_origins = [\"https://new.example.test\"]")).await;
+    let api = env.admin().await;
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    db.passkey_put_at_origin(
+        &bridge_coordinator::db::PasskeyCredentialRow {
+            credential_id: "old-credential".into(),
+            principal_id: "admin".into(),
+            credential: "stored-passkey".into(),
+            user_name: "old device".into(),
+            created_at: bridge_coordinator::now(),
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        },
+        "https://old.example.test",
+    )
+    .unwrap();
+    let path = "/api/v1/auth/passkeys/re-enroll";
+    let body = json!({"current_password":"wrong password","new_origin":"https://new.example.test","confirm":true});
+    let request = |body: Value| {
+        api.c
+            .post(format!("{}{path}", api.base))
+            .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+            .header("origin", "https://new.example.test")
+            .header("x-csrf-token", api.csrf.as_deref().unwrap())
+            .json(&body)
+    };
+    let (status, _) = api.send(request(body)).await;
+    assert_eq!(status, 401);
+    assert_eq!(db.passkey_count("admin").unwrap(), 1);
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://old.example.test"));
+
+    let body = json!({"current_password":PASSWORD,"new_origin":"https://new.example.test","confirm":true});
+    let (status, response) = api.send(request(body)).await;
+    assert_eq!(status, 200, "{response}");
+    assert_eq!(response["registration_required"], true);
+    assert_eq!(db.passkey_count("admin").unwrap(), 0);
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://new.example.test"));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn malformed_numeric_path_parameters_use_problem_json() {
     let env = boot().await;
     let api = env.admin().await;

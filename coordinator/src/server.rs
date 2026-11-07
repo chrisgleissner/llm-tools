@@ -226,8 +226,10 @@ mod internet_exposure_tests {
 
     #[test]
     fn internet_exposure_requires_enrolled_passkey_and_expiring_tokens() {
-        let mut cfg = Config::default();
-        cfg.exposure = crate::config::Exposure::Internet;
+        let cfg = Config {
+            exposure: crate::config::Exposure::Internet,
+            ..Config::default()
+        };
         let (dir, db) = temp_db();
         db.admin_create("admin", "hash").unwrap();
         assert!(validate_internet_runtime(&cfg, &db).unwrap_err().contains("phishing-resistant passkey"));
