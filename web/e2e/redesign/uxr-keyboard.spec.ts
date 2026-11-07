@@ -9,6 +9,8 @@ import { RUNS, openPath, type Ctx } from "./click-paths";
 import { expect, uxr } from "./gate";
 import { isPhone, viewport } from "./harness";
 
+/** Firefox cannot emulate a touch device (pointer: coarse) with a soft keyboard, which the layouts under test are conditional on: Chromium measures them. */
+const NO_KEYBOARD = "phones with a soft keyboard: Chromium only";
 const NEEDS = ["WP-0", "WP-1", "WP-2", "WP-3", "WP-4", "WP-5"] as const;
 /** The paths that need typing, and so open the keyboard. */
 export const TYPING = ["sign-in", "take-control", "steer-note", "answer-question", "reject", "add-task", "add-worker", "find-mission"];
@@ -57,8 +59,8 @@ function keyboardHooks(page: Page, seen: string[]): Pick<Ctx, "field"> {
 }
 
 for (const run of RUNS.filter((r) => TYPING.includes(r.id))) {
-  uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, `${run.id}: the field, its submit control and the message stay visible above a keyboard that covers half the screen`, async ({ page }, info) => {
-    pw.skip(!isPhone(page), "the on-screen keyboard is for phones");
+  uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, `${run.id}: the field, its submit control and the message stay visible above a keyboard that covers half the screen`, async ({ page, browserName }, info) => {
+    pw.skip(!isPhone(page) || browserName === "firefox", NO_KEYBOARD);
     const seen: string[] = [];
     const ctx = await openPath(page, run, keyboardHooks(page, seen));
     await run.run(ctx);
@@ -77,8 +79,8 @@ async function halve(page: Page, field: Locator): Promise<number> {
   return visible;
 }
 
-uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "sign-in: the error of a wrong password is visible with the keyboard open, with the password field and Sign in", async ({ page }, info) => {
-  pw.skip(!isPhone(page), "phones only");
+uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "sign-in: the error of a wrong password is visible with the keyboard open, with the password field and Sign in", async ({ page, browserName }, info) => {
+  pw.skip(!isPhone(page) || browserName === "firefox", NO_KEYBOARD);
   const run = RUNS.find((r) => r.id === "sign-in")!;
   await openPath(page, { ...run, mock: { auth: "login", login: "wrong" } });
   const visible = await halve(page, page.getByLabel("Username"));
@@ -93,8 +95,8 @@ uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "sign-in: the error of a 
   await evidence(page, info, ["UXR-045"], "keyboard-sign-in-error");
 });
 
-uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "reject: the missing-reason message is visible with the keyboard open, with the field and Reject", async ({ page }, info) => {
-  pw.skip(!isPhone(page), "phones only");
+uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "reject: the missing-reason message is visible with the keyboard open, with the field and Reject", async ({ page, browserName }, info) => {
+  pw.skip(!isPhone(page) || browserName === "firefox", NO_KEYBOARD);
   const run = RUNS.find((r) => r.id === "reject")!;
   await openPath(page, run);
   await page.locator('[data-section="needs-you"] [data-action="reject"]').first().click();
@@ -109,8 +111,8 @@ uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "reject: the missing-reas
   await evidence(page, info, ["UXR-045"], "keyboard-reject-error");
 });
 
-uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "add task: the empty-prompt message is visible with the keyboard open, with the field and Add", async ({ page }, info) => {
-  pw.skip(!isPhone(page), "phones only");
+uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "add task: the empty-prompt message is visible with the keyboard open, with the field and Add", async ({ page, browserName }, info) => {
+  pw.skip(!isPhone(page) || browserName === "firefox", NO_KEYBOARD);
   const run = RUNS.find((r) => r.id === "add-task")!;
   await openPath(page, run);
   await page.getByRole("tab", { name: /^Tasks\b/i }).click();
@@ -125,8 +127,8 @@ uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "add task: the empty-prom
   await evidence(page, info, ["UXR-045"], "keyboard-add-task-error");
 });
 
-uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "add worker: the invalid-name message is visible with the keyboard open, with the field and Add worker", async ({ page }, info) => {
-  pw.skip(!isPhone(page), "phones only");
+uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "add worker: the invalid-name message is visible with the keyboard open, with the field and Add worker", async ({ page, browserName }, info) => {
+  pw.skip(!isPhone(page) || browserName === "firefox", NO_KEYBOARD);
   const run = RUNS.find((r) => r.id === "add-worker")!;
   await openPath(page, run);
   await page.locator("#add-worker-button").click();
@@ -143,8 +145,8 @@ uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "add worker: the invalid-
 });
 
 // ---- keyboard that overlays the page instead of resizing it (iOS Safari): only the visual viewport shrinks -----------------
-uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "a keyboard that overlays the page (visual viewport halved, layout viewport unchanged) leaves the composer and Send above it", async ({ page }, info) => {
-  pw.skip(!isPhone(page), "phones only");
+uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "a keyboard that overlays the page (visual viewport halved, layout viewport unchanged) leaves the composer and Send above it", async ({ page, browserName }, info) => {
+  pw.skip(!isPhone(page) || browserName === "firefox", NO_KEYBOARD);
   const run = RUNS.find((r) => r.id === "take-control")!;
   const ctx = await openPath(page, run);
   await page.locator("#terminal-control").click();
@@ -167,8 +169,8 @@ uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "a keyboard that overlays
 });
 
 // ---- the composer and the key bar are above the fold before the keyboard opens -----------------------------------------
-uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "on arrival the composer (Take control, Steer) is inside the fold, above the bottom bar and the action dock", async ({ page }, info) => {
-  pw.skip(!isPhone(page), "phones only");
+uxr({ t: "T45", uxr: ["UXR-045"], needs: [...NEEDS] }, "on arrival the composer (Take control, Steer) is inside the fold, above the bottom bar and the action dock", async ({ page, browserName }, info) => {
+  pw.skip(!isPhone(page) || browserName === "firefox", NO_KEYBOARD);
   const run = RUNS.find((r) => r.id === "watch")!;
   await openPath(page, run);
   const edge = await page.evaluate(() => {
