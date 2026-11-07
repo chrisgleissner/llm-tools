@@ -230,9 +230,9 @@ temporary directory, then `~/.cache`) and skips with that reason when none works
 
 | Workload | Measured | Bound asserted |
 |---|---|---|
-| 1000 replicated events (about 100-byte payload, batches of up to 200) | 0.52 MiB written, 545 bytes/event | 1.5 MiB |
-| Database file growth for those events (main file + WAL) | 527 bytes/event | 1024 bytes/event |
-| `db_bytes` from `GET /api/v1/diagnostics` for the same events | 896 bytes/event | 2048 bytes/event |
+| 1000 replicated events (about 100-byte payload, committed at once, five batches of 200) | 0.60-0.64 MiB written, 631-668 bytes/event | 1.5 MiB |
+| Database file growth for those events (main file, after a checkpoint) | 369 bytes/event | 920 bytes/event |
+| `db_bytes` from `GET /api/v1/diagnostics` for the same events (after the checkpoint) | 369 bytes/event | 920 bytes/event |
 | 1000 `mission.list` commands round-tripped through a worker (16 in flight) | 66.6 MiB written, 68 KiB/command | 150 MiB |
 | Idle for 50 s: one connected worker (pinged every 20 s) and an API client reading the worker list every 5 s | 0 bytes | 8 KiB |
 | Idle for one hour, one connected worker, no clients | 104 KiB (16-20 KiB per 10 minutes) | not asserted (one-hour run) |
@@ -240,14 +240,27 @@ temporary directory, then `~/.cache`) and skips with that reason when none works
 Reading the figures:
 
 - Events are written one transaction per batch, so the bytes written are about
-  the bytes stored (545 written against 527 stored per event). The bound is about
-  2.9 times the measurement. A change that adds a write per event fails it.
-- The 557-558 bytes/event above is for 10 000 events. The 527 bytes/event here is for
-  1000 events: the write-ahead log (WAL) file is counted at its current size, and
-  SQLite checkpoints it into the main file after 1000 pages (about 4 MiB) and then
-  reuses it, so the file size stops growing by the WAL's share beyond that.
-  `db_bytes` is larger because it adds the WAL file size to `page_count * page_size`,
-  which already includes pages that are still only in the WAL.
+  1.7 times the bytes stored (631-668 written against 369 stored per event; the difference is
+  pages that each batch's commit writes again, such as the `workers` row and index pages). The write bound is about
+  2.3 times the measurement and the growth bound 2.5 times. A change that commits per event
+  fails the write bound (13 KiB/event when added temporarily).
+- The test commits the 1000 events to the worker's store in one transaction, so the
+  coordinator always receives five batches of 200. When the events were committed one by
+  one, the batch sizes followed the timing of the worker's polling, and across 30 runs
+  the figures ranged from 573 to 1516 bytes/event of file growth and 602 to 1663 bytes/event
+  written. The write-ahead log (WAL) file is append-only until a checkpoint: each commit
+  adds a frame for every page it changes, even a page that an earlier commit already
+  changed. No checkpoint happened in any of those runs, so the spread came from the
+  number of commits alone.
+- Before each size reading the test runs `PRAGMA wal_checkpoint(TRUNCATE)` on its own
+  connection, so the WAL file is empty and the main file alone is measured: the number
+  of pages the events occupy. Without this, an automatic checkpoint (after 1000 WAL
+  frames) landing inside the window would count the same pages once in the main file and
+  once in the WAL file, because the WAL file keeps its size after a checkpoint.
+  `db_bytes` (`page_count * page_size` plus the WAL file size) has the same dependency
+  and is read after the checkpoint as well.
+- The 557-558 bytes/event for 10 000 events in the load tables above counts the main file
+  plus WAL and was not re-measured with this method.
 - A command costs much more than an event: about 17 database pages (68 KiB). The
   coordinator commits five separate transactions per command (insert, audit row,
   `sent`, `acked`, `done`), each with `synchronous=FULL` and therefore an fsync
