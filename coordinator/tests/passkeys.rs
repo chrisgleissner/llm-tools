@@ -1,13 +1,22 @@
 use bridge_coordinator::db::{Db, WebauthnChallengeRow, SCHEMA_VERSION};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn db_path() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     std::env::temp_dir().join(format!(
-        "bridge-passkeys-{}-{}.sqlite",
+        "bridge-passkeys-{}-{}-{}.sqlite",
         std::process::id(),
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+fn remove_database(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
 }
 
 #[test]
@@ -51,7 +60,7 @@ fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
         .unwrap()
         .is_none());
     drop(db);
-    let _ = std::fs::remove_file(path);
+    remove_database(&path);
 }
 
 #[test]
@@ -68,5 +77,5 @@ fn challenge_insert_rejects_lifetime_over_five_minutes() {
     };
     assert!(db.webauthn_challenge_put("too-long", &row).is_err());
     drop(db);
-    let _ = std::fs::remove_file(path);
+    remove_database(&path);
 }

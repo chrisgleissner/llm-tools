@@ -118,6 +118,8 @@ jobs:
           --report junit --report-dir "$RUNNER_TEMP/schemathesis"
 
       - name: Run the ZAP OpenAPI API scan
+        # ZAP's memory Insights auto-stop triggers under the container limit; keep Insights
+        # in reports but let the scan finish so the alert report is evaluated by our gate.
         run: >-
           docker run --rm --network host
           -v "$GITHUB_WORKSPACE:/zap/wrk/:rw"
@@ -128,7 +130,7 @@ jobs:
           -J /zap/wrk/zap-api-report.json
           -r /zap/wrk/zap-api-report.html
           -I
-          -z "-config connection.sslInsecure=true"
+          -z "-config connection.sslInsecure=true -config insights.exitAutoOnHigh=false"
 
       - name: Run the ZAP console baseline scan
         run: >-
@@ -140,7 +142,7 @@ jobs:
           -J /zap/wrk/zap-console-report.json
           -r /zap/wrk/zap-console-report.html
           -I
-          -z "-config connection.sslInsecure=true"
+          -z "-config connection.sslInsecure=true -config insights.exitAutoOnHigh=false"
 
       - name: Fail on medium or high ZAP alerts
         run: |

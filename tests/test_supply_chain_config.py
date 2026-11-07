@@ -68,6 +68,8 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert "Authored API tests cover valid stateful" in workflow
     assert "zap-api-scan.py" in workflow and "-f openapi" in workflow
     assert "zap-baseline.py" in workflow
+    assert workflow.count("insights.exitAutoOnHigh=false") == 2
+    assert "alert report is evaluated by our gate" in workflow
     assert "if risk >= 2:" in workflow
     assert "dynamic-security-reports" in workflow
     assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow

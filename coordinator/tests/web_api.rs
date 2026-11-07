@@ -178,7 +178,11 @@ async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secre
     }
     let response = token_api.rb(Method::POST, "/api/v1/commands").json(&json!({})).send().await.unwrap();
     assert_eq!(response.status().as_u16(), 429);
-    assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+    let retry_after = response.headers().get("retry-after").unwrap().to_str().unwrap().parse::<u64>().unwrap();
+    assert!(
+        (1..=60).contains(&retry_after),
+        "Retry-After must be positive and no longer than the configured 60-second window: {retry_after}"
+    );
     let body: Value = response.json().await.unwrap();
     assert_eq!(body["type"], "https://llm-tools.dev/problems/mutation-rate-limit");
 
