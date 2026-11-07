@@ -22,6 +22,14 @@ Every spec runs on all four projects. `mobile.spec.ts` asserts no horizontal scr
 44x44 CSS px, input font size of at least 16 px, dialogs inside the viewport and the terminal key bar (Esc, Tab, Ctrl,
 arrows; the test captures the bytes sent on the WebSocket) in portrait and landscape.
 
+## Click paths, the on-screen keyboard and thumb reach (UXR-043 to UXR-046)
+
+`e2e/redesign/click-paths-data.ts` lists every operator task with its interaction count at 1440x900 and at phone widths; `docs/distributed/ux-audit.md`
+holds the table generated from it. After changing a row run `node scripts/click-paths-doc.mjs` (with `--check` it only verifies). The specs
+`uxr-paths` (interaction counts, equal to the table), `uxr-keyboard` (typing above a keyboard that covers half the screen), `uxr-reach` (primary
+control in the lower 60% of the screen on phones) and `uxr-keyboard-only` (every task with the keyboard alone on a desktop) run on the four standard
+projects and, with `uxr-keyboard` and `uxr-reach`, also on `paths-320x568` and `paths-360x640`.
+
 ## Visual baselines
 
 `e2e/screenshots.spec.ts` renders every page and state (first-run setup and its errors, sign-in and its error

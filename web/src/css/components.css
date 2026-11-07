@@ -193,3 +193,12 @@ pre.cmd { background: var(--surface-2); border-radius: var(--r-2); padding: var(
 
 .steps { margin: var(--sp-2) 0; padding-inline-start: var(--sp-5); }
 .steps li { margin: var(--sp-1) 0; }
+
+/* Phones with the on-screen keyboard open (half the screen): in a dialog with a form the body scrolls and the buttons stay below it, so nothing can sit over
+   the focused field. */
+@media (max-width: 47.99rem) {
+  dialog.dialog[open]:not(.sheet):has(> form > .dialog-body), dialog.dialog[open]:not(.sheet):has(> .dialog-body) { display: flex; flex-direction: column; overflow: hidden; }
+  dialog.dialog[open] > form { display: flex; flex-direction: column; min-block-size: 0; flex: 1 1 auto; }
+  dialog.dialog .dialog-body { overflow: auto; min-block-size: 0; flex: 1 1 auto; scroll-padding-block: var(--sp-2); }
+  dialog.dialog > form > .actions { flex: none; margin-block-end: 0; }
+}

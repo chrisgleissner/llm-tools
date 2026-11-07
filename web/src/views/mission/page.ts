@@ -46,7 +46,18 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   let session: SessionHandle | null = null;
   let sessionMounting = false;
   let sessionKind = "none";
-  let focusWhenMounted = false;
+  // A deep link from an "Answer" row or a notification (`?focus=composer`) lands with the focus in the session pane: the message field when the
+  // operator holds control, else Take control (spec 8.3), so the answer is one key press away. The parameter is consumed once.
+  let focusWhenMounted = new URLSearchParams(location.search).get("focus") === "composer";
+  if (focusWhenMounted) {
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete("focus");
+      history.replaceState(history.state, "", url.pathname + url.search);
+    } catch {
+      /* the address bar is a convenience */
+    }
+  }
   let headSignature = "";
 
   // ---- derived facts
@@ -135,13 +146,17 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const revealTimer = window.setTimeout(reveal, REVEAL_MS);
   root.append(wrap);
 
+  /** One tab stop in the tablist: the selected tab, or, where the selected one is not shown (the Session tab beside the side column), the first tab that is. */
+  function tabStops(): void {
+    const shown = [...tabButtons.values()].filter((b) => b.offsetWidth > 0);
+    const stop = shown.find((b) => b.getAttribute("aria-selected") === "true") ?? shown[0];
+    for (const b of tabButtons.values()) b.tabIndex = b === stop ? 0 : -1;
+  }
   function setTab(next: Tab, replaceUrl = true): void {
     tab = next;
     page.dataset["tab"] = next;
-    for (const [id, b] of tabButtons) {
-      b.setAttribute("aria-selected", String(id === next));
-      b.tabIndex = id === next ? 0 : -1;
-    }
+    for (const [id, b] of tabButtons) b.setAttribute("aria-selected", String(id === next));
+    tabStops();
     if (replaceUrl) {
       try {
         const url = new URL(location.href);
@@ -502,6 +517,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   // The session pane takes the height left under the header and the tabs, so its composer is never pushed below the fold (phones and tablets).
   const measure = (): void => {
+    tabStops();
     const top = page.getBoundingClientRect().top;
     const gap = parseFloat(getComputedStyle(page).rowGap) || 0;
     const bottom = (tabsEl.offsetHeight ? tabsEl : head).getBoundingClientRect().bottom;

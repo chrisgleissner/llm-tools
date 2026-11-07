@@ -30,7 +30,7 @@ function addDialog(): void {
   const name = field("worker-name", "Worker name", "text", { autocapitalize: "none", spellcheck: "false", autocomplete: "off", required: true }, "Lowercase letters, digits and - (up to 63 characters), for example build-1.");
   const error = h("p", { class: "form-error box", role: "alert" });
   const submit = h("button", { type: "submit", class: "btn primary" }, "Add worker");
-  const form = h("form", { novalidate: true }, name.wrap, error, h("div", { class: "actions end" }, h("button", { type: "button", class: "btn", onclick: () => (document.getElementById("add-worker") as HTMLDialogElement | null)?.close() }, "Cancel"), submit));
+  const form = h("form", { novalidate: true }, h("div", { class: "dialog-body" }, name.wrap, error), h("div", { class: "actions end" }, h("button", { type: "button", class: "btn", onclick: () => (document.getElementById("add-worker") as HTMLDialogElement | null)?.close() }, "Cancel"), submit));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     error.textContent = "";
