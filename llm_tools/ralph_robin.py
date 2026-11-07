@@ -1516,7 +1516,7 @@ def scheduler_config_for(
         log_dir=logs.run_dir,
         # Each iteration gets its own subdir so per-iteration provider logs
         # (attempt output, status, events) are preserved instead of overwritten.
-        run_dir=logs.run_dir / f"iter-{iteration:03d}-{selected_provider}",
+        run_dir=common.RunPath(logs.run_dir, f"iter-{iteration:03d}-{selected_provider}"),
         dry_run=cfg.dry_run,
         wake=cfg.wake,
         # Ralph owns cross-provider suspend (see suspend_machine_until); it never

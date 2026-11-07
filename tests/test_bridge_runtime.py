@@ -1303,68 +1303,64 @@ def test_headless_restart_skips_reused_provider_pid_without_signalling(tmp_path,
     [(ProcessLookupError(), False), (PermissionError(), True)],
 )
 def test_unreadable_process_identity_only_counts_alive_after_kill_probe(tmp_path, monkeypatch, kill_error, expected) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def unreadable_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
+    def unreadable_proc_stat(path):
+        if path == "/proc/424242/stat":
             raise PermissionError("proc identity is hidden")
-        return original_read_text(path, *args, **kwargs)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", unreadable_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", unreadable_proc_stat)
     monkeypatch.setattr(bridge_runtime.os, "kill", lambda _pid, _sig: (_ for _ in ()).throw(kill_error))
 
     assert bridge_runtime._process_alive_but_unverifiable(424242) is expected
 
 
 def test_unverifiable_process_identity_with_successful_signal_zero_is_alive(tmp_path, monkeypatch) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def unreadable_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
+    def unreadable_proc_stat(path):
+        if path == "/proc/424242/stat":
             raise PermissionError("proc identity is hidden")
-        return original_read_text(path, *args, **kwargs)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", unreadable_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", unreadable_proc_stat)
     monkeypatch.setattr(bridge_runtime.os, "kill", lambda _pid, _sig: None)
 
     assert bridge_runtime._process_alive_but_unverifiable(424242) is True
 
 
 def test_process_identity_probe_reports_missing_proc_entry_as_not_alive(tmp_path, monkeypatch) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def missing_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
-            raise FileNotFoundError(str(path))
-        return original_read_text(path, *args, **kwargs)
+    def missing_proc_stat(path):
+        if path == "/proc/424242/stat":
+            raise FileNotFoundError(path)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", missing_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", missing_proc_stat)
 
     assert bridge_runtime._process_alive_but_unverifiable(424242) is False
 
 
 def test_proc_process_info_returns_none_for_missing_or_malformed_process_stat(tmp_path, monkeypatch) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
     assert bridge_runtime._proc_process_info(999999999) is None
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def malformed_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
+    def malformed_proc_stat(path):
+        if path == "/proc/424242/stat":
             return "424242 (broken) S 1"
-        return original_read_text(path, *args, **kwargs)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", malformed_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", malformed_proc_stat)
     assert bridge_runtime._proc_process_info(424242) is None
 
 

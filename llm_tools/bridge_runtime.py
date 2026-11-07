@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import common
+from .fileio import read_proc_text
 from .common import LAUNCH_REFUSED_STATUS, python_module_argv, rooted_module_argv, scrubbed_environment
 from .bridge_sockets import (  # noqa: F401  (re-exported; defined where mission list can use them without loading this module)
     _RUN_USER_ROOT,
@@ -1161,7 +1162,7 @@ class BridgeMissionHooks:
             provider_output = ""
             if logs_path:
                 try:
-                    with Path(logs_path).open("rb") as stream:
+                    with open(logs_path, "rb") as stream:  # a str name: Path(logs_path) would intern the run directory name
                         stream.seek(0, os.SEEK_END)
                         stream.seek(max(0, stream.tell() - 65536))
                         provider_output = stream.read(65536).decode("utf-8", "replace")
@@ -1172,7 +1173,7 @@ class BridgeMissionHooks:
             if limited:
                 # The native provider printed a usage-limit notice: a capacity failure, not a crash.
                 self._block_limited_provider(operation_id, str(selection.get("provider") or scheduler_config.provider), str(selection.get("route") or ""))
-            diagnostic_path = Path(logs_path).with_suffix(".diagnostic.json") if logs_path else None
+            diagnostic_path = common.RunPath(logs_path).with_suffix(".diagnostic.json") if logs_path else None
             if diagnostic_path is not None:
                 detail = common.read_provider_diagnostic(diagnostic_path)
                 if detail is not None:
@@ -1240,7 +1241,7 @@ class BridgeMissionHooks:
                 reason = ""
                 if logs_path:
                     try:
-                        reason = Path(logs_path).read_text(encoding="utf-8", errors="replace").strip()[:500]
+                        reason = common.RunPath(logs_path).read_text(encoding="utf-8", errors="replace").strip()[:500]
                     except OSError:
                         pass
                 self.store.record_runtime_event(self.mission_id, "task-launch-refused", {
@@ -1293,7 +1294,7 @@ class BridgeMissionHooks:
                 _prune_old_run_logs(
                     self.store,
                     self.mission_id,
-                    Path(log_root),
+                    common.RunPath(log_root),  # the directories below it are named once per run
                     retain=int(mission_config.get("log_retained_runs", 20)),
                 )
         except TransitionError:
@@ -1330,7 +1331,7 @@ def _prune_old_run_logs(store: BridgeStore, mission_id: str, log_root: Path, *, 
         except (OSError, ValueError):
             continue
         for operation in store.operation_logs_in_directory(mission_id, canonical):
-            logs_path = Path(str(operation["logs_path"]))
+            logs_path = common.RunPath(str(operation["logs_path"]))
             try:
                 logs_path.resolve(strict=False).relative_to(canonical)
             except ValueError:
@@ -1537,7 +1538,7 @@ def run_configured_verifier(
     timeout = float(timeout_override if timeout_override is not None else verifier.get("timeout_seconds", 300))
     if timeout <= 0 or timeout > 3600:
         raise ValueError("verifier timeout must be between 0 and 3600 seconds")
-    directory = _private_verifier_dir(runtime)
+    directory = common.RunPath(_private_verifier_dir(runtime))  # one new file name per attempt
     attempt_id = secrets.token_hex(8)
     attempt_stem = f"{task_id}-r{task['revision']}-a{attempt_id}"
     context_path = directory / f"{attempt_stem}.json"
@@ -1688,7 +1689,7 @@ def _process_start_token(process_pid: int) -> str:
 
 def _proc_process_info(process_pid: int) -> dict[str, Any] | None:
     try:
-        raw = Path(f"/proc/{int(process_pid)}/stat").read_text(encoding="ascii")
+        raw = read_proc_text(f"/proc/{int(process_pid)}/stat")
         tail = raw[raw.rfind(")") + 2:].split()
         if len(tail) <= 19:
             return None
@@ -1888,7 +1889,7 @@ def terminate_active_provider_groups(store: BridgeStore, mission_id: str) -> boo
 def _process_alive_but_unverifiable(process_pid: int) -> bool:
     """Distinguish a vanished process from one whose /proc identity is unreadable."""
     try:
-        raw = Path(f"/proc/{process_pid}/stat").read_text(encoding="ascii")
+        raw = read_proc_text(f"/proc/{process_pid}/stat")
     except FileNotFoundError:
         return False
     except OSError:

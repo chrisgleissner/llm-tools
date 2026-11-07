@@ -2981,6 +2981,51 @@ def validate_gate_args(cwd: str, min_remaining: str, poll_interval: str, max_una
     validate_retry_delays(retry_delays)
 
 
+def _build_run_path_class() -> type[Path]:
+    """The path class for names that are unique to one run (see ``RunPath``)."""
+    platform_path = type(Path())
+    if sys.version_info[:2] != (3, 12) or os.name != "posix" or not hasattr(platform_path, "_parse_path"):
+        return platform_path  # other versions release interned strings, so plain pathlib does not accumulate them
+
+    class _RunPath(platform_path):  # type: ignore[valid-type, misc]
+        """``PosixPath`` whose parser keeps the path components as ordinary strings.
+
+        CPython 3.12 makes every string passed to ``sys.intern`` immortal, and its pathlib interns each
+        component it parses. A long-lived process that parses one new name per run (an iteration directory,
+        a verifier file) therefore keeps about 55 bytes per name for the rest of its life. This parser is the
+        3.12 POSIX parser without the ``sys.intern`` call.
+        """
+
+        __slots__ = ()
+
+        @classmethod
+        def _parse_path(cls, path: str) -> tuple[str, str, list[str]]:  # type: ignore[override]
+            if not path:
+                return "", "", []
+            drive, root, rest = cls._flavour.splitroot(path)  # type: ignore[attr-defined]
+            return drive, root, [part for part in rest.split("/") if part and part != "."]
+
+    _RunPath.__name__ = _RunPath.__qualname__ = platform_path.__name__  # the repr stays PosixPath('...')
+    try:
+        probe = "run-path-probe-%d" % os.getpid()
+        before = sys.getunicodeinternedsize()
+        parts = _RunPath("/", probe, "a.b", "..", "c").parts
+        if parts != ("/", probe, "a.b", "..", "c") or sys.getunicodeinternedsize() != before:
+            return platform_path
+    except Exception:  # a different pathlib internal layout: stay with the standard class
+        return platform_path
+    return _RunPath
+
+
+RunPath: type[Path] = _build_run_path_class()
+"""Path class for locations whose name is unique to one run or one attempt.
+
+Use it for paths a long-lived process builds over and over with a new name each time (the iteration
+directory of each provider run, the verifier files of each attempt). Behaviour, equality and file
+layout are the same as ``pathlib.Path``; only the retained memory differs on CPython 3.12.
+"""
+
+
 @dataclass
 class RunLogs:
     run_dir: Path
@@ -4548,7 +4593,7 @@ def read_provider_diagnostic(path: str | Path, *, max_bytes: int = 16384) -> dic
     if max_bytes < 1 or max_bytes > 16384:
         raise ValueError("provider diagnostic size limit must be between 1 and 16384 bytes")
     try:
-        with Path(path).open("rb") as stream:
+        with open(path, "rb") as stream:  # not Path(path): that would intern a run-specific directory name
             raw = stream.read(max_bytes + 1)
         if len(raw) > max_bytes:
             return None

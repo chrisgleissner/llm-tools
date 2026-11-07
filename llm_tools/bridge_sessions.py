@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Any, Mapping, cast
 import uuid
 
-from .fileio import open_regular_file
+from .fileio import open_regular_file, read_proc_text
 
 
 @dataclass(frozen=True)
@@ -468,7 +468,7 @@ def child_pids(process_pid: int) -> list[int] | None:
 def _proc_stat(process_pid: int) -> tuple[str, int, int, str] | None:
     """Return state, parent pid, process group and boot-scoped start token."""
     try:
-        raw = Path(f"/proc/{int(process_pid)}/stat").read_text(encoding="ascii")
+        raw = read_proc_text(f"/proc/{int(process_pid)}/stat")
         fields = raw[raw.rfind(")") + 2:].split()
         if len(fields) <= 19:
             return None
@@ -546,7 +546,7 @@ def _owned_processes(process_pid: int, start_token: str) -> dict[int, str] | Non
 
 def _fd_is_writable(process_pid: int, fd_name: str) -> bool:
     try:
-        info = Path(f"/proc/{process_pid}/fdinfo/{fd_name}").read_text(encoding="ascii")
+        info = read_proc_text(f"/proc/{process_pid}/fdinfo/{fd_name}")
     except OSError:
         return False
     for line in info.splitlines():
