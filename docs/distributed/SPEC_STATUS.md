@@ -358,7 +358,7 @@ negative tests remain incomplete unless explicitly recorded below.
 | UX-009 | [~] | Needs-attention now precedes overview counters; no-worker and no-mission next steps are explicit; mission page prioritizes current work; event JSON is replaced by whitelisted state transitions. Remaining pages and first-run action hierarchy are catalogued in `ux-audit.md`. |
 | UX-010 | [~] | `docs/distributed/ux-audit.md` records the all-screen critique, findings, screenshot references, flow clicks, output latency, bundle, site Lighthouse scores, Pixel 4 CLS/INP proxy and remaining work. Persona task observation, broader task timings, and site INP/CLS remain. |
 | UX-011 | [~] | Mission detail and overview humanize selected state-transition events and suppress raw event JSON; `web/e2e/screenshots.spec.ts` covers safe transition rendering. Full event-kind coverage, filters, and collapsed plumbing/distributed exchanges remain. |
-| REV-001 | [x] | Merged `origin/main` commit `8672793c84458fd842644f5ee601a66a4c24aa5e` into this branch in merge commit `9028b0e`; this includes the Pi verification changes from merged PR #32. Adversarial review remains tracked by REV-002..008. |
+| REV-001 | [x] | Merged the current `origin/main` at `d05f3d8` into this branch with merge commit `5037f22`, preserving the Pi verification and merged PR #33/#34 updates. Adversarial review remains tracked by REV-002..008. |
 | REV-002 | [ ] | Adversarial evidence/revertability audit of every registered ID remains. |
 | REV-003 | [ ] | Correctness/race/replay/platform review remains. |
 | REV-004 | [ ] | Security/API/passkey review and independent second opinion remain. |

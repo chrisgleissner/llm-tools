@@ -69,8 +69,8 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 239 |
-| Incomplete `[~]` | 56 |
+| Verified `[x]` | 240 |
+| Incomplete `[~]` | 55 |
 | Blocked `[!]` | 6 |
 | Not started `[ ]` | 41 |
 | **Total** | **342** |
