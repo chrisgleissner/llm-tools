@@ -397,6 +397,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/auth/passkeys` |
 | `POST /api/v1/auth/passkeys/assertion/start` |
 | `POST /api/v1/auth/passkeys/assertion/finish` |
+| `POST /api/v1/auth/passkeys/re-enroll` |
 | `GET /api/v1/workers` |
 | `POST /api/v1/workers` |
 | `GET /api/v1/workers/{name}` |
@@ -409,6 +410,8 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/tokens` |
 | `POST /api/v1/tokens` |
 | `DELETE /api/v1/tokens/{name}` |
+| `GET /api/v1/security/notifications` |
+| `DELETE /api/v1/security/notifications/{id}` |
 | `GET /api/v1/missions` |
 | `POST /api/v1/missions` |
 | `GET /api/v1/missions/{id}` |
