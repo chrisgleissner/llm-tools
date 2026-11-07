@@ -19,6 +19,7 @@ SPEC_GROUPS = {
     "PI-FLASH": 13, "PI-BOOT": 5, "PI-HARD": 6, "PI-SYS": 6, "PI-WEAR": 10, "PI-UPD": 9,
     "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6, "PRD": 37,
     "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 14, "PAR": 14,
+    "UXR": 42,
 }
 SPEC_EXPLICIT_IDS = {"PI-DEPLOY-000", "DOG-017"}
 SPEC_OMITTED_IDS = {"PI-FLASH-008", "PI-FLASH-009"}
@@ -169,3 +170,79 @@ def test_final_report_count_check_fails_on_stale_total(tmp_path: Path) -> None:
 
     assert any(f"Total: FINAL_REPORT says {total - 1}, SPEC_STATUS.md has {total}" in item for item in mismatches)
     assert any(f"prose 'has {total - 1} IDs': FINAL_REPORT says {total - 1}, SPEC_STATUS.md has {total}" in item for item in mismatches)
+
+
+# A done UXR row cites a test as `tests/x.py::name` or `web/e2e/x.spec.ts` with an optional
+# `::title`, all in backticks inside its Evidence clause. Screenshots are `*.png` paths.
+UXR_TEST_CITATION = re.compile(r"`(tests/[\w./-]+\.py)::(\w+)`|`(web/e2e/[\w./-]+\.spec\.ts)(?:::([^`]+))?`")
+SCREENSHOT_PATH = re.compile(r"[\w./-]+\.png")
+VISIBLE_MARKER = "(visible)"
+REPO_ROOT = REGISTER.parents[2]
+
+
+def _citation_exists(match: re.Match[str], root: Path) -> bool:
+    if match.group(1):
+        path = root / match.group(1)
+        return path.is_file() and re.search(
+            rf"\bdef {re.escape(match.group(2))}\b", path.read_text(encoding="utf-8")
+        ) is not None
+    path = root / match.group(3)
+    if not path.is_file():
+        return False
+    title = match.group(4)
+    return title is None or title in path.read_text(encoding="utf-8")
+
+
+def uxr_evidence_mismatches(
+    rows: list[tuple[str, str, str]] | None = None, root: Path = REPO_ROOT
+) -> list[str]:
+    """Return why each done UXR row lacks an existing test, a revert statement or a screenshot."""
+    mismatches: list[str] = []
+    for identifier, status, text in register_rows() if rows is None else rows:
+        if not identifier.startswith("UXR-") or status != "[x]":
+            continue
+        _, found, evidence = text.partition("Evidence:")
+        if not found:
+            mismatches.append(f"{identifier}: no 'Evidence:' clause")
+            continue
+        if not any(_citation_exists(m, root) for m in UXR_TEST_CITATION.finditer(evidence)):
+            mismatches.append(f"{identifier}: no existing test cited")
+        if "revert" not in evidence.lower():
+            mismatches.append(f"{identifier}: evidence does not say what was reverted")
+        if VISIBLE_MARKER in text and not any(
+            (root / path).is_file() for path in SCREENSHOT_PATH.findall(evidence)
+        ):
+            mismatches.append(f"{identifier}: visible row cites no existing screenshot (*.png)")
+    return mismatches
+
+
+def test_done_uxr_rows_cite_a_test_and_screenshots() -> None:
+    mismatches = uxr_evidence_mismatches()
+    assert not mismatches, "UXR rows marked [x] without proof:\n" + "\n".join(mismatches)
+
+
+def test_uxr_evidence_check_passes_and_fails_on_fake_rows(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_fake.py").write_text("def test_fake_row():\n    pass\n", encoding="utf-8")
+    shots = tmp_path / "docs" / "distributed" / "ux-evidence" / "UXR-901"
+    shots.mkdir(parents=True)
+    (shots / "mobile.png").write_bytes(b"\x89PNG\r\n")
+    passing = (
+        "UXR-901",
+        "[x]",
+        "(visible) Fake row. Evidence: `tests/test_fake.py::test_fake_row`, reverted the fix so the test "
+        "failed. Screenshot docs/distributed/ux-evidence/UXR-901/mobile.png.",
+    )
+    failing = (
+        "UXR-902",
+        "[x]",
+        "(visible) Fake row. Evidence: `tests/test_fake.py::test_missing`, no screenshot.",
+    )
+    not_done = ("UXR-903", "[ ]", "(visible) Fake row. Not started.")
+
+    assert uxr_evidence_mismatches([passing, not_done], tmp_path) == []
+    assert uxr_evidence_mismatches([failing], tmp_path) == [
+        "UXR-902: no existing test cited",
+        "UXR-902: evidence does not say what was reverted",
+        "UXR-902: visible row cites no existing screenshot (*.png)",
+    ]
