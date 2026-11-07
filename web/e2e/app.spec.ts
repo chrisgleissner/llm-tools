@@ -50,11 +50,11 @@ test("workers added with the CLI are listed as offline", async ({ page, coord })
   await setupViaUi(page, coord);
   await navTo(page, "Workers");
   await expect(page.getByRole("heading", { name: "Workers" })).toBeVisible();
-  const rows = page.locator("#workers-table tbody tr");
+  const rows = page.locator('[data-entity^="worker:"]');
   await expect(rows).toHaveCount(2);
   for (const name of ["alpha", "beta"]) {
-    const row = page.locator(`tr[data-worker="${name}"]`);
-    await expect(row.locator('[data-label="State"]')).toContainText(/offline/i);
+    const row = page.locator(`[data-entity="worker:${name}"]`);
+    await expect(row.locator(".pill")).toContainText(/offline/i);
     await expect(row).toContainText("never");
   }
   await expectNoHorizontalScroll(page);
@@ -162,8 +162,8 @@ test("diagnostics shows coordinator data", async ({ page, coord }) => {
   await setupViaUi(page, coord);
   await navTo(page, "Diagnostics");
   await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();
-  await expect(page.getByRole("row", { name: /Protocol/ })).toBeVisible();
-  await expect(page.getByRole("row", { name: /Live stream live/ })).toBeVisible();
+  await expect(page.locator("dt", { hasText: "Protocol" })).toBeVisible();
+  await expect(page.locator("dt", { hasText: "Live stream" }).locator("+ dd")).toHaveText("live");
 });
 
 test("static responses carry the security headers and the app logs no console errors", async ({ page, coord, request }) => {

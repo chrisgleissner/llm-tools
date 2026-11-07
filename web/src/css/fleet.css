@@ -1,1 +1,57 @@
-/* Sessions, Workers, Usage and Diagnostics (WP-5). The legacy table rules these pages use are in missions.css until the last page package removes them. */
+/* Sessions, Workers, Usage and Diagnostics (WP-5): list rows, provider cards with meters, definition grids.
+   Nothing here depends on the legacy table rules in missions.css. Colours come from tokens only. */
+
+/* ---------------------------------------------------------------- page head and the one-line answer */
+.fleet-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-2) var(--sp-4); }
+.fleet-head h1 { margin: 0; }
+.fleet-filter { display: flex; align-items: center; gap: var(--sp-2); }
+.fleet-filter select { inline-size: auto; min-inline-size: 8rem; max-inline-size: 14rem; }
+.answers { margin: var(--sp-2) 0 var(--sp-4); color: var(--text-muted); max-inline-size: 60rem; }
+#view-status { margin-block: 0 var(--sp-3); }
+#view-status:empty { display: none; }
+
+/* ---------------------------------------------------------------- list rows (sessions, workers) */
+.frows { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-2); }
+.frow { display: flex; flex-direction: column; gap: 2px; min-inline-size: 0; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-2) var(--sp-3); }
+.row-main { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); min-inline-size: 0; }
+.row-end { margin-inline-start: auto; }
+.row-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--sp-3); min-inline-size: 0; }
+.row-link { display: inline-flex; align-items: center; min-block-size: var(--target); min-inline-size: 0; max-inline-size: 100%; font-weight: 500; }
+.frow > .disclosure { border-block-start: 0; }
+.frow > .disclosure > summary { color: var(--text-muted); font-size: var(--fs-sm); }
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-1) var(--sp-4); margin: 0; align-items: center; }
+.facts dt { color: var(--text-muted); font-size: var(--fs-sm); }
+.facts dd { margin: 0; min-inline-size: 0; }
+.facts.grid { max-inline-size: 40rem; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-3) var(--sp-4); gap: var(--sp-2) var(--sp-5); }
+[data-section="history"] { margin-block-start: var(--sp-4); }
+[data-section="history"] > .disclosure { border-block-start: 1px solid var(--border); }
+[data-section="history"] .frows { margin-block-start: var(--sp-2); }
+
+/* ---------------------------------------------------------------- usage: one card per provider, meters side by side from 22rem of card width */
+.wsection + .wsection { margin-block-start: var(--sp-5); }
+.wname { font-size: var(--fs-lg); line-height: var(--lh-lg); margin: 0 0 var(--sp-2); }
+.pcards { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); }
+.pcard { container-type: inline-size; display: flex; flex-direction: column; gap: var(--sp-3); min-inline-size: 0; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-3) var(--sp-4); }
+.pcard-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-1) var(--sp-3); }
+.pcard-name { margin: 0; font-size: var(--fs-lg); line-height: var(--lh-lg); }
+.gauges { display: grid; gap: var(--sp-3); grid-template-columns: minmax(0, 1fr); }
+@container (min-width: 22rem) { .gauges { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.mhead { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 var(--sp-3); }
+.gauge { block-size: 8px; margin-block: 6px; background: var(--surface-3); border-radius: var(--r-pill); overflow: hidden; }
+.gauge > i { display: block; block-size: 100%; background: var(--accent); border-radius: inherit; }
+.gauge[data-low="true"] > i { background: var(--alert-attention-bar); }
+.foot { margin-block: var(--sp-3) 0; }
+.pcard > .disclosure { border-block-start: 1px solid var(--border); }
+
+/* ---------------------------------------------------------------- diagnostics */
+.dsection { margin-block-end: var(--sp-5); }
+.dsection h2 { margin-block-start: var(--sp-4); }
+
+/* ---------------------------------------------------------------- the one-time secret dialog (worker enrolment) */
+dialog.once { inline-size: min(calc(100vw - 2 * var(--sp-4)), 36rem); }
+.once-warning { display: flex; align-items: flex-start; gap: var(--sp-2); margin: var(--sp-3) 0; padding: var(--sp-2) var(--sp-3); border-radius: var(--r-2); background: var(--alert-attention-bg); color: var(--alert-attention-fg); font-weight: 600; }
+.once-warning .icon { margin-block-start: 2px; }
+
+/* per-row Details button (sessions) */
+.btn.toggle { justify-content: flex-start; padding-inline: var(--sp-1) var(--sp-2); color: var(--text-muted); font-size: var(--fs-sm); font-weight: 400; }
+.toggle-body { padding: var(--sp-1) var(--sp-1) var(--sp-2); }

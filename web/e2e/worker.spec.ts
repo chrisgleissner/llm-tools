@@ -55,7 +55,7 @@ test.describe("with a connected worker", () => {
       await setupViaUi(page, coord);
       // Workers: online.
       await navTo(page, "Workers");
-      const online = page.locator('tr[data-worker="e2e-worker"] .pill[data-state="online"]');
+      const online = page.locator('[data-entity="worker:e2e-worker"] .pill[data-state="online"]');
       await expect(online).toHaveText("Online", { timeout: 20_000 });
       // A pill in a list never animates (calm design: at most one running animation per document).
       await page.emulateMedia({ reducedMotion: "no-preference" });
@@ -113,7 +113,7 @@ test.describe("with a connected worker", () => {
       await expect(page.locator('.page-head .pill[data-state="offline"]')).toBeVisible({ timeout: 20_000 });
       await expect(page.locator("#mission-actions .notice")).toContainText("not connected");
       await navTo(page, "Workers");
-      await expect(page.locator('tr[data-worker="e2e-worker"] .pill[data-state="offline"]')).toHaveText("Offline");
+      await expect(page.locator('[data-entity="worker:e2e-worker"] .pill[data-state="offline"]')).toHaveText("Offline");
       await navTo(page, "Missions");
       await expect(page.locator('#missions-table .pill[data-state="offline"]')).toBeVisible();
     } finally {

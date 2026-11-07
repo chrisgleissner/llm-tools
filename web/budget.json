@@ -27,7 +27,7 @@
     "account": "Create token",
     "workers": "A worker runs missions on a machine",
     "sessions": "No provider sessions yet",
-    "usage": "Guidance / reason",
+    "usage": "No local usage data",
     "diagnostics": "Coordinator diagnostics"
   }
 }
