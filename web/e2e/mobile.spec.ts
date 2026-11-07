@@ -89,7 +89,8 @@ test("every page, menu and dialog fits the screen with large targets", async ({ 
   await audit(page, "enrolment dialog");
   await page.getByRole("button", { name: "Done" }).click();
   // Confirmation dialog, with the on-screen keyboard's worth of space not needed: it is short.
-  await page.getByRole("button", { name: "Remove worker phone-test" }).click();
+  await page.getByRole("button", { name: "Actions for worker phone-test" }).click();
+  await page.getByRole("menuitem", { name: "Remove worker" }).click();
   await fits("dialog.dialog");
   await audit(page, "confirmation dialog");
   await page.locator("#dialog-cancel").click();
@@ -151,7 +152,7 @@ test.describe("terminal on a phone", () => {
       await setupViaUi(page, coord);
       await expect(async () => {
         await page.goto(`/missions/e2e-worker/${st.missionId}`);
-        await expect(page.locator("#terminal-open")).toBeEnabled({ timeout: 2000 });
+        await expect(page.locator("#terminal-status")).toHaveAttribute("data-state", "live", { timeout: 2000 });
       }).toPass({ timeout: 30_000 });
       const keys = page.locator("#terminal-keys");
       const status = page.locator("#terminal-status");

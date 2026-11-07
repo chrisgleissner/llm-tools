@@ -3,6 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { showTab } from "./redesign/harness";
 import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, test, type Coordinator } from "./fixtures";
 
 const repo = resolve(import.meta.dirname, "../..");
@@ -62,7 +63,7 @@ test.describe("with a connected worker", () => {
       expect(await online.locator("svg").evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
       // Missions index: shows the mission, not offline.
       await navTo(page, "Missions");
-      const link = page.getByRole("link", { name: "Browser E2E mission" });
+      const link = page.locator("a.row-title", { hasText: "Browser E2E mission" });
       await expect(link).toBeVisible({ timeout: 20_000 });
       await expect(link).toHaveAttribute("href", `/missions/e2e-worker/${fake.missionId}`);
       const row = page.locator('[data-entity^="mission:"]').first();
@@ -75,43 +76,50 @@ test.describe("with a connected worker", () => {
       // Mission detail: status and tasks come from the worker via commands.
       await link.click();
       await expect(page.getByRole("heading", { name: "Browser E2E mission" })).toBeVisible();
-      const tasks = page.locator("#tasks-table tbody tr");
+      await showTab(page, "Tasks");
+      const tasks = page.locator('[data-entity^="task:"]');
       await expect(tasks).toHaveCount(2, { timeout: 20_000 });
-      await expect(page.locator("#mission-status")).toContainText("status");
-      await expect(page.locator("#events-list li").first()).toBeVisible({ timeout: 20_000 });
-      await expect(page.locator("#events-list .ev-kind").filter({ hasText: "Mission created" })).toHaveCount(1);
       await expectNoHorizontalScroll(page);
       await expectAccessible(page, "mission detail");
+      await showTab(page, "Activity");
+      await expect(page.locator("#events-list li").first()).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('#events-list [data-event-kind="mission-created"]')).toHaveCount(1);
+      await showTab(page, "Tasks");
 
-      // Pause task 2 (round trip through coordinator, worker, SQLite and back).
-      const second = page.locator("#tasks-table tbody tr", { hasText: "Second task" });
-      await second.getByRole("button", { name: "Pause" }).click();
+      // Pause task 2 (round trip through coordinator, worker, SQLite and back): Pause is in the row menu, Resume is inline.
+      const second = tasks.filter({ hasText: "Second task" });
+      await second.getByRole("button", { name: "More actions for task 2" }).click();
+      await page.getByRole("menuitem", { name: "Pause task" }).click();
       await expect(second.locator(".pill")).toHaveText("Paused", { timeout: 20_000 });
       await expect(page.locator(".toast", { hasText: /Pause task 2/ })).toBeVisible();
-      await second.getByRole("button", { name: "Resume" }).click();
+      await second.getByRole("button", { name: "Resume task 2" }).click();
       await expect(second.locator(".pill")).not.toHaveText("Paused", { timeout: 20_000 });
 
       // Destructive action: cancel asks for confirmation; declining changes nothing.
-      await second.getByRole("button", { name: "Cancel" }).click();
+      const cancel = async () => {
+        await second.getByRole("button", { name: "More actions for task 2" }).click();
+        await page.getByRole("menuitem", { name: "Cancel task" }).click();
+      };
+      await cancel();
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeVisible();
       await expectAccessible(page, "confirmation dialog");
       await dialog.getByRole("button", { name: "Go back" }).click();
       await expect(dialog).toBeHidden();
       await expect(second.locator(".pill")).not.toHaveText("Cancelled");
-      await second.getByRole("button", { name: "Cancel" }).click();
+      await cancel();
       await page.keyboard.press("Escape");
       await expect(dialog).toBeHidden();
       await expect(second.locator(".pill")).not.toHaveText("Cancelled");
-      await second.getByRole("button", { name: "Cancel" }).click();
+      await cancel();
       await page.locator("#dialog-confirm").click();
       await expect(second.locator(".pill")).toHaveText("Cancelled", { timeout: 20_000 });
 
-      // Stop the worker: the mission and worker become offline while the page is open.
+      // Stop the worker: the mission and worker become offline while the page is open, and mutations say why they are disabled.
       await fake.stopWorker();
-      await expect(page.locator("#mission-tasks").getByRole("button", { name: "Pause" }).first()).toBeDisabled({ timeout: 20_000 });
-      await expect(page.locator('.page-head .pill[data-state="offline"]')).toBeVisible({ timeout: 20_000 });
-      await expect(page.locator("#mission-actions .notice")).toContainText("not connected");
+      await expect(page.locator('.mission-head .pill[data-state="offline"]')).toBeVisible({ timeout: 20_000 });
+      await expect(page.getByRole("button", { name: "Add task" })).toBeDisabled();
+      await expect(page.locator(".mission-head")).toContainText(/offline/i);
       await navTo(page, "Workers");
       await expect(page.locator('[data-entity="worker:e2e-worker"] .pill[data-state="offline"]')).toHaveText("Offline");
       await navTo(page, "Missions");

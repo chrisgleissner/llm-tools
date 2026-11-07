@@ -63,11 +63,11 @@ test("the skip link is the first Tab stop, then the brand and the search button"
 test("what needs the operator shows in the Inbox badge, the tab title and the favicon", async ({ page }) => {
   await mockApp(page, IN);
   await page.goto("/");
-  await expect(page).toHaveTitle(/^\(1\) /);
-  await expect(page.locator(".nav-count")).toHaveText(/^1\s*need you$/);
+  await expect(page).toHaveTitle(/^\(2\) /);
+  await expect(page.locator(".nav-count")).toHaveText(/^2\s*need you$/);
   expect(decodeURIComponent((await page.locator('link[rel~="icon"]').getAttribute("href")) ?? "")).toContain("circle");
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" }).click();
-  await expect(page).toHaveTitle(/^\(1\) .*LLM Bridge$/);
+  await expect(page).toHaveTitle(/^\(2\) .*LLM Bridge$/);
 });
 
 test("the notification offer follows a new needs-you item and asks for permission only when the button is pressed", async ({ page }) => {

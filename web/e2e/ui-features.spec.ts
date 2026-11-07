@@ -1,5 +1,6 @@
 // Dashboard, lists, toasts, dialogs and shortcuts (WEB-003, WEB-004, WEB-005, WEB-006, WEB-010, WEB-011).
 import { expect, expectAccessible, expectNoHorizontalScroll, navTo, setupViaUi, test } from "./fixtures";
+import { showTab } from "./redesign/harness";
 import { havePython, startSeededWorker } from "./seed";
 
 test.describe("workers page", () => {
@@ -54,7 +55,8 @@ test.describe("keyboard shortcuts", () => {
     await setupViaUi(page, coord);
     await page.locator("body").press("?");
     const help = page.getByRole("dialog", { name: "Keyboard shortcuts" });
-    await expect(help).toContainText("Go to Workers");
+    await expect(help).toContainText("Go to");
+    await expect(help).toContainText("Workers");
     await expectAccessible(page, "shortcut help");
     await page.keyboard.press("Escape");
     await expect(help).toBeHidden();
@@ -65,9 +67,9 @@ test.describe("keyboard shortcuts", () => {
     await page.locator("body").press("m");
     await expect(page).toHaveURL(/\/missions$/);
     // The missions view builds its search box after navigation; on a slow runner "/" can arrive first.
-    await expect(page.getByLabel("Search missions")).toBeVisible();
+    await expect(page.getByLabel("Search missions", { exact: true })).toBeVisible();
     await page.locator("body").press("/");
-    await expect(page.getByLabel("Search missions")).toBeFocused();
+    await expect(page.getByLabel("Search missions", { exact: true })).toBeFocused();
     // Typing in a field never triggers a shortcut.
     await page.keyboard.type("gw?");
     await expect(page).toHaveURL(/\/missions/);
@@ -91,11 +93,11 @@ test.describe("with a seeded worker", () => {
       await setupViaUi(page, coord);
       // Needs you: a task waits for approval (with Approve and Reject inline) and a mission or task failed.
       const needs = page.locator('[data-section="needs-you"]');
-      const approvalRow = needs.locator('.mrow[data-state="needs-approval"]');
+      const approvalRow = needs.locator('[data-entity^="mission:"]', { has: page.locator('.pill[data-state="needs-approval"]') });
       await expect(approvalRow).toHaveCount(1, { timeout: 45_000 });
       await expect(approvalRow.locator('[data-action="approve"]')).toBeVisible();
       await expect(approvalRow.locator('[data-action="reject"]')).toBeVisible();
-      await expect(needs.locator('.mrow[data-state="failed"]').first()).toBeVisible();
+      await expect(needs.locator('[data-entity^="mission:"]', { has: page.locator('.pill[data-state="failed"]') }).first()).toBeVisible();
       await expect(page.locator('[data-q="need-me"]')).toContainText(/need/);
       await expectAccessible(page, "inbox with attention items");
       await expectNoHorizontalScroll(page);
@@ -104,7 +106,7 @@ test.describe("with a seeded worker", () => {
       const approvalMission = await approvalLink.getAttribute("href");
       const findStarted = Date.now();
       await approvalLink.click();
-      await expect(page.locator(".page-head h1")).toContainText("Parser refactor 00");
+      await expect(page.locator(".mission-head h1")).toContainText("Parser refactor 00");
       const findElapsedMs = Date.now() - findStarted;
       if (browserName === "chromium") console.log(`UX task find approval: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${findElapsedMs} ms`);
 
@@ -112,12 +114,12 @@ test.describe("with a seeded worker", () => {
       await navTo(page, "Missions");
       const total = page.locator("#missions-total");
       await expect(total).toHaveText("30 missions", { timeout: 20_000 });
-      await page.getByLabel("Search missions").fill("docs sweep 04");
+      await page.getByLabel("Search missions", { exact: true }).fill("docs sweep 04");
       await expect(total).toHaveText("1 mission");
-      await expect(page.getByLabel("Search missions"), "typing keeps focus while results arrive").toBeFocused();
+      await expect(page.getByLabel("Search missions", { exact: true }), "typing keeps focus while results arrive").toBeFocused();
       await expect(page.locator('[data-entity^="mission:"]:visible')).toContainText("Docs sweep 04");
       await expect(page).toHaveURL(/q=docs/);
-      await page.getByLabel("Search missions").fill("zzz-no-such-mission");
+      await page.getByLabel("Search missions", { exact: true }).fill("zzz-no-such-mission");
       await expect(page.getByRole("heading", { name: "No missions match" })).toBeVisible();
       await page.locator("#clear-filters").click();
       await expect(total).toHaveText("30 missions");
@@ -135,7 +137,7 @@ test.describe("with a seeded worker", () => {
 
       expect(approvalMission).toBeTruthy();
       await page.goto(new URL(approvalMission!, page.url()).toString());
-      const approvalTask = page.locator("#tasks-table tbody tr", { hasText: "Implement it" });
+      const approvalTask = page.locator('[data-entity^="task:"]', { hasText: "Implement it" });
       await expect(approvalTask).toBeVisible();
       const approveStarted = Date.now();
       await approvalTask.getByRole("button", { name: "Approve task 2" }).click();
@@ -155,34 +157,27 @@ test.describe("with a seeded worker", () => {
     }
   });
 
-  test("mission detail: task search, filter, sort, copy ID and outcome toasts", async ({ page, coord, context }) => {
+  test("mission detail: task rows, Copy mission ID, and the outcome toast of Reject", async ({ page, coord, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
     const w = await startSeededWorker(coord, { missions: 1 });
     try {
       await setupViaUi(page, coord);
       await navTo(page, "Missions");
-      await page.getByRole("link", { name: /Parser refactor 00/ }).click();
-      await expect(page.locator("#tasks-table tbody tr")).toHaveCount(5, { timeout: 20_000 });
-      // Filter by status chip and search by title.
-      await page.locator('#mission-tasks [data-status="VERIFYING"]').click();
-      await expect(page.locator("#tasks-table tbody tr")).toHaveCount(1);
-      await expect(page.locator("#tasks-table tbody tr")).toContainText("Implement it");
-      await page.locator('#mission-tasks [data-status="VERIFYING"]').click();
-      await page.getByLabel("Search tasks").fill("ship");
-      await expect(page.locator("#tasks-table tbody tr")).toHaveCount(1);
-      await page.getByLabel("Search tasks").fill("");
-      await expect(page.locator("#tasks-table tbody tr")).toHaveCount(5);
-      await page.locator("#task-sort").selectOption("title");
-      await expect(page.locator("#tasks-table tbody tr").first()).toContainText("Implement it");
-      // Copy the mission ID: the clipboard holds the full ID, the button confirms inline and the live region says so; no toast opens.
-      await page.locator(".page-head").getByRole("button", { name: "Copy mission ID" }).click();
-      await expect(page.locator(".page-head .check-flash")).toBeVisible();
+      await page.locator("a.row-title", { hasText: "Parser refactor 00" }).click();
+      await showTab(page, "Tasks");
+      const rows = page.locator('[data-entity^="task:"]');
+      await expect(rows.first()).toBeVisible({ timeout: 20_000 });
+      await expect(rows).toHaveCount(5);
+      await expect(rows.filter({ hasText: "Implement it" })).toBeVisible();
+      // Copy the mission ID from the header menu: the clipboard holds the full ID, the live region says so; no toast opens.
+      await page.locator(".mission-head").getByRole("button", { name: /more|actions/i }).last().click();
+      await page.getByRole("menuitem", { name: "Copy mission ID" }).click();
       await expect(page.locator("#live-status")).toContainText("Copied mission ID");
       await expect(page.locator(".toast")).toHaveCount(0);
       const id = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
       if (id) expect(id).toMatch(/^[0-9a-f]{32}$/);
       // Rejecting a task asks for a reason, then reports the outcome in a toast that names it.
-      const row = page.locator("#tasks-table tbody tr", { hasText: "Implement it" });
+      const row = rows.filter({ hasText: "Implement it" });
       await row.getByRole("button", { name: "Reject task 2" }).click();
       const dlg = page.getByRole("dialog");
       await expect(dlg).toBeVisible();
@@ -200,49 +195,35 @@ test.describe("with a seeded worker", () => {
   });
 });
 
-test("mission activity humanizes, filters, and collapses system events", async ({ page }) => {
+test("mission activity humanizes events, counts background events and shows only allowlisted raw fields", async ({ page }) => {
   const { mockApp, MISSION_PATH } = await import("./mock");
   const mock = await mockApp(page, { auth: "in", terminalClose: true });
   await page.goto(MISSION_PATH);
+  await showTab(page, "Activity");
   const events = page.locator("#events-list");
-  await expect(events).toContainText("Terminal opened");
-  await expect(events).toContainText("Terminal closed · Terminal closed by test");
+  // Milestones by default: lifecycle and task changes; commands, terminal and provider selection are detail.
   await expect(events).toContainText("Mission created");
   await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
-  await expect(events).not.toContainText("do-not-render-this");
+  await expect(events).not.toContainText("Terminal opened");
+  await expect(events).not.toContainText("Command queued");
+  await expect(events).not.toContainText("controller alive");
+  await expect(page.locator("[data-plumbing-count]")).toContainText("background event");
+  // All activity adds the detail events with readable phrases.
+  await page.getByRole("button", { name: "All activity" }).click();
+  await expect(events).toContainText("Terminal opened");
+  await expect(events).toContainText("Terminal closed · Terminal closed by test");
   await expect(events).toContainText("Command queued: task.verify");
   await expect(events).toContainText("Selected codex (gpt-5)");
-  await expect(events.locator('a[href="/api/v1/commands/safe-request-01"]')).toHaveText("Command details");
-  await expect(events).not.toContainText("controller alive");
-  await page.getByRole("button", { name: /Show \d+ system events/ }).click();
-  await expect(events).toContainText("controller alive");
-
-  await page.getByLabel("Filter events").selectOption("provider");
   await expect(events).toContainText("Started provider · codex · Task 2 · gpt-5");
-  await expect(events).not.toContainText("Task status changed");
-  await page.getByLabel("Filter events").selectOption("all");
-  await page.getByLabel("Filter by event kind").selectOption("task-status");
-  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
-  await expect(events).not.toContainText("Write a regression test");
-  await page.getByLabel("Filter by event kind").selectOption("task-added");
   await expect(events).toContainText("Task added · Task 3 · Write a regression test");
-  await expect(events).not.toContainText("RUNNING → VERIFYING");
-  await page.getByLabel("Filter by event kind").selectOption("all");
+  // Background events stay hidden until asked for.
+  await expect(events).not.toContainText("controller alive");
+  await page.getByRole("button", { name: "Show background events" }).click();
+  await expect(page.locator('[data-event-class="plumbing"]').first()).toBeVisible();
+  // The Raw block of every event holds allowlisted fields only.
+  for (const summary of await page.locator("summary", { hasText: /^Raw$/ }).all()) await summary.click();
+  expect(await page.locator("main").innerText()).not.toContain("do-not-render-this");
+  // A stream event appears as a detail row.
   mock.emitStream({ type: "worker", worker: "alpha", state: "offline" });
   await expect(events).toContainText("Worker offline · alpha");
-  await page.getByLabel("Filter events").selectOption("terminal");
-  await expect(events).toContainText("Terminal opened");
-  await expect(events).not.toContainText("Worker offline");
-  await page.getByLabel("Filter by event kind").selectOption("terminal-closed");
-  await expect(events).toContainText("Terminal closed · Terminal closed by test");
-  await expect(events).not.toContainText("Terminal opened");
-  await page.getByLabel("Filter by event kind").selectOption("all");
-  await page.getByLabel("Filter events").selectOption("worker");
-  await expect(events).toContainText("Worker offline · alpha");
-  await expect(events).not.toContainText("Terminal opened");
-  await page.getByLabel("Filter events").selectOption("all");
-  await page.getByLabel("Filter by event kind").selectOption("all");
-  await page.getByLabel("Filter events").selectOption("task");
-  await expect(events).toContainText("Task updated · Task 2 · RUNNING → VERIFYING");
-  await expect(events).not.toContainText("Started provider");
 });

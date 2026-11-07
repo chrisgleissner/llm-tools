@@ -4,8 +4,8 @@ test("first-run setup signs in and shows the Inbox; unauthenticated visits go to
   await setupViaUi(page, coord);
   await expect(page).toHaveURL(/\/$/);
   await expect(page.locator("#conn")).toContainText("Live");
-  await expect(page.getByText("Workers online")).toBeVisible();
-  await expect(page.getByText("healthy")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No workers yet" })).toBeVisible();
+  await expect(page.locator("[data-q=need-me]")).toHaveText("Nothing needs you");
   // The setup token is consumed.
   await signOutViaUi(page);
   await expect(page).toHaveURL(/\/login$/);
@@ -66,8 +66,9 @@ test("missions index is empty without workers and the SPA serves deep links", as
   await expect(page.getByRole("heading", { name: "Missions", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "No missions yet" })).toBeVisible();
   await page.goto("/missions/nobody/none");
-  await expect(page.getByRole("heading", { name: "none" })).toBeVisible();
-  await expect(page.locator("#terminal-region")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mission not found" })).toBeVisible();
+  await expect(page.getByText("The coordinator has no mission none on worker nobody.")).toBeVisible();
+  await expect(page.getByRole("tab")).toHaveCount(0);
   await page.goto("/does/not/exist");
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
 });
@@ -173,7 +174,7 @@ test("pages have no horizontal scroll and no accessibility violations", async ({
   await expectNoHorizontalScroll(page);
   await expectAccessible(page, "setup");
   await setupViaUi(page, coord);
-  for (const name of ["Overview", "Workers", "Missions", "Sessions", "Usage", "Diagnostics", "Account"] as const) {
+  for (const name of ["Inbox", "Workers", "Missions", "Sessions", "Usage", "Diagnostics", "Account"] as const) {
     await navTo(page, name);
     await expect(page.getByRole("heading", { name: name === "Usage" ? "Provider usage" : name, exact: true })).toBeVisible();
     if (name === "Diagnostics") await expect(page.getByRole("heading", { name: "Coordinator" })).toBeVisible();

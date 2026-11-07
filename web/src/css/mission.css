@@ -126,6 +126,7 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
   .mission-session > [data-pane] { block-size: 100%; }
   .mission-page[data-tab] .mission-session, .mission-page[data-tab] .mission-side { display: block; }
   .mission-side { overflow-y: auto; }
+  .tab-session { display: none; } /* the class is built as `tab-${id}` in views/mission/page.ts */
   /* A compact header: crumb and meta share a row, the pill sits beside the title, so the session keeps its height */
   .mission-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--sp-4); row-gap: 0; }
   .mission-head > * { grid-column: 1 / -1; }
@@ -135,3 +136,5 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
   .head-id h1 { margin: 0; }
   .mission-answer { margin-block: 0 var(--sp-1); }
 }
+
+.mission-page[data-missing] > :not(.mission-head) { display: none !important; }

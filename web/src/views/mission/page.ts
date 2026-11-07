@@ -206,6 +206,9 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const FOCUS_FALLBACK: Record<string, string> = { pause: "resume", resume: "pause", start: "pause", approve: "pause", reject: "pause" };
   function renderHeader(): void {
     const m = headerModel();
+    // A mission the coordinator does not know has nothing but its message: no tabs, panels or session box.
+    if (store.loaded && !m) page.dataset["missing"] = "";
+    else delete page.dataset["missing"];
     if (!m) {
       const loaded = store.loaded;
       const sig = `none|${loaded}`;

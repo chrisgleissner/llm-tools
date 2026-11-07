@@ -8,7 +8,8 @@ import { icon, type IconName } from "./icons";
 import { menu, type MenuItem } from "./menu";
 import type { PaletteAction } from "./palette";
 import type { DerivedState } from "./state";
-import { missionState, store, subscribe } from "./store";
+import { itemOf } from "./rows";
+import { store, subscribe } from "./store";
 import { openPanel, say } from "./ui";
 
 export interface NavItem {
@@ -88,13 +89,13 @@ interface Needing {
   path: string;
   state: DerivedState;
 }
-type Summary = api.MissionInfo & { attention?: api.NeedsYou | null; task_counts?: Record<string, number> | null };
 
 function needing(): Needing[] {
   const out: Needing[] = [];
   for (const m of store.missions) {
-    const info = m.mission as Summary;
-    const state = missionState(m, { needsYou: info.needs_you ?? info.attention ?? null, taskCounts: info.task_counts ?? null });
+    const info = m.mission;
+    // The same derivation as the Inbox rows, so the badge, the tab title and the Inbox agree wherever the operator is.
+    const state = itemOf(m).state;
     if (state.rank <= 2) out.push({ key: `${m.worker}/${info.id}`, name: info.name, path: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(info.id)}`, state });
   }
   return out;

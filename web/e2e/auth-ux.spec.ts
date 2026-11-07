@@ -175,7 +175,7 @@ test.describe("sign-in", () => {
     await navTo(page, "Missions");
     await expect(page.getByRole("heading", { name: "No missions yet" })).toBeVisible();
     await context.clearCookies();
-    await page.getByLabel("Search missions").fill("x");
+    await page.getByLabel("Search missions", { exact: true }).fill("x");
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
     await expect(page.locator("#login-notice")).toHaveAttribute("data-kind", "expired");
     await expect(page.locator("#login-notice")).toContainText("session expired");

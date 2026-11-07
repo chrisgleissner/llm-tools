@@ -23,23 +23,28 @@ export async function loadSession(workerName: string, missionId: string, opts: S
   const { sessionPane } = await import("../../session");
   const pane = sessionPane(workerName, missionId, opts.provider ? { provider: opts.provider } : {});
   let running = opts.running;
-  // `openReadOnly` is idempotent, and a pane that was unavailable when it was asked to connect needs asking again once the worker is back.
+  let available = opts.available;
+  // `openReadOnly` is idempotent. It is asked for on arrival and again only when the mission starts running or the worker comes back,
+  // never on every refresh: an operator who chose Disconnect stays disconnected.
   const watch = (): void => {
     if (running) pane.openReadOnly();
   };
-  pane.setAvailable(opts.available);
+  pane.setAvailable(available);
   watch();
   return {
     element: pane.element,
     focusComposer: () => pane.focusComposer(),
     takeControl: () => pane.takeControl(),
     setAvailable: (a) => {
+      const back = a && !available;
+      available = a;
       pane.setAvailable(a);
-      if (a) watch();
+      if (back) watch();
     },
     setRunning: (r) => {
+      const started = r && !running;
       running = r;
-      watch();
+      if (started) watch();
     },
     dispose: () => pane.dispose(),
   };

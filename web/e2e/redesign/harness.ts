@@ -102,6 +102,14 @@ export async function openTab(page: Page, name: "Session" | "Tasks" | "Activity"
   throw new Error(`no visible "${name}" tab on the mission page`);
 }
 
+/** Like `openTab`, but a no-op where the view is already on screen (the side column and the session are all visible on a wide screen). */
+export async function showTab(page: Page, name: "Session" | "Tasks" | "Activity"): Promise<void> {
+  const tab = page.getByRole("tab", { name: new RegExp(`^${name}\\b`, "i") }).first();
+  // The tab bar is built with the page; wait for it rather than testing once, then click only if the view is a tab here.
+  await tab.waitFor({ state: "visible", timeout: name === "Session" ? 1000 : 10_000 }).catch(() => undefined);
+  if (await tab.isVisible()) await tab.click();
+}
+
 /** The element that currently has focus, as a short description (for failure messages). */
 export const activeElement = (page: Page): Promise<string> => page.evaluate(() => { const a = document.activeElement; return a ? `${a.tagName.toLowerCase()}${a.id ? "#" + a.id : ""}` : "none"; });
 

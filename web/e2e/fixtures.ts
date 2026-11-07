@@ -80,7 +80,7 @@ export async function setupViaUi(page: Page, coord: Coordinator, username = "adm
   await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
   await page.getByLabel("Repeat password").fill(PASSWORD);
   await page.getByRole("button", { name: "Create administrator" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
 }
 
 /** Open the account menu and sign out. */
@@ -105,7 +105,7 @@ export async function loginViaUi(page: Page, username = "admin", password = PASS
   await page.getByLabel("Username", { exact: true }).fill(username);
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox", exact: true })).toBeVisible();
 }
 
 /** WCAG 2.x A/AA axe scan in both colour schemes; fails on any violation and prints the details. */
