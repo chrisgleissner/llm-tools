@@ -100,10 +100,11 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
         assert f"-J {report}" in workflow or f"-r {report}" in workflow
     assert "/zap/wrk/zap-console-report" not in workflow
     assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow
-    assert "--severity CRITICAL" in workflow
+    assert "--severity MEDIUM" in workflow
     assert 'severity in {"MEDIUM", "HIGH", "CRITICAL"}' in workflow
     assert 'mutation_limit_per_token = 10000' in workflow
     assert 'mutation_limit_per_address = 10000' in workflow
+    assert 'mutation_limit_global = 10000' in workflow
 
 
 def test_openapi_json_depth_schema_stays_within_scanner_budget() -> None:

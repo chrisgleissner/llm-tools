@@ -48,6 +48,7 @@ jobs:
           text = config.read_text(encoding="utf-8")
           text = text.replace("mutation_limit_per_token = 30", "mutation_limit_per_token = 10000")
           text = text.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 10000")
+          text = text.replace("mutation_limit_global = 600", "mutation_limit_global = 10000")
           config.write_text(text, encoding="utf-8")
           PY
           token=$("$bin" --data-dir "$data" token create security-scan --scope admin --expires-days 1)
@@ -75,7 +76,7 @@ jobs:
           git -C "$RUNNER_TEMP/testssl-src" remote add origin https://github.com/testssl/testssl.sh.git
           git -C "$RUNNER_TEMP/testssl-src" fetch --depth 1 origin 4f17be931a9d60f3f987975aea8221f1a8eaf7aa
           git -C "$RUNNER_TEMP/testssl-src" checkout --detach FETCH_HEAD
-          "$RUNNER_TEMP/testssl-src/testssl.sh" --quiet --warnings off --severity CRITICAL \
+          "$RUNNER_TEMP/testssl-src/testssl.sh" --quiet --warnings off --severity MEDIUM \
             --add-ca "$RUNNER_TEMP/bridge-security-scan/ca.pem" \
             --jsonfile-pretty "$RUNNER_TEMP/testssl-report.json" localhost:18443
           TLS_SCAN_REPORT="$RUNNER_TEMP/testssl-report.json" python - <<'PY'
