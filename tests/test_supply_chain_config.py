@@ -66,7 +66,12 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert "--max-failures 10" in workflow
     assert "--exclude-checks positive_data_acceptance" in workflow
     assert "--exclude-path-regex '^/api/v1/(stream|terminal|worker/connect|worker/terminal/.*)$'" in workflow
-    assert "Authored API tests cover valid stateful" in workflow
+    assert "Fuzz read operations only" in workflow
+    assert "--exclude-method POST --exclude-method PUT --exclude-method PATCH --exclude-method DELETE" in workflow
+    assert "--workers 1" in workflow and "--max-time 120" in workflow
+    assert "ulimit -v 4194304" in workflow and "timeout --signal=TERM --kill-after=15s 180s" in workflow
+    assert "Schemathesis exceeded its 180-second / 4-GiB resource budget" in workflow
+    assert "Coordinator stopped responding during Schemathesis" in workflow
     assert "zap-api-scan.py" in workflow and "-f openapi" in workflow
     assert "zap-baseline.py" in workflow
     assert workflow.count("insights.exitAuto=false") == 2

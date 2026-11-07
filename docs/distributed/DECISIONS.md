@@ -218,3 +218,18 @@ only when each instance shows the expected policy (`default-src 'self'`, `script
 the xterm inline-style directive). `docs/distributed/review-findings.md` records the evidence and
 residual risk. Other CSP findings and all other medium-or-higher alerts remain failures.
 
+## D15 Read-only, resource-bounded Schemathesis run (API-012, SEC2-016)
+
+Repeated hosted scan runs stopped during Schemathesis about three minutes after its 47-operation
+coverage phase, with no runner system log and no coordinator log artifact because cancellation
+skipped finalization. The OpenAPI contract includes mutations that can start paid work, change
+credentials or settings, create/revoke tokens and workers, restore backups, or suspend a worker.
+Those state changes are exercised by authored coordinator/worker integration tests; keep the
+automated property-based run on GET operations and WebSocket upgrades out of band. Run one worker,
+cap its address space at 4 GiB, bound the fuzz phase to 120 seconds and wrap it in a 180-second
+timeout. After a successful run, verify that coordinator health still responds. This keeps the
+CI check useful for read-path status/schema/5xx defects without allowing fuzzed writes to change
+deployment state or exceed the runner budget. A local pinned run selected 23 read operations,
+passed 4,201 generated cases across coverage, fuzzing and stateful phases in 30 seconds, and left
+the coordinator healthy. Revisit the scan scope if authored mutation coverage changes.
+

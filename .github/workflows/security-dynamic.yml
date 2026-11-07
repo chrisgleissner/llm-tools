@@ -106,24 +106,50 @@ jobs:
           PY
 
       - name: Fuzz every documented API operation
-        # Generated identifiers are unseeded, so positive acceptance cannot distinguish a bad
-        # request from an unknown mission or worker. Authored API tests cover valid stateful
-        # calls; response schema, status, content-type and server-error checks remain enabled.
-        # WebSocket endpoints require an upgrade; coordinator integration suites cover their
-        # protocol-level authentication and lifecycle instead of plain-HTTP REST fuzzing.
-        run: >-
-          st run docs/distributed/openapi.json
-          --url https://localhost:18443
-          --tls-verify "$RUNNER_TEMP/bridge-security-scan/ca.pem"
-          --header "Authorization: Bearer $SCAN_TOKEN"
-          --max-examples 10
-          --max-failures 10
-          --exclude-checks positive_data_acceptance
-          --exclude-path-regex '^/api/v1/(stream|terminal|worker/connect|worker/terminal/.*)$'
-          --report junit --report-dir "$RUNNER_TEMP/schemathesis"
+        # Fuzz read operations only. Writes can start paid work, revoke workers/tokens,
+        # suspend or restore a worker, or change credentials; authored Rust/Python tests cover
+        # those operations with controlled state. Exclude WebSocket upgrade routes as well.
+        # Keep the scanner single-worker, under a 4 GiB address-space limit, and time-bounded.
+        # Report coordinator death or a resource timeout as an actionable failed step.
+        shell: bash
+        run: |
+          set -uo pipefail
+          ulimit -v 4194304
+          set +e
+          timeout --signal=TERM --kill-after=15s 180s st run docs/distributed/openapi.json \
+            --url https://localhost:18443 \
+            --tls-verify "$RUNNER_TEMP/bridge-security-scan/ca.pem" \
+            --header "Authorization: Bearer $SCAN_TOKEN" \
+            --workers 1 \
+            --max-time 120 \
+            --max-examples 10 \
+            --max-failures 10 \
+            --request-timeout 10 \
+            --exclude-method POST --exclude-method PUT --exclude-method PATCH --exclude-method DELETE \
+            --exclude-checks positive_data_acceptance \
+            --exclude-path-regex '^/api/v1/(stream|terminal|worker/connect|worker/terminal/.*)$' \
+            --report junit --report-dir "$RUNNER_TEMP/schemathesis"
+          scan_status=$?
+          set -e
+          if [ "$scan_status" -ne 0 ]; then
+            if [ "$scan_status" -eq 124 ] || [ "$scan_status" -eq 137 ]; then
+              echo "::error::Schemathesis exceeded its 180-second / 4-GiB resource budget (exit $scan_status)"
+            else
+              echo "::error::Schemathesis exited with status $scan_status"
+            fi
+            echo "--- coordinator log ---"
+            cat "$RUNNER_TEMP/bridge-security-scan.log"
+            exit "$scan_status"
+          fi
+          if ! curl --silent --show-error --fail --cacert "$RUNNER_TEMP/bridge-security-scan/ca.pem" \
+            https://localhost:18443/healthz >/dev/null; then
+            echo "::error::Coordinator stopped responding during Schemathesis; see coordinator log above"
+            cat "$RUNNER_TEMP/bridge-security-scan.log"
+            exit 1
+          fi
 
       - name: Run the ZAP OpenAPI API scan
-        # The runtime and OpenAPI schema both bound arbitrary JSON nesting to eight levels,
+        # The runtime and OpenAPI schema both bound arbitrary JSON nesting to four levels,
         # keeping ZAP's recursive Swagger parser within its tested memory budget. Keep Insights
         # This prevents the memory warning from stopping ZAP; the alert report is evaluated by our gate.
         # Bypass runner proxies for the scanner's localhost control API.
