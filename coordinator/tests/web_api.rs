@@ -144,6 +144,24 @@ async fn security_audit_api_is_admin_only_and_detects_tampering() {
     let entry = body["entries"].as_array().unwrap().first().unwrap();
     assert!(entry["entry_hash"].as_str().unwrap().len() == 64);
     assert!(entry["prev_hash"].as_str().unwrap().len() == 64);
+
+    for n in 0..3 {
+        env.srv.state.db.audit_checked("admin", "audit.page", &n.to_string(), "127.0.0.1").unwrap();
+    }
+    let (status, first_page) = admin.get("/api/v1/audit?limit=2").await;
+    assert_eq!(status, 200, "{first_page}");
+    assert_eq!(first_page["entries"].as_array().unwrap().len(), 2);
+    let cursor = first_page["next_cursor"].as_str().unwrap();
+    let (status, second_page) = admin.get(&format!("/api/v1/audit?limit=2&cursor={cursor}")).await;
+    assert_eq!(status, 200, "{second_page}");
+    let first_id = first_page["entries"][0]["id"].as_i64().unwrap();
+    assert_ne!(first_id, second_page["entries"][0]["id"].as_i64().unwrap());
+    assert_eq!(
+        admin.get(&format!("/api/v1/audit?limit=1&cursor={cursor}")).await.0,
+        400,
+        "cursor binds the page size"
+    );
+
     let id = entry["id"].as_i64().unwrap();
     let conn = rusqlite::Connection::open(bridge_coordinator::db_path(&env.dir)).unwrap();
     conn.execute("UPDATE audit SET detail='tampered' WHERE id=?", [id]).unwrap();

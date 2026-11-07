@@ -1542,11 +1542,15 @@ impl Db {
         Ok(())
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
+        self.audit_list_page(limit.clamp(1, 500), 0)
+    }
+    pub fn audit_list_page(&self, limit: i64, offset: i64) -> R<Vec<Value>> {
         let c = self.c();
-        let limit = limit.clamp(1, 500);
-        let mut st = c.prepare("SELECT id,ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash FROM audit ORDER BY id DESC LIMIT ?")?;
+        let limit = limit.clamp(1, 501);
+        let offset = offset.clamp(0, MAX_AUDIT_ROWS);
+        let mut st = c.prepare("SELECT id,ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash FROM audit ORDER BY id DESC LIMIT ? OFFSET ?")?;
         let rows = st
-            .query_map(params![limit], |r| {
+            .query_map(params![limit, offset], |r| {
                 Ok(
                     json!({"id":r.get::<_,i64>(0)?,"ts":r.get::<_,i64>(1)?,"actor":r.get::<_,String>(2)?,"action":r.get::<_,String>(3)?,
             "detail":r.get::<_,String>(4)?,"remote":r.get::<_,String>(5)?,"principal_id":r.get::<_,String>(6)?,"prev_hash":r.get::<_,String>(7)?,"entry_hash":r.get::<_,String>(8)?}),

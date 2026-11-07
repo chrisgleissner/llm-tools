@@ -1465,7 +1465,7 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
 }
 
 async fn audit_resource(State(st): State<St>, _admin: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
-    if q.keys().any(|key| key != "limit") {
+    if q.keys().any(|key| !matches!(key.as_str(), "limit" | "cursor")) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
     }
     let limit = q.get("limit").map_or(Ok(100_i64), |value| {
@@ -1476,9 +1476,26 @@ async fn audit_resource(State(st): State<St>, _admin: Authed, Query(q): Query<Ha
     if !(1..=500).contains(&limit) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be between 1 and 500"));
     }
+    let filters = format!("limit={limit}");
+    let offset = match q.get("cursor") {
+        Some(cursor) => crate::cursor::read(&st.cursor_key, "audit", &filters, cursor).map_err(|_| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "invalid-cursor",
+                "cursor is invalid or belongs to different audit filters",
+            )
+        })?,
+        None => 0,
+    };
+    let mut entries = st.db.audit_list_page(limit + 1, offset.min(crate::db::MAX_AUDIT_ROWS as usize) as i64)?;
+    let has_more = entries.len() > limit as usize;
+    if has_more {
+        entries.pop();
+    }
+    let next_cursor = has_more.then(|| crate::cursor::issue(&st.cursor_key, "audit", &filters, offset.saturating_add(entries.len())));
     Ok(json_ok(
         StatusCode::OK,
-        json!({"entries":st.db.audit_list(limit)?,"chain_valid":st.db.audit_chain_valid()?}),
+        json!({"entries":entries,"chain_valid":st.db.audit_chain_valid()?,"next_cursor":next_cursor}),
     ))
 }
 

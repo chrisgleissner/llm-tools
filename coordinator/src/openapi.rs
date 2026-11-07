@@ -169,14 +169,14 @@ fn response_schema(path: &str, method: &str) -> Value {
         }}},"additionalProperties":false});
     }
     if path == "/api/v1/audit" && method == "GET" {
-        return json!({"type":"object","required":["entries","chain_valid"],"properties":{
+        return json!({"type":"object","required":["entries","chain_valid","next_cursor"],"properties":{
             "entries":{"type":"array","items":{"type":"object","required":["id","ts","actor","action","detail","remote","principal_id","prev_hash","entry_hash"],"properties":{
                 "id":{"type":"integer","minimum":1},"ts":{"type":"string","format":"date-time"},
                 "actor":{"type":"string"},"action":{"type":"string"},"detail":{"type":"string"},"remote":{"type":"string"},
                 "principal_id":{"type":"string"},"prev_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
                 "entry_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}
             },"additionalProperties":false}},
-            "chain_valid":{"type":"boolean"}
+            "chain_valid":{"type":"boolean"},"next_cursor":{"type":["string","null"],"maxLength":2048,"description":"Opaque continuation cursor bound to the page size."}
         },"additionalProperties":false});
     }
     if path.ends_with("/registration/start") && method == "POST" {
@@ -268,7 +268,10 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         ]);
     }
     if path == "/api/v1/audit" && method == "GET" {
-        op["parameters"] = json!([{"name":"limit","in":"query","required":false,"description":"Maximum audit entries, default 100, maximum 500.","schema":{"type":"integer","minimum":1,"maximum":500}}]);
+        op["parameters"] = json!([
+            {"name":"limit","in":"query","required":false,"description":"Maximum audit entries, default 100, maximum 500.","schema":{"type":"integer","minimum":1,"maximum":500}},
+            {"name":"cursor","in":"query","required":false,"description":"Authenticated encrypted opaque cursor from next_cursor, bound to the page size.","schema":{"type":"string","maxLength":2048}}
+        ]);
     }
     if method == "POST" || method == "PATCH" || method == "PUT" {
         op["requestBody"] = json!({
@@ -783,6 +786,19 @@ mod tests {
         for field in ["created_at", "last_used", "expires_at"] {
             assert_eq!(document["components"]["schemas"]["TokenInfo"]["properties"][field]["format"], "date-time");
         }
+    }
+
+    #[test]
+    fn audit_api_documents_opaque_cursor_pagination() {
+        let doc = openapi_value();
+        let operation = &doc["paths"]["/api/v1/audit"]["get"];
+        assert_eq!(
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["next_cursor"]["maxLength"],
+            2048
+        );
+        let parameters = operation["parameters"].as_array().unwrap();
+        assert!(parameters.iter().any(|param| param["name"] == "cursor" && param["in"] == "query"));
+        assert!(parameters.iter().any(|param| param["name"] == "limit" && param["schema"]["maximum"] == 500));
     }
 
     #[test]

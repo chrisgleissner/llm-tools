@@ -777,6 +777,16 @@
               "minimum": 1,
               "type": "integer"
             }
+          },
+          {
+            "description": "Authenticated encrypted opaque cursor from next_cursor, bound to the page size.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "maxLength": 2048,
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -839,11 +849,20 @@
                         "type": "object"
                       },
                       "type": "array"
+                    },
+                    "next_cursor": {
+                      "description": "Opaque continuation cursor bound to the page size.",
+                      "maxLength": 2048,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
                     }
                   },
                   "required": [
                     "entries",
-                    "chain_valid"
+                    "chain_valid",
+                    "next_cursor"
                   ],
                   "type": "object"
                 }
