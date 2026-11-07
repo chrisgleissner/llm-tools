@@ -49,9 +49,27 @@ export async function loadSession(workerName: string, missionId: string, opts: S
   const mod = (await import("../../terminal")) as unknown as PaneModule;
   if (mod.sessionPane) {
     const pane = mod.sessionPane(workerName, missionId, opts.provider ? { provider: opts.provider } : {});
+    let running = opts.running;
+    // `openReadOnly` is idempotent, and a pane that was unavailable when it was asked to connect needs asking again once the worker is back.
+    const watch = (): void => {
+      if (running) pane.openReadOnly();
+    };
     pane.setAvailable(opts.available);
-    if (opts.running) pane.openReadOnly();
-    return { ...pane, element: pane.element, focusComposer: () => pane.focusComposer(), takeControl: () => pane.takeControl(), setAvailable: (a) => pane.setAvailable(a), setRunning: (r) => r && pane.openReadOnly(), dispose: () => pane.dispose() };
+    watch();
+    return {
+      element: pane.element,
+      focusComposer: () => pane.focusComposer(),
+      takeControl: () => pane.takeControl(),
+      setAvailable: (a) => {
+        pane.setAvailable(a);
+        if (a) watch();
+      },
+      setRunning: (r) => {
+        running = r;
+        watch();
+      },
+      dispose: () => pane.dispose(),
+    };
   }
   return legacyPane(mod.terminalPanel as NonNullable<PaneModule["terminalPanel"]>, workerName, missionId, opts);
 }
