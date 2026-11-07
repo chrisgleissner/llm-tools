@@ -391,6 +391,15 @@
               "null"
             ]
           },
+          "allowed_workers": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "expires_days": {
             "format": "int32",
             "minimum": 0,
@@ -441,6 +450,12 @@
             },
             "type": "array"
           },
+          "allowed_workers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "created_at": {
             "type": "string"
           },
@@ -483,7 +498,8 @@
           "name",
           "scopes",
           "created_at",
-          "allowed_cidrs"
+          "allowed_cidrs",
+          "allowed_workers"
         ],
         "type": "object"
       },
@@ -10834,6 +10850,18 @@
                     "items": {
                       "maxLength": 64,
                       "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$",
+                      "type": "string"
+                    },
+                    "maxItems": 32,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "allowed_workers": {
+                    "description": "Empty or omitted means all workers; a non-empty list restricts this token to those enrolled workers.",
+                    "items": {
+                      "maxLength": 63,
+                      "minLength": 1,
+                      "pattern": "^[a-z0-9][a-z0-9-]*$",
                       "type": "string"
                     },
                     "maxItems": 32,

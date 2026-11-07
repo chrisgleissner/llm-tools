@@ -33,6 +33,7 @@ function tokenManagement(): HTMLElement {
   const allowedNetworks = field("api-token-networks", "Allowed client networks (optional)", "text", {
     autocomplete: "off", maxlength: 2048, placeholder: "192.0.2.0/24, 2001:db8::/32",
   });
+  const allowedWorkers = h("select", { id: "api-token-workers", name: "allowed_workers", multiple: true, size: 4, "aria-label": "Allowed workers (optional)" });
   const create = h("button", { type: "submit", class: "btn primary" }, "Create token");
   const form = h(
     "form",
@@ -44,6 +45,9 @@ function tokenManagement(): HTMLElement {
     expiry,
     allowedNetworks.wrap,
     h("p", { class: "hint" }, "Leave blank to allow requests from any address. Separate CIDR ranges with commas."),
+    h("label", { for: allowedWorkers.id }, "Restrict to workers (optional)"),
+    allowedWorkers,
+    h("p", { class: "hint" }, "Leave no workers selected to allow every worker. Worker-bound tokens cannot use global diagnostics, audit, token, or low-level command endpoints."),
     h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
     status,
     create,
@@ -51,6 +55,8 @@ function tokenManagement(): HTMLElement {
   const refresh = async (): Promise<void> => {
     try {
       const result = await api.get<{ tokens: api.ApiTokenInfo[] }>("/api/v1/tokens");
+      const workers = await api.get<{ workers: Array<{ name: string }> }>("/api/v1/workers");
+      allowedWorkers.replaceChildren(...workers.workers.map((worker) => h("option", { value: worker.name }, worker.name)));
       rows.replaceChildren();
       for (const token of result.tokens) {
         const revoke = h("button", { class: "btn small", type: "button", "aria-label": `Revoke ${token.name}` }, "Revoke");
@@ -68,7 +74,7 @@ function tokenManagement(): HTMLElement {
         const lastUsed = token.last_used
           ? `Last used ${new Date(token.last_used).toLocaleString()} from ${token.last_address ?? "unknown address"}`
           : "Not used yet";
-        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, token.allowed_cidrs.length ? `Networks ${token.allowed_cidrs.join(", ")}` : "Any client network"), h("span", {}, lastUsed), revoke));
+        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, token.allowed_cidrs.length ? `Networks ${token.allowed_cidrs.join(", ")}` : "Any client network"), h("span", {}, token.allowed_workers.length ? `Workers ${token.allowed_workers.join(", ")}` : "All workers"), h("span", {}, lastUsed), revoke));
       }
       if (!result.tokens.length) rows.append(h("li", { class: "muted" }, "No API tokens yet."));
     } catch (err) {
@@ -96,6 +102,7 @@ function tokenManagement(): HTMLElement {
       const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", {
         name: name.input.value.trim(), scopes, expires_days: Number(expiry.value),
         allowed_cidrs: allowedNetworks.input.value.split(",").map((value) => value.trim()).filter(Boolean),
+        allowed_workers: Array.from(allowedWorkers.selectedOptions, (option) => option.value),
       });
       oneTime.hidden = false;
       oneTime.replaceChildren(
@@ -106,6 +113,7 @@ function tokenManagement(): HTMLElement {
       status.textContent = `Token ${created.token.name} created.`;
       name.input.value = "";
       allowedNetworks.input.value = "";
+      Array.from(allowedWorkers.options).forEach((option) => { option.selected = false; });
       await refresh();
     } catch (err) {
       status.textContent = err instanceof api.ApiError ? err.message : "Could not create token.";

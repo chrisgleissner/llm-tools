@@ -16,7 +16,7 @@ use axum::routing::{delete, get, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
 use base64::Engine;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -289,6 +289,7 @@ pub enum Principal {
         name: String,
         scopes: Vec<String>,
         allowed_cidrs: Vec<String>,
+        allowed_workers: Vec<String>,
     },
 }
 
@@ -327,6 +328,7 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
                 name: token.name,
                 scopes: token.scopes,
                 allowed_cidrs: token.allowed_cidrs,
+                allowed_workers: token.allowed_workers,
             }),
             None => Err(unauthorized()),
         };
@@ -377,6 +379,57 @@ impl Principal {
             Principal::Token { name, .. } => format!("token:{name}"),
         }
     }
+
+    fn worker_restrictions(&self) -> &[String] {
+        match self {
+            Principal::Session { .. } => &[],
+            Principal::Token { allowed_workers, .. } => allowed_workers,
+        }
+    }
+
+    fn allows_worker(&self, worker: &str) -> bool {
+        let allowed = self.worker_restrictions();
+        allowed.is_empty() || allowed.iter().any(|name| name == worker)
+    }
+}
+
+fn query_values(parts: &Parts, key: &str) -> Vec<String> {
+    parts
+        .uri
+        .query()
+        .into_iter()
+        .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
+        .filter_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
+        .collect()
+}
+
+/// Bound tokens may enter worker-owned resources only through a route that names one worker.
+/// Global and low-level command routes are denied because they cannot safely apply this object
+/// restriction at the router boundary.
+fn worker_bound_token_request_allowed(parts: &Parts, principal: &Principal) -> bool {
+    if principal.worker_restrictions().is_empty() {
+        return true;
+    }
+    let path = parts.uri.path();
+    let method = parts.method.as_str();
+    if path == "/api/v1/workers" {
+        return method == "GET";
+    }
+    if path == "/api/v1/missions" {
+        return matches!(method, "GET" | "POST");
+    }
+    if path == "/api/v1/auth/state" || path == "/api/v1/auth/token" {
+        return method == "GET";
+    }
+    let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+    if segments.len() >= 4 && segments[..3] == ["api", "v1", "workers"] {
+        return !segments[3].contains('%') && principal.allows_worker(segments[3]);
+    }
+    if (segments.len() >= 4 && segments[..3] == ["api", "v1", "missions"]) || path == "/api/v1/terminal" {
+        let workers = query_values(parts, "worker");
+        return workers.len() == 1 && principal.allows_worker(&workers[0]);
+    }
+    false
 }
 
 impl FromRequestParts<St> for Authed {
@@ -402,6 +455,7 @@ impl FromRequestParts<St> for Authed {
             name,
             scopes: granted,
             allowed_cidrs,
+            ..
         } = &principal
         {
             if !allowed_cidrs.is_empty() {
@@ -466,6 +520,26 @@ impl FromRequestParts<St> for Authed {
                 st.db.audit_checked(&format!("token:{name}"), "authorization.denied", &detail, &remote)?;
                 return Err(err(StatusCode::FORBIDDEN, "insufficient-scope", format!("token requires scope {required}")));
             }
+        }
+        if matches!(principal, Principal::Token { .. }) && !worker_bound_token_request_allowed(parts, &principal) {
+            let name = match &principal {
+                Principal::Token { name, .. } => name.as_str(),
+                Principal::Session { .. } => unreachable!(),
+            };
+            let remote = resolved_client_address(parts, st);
+            let request_id = parts
+                .headers
+                .get("idempotency-key")
+                .or_else(|| parts.headers.get("x-request-id"))
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-");
+            let detail = format!("method={} path={} request_id={}", parts.method, parts.uri.path(), clean(request_id));
+            st.db.audit_checked(&format!("token:{name}"), "authorization.denied.worker", &detail, &remote)?;
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "token-worker-denied",
+                "request is outside this token's allowed workers",
+            ));
         }
         let remote = resolved_client_address(parts, st);
         if let Principal::Token { name, scopes: granted, .. } = &principal {
@@ -607,6 +681,7 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote
             name,
             scopes: granted,
             allowed_cidrs,
+            ..
         }) => {
             if !allowed_cidrs.is_empty()
                 && !ip
@@ -776,6 +851,7 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     if !known_addr {
         security_notification(&st, &username, "new_sign_in_address");
     }
+    remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
     st.db.session_create_with(&auth::sha256_hex(&token), &csrf, remember)?;
     st.db.audit(&username, "login.success", "", &ip);
@@ -1177,6 +1253,7 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     records[index].backed_up = result.backup_state();
     records[index].sign_count = result.counter();
     st.db.passkey_update(&records[index])?;
+    remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
     st.db.session_create_with(&auth::sha256_hex(&token), &csrf, false)?;
     st.db.audit(
@@ -1289,7 +1366,8 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
                 "last_used": timestamp(t.last_used),
                 "last_address": t.last_address,
                 "expires_at": timestamp(t.expires_at),
-                "allowed_cidrs": t.allowed_cidrs
+                "allowed_cidrs": t.allowed_cidrs,
+                "allowed_workers": t.allowed_workers
             })
         })
         .collect();
@@ -1298,7 +1376,7 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
 
 async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
-    no_extra(&m, &["name", "scopes", "expires_days", "allowed_cidrs"])?;
+    no_extra(&m, &["name", "scopes", "expires_days", "allowed_cidrs", "allowed_workers"])?;
     let name = str_field(&m, "name")?;
     if !valid_name(name) {
         return Err(err(
@@ -1370,6 +1448,34 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
             ))
         }
     };
+    let allowed_workers = match m.get("allowed_workers") {
+        None => Vec::new(),
+        Some(Value::Array(values)) if values.len() <= 32 => {
+            let existing: HashSet<String> = st.db.workers_list()?.into_iter().map(|worker| worker.name).collect();
+            let mut names = Vec::with_capacity(values.len());
+            for value in values {
+                let worker = value
+                    .as_str()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "allowed_workers must contain worker names"))?;
+                if !valid_name(worker) || names.iter().any(|existing| existing == worker) || !existing.contains(worker) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "invalid-request",
+                        "allowed_workers must contain at most 32 unique names of enrolled workers",
+                    ));
+                }
+                names.push(worker.to_string());
+            }
+            names
+        }
+        Some(_) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "allowed_workers must be an array of at most 32 worker names",
+            ))
+        }
+    };
     validate_token_expiry(days, st.cfg.exposure).map_err(|message| err(StatusCode::BAD_REQUEST, "non-expiring-token-forbidden", message))?;
     let expires_at = (days > 0).then(|| crate::now() + (days as i64) * 86_400);
     let token_id = auth::sha256_hex(&auth::random_token())[..16].to_string();
@@ -1378,10 +1484,15 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
         .map(hex::encode)
         .expect("URL-safe token generator output decodes");
     let secret = format!("lbr_pat_{token_id}_{token_secret}");
-    if !st
-        .db
-        .token_create_identified_with_cidrs(name, &token_id, &auth::sha256_hex(&token_secret), expires_at, &scopes, &allowed_cidrs)?
-    {
+    if !st.db.token_create_identified_with_restrictions(
+        name,
+        &token_id,
+        &auth::sha256_hex(&token_secret),
+        expires_at,
+        &scopes,
+        &allowed_cidrs,
+        &allowed_workers,
+    )? {
         return Err(err(StatusCode::CONFLICT, "token-exists", "a token with this name already exists"));
     }
     let detail = format!(
@@ -1395,7 +1506,7 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
     Ok(json_ok(
         StatusCode::CREATED,
         json!({
-            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "last_address": Value::Null, "expires_at": timestamp(expires_at), "allowed_cidrs": allowed_cidrs},
+            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "last_address": Value::Null, "expires_at": timestamp(expires_at), "allowed_cidrs": allowed_cidrs, "allowed_workers": allowed_workers},
             "secret": secret
         }),
     ))
@@ -1430,6 +1541,21 @@ fn security_notification(st: &St, principal_id: &str, category: &str) {
             Err(_) => eprintln!("security notification webhook delivery failed"),
         }
     });
+}
+
+/// User-Agent is only a coarse device hint. Bound it, reject control bytes, and let the database
+/// retain a salted hash only. Missing or malformed values simply disable this notification signal.
+fn remember_login_device(st: &St, principal_id: &str, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(value) = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()) else {
+        return Ok(());
+    };
+    if value.is_empty() || value.len() > 512 || value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Ok(());
+    }
+    if st.db.known_login_device_remember(principal_id, value)? {
+        security_notification(st, principal_id, "new_sign_in_device");
+    }
+    Ok(())
 }
 
 fn validate_token_expiry(days: u64, exposure: crate::config::Exposure) -> Result<(), &'static str> {
@@ -1488,8 +1614,14 @@ fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
            "platform": w.platform, "capabilities": w.capabilities, "policy": policy})
 }
 
-async fn list_workers(State(st): State<St>, _a: Authed) -> ApiResult {
-    let workers: Vec<Value> = st.db.workers_list()?.iter().map(|w| worker_json(&st, w)).collect();
+async fn list_workers(State(st): State<St>, Authed(principal, _): Authed) -> ApiResult {
+    let workers: Vec<Value> = st
+        .db
+        .workers_list()?
+        .iter()
+        .filter(|worker| principal.allows_worker(&worker.name))
+        .map(|w| worker_json(&st, w))
+        .collect();
     Ok(json_ok(StatusCode::OK, json!({"workers": workers})))
 }
 
@@ -1555,10 +1687,17 @@ async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): 
 /// `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`),
 /// `limit` (default 100, maximum 500) and an authenticated, encrypted opaque `cursor`. Legacy `offset` remains
 /// accepted. The reply carries `total`, `next_cursor` and status facets.
-async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+async fn list_missions(State(st): State<St>, Authed(principal, _): Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
     let bad = |m: &str| err(StatusCode::BAD_REQUEST, "invalid-request", m.to_string());
     if q.get("worker").is_some_and(|worker| !valid_name(worker)) {
         return Err(bad("worker must be a valid worker name"));
+    }
+    if q.get("worker").is_some_and(|worker| !principal.allows_worker(worker)) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "token-worker-denied",
+            "request is outside this token's allowed workers",
+        ));
     }
     if let Some(key) = q
         .keys()
@@ -1600,6 +1739,7 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
     let filters = serde_json::to_string(&json!({
         "q": needle,
         "worker": q.get("worker"),
+        "allowed_workers": principal.worker_restrictions(),
         "status": statuses,
         "sort": sort.unwrap_or("worker"),
         "descending": descending,
@@ -1628,7 +1768,8 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
             Some((worker, stale, info))
         })
         .filter(|(worker, _, info)| {
-            q.get("worker").is_none_or(|w| w == worker)
+            principal.allows_worker(worker)
+                && q.get("worker").is_none_or(|w| w == worker)
                 && needle.as_ref().is_none_or(|n| {
                     [worker.as_str(), &text(info, "name"), &text(info, "id"), &text(info, "folder")]
                         .iter()
@@ -1826,6 +1967,13 @@ async fn mission_status_resource(
 async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let mut params = parse_body(&body.bytes)?;
     let worker = str_field(&params, "worker")?.to_string();
+    if !p.allows_worker(&worker) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "token-worker-denied",
+            "request is outside this token's allowed workers",
+        ));
+    }
     let local_only = [
         "auto_continue",
         "command_template",

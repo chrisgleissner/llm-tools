@@ -19,6 +19,15 @@ async fn login_with(env: &Env, remember: Option<Value>) -> (Api, String) {
     (api, sc)
 }
 
+async fn sign_in_with_ua(api: &Api, user_agent: &str) -> reqwest::Response {
+    api.bare(Method::POST, "/api/v1/auth/login")
+        .header("user-agent", user_agent)
+        .json(&json!({"username":"admin", "password":PASSWORD}))
+        .send()
+        .await
+        .unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn mutation_bodies_require_json_content_type() {
     let env = boot().await;
@@ -54,6 +63,66 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
     assert_eq!(status, 200);
     let (_, body) = api.get("/api/v1/security/notifications").await;
     assert!(!body["notifications"].as_array().unwrap().iter().any(|item| item["id"] == id));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn successful_sign_in_from_a_new_device_creates_a_notice_without_storing_user_agent() {
+    let env = boot().await;
+    let mut api = env.admin().await;
+    let first = sign_in_with_ua(&api, "ExampleBrowser/1 Linux").await;
+    assert_eq!(first.status().as_u16(), 200, "{}", first.text().await.unwrap());
+    let cookie = first.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    api.cookie = Some(cookie.split(';').next().unwrap().strip_prefix("__Host-bridge_session=").unwrap().to_string());
+    api.csrf = Some(first.json::<Value>().await.unwrap()["csrf_token"].as_str().unwrap().to_string());
+    let (status, notices) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(status, 200);
+    assert!(notices["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["category"] == "new_sign_in_device"));
+
+    let repeated = sign_in_with_ua(&api, "ExampleBrowser/1 Linux").await;
+    assert_eq!(repeated.status().as_u16(), 200);
+    let (_, repeated_notices) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(
+        repeated_notices["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["category"] == "new_sign_in_device")
+            .count(),
+        1
+    );
+
+    let different = sign_in_with_ua(&api, "ExampleBrowser/2 Android").await;
+    assert_eq!(different.status().as_u16(), 200);
+    let (_, different_notices) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(
+        different_notices["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["category"] == "new_sign_in_device")
+            .count(),
+        2
+    );
+
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    let conn = rusqlite::Connection::open(bridge_coordinator::db_path(&env.dir)).unwrap();
+    let stored: String = conn
+        .query_row("SELECT fingerprint_hash FROM known_login_devices LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    assert!(!stored.contains("ExampleBrowser"));
+    assert_eq!(
+        db.security_notifications_list("admin")
+            .unwrap()
+            .iter()
+            .filter(|item| item["category"] == "new_sign_in_device")
+            .count(),
+        2
+    );
     env.stop().await;
 }
 
@@ -105,6 +174,101 @@ async fn api_token_cidr_binding_rejects_out_of_range_clients_and_audits_denial()
         )
         .await;
     assert_eq!(status, 400, "{problem}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_tokens_are_bound_to_their_allowed_worker_objects() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    for name in ["worker-a", "worker-b"] {
+        let (status, body) = admin.post("/api/v1/workers", json!({"name":name})).await;
+        assert_eq!(status, 201, "{body}");
+    }
+    for (worker, worker_id, mission) in [("worker-a", "worker-id-a", "mission-a"), ("worker-b", "worker-id-b", "mission-b")] {
+        let mut hello = serde_json::Map::new();
+        hello.insert("missions".into(), json!([{"id":mission,"name":mission}]));
+        env.srv.state.db.worker_hello(worker, worker_id, &hello, &json!([]), "127.0.0.1").unwrap();
+    }
+    let (status, created) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({"name":"one-worker", "scopes":["admin"], "allowed_workers":["worker-a"]}),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["token"]["allowed_workers"], json!(["worker-a"]));
+    let token = created["secret"].as_str().unwrap();
+    let (status, invalid) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({"name":"unknown-worker-key", "scopes":["read"], "allowed_workers":["not-enrolled"]}),
+        )
+        .await;
+    assert_eq!(status, 400, "{invalid}");
+
+    let workers: Value = admin
+        .bare(Method::GET, "/api/v1/workers")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(workers["workers"].as_array().unwrap().len(), 1);
+    assert_eq!(workers["workers"][0]["name"], "worker-a");
+
+    let missions: Value = admin
+        .bare(Method::GET, "/api/v1/missions")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(missions["total"], 1);
+    assert_eq!(missions["missions"][0]["worker"], "worker-a");
+
+    let permitted = admin.bare(Method::GET, "/api/v1/workers/worker-a").bearer_auth(token).send().await.unwrap();
+    assert_eq!(permitted.status().as_u16(), 200);
+    let forbidden = admin.bare(Method::GET, "/api/v1/workers/worker-b").bearer_auth(token).send().await.unwrap();
+    assert_eq!(forbidden.status().as_u16(), 403);
+    assert_eq!(forbidden.json::<Value>().await.unwrap()["code"], "token-worker-denied");
+
+    let forbidden_mission = admin
+        .bare(Method::GET, "/api/v1/missions/private-mission?worker=worker-b")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_mission.status().as_u16(), 403);
+    let forbidden_terminal = admin
+        .bare(Method::GET, "/api/v1/terminal?worker=worker-b&mission=private-mission&mode=view")
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_terminal.status().as_u16(), 403);
+    let forbidden_create = admin
+        .bare(Method::POST, "/api/v1/missions")
+        .bearer_auth(token)
+        .json(&json!({"worker":"worker-b","prompt":"no","cwd":"/tmp"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_create.status().as_u16(), 403);
+    let forbidden_low_level = admin
+        .bare(Method::POST, "/api/v1/commands")
+        .bearer_auth(token)
+        .json(&json!({"target":"worker-a","request":{"operation":"mission.status"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden_low_level.status().as_u16(), 403);
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    assert!(db.audit_list(20).unwrap().iter().any(|row| row["action"] == "authorization.denied.worker"));
     env.stop().await;
 }
 

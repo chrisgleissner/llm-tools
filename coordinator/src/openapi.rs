@@ -50,6 +50,7 @@ struct TokenInfo {
     last_address: Option<String>,
     expires_at: Option<String>,
     allowed_cidrs: Vec<String>,
+    allowed_workers: Vec<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -63,6 +64,7 @@ struct TokenCreate {
     scopes: Option<Vec<String>>,
     expires_days: Option<u32>,
     allowed_cidrs: Option<Vec<String>>,
+    allowed_workers: Option<Vec<String>>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -100,7 +102,8 @@ fn token_create_schema() -> Value {
             "name":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},
             "scopes":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["read","operate","terminal:view","terminal:write","admin"]}},
             "expires_days":{"type":"integer","minimum":0,"maximum":3650},
-            "allowed_cidrs":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","maxLength":64,"pattern":"^[0-9a-fA-F:.]+/[0-9]{1,3}$"}}
+            "allowed_cidrs":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","maxLength":64,"pattern":"^[0-9a-fA-F:.]+/[0-9]{1,3}$"}},
+            "allowed_workers":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},"description":"Empty or omitted means all workers; a non-empty list restricts this token to those enrolled workers."}
         }
     })
 }
@@ -739,10 +742,12 @@ mod tests {
         );
         assert_eq!(schema["properties"]["expires_days"]["maximum"], 3650);
         assert_eq!(schema["properties"]["allowed_cidrs"]["maxItems"], 32);
+        assert_eq!(schema["properties"]["allowed_workers"]["maxItems"], 32);
         assert_eq!(schema["additionalProperties"], false);
         let response = &doc["components"]["schemas"]["TokenInfo"]["properties"];
         assert_eq!(response["last_address"]["type"], json!(["string", "null"]));
         assert_eq!(response["allowed_cidrs"]["type"], "array");
+        assert_eq!(response["allowed_workers"]["type"], "array");
     }
 
     #[test]

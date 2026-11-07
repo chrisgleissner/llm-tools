@@ -365,4 +365,18 @@ test.describe("account menu and password change", () => {
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
     await expect(secret).toHaveCount(1);
   });
+
+  test("API tokens can be restricted to selected workers", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    coord.cli("worker", "add", "token-worker-a");
+    coord.cli("worker", "add", "token-worker-b");
+    await page.goto("/account");
+    const workers = page.getByLabel("Allowed workers (optional)");
+    await expect(workers.locator("option")).toHaveCount(2);
+    await workers.selectOption("token-worker-a");
+    await page.getByLabel("Token name").fill("worker-limited-key");
+    await page.getByRole("button", { name: "Create token" }).click();
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Workers token-worker-a");
+    await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("Workers token-worker-b");
+  });
 });

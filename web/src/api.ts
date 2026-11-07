@@ -52,6 +52,7 @@ export interface ApiTokenInfo {
   last_address: string | null;
   expires_at: string | null;
   allowed_cidrs: string[];
+  allowed_workers: string[];
 }
 
 export interface ApiTokenCreated {
@@ -161,6 +162,7 @@ export async function authState(): Promise<AuthState> {
 export async function login(username: string, password: string, remember = false): Promise<void> {
   const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/login", { username, password, remember }, true);
   setCsrf(r.csrf_token);
+  window.dispatchEvent(new Event("bridge-security-notification"));
 }
 
 export interface PasskeyAssertionStart {
@@ -175,6 +177,7 @@ export async function beginPasskeySignIn(): Promise<PasskeyAssertionStart> {
 export async function finishPasskeySignIn(challenge_id: string, credential: unknown): Promise<void> {
   const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/passkeys/assertion/finish", { challenge_id, credential }, true);
   setCsrf(r.csrf_token);
+  window.dispatchEvent(new Event("bridge-security-notification"));
 }
 
 export const setup = (setup_token: string, username: string, password: string) =>

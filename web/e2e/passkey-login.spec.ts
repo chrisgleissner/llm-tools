@@ -210,5 +210,8 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   await expect(page.getByRole("button", { name: "Sign in with a passkey" })).toBeVisible();
   await page.getByRole("button", { name: "Sign in with a passkey" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  const categories = await page.evaluate(async () => (await fetch("/api/v1/security/notifications").then((r) => r.json()) as { notifications: Array<{ category: string }> }).notifications.map((item) => item.category));
+  expect(categories).toContain("new_sign_in_device");
+  await expect(page.getByText("A sign-in came from a new device.")).toBeVisible();
   await cdp.detach();
 });

@@ -183,6 +183,7 @@ pub struct ApiToken {
     pub name: String,
     pub scopes: Vec<String>,
     pub allowed_cidrs: Vec<String>,
+    pub allowed_workers: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +196,7 @@ pub struct ApiTokenInfo {
     pub last_address: Option<String>,
     pub expires_at: Option<i64>,
     pub allowed_cidrs: Vec<String>,
+    pub allowed_workers: Vec<String>,
 }
 
 fn json_col(s: Option<String>) -> Option<Value> {
@@ -242,7 +244,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 16;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -305,12 +307,16 @@ ALTER TABLE workers ADD COLUMN pending_token_hash TEXT;
 ALTER TABLE workers ADD COLUMN pending_token_expires_at INTEGER;
 CREATE UNIQUE INDEX workers_pending_token_hash ON workers(pending_token_hash) WHERE pending_token_hash IS NOT NULL;
 ";
+/// Version 15: optionally bind API tokens to a bounded set of coordinator workers.
+const MIGRATE_V15: &str = "ALTER TABLE api_tokens ADD COLUMN allowed_workers TEXT NOT NULL DEFAULT '[]';";
+/// Version 16: salted device fingerprints for new-device sign-in notices; never stores user agents.
+const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NOT NULL, fingerprint_hash TEXT NOT NULL, last_success INTEGER NOT NULL, PRIMARY KEY(principal_id, fingerprint_hash)); CREATE INDEX known_login_devices_recent ON known_login_devices(principal_id, last_success DESC);";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 
 type R<T> = rusqlite::Result<T>;
-type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String);
+type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String, String);
 
 impl Db {
     pub fn open(path: &Path) -> R<Db> {
@@ -436,6 +442,16 @@ impl Db {
             })? > 0;
             let alter = if has_table { MIGRATE_V14 } else { "" };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 14; COMMIT;"))?;
+        }
+        if version < 15 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='api_tokens'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let alter = if has_table { MIGRATE_V15 } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 15; COMMIT;"))?;
+        }
+        if version < 16 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V16} PRAGMA user_version = 16; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -765,8 +781,20 @@ impl Db {
         scopes: &[String],
         allowed_cidrs: &[String],
     ) -> R<bool> {
+        self.token_create_identified_with_restrictions(name, token_id, secret_hash, expires_at, scopes, allowed_cidrs, &[])
+    }
+    pub fn token_create_identified_with_restrictions(
+        &self,
+        name: &str,
+        token_id: &str,
+        secret_hash: &str,
+        expires_at: Option<i64>,
+        scopes: &[String],
+        allowed_cidrs: &[String],
+        allowed_workers: &[String],
+    ) -> R<bool> {
         Ok(self.c().execute(
-            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id, allowed_cidrs) VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id, allowed_cidrs, allowed_workers) VALUES(?,?,?,?,?,?,?,?)",
             params![
                 name,
                 secret_hash,
@@ -774,7 +802,8 @@ impl Db {
                 expires_at,
                 serde_json::to_string(scopes).unwrap_or_else(|_| "[]".into()),
                 token_id,
-                serde_json::to_string(allowed_cidrs).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string(allowed_cidrs).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(allowed_workers).unwrap_or_else(|_| "[]".into())
             ],
         )? == 1)
     }
@@ -787,8 +816,9 @@ impl Db {
     }
     pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
         let c = self.c();
-        let mut st =
-            c.prepare("SELECT name, token_id, scopes, created_at, last_used, last_address, expires_at, allowed_cidrs FROM api_tokens ORDER BY name")?;
+        let mut st = c.prepare(
+            "SELECT name, token_id, scopes, created_at, last_used, last_address, expires_at, allowed_cidrs, allowed_workers FROM api_tokens ORDER BY name",
+        )?;
         let rows = st.query_map([], |r| {
             let scopes_json: String = r.get(2)?;
             Ok(ApiTokenInfo {
@@ -800,6 +830,7 @@ impl Db {
                 last_address: r.get(5)?,
                 expires_at: r.get(6)?,
                 allowed_cidrs: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+                allowed_workers: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -829,8 +860,9 @@ impl Db {
     pub fn token_lookup(&self, hash: &str) -> R<Option<ApiToken>> {
         let c = self.c();
         let now = crate::now();
-        let mut stmt =
-            c.prepare("SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs FROM api_tokens WHERE token_id IS NULL ORDER BY name")?;
+        let mut stmt = c.prepare(
+            "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers FROM api_tokens WHERE token_id IS NULL ORDER BY name",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -839,19 +871,20 @@ impl Db {
                 r.get::<_, Option<i64>>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
             ))
         })?;
         let mut matched = None;
         for row in rows {
-            let (name, stored_hash, last, expires_at, scopes_json, cidrs_json) = row?;
+            let (name, stored_hash, last, expires_at, scopes_json, cidrs_json, workers_json) = row?;
             let matches = crate::auth::ct_eq(hash, &stored_hash);
             let unexpired = expires_at.is_none_or(|expires| now < expires);
             if matches & unexpired {
-                matched = Some((name, last, scopes_json, cidrs_json));
+                matched = Some((name, last, scopes_json, cidrs_json, workers_json));
             }
         }
         drop(stmt);
-        let Some((name, last, scopes_json, cidrs_json)) = matched else {
+        let Some((name, last, scopes_json, cidrs_json, workers_json)) = matched else {
             return Ok(None);
         };
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
@@ -862,6 +895,7 @@ impl Db {
             name,
             scopes,
             allowed_cidrs: serde_json::from_str(&cidrs_json).unwrap_or_default(),
+            allowed_workers: serde_json::from_str(&workers_json).unwrap_or_default(),
         }))
     }
     /// Look up an identifiable token by its public ID, then compare the supplied secret hash
@@ -870,12 +904,12 @@ impl Db {
         let c = self.c();
         let row: Option<IdentifiedTokenRow> = c
             .query_row(
-                "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs FROM api_tokens WHERE token_id=?",
+                "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs, allowed_workers FROM api_tokens WHERE token_id=?",
                 params![token_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
             )
             .optional()?;
-        let Some((name, stored_hash, last, expires_at, scopes_json, cidrs_json)) = row else {
+        let Some((name, stored_hash, last, expires_at, scopes_json, cidrs_json, workers_json)) = row else {
             return Ok(None);
         };
         if !crate::auth::ct_eq(secret_hash, &stored_hash) || expires_at.is_some_and(|e| crate::now() >= e) {
@@ -890,6 +924,7 @@ impl Db {
             name,
             scopes,
             allowed_cidrs: serde_json::from_str(&cidrs_json).unwrap_or_default(),
+            allowed_workers: serde_json::from_str(&workers_json).unwrap_or_default(),
         }))
     }
 
@@ -932,6 +967,37 @@ impl Db {
         let h = Self::addr_hash(&c, addr_key)?;
         c.execute("UPDATE known_addrs SET last_success=? WHERE hash=?", params![last_success, h])?;
         Ok(())
+    }
+
+    /// Remember a successful device fingerprint. Returns true only for a new fingerprint.
+    /// The caller supplies a bounded, normalized User-Agent signature; only its salted hash is
+    /// retained. Old entries and entries beyond the per-principal cap are pruned transactionally.
+    pub fn known_login_device_remember(&self, principal_id: &str, fingerprint: &str) -> R<bool> {
+        const RETAIN_SECS: i64 = 30 * 86_400;
+        const MAX_DEVICES: i64 = 64;
+        let now = crate::now();
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let hash = Self::addr_hash(&tx, &format!("device:{fingerprint}"))?;
+        tx.execute(
+            "DELETE FROM known_login_devices WHERE principal_id=? AND last_success<?",
+            params![principal_id, now - RETAIN_SECS],
+        )?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM known_login_devices WHERE principal_id=? AND fingerprint_hash=?)",
+            params![principal_id, hash],
+            |r| r.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO known_login_devices(principal_id,fingerprint_hash,last_success) VALUES(?,?,?) ON CONFLICT(principal_id,fingerprint_hash) DO UPDATE SET last_success=excluded.last_success",
+            params![principal_id, hash, now],
+        )?;
+        tx.execute(
+            "DELETE FROM known_login_devices WHERE principal_id=? AND fingerprint_hash IN (SELECT fingerprint_hash FROM known_login_devices WHERE principal_id=? ORDER BY last_success DESC,fingerprint_hash LIMIT -1 OFFSET ?)",
+            params![principal_id, principal_id, MAX_DEVICES],
+        )?;
+        tx.commit()?;
+        Ok(!known)
     }
 
     pub fn security_notification_add(&self, principal_id: &str, category: &str) -> R<Option<String>> {

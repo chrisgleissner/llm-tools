@@ -176,6 +176,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   const refreshSecurity = (): void => { void api.securityNotifications().then((items) => {
     const labels: Record<string, string> = {
       new_sign_in_address: "A sign-in came from a new address.",
+      new_sign_in_device: "A sign-in came from a new device.",
       api_token_created: "An API token was created.",
       repeated_sign_in_failures: "Repeated sign-in failures were blocked.",
       passkey_origin_reenrolled: "Passkeys were reset for a new trusted address.",
