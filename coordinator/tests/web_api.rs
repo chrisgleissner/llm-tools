@@ -210,13 +210,38 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
     let mut bearer = env.api();
     bearer.bearer = Some(secret.to_string());
     assert_eq!(bearer.get("/api/v1/missions").await.0, 200, "prefixed bearer token authenticates");
+    let mut wrong_secret = secret.to_string();
+    let last_secret_char = wrong_secret.chars().last().unwrap();
+    wrong_secret.pop();
+    wrong_secret.push(if last_secret_char == '0' { '1' } else { '0' });
+    let mut rejected = env.api();
+    rejected.bearer = Some(wrong_secret);
+    assert_eq!(rejected.get("/api/v1/missions").await.0, 401, "wrong token secret is rejected");
+    let legacy_secret = bridge_coordinator::auth::random_token();
+    assert!(env
+        .srv
+        .state
+        .db
+        .token_create_scoped(
+            "legacy-token",
+            &bridge_coordinator::auth::sha256_hex(&legacy_secret),
+            None,
+            &["read".to_string()],
+        )
+        .unwrap());
+    let mut legacy = env.api();
+    legacy.bearer = Some(legacy_secret);
+    assert_eq!(legacy.get("/api/v1/missions").await.0, 200, "old unprefixed bearer tokens remain accepted");
 
     let (status, listed) = api.get("/api/v1/tokens").await;
     assert_eq!(status, 200);
     let token = listed["tokens"].as_array().unwrap().iter().find(|t| t["name"] == "automation").unwrap();
+    assert_eq!(token["id"], created["token"]["id"]);
     assert_eq!(token["scopes"], json!(["read", "operate"]));
     assert!(token["last_used"].as_str().is_some_and(|value| value.ends_with('Z')));
     assert!(token.get("secret").is_none() && token.get("token_hash").is_none());
+    let legacy = listed["tokens"].as_array().unwrap().iter().find(|t| t["name"] == "legacy-token").unwrap();
+    assert!(legacy["id"].is_null(), "legacy token has no public token ID");
 
     let (status, revoked) = api.send(api.rb(Method::DELETE, "/api/v1/tokens/automation")).await;
     assert_eq!(status, 200, "{revoked}");

@@ -186,6 +186,7 @@ pub struct ApiToken {
 #[derive(Debug, Clone)]
 pub struct ApiTokenInfo {
     pub name: String,
+    pub token_id: Option<String>,
     pub scopes: Vec<String>,
     pub created_at: i64,
     pub last_used: Option<i64>,
@@ -236,7 +237,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -275,11 +276,18 @@ const MIGRATE_V9: &str = "
 CREATE TABLE auth_policy(
   principal_id TEXT PRIMARY KEY, passkey_origin TEXT);
 ";
+/// Version 10: public token identifiers let authentication select a row before comparing
+/// the secret hash in constant time; migrated legacy tokens keep a NULL identifier.
+const MIGRATE_V10: &str = "
+ALTER TABLE api_tokens ADD COLUMN token_id TEXT;
+CREATE UNIQUE INDEX api_tokens_token_id ON api_tokens(token_id) WHERE token_id IS NOT NULL;
+";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 
 type R<T> = rusqlite::Result<T>;
+type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String);
 
 impl Db {
     pub fn open(path: &Path) -> R<Db> {
@@ -374,6 +382,13 @@ impl Db {
         }
         if version < 9 {
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V9} PRAGMA user_version = 9; COMMIT;"))?;
+        }
+        if version < 10 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='api_tokens'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let alter = if has_table { MIGRATE_V10 } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 10; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -677,6 +692,20 @@ impl Db {
             ],
         )? == 1)
     }
+    /// Create an identifiable token, storing only its secret hash and public ID.
+    pub fn token_create_identified(&self, name: &str, token_id: &str, secret_hash: &str, expires_at: Option<i64>, scopes: &[String]) -> R<bool> {
+        Ok(self.c().execute(
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id) VALUES(?,?,?,?,?,?)",
+            params![
+                name,
+                secret_hash,
+                crate::now(),
+                expires_at,
+                serde_json::to_string(scopes).unwrap_or_else(|_| "[]".into()),
+                token_id
+            ],
+        )? == 1)
+    }
     /// (name, expires_at) of every API token, by name.
     pub fn tokens_list(&self) -> R<Vec<(String, Option<i64>)>> {
         let c = self.c();
@@ -686,15 +715,16 @@ impl Db {
     }
     pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
         let c = self.c();
-        let mut st = c.prepare("SELECT name, scopes, created_at, last_used, expires_at FROM api_tokens ORDER BY name")?;
+        let mut st = c.prepare("SELECT name, token_id, scopes, created_at, last_used, expires_at FROM api_tokens ORDER BY name")?;
         let rows = st.query_map([], |r| {
-            let scopes_json: String = r.get(1)?;
+            let scopes_json: String = r.get(2)?;
             Ok(ApiTokenInfo {
                 name: r.get(0)?,
+                token_id: r.get(1)?,
                 scopes: serde_json::from_str(&scopes_json).unwrap_or_default(),
-                created_at: r.get(2)?,
-                last_used: r.get(3)?,
-                expires_at: r.get(4)?,
+                created_at: r.get(3)?,
+                last_used: r.get(4)?,
+                expires_at: r.get(5)?,
             })
         })?;
         rows.collect()
@@ -717,6 +747,30 @@ impl Db {
         if expires_at.is_some_and(|e| now >= e) {
             return Ok(None);
         }
+        if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
+            c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
+        }
+        let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
+        Ok(Some(ApiToken { name, scopes }))
+    }
+    /// Look up an identifiable token by its public ID, then compare the supplied secret hash
+    /// against the stored hash in constant time.
+    pub fn token_lookup_identified(&self, token_id: &str, secret_hash: &str) -> R<Option<ApiToken>> {
+        let c = self.c();
+        let row: Option<IdentifiedTokenRow> = c
+            .query_row(
+                "SELECT name, token_hash, last_used, expires_at, scopes FROM api_tokens WHERE token_id=?",
+                params![token_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        let Some((name, stored_hash, last, expires_at, scopes_json)) = row else {
+            return Ok(None);
+        };
+        if !crate::auth::ct_eq(secret_hash, &stored_hash) || expires_at.is_some_and(|e| crate::now() >= e) {
+            return Ok(None);
+        }
+        let now = crate::now();
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }

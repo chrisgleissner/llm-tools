@@ -283,10 +283,11 @@ and `coordinator/tests/web_api.rs::token_expiry_respects_the_configured_maximum_
 
 New API tokens use `lbr_pat_<id>_<secret>`. The random 16-character lowercase-hex ID makes
 the credential recognizable to scanners; the independently generated 32-byte secret is
-encoded as 64 lowercase-hex characters and provides 256 bits of entropy. Store only the
-SHA-256 hash of the entire token and
-continue accepting existing unprefixed tokens until operators rotate them. The generated
-OpenAPI schema constrains the new format. Do not log either component.
+encoded as 64 lowercase-hex characters and provides 256 bits of entropy. Store the ID and
+only the SHA-256 hash of the secret. Look up by public ID, then compare the secret hash in
+constant time. Continue accepting existing unprefixed tokens through their legacy full-token
+hash lookup until operators rotate them. The generated OpenAPI schema constrains the new
+format. Do not log either component.
 
 In the code: token minting is in `coordinator/src/http.rs::create_token`, and the response
 schema is in `coordinator/src/openapi.rs::TokenCreated`; the format regression is in

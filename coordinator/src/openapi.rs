@@ -42,6 +42,8 @@ struct CommandOutcome {
 #[derive(Serialize, utoipa::ToSchema)]
 struct TokenInfo {
     name: String,
+    #[schema(pattern = "^[0-9a-f]{16}$")]
+    id: Option<String>,
     scopes: Vec<String>,
     created_at: String,
     last_used: Option<String>,

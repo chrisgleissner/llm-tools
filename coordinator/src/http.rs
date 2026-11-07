@@ -299,7 +299,22 @@ fn cookie_value(headers: &HeaderMap) -> Option<String> {
 pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
     if let Some(h) = headers.get(header::AUTHORIZATION) {
         let token = h.to_str().ok().and_then(|s| s.strip_prefix("Bearer ")).ok_or_else(unauthorized)?;
-        return match st.db.token_lookup(&auth::sha256_hex(token))? {
+        let token_record = if let Some(rest) = token.strip_prefix("lbr_pat_") {
+            let Some((token_id, secret)) = rest.split_once('_') else {
+                return Err(unauthorized());
+            };
+            if token_id.len() != 16
+                || !token_id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || secret.len() != 64
+                || !secret.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(unauthorized());
+            }
+            st.db.token_lookup_identified(token_id, &auth::sha256_hex(secret))?
+        } else {
+            st.db.token_lookup(&auth::sha256_hex(token))?
+        };
+        return match token_record {
             Some(token) => Ok(Principal::Token {
                 name: token.name,
                 scopes: token.scopes,
@@ -1100,6 +1115,7 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
         .map(|t| {
             json!({
                 "name": t.name,
+                "id": t.token_id,
                 "scopes": t.scopes,
                 "created_at": timestamp(Some(t.created_at)),
                 "last_used": timestamp(t.last_used),
@@ -1161,9 +1177,13 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
     let token_id = auth::sha256_hex(&auth::random_token())[..16].to_string();
     let token_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(auth::random_token())
+        .map(hex::encode)
         .expect("URL-safe token generator output decodes");
-    let secret = format!("lbr_pat_{token_id}_{}", hex::encode(token_secret));
-    if !st.db.token_create_scoped(name, &auth::sha256_hex(&secret), expires_at, &scopes)? {
+    let secret = format!("lbr_pat_{token_id}_{token_secret}");
+    if !st
+        .db
+        .token_create_identified(name, &token_id, &auth::sha256_hex(&token_secret), expires_at, &scopes)?
+    {
         return Err(err(StatusCode::CONFLICT, "token-exists", "a token with this name already exists"));
     }
     let detail = format!(
@@ -1175,7 +1195,7 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
     Ok(json_ok(
         StatusCode::CREATED,
         json!({
-            "token": {"name": name, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "expires_at": timestamp(expires_at)},
+            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "expires_at": timestamp(expires_at)},
             "secret": secret
         }),
     ))

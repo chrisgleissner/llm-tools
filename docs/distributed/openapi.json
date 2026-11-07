@@ -435,6 +435,13 @@
               "null"
             ]
           },
+          "id": {
+            "pattern": "^[0-9a-f]{16}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "last_used": {
             "type": [
               "string",
