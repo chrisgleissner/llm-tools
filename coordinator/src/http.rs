@@ -875,6 +875,9 @@ async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): 
 /// accepted. The reply carries `total`, `next_cursor` and status facets.
 async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
     let bad = |m: &str| err(StatusCode::BAD_REQUEST, "invalid-request", m.to_string());
+    if q.get("worker").is_some_and(|worker| !valid_name(worker)) {
+        return Err(bad("worker must be a valid worker name"));
+    }
     if let Some(key) = q
         .keys()
         .find(|key| !matches!(key.as_str(), "q" | "worker" | "status" | "sort" | "order" | "limit" | "offset" | "cursor"))
@@ -886,7 +889,15 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
             .map(|v| v.parse::<usize>().map_err(|_| bad(&format!("{k} must be a non-negative integer"))))
             .transpose()
     };
-    let limit = num("limit")?.unwrap_or(100).clamp(1, 500);
+    for key in ["q", "status"] {
+        if q.get(key).is_some_and(|value| value.chars().count() > 256) {
+            return Err(bad(&format!("{key} must be at most 256 characters")));
+        }
+    }
+    let limit = num("limit")?.unwrap_or(100);
+    if !(1..=500).contains(&limit) {
+        return Err(bad("limit must be between 1 and 500"));
+    }
     let legacy_offset = num("offset")?;
     let sort = q.get("sort").map(String::as_str);
     if !matches!(sort, None | Some("name" | "status" | "worker" | "updated")) {
@@ -913,8 +924,10 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
     }))
     .expect("mission list filters serialize");
     let offset = match (q.get("cursor"), legacy_offset) {
-        (Some(_), Some(_)) => return Err(bad("cursor and offset cannot be used together")),
-        (Some(cursor), None) => crate::cursor::read(&st.cursor_key, "missions", &filters, cursor)
+        // Cursor pagination wins when a client also sends the deprecated
+        // offset parameter. This keeps generated clients and scanners from
+        // turning two independently optional query parameters into a 400.
+        (Some(cursor), _) => crate::cursor::read(&st.cursor_key, "missions", &filters, cursor)
             .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-cursor", "cursor is invalid or belongs to a different query"))?,
         (None, Some(offset)) => offset,
         (None, None) => 0,
@@ -1019,13 +1032,6 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
         "events" => Some("after"),
         _ => None,
     };
-    if query.contains_key("cursor") && legacy_key.is_some_and(|key| query.contains_key(key)) {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "invalid-request",
-            "cursor cannot be combined with legacy pagination parameters",
-        ));
-    }
     let filters = format!("worker={worker};mission={mission_id};resource={resource};limit={limit}");
     let wait_ms = query.get("wait_ms").map_or(Ok(0), |value| {
         value
@@ -1038,6 +1044,9 @@ async fn mission_read(st: St, principal: Principal, ip: String, request: Mission
     let mut params = serde_json::Map::new();
     for key in allowed {
         if *key == "cursor" || *key == "limit" {
+            continue;
+        }
+        if query.contains_key("cursor") && Some(*key) == legacy_key {
             continue;
         }
         if let Some(value) = query.get(*key) {
@@ -2401,6 +2410,17 @@ async fn security_headers(mut r: Response) -> Response {
         if let Some(allow) = allow {
             r.headers_mut().insert(header::ALLOW, allow);
         }
+    }
+    // Axum's built-in path extractors reject malformed numeric route segments
+    // before handlers run and return plain text. Normalize those API failures
+    // to the documented RFC 9457 shape, without reflecting parser details.
+    if r.status() == StatusCode::BAD_REQUEST
+        && r.headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/plain"))
+    {
+        r = err(StatusCode::BAD_REQUEST, "invalid-request", "a request path or parameter has an invalid format").into_response();
     }
     let h = r.headers_mut();
     // The static handler sets its own Content-Security-Policy and cache policy.

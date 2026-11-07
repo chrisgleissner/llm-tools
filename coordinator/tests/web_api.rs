@@ -36,6 +36,18 @@ async fn mutation_bodies_require_json_content_type() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn malformed_numeric_path_parameters_use_problem_json() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let response = api.rb(Method::GET, "/api/v1/missions/m1/tasks/not-a-number?worker=w1").send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 400);
+    assert_eq!(response.headers()["content-type"], "application/problem+json");
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "invalid-request");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn auth_state_publishes_the_password_policy_and_session_details() {
     let env = boot().await;
     let anon = env.api();
@@ -798,8 +810,17 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
     assert_eq!(b["offset"], 1);
     let (_, b) = api.get("/api/v1/missions?worker=nobody").await;
     assert_eq!(b["total"], 0);
-    let (_, b) = api.get("/api/v1/missions?limit=0").await;
-    assert_eq!(ids(&b).len(), 1, "limit is clamped to at least 1");
+    let (invalid_worker_status, invalid_worker) = api
+        .get("/api/v1/missions?worker=0000000000000000000000000000000000000000000000000000000000000000")
+        .await;
+    assert_eq!(invalid_worker_status, 400);
+    assert_eq!(invalid_worker["code"], "invalid-request");
+    let (invalid_limit_status, invalid_limit) = api.get("/api/v1/missions?limit=0").await;
+    assert_eq!(invalid_limit_status, 400);
+    assert_eq!(invalid_limit["code"], "invalid-request");
+    let (invalid_large_limit_status, invalid_large_limit) = api.get("/api/v1/missions?limit=501").await;
+    assert_eq!(invalid_large_limit_status, 400);
+    assert_eq!(invalid_large_limit["code"], "invalid-request");
 
     let (_, page_one) = api.get("/api/v1/missions?limit=2").await;
     assert_eq!(ids(&page_one), ["m1", "m2"] as [&str; 2]);
@@ -810,19 +831,25 @@ async fn missions_can_be_searched_filtered_sorted_and_paged() {
     let (invalid_status, invalid) = api.get(&format!("/api/v1/missions?limit=2&sort=name&cursor={next}")).await;
     assert_eq!(invalid_status, 400);
     assert_eq!(invalid["code"], "invalid-cursor");
-    let mut forged = next.into_bytes();
+    let mut forged = next.clone().into_bytes();
     forged[0] = if forged[0] == b'A' { b'B' } else { b'A' };
     let forged = String::from_utf8(forged).unwrap();
     let (forged_status, forged_problem) = api.get(&format!("/api/v1/missions?limit=2&cursor={forged}")).await;
     assert_eq!(forged_status, 400);
     assert_eq!(forged_problem["code"], "invalid-cursor");
-    let (conflict_status, conflict) = api.get("/api/v1/missions?cursor=bogus&offset=0").await;
-    assert_eq!(conflict_status, 400);
-    assert_eq!(conflict["code"], "invalid-request");
+    let (_, combined_page) = api.get(&format!("/api/v1/missions?limit=2&cursor={next}&offset=0")).await;
+    assert_eq!(
+        ids(&combined_page),
+        ["m3", "m4"] as [&str; 2],
+        "opaque cursor takes precedence over the deprecated offset"
+    );
 
     for bad in ["sort=colour", "order=sideways", "limit=-1", "offset=x"] {
         let (st, e) = api.get(&format!("/api/v1/missions?{bad}")).await;
         assert_eq!(st, 400, "{bad}: {e}");
     }
+    let overlong_status = "x".repeat(257);
+    let (st, e) = api.get(&format!("/api/v1/missions?status={overlong_status}")).await;
+    assert_eq!(st, 400, "overlong status filter: {e}");
     env.stop().await;
 }

@@ -85,6 +85,19 @@ fn operation_id(path: &str, method: &str) -> String {
     id
 }
 
+fn token_create_schema() -> Value {
+    json!({
+        "type":"object",
+        "additionalProperties":false,
+        "required":["name"],
+        "properties":{
+            "name":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},
+            "scopes":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["read","operate","terminal:view","terminal:write","admin"]}},
+            "expires_days":{"type":"integer","minimum":0,"maximum":3650}
+        }
+    })
+}
+
 fn response_schema(path: &str, method: &str) -> Value {
     if path == "/api/v1/missions" && method == "GET" {
         return json!({"$ref":"#/components/schemas/MissionListPage"});
@@ -114,11 +127,17 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         "summary": format!("{} {}", method.to_ascii_uppercase(), path),
         "responses": {
             "200": {"description":"Successful response","content":{"application/json":{"schema":response_schema(path, method)}}},
+            "201": {"description":"Resource created","content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}},
+            "202": {"description":"Command accepted for durable asynchronous processing","headers":{"Location":{"schema":{"type":"string","format":"uri-reference"}}},"content":{"application/json":{"schema":{"type":"object","additionalProperties":true}}}},
+            "204": {"description":"Resource deleted"},
             "400": {"description":"Invalid request","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "401": {"description":"Authentication required","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "403": {"description":"Insufficient scope or forbidden request","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "404": {"description":"Resource not found","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "428": {"description":"A required If-Match precondition was not supplied","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "409": {"description":"The requested change conflicts with current state","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "422": {"description":"The worker does not support this operation","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "405": {"description":"Method not allowed","headers":{"Allow":{"schema":{"type":"string"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "500": {"description":"Internal server error","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
@@ -128,7 +147,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
             "required":true,
-            "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreate"}}}
+            "content":{"application/json":{"schema":token_create_schema()}}
         });
         op["responses"]["201"] = json!({
             "description":"Token created; secret is returned once",
@@ -161,11 +180,21 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             {"name":"offset","in":"query","required":false,"deprecated":true,"description":"Legacy pagination; use cursor.","schema":{"type":"integer","minimum":0}}
         ]);
     }
-    if method == "POST" || method == "PATCH" || method == "PUT" || method == "DELETE" {
+    if method == "POST" || method == "PATCH" || method == "PUT" {
         op["requestBody"] = json!({
             "required": method == "POST" || method == "PUT",
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/BoundedRequestObject"}}}
         });
+    }
+    if path == "/api/docs" && method == "GET" {
+        op["responses"]["200"]["content"] = json!({"text/html":{"schema":{"type":"string"}}});
+    }
+    if path == "/api/v1/workers" && method == "POST" {
+        op["requestBody"]["content"]["application/json"]["schema"] = json!({
+            "type":"object","additionalProperties":false,"required":["name"],
+            "properties":{"name":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}}
+        });
+        op["responses"]["201"] = json!({"description":"Worker enrolled; enrolment secret is returned once","content":{"application/json":{"schema":{"type":"object","required":["name","token"],"properties":{"name":{"type":"string"},"token":{"type":"string"}},"additionalProperties":false}}}});
     }
     // Logout revokes the authenticated session and has no request payload.
     // Describing the generic POST body here makes Schemathesis correctly flag
@@ -176,7 +205,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
             "required":true,
-            "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreate"}}}
+            "content":{"application/json":{"schema":token_create_schema()}}
         });
     }
     if path == "/api/v1/auth/login" && method == "POST" {
@@ -190,6 +219,58 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                     "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
                     "password":{"type":"string","minLength":12,"maxLength":256},
                     "remember":{"type":"boolean"}
+                }
+            }}}
+        });
+    }
+    if path == "/api/v1/auth/password" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{
+                "type":"object",
+                "additionalProperties":false,
+                "required":["current","new"],
+                "properties":{
+                    "current":{"type":"string","minLength":12,"maxLength":256},
+                    "new":{"type":"string","minLength":12,"maxLength":256},
+                    "keep_api_tokens":{"type":"boolean"}
+                }
+            }}}
+        });
+    }
+    if path == "/api/v1/auth/setup" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{
+                "type":"object",
+                "additionalProperties":false,
+                "required":["setup_token","username","password"],
+                "properties":{
+                    "setup_token":{"type":"string","minLength":1,"maxLength":256},
+                    "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
+                    "password":{"type":"string","minLength":12,"maxLength":256}
+                }
+            }}}
+        });
+    }
+    if path == "/api/v1/commands" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{
+                "type":"object",
+                "additionalProperties":false,
+                "required":["target","request"],
+                "properties":{
+                    "target":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},
+                    "wait_ms":{"type":"integer","minimum":0,"maximum":30000},
+                    "request":{"type":"object","additionalProperties":false,"required":["schema_version","operation","request_id"],"properties":{
+                        "schema_version":{"type":"integer","const":1},
+                        "operation":{"type":"string","minLength":1,"maxLength":128},
+                        "request_id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._-]+$"},
+                        "mission_id":{"type":["string","null"],"maxLength":128},
+                        "target":{"type":"string","minLength":1,"maxLength":63},
+                        "params":{"type":"object","maxProperties":128}
+                    }}
                 }
             }}}
         });
@@ -278,7 +359,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             params.push(json!({
                 "name":"If-Match","in":"header","required":false,
                 "description":"Task revision ETag returned by GET /missions/{id}/tasks/{n}; maps to expected_revision.",
-                "schema":{"type":"string","pattern":"^\\\"[0-9]+\\\"$"}
+                "schema":{"type":"string","minLength":3,"maxLength":32,"pattern":"^\\\"[0-9]+\\\"$"}
             }));
         }
         if path == "/api/v1/missions/{id}/tasks/{n}" && method == "GET" {
@@ -303,7 +384,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             }));
             params.push(json!({
                 "name":legacy_key,"in":"query","required":false,"deprecated":true,
-                "description":"Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
+                "description":"Legacy numeric pagination. Use cursor instead; ignored when cursor is supplied.",
                 "schema":{"type":"integer","minimum":0}
             }));
             params.push(json!({
@@ -544,5 +625,78 @@ mod tests {
     fn logout_has_no_request_body() {
         let doc = openapi_value();
         assert!(doc["paths"]["/api/v1/auth/logout"]["post"]["requestBody"].is_null());
+    }
+
+    #[test]
+    fn password_change_schema_matches_the_handler_fields() {
+        let doc = openapi_value();
+        let schema = &doc["paths"]["/api/v1/auth/password"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["required"], json!(["current", "new"]));
+        assert_eq!(schema["properties"]["current"]["type"], "string");
+        assert_eq!(schema["properties"]["new"]["type"], "string");
+        assert_eq!(schema["properties"]["keep_api_tokens"]["type"], "boolean");
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn setup_schema_matches_the_handler_fields() {
+        let doc = openapi_value();
+        let schema = &doc["paths"]["/api/v1/auth/setup"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["required"], json!(["setup_token", "username", "password"]));
+        assert_eq!(schema["properties"]["setup_token"]["type"], "string");
+        assert_eq!(schema["properties"]["username"]["type"], "string");
+        assert_eq!(schema["properties"]["password"]["minLength"], 12);
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn low_level_command_schema_matches_the_handler_fields() {
+        let doc = openapi_value();
+        let schema = &doc["paths"]["/api/v1/commands"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["required"], json!(["target", "request"]));
+        assert_eq!(
+            schema["properties"]["request"]["required"],
+            json!(["schema_version", "operation", "request_id"])
+        );
+        assert_eq!(schema["properties"]["request"]["properties"]["schema_version"]["const"], 1);
+        assert_eq!(schema["properties"]["wait_ms"]["maximum"], 30000);
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn token_create_schema_matches_the_handler_constraints() {
+        let doc = openapi_value();
+        let schema = &doc["paths"]["/api/v1/tokens"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["required"], json!(["name"]));
+        assert_eq!(schema["properties"]["name"]["pattern"], "^[a-z0-9][a-z0-9-]*$");
+        assert_eq!(
+            schema["properties"]["scopes"]["items"]["enum"],
+            json!(["read", "operate", "terminal:view", "terminal:write", "admin"])
+        );
+        assert_eq!(schema["properties"]["expires_days"]["maximum"], 3650);
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn documented_request_and_response_shapes_match_http_handlers() {
+        let doc = openapi_value();
+        assert!(doc["paths"]["/api/v1/tokens/{name}"]["delete"]["requestBody"].is_null());
+        assert_eq!(
+            doc["paths"]["/api/v1/tokens"]["post"]["responses"]["409"]["content"]["application/problem+json"]["schema"]["$ref"],
+            "#/components/schemas/ProblemDetails"
+        );
+        let worker_schema = &doc["paths"]["/api/v1/workers"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(worker_schema["required"], json!(["name"]));
+        assert_eq!(worker_schema["additionalProperties"], false);
+        assert_eq!(
+            doc["paths"]["/api/docs"]["get"]["responses"]["200"]["content"]["text/html"]["schema"]["type"],
+            "string"
+        );
+        let if_match = &doc["paths"]["/api/v1/missions/{id}/tasks/{n}/verify"]["post"]["parameters"];
+        assert!(if_match
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "If-Match" && p["schema"]["minLength"] == 3));
     }
 }

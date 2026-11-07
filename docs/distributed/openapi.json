@@ -951,6 +951,16 @@
         "responses": {
           "200": {
             "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful response"
+          },
+          "201": {
+            "content": {
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
@@ -958,7 +968,29 @@
                 }
               }
             },
-            "description": "Successful response"
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -1017,6 +1049,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -1036,6 +1078,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -1115,6 +1177,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -1172,6 +1267,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -1191,6 +1296,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -1239,6 +1364,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -1296,6 +1454,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -1315,6 +1483,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -1365,7 +1553,27 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BoundedRequestObject"
+                "additionalProperties": false,
+                "properties": {
+                  "current": {
+                    "maxLength": 256,
+                    "minLength": 12,
+                    "type": "string"
+                  },
+                  "keep_api_tokens": {
+                    "type": "boolean"
+                  },
+                  "new": {
+                    "maxLength": 256,
+                    "minLength": 12,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "current",
+                  "new"
+                ],
+                "type": "object"
               }
             }
           },
@@ -1382,6 +1590,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -1440,6 +1681,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -1459,6 +1710,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -1509,7 +1780,31 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BoundedRequestObject"
+                "additionalProperties": false,
+                "properties": {
+                  "password": {
+                    "maxLength": 256,
+                    "minLength": 12,
+                    "type": "string"
+                  },
+                  "setup_token": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "username": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9._@-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "setup_token",
+                  "username",
+                  "password"
+                ],
+                "type": "object"
               }
             }
           },
@@ -1526,6 +1821,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -1584,6 +1912,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -1603,6 +1941,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -1651,6 +2009,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -1708,6 +2099,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -1727,6 +2128,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -1781,7 +2202,67 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BoundedRequestObject"
+                "additionalProperties": false,
+                "properties": {
+                  "request": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "mission_id": {
+                        "maxLength": 128,
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "operation": {
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "params": {
+                        "maxProperties": 128,
+                        "type": "object"
+                      },
+                      "request_id": {
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9._-]+$",
+                        "type": "string"
+                      },
+                      "schema_version": {
+                        "const": 1,
+                        "type": "integer"
+                      },
+                      "target": {
+                        "maxLength": 63,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "schema_version",
+                      "operation",
+                      "request_id"
+                    ],
+                    "type": "object"
+                  },
+                  "target": {
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$",
+                    "type": "string"
+                  },
+                  "wait_ms": {
+                    "maximum": 30000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "target",
+                  "request"
+                ],
+                "type": "object"
               }
             }
           },
@@ -1797,6 +2278,17 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
           },
           "202": {
             "content": {
@@ -1815,6 +2307,9 @@
                 }
               }
             }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -1873,6 +2368,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -1892,6 +2397,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -1959,6 +2484,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -2016,6 +2574,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -2035,6 +2603,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -2093,6 +2681,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -2150,6 +2771,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -2169,6 +2800,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -2227,6 +2878,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -2284,6 +2968,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -2303,6 +2997,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -2447,6 +3161,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -2504,6 +3251,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -2523,6 +3280,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -2608,6 +3385,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -2665,6 +3475,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -2684,6 +3504,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -2775,6 +3615,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -2832,6 +3705,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -2851,6 +3734,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -2942,6 +3845,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -2999,6 +3935,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -3018,6 +3964,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -3108,7 +4074,7 @@
           },
           {
             "deprecated": true,
-            "description": "Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
+            "description": "Legacy numeric pagination. Use cursor instead; ignored when cursor is supplied.",
             "in": "query",
             "name": "after",
             "required": false,
@@ -3138,6 +4104,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -3196,6 +4195,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -3215,6 +4224,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -3305,6 +4334,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -3362,6 +4424,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -3381,6 +4453,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -3471,7 +4563,7 @@
           },
           {
             "deprecated": true,
-            "description": "Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
+            "description": "Legacy numeric pagination. Use cursor instead; ignored when cursor is supplied.",
             "in": "query",
             "name": "offset",
             "required": false,
@@ -3501,6 +4593,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -3559,6 +4684,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -3578,6 +4713,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -3702,6 +4857,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -3759,6 +4947,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -3778,6 +4976,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -3866,6 +5084,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -3923,6 +5174,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -3942,6 +5203,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -4031,6 +5312,8 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "maxLength": 32,
+              "minLength": 3,
               "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
@@ -4057,6 +5340,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -4115,6 +5431,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -4134,6 +5460,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -4225,6 +5571,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -4282,6 +5661,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -4301,6 +5690,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -4389,6 +5798,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -4446,6 +5888,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -4465,6 +5917,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -4581,6 +6053,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -4638,6 +6143,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -4657,6 +6172,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -4728,6 +6263,8 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "maxLength": 32,
+              "minLength": 3,
               "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
@@ -4793,6 +6330,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -4850,6 +6420,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -4869,6 +6449,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -4959,6 +6559,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -5016,6 +6649,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -5035,6 +6678,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -5125,6 +6788,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -5182,6 +6878,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -5201,6 +6907,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -5291,7 +7017,7 @@
           },
           {
             "deprecated": true,
-            "description": "Legacy numeric pagination. Use cursor instead; cannot be combined with cursor.",
+            "description": "Legacy numeric pagination. Use cursor instead; ignored when cursor is supplied.",
             "in": "query",
             "name": "offset",
             "required": false,
@@ -5321,6 +7047,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -5379,6 +7138,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -5398,6 +7167,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -5486,6 +7275,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -5543,6 +7365,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -5562,6 +7394,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -5670,6 +7522,39 @@
               }
             }
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -5727,6 +7612,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -5746,6 +7641,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -5825,6 +7740,8 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "maxLength": 32,
+              "minLength": 3,
               "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
@@ -5851,6 +7768,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -5909,6 +7859,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -5928,6 +7888,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -6009,6 +7989,8 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "maxLength": 32,
+              "minLength": 3,
               "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
@@ -6035,6 +8017,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -6093,6 +8108,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -6112,6 +8137,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -6201,6 +8246,8 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "maxLength": 32,
+              "minLength": 3,
               "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
@@ -6227,6 +8274,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -6285,6 +8365,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -6304,6 +8394,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -6385,6 +8495,8 @@
             "name": "If-Match",
             "required": false,
             "schema": {
+              "maxLength": 32,
+              "minLength": 3,
               "pattern": "^\\\"[0-9]+\\\"$",
               "type": "string"
             }
@@ -6411,6 +8523,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -6469,6 +8614,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -6488,6 +8643,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -6546,6 +8721,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -6603,6 +8811,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -6622,6 +8840,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -6670,6 +8908,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -6727,6 +8998,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -6746,6 +9027,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -6804,6 +9105,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -6861,6 +9195,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -6880,6 +9224,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -6938,6 +9302,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -6995,6 +9392,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -7014,6 +9421,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -7062,7 +9489,40 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TokenCreate"
+                "additionalProperties": false,
+                "properties": {
+                  "expires_days": {
+                    "maximum": 3650,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "name": {
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$",
+                    "type": "string"
+                  },
+                  "scopes": {
+                    "items": {
+                      "enum": [
+                        "read",
+                        "operate",
+                        "terminal:view",
+                        "terminal:write",
+                        "admin"
+                      ],
+                      "type": "string"
+                    },
+                    "maxItems": 5,
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
               }
             }
           },
@@ -7088,6 +9548,28 @@
               }
             },
             "description": "Token created; secret is returned once"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -7146,6 +9628,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -7165,6 +9657,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -7221,16 +9733,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BoundedRequestObject"
-              }
-            }
-          },
-          "required": false
-        },
         "responses": {
           "200": {
             "content": {
@@ -7242,6 +9744,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -7300,6 +9835,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -7319,6 +9864,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -7377,6 +9942,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -7434,6 +10032,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -7453,6 +10061,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -7515,6 +10143,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -7572,6 +10233,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -7591,6 +10262,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -7643,6 +10334,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -7700,6 +10424,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -7719,6 +10453,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -7767,7 +10521,19 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BoundedRequestObject"
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "pattern": "^[a-z0-9][a-z0-9-]*$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
               }
             }
           },
@@ -7784,6 +10550,51 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "token": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "token"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Worker enrolled; enrolment secret is returned once"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -7842,6 +10653,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -7861,6 +10682,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -7917,16 +10758,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BoundedRequestObject"
-              }
-            }
-          },
-          "required": false
-        },
         "responses": {
           "200": {
             "content": {
@@ -7938,6 +10769,39 @@
               }
             },
             "description": "Successful response"
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
           },
           "400": {
             "content": {
@@ -7996,6 +10860,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -8015,6 +10889,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -8081,6 +10975,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -8138,6 +11065,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -8157,6 +11094,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -8244,6 +11201,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -8301,6 +11291,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -8320,6 +11320,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -8408,6 +11428,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -8465,6 +11518,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -8484,6 +11547,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -8571,6 +11654,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -8628,6 +11744,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -8647,6 +11773,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -8725,6 +11871,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -8782,6 +11961,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -8801,6 +11990,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -8879,6 +12088,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -8936,6 +12178,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -8955,6 +12207,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {
@@ -9013,6 +12285,39 @@
             },
             "description": "Successful response"
           },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Resource created"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Command accepted for durable asynchronous processing",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "format": "uri-reference",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Resource deleted"
+          },
           "400": {
             "content": {
               "application/problem+json": {
@@ -9070,6 +12375,16 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The requested change conflicts with current state"
+          },
           "412": {
             "content": {
               "application/problem+json": {
@@ -9089,6 +12404,26 @@
               }
             },
             "description": "Mutation body is not application/json"
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The worker does not support this operation"
+          },
+          "428": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "A required If-Match precondition was not supplied"
           },
           "429": {
             "content": {

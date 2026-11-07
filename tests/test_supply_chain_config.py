@@ -62,6 +62,10 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert "st run docs/distributed/openapi.json" in workflow
     assert "--header \"Authorization: Bearer $SCAN_TOKEN\"" in workflow
     assert "--max-examples 10" in workflow
+    assert "--max-failures 10" in workflow
+    assert "--exclude-checks positive_data_acceptance" in workflow
+    assert "--exclude-path-regex '^/api/v1/(stream|terminal|worker/connect|worker/terminal/.*)$'" in workflow
+    assert "Authored API tests cover valid stateful" in workflow
     assert "zap-api-scan.py" in workflow and "-f openapi" in workflow
     assert "zap-baseline.py" in workflow
     assert "if risk >= 2:" in workflow
@@ -69,3 +73,5 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow
     assert "--severity CRITICAL" in workflow
     assert 'severity in {"MEDIUM", "HIGH", "CRITICAL"}' in workflow
+    assert 'mutation_limit_per_token = 10000' in workflow
+    assert 'mutation_limit_per_address = 10000' in workflow
