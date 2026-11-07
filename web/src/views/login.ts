@@ -78,7 +78,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
   const remember = h("input", { type: "checkbox", id: "remember", name: "remember" });
   const progress = h("p", { class: "hint login-progress", id: "login-progress", role: "status", "aria-live": "polite", "aria-atomic": "true", hidden: true });
   const rememberHint = sp
-    ? `Off, for a shared computer: signed out after ${minutes(sp.default.idle_secs)} idle, ${minutes(sp.default.absolute_secs)} at most, and when the browser closes. On: signed in for up to ${minutes(sp.remembered.absolute_secs)}, or until ${minutes(sp.remembered.idle_secs)} pass idle.`
+    ? `Not remembered: signed out after ${minutes(sp.default.idle_secs)} without activity or ${minutes(sp.default.absolute_secs)} at most, and when the browser closes. Remembered: signed in for up to ${minutes(sp.remembered.absolute_secs)}, or until ${minutes(sp.remembered.idle_secs)} idle.`
     : "Leave this off on a shared computer.";
   const submit = h("button", { type: "submit", class: "btn primary", id: "login-submit" }, "Sign in");
   const form = h(

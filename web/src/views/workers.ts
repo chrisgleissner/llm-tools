@@ -20,7 +20,7 @@ function enrolDialog(name: string, token: string): void {
     h("h3", {}, "Enrol it on the worker machine"),
     h("ol", { class: "steps" }, h("li", {}, "Copy ", h("code", {}, "ca.pem"), " from the coordinator data directory to the worker machine."), h("li", {}, "Run the commands below. Paste the token, press Enter, then Ctrl-D."), h("li", {}, "Add ", h("code", {}, "--allow-control"), " to let this web interface change missions, and ", h("code", {}, "--allow-terminal-view"), " to allow read-only terminals.")),
     h("pre", { class: "cmd" }, cmd),
-    h("div", { class: "actions end" }, button("Copy commands", () => void copyText(cmd).then((ok) => hooks.say(ok ? "Copied the commands." : "Could not copy the commands.")), { icon: "copy" }), done),
+    h("div", { class: "actions end" }, button("Copy commands", () => void copyText(cmd).then((ok) => hooks.say(ok ? "Copied." : "Could not copy.")), { icon: "copy" }), done),
   );
   const dlg = onceDialog({ id: "enrol-result", title: "Worker added", body, warning: "This token is shown once. If you close this window before copying it, remove the worker and add it again to get a new token." });
   done.addEventListener("click", () => dlg.close());

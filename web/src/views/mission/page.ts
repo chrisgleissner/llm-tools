@@ -197,7 +197,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     stop: () =>
       void (async () => {
         if (blocked()) return void announce(blocked(), "failed");
-        const reason = await confirm({ title: "Stop mission?", message: `Stop "${entry()?.mission.name || missionId}" on ${workerName}. Stop ends the session once the provider finishes its current step, and you can start the mission again later. Pause keeps the session open.`, confirmLabel: "Stop mission", danger: true });
+        const reason = await confirm({ title: "Stop mission?", message: `Stop "${entry()?.mission.name || missionId}" on ${workerName}. Stop ends the session when the provider's current step is done; you can start the mission again. Pause keeps it open.`, confirmLabel: "Stop mission", danger: true });
         if (reason !== null) await missionAction("Mission stopped", "stop the mission", "mission.stop", "STOPPING");
       })(),
     cancel: () =>
