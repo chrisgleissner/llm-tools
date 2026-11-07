@@ -429,9 +429,16 @@ ownership.
 ### After the reset
 
 Open the web interface and sign in with the new password (the temporary one, after
-`--temporary`). The browser shows that the host reset the password. After `--temporary`
-the web interface asks for a new password first; the new password has to satisfy the same
-rules. Signing in again with the temporary password is then refused.
+`--temporary`). The browser shows that the host reset the password, as a message above
+the page that can be dismissed and is not shown again in that browser session. After
+`--temporary` the web interface shows only a "Choose a new password" form (with a Sign out
+button): every other page is blocked, and a request that is answered with the
+`password-change-required` error opens the same form. The new password has to satisfy the
+same rules. Signing in again with the temporary password is then refused.
+
+The sign-in page itself tells a person who has forgotten the password to run
+`llm-bridge-coordinator reset-password` in an SSH session on the coordinator host, and
+links to this section.
 
 If sign-in still fails, check that you are using the right coordinator (`bridge-coordinator
 info` or `docker compose exec coordinator bridge-coordinator info` prints its URL) and
