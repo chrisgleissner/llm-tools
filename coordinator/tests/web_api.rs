@@ -339,6 +339,7 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
             "203.0.113.7",
         )
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-resource-test");
 
     let (status, command) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=25&offset=5").await;
     assert_eq!(status, 202, "{command}");
@@ -456,6 +457,7 @@ async fn cli_parity_resource_adapters_queue_the_expected_typed_operations() {
         .db
         .worker_hello("build-1", "worker-id-parity", &hello, &json!(capabilities), "203.0.113.8")
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-parity");
     let routes = [
         (
             Method::GET,

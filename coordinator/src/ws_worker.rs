@@ -67,8 +67,16 @@ fn close_frame(code: u16, reason: &'static str) -> Ws {
     Ws::Close(Some(CloseFrame { code, reason: reason.into() }))
 }
 
-async fn send(socket: &mut WebSocket, text: String) -> bool {
+async fn send(st: &St, socket: &mut WebSocket, text: String) -> bool {
+    st.hub.count_message("worker_out", &text);
     socket.send(Ws::Text(text.into())).await.is_ok()
+}
+
+/// Count an incoming text frame for the diagnostics byte counters.
+fn count_in(st: &St, frame: &Option<Result<Ws, axum::Error>>) {
+    if let Some(Ok(Ws::Text(t))) = frame {
+        st.hub.count_message("worker_in", t.as_str());
+    }
 }
 
 enum Step {
@@ -123,6 +131,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             f = timeout(deadline.saturating_duration_since(Instant::now()), socket.recv()) => match f { Ok(f) => f, Err(_) => { let _ = socket.send(close_frame(1008, "hello timeout")).await; return } },
             _ = shutdown.changed() => { let _ = socket.send(close_frame(1001, "shutting down")).await; return }
         };
+        count_in(&st, &frame);
         match classify(frame, &name, 0) {
             Step::Close(c, r) => {
                 let _ = socket.send(close_frame(c, r)).await;
@@ -131,18 +140,18 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             Step::Skip => {}
             Step::Reject(text) => {
                 if let Some(t) = text.strip_prefix("\u{0}fatal") {
-                    let _ = send(&mut socket, t.to_string()).await;
+                    let _ = send(&st, &mut socket, t.to_string()).await;
                     let _ = socket.send(close_frame(1002, "unsupported version")).await;
                     return;
                 }
-                if !send(&mut socket, text).await {
+                if !send(&st, &mut socket, text).await {
                     return;
                 }
             }
             Step::Message(m) if m.kind == "hello" => match protocol::check_hello(&m) {
                 Ok(caps) => break (m, caps),
                 Err(e) => {
-                    let _ = send(&mut socket, protocol::error_message(&name, 0, e.code, &e.message, Some(&m.id))).await;
+                    let _ = send(&st, &mut socket, protocol::error_message(&name, 0, e.code, &e.message, Some(&m.id))).await;
                     if e.code == "unsupported-version" {
                         let _ = socket.send(close_frame(1002, "unsupported version")).await;
                         return;
@@ -152,6 +161,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             Step::Message(m) if m.kind == "error" => {}
             Step::Message(m) => {
                 if !send(
+                    &st,
                     &mut socket,
                     protocol::error_message(&name, 0, "not-welcomed", &format!("{} before hello", m.kind), Some(&m.id)),
                 )
@@ -168,6 +178,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         Ok(HelloOutcome::Ok { generation, cursor }) => (generation, cursor),
         Ok(HelloOutcome::WorkerIdMismatch) => {
             let _ = send(
+                &st,
                 &mut socket,
                 protocol::error_message(
                     &name,
@@ -192,7 +203,11 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         }
     };
 
-    // ---- register (closes any older connection) and welcome
+    // ---- register (closes any older connection) and welcome.
+    // Unanswered reads are failed with `worker-offline` first: nobody is waiting for them any more, and
+    // replaying them after a reconnect cost megabytes (DOG-021). Doing it before `register` means no
+    // read submitted on the new connection can be caught by it.
+    expire_reads(&st, &name);
     let conn_id = st.hub.next_conn_id();
     let (tx, mut rx) = mpsc::channel::<Outbound>(OUTBOUND_QUEUE);
     let (close_tx, mut close_rx) = watch::channel(None);
@@ -216,9 +231,9 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         generation,
         json!({"generation": generation, "protocol_version": PROTOCOL_VERSION, "event_cursor": cursor}),
     );
-    let mut alive = send(&mut socket, welcome).await;
+    let mut alive = send(&st, &mut socket, welcome).await;
 
-    // ---- redeliver every unfinished command
+    // ---- redeliver every unfinished write (reads were expired before registering, see above)
     if alive {
         match st.db.commands_resend(&name) {
             Ok(rows) => {
@@ -245,12 +260,13 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
         tokio::select! {
             frame = socket.recv() => {
                 last_heard = Instant::now();
+                count_in(&st, &frame);
                 match classify(frame, &worker_id, generation) {
                     Step::Close(c, r) => { final_close = Some((c, r)); break }
                     Step::Skip => {}
                     Step::Reject(text) => {
                         let text = text.strip_prefix("\u{0}fatal").map(str::to_string).unwrap_or(text);
-                        if !send(&mut socket, text).await { break }
+                        if !send(&st, &mut socket, text).await { break }
                     }
                     Step::Message(m) if is_stale_welcome_reply(&m, &welcome_id) => {
                         st.db.audit(
@@ -263,16 +279,16 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
                         break
                     }
                     Step::Message(m) => match handle(&st, &name, &worker_id, generation, m) {
-                        Ok(replies) => for r in replies { if !send(&mut socket, r).await { alive = false; break } },
+                        Ok(replies) => for r in replies { if !send(&st, &mut socket, r).await { alive = false; break } },
                         Err(()) => { final_close = Some((1011, "internal error")); break }
                     },
                 }
             }
             item = rx.recv() => {
                 let Some(item) = item else { final_close = *close_rx.borrow(); break };
-                if !send(&mut socket, item.text).await { break }
+                if !send(&st, &mut socket, item.text).await { break }
                 if let Some(id) = item.command_id {
-                    if let Ok(Some(row)) = st.db.command_sent(&id) { st.hub.publish(json!({"type": "command", "command": row.to_json()})); }
+                    if let Ok(Some(row)) = st.db.command_sent(&id) { st.hub.publish(json!({"type": "command", "command": row.to_notice()})); }
                 }
             }
             _ = close_rx.changed() => {
@@ -287,7 +303,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
                     Ok(None) => { final_close = Some((1008, "worker revoked")); break }
                     _ => {}
                 }
-                if !send(&mut socket, protocol::encode("ping", &worker_id, generation, json!({}))).await { break }
+                if !send(&st, &mut socket, protocol::encode("ping", &worker_id, generation, json!({}))).await { break }
             }
         }
     }
@@ -296,8 +312,21 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
     }
     if st.hub.unregister(&name, conn_id) {
         let _ = st.db.worker_disconnected(&name);
+        expire_reads(&st, &name);
         st.hub
             .publish(json!({"type": "worker", "worker": name, "state": "offline", "generation": generation}));
+    }
+}
+
+/// Finish the worker's unanswered read-only commands with a `worker-offline` failure and tell the browsers.
+fn expire_reads(st: &St, name: &str) {
+    match st.db.commands_expire_reads(name) {
+        Ok(rows) => {
+            for row in rows {
+                st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
+            }
+        }
+        Err(e) => eprintln!("database error: {e}"),
     }
 }
 
@@ -308,13 +337,39 @@ async fn deliver_row(st: &St, socket: &mut WebSocket, worker_id: &str, generatio
         o.entry("params").or_insert_with(|| json!({}));
         o.entry("mission_id").or_insert(Value::Null);
     }
-    if !send(socket, protocol::encode("command", worker_id, generation, payload)).await {
+    if !send(st, socket, protocol::encode("command", worker_id, generation, payload)).await {
         return false;
     }
     if let Ok(Some(r)) = st.db.command_sent(&row.request_id) {
-        st.hub.publish(json!({"type": "command", "command": r.to_json()}));
+        st.hub.publish(json!({"type": "command", "command": r.to_notice()}));
     }
     true
+}
+
+/// The browser-stream change notice for one accepted batch: counts per mission, not the events.
+/// A console that wants the details reads `GET /api/v1/events` (stored by the coordinator, so no
+/// worker round trip) or the mission list, whose entries carry the replicated summaries.
+fn event_notice(worker: &str, cursor: u64, events: &[Value], summaries: &[Value]) -> Value {
+    let mut by_mission: std::collections::BTreeMap<String, (u64, u64, bool)> = std::collections::BTreeMap::new();
+    for event in events {
+        let mission = event.get("mission_id").and_then(Value::as_str).unwrap_or("");
+        let id = event.get("id").and_then(Value::as_u64).unwrap_or(0);
+        let entry = by_mission.entry(mission.to_string()).or_default();
+        entry.0 += 1;
+        entry.1 = entry.1.max(id);
+    }
+    for summary in summaries {
+        if let Some(id) = summary.get("id").and_then(Value::as_str) {
+            by_mission.entry(id.to_string()).or_default().2 = true;
+        }
+    }
+    let first = events.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).min();
+    let last = events.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).max();
+    let missions: Vec<Value> = by_mission
+        .into_iter()
+        .map(|(id, (count, last_id, summary))| json!({"id": id, "events": count, "last_event_id": last_id, "summary": summary}))
+        .collect();
+    json!({"type": "event", "worker": worker, "cursor": cursor, "count": events.len(), "first_event_id": first, "last_event_id": last, "missions": missions})
 }
 
 /// The worker's `stale-generation` error in reply to our `welcome`.
@@ -361,8 +416,8 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
                 .map_err(db)?
             {
                 EventsOutcome::Accepted { cursor, stored } => {
-                    if stored > 0 {
-                        st.hub.publish(json!({"type": "event", "worker": name, "cursor": cursor, "events": events}));
+                    if stored > 0 || missions.as_ref().is_some_and(|m| !m.is_empty()) {
+                        st.hub.publish(event_notice(name, cursor, &events, missions.as_deref().unwrap_or(&[])));
                     }
                     Ok(vec![])
                 }
@@ -377,14 +432,14 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
         "command.ack" => {
             let id = m.payload["request_id"].as_str().unwrap_or_default();
             if let Some(row) = st.db.command_acked(name, id).map_err(db)? {
-                st.hub.publish(json!({"type": "command", "command": row.to_json()}));
+                st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
             }
             Ok(vec![])
         }
         "command.result" => {
             let id = m.payload["request_id"].as_str().unwrap_or_default();
             if let Some(row) = st.db.command_done(name, id, &Value::Object(m.payload.clone())).map_err(db)? {
-                st.hub.publish(json!({"type": "command", "command": row.to_json()}));
+                st.hub.publish(json!({"type": "command", "command": row.to_notice()}));
             }
             Ok(vec![])
         }
