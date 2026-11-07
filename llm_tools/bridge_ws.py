@@ -103,12 +103,19 @@ def read_frame(stream: socket.socket, *, max_payload: int, expect_masked: bool) 
     return Frame(bool(first & 0x80), opcode, payload)
 
 
+# How long one outgoing frame may block. Independent of the receive timeout:
+# the worker polls with a short receive timeout, and a send that inherited it
+# failed on any link where a write blocks briefly (weak Wi-Fi, full TCP window).
+SEND_TIMEOUT_SECONDS = 30.0
+
+
 class WebSocketClient:
     """A blocking client connection. Not thread-safe; one reader and one writer at most."""
 
-    def __init__(self, sock: socket.socket, *, max_message: int) -> None:
+    def __init__(self, sock: socket.socket, *, max_message: int, send_timeout: float = SEND_TIMEOUT_SECONDS) -> None:
         self.sock = sock
         self.max_message = max_message
+        self.send_timeout = send_timeout
         self.closed = False
 
     @classmethod
@@ -177,7 +184,12 @@ class WebSocketClient:
     def _send(self, opcode: int, payload: bytes) -> None:
         if self.closed:
             raise WebSocketClosed(1006, "connection already closed")
-        self.sock.sendall(encode_frame(opcode, payload, mask=True))
+        previous = self.sock.gettimeout()
+        self.sock.settimeout(self.send_timeout)
+        try:
+            self.sock.sendall(encode_frame(opcode, payload, mask=True))
+        finally:
+            self.sock.settimeout(previous)
 
     def receive_text(self, timeout: float | None = None) -> str | None:
         """Return the next text message, ``None`` on timeout; answer pings on the way."""
