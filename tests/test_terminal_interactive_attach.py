@@ -328,14 +328,15 @@ def test_real_curses_dispatches_terminal_action_after_restoring_terminal(tmp_pat
         "tui._execute_terminal_action = execute\n"
         "def dispatch(mission, line):\n"
         "    return TerminalAction('mission-b', '/dev/pts/7') if line.startswith('attach') else 'UI_RESUMED_AFTER_ATTACH'\n"
-        "def snapshot(mission): return {'mission': {'id': mission, 'name': 'Attach Action Mission', 'status': 'RUNNING'}}\n"
+        "# The header shows the short ID too, so at 80 columns with the outside-station badge a longer name is clipped.\n"
+        "def snapshot(mission): return {'mission': {'id': mission, 'name': 'Attach Test', 'status': 'RUNNING'}}\n"
         "raise SystemExit(tui.run_control('mission-a', dispatch, snapshot))\n"
     )
     env = dict(os.environ, TERM="xterm-256color")
     process = subprocess.Popen([sys.executable, "-c", script], stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)
     os.close(slave)
     try:
-        _wait_for(master, process, b"Attach Action Mission")
+        _wait_for(master, process, b"Attach Test")
         os.write(master, b"attach --mission mission-b --client /dev/pts/7\r")
         deadline = time.monotonic() + scaled(5)
         # write_text() creates the file before it writes the content, so wait for the content.
