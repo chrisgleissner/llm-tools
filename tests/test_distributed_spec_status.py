@@ -92,3 +92,67 @@ def test_distributed_docs_do_not_contain_unapproved_private_addresses() -> None:
             if token not in ALLOWED_PRIVATE_EXAMPLES:
                 violations.append(f"{document.name}: {token}")
     assert not violations, "private deployment address in distributed docs: " + ", ".join(violations)
+
+
+FINAL_REPORT = REGISTER.parent / "FINAL_REPORT.md"
+STATUS_MARKERS = ("[x]", "[~]", "[!]", "[ ]")
+REPORT_COUNT_ROW = re.compile(r"^\| .*`(\[[ ~x!]\])`.* \| (\d+) \|$", re.MULTILINE)
+REPORT_TOTAL_ROW = re.compile(r"^\| \*\*Total\*\* \| \*\*(\d+)\*\* \|$", re.MULTILINE)
+REPORT_PROSE_TOTAL = re.compile(r"\bhas (\d+) (?:specification )?IDs\b")
+
+
+def final_report_mismatches(report: Path = FINAL_REPORT) -> list[str]:
+    """Return every disagreement between the FINAL_REPORT counts and the register."""
+    register_counts = Counter(status for _, status, _ in register_rows())
+    register_total = sum(register_counts.values())
+    text = report.read_text(encoding="utf-8")
+    start = text.index("## 2. Specification ID counts")
+    end = text.index("\n## ", start + 1)
+    section = text[start:end]
+
+    mismatches: list[str] = []
+    report_counts = {marker: int(count) for marker, count in REPORT_COUNT_ROW.findall(section)}
+    for marker in STATUS_MARKERS:
+        if marker not in report_counts:
+            mismatches.append(f"FINAL_REPORT count table has no row for {marker}")
+        elif report_counts[marker] != register_counts[marker]:
+            mismatches.append(
+                f"{marker}: FINAL_REPORT says {report_counts[marker]}, "
+                f"SPEC_STATUS.md has {register_counts[marker]}"
+            )
+
+    total = REPORT_TOTAL_ROW.search(section)
+    if total is None:
+        mismatches.append("FINAL_REPORT count table has no Total row")
+    elif int(total.group(1)) != register_total:
+        mismatches.append(f"Total: FINAL_REPORT says {total.group(1)}, SPEC_STATUS.md has {register_total}")
+
+    prose_totals = REPORT_PROSE_TOTAL.findall(text)
+    if not prose_totals:
+        mismatches.append("FINAL_REPORT prose has no 'has N IDs' total")
+    for value in prose_totals:
+        if int(value) != register_total:
+            mismatches.append(
+                f"prose 'has {value} IDs': FINAL_REPORT says {value}, SPEC_STATUS.md has {register_total}"
+            )
+    return mismatches
+
+
+def test_final_report_counts_match_register() -> None:
+    mismatches = final_report_mismatches()
+    assert not mismatches, "FINAL_REPORT counts differ from SPEC_STATUS.md:\n" + "\n".join(mismatches)
+
+
+def test_final_report_count_check_fails_on_stale_total(tmp_path: Path) -> None:
+    stale = tmp_path / "FINAL_REPORT.md"
+    text = FINAL_REPORT.read_text(encoding="utf-8")
+    stale.write_text(
+        text.replace("| **Total** | **283** |", "| **Total** | **282** |").replace("now has 283 IDs", "now has 282 IDs"),
+        encoding="utf-8",
+    )
+
+    mismatches = final_report_mismatches(stale)
+
+    assert mismatches
+    assert any("Total: FINAL_REPORT says 282, SPEC_STATUS.md has 283" in item for item in mismatches)
+    assert any("prose 'has 282 IDs': FINAL_REPORT says 282, SPEC_STATUS.md has 283" in item for item in mismatches)
