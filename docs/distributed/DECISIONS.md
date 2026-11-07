@@ -370,3 +370,43 @@ Rules that a first-load page and a route stylesheet both use stay in `components
 `.transition-summary`, `.event-controls`); the landscape header rule moved from `session.css` to `shell.css`. The
 page packages remove these with their legacy pages. The Coordinator-unreachable and load-error pages in `main.ts` use
 the auth page styles and load that stylesheet before they render.
+
+### D18 update: final routes caps after the last page package (integration)
+
+All page packages are merged. The caps that were fixed before (initial JavaScript 91000 raw / 31750 gzip, initial CSS
+34000 / 9000, terminal chunk 360000 / 93000) were not raised. The `routes` cap is now the measured figure plus less than
+5% (`web/budget.json`, bytes, gzip level 9, `e2e/budget.spec.ts`):
+
+| Measure | Measured | Cap |
+|---|---:|---:|
+| Initial JavaScript, raw / gzip | 81869 / 31595 | 91000 / 31750 (unchanged) |
+| Initial CSS, raw / gzip | 29105 / 6583 | 34000 / 9000 (unchanged) |
+| Terminal chunk, raw / gzip | 354858 / 92148 | 360000 / 93000 (unchanged) |
+| Route JavaScript (all lazy chunks but the terminal), raw / gzip | 89710 / 36952 | 94000 / 38700 |
+| Route CSS (`fleet`, `auth`, `mission`), raw / gzip | 17613 / 4682 | 18400 / 4900 |
+
+The initial gzip figure is 155 bytes below its cap, so any further first-load code needs a matching removal.
+
+Per-chunk figures (raw / gzip) and the package that added each one:
+
+| Chunk | Raw / gzip | Added by |
+|---|---:|---|
+| `views/mission` (header, tasks, evidence, activity, about, page) | 31329 / 11554 | WP-3 |
+| `views/login` (sign-in, setup) | 12397 / 4822 | WP-0 moved it; WP-5 restyled it |
+| `views/account` and the tokens dialog | 7229 / 2901 | WP-0 moved it; WP-5 |
+| `views/usage` | 6780 / 2982 | WP-0 moved it; WP-5 (meters) |
+| `views/workers` | 6683 / 2886 | WP-0 moved it; WP-5 (enrolment warning) |
+| session extras (steer dialogs, key bar) | 6272 / 2868 | WP-2 |
+| `remote.ts` shared by sessions, usage and diagnostics | 4630 / 2166 | WP-0; WP-5 |
+| `views/sessions` | 4889 / 2109 | WP-0 moved it; WP-5 |
+| command palette | 4496 / 1992 | WP-1 |
+| `views/diagnostics` | 2891 / 1401 | WP-0 moved it; WP-5 |
+| `views/reset` | 1389 / 734 | WP-0 |
+| four re-export shims | 1000 / 740 | esbuild |
+
+The session pane itself is part of the terminal chunk (xterm.js plus `session.ts`, `composer.ts`); the page reserves its box
+with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until that chunk arrives. Route CSS: `auth`
+3313 / 982, `fleet` 3639 / 1003, `mission` (session.css and mission.css) 10458 / 2658 at the first measurement.
+
+Dead code removed at integration: the `statusBadge` shim, `sortHeader`, the legacy table CSS (`table`, `table.rt`,
+`table.kv`, `.table-wrap`, `.sort`), the `.grid-auto`, `.pane-split` and `.grid-2` helpers and `@xterm/addon-fit`.
