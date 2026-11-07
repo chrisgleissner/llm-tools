@@ -27,9 +27,9 @@
 .row-reason { flex: 1 1 10rem; min-inline-size: 0; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }
-.row-cells { flex-wrap: nowrap; gap: var(--sp-4); }
-.row-cells .cell:nth-child(2), .row-cells .cell:nth-child(3) { min-inline-size: 7rem; }
-.row-cells .cell:first-child, .row-cells .cell:last-child { min-inline-size: 3rem; }
+.row-cells { flex-wrap: nowrap; gap: var(--sp-3); }
+.row-cells .cell:nth-child(2), .row-cells .cell:nth-child(3) { min-inline-size: 5rem; }
+.row-cells .cell:first-child, .row-cells .cell:last-child { min-inline-size: 2.5rem; }
 .row-actions { grid-area: actions; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); }
 .row-menu { grid-area: menu; }
 /* From 60rem an Inbox row is one line: pill, title, reason and age, actions, menu. */
