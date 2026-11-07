@@ -30,8 +30,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import bridge_commands as commands
+from .bridge_format import printable
 from .bridge_protocol import MAX_EVENTS_PER_BATCH, PROTOCOL_VERSION, SUPPORTED_VERSIONS, Message, ProtocolError, decode
+from .bridge_states import FINISHED_MISSION_STATUSES
 from .bridge_store import BridgeStore, default_state_dir, store_path
+from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
 CA_FILE = "coordinator-ca.pem"
@@ -43,6 +46,13 @@ SILENCE_LIMIT = 60.0
 EVENT_BATCH = 200
 MISSION_QUESTION_REFRESH_SECS = 5.0
 MAX_QUESTION_MISSIONS_PER_REFRESH = 64
+# Event kinds the controller writes every few seconds. They cannot change a mission summary, so a
+# batch of them needs no summary (the coordinator mirrors this list in `protocol::HEARTBEAT_KINDS`).
+HEARTBEAT_KINDS = frozenset({str(EventKind.CONTROLLER_HEARTBEAT), str(EventKind.CAPACITY_REFRESH)})
+# Bounds of the `attention` field of a mission summary (also in the coordinator's OpenAPI schema).
+ATTENTION_KINDS = frozenset({"approval", "failed", "blocked", "operator", "proposal", "capacity", "provider"})
+ATTENTION_MESSAGE_CHARS = 240
+ATTENTION_MAX_TASKS = 8
 
 
 class WorkerConfigError(ValueError):
@@ -459,6 +469,7 @@ class WorkerSession:
         self.last_question_refresh = 0.0
         self.last_question_mission_id: str | None = None
         self.mission_questions: dict[str, dict[str, str] | None] = {}
+        self.mission_attention: dict[str, dict[str, Any] | None] = {}  # native RUNNING missions only, like mission_questions
 
     def message(self, kind: str, payload: dict[str, Any]) -> Message:
         return Message(kind, self.config.worker_id, self.generation, payload)
@@ -495,14 +506,18 @@ class WorkerSession:
             payload["host_name"] = host_name
         return Message("hello", self.config.worker_id, 0, payload)
 
-    def _provider_question(self, store: BridgeStore, mission_id: str) -> dict[str, str] | None:
-        """Project the existing bounded status decision for one active native mission."""
+    def _attention_snapshot(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
+        """The bounded status projection of one mission (task page of one), or ``None`` when it cannot be read."""
         try:
             from .bridge_monitor import project_snapshot
 
-            needs = project_snapshot(store, mission_id, task_limit=1).get("needs_you")
+            return dict(project_snapshot(store, mission_id, task_limit=1))
         except Exception:  # noqa: BLE001 - observation must never stop worker replication
             return None
+
+    @staticmethod
+    def _provider_question(needs: Any) -> dict[str, str] | None:
+        """The bounded provider question of a status projection's ``needs_you``, as replicated in ``needs_you``."""
         if not isinstance(needs, dict) or needs.get("kind") != "provider":
             return None
         message = needs.get("message")
@@ -510,6 +525,22 @@ class WorkerSession:
         if not isinstance(message, str) or not message or not isinstance(command, str) or not command:
             return None
         return {"kind": "provider", "message": message[:2048], "command": command[:512]}
+
+    @staticmethod
+    def _bounded_attention(needs: Any) -> dict[str, Any] | None:
+        """``{kind, message, tasks}`` of the projection's ``needs_you``, cut to the summary bounds, or ``None``.
+
+        The message is the one-line text the status projection already shows the operator, with control
+        characters removed and at most ``ATTENTION_MESSAGE_CHARS`` characters. The CLI command is left out.
+        """
+        if not isinstance(needs, dict) or needs.get("kind") not in ATTENTION_KINDS:
+            return None
+        text = " ".join(printable(needs.get("message") or "").split())
+        if len(text) > ATTENTION_MESSAGE_CHARS:
+            text = text[: ATTENTION_MESSAGE_CHARS - 1] + "\u2026"
+        tasks = needs.get("tasks")
+        numbers = [item for item in tasks if isinstance(item, int) and not isinstance(item, bool) and item > 0] if isinstance(tasks, list) else []
+        return {"kind": needs["kind"], "message": text, "tasks": numbers[:ATTENTION_MAX_TASKS]}
 
     def _mission_summary(self, store: BridgeStore, row: dict[str, Any]) -> dict[str, Any]:
         mission_id = str(row["id"])
@@ -520,15 +551,26 @@ class WorkerSession:
             "folder": Path(str(row["cwd"])).name,
             "updated_at": row.get("updated_at"),
         }
+        try:
+            summary["task_counts"] = {str(key): int(value) for key, value in store.task_counters(mission_id)["status"].items() if int(value) > 0}
+        except Exception:  # noqa: BLE001 - an unreadable count is left out, not reported as zero
+            pass
+        snapshot = None if row.get("status") in FINISHED_MISSION_STATUSES else self._attention_snapshot(store, mission_id)
+        if snapshot is not None:
+            summary["attention"] = self._bounded_attention(snapshot.get("needs_you"))
+        elif row.get("status") in FINISHED_MISSION_STATUSES:
+            summary["attention"] = None  # a finished mission needs nothing; an unreadable one stays absent (unknown)
         config = row.get("config")
         if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
-            question = self._provider_question(store, mission_id)
+            question = self._provider_question(snapshot.get("needs_you")) if snapshot is not None else None
             summary["needs_you"] = question
             self.mission_questions[mission_id] = question
+            self.mission_attention[mission_id] = summary.get("attention")
         elif mission_id in self.mission_questions:
             # Event-driven summaries clear a question when its mission leaves RUNNING.
             summary["needs_you"] = None
             self.mission_questions.pop(mission_id, None)
+            self.mission_attention.pop(mission_id, None)
         return summary
 
     def _question_refresh_batch(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -687,9 +729,11 @@ class WorkerSession:
             # Ordinary summaries remain event-scoped. A small, periodic scan of
             # active native missions catches provider questions, which can arrive
             # without a Bridge database event.
+            # A mission whose only events in the batch are heartbeats has nothing new to report.
             event_mission_ids = {
                 str(event["mission_id"]) for event in events
                 if isinstance(event.get("mission_id"), str) and event["mission_id"]
+                and event.get("kind") not in HEARTBEAT_KINDS
             }
             candidate_rows: dict[str, dict[str, Any]] = {
                 mission_id: row for mission_id in sorted(event_mission_ids)
@@ -706,9 +750,9 @@ class WorkerSession:
                 candidate_rows.update({str(row["id"]): row for row in active_native})
             missions: list[dict[str, Any]] = []
             for mission_id, row in candidate_rows.items():
-                previous = self.mission_questions.get(mission_id)
+                previous = (self.mission_questions.get(mission_id), self.mission_attention.get(mission_id))
                 summary = self._mission_summary(store, row)
-                current = self.mission_questions.get(mission_id)
+                current = (self.mission_questions.get(mission_id), self.mission_attention.get(mission_id))
                 if mission_id in event_mission_ids or current != previous:
                     missions.append(summary)
             if not events and not missions:

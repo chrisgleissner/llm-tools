@@ -52,7 +52,7 @@ whole numbers with `invalid-message`.
 
 | Type | Direction | Payload |
 |---|---|---|
-| `hello` | worker → coordinator | `worker_id`, `name`, `software_version`, `protocol_versions`, `platform`, `capabilities` (the `operation_catalog()` output), `missions` (id, name, status, cwd basename, updated_at; active native missions may include bounded `needs_you`), `event_cursor` (highest local event id). |
+| `hello` | worker → coordinator | `worker_id`, `name`, `software_version`, `protocol_versions`, `platform`, `capabilities` (the `operation_catalog()` output), `missions` (mission summaries, see below), `event_cursor` (highest local event id). |
 | `welcome` | coordinator → worker | `generation`, `protocol_version`, `event_cursor` (highest event id the coordinator has stored for this worker). |
 | `command` | coordinator → worker | A `CommandRequest` object. |
 | `command.ack` | worker → coordinator | `request_id`, `status`: `received` or `duplicate`. Acknowledges delivery only. |
@@ -94,9 +94,33 @@ The worker sends ordinary mission summaries only for mission IDs in an event
 batch. Every five seconds it checks active native missions for provider
 questions, and sends only summaries whose bounded `needs_you` value changed;
 it does not resend the full inventory with every task event or heartbeat. The
-coordinator applies summary upserts and cursors atomically. `needs_you` contains
+coordinator applies summary upserts and cursors atomically. The coordinator marks the mission copy of a
+worker `stale` only while the worker is offline or `mission_cursor` is behind the event cursor. A
+batch that carries `mission_cursor` sets it. A batch without it (a worker that predates the field)
+leaves it unchanged, except that a batch made only of `controller-heartbeat` and `capacity-refresh`
+events moves it together with the event cursor when it was caught up before the batch. `needs_you` contains
 only the existing status projection's provider message and answer command, not
 terminal content or transcript records.
+
+## Mission summary
+
+A mission summary is a JSON object. `id`, `name`, `status`, `folder` (cwd basename) and
+`updated_at` are the original fields. The fields below are optional and were added within
+version 1; a coordinator or browser must treat a summary without them as "unknown", and a
+worker that predates them keeps working unchanged.
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `task_counts` | `{"<TASK STATUS>": n}` | Tasks per status (`QUEUED`, `READY`, `RUNNING`, `PAUSED`, `BLOCKED`, `VERIFYING`, `COMPLETED`, `FAILED`, `CANCELLED`). Statuses without tasks are absent. Same shape as `task_counts` in the `mission.status` result. |
+| `attention` | `{"kind", "message", "tasks"}` or `null` | Why the mission needs the operator, from the same decision as the CLI's "Needs you" hint (`bridge_format.needs_attention`). `kind` is `approval`, `failed`, `blocked`, `operator`, `proposal`, `capacity` or `provider`. `message` is that hint's one-line text with control characters removed, at most 240 characters. `tasks` lists at most 8 task numbers. `null` means nothing is needed (a `COMPLETED` or `CANCELLED` mission always has `null`). The field is absent when the worker could not read the projection. |
+| `needs_you` | `{"kind": "provider", "message", "command"}` or `null` | Unchanged: the bounded provider question of an active native mission (message at most 2048 characters, command at most 512). When `attention.kind` is `provider`, `attention.message` is the first 240 characters of the same text. |
+
+The worker sends a summary for every mission in an event batch, except for a mission whose
+only events in the batch are `controller-heartbeat` or `capacity-refresh`: those events never
+change a summary. The five-second scan of active native missions also sends a summary when
+`needs_you` or `attention` changed without a database event. `attention` and `task_counts` are
+computed from the status projection without reading the provider's terminal, and a hello of 300
+missions with the fields adds about 190 bytes per mission.
 
 ## Generation fencing (PROTO-010)
 

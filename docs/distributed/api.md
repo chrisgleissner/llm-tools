@@ -46,6 +46,24 @@ the durable command envelope; if the worker is offline, the response is `202`
 with a command `Location` and can be checked with `GET /api/v1/commands/{id}`.
 Read resource requests may include `wait_ms` (0 to 30000) to wait for a worker;
 the default is immediate durable acceptance.
+
+`GET /api/v1/missions` (the mission list across workers) carries, for each mission the worker
+reports them for, `attention` (`{kind, message, tasks}` or `null`: why the operator is needed) and
+`task_counts` (`{STATUS: n}`). Both are optional and additive within v1; a mission from a worker
+that predates them has neither key, which means unknown. `stale` is `true` only while the worker is
+offline or its mission data is behind its events. See `protocol.md` (mission summary) for the exact
+bounds.
+
+The typed read operation `mission.activity_line` (mission-scoped, no parameters, sent through `POST
+/api/v1/commands`; no resource path and no CLI command) returns one line of what the running
+provider printed last: `{schema_version, available, reason, message, line, at, task, provider}`.
+`line` is at most 160 characters with terminal escape sequences, control characters and
+box-drawing-only lines removed. `at` is the modification time of the provider's retained log (UTC,
+ISO 8601 seconds), `task` the task number and `provider` the route or station of the running
+operation. The line comes only from the operation's retained log, which `task.output` returns in
+full to the same callers; the worker reads at most the last 16 KiB and never captures the provider's
+terminal screen. When there is no line, `available` is `false`, `line` and `at` are `null`, and
+`reason` is `not-running` (no active provider run), `no-log`, `unreadable` or `no-output`.
 The current mutation adapters use the same command journal: `POST
 /api/v1/missions/{id}/start|resume|pause|stop|cancel|continue`, `POST
 /api/v1/missions/{id}/tasks`, `PATCH /api/v1/missions/{id}/tasks/{n}` and `POST
