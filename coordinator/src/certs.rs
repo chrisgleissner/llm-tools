@@ -325,6 +325,35 @@ pub fn load_server_config(dir: &Path, min_tls: &str) -> Result<Arc<ServerConfig>
     Ok(Arc::new(build_config_with_min_tls(&cert, &key, min_tls)?))
 }
 
+/// Certificate source boundary. Future ACME provisioning can implement this interface without
+/// changing listener startup; no ACME client or project-operated certificate service is included.
+pub trait CertificateProvider: Send + Sync {
+    fn load(&self, data_dir: &Path, min_tls: &str) -> Result<(Arc<ServerConfig>, Option<Arc<ReloadingFileCertResolver>>), String>;
+}
+
+/// The coordinator's local CA and its generated server certificate.
+pub struct InternalCaProvider;
+
+impl CertificateProvider for InternalCaProvider {
+    fn load(&self, data_dir: &Path, min_tls: &str) -> Result<(Arc<ServerConfig>, Option<Arc<ReloadingFileCertResolver>>), String> {
+        Ok((load_server_config(data_dir, min_tls)?, None))
+    }
+}
+
+/// Operator supplied certificate files, with the internal CA retained for other hostnames.
+pub struct FileCertificateProvider {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub exact_name: String,
+}
+
+impl CertificateProvider for FileCertificateProvider {
+    fn load(&self, data_dir: &Path, min_tls: &str) -> Result<(Arc<ServerConfig>, Option<Arc<ReloadingFileCertResolver>>), String> {
+        let (config, resolver) = load_reloading_file_server_config(self.cert_path.clone(), self.key_path.clone(), self.exact_name.clone(), data_dir, min_tls)?;
+        Ok((config, Some(resolver)))
+    }
+}
+
 /// TLS certificate resolver for operator-managed files. Only a complete,
 /// key-matched pair replaces the active key; partial writes keep the last good one.
 pub struct ReloadingFileCertResolver {

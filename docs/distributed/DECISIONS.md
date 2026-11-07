@@ -293,3 +293,14 @@ In the code: token minting is in `coordinator/src/http.rs::create_token`, and th
 schema is in `coordinator/src/openapi.rs::TokenCreated`; the format regression is in
 `coordinator/tests/web_api.rs::token_management_lists_metadata_and_shows_secret_only_at_creation`.
 
+## D20 Certificate provisioning boundary (SEC2-019)
+
+Keep certificate source selection behind `CertificateProvider`, with implementations for the
+internal coordinator CA and operator-supplied certificate files. File reload keeps the last
+valid certificate when replacement files are incomplete. ACME remains an unimplemented future
+provider; the project does not operate certificate or DNS infrastructure.
+
+In the code: `coordinator/src/certs.rs` owns the trait and both current providers;
+`coordinator/src/server.rs` selects a provider from the validated config. Existing file-reload
+and TLS tests cover the provider implementations.
+
