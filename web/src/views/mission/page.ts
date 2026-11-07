@@ -7,7 +7,7 @@ import { absTime, copyText, emptyState, button, h, hooks } from "../../dom";
 import { humanizeEvent } from "../../event-humanizer";
 import { missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import type { DerivedState } from "../../state";
-import { announce, announceStreamEvent, confirmDialog as confirm } from "../../ui";
+import { announce, announceStreamEvent, confirmDialog as confirm, reportOutcome } from "../../ui";
 import { aboutBlock } from "./about";
 import { activityPanel, type ActivityData } from "./activity";
 import { taskActions } from "./actions";
@@ -67,7 +67,10 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const status = (): string => String(optimistic ?? entry()?.mission.status ?? record(snapshot?.["mission"])["status"] ?? "").toUpperCase();
   const needs = (): api.NeedsYou | null => {
     const n = snapshot ? snapshot["needs_you"] : entry()?.mission.needs_you;
-    return n && typeof n === "object" ? (n as api.NeedsYou) : null;
+    if (!n || typeof n !== "object") return null;
+    // The status projection and the task list are read separately. When the list is loaded and no task awaits approval, an "approval" hint is out of date:
+    // the header must not offer Approve for a task the list shows as queued.
+    return (n as api.NeedsYou).kind === "approval" && taskLoaded && !tasks.some((t) => t.status === "VERIFYING") ? null : (n as api.NeedsYou);
   };
   /** Counts of the loaded task list: it is current, and the state needs nothing else besides `needs_you` while the list loads. */
   const taskCounts = (): Record<string, number> => {
@@ -118,7 +121,16 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   const sessionSlot = h("section", { class: "mission-session", "aria-label": "Session" });
 
-  const ctx: PageCtx = { workerName, missionId, blocked, needs, mutateTask };
+  const verifiers = new Map<number, string>();
+  const ctx: PageCtx = {
+    workerName, missionId, blocked, needs, mutateTask, status,
+    answer: () => handlers.takeControl(),
+    verified: (ordinal, text) => {
+      if (verifiers.get(ordinal) === text) return;
+      verifiers.set(ordinal, text);
+      renderHeader();
+    },
+  };
   const actions = taskActions(ctx);
   const tasksP = tasksPanel(ctx, actions, addTask);
   const activityP = activityPanel(() => void loadOlderEvents());
@@ -178,21 +190,21 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   // ---- header
   const handlers: HeaderHandlers = {
-    pause: () => void missionAction("Pause mission", "mission.pause", "PAUSED"),
-    resume: () => void missionAction("Resume mission", "mission.resume", "RUNNING"),
-    start: () => void missionAction("Start mission", "mission.start", "RUNNING"),
-    runNext: () => void missionAction("Run next task", "mission.continue", null),
+    pause: () => void missionAction("Mission paused", "pause the mission", "mission.pause", "PAUSED"),
+    resume: () => void missionAction("Mission resumed", "resume the mission", "mission.resume", "RUNNING"),
+    start: () => void missionAction("Mission started", "start the mission", "mission.start", "RUNNING"),
+    runNext: () => void missionAction("Next task started", "run the next task now", "mission.continue", null),
     stop: () =>
       void (async () => {
         if (blocked()) return void announce(blocked(), "failed");
-        const reason = await confirm({ title: "Stop mission?", message: `Stop "${entry()?.mission.name || missionId}" on ${workerName}. The provider finishes its current step, and you can start the mission again later.`, confirmLabel: "Stop mission", danger: true });
-        if (reason !== null) await missionAction("Stop mission", "mission.stop", "STOPPING");
+        const reason = await confirm({ title: "Stop mission?", message: `Stop "${entry()?.mission.name || missionId}" on ${workerName}. Stop ends the session once the provider finishes its current step, and you can start the mission again later. Pause keeps the session open.`, confirmLabel: "Stop mission", danger: true });
+        if (reason !== null) await missionAction("Mission stopped", "stop the mission", "mission.stop", "STOPPING");
       })(),
     cancel: () =>
       void (async () => {
         if (blocked()) return void announce(blocked(), "failed");
         const reason = await confirm({ title: "Cancel mission?", message: `Cancel "${entry()?.mission.name || missionId}" on ${workerName}. This cannot be undone from the browser.`, confirmLabel: "Cancel mission", danger: true });
-        if (reason !== null) await missionAction("Cancel mission", "mission.cancel", null);
+        if (reason !== null) await missionAction("Mission cancelled", "cancel the mission", "mission.cancel", null);
       })(),
     approve: (t) => void actions.approve(t),
     reject: (t) => void actions.reject(t),
@@ -227,6 +239,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
       folder: typeof mission["cwd"] === "string" ? mission["cwd"] : e.mission.folder,
       updatedAt: e.mission.updated_at,
       blocked: blocked(),
+      verifier: ((o) => (o.length === 1 ? (verifiers.get(o[0]!) ?? null) : null))(approvalOrdinals({ needs: needs(), tasks })),
     };
   }
 
@@ -254,7 +267,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
       );
       return;
     }
-    const sig = JSON.stringify([m.name, m.status, m.state, m.needs, m.tasks.map((t) => [t.ordinal, t.status]), m.blocked, m.folder, m.updatedAt, providerModel(m.snapshot), m.worker?.state]);
+    const sig = JSON.stringify([m.name, m.status, m.state, m.needs, m.tasks.map((t) => [t.ordinal, t.status]), m.blocked, m.folder, m.updatedAt, providerModel(m.snapshot), m.worker?.state, m.verifier]);
     if (sig === headSignature) return;
     headSignature = sig;
     const active = document.activeElement as HTMLElement | null;
@@ -420,28 +433,28 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   }
 
   // ---- mutations
-  async function mutateTask(label: string, operation: string, task: Task, params: Record<string, unknown> = {}): Promise<void> {
-    const r = await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params });
-    announce(`${label}.`, r.outcome, r.message);
+  const DID = { approve: "Approved", reject: "Rejected", retry: "Retry queued for", resume: "Resumed", pause: "Paused", cancel: "Cancelled" };
+  async function mutateTask(verb: keyof typeof DID, operation: string, task: Task, params: Record<string, unknown> = {}): Promise<void> {
+    reportOutcome(await api.mutateTask(workerName, missionId, task.ordinal, operation, { task_id: task.id, expected_revision: task.revision, ...params }), `${DID[verb]} task ${task.ordinal}`, `${verb} task ${task.ordinal}`);
     await reloadAll();
   }
 
   /** Pause, Resume, Start, Stop and the rest. The pill changes at once (`optimisticStatus`) and rolls back if the worker refuses. */
-  async function missionAction(label: string, operation: string, optimisticStatus: string | null): Promise<void> {
+  async function missionAction(did: string, action: string, operation: string, optimisticStatus: string | null): Promise<void> {
     const why = blocked();
-    if (why) return void announce(`${label}: ${why}`, "failed");
+    if (why) return void announce(`Could not ${action}. ${why}`, "failed");
     const r = await api.optimisticMutation(
       () => {
         optimistic = optimisticStatus;
-        if (optimisticStatus) renderHeader();
+        if (optimisticStatus) renderTasks();
       },
       () => {
         optimistic = null;
-        renderHeader();
+        renderTasks();
       },
       () => api.mutateMission(workerName, operation, missionId, {}),
     );
-    announce(`${label}.`, r.outcome, r.message);
+    reportOutcome(r, did, action);
     await reloadAll();
     optimistic = null;
     renderHeader();
@@ -451,13 +464,11 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   async function addTask(prompt: string): Promise<boolean> {
     const why = blocked();
     if (why) {
-      announce(`Add task: ${why}`, "failed");
+      announce(`Could not add the task. ${why}`, "failed");
       return false;
     }
     const title = (prompt.split("\n")[0] ?? prompt).trim().slice(0, 80);
-    const r = await api.addTask(workerName, missionId, { prompt, title });
-    announce("Add task.", r.outcome, r.message);
-    const ok = r.outcome === "applied" || r.outcome === "accepted";
+    const ok = reportOutcome(await api.addTask(workerName, missionId, { prompt, title }), "Task added", "add the task");
     if (ok) await loadTasks();
     return ok;
   }

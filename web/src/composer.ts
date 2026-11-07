@@ -24,6 +24,8 @@ export interface ComposerView {
   note: string;
   /** The note only repeats what the controls already show (it is not a reason), so a phone may leave it out. */
   hint?: boolean;
+  /** Why Steer is disabled (the worker is offline); empty when it can be used. */
+  steerReason?: string;
 }
 
 export interface Composer {
@@ -45,7 +47,8 @@ const KINDS: Array<[api.SteerKind, string]> = [
 export function composer(o: ComposerOpts): Composer {
   const input = h("textarea", { class: "composer-field", rows: 1, "aria-label": o.provider ? `Message ${o.provider}` : "Message to the session", "aria-describedby": "composer-note", autocomplete: "off", spellcheck: false });
   const note = h("p", { class: "composer-note small muted", id: "composer-note" });
-  const take = button("Take control", () => o.takeControl(), { kind: "primary", action: "take-control", id: "terminal-control" });
+  // Not primary: the header holds the one primary button of the page (spec 6.1).
+  const take = button("Take control", () => o.takeControl(), { action: "take-control", id: "terminal-control" });
   const sendBtn = button("Send", () => submit(), { disabled: true, id: "composer-send" });
   const chips = h("div", { class: "cluster", "data-queued-steer": "", hidden: true });
   const grow = (): void => {
@@ -77,6 +80,7 @@ export function composer(o: ComposerOpts): Composer {
   const steer = (kind: api.SteerKind, label: string): void => void loading.then((m) => m.runSteer({ ...o, chips, own: (stop) => stops.push(stop) }, kind, label));
   const steerMenu = menu({ label: "Steer the mission", text: "Steer" }, KINDS.map(([kind, label]) => ({ label, id: `steer-${kind}`, attrs: { "data-steer": kind }, onSelect: () => steer(kind, label) })));
 
+  const steerBtn = steerMenu.querySelector("button") as HTMLButtonElement;
   const element = h("div", { class: "composer", "data-composer": "" }, chips, h("div", { class: "cluster" }, take, input, sendBtn, steerMenu), note);
   return {
     element,
@@ -88,6 +92,8 @@ export function composer(o: ComposerOpts): Composer {
       take.hidden = !v.offerControl;
       take.disabled = Boolean(v.takeReason);
       take.title = v.takeReason;
+      steerBtn.disabled = Boolean(v.steerReason);
+      steerBtn.title = v.steerReason ?? "";
       note.textContent = v.note;
       note.hidden = !v.note;
       note.dataset["hint"] = String(Boolean(v.hint));

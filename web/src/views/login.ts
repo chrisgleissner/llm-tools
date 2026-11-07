@@ -78,7 +78,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
   const remember = h("input", { type: "checkbox", id: "remember", name: "remember" });
   const progress = h("p", { class: "hint login-progress", id: "login-progress", role: "status", "aria-live": "polite", "aria-atomic": "true", hidden: true });
   const rememberHint = sp
-    ? `Leave this off on a shared computer: you are signed out after ${minutes(sp.default.idle_secs)} without activity or ${minutes(sp.default.absolute_secs)} at most, and when the browser closes. On, you stay signed in for up to ${minutes(sp.remembered.absolute_secs)}, until ${minutes(sp.remembered.idle_secs)} pass without activity.`
+    ? `Off (use this on a shared computer): you are signed out after ${minutes(sp.default.idle_secs)} idle or ${minutes(sp.default.absolute_secs)} at most, and when the browser closes. On: you stay signed in for up to ${minutes(sp.remembered.absolute_secs)}, or until ${minutes(sp.remembered.idle_secs)} pass idle.`
     : "Leave this off on a shared computer.";
   const submit = h("button", { type: "submit", class: "btn primary", id: "login-submit" }, "Sign in");
   const form = h(
@@ -90,7 +90,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     user.wrap,
     pass.wrap,
     h("label", { class: "check", for: "remember" }, remember, h("span", {}, "Remember this device")),
-    h("details", { class: "aside" }, h("summary", {}, "What does this do?"), h("p", { class: "hint", id: "remember-hint" }, rememberHint)),
+    h("details", { class: "aside" }, h("summary", {}, "What does remembering do?"), h("p", { class: "hint", id: "remember-hint" }, rememberHint)),
     error,
     progress,
     h("div", { class: "actions" }, submit),

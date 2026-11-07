@@ -32,6 +32,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
   let evidenceKey = "";
   let openShown = OPEN_PAGE;
   let adding = false;
+  let touched = false;
   let completedOpen = false;
   let signature = "";
 
@@ -138,10 +139,12 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
 
   function inlineButtons(t: Task, state: ReturnType<typeof rowState>): HTMLElement[] {
     const why = ctx.blocked();
+    // The header holds the one primary button of the page (the same Approve or Retry); the buttons of a row are secondary.
     const b = (label: string, fn: () => void, kind: string, action: string): HTMLElement =>
       button(label, fn, { kind: `${kind} small`, reason: why, label: `${label} task ${t.ordinal}`, action });
-    if (state.id === "needs-approval") return [b("Approve", () => void actions.approve(t), "primary", "approve"), b("Reject", () => void actions.reject(t), "danger", "reject")];
-    if (t.status === "FAILED") return [b("Retry", () => void actions.retry(t), "primary", "retry")];
+    if (state.id === "needs-approval") return [b("Approve", () => void actions.approve(t), "", "approve"), b("Reject", () => void actions.reject(t), "danger", "reject")];
+    if (state.id === "needs-input") return [b("Answer", () => ctx.answer(), "", "answer")];
+    if (t.status === "FAILED") return [b("Retry", () => void actions.retry(t), "", "retry")];
     if (t.status === "PAUSED") return [b("Resume", () => void actions.resume(t), "", "resume")];
     return [];
   }
@@ -152,6 +155,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
     const link = h("a", { class: "task-title clamp-2", href: `#task-${t.ordinal}`, title, "aria-current": selected === t.ordinal ? "true" : null, "data-task-link": t.ordinal }, title);
     link.addEventListener("click", (e) => {
       e.preventDefault();
+      touched = true;
       selected = selected === t.ordinal ? null : t.ordinal;
       renderList();
       renderEvidence();
@@ -164,7 +168,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
         "div",
         { class: "task-main" },
         link,
-        h("div", { class: "task-meta" }, statePill(state, { dense: true }), t.priority > 0 ? h("span", { class: "pill-meta" }, `Priority ${t.priority}`) : null),
+        h("div", { class: "task-meta" }, statePill(state, { dense: true }), t.priority > 0 ? h("span", { class: "pill-meta" }, `Priority ${t.priority}`) : null, t.status === "RUNNING" && ["PAUSED", "STOPPING"].includes(ctx.status()) ? h("span", { class: "pill-meta" }, "mission paused") : null),
       ),
       h("div", { class: "task-actions" }, ...inlineButtons(t, state), menu({ label: `More actions for task ${t.ordinal}`, kind: "ghost small" }, menuItems(t))),
     );
@@ -174,7 +178,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
     const why = ctx.blocked();
     keepFocus(headBox, () =>
       headBox.replaceChildren(
-        h("h2", { class: "panel-title" }, "Tasks", data.loaded ? h("span", { class: "count num" }, ` ${data.tasks.length}`) : null),
+        h("h2", { class: "panel-title" }, "Tasks"),
         button("Add task", () => (adding ? closeForm(true) : openForm()), { icon: "plus", kind: "small", id: "add-task", reason: why, action: "add-task" }),
       ),
     );
@@ -225,6 +229,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
     evidenceKey = key;
     evidenceBox.hidden = false;
     const view = evidenceBody(ctx.workerName, ctx.missionId, t, true);
+    void view.done.then((e) => ctx.verified(t.ordinal, e.verifier));
     const state = rowState(t);
     evidenceBox.replaceChildren(
       h("h3", {}, `Evidence, task ${t.ordinal}`),
@@ -240,11 +245,13 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
   return {
     el,
     update(next) {
-      const sig = JSON.stringify([next, ctx.needs(), ctx.blocked(), selected]);
+      const sig = JSON.stringify([next, ctx.needs(), ctx.blocked(), selected, ctx.status()]);
       data = next;
       if (sig === signature) return;
       signature = sig;
       if (selected !== null && !data.tasks.some((t) => t.ordinal === selected)) selected = null;
+      // The evidence of the task that awaits approval opens by itself: it is what the decision rests on. Choosing a task (or closing it) is respected.
+      if (!touched && selected === null) selected = data.tasks.find((t) => rowState(t).id === "needs-approval")?.ordinal ?? null;
       renderHead();
       renderList();
       renderEvidence();

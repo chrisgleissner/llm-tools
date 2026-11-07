@@ -2,7 +2,7 @@
 import * as api from "./api";
 import { h } from "./dom";
 import { onStream } from "./store";
-import { announce, confirmDialog } from "./ui";
+import { announce, confirmDialog, reportOutcome } from "./ui";
 
 export interface SteerTarget {
   workerName: string;
@@ -21,6 +21,13 @@ const WHAT = {
   verify: (n: number) => `verify task ${n} when the run exits`,
   replace: (n: number) => `new prompt for task ${n}`,
   "stop-after-task": (n: number) => `stop after task ${n}`,
+};
+const HELP: Partial<Record<api.SteerKind, string>> = {
+  review: "The provider reviews the task again.",
+  verify: "The verifier runs when the run exits.",
+  replace: "The task gets a new prompt.",
+  "stop-after-task": "The mission stops after that task.",
+  handoff: "The next run uses another provider.",
 };
 const OPEN = /^(RUNNING|VERIFYING|BLOCKED|READY|QUEUED|PAUSED|CREATED)$/;
 const field = (id: string, label: string, control: HTMLElement): HTMLElement => h("div", { class: "field" }, h("label", { for: id }, label), control);
@@ -64,10 +71,11 @@ export async function runSteer(o: SteerTarget, kind: api.SteerKind, label: strin
       : api.missionTasks(o.workerName, o.missionId).then((r) => {
           const list = r.tasks.filter((t) => kind === "review" || OPEN.test(String(t["status"])));
           pick.replaceChildren(...list.map((t) => h("option", { value: String(t["ordinal"]) }, `${t["ordinal"]}. ${t["title"]}`)));
-          pick.value = String(list.find((t) => t["status"] === "RUNNING")?.["ordinal"] ?? list[0]?.["ordinal"] ?? "");
+          // The default is the task the operator most likely means: the one awaiting approval, else the one running, else the first.
+          pick.value = String((["VERIFYING", "RUNNING"].map((st) => list.find((t) => t["status"] === st)).find(Boolean) ?? list[0])?.["ordinal"] ?? "");
           pick.disabled = !list.length;
         });
-    const answer = confirmDialog({ title: label, message: "This is queued and applied at the next safe point.", confirmLabel: handoff ? "Hand off" : "Queue", details: h("div", {}, ...body) });
+    const answer = confirmDialog({ title: label, message: `${HELP[kind]} Queued, applied at the next safe point.`, confirmLabel: handoff ? "Hand off" : `Queue ${{ review: "review", verify: "verify", replace: "new prompt" }[kind as string] ?? "stop"}`, details: h("div", {}, ...body) });
     (withPrompt ? text : handoff ? route : pick).focus();
     if ((await answer) === null) return;
     await loaded.catch(() => {});
@@ -76,8 +84,5 @@ export async function runSteer(o: SteerTarget, kind: api.SteerKind, label: strin
     if (withPrompt) request.prompt = text.value.trim();
     what = handoff ? `hand off to ${request.route} at the next safe point` : WHAT[kind as keyof typeof WHAT](request.task!);
   }
-  const r = await api.steer(o.workerName, o.missionId, request);
-  const ok = r.outcome === "applied" || r.outcome === "accepted";
-  announce(ok ? `Queued: ${what}.` : r.message || "The steering was not applied.", r.outcome);
-  if (ok) chip(o, kind, what);
+  if (reportOutcome(await api.steer(o.workerName, o.missionId, request), `Queued: ${what}`, `queue ${what}`)) chip(o, kind, what);
 }

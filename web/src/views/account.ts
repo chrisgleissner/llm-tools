@@ -1,5 +1,5 @@
 import * as api from "../api";
-import { button, copyButton, field, h, isoTime, timeEl } from "../dom";
+import { absTime, button, copyButton, field, h, isoTime, relFromMs } from "../dom";
 import { menu } from "../menu";
 import { DEFAULT_POLICY } from "../password";
 import { announce, openPanel } from "../ui";
@@ -13,13 +13,21 @@ export interface AccountOpts {
 }
 
 const SCOPE_NAMES = ["read", "operate", "terminal:view", "terminal:write", "admin"] as const;
+/** What each permission allows, in a few words; the last two are powerful and say so. */
+const SCOPE_HELP: Record<(typeof SCOPE_NAMES)[number], string> = {
+  read: "See missions and usage.",
+  operate: "Start, pause and stop missions.",
+  "terminal:view": "Watch live terminals.",
+  "terminal:write": "Type into terminals. Powerful.",
+  admin: "Manage workers and tokens. Powerful.",
+};
 
 /** The dialog that creates a token. It closes itself and hands the secret to `onCreated`, which shows it once. */
 function createTokenDialog(onCreated: (created: api.ApiTokenCreated) => void): void {
   const name = field("api-token-name", "Token name", "text", { autocomplete: "off", maxlength: 63, required: true });
   const scopeInputs = SCOPE_NAMES.map((scope, i) => {
     const input = h("input", { type: "checkbox", id: `token-scope-${i}`, value: scope, checked: scope === "read" });
-    return { scope, input, label: h("label", { class: "check", for: input.id }, input, h("span", {}, scope)) };
+    return { scope, input, label: h("label", { class: "check", for: input.id }, input, h("span", {}, scope, h("small", { class: "muted" }, ` ${SCOPE_HELP[scope]}`))) };
   });
   const scopeError = h("p", { class: "field-error", id: "token-scope-error", role: "alert" });
   const expiry = h("select", { id: "api-token-expiry", name: "expires_days" }, h("option", { value: "30" }, "30 days"), h("option", { value: "90", selected: true }, "90 days"), h("option", { value: "365" }, "1 year"), h("option", { value: "0" }, "Never"));
@@ -32,7 +40,7 @@ function createTokenDialog(onCreated: (created: api.ApiTokenCreated) => void): v
       "div",
       { class: "dialog-body" },
       name.wrap,
-      h("fieldset", { "aria-describedby": "token-scope-error" }, h("legend", {}, "Permissions"), ...scopeInputs.map((x) => x.label)),
+      h("fieldset", { "aria-describedby": "token-scope-error" }, h("legend", {}, "Permissions"), h("p", { class: "hint" }, "Grant the least access the tool needs."), ...scopeInputs.map((x) => x.label)),
       scopeError,
       h("div", { class: "field" }, h("label", { for: "api-token-expiry" }, "Expires after"), expiry),
       h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
@@ -193,8 +201,8 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       h("dd", {}, me?.username ?? "-"),
       h("dt", {}, "Device"),
       h("dd", {}, s ? (s.remember ? "Remembered" : "Not remembered (browser session)") : "-"),
-      h("dt", {}, "Signs out at the latest"),
-      h("dd", {}, exp ? timeEl(exp.toISOString()) : "-"),
+      h("dt", {}, "Signs out"),
+      h("dd", {}, exp ? `${relFromMs(exp.getTime())} (${absTime(exp).slice(11)}) at the latest` : "-"),
       h("dt", {}, "Idle limit"),
       h("dd", {}, s ? `${minutes(s.idle_timeout_secs)} without activity` : "-"),
     ),

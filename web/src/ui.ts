@@ -1,6 +1,6 @@
 import { ownRequests } from "./api";
 import { h, hooks } from "./dom";
-import { eventClass } from "./event-humanizer";
+import { eventClass } from "./event-class";
 import { icon, type IconName } from "./icons";
 
 let liveRegion: HTMLElement | null = null;
@@ -11,24 +11,21 @@ export type Outcome = "accepted" | "applied" | "rejected" | "failed" | "uncertai
 /** `attention` is a new needs-you item (needs approval, needs input, failed): the only toast a stream event may cause. */
 export type ToastKind = "info" | "error" | "attention" | Outcome;
 
-const TOAST: Record<ToastKind, { icon: IconName; label: string }> = {
-  info: { icon: "info", label: "Note" },
-  error: { icon: "alert", label: "Error" },
-  attention: { icon: "diamondCheck", label: "Needs you" },
-  accepted: { icon: "clock", label: "Accepted" },
-  applied: { icon: "checkCircle", label: "Applied" },
-  rejected: { icon: "ban", label: "Rejected" },
-  failed: { icon: "alert", label: "Failed" },
-  uncertain: { icon: "help", label: "Uncertain" },
-};
+// The icon carries the kind; the text says what happened in plain words (no "Applied." or "Rejected." prefix).
+const TOAST: Record<ToastKind, IconName> = { info: "info", error: "alert", attention: "diamondCheck", accepted: "clock", applied: "checkCircle", rejected: "ban", failed: "alert", uncertain: "help" };
 
-export const OUTCOME_HELP: Record<Outcome, string> = {
-  accepted: "The coordinator queued the request. The worker has not confirmed it yet.",
-  applied: "The worker carried the change out.",
-  rejected: "The worker refused the change. Nothing was modified.",
-  failed: "The request could not be carried out. Nothing was modified.",
-  uncertain: "The request may or may not have been applied. Refresh and check before trying again.",
-};
+/**
+ * Report what happened to the operator's own request as one toast, in words: "Mission paused." on success, "Could not pause the mission. The worker
+ * refused the change." on a refusal. `did` is the past tense ("Mission paused"), `action` the verb phrase ("pause the mission"). Returns whether it went through.
+ */
+export function reportOutcome(r: { outcome: string; message: string }, did: string, action: string): boolean {
+  const ok = r.outcome === "applied" || r.outcome === "accepted";
+  const text = r.outcome === "applied" ? `${did}.` : r.outcome === "accepted" ? `Asked the worker to ${action}.`
+    : r.outcome === "uncertain" ? `The worker did not confirm: ${action}. Refresh and check before trying again.`
+    : `Could not ${action}. ${r.message || (r.outcome === "rejected" ? "The worker refused the change." : "Nothing was changed.")}`;
+  announce(text, r.outcome as ToastKind);
+  return ok;
+}
 
 export function mountFeedback(root: HTMLElement): void {
   liveRegion = h("div", { id: "live-status", class: "sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true" });
@@ -75,7 +72,6 @@ const sticky = (spec: ToastSpec) => spec.kind === "error" || spec.kind === "fail
 
 function showToast(spec: ToastSpec): void {
   if (!toastBox) return;
-  const t = TOAST[spec.kind];
   const loud = spec.kind === "error" || spec.kind === "failed" || spec.kind === "uncertain" || spec.kind === "rejected";
   const el = h("div", { class: `toast ${spec.kind}`, role: loud ? "alert" : null, "data-kind": spec.kind });
   const close = h("button", { type: "button", class: "btn icon ghost", "aria-label": "Dismiss notification" }, icon("x", 18));
@@ -83,8 +79,8 @@ function showToast(spec: ToastSpec): void {
     ? h("div", { class: "toast-actions" }, h("button", { type: "button", class: "btn small", onclick: () => { spec.action?.run(); dismiss(); } }, spec.action.label))
     : null;
   el.append(
-    h("span", { class: "toast-icon" }, icon(t.icon, 20)),
-    h("div", { class: "toast-text" }, spec.kind === "info" ? null : h("strong", {}, `${t.label}. `), spec.message, spec.detail ? h("div", { class: "muted small" }, spec.detail) : null, actions),
+    h("span", { class: "toast-icon" }, icon(TOAST[spec.kind], 20)),
+    h("div", { class: "toast-text" }, spec.message, spec.detail ? h("div", { class: "muted small" }, spec.detail) : null, actions),
     close,
   );
   let timer = 0;
@@ -110,8 +106,16 @@ function showToast(spec: ToastSpec): void {
   toastBox.insertBefore(el, toastBox.querySelector(".toast-more"));
 }
 
+/** On a phone the toast sits just above the lowest fixed bar (composer, action dock or navigation), so it never covers the header or those controls. */
+function lift(): void {
+  const half = window.innerHeight / 2;
+  const tops = [...document.querySelectorAll<HTMLElement>("[data-composer], .mission-head .head-actions, .main-nav")].filter((e) => e.offsetWidth > 0).map((e) => e.getBoundingClientRect().top).filter((t) => t > half);
+  toastBox?.style.setProperty("--toast-floor", `${Math.round(window.innerHeight - Math.min(window.innerHeight, ...tops)) + 8}px`);
+}
+
 function pump(): void {
   if (!toastBox) return;
+  if (isPhone()) lift();
   while (queue.length > 0 && toastBox.querySelectorAll(".toast").length < maxVisible()) showToast(queue.shift() as ToastSpec);
   toastBox.querySelector(".toast-more")?.remove();
   if (queue.length > 0) toastBox.append(h("div", { class: "toast-more" }, `+${queue.length} more`));

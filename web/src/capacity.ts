@@ -45,7 +45,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
     el.classList.remove("tight");
     el.replaceChildren(
       ...(narrow ? chips.slice(0, 1) : chips).map((c) =>
-        h("a", { class: "cap-chip", href: "/usage", title: c.title }, h("span", {}, c.provider, h("span", { class: "cap-scope" }, ` ${c.scope}`)), h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), ` ${c.percent}%`, h("span", { class: "sr-only" }, " left")),
+        h("a", { class: "cap-chip", href: "/usage", title: c.title }, h("span", {}, c.provider, h("span", { class: "cap-scope" }, ` ${c.scope}`)), h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), ` ${c.percent}% left`),
       ),
     );
     el.classList.toggle("tight", (el.firstElementChild?.getBoundingClientRect().left ?? 0) < el.getBoundingClientRect().left - 0.5);

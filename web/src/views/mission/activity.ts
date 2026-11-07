@@ -2,7 +2,8 @@
 // behind a Show button. Each row has a "Raw" disclosure that shows only the allowlisted event fields.
 import type { BridgeEvent } from "../../api";
 import { absTime, button, emptyState, h, relFromMs } from "../../dom";
-import { allowedEventData, eventClass, humanizeEvent, type EventClass } from "../../event-humanizer";
+import { allowedEventData, humanizeEvent } from "../../event-humanizer";
+import { eventClass, type EventClass } from "../../event-class";
 
 const PAGE = 20;
 const PLUMBING_PAGE = 50;

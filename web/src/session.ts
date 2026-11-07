@@ -60,17 +60,19 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   const status = h("p", { id: "terminal-status", class: "term-status", role: "status", "aria-live": "polite", "data-state": "idle", "data-mode": "view" }, "Not connected.");
   const host = h("div", { id: "terminal-host", class: "term-host", role: "region", "aria-label": "Terminal output", hidden: true });
   const transcript = h("pre", { class: "transcript", tabindex: "0", "aria-label": "Session transcript", hidden: true });
-  // The note was an empty visible paragraph that took 16 px of margin in the pane; the fade on the terminal edge is the visual cue, this is its text.
-  const panNote = h("p", { class: "sr-only", hidden: true }, "The session is wider than the screen. Scroll sideways to read all of it.");
   const jump = button("Jump to latest", () => toBottom(), { kind: "small", icon: "chevronDown" });
   jump.classList.add("jump");
   jump.hidden = true;
   const watch = button("Watch live", () => start("view"), { kind: "small", id: "terminal-open" });
-  const followBtn = button("Following", () => (follow ? pause() : toBottom()), { kind: "small ghost bar-btn", icon: "chevronDown" });
+  // Visible while the operator holds the writer role: giving control back is level 0, never only in the menu (spec section 3, rule 3).
+  const release = button("Release", () => restart("view"), { kind: "small", id: "terminal-release", action: "release", label: "Release control" });
+  release.hidden = true;
+  const followBtn = button("Follow: on", () => (follow ? pause() : toBottom()), { kind: "small ghost bar-btn", icon: "chevronDown" });
   const transcriptBtn = button("Transcript", () => showTranscript(!!transcript.hidden), { kind: "small ghost bar-btn", icon: "sessions" });
   const expandBtn = button("Expand", () => toggleFull(), { kind: "small ghost bar-btn", icon: "chevronUp", label: "Expand to full screen" });
   const menuSlot = h("span", { class: "pane-menu" });
-  const bar = h("div", { class: "session-bar" }, status, watch, followBtn, transcriptBtn, expandBtn, menuSlot);
+  const bar = h("div", { class: "session-bar" }, status, watch, release, followBtn, transcriptBtn, expandBtn, menuSlot);
+  const waiting = h("p", { class: "term-wait" }, "Waiting for output...");
 
   // On-screen keys (lazy, see session-extras.ts). They never take focus from the terminal and send bytes only with the writer role.
   const keybar = h("div", { class: "keybar", id: "terminal-keys", role: "toolbar", "aria-label": "Terminal keys" });
@@ -87,8 +89,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     "section",
     { id: "terminal-region", class: "session-pane", "data-pane": "session", "aria-label": "Live session", tabindex: "-1" },
     bar,
-    h("div", { class: "session-main" }, host, transcript, jump),
-    panNote,
+    h("div", { class: "session-main" }, host, transcript, waiting, jump),
     input.element,
     keybar,
   );
@@ -107,6 +108,10 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   let transcriptTimer = 0;
   let available = true;
   let disposed = false;
+  /** Output has arrived since the terminal was last cleared; until then the pane says it is waiting. */
+  let received = false;
+  /** The remote screen is wider than the pane, so it scrolls sideways. */
+  let panning = false;
   /** A focus request that arrived while neither the message field nor Take control could take focus. */
   let wantFocus = false;
   const settleFocus = (): boolean => {
@@ -136,15 +141,20 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     const busy = state === "connecting" || state === "reconnecting";
     const live = state === "live";
     let text: string;
-    if (live) text = mode === "write" ? "You have control" : `Watching, read only${reason ? `: ${reason}` : ""}`;
+    // The reason a viewer cannot type sits in the composer, beside Take control; the status does not repeat it.
+    if (live) text = (mode === "write" ? "You have control" : "Watching, read only") + (received ? "" : ". No output yet");
     else if (state === "idle") text = available ? "Not connected." : OFFLINE;
     else text = ({ connecting: "Connecting...", reconnecting: "Connection lost, reconnecting...", ended: "Session ended" } as Record<string, string>)[state] ?? "";
     status.textContent = detail && !live ? `${text} ${detail}` : text;
+    // Visible text must not change the height of the bar when the width of the remote screen is measured (a layout shift); the edge fade is the visual cue.
+    if (live && panning) status.append(h("span", { class: "sr-only" }, `. Narrow view, ${paneCols} columns. Pan, or open Transcript`));
     status.dataset["state"] = state;
     status.dataset["mode"] = mode;
-    watch.hidden = live || busy;
-    watch.disabled = !available;
     const controlling = live && mode === "write";
+    watch.hidden = live || busy || !available;
+    release.hidden = !controlling;
+    bar.classList.toggle("ctl", controlling);
+    waiting.hidden = !live || received;
     let takeReason = "";
     if (!available) takeReason = OFFLINE;
     else if (busy) takeReason = state === "connecting" ? "Connecting..." : "Reconnecting...";
@@ -155,6 +165,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
       takeReason,
       note: controlling ? "Enter sends, Shift+Enter adds a line." : takeReason || (live ? "Take control to type" : "Not connected."),
       hint: controlling || (live && !takeReason),
+      steerReason: available ? "" : OFFLINE,
     });
     keys?.enable(controlling, "Take control to use the keys");
     if (wantFocus && settleFocus()) wantFocus = false;
@@ -228,7 +239,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   const baseY = (): number => term?.buffer.active.baseY ?? 0;
   const label = (b: HTMLElement, text: string): string => (b.querySelector("span")!.textContent = text);
   function paintFollow(): void {
-    label(followBtn, follow ? "Following" : "Paused");
+    label(followBtn, follow ? "Follow: on" : "Follow: off");
     followBtn.setAttribute("aria-pressed", String(follow));
     jump.hidden = follow || !transcript.hidden;
     label(jump, baseY() > pausedAt ? `Jump to latest ${baseY() - pausedAt}` : "Jump to latest");
@@ -298,8 +309,9 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     observer = new ResizeObserver(() => {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        panNote.hidden = !(narrow.matches && host.scrollWidth > host.clientWidth + 1);
-        host.classList.toggle("pan", !panNote.hidden);
+        const pan = narrow.matches && host.scrollWidth > host.clientWidth + 1;
+        host.classList.toggle("pan", pan);
+        if (panning !== pan) ((panning = pan), paint());
         // Never auto-resize on a narrow screen: the PTY is shared with other viewers and the tmux station (UXR-041).
         if (mode !== "write" || narrow.matches) return;
         const p = proposed();
@@ -332,6 +344,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
         return;
       }
       if (f.t === "o" && typeof f.d === "string") {
+        if (!received) ((received = true), paint());
         t.write(fromBase64(f.d), () => {
           if (!follow) paintFollow(); // xterm itself stays at the bottom while the reader has not scrolled up
           if (!transcript.hidden && !transcriptTimer) transcriptTimer = window.setTimeout(renderTranscript, 1000);
@@ -377,6 +390,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
         if (disposed || state !== "reconnecting") return;
         follow = true;
         t.reset();
+        received = false;
         connect();
       }, delay);
     };
@@ -419,6 +433,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     attempt = 0;
     follow = true;
     if (term) term.reset();
+    received = false;
     setState("connecting");
     connect();
     // xterm.js does not paint while the terminal is outside the viewport, so bring it into view.

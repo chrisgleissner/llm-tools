@@ -26,7 +26,6 @@ details.aside > .hint { margin-block-end: var(--sp-2); }
 .policy li .icon { color: var(--text-muted); }
 .policy li.met .icon { color: var(--icon-done); }
 .caps-warning { display: flex; align-items: center; gap: var(--sp-2); color: var(--alert-attention-fg); font-weight: 600; font-size: var(--fs-md); margin: 0; }
-.caps-warning[hidden] { display: none; }
 @media (max-width: 600px) { .card { padding: var(--sp-4); } }
 
 /* ---------------------------------------------------------------- account: one 640 px column of three blocks */
@@ -43,7 +42,7 @@ details.aside > .hint { margin-block-end: var(--sp-2); }
 .token-meta { display: flex; flex-wrap: wrap; gap: 0 var(--sp-4); }
 .token-list .token-none { border: 0; padding: 0; }
 .token-create { display: grid; gap: var(--sp-3); }
-.token-create fieldset { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-2); padding: var(--sp-2) var(--sp-3); margin: 0; }
+.token-create fieldset { display: grid; gap: var(--sp-1); border: 1px solid var(--border); border-radius: var(--r-2); padding: var(--sp-2) var(--sp-3); margin: 0; }
 .token-create legend { font-weight: 600; padding-inline: var(--sp-1); }
 .token-secret .secret { margin: var(--sp-3) 0; }
 @media (max-width: 600px) { .account-block { padding: var(--sp-3) var(--sp-4); } }

@@ -32,11 +32,12 @@
 @media (hover: hover) { .row-title:hover { text-decoration: underline; } }
 .row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
 .row-reason { flex: 1 1 10rem; min-inline-size: 0; }
+.row-reason + .row-reason { flex-basis: 100%; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }
 .row-cells { flex-wrap: nowrap; gap: var(--sp-3); }
+.row-cells .cell { min-inline-size: 2.5rem; }
 .row-cells .cell:nth-child(2), .row-cells .cell:nth-child(3) { min-inline-size: 5rem; }
-.row-cells .cell:first-child, .row-cells .cell:last-child { min-inline-size: 2.5rem; }
 .row-actions { grid-area: actions; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); }
 .row-menu { grid-area: menu; }
 /* From 60rem an Inbox row is one line: pill, title, reason and age, actions, menu. */

@@ -8,7 +8,8 @@ import { icon } from "./icons";
 import { menu } from "./menu";
 import { compactAge, type DerivedState } from "./state";
 import { missionState, store, worker } from "./store";
-import { announce, confirmDialog, say } from "./ui";
+import { confirmDialog, reportOutcome, say } from "./ui";
+import { evidenceBody, evidenceLine, readEvidence } from "./views/mission/evidence";
 
 // ---------------------------------------------------------------- data: what a mission needs and what it is doing
 
@@ -66,9 +67,16 @@ export function attentionPending(entries: MissionEntry[]): boolean {
   return attentionGaps(entries).slice(0, FAN_OUT).some((e) => !statuses.has(keyOf(e)));
 }
 
-export function attentionChecked(entries: MissionEntry[]): { checked: number; eligible: number } {
+/**
+ * The one count of missions that need the operator: the Inbox badge, the tab title and the answer lines of the Inbox and Missions all use it, so they
+ * cannot disagree. Missions whose attention is not known yet (an older worker, more than 12 at once) are not counted; while any is unread `partial`
+ * is set and `text` is "14+" rather than a number nobody can vouch for, and `note` says how many were checked.
+ */
+export function attentionCount(entries: MissionEntry[] = store.missions): { n: number; partial: boolean; text: string; note: string } {
   const gaps = attentionGaps(entries);
-  return { checked: Math.min(gaps.length, FAN_OUT), eligible: gaps.length };
+  const unread = gaps.filter((e) => !statuses.has(keyOf(e))).length;
+  const n = entries.filter((e) => itemOf(e).state.tier === "alert").length;
+  return { n, partial: unread > 0, text: unread > 0 ? `${n}+` : String(n), note: unread > 0 ? `Checked ${gaps.length - unread} of ${gaps.length} active missions` : "" };
 }
 
 /** Read `mission.status` for these missions, a few at a time. Results replace the cached ones; the page is notified when they arrive. */
@@ -151,11 +159,6 @@ export function sectionOf(state: DerivedState): Section {
   return "waiting";
 }
 
-/** Number of missions that need the operator now (alert states). Used by the Inbox answer line and available to the shell badge. */
-export function needsYouCount(entries: MissionEntry[] = store.missions): number {
-  return entries.filter((e) => itemOf(e).state.tier === "alert").length;
-}
-
 const ORDER = ["needs-approval", "needs-input", "failed", "offline", "waiting", "running", "paused", "queued", "done", "stopped"];
 export const stateOrder = (state: DerivedState): number => ORDER.indexOf(state.id);
 
@@ -196,13 +199,12 @@ export const lastLine = (e: MissionEntry): string => lines.get(keyOf(e))?.line ?
 export function taskOf(item: Item): number | null {
   const fromAttention = item.attention?.tasks?.[0];
   if (typeof fromAttention === "number") return fromAttention;
-  return workOf(item.entry)?.task?.ordinal ?? null;
+  return failedAt.get(stamp(item))?.ordinal ?? workOf(item.entry)?.task?.ordinal ?? null;
 }
 
 // ---------------------------------------------------------------- text
 
 const capital = (s: string): string => (s ? s[0]!.toUpperCase() + s.slice(1) : s);
-const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
 /** "now", "3m", "2h", "5d": minute granularity, so a row does not change every second. */
 export function age(iso: string | null | undefined): string {
@@ -210,25 +212,86 @@ export function age(iso: string | null | undefined): string {
   return Number.isNaN(t) ? "" : compactAge((Date.now() - t) / 1000);
 }
 
-/** The one reason line of a row: why the operator is needed, or what the mission is doing. Never raw JSON or ids. */
-export function reasonOf(item: Item): string {
+/** Segments of the worker's message that only tell a shell user which command to run ("llm-bridge task approve ...", "type /approve 2"): not shown in the console. */
+const COMMAND_HINT = /llm-bridge|^(type|run:|inspect|check|change providers)\b|^\/[a-z]|take control/i;
+
+/** The parts of a worker message without the commands it hints at, each with a capital: "Codex asks: Should I continue?", "Choices: 1. Yes; 2. No". */
+export const messageParts = (message: string | null | undefined): string[] => (message ?? "").split(/\s+·\s+/).map((p) => p.trim()).filter((p) => p && !COMMAND_HINT.test(p)).map(capital);
+
+/** A task of a failed mission, read from its task list (the worker's attention for a failed mission names no task). */
+const failedAt = new Map<string, { ordinal: number; title: string }>();
+/** A cached read belongs to one state of the mission: a retry or a new run changes `updated_at`, and the read is made again. */
+const stamp = (item: Item): string => `${item.key}@${item.entry.mission.updated_at}`;
+/** The verifier and change summary of a task that awaits approval, so the row says whether it is safe to approve. */
+const evidenceAt = new Map<string, string>();
+const evidenceKey = (item: Item): string => `${item.key}#${taskOf(item)}@${item.entry.mission.updated_at}`;
+
+/** The failing task of a failed row, from the attention or the task list: Retry needs its number. */
+export const failedTaskOf = (item: Item): number | null => {
+  const n = item.attention?.tasks?.[0];
+  return typeof n === "number" ? n : (failedAt.get(stamp(item))?.ordinal ?? null);
+};
+
+/**
+ * The reason of a row, as lines: why the operator is needed, or what the mission is doing. The worker's message without the commands it hints at,
+ * never raw JSON or ids. A failed row names the failing task; an approval row adds the verifier result and the size of the change once they are read.
+ */
+export function reasonLines(item: Item): string[] {
   const { state, attention } = item;
   if (state.tier === "alert") {
-    const message = (attention?.message ?? "").replace(/\s*·\s*take control of the terminal to answer\.?$/i, "").trim();
-    if (message) return capital(message);
-    if (state.id === "failed" && item.entry.mission.status.toUpperCase() === "FAILED") return "The mission failed.";
-    if (state.detail) return capital(state.detail);
-    return state.id === "needs-approval" ? "A task is waiting for approval." : state.id === "needs-input" ? "The provider is waiting for you." : "A task failed.";
+    let parts = messageParts(attention?.message);
+    const failed = failedAt.get(stamp(item));
+    if (state.id === "failed" && failed) {
+      const rest = parts.filter((p) => !/^(mission|task \d+) failed$/i.test(p));
+      parts = [`Task ${failed.ordinal} failed`, ...(rest.length ? rest : failed.title ? [failed.title] : [])];
+    }
+    if (parts.length === 0) {
+      parts = [state.id === "failed" && item.entry.mission.status.toUpperCase() === "FAILED" ? "The mission failed." : state.detail ? capital(state.detail) : state.id === "needs-approval" ? "A task is waiting for approval." : state.id === "needs-input" ? "The provider is waiting for you." : "A task failed."];
+    }
+    const line = state.id === "needs-approval" ? evidenceAt.get(evidenceKey(item)) : undefined;
+    // A provider question is shown as the question, then its choices; any other message is one line (an approval adds what it rests on).
+    return attention?.kind === "provider" ? parts : [parts.join(" - "), ...(line ? [line] : [])];
   }
   if (state.id === "running") {
     const line = lastLine(item.entry);
-    if (line) return line;
+    if (line) return [line];
     const work = workOf(item.entry);
-    const parts = [work?.task ? `Task ${work.task.ordinal}${work.task.title ? ` - ${work.task.title}` : ""}` : ""].filter(Boolean);
-    return parts.join(" - ") || "Working";
+    return [(work?.task ? `Task ${work.task.ordinal}${work.task.title ? ` - ${work.task.title}` : ""}` : "") || "Working"];
   }
-  if (state.id === "offline" || state.id === "waiting") return state.detail ? capital(state.detail) : state.label;
-  return "";
+  if (state.id === "offline" || state.id === "waiting") return [state.detail ? capital(state.detail) : state.label];
+  return [];
+}
+
+
+/** Read what the visible needs-you rows lack: the failing task of a failed mission, the verifier and change summary of an approval. */
+const reading = new Set<string>();
+/** Failed missions whose task list was read once (a list without a failed task is not read again). */
+const searched = new Set<string>();
+export async function loadRowEvidence(items: Item[], stop: () => boolean = () => false): Promise<void> {
+  const todo = items.filter((i) => !reading.has(evidenceKey(i)) && ((i.state.id === "failed" && failedTaskOf(i) === null && !searched.has(stamp(i))) || (i.state.id === "needs-approval" && taskOf(i) !== null && !evidenceAt.has(evidenceKey(i)))));
+  let next = 0;
+  const lane = async (): Promise<void> => {
+    while (next < todo.length && !stop()) {
+      const i = todo[next++] as Item;
+      const { worker: w, mission: m } = i.entry;
+      const mark = evidenceKey(i);
+      reading.add(mark);
+      try {
+        if (i.state.id === "failed") {
+          searched.add(stamp(i));
+          const list = (await api.missionTasks(w, m.id, 500, 0)).tasks as Array<Record<string, unknown>>;
+          const t = list.find((x) => x["status"] === "FAILED") ?? list.find((x) => x["status"] === "BLOCKED");
+          if (t && typeof t["ordinal"] === "number") failedAt.set(stamp(i), { ordinal: t["ordinal"], title: typeof t["title"] === "string" ? t["title"] : "" });
+        } else evidenceAt.set(evidenceKey(i), evidenceLine(await readEvidence(w, m.id, taskOf(i) as number, false)));
+        notify();
+      } catch {
+        /* the row keeps what the worker's message says */
+      } finally {
+        reading.delete(mark);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: LANES }, lane));
 }
 
 /** "4/9" from the task counts, or "" when they are unknown. */
@@ -244,75 +307,6 @@ export const providerLabel = (e: MissionEntry): string => {
   return w ? [capital(w.provider), w.model].filter(Boolean).join(" ") : "";
 };
 
-// ---------------------------------------------------------------- evidence for the approval dialog
-
-export interface DiffStats {
-  files: string[];
-  added: number;
-  removed: number;
-}
-
-/** Changed files and +/- line counts from unified diff text (`diff --git` headers and hunk lines). */
-export function diffStats(text: string): DiffStats {
-  const out: DiffStats = { files: [], added: 0, removed: 0 };
-  let inHunk = false;
-  for (const line of text.split("\n")) {
-    if (line.startsWith("diff --git ")) {
-      inHunk = false;
-      out.files.push(line.replace(/^diff --git a\/.*? b\//, "").trim() || line.slice(11));
-    } else if (line.startsWith("@@")) inHunk = true;
-    else if (inHunk && line.startsWith("+")) out.added += 1;
-    else if (inHunk && line.startsWith("-")) out.removed += 1;
-  }
-  return out;
-}
-
-const clip = (s: string, n = 140): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-
-/** One verifier sentence from `task.show`, in whatever shape the worker reports it; says so when nothing was recorded. */
-export function verifierLine(show: Record<string, unknown>): string {
-  const v = (show["verification"] ?? show["verifier"]) as Record<string, unknown> | string | null | undefined;
-  if (typeof v === "string" && v.trim()) return clip(v.trim());
-  if (v && typeof v === "object") {
-    const passed = v["passed"] === true ? "Verifier passed" : v["passed"] === false ? "Verifier failed" : "Verifier result";
-    const detail = [v["summary"], v["message"]].find((x) => typeof x === "string" && x.trim()) as string | undefined;
-    const command = typeof v["command"] === "string" ? ` (${v["command"]})` : "";
-    return clip(`${passed}${detail ? `: ${detail}` : ""}${command}`);
-  }
-  const evidence = show["evidence"] ?? (show["task"] as Record<string, unknown> | undefined)?.["evidence"];
-  if (Array.isArray(evidence) && evidence.length) {
-    const last = evidence[evidence.length - 1] as unknown;
-    const text = typeof last === "string" ? last : last && typeof last === "object" ? String((last as Record<string, unknown>)["evidence"] ?? (last as Record<string, unknown>)["text"] ?? (last as Record<string, unknown>)["summary"] ?? "") : "";
-    if (text.trim()) return clip(`Verifier evidence: ${text.trim()}`);
-  }
-  return "No verifier result recorded.";
-}
-
-const taskTitleOf = (show: Record<string, unknown>): string => {
-  const t = (show["task"] ?? show) as Record<string, unknown>;
-  return typeof t["title"] === "string" ? t["title"].trim() : "";
-};
-
-async function evidenceBlock(into: HTMLElement, e: MissionEntry, task: number): Promise<void> {
-  // `task.show` goes through the command route (the same one `task.diff` uses) so one reading path serves both.
-  const shown = api.command(e.worker, "task.show", e.mission.id, { task_number: task }).then((row) => (row.result?.result ?? {}) as Record<string, unknown>);
-  const [show, diff] = await Promise.allSettled([shown, api.taskDiff(e.worker, e.mission.id, task)]);
-  const title = show.status === "fulfilled" ? taskTitleOf(show.value) : "";
-  const verifier = show.status === "fulfilled" ? verifierLine(show.value) : "Verifier result unavailable.";
-  let changes: Node;
-  let files: string[] = [];
-  if (diff.status === "fulfilled" && diff.value.available !== false && typeof diff.value.text === "string") {
-    const stats = diffStats(diff.value.text);
-    changes = h("span", {}, `${plural(stats.files.length, "file")}, +${stats.added} -${stats.removed}`);
-    files = stats.files.slice(0, 6);
-  } else {
-    const why = diff.status === "fulfilled" ? (diff.value.message ?? diff.value.reason ?? "") : "";
-    changes = h("span", {}, `Diff unavailable${why ? `: ${why}` : "."}`);
-  }
-  const line = (label: string, text: Node | string) => h("p", {}, h("strong", {}, `${label}: `), text);
-  into.replaceChildren(line("Task", `${task}${title ? ` - ${title}` : ""}`), line("Verifier", verifier), line("Changes", changes), ...(files.length ? [h("ul", { class: "plain" }, ...files.map((f) => h("li", {}, h("code", {}, f))))] : []));
-}
-
 // ---------------------------------------------------------------- actions
 
 export function blockedReason(e: MissionEntry): string | undefined {
@@ -321,24 +315,18 @@ export function blockedReason(e: MissionEntry): string | undefined {
   return undefined;
 }
 
-/** Report the outcome of the operator's own action as one toast, then let the page re-read the mission. */
-function report(label: string, r: api.MutationResult): boolean {
-  announce(`${label}.`, r.outcome, r.message);
-  return r.outcome === "applied" || r.outcome === "accepted";
-}
-
 export async function approve(item: Item, task: number, done: () => void): Promise<void> {
   const e = item.entry;
-  const body = h("div", { class: "evidence", "aria-live": "polite" }, h("p", { class: "muted" }, "Loading the evidence..."));
+  const body = evidenceBody(e.worker, e.mission.id, { ordinal: task }, false, true).el;
+  body.setAttribute("aria-live", "polite");
   const pending = confirmDialog({
     title: `Approve task ${task}?`,
     message: `Approve task ${task} of "${e.mission.name || "this mission"}" on ${e.worker}.`,
     confirmLabel: "Approve",
     details: body,
   });
-  void evidenceBlock(body, e, task);
   if ((await pending) === null) return;
-  report(`Approved task ${task}`, await api.mutateTask(e.worker, e.mission.id, task, "task.verify", { approved: true, evidence: "approved in web UI" }));
+  reportOutcome(await api.mutateTask(e.worker, e.mission.id, task, "task.verify", { approved: true, evidence: "approved in web UI" }), `Approved task ${task}`, `approve task ${task}`);
   done();
 }
 
@@ -353,13 +341,13 @@ export async function reject(item: Item, task: number, done: () => void): Promis
   });
   const reason = await pending;
   if (reason === null) return;
-  report(`Rejected task ${task}`, await api.mutateTask(e.worker, e.mission.id, task, "task.reject", { reason }));
+  reportOutcome(await api.mutateTask(e.worker, e.mission.id, task, "task.reject", { reason }), `Rejected task ${task}`, `reject task ${task}`);
   done();
 }
 
 export async function retry(item: Item, task: number, done: () => void): Promise<void> {
   const e = item.entry;
-  report(`Retry of task ${task} queued`, await api.mutateTask(e.worker, e.mission.id, task, "task.retry", {}));
+  reportOutcome(await api.mutateTask(e.worker, e.mission.id, task, "task.retry", {}), `Retry of task ${task} queued`, `retry task ${task}`);
   done();
 }
 
@@ -390,13 +378,13 @@ function inlineActions(item: Item, done: () => void): HTMLElement[] {
   const why = blockedReason(e);
   const task = item.attention?.tasks?.[0];
   const open = (label = "Open", extra = "") => h("a", { class: `btn small ${extra}`.trim(), href: missionHref(e), "data-action": "open", "aria-label": `${label} ${e.mission.name || "mission"}` }, h("span", {}, label));
-  const act = (label: string, run: () => Promise<void>, o: { kind?: string; action: string; busy?: boolean }): HTMLButtonElement => {
+  const act = (label: string, run: () => Promise<void>, o: { kind?: string; action: string; busy?: boolean; n?: number }): HTMLButtonElement => {
     const b = button(label, () => {
       // Approve and Reject open a dialog first; only a direct action (Retry) shows the button as working.
       if (o.busy) setBusy(b, true);
       void run().finally(() => setBusy(b, false));
     }, { kind: `${o.kind ?? ""} small`.trim(), reason: why, action: o.action });
-    b.setAttribute("aria-label", `${label} task ${task} of ${e.mission.name || "mission"}`);
+    b.setAttribute("aria-label", `${label} task ${o.n ?? task} of ${e.mission.name || "mission"}`);
     return b;
   };
   switch (item.state.id) {
@@ -408,8 +396,10 @@ function inlineActions(item: Item, done: () => void): HTMLElement[] {
     case "needs-input":
       if (item.attention?.kind === "provider") return [h("a", { class: "btn small primary", href: missionHref(e, "?focus=composer"), "data-action": "answer", "aria-label": `Answer in ${e.mission.name || "mission"}` }, h("span", {}, "Answer"))];
       return [open("Open", "primary")];
-    case "failed":
-      return typeof task === "number" ? [act("Retry", () => retry(item, task, done), { action: "retry", busy: true }), open()] : [open("Open", "primary")];
+    case "failed": {
+      const failing = failedTaskOf(item);
+      return failing === null ? [open("Open", "primary")] : [act("Retry", () => retry(item, failing, done), { action: "retry", busy: true, n: failing }), open()];
+    }
     default:
       return [];
   }
@@ -427,23 +417,23 @@ function rowMenu(item: Item): HTMLElement {
 /** Everything a row shows, as one string: when it is unchanged the page keeps the existing element. */
 export function rowSig(item: Item, o: RowOptions): string {
   const e = item.entry;
-  return JSON.stringify([item.state.id, item.state.label, item.state.detail, e.mission.name, e.worker, age(e.mission.updated_at), reasonOf(item), progress(item), providerLabel(e), item.attention?.tasks ?? null, item.attention?.kind ?? null, o.selected ?? false, o.l0, blockedReason(e) ?? "", store.conn]);
+  return JSON.stringify([item.state.id, item.state.label, item.state.detail, e.mission.name, e.worker, age(e.mission.updated_at), reasonLines(item), progress(item), providerLabel(e), item.attention?.tasks ?? null, item.attention?.kind ?? null, o.selected ?? false, o.l0, blockedReason(e) ?? "", store.conn]);
 }
 
 export function missionRow(item: Item, o: RowOptions): HTMLElement {
   const e = item.entry;
   const name = e.mission.name || "Untitled mission";
-  const reason = reasonOf(item);
+  const reasons = reasonLines(item);
   const updated = age(e.mission.updated_at);
   const title = h("a", { class: "row-title", href: missionHref(e), title: name }, h("span", { class: "clamp-2 long-text" }, name));
   const sub = o.layout === "cells"
     ? h("div", { class: "row-cells" },
-      h("span", { class: "cell num nowrap", "data-cell": "progress" }, progress(item)),
+      h("span", { class: "cell num nowrap", "data-cell": "progress", title: "Tasks done of all tasks" }, progress(item)),
       h("span", { class: "cell nowrap", "data-cell": "provider" }, providerLabel(e)),
       h("span", { class: "cell nowrap", "data-cell": "worker", title: e.worker }, e.worker),
-      h("span", { class: "cell num nowrap", "data-cell": "updated" }, updated ? (updated === "now" ? "now" : updated) : ""))
+      h("span", { class: "cell num nowrap", "data-cell": "updated", title: "Time since the last update" }, updated))
     : h("div", { class: "row-sub" },
-      reason ? h("span", { class: "row-reason clamp-2" }, reason) : null,
+      ...reasons.map((line) => h("span", { class: "row-reason clamp-2" }, line)),
       h("span", { class: "row-meta" }, ...[providerLabel(e), e.worker, updated ? `updated ${updated}` : ""].filter(Boolean).map((part) => h("span", { class: "nowrap" }, part))));
   const pill = h("span", { class: "pill", "data-state": item.state.id, "data-tier": item.state.tier }, icon(item.state.icon, 16), item.state.label);
   const actions = o.actions ? inlineActions(item, () => o.done?.(item)) : [];

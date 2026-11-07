@@ -4,7 +4,7 @@ import * as api from "../api";
 import { debounce, deferSkeleton, disclosure, emptyState, errorBlock, h, searchBox } from "../dom";
 import { store, streamConnecting, subscribe } from "../store";
 import {
-  attentionGaps, attentionPending, hasLine, hasStatus, isFinishedStatus, itemOf, loadLines, loadStatuses, missionRow, onDetails, reconcile, rowSig, sectionOf, stateOrder,
+  attentionCount, attentionGaps, attentionPending, hasLine, hasStatus, isFinishedStatus, itemOf, loadLines, loadStatuses, missionRow, onDetails, reconcile, rowSig, sectionOf, stateOrder,
   type Item, type RowOptions, type RowSpec,
 } from "../rows";
 
@@ -139,6 +139,7 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
   function render(): void {
     window.clearTimeout(renderTimer);
     if (disposed) return;
+    controls.hidden = Boolean(error);
     if (error) {
       stateBox.replaceChildren(errorBlock({ message: "The missions could not be loaded.", code: error, retry: () => { error = ""; void load(); } }));
       list.replaceChildren();
@@ -181,12 +182,13 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     order = new Map(active.map((i, n) => [i.key, n]));
     done.sort(sort === "name" ? byName : byUpdated);
 
-    const needs = items.filter((i) => i.state.tier === "alert").length;
+    const need2 = attentionCount(reply.missions);
     const pending = attentionPending(reply.missions);
     const open = items.filter((i) => sectionOf(i.state) !== "finished").length;
-    need.textContent = pending && needs === 0 ? "Checking..." : needs ? `${needs} ${needs === 1 ? "needs" : "need"} you` : "None need you";
+    need.textContent = pending && need2.n === 0 ? "Checking..." : need2.n ? `${need2.text} ${need2.n === 1 && !need2.partial ? "needs" : "need"} you` : "None need you";
+    need.title = need2.note;
     what.textContent = `${open} active`;
-    next.textContent = items.length === 0 ? "Create a mission" : "Open one to act";
+    next.textContent = items.length === 0 ? "Create a mission" : "Open one to see its session";
     live.textContent = `${shown.length} mission${shown.length === 1 ? "" : "s"} shown.`;
 
     if (items.length === 0 && !filtered()) {

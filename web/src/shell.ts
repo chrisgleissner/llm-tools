@@ -8,7 +8,7 @@ import { icon, type IconName } from "./icons";
 import { menu, type MenuItem } from "./menu";
 import type { PaletteAction } from "./palette";
 import type { DerivedState } from "./state";
-import { needsYouCount } from "./rows";
+import { attentionCount, attentionGaps, hasStatus, loadStatuses, onDetails } from "./rows";
 import { missionState, store, subscribe } from "./store";
 import { openPanel, say } from "./ui";
 
@@ -99,14 +99,6 @@ function needing(): Needing[] {
     if (state.rank <= 2) out.push({ key: `${m.worker}/${info.id}`, name: info.name, path: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(info.id)}`, state });
   }
   return out;
-}
-
-let countOverride: number | null = null;
-let recount: () => void = () => {};
-/** The Inbox knows more than the mission list (approvals and failures come from per-mission status): it may report the exact count. `null` returns to the list-derived count. */
-export function setAttentionCount(n: number | null): void {
-  countOverride = n;
-  recount();
 }
 
 function faviconHref(dot: boolean): string {
@@ -452,11 +444,13 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   };
   function paintAttention(): void {
     const list = needing();
-    // The badge and the tab title use the Inbox derivation (it reads the cached status of each mission), so they agree with the Inbox on every page;
-    // what is notified as new comes from the summaries only, so a mission whose status is read later is not announced as new.
-    count = countOverride ?? Math.max(needsYouCount(), list.length);
+    // The badge, the tab title and the Inbox and Missions answer lines share one count (`attentionCount`), so they agree on every page; while some
+    // mission's status is unread it reads "14+". What is notified as new comes from the summaries only, so a mission read later is not announced as new.
+    const all = attentionCount();
+    count = all.n;
     needBadge.hidden = count === 0;
-    needBadge.replaceChildren(String(count), h("span", { class: "sr-only" }, " need you"));
+    needBadge.title = all.note;
+    needBadge.replaceChildren(all.text, h("span", { class: "sr-only" }, " need you"));
     syncTitle();
     if (iconLink) iconLink.href = faviconHref(count > 0);
     if (!store.loaded) return;
@@ -478,14 +472,24 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
     }
     seen = keys;
   }
-  recount = paintAttention;
   const mo = titleEl ? new MutationObserver(syncTitle) : null;
   mo?.observe(titleEl as Element, { childList: true, characterData: true, subtree: true });
 
+  // Missions whose attention the list does not carry (an older worker) are read here, so every page has the same count, not only the Inbox.
+  let readTimer = 0;
+  const readGaps = (): void => {
+    window.clearTimeout(readTimer);
+    readTimer = window.setTimeout(() => {
+      const gaps = attentionGaps(store.missions).slice(0, 12).filter((e) => !hasStatus(e));
+      if (gaps.length) void loadStatuses(gaps);
+    }, 200);
+  };
   const unsubscribe = subscribe(() => {
     onConn();
     paintAttention();
+    readGaps();
   });
+  const unDetails = onDetails(paintAttention);
   const asOf = window.setInterval(paintAge, 15000);
   paintConn();
   paintAttention();
@@ -515,6 +519,8 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
     el,
     dispose: () => {
       unsubscribe();
+      unDetails();
+      window.clearTimeout(readTimer);
       caps.dispose();
       mo?.disconnect();
       for (const t of [showTimer, hideTimer]) window.clearTimeout(t);
@@ -522,7 +528,6 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       window.clearInterval(asOf);
       document.title = document.title.replace(prefix, "");
       if (iconLink) iconLink.href = faviconHref(false);
-      recount = () => {};
       live = null;
     },
   };

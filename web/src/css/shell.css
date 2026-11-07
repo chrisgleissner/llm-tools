@@ -12,7 +12,7 @@
 .search-open { flex: 0 1 26rem; justify-content: flex-start; color: var(--text-muted); background: var(--surface-2); border-color: transparent; font-weight: 400; min-inline-size: var(--control-h); }
 .search-open .so-text { flex: 1; text-align: start; white-space: nowrap; }
 @media (max-width: 47.99rem), (pointer: coarse) { .search-open kbd { display: none; } }
-@media (max-width: 47.99rem) { .search-open { flex: none; padding: 0; } .search-open .so-text { display: none; } }
+@media (max-width: 47.99rem) { .search-open { flex: none; padding: 0; border-color: var(--border-strong); } .search-open .so-text { display: none; } }
 
 /* capacity chips: neutral text and a small meter */
 .cap-chips { flex: 1 1 0; min-inline-size: 0; display: flex; justify-content: flex-end; gap: var(--sp-2); overflow: hidden; }

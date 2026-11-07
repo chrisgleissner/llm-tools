@@ -61,7 +61,7 @@ const isActive = (s: DerivedState): boolean => s.id === "running" || s.id === "q
 
 function sessionRow(s: Row): HTMLElement {
   const state = sessionState(s.state);
-  const provider = s.route_id ?? s.provider;
+  const provider = (s.route_id ?? s.provider).replace(/^./, (c) => c.toUpperCase());
   const mission = s.mission_name || "Mission";
   const details = toggleDetails("Details", h("dl", { class: "facts" }, h("dt", {}, "Provider session"), h("dd", {}, s.native_session_id ? h("span", { class: "idchip" }, h("code", { title: s.native_session_id }, shortId(s.native_session_id)), copyButton(s.native_session_id, "session ID")) : "Not reported"), h("dt", {}, "Restoration"), h("dd", {}, restoration(s.restoration_state))));
   return h(
@@ -141,10 +141,6 @@ export function sessions(root: HTMLElement, query: URLSearchParams): () => void 
     },
     noWorkers: () => emptyState({ icon: "sessions", title: "No provider sessions yet", text: "Sessions come from workers, and none is enrolled. Add a worker, then run a mission on it.", action: h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/workers" }, "Go to Workers")) }),
     allOffline: (names) => emptyState({ icon: "workers", title: "No worker is online", text: `${names.join(", ")} must reconnect before its sessions can be listed.`, action: h("div", { class: "actions" }, h("a", { class: "btn", href: "/workers" }, "Check Workers")) }),
-    idle: (reason) => ({
-      what: reason === "loading" ? "Reading provider sessions from the workers." : reason === "offline" ? "No worker is online, so sessions cannot be read." : "No worker is enrolled yet.",
-      needMe: reason === "loading" ? "Nothing needs you." : "A worker has to be online first.",
-      next: reason === "loading" ? "This takes a moment." : "Open Workers to add or check one.",
-    }),
+    read: "provider sessions",
   });
 }

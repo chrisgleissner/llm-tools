@@ -20,7 +20,7 @@ function enrolDialog(name: string, token: string): void {
     h("h3", {}, "Enrol it on the worker machine"),
     h("ol", { class: "steps" }, h("li", {}, "Copy ", h("code", {}, "ca.pem"), " from the coordinator data directory to the worker machine."), h("li", {}, "Run the commands below. Paste the token, press Enter, then Ctrl-D."), h("li", {}, "Add ", h("code", {}, "--allow-control"), " to let this web interface change missions, and ", h("code", {}, "--allow-terminal-view"), " to allow read-only terminals.")),
     h("pre", { class: "cmd" }, cmd),
-    h("div", { class: "actions end" }, copyButton(cmd, "commands"), done),
+    h("div", { class: "actions end" }, button("Copy commands", () => void copyText(cmd).then((ok) => hooks.say(ok ? "Copied the commands." : "Could not copy the commands.")), { icon: "copy" }), done),
   );
   const dlg = onceDialog({ id: "enrol-result", title: "Worker added", body, warning: "This token is shown once. If you close this window before copying it, remove the worker and add it again to get a new token." });
   done.addEventListener("click", () => dlg.close());
@@ -131,12 +131,14 @@ function workerRow(w: api.WorkerInfo): HTMLElement {
 
 export function workers(root: HTMLElement): () => void {
   const body = h("div", { id: "workers-body" });
-  const add = button("Add worker", addDialog, { kind: "primary", icon: "plus" });
+  const add = button("Add worker", addDialog, { icon: "plus" });
   add.id = "add-worker-button";
   const answers = answerLine({ what: "Reading workers.", needMe: "Nothing needs you.", next: "This takes a moment." });
   root.append(h("div", { class: "fleet-head" }, h("h1", {}, "Workers"), add), answers.el, body);
 
   const renderNow = () => {
+    // One primary button per page: the header's while there are workers, else the empty state's.
+    add.classList.toggle("primary", store.workers.length > 0);
     if (store.workers.length === 0) {
       answers.set(store.loaded ? { what: "No workers are enrolled.", needMe: "A worker has to be enrolled before missions can run.", next: "Add one, then enrol it on its machine." } : { what: "Reading workers.", needMe: "Nothing needs you.", next: "This takes a moment." });
       body.replaceChildren(

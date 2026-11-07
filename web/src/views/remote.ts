@@ -122,8 +122,8 @@ export interface FleetViewOpts<T> {
   noWorkers: () => Node;
   /** Content when every selected worker is offline. */
   allOffline: (names: string[]) => Node;
-  /** Answer sentences for the states where nothing was read. */
-  idle: (reason: "loading" | "no-workers" | "offline") => Answer;
+  /** What the page reads ("provider capacity"): the answer sentences of the states where nothing was read are built from it. */
+  read: string;
 }
 
 /**
@@ -134,7 +134,12 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
   const select = h("select", { id: "worker-select", name: "worker", "aria-label": "Worker" });
   const refreshBtn = button("", () => void load(), { kind: "icon", icon: "refresh", label: "Refresh", id: "view-refresh" });
   const filter = h("div", { class: "fleet-filter" }, select, refreshBtn);
-  const answers = answerLine(opts.idle("loading"));
+  const idle = (reason: "loading" | "no-workers" | "offline"): Answer => ({
+    what: reason === "loading" ? `Reading ${opts.read} from the workers.` : reason === "offline" ? `No worker is online, so ${opts.read} cannot be read.` : "No worker is enrolled yet.",
+    needMe: reason === "loading" ? "Nothing needs you." : "A worker has to be online first.",
+    next: reason === "loading" ? "This takes a moment." : "Open Workers to add or check one.",
+  });
+  const answers = answerLine(idle("loading"));
   const status = h("p", { class: "muted small", role: "status", id: "view-status" });
   const body = h("div", { id: "view-body", "aria-live": "off" });
   root.append(h("div", { class: "fleet-head" }, h("h1", {}, opts.title), filter), answers.el, status, body);
@@ -161,7 +166,7 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
     if (!store.loaded) return;
     if (store.workers.length === 0) {
       status.textContent = "";
-      answers.set(opts.idle("no-workers"));
+      answers.set(idle("no-workers"));
       body.replaceChildren(opts.noWorkers());
       rendered = true;
       return;
@@ -175,7 +180,7 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
     }
     if (online.length === 0) {
       status.textContent = `Worker ${offline.join(", ")} ${offline.length === 1 ? "is" : "are"} offline. Nothing can be read until it reconnects.`;
-      answers.set(opts.idle("offline"));
+      answers.set(idle("offline"));
       body.replaceChildren(opts.allOffline(offline));
       rendered = true;
       return;
@@ -195,15 +200,17 @@ export function fleetView<T>(root: HTMLElement, opts: FleetViewOpts<T>): () => v
     });
     if (results.length === 0) {
       status.textContent = "";
-      answers.set(opts.idle("offline"));
+      answers.set(idle("offline"));
       body.replaceChildren(errorBlock({ message: `The worker could not answer. ${failed.join(" ")}`, retry: () => void load(), code: "worker-read-failed" }));
       rendered = true;
       return;
     }
     const view = opts.render({ results, offline, single: names.length === 1 });
     answers.set(view.answer);
-    const notes = [offline.length > 0 ? `Not shown (offline): ${offline.join(", ")}.` : "", failed.length > 0 ? `Could not read ${failed.join("; ")}.` : ""].filter(Boolean);
-    status.textContent = notes.join(" ");
+    status.replaceChildren(
+      ...(offline.length > 0 ? ["Not shown (offline): ", ...offline.flatMap((n, i) => [i ? ", " : "", h("a", { href: "/workers" }, n)]), ". "] : []),
+      failed.length > 0 ? `Could not read ${failed.join("; ")}.` : "",
+    );
     body.replaceChildren(view.body);
     rendered = true;
   }

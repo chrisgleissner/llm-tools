@@ -21,8 +21,14 @@ export interface PageCtx {
   blocked(): string;
   /** `needs_you` of the status projection (null: nothing is needed). */
   needs(): NeedsYou | null;
-  /** Send a task change, toast the outcome once, then reload. */
-  mutateTask(label: string, operation: string, task: Task, params?: Record<string, unknown>): Promise<void>;
+  /** The mission's status (RUNNING, PAUSED, ...), optimistic while a change is in flight. */
+  status(): string;
+  /** Take control of the session to answer the provider (the Answer button of a task that needs input). */
+  answer(): void;
+  /** The verifier result of a task whose evidence was read ("" when none is recorded): the header quotes it. */
+  verified(ordinal: number, text: string): void;
+  /** Send a task change, toast the outcome once ("Approved task 2" or "Could not approve task 2. ..."), then reload. */
+  mutateTask(verb: "approve" | "reject" | "retry" | "resume" | "pause" | "cancel", operation: string, task: Task, params?: Record<string, unknown>): Promise<void>;
 }
 
 /** The text of a plain-words age: "14:02 (3m ago)". */

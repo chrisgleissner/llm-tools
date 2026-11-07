@@ -1,18 +1,10 @@
 import type { BridgeEvent } from "./api";
 import { TUI_EVENT_PHRASES } from "./event-phrases.generated";
+import { eventClass, type EventClass } from "./event-class";
+
+export { eventClass, type EventClass };
 
 export type EventCategory = "task" | "command" | "worker" | "terminal" | "provider" | "system";
-
-const PLUMBING = new Set([
-  "controller-heartbeat", "capacity-refresh", "controller-heartbeat-error", "capacity-refresh-error",
-  "capacity-wake-plan", "operation-process", "repository-checkpoint", "prompt-assembled", "controller-mode",
-  "controller-config", "operation-progress", "provider-result-diagnosed",
-  "task-status-transition", "events-pruned", "operation-prepared", "suspend-decision", "suspend-provider-started",
-  "operation-log-pruned", "managed-process-prepared", "controller-ownership",
-  "station-observation", "station-stopped", "native-session-restoration", "task-provider-continuation",
-  "steering-handoff-consumed", "steering-pause-applied", "steering-stop-task-applied", "steering-verify-applied",
-  "steering-verify-drained", "after-verification-result",
-]);
 
 const value = (x: unknown, max = 80): string => typeof x === "string" ? x.replace(/[\r\n\t]/g, " ").slice(0, max) : "";
 const taskText = (event: Pick<BridgeEvent, "task_id">): string => event.task_id == null ? "" : `Task ${event.task_id}`;
@@ -56,38 +48,11 @@ export function eventCategory(kind: string): EventCategory {
   return "system";
 }
 
-export function isPlumbing(kind: string): boolean {
-  return PLUMBING.has(kind) || (kind.startsWith("steering-") && ["applied", "drained", "consumed"].includes(kind.split("-").at(-1) ?? ""));
-}
-
 export function transitionSummary(data: Record<string, unknown>): string | null {
   const from = data["from"];
   const to = data["to"];
   const safe = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z][A-Za-z _-]{0,31}$/.test(v);
   return safe(from) && safe(to) ? `${from} → ${to}` : null;
-}
-
-/**
- * How much attention an event deserves. Milestones are what the operator reads by default (task transitions, verification,
- * approvals, mission lifecycle, handoffs, failures, provider waits). Details (commands, operations, terminal and worker
- * connection, provider selection) appear under "All activity". Plumbing (heartbeats, capacity refreshes, bookkeeping) is
- * counted, hidden by default, never toasted and never counted in totals.
- */
-export type EventClass = "milestone" | "detail" | "plumbing";
-
-const MILESTONES = new Set([
-  "mission-created", "mission-status", "mission-reopened", "mission-waiting-for-operator",
-  "task-added", "task-status", "task-verified", "task-rejected", "task-awaiting-answer", "task-proposed",
-  "task-proposal-accepted", "task-proposal-rejected", "task-evidence-recorded",
-  "provider-wait", "provider-usage-limit", "provider-switched", "provider-handoff", "provider-handoff-exhausted", "provider-handoff-selected",
-  "operation-uncertain", "operation-aborted-before-launch", "controller-exited-unexpectedly", "controller-failed",
-  "review-hold", "review-hold-released", "suspend-outcome",
-]);
-
-export function eventClass(kind: string): EventClass {
-  if (isPlumbing(kind)) return "plumbing";
-  if (MILESTONES.has(kind) || kind.startsWith("verification-")) return "milestone";
-  return "detail";
 }
 
 /** Fields of `event.data` that `humanizeEvent` reads. The per-row "Raw" disclosure shows these and nothing else. */

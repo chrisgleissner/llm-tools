@@ -10,12 +10,8 @@ main:has(> .mission-wrap) { max-inline-size: none; }
 .mission-tabs { grid-area: tabs; }
 .mission-session, .mission-side { grid-area: panel; min-inline-size: 0; min-block-size: 0; }
 .mission-about { grid-area: about; min-inline-size: 0; }
-.mission-page[data-tab="session"] .mission-side,
-.mission-page[data-tab="tasks"] .mission-session,
-.mission-page[data-tab="activity"] .mission-session { display: none; }
-.mission-page[data-tab="session"] .panel-activity,
-.mission-page[data-tab="tasks"] .panel-activity,
-.mission-page[data-tab="activity"] .panel-tasks { display: none; }
+.mission-page:not([data-tab="session"]) .mission-session, .mission-page[data-tab="session"] .mission-side,
+.mission-page:not([data-tab="activity"]) .panel-activity, .mission-page[data-tab="activity"] .panel-tasks { display: none; }
 
 /* Header */
 .crumbs { font-size: var(--fs-sm); }
@@ -93,7 +89,7 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
 @media (max-width: 47.99rem) {
   .back { color: var(--accent); }
   .back .icon { display: inline; }
-  .mission-answer { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+  .mission-answer { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-block-size: calc(2 * var(--lh-sm)); } /* two lines whatever the state, so the answer does not move the session when the status arrives */
   .head-meta, .head-state .pill-meta { display: none; }
   .mission-page { row-gap: var(--sp-1); }
   .mission-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--sp-2); row-gap: 0; align-items: center; }

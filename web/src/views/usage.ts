@@ -17,21 +17,18 @@ const display = (name: string): string => NAMES[name] ?? name.charAt(0).toUpperC
 /** Plain sentences for the reason codes a worker reports (WUX-017); the raw code is never shown. */
 export function reasonText(reason: string | null | undefined): string {
   const code = (reason ?? "").toLowerCase();
-  if (!code || code === "unavailable") return "No usage data";
+  if (!code || code === "unavailable" || code === "none") return "No usage data";
   if (code.startsWith("read-failed")) return "The usage check failed";
   const map: Record<string, string> = {
     "not-authenticated": "Not signed in",
     "missing-cli": "Its command-line tool is not installed",
     "inconclusive-usage": "No local usage data",
-    "no-local-usage": "No local usage data",
     "stale-usage": "The usage data is out of date",
     "rate-limited": "The provider is limiting usage checks",
     "network-error": "A network error stopped the usage check",
     "subscription-required": "No active subscription",
     "quota-error": "The provider refused the quota query",
-    hidden: "Hidden by configuration",
     timeout: "The usage check timed out",
-    none: "No usage data",
   };
   return map[code] ?? code.replace(/[-_]+/g, " ").replace(/^./, (c) => c.toUpperCase());
 }
@@ -63,14 +60,14 @@ function resetText(epoch: number | null): HTMLElement | null {
 function meterRow(p: Provider, s: Scope): HTMLElement {
   const label = scopeLabel(s);
   const reset = resetText(s.reset_epoch);
-  if (!measured(s)) {
-    return h("div", { class: "meter-row" }, h("div", { class: "mhead" }, h("span", { class: "nowrap" }, label), h("strong", { class: "muted" }, "Not measured")), h("div", { class: "mfoot muted small" }, s.guidance ?? "This scope has no percentage.", reset ? " " : null, reset));
-  }
-  const left = Math.max(0, Math.min(100, s.remaining_percent));
+  const m = measured(s);
+  const left = m ? Math.max(0, Math.min(100, s.remaining_percent)) : 0;
   const text = `${Math.round(left)}% left`;
+  const head = h("div", { class: "mhead" }, h("span", { class: "nowrap" }, label), m ? h("strong", { class: "num nowrap" }, text) : h("strong", { class: "muted" }, "Not measured"));
+  if (!m) return h("div", { class: "meter-row" }, head, h("div", { class: "mfoot muted small" }, s.guidance ?? "This scope has no percentage.", reset ? " " : null, reset));
   const gauge = h("div", { class: "gauge", role: "meter", "aria-label": `${display(p.provider)}, ${label}: capacity left`, "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.round(left), "aria-valuetext": text, "data-low": left <= LOW ? "true" : null }, h("i"));
   (gauge.firstElementChild as HTMLElement).style.setProperty("inline-size", `${left}%`);
-  return h("div", { class: "meter-row" }, h("div", { class: "mhead" }, h("span", { class: "nowrap" }, label), h("strong", { class: "num nowrap" }, text)), gauge, h("div", { class: "mfoot muted small" }, reset ?? "No reset time reported"));
+  return h("div", { class: "meter-row" }, head, gauge, h("div", { class: "mfoot muted small" }, reset ?? "No reset time reported"));
 }
 
 function providerCard(p: Provider, level: "h2" | "h3"): HTMLElement {
@@ -92,9 +89,9 @@ function sortedProviders(snapshot: Snapshot): Provider[] {
   return [...(snapshot.providers ?? [])].sort((a, b) => rank(a) - rank(b) || (tightest(a) ?? 101) - (tightest(b) ?? 101) || a.provider.localeCompare(b.provider));
 }
 
-function sourceNote(s: Snapshot): HTMLElement {
+function sourceNote(s: Snapshot, workers = ""): HTMLElement {
   const source = s.source === "service" ? "the usage service" : s.source === "direct" ? "a direct read" : null;
-  return h("p", { class: "muted small foot" }, s.observed_at ? ago(s.observed_at, "Observed") : "Not observed yet", source ? ` · from ${source}` : null);
+  return h("p", { class: "muted small foot" }, s.observed_at ? ago(s.observed_at, "Observed") : "Not observed yet", source ? ` · from ${source}` : null, workers ? ` · ${workers}` : null);
 }
 
 function answerFor(all: Array<{ worker: string; snap: Snapshot }>): Answer {
@@ -110,9 +107,9 @@ function answerFor(all: Array<{ worker: string; snap: Snapshot }>): Answer {
   const blocked = byName.find((n) => n.usable && !n.ready);
   const low = byName.find((n) => n.left !== null && n.left <= LOW);
   const unavailable = byName.find((n) => !n.usable);
-  const needMe = blocked ? `${display(blocked.name)} has no capacity to start new work.` : low ? `${display(low.name)} is nearly out of capacity.` : unavailable ? `${display(unavailable.name)} is unavailable: ${reasonText(unavailable.reason)}.` : "Every provider has capacity.";
+  const needMe = blocked ? `${display(blocked.name)} is waiting for capacity${blocked.left === null ? "" : `, ${Math.round(blocked.left)}% is left`}.` : low ? `${display(low.name)} is nearly out of capacity.` : unavailable ? `${display(unavailable.name)} is unavailable: ${reasonText(unavailable.reason)}.` : "Every provider has capacity.";
   const focus = blocked ?? low;
-  const next = focus && focus.resets !== null ? `${display(focus.name)} resets at ${clock(focus.resets)}. Missions that need it wait until then.` : unavailable ? `Sign in to ${display(unavailable.name)} on the worker's machine.` : "Nothing to do.";
+  const next = focus && focus.resets !== null ? `Missions that need ${display(focus.name)} wait for its reset at ${clock(focus.resets)}.` : unavailable ? `Sign in to ${display(unavailable.name)} on the worker's machine.` : "Nothing to do.";
   return { what: `${plural(names.length, "provider")} reporting: ${figures.join(", ")}.`, needMe, next };
 }
 
@@ -125,14 +122,23 @@ function render(ctx: FleetRender<Snapshot>): { answer: Answer; body: Node } {
       body: emptyState({ icon: "usage", title: "No usage data yet", text: `A worker reports provider capacity once a provider command-line tool such as Codex or Claude Code is installed and signed in on its machine.${reason ? ` ${reasonText(reason)}.` : ""}`, command: "llm-usage" }),
     };
   }
-  const sections = ctx.single || withData.length === 1 ? 1 : withData.length;
-  const level = sections === 1 ? "h2" : "h3";
   const lowest = (r: { data: Snapshot }) => Math.min(101, ...(r.data.providers ?? []).map((p) => tightest(p) ?? 101));
   const ordered = [...withData].sort((a, b) => lowest(a) - lowest(b) || a.worker.localeCompare(b.worker));
-  const parts = ordered.map((r) => {
-    const cards = h("ul", { class: "pcards", "aria-label": sections === 1 ? "Providers" : `Providers on ${r.worker}` }, ...sortedProviders(r.data).map((p) => providerCard(p, level)));
-    if (sections === 1) return h("div", {}, cards, sourceNote(r.data));
-    return h("section", { class: "wsection", "aria-label": `Capacity on ${r.worker}`, "data-worker": r.worker }, h("h2", { class: "wname" }, r.worker), cards, sourceNote(r.data));
+  // Workers that report the same figures share one card set, headed by all their names.
+  const groups = new Map<string, { workers: string[]; data: Snapshot }>();
+  for (const r of ordered) {
+    const key = JSON.stringify(sortedProviders(r.data));
+    const g = groups.get(key);
+    if (g) g.workers.push(r.worker);
+    else groups.set(key, { workers: [r.worker], data: r.data });
+  }
+  const sections = ctx.single || groups.size === 1 ? 1 : groups.size;
+  const level = sections === 1 ? "h2" : "h3";
+  const parts = [...groups.values()].map(({ workers, data }) => {
+    const names = workers.join(", ");
+    const cards = h("ul", { class: "pcards", "aria-label": sections === 1 ? "Providers" : `Providers on ${names}` }, ...sortedProviders(data).map((p) => providerCard(p, level)));
+    if (sections === 1) return h("div", {}, cards, sourceNote(data, ctx.single ? "" : `reported by ${names}`));
+    return h("section", { class: "wsection", "aria-label": `Capacity on ${names}`, "data-worker": workers[0] }, h("h2", { class: "wname" }, names), cards, sourceNote(data));
   });
   return { answer: answerFor(withData.map((r) => ({ worker: r.worker, snap: r.data }))), body: h("div", {}, ...parts) };
 }
@@ -145,10 +151,6 @@ export function usage(root: HTMLElement, query: URLSearchParams): () => void {
     render,
     noWorkers: () => emptyState({ icon: "usage", title: "No usage data yet", text: "Provider capacity comes from workers, and none is enrolled. Add a worker to see how much of each provider's allowance is left.", action: h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/workers" }, "Go to Workers")) }),
     allOffline: (names) => emptyState({ icon: "workers", title: "No worker is online", text: `${names.join(", ")} must reconnect before provider usage can be read.`, action: h("div", { class: "actions" }, h("a", { class: "btn", href: "/workers" }, "Check Workers")) }),
-    idle: (reason) => ({
-      what: reason === "loading" ? "Reading provider capacity from the workers." : reason === "offline" ? "No worker is online, so capacity cannot be read." : "No worker is enrolled yet.",
-      needMe: reason === "loading" ? "Nothing needs you." : "A worker has to be online first.",
-      next: reason === "loading" ? "This takes a moment." : "Open Workers to add or check one.",
-    }),
+    read: "provider capacity",
   });
 }

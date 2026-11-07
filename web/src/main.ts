@@ -11,13 +11,10 @@ import { inbox } from "./views/inbox";
 
 // Routes that are not part of the first load: each is a separate chunk fetched when the route is first opened (spec 11.4, budget D18).
 const loadMission = withCss("mission", () => import("./views/mission"));
-const loadLogin = withCss("auth", () => import("./views/login"));
-const loadReset = withCss("auth", () => import("./views/reset"));
-const loadAccount = withCss("auth", () => import("./views/account"));
-const loadWorkers = withCss("fleet", () => import("./views/workers"));
-const loadSessions = withCss("fleet", () => import("./views/sessions"));
-const loadUsage = withCss("fleet", () => import("./views/usage"));
-const loadDiagnostics = withCss("fleet", () => import("./views/diagnostics"));
+const loadAuth = withCss("auth", () => import("./views/auth"));
+// The account page uses the definition-list rules of the fleet stylesheet (.facts) as well as its own.
+const loadAccount = withCss("fleet", loadAuth);
+const loadFleet = withCss("fleet", () => import("./views/fleet"));
 
 const app = document.getElementById("app") as HTMLElement;
 let authed = false;
@@ -101,9 +98,9 @@ async function route(): Promise<void> {
     const n = notice;
     notice = null;
     document.title = state.setup_required ? "First-run setup - LLM Bridge" : "Sign in - LLM Bridge";
-    let login: typeof import("./views/login");
+    let login: typeof import("./views/auth");
     try {
-      login = await loadLogin();
+      login = await loadAuth();
     } catch {
       if (generation === routeGeneration) showLoadError(app, generation);
       return;
@@ -126,9 +123,9 @@ async function route(): Promise<void> {
   }
   if (state.password_change_required) {
     stopLive();
-    let reset: typeof import("./views/reset");
+    let reset: typeof import("./views/auth");
     try {
-      reset = await loadReset();
+      reset = await loadAuth();
     } catch {
       if (generation === routeGeneration) showLoadError(app, generation);
       return;
@@ -160,10 +157,10 @@ async function route(): Promise<void> {
     if (path === "/") cleanup = inbox(main);
     else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
     else if (m && m[1] && m[2]) cleanup = await lazyView(main, generation, loadMission, (v) => v.missionDetail(main, decodeURIComponent(m[1] as string), decodeURIComponent(m[2] as string)));
-    else if (path === "/workers") cleanup = await lazyView(main, generation, loadWorkers, (v) => v.workers(main));
-    else if (path === "/sessions") cleanup = await lazyView(main, generation, loadSessions, (v) => v.sessions(main, new URLSearchParams(location.search)));
-    else if (path === "/usage") cleanup = await lazyView(main, generation, loadUsage, (v) => v.usage(main, new URLSearchParams(location.search)));
-    else if (path === "/diagnostics") cleanup = await lazyView(main, generation, loadDiagnostics, (v) => v.diagnostics(main));
+    else if (path === "/workers") cleanup = await lazyView(main, generation, loadFleet, (v) => v.workers(main));
+    else if (path === "/sessions") cleanup = await lazyView(main, generation, loadFleet, (v) => v.sessions(main, new URLSearchParams(location.search)));
+    else if (path === "/usage") cleanup = await lazyView(main, generation, loadFleet, (v) => v.usage(main, new URLSearchParams(location.search)));
+    else if (path === "/diagnostics") cleanup = await lazyView(main, generation, loadFleet, (v) => v.diagnostics(main));
     else if (path === "/account") cleanup = await lazyView(main, generation, loadAccount, (v) => v.account(main, { me, signOut: () => void signOut(), onPasswordChanged: signedOut }));
     else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the Inbox")));
   } catch {
@@ -173,7 +170,7 @@ async function route(): Promise<void> {
   const reset = state.password_reset_notice;
   if (reset) {
     try {
-      const box = (await loadReset()).resetNotice(reset);
+      const box = (await loadAuth()).resetNotice(reset);
       if (box && generation === routeGeneration) main.prepend(box);
     } catch {
       /* the notice is optional; the page itself is already shown */

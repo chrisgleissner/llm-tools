@@ -138,12 +138,16 @@ export const DENSE_CALM = DENSE_MISSIONS[3]!;
 export const DENSE_CALM_URL = `/missions/${DENSE_CALM.worker}/${DENSE_CALM.mission.id}`;
 export const DENSE_APPROVAL = DENSE_MISSIONS[0]!;
 export const DENSE_APPROVAL_URL = `/missions/${DENSE_APPROVAL.worker}/${DENSE_APPROVAL.mission.id}`;
+/** The worker's messages as `needs_attention` words them for a shell user: the commands after the first " · " are not for the web console. A failed mission names no task. */
+const approvalNeeds = (short: string): Record<string, unknown> => ({ kind: "approval", tasks: [2], message: `task 2 awaits your review · llm-bridge task approve --mission ${short} --task 2 (or reject: llm-bridge task reject --mission ${short} --task 2 --reason …)`, command: `llm-bridge task approve --mission ${short} --task 2` });
+const failedNeeds = (short: string): Record<string, unknown> => ({ kind: "failed", tasks: [], message: `mission failed · verify exited 2 · inspect with: llm-bridge events --mission ${short}`, command: `llm-bridge events --mission ${short}` });
 /** Per-mission "needs you" as the status projection reports it (null: nothing is needed). */
 function denseNeeds(index: number): Record<string, unknown> | null {
   const shape = index % 8;
-  if (shape === 0) return { kind: "approval", tasks: [2], message: "task 2 awaits approval" };
+  const short = `${String(index + 1).padStart(2, "0")}a1b2c3`;
+  if (shape === 0) return approvalNeeds(short);
   if (shape === 1) return { kind: "provider", tasks: [], message: "Claude asks: Delete the fixture? · Choices: 1. Yes; 2. No · take control of the terminal to answer", command: "llm-bridge attach" };
-  if (shape === 2) return { kind: "failed", tasks: [3], message: "task 3 failed: verify exited 2" };
+  if (shape === 2) return failedNeeds(short);
   return null;
 }
 const LONG_SLUG = "feature/very-long-branch-name-with-no-spaces-" + "x".repeat(60);
@@ -190,7 +194,7 @@ const countsOf = (tasks: TaskLite[]): Record<string, number> => tasks.reduce<Rec
 const task = (ordinal: number, title: string, status: string): TaskLite => ({ id: ordinal, ordinal, title, status, priority: 0, revision: 2 });
 /** A mission's own task list: one with something for the operator has the full set; the others follow their status. */
 function tasksOf(status: string, needs: boolean): TaskLite[] {
-  if (needs) return TASKS;
+  if (needs && status !== "FAILED") return TASKS;
   if (status === "COMPLETED") return [task(1, "Plan the change", "COMPLETED"), task(2, "Write the changelog entry", "COMPLETED")];
   if (status === "CREATED") return [task(1, "Plan the change", "QUEUED"), task(2, "Write the changelog entry", "QUEUED")];
   if (status === "FAILED") return [task(1, "Plan the change", "COMPLETED"), task(2, "Update the golden files", "FAILED")];
@@ -259,6 +263,8 @@ export interface Mock {
   closeTerminals(): void;
   /** Change what the status projection reports as needing the operator for one mission (null: nothing). */
   setNeeds(missionId: string, needs: Record<string, unknown> | null): void;
+  /** Pin the task list of one mission (task statuses by ordinal), whatever its status says; null restores the derived list. */
+  setTasks(missionId: string, statuses: string[] | null): void;
 }
 
 /** The typed operation a request carries, derived the way the coordinator routes it. */
@@ -290,13 +296,17 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let streamDown = false;
   const terminalRoutes: WebSocketRoute[] = [];
   const needsOverride = new Map<string, Record<string, unknown> | null>();
+  const tasksOverride = new Map<string, TaskLite[]>();
+  const tasksFor = (id: string, status: string, needs: boolean): TaskLite[] => tasksOverride.get(id) ?? tasksOf(status, needs);
   const needsFor = (id: string): Record<string, unknown> | null => {
     if (needsOverride.has(id)) return needsOverride.get(id) ?? null;
     if (dataset === "dense") {
       const index = DENSE_MISSIONS.findIndex((entry) => entry.mission.id === id);
       return index < 0 ? null : denseNeeds(index);
     }
-    return id === MISSIONS[0]!.mission.id ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : null;
+    const own = MISSIONS.find((m) => m.mission.id === id);
+    if (own?.mission.status === "FAILED") return failedNeeds(id.slice(0, 8));
+    return id === MISSIONS[0]!.mission.id ? approvalNeeds(id.slice(0, 8)) : null;
   };
   const providerNeedsYou = { kind: "provider", tasks: [], message: "Codex asks: Should I continue? · Choices: 1. Continue; 2. Stop · take control of the terminal to answer", command: "llm-bridge attach --mission 01a1b2c3" };
   const missions = opts.missions === "none" || opts.workers === "none" ? [] : baseMissions.map((entry, i) =>
@@ -355,7 +365,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     const mutating = method !== "GET" && !path.startsWith("/auth/");
     if (mutating && opts.mutationDelayMs) await new Promise((r) => setTimeout(r, opts.mutationDelayMs));
     if (mutating && opts.failMutations && path !== "/tokens")
-      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: operationOf(method, path, body) ?? "unknown", state: "done", result: { outcome: "rejected", result: null, error: { code: "rejected", message: "The worker refused the change (test)." } } });
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: operationOf(method, path, body) ?? "unknown", state: "done", result: { outcome: "rejected", result: null, error: { code: "rejected", message: "The worker refused the change." } } });
     if (opts.getDelayMs && method === "GET" && (path === "/missions" || path === "/workers")) await new Promise((r) => setTimeout(r, opts.getDelayMs));
     if (opts.apiErrors && method === "GET" && (path === "/missions" || path === "/workers")) return json(route, 500, { error: { code: "internal", message: "internal error (test)" } });
     if (path === "/auth/state") {
@@ -410,7 +420,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (missionResource && method === "GET") {
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
       const isProviderQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
-      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: countsOf(tasksOf(current.mission.status, needsFor(current.mission.id) !== null || (dataset === "default" && current.mission.id === MISSIONS[0]!.mission.id))), current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : dataset === "default" ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : needsFor(current.mission.id), health: { state: "healthy" } };
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: countsOf(tasksFor(current.mission.id, current.mission.status, needsFor(current.mission.id) !== null || (dataset === "default" && current.mission.id === MISSIONS[0]!.mission.id))), current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : needsFor(current.mission.id), health: { state: "healthy" } };
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
     }
     if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {
@@ -420,7 +430,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (taskRoute) {
       let operation = "task.list";
       const owner = missions.find((m) => m.mission.id === taskRoute[1]) ?? baseMissions[0]!;
-      const taskSet = tasksOf(owner.mission.status, needsFor(owner.mission.id) !== null);
+      const taskSet = tasksFor(owner.mission.id, owner.mission.status, needsFor(owner.mission.id) !== null);
       let result: unknown = { tasks: taskSet.map((t) => fullTask(t, owner.mission.id)), total: taskSet.length, offset: 0 };
       let etag: string | null = null;
       if (method === "GET" && taskRoute[2] && !taskRoute[3]) {
@@ -472,7 +482,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const entry = missions.find((m) => m.mission.id === missionId) ?? baseMissions[0]!;
       const needs = needsFor(entry.mission.id);
       const running = entry.mission.status === "RUNNING";
-      const ownTasks = tasksOf(entry.mission.status, needs !== null);
+      const ownTasks = tasksFor(entry.mission.id, entry.mission.status, needs !== null);
       const results: Record<string, unknown> = {
         "mission.status": { mission: { id: entry.mission.id, name: entry.mission.name, status: entry.mission.status, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: entry.mission.updated_at }, task_counts: countsOf(ownTasks), current_task: running ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_observation: running ? { station: "codex", model: "gpt-5" } : null, needs_you: needs, health: { state: "healthy" } },
         "task.list": { tasks: ownTasks.map((t) => fullTask(t, entry.mission.id)), total: ownTasks.length, offset: 0 },
@@ -502,6 +512,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     dropStream: () => { streamDown = true; streamSocket?.close({ code: 1011, reason: "stream down (test)" }); },
     restoreStream: () => { streamDown = false; },
     setNeeds: (missionId, needs) => void needsOverride.set(missionId, needs),
+    setTasks: (missionId, statuses) => void (statuses ? tasksOverride.set(missionId, statuses.map((st, i) => task(i + 1, `Task number ${i + 1}`, st))) : tasksOverride.delete(missionId)),
     closeTerminals: () => { for (const ws of terminalRoutes) { try { ws.close({ code: 1006, reason: "closed by test" }); } catch { /* already closed */ } } },
   };
 }

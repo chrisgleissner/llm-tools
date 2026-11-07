@@ -3,10 +3,9 @@
 import * as api from "../api";
 import { button, deferSkeleton, disclosure, emptyState, errorBlock, h } from "../dom";
 import { icon } from "../icons";
-import { setAttentionCount } from "../shell";
 import { onStream, refresh, store, subscribe } from "../store";
 import {
-  attentionChecked, attentionGaps, attentionPending, hasLine, hasStatus, itemOf, loadLines, loadStatuses, missionHref, missionRow, onDetails,
+  attentionCount, attentionGaps, attentionPending, failedTaskOf, hasLine, hasStatus, itemOf, loadLines, loadRowEvidence, loadStatuses, missionHref, missionRow, onDetails,
   reconcile, rowSig, sectionOf, stateOrder, taskOf, type Item, type RowOptions, type RowSpec,
 } from "../rows";
 
@@ -59,9 +58,11 @@ export function inbox(root: HTMLElement): () => void {
   const previewBody = h("div", { class: "preview-body" });
   const preview = h("aside", { class: "inbox-preview", "aria-label": "Preview" }, h("h2", {}, "Preview"), previewBody);
   const main = h("div", { class: "inbox-main" }, stateBox, needsSection, runSection, waitSection, footer);
-  root.append(h("h1", { class: "page-title" }, "Inbox"), answer, h("div", { class: "inbox-layout" }, h("div", { class: "inbox-grid" }, main, preview)));
+  const layout = h("div", { class: "inbox-layout" }, h("div", { class: "inbox-grid" }, main, preview));
+  root.append(h("h1", { class: "page-title" }, "Inbox"), answer, layout);
 
-  const previewVisible = () => getComputedStyle(preview).display !== "none";
+  // The preview needs a list column of 70rem or more (the container query in inbox.css); it shows once a row is selected, the first needs-you row by default.
+  const previewVisible = () => layout.clientWidth >= 70 * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
 
   // ---- data
   const all = (): Item[] => store.missions.map(itemOf);
@@ -94,6 +95,7 @@ export function inbox(root: HTMLElement): () => void {
     const l = everything ? t.lines : t.lines.filter((e) => !hasLine(e));
     if (s.length) void loadStatuses(s, () => disposed);
     if (l.length) void loadLines(l, () => disposed);
+    void loadRowEvidence(all().filter((i) => i.state.tier === "alert").slice(0, expandedNeeds ? 50 : NEEDS_VISIBLE), () => disposed);
   }
 
   async function afterAction(item: Item): Promise<void> {
@@ -112,11 +114,7 @@ export function inbox(root: HTMLElement): () => void {
   async function renderPreview(): Promise<void> {
     if (!previewVisible()) return;
     const item = all().find((i) => i.key === selected);
-    if (!item) {
-      previewKey = "";
-      previewBody.replaceChildren(h("p", { class: "muted" }, "Select a row to see the latest output of its task."));
-      return;
-    }
+    if (!item) return void (previewKey = "");
     const seq = ++previewSeq;
     const task = taskOf(item);
     const head = h("p", { class: "preview-title" }, item.entry.mission.name, h("span", { class: "muted nowrap" }, ` ${item.entry.worker}`));
@@ -147,6 +145,7 @@ export function inbox(root: HTMLElement): () => void {
     const items = all();
     const workers = store.workers.length;
     const pending = attentionPending(store.missions);
+    const count = attentionCount(store.missions);
     const groups: Record<string, Item[]> = { "needs-you": [], running: [], waiting: [], finished: [] };
     for (const i of items) groups[sectionOf(i.state)]!.push(i);
     const kindOrder = (i: Item) => (i.state.id === "failed" ? 0 : i.state.id === "needs-approval" ? 1 : 2);
@@ -156,14 +155,19 @@ export function inbox(root: HTMLElement): () => void {
     const needs = groups["needs-you"]!;
     const running = groups["running"]!;
     const waiting = groups["waiting"]!;
+    const wide = previewVisible();
+    if (wide && !items.some((i) => i.key === selected)) {
+      selected = (needs[0] ?? running[0])?.key ?? "";
+      if (selected) void renderPreview();
+    }
+    preview.hidden = !wide || !items.some((i) => i.key === selected);
 
     // The answer line: does it need me, what is happening, what next. Counts are not shown as zero while still being read.
     const checking = !store.loaded || (pending && needs.length === 0);
-    setAttentionCount(checking || !store.loaded ? null : needs.length);
-    need.textContent = checking ? "Checking..." : needs.length ? `${needs.length} ${needs.length === 1 ? "needs" : "need"} you` : "Nothing needs you";
+    need.textContent = checking ? "Checking..." : count.n ? `${count.text} ${count.n === 1 && !count.partial ? "needs" : "need"} you` : "Nothing needs you";
     what.textContent = !store.loaded ? "" : running.length ? `${running.length} running` : workers === 0 ? "No workers yet" : items.length === 0 ? "No missions yet" : "Nothing is running";
     const first = needs[0]?.state.id;
-    next.textContent = checking ? "Reading missions" : first === "failed" ? "Retry or open" : first === "needs-approval" ? "Approve or reject" : first === "needs-input" ? "Answer in the mission" : workers === 0 ? "Add a worker" : items.length === 0 ? "Create a mission" : "Nothing to do";
+    next.textContent = checking ? "Reading missions" : first === "failed" ? (needs.some((i) => i.state.id === "failed" && failedTaskOf(i) !== null) ? "Retry or open" : "Open to retry") : first === "needs-approval" ? "Approve or reject" : first === "needs-input" ? "Answer in the mission" : workers === 0 ? "Add a worker" : items.length === 0 ? "Create a mission" : "Nothing to do";
 
     // loading, error and empty states
     if (!store.loaded) {
@@ -206,10 +210,9 @@ export function inbox(root: HTMLElement): () => void {
 
     const finished = groups["finished"]!;
     const recent = finished.filter((i) => Date.now() - updatedMs(i) < WEEK_MS).length;
-    const checked = attentionChecked(store.missions);
     footer.replaceChildren(
       ...(populated && finished.length ? [`Quiet: ${recent > 0 ? `${recent} finished this week` : `${finished.length} finished`} - `, h("a", { href: "/missions" }, "All missions")] : []),
-      ...(populated && checked.eligible > checked.checked ? [h("span", { class: "checked" }, `${finished.length ? " · " : ""}Checked ${checked.checked} of ${checked.eligible} active missions`)] : []),
+      ...(populated && count.note ? [h("span", { class: "checked" }, `${finished.length ? " · " : ""}${count.note}`)] : []),
     );
     fetchDetails(false);
   }
@@ -285,7 +288,6 @@ export function inbox(root: HTMLElement): () => void {
     window.clearTimeout(probeTimer);
     window.clearInterval(clock);
     cancelSkeleton?.();
-    setAttentionCount(null);
     unsubscribe();
     unDetails();
     unStream();

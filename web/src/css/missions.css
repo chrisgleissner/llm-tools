@@ -3,7 +3,8 @@
 @media (max-width: 47.99rem) { .toolbar { margin-block: var(--sp-2); } }
 @media (max-width: 36rem) {
   .toolbar .search, .selects { flex-basis: 100%; }
-  .selects { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .selects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .selects select { inline-size: 100%; min-inline-size: 0; padding-inline: var(--sp-2); }
+  #sort-select { grid-column: 1 / -1; }
 }
 [data-section="finished"] { margin-block-start: var(--sp-4); }
