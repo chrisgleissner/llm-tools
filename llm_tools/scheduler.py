@@ -126,7 +126,7 @@ class SchedulerConfig:
     tmux_pane: str = ""
     native_tui: bool = False
     process_started: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
-    process_observer: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    process_observer: Callable[[], int | None] | None = field(default=None, repr=False, compare=False)
     # Internal Bridge callback used to interrupt long capacity waits promptly.
     should_interrupt_wait: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
     # Internal Bridge flag: the caller already waited out ``max_unavailable_wait``
@@ -1805,7 +1805,11 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     timeout = int(configured_timeout) if configured_timeout else (None if owned_pane else 3600)
     while (not status_file.is_file() or status_file.stat().st_size == 0) and (timeout is None or waited < timeout):
         if owned_pane and cfg.process_observer is not None:
-            cfg.process_observer()
+            ended = cfg.process_observer()
+            if ended:
+                # The observer has stopped the provider (for example after a usage-limit notice): end the run with its status.
+                status_file.write_text(str(ended), encoding="utf-8")
+                break
         if owned_pane:
             # A provider that finishes writes its status file, which the loop
             # condition sees. The checks below only cover a station or provider

@@ -186,6 +186,7 @@ class EventKind(StrEnum):
     PROVIDER_SELECTION = "provider-selection"
     PROVIDER_RESULT_DIAGNOSED = "provider-result-diagnosed"
     PROVIDER_SWITCHED = "provider-switched"
+    PROVIDER_USAGE_LIMIT = "provider-usage-limit"
     PROVIDER_WAIT = "provider-wait"
     REPOSITORY_CHECKPOINT = "repository-checkpoint"
     PROMPT_ASSEMBLED = "prompt-assembled"

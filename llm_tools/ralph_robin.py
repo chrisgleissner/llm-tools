@@ -12,6 +12,7 @@ from typing import Any
 
 from . import common
 from . import config as toolconfig
+from . import routes
 from . import scheduler
 
 
@@ -1321,6 +1322,8 @@ def select_provider(
             model=policy.model if policy else None,
             allow_fallback=policy.allow_fallback if policy else True,
         )
+        # A usage-limit notice seen on a native provider screen is recorded as a local block.
+        snapshot, decision = routes.apply_local_block_to_provider_decision(provider, snapshot, decision)
         decisions.append(decision)
         common.log_event(logs, "usage_snapshot", {"provider": provider, "capacity_provider": capacity_provider, "snapshot": snapshot})
         common.log_event(logs, "usage_decision", decision)
