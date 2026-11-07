@@ -443,6 +443,62 @@ class ApiClient:
 # Coordinator
 # --------------------------------------------------------------------------------------------
 
+@dataclass
+class TerminalOpen:
+    """One remote terminal opened through the coordinator, timed from the browser's request to the first screen."""
+
+    seconds_to_first_output: float | None
+    seconds_to_status: float | None
+    frames: int
+    error: str = ""
+
+
+def open_terminal(coordinator: "Coordinator", worker: str, mission_id: str, *, mode: str = "view", cols: int = 100, rows: int = 30,
+                  limit: float = 15.0, hold: float = 2.0) -> TerminalOpen:
+    """Open ``/api/v1/terminal`` as an API client and wait for the first ``o`` frame (the screen snapshot), then read for ``hold`` seconds.
+
+    The clock starts before the WebSocket upgrade request and stops when the first output frame has arrived, so the figure includes
+    the coordinator's ``terminal.open`` to the worker, the worker's own connection to the coordinator and the first snapshot.
+    """
+    from llm_tools import bridge_ws
+
+    context = ssl.create_default_context(cafile=str(coordinator.ca_file))
+    query = f"worker={worker}&mission={mission_id}&mode={mode}&cols={cols}&rows={rows}"
+    started = time.monotonic()
+    first = status = None
+    frames = 0
+    try:
+        client = bridge_ws.WebSocketClient.connect(f"wss://{HOST}:{coordinator.port}/api/v1/terminal?{query}",
+                                                   headers={"Authorization": f"Bearer {coordinator.api_token}"}, context=context, timeout=limit)
+    except (OSError, bridge_ws.WebSocketError) as exc:
+        return TerminalOpen(None, None, 0, f"{type(exc).__name__}: {exc}")
+    try:
+        end = started + limit
+        while time.monotonic() < end and (first is None or time.monotonic() < first + started + hold):
+            try:
+                text = client.receive_text(timeout=max(0.05, min(0.5, end - time.monotonic())))
+            except (OSError, bridge_ws.WebSocketError) as exc:
+                return TerminalOpen(first, status, frames, f"{type(exc).__name__}: {exc}")
+            if text is None:
+                continue
+            frames += 1
+            try:
+                kind = json.loads(text).get("t")
+            except ValueError:
+                kind = None
+            elapsed = time.monotonic() - started
+            if kind == "s" and status is None:
+                status = elapsed
+            if kind == "o" and first is None:
+                first = elapsed
+            if kind == "x":
+                return TerminalOpen(first, status, frames, "session ended: " + text[:120])
+        return TerminalOpen(first, status, frames, "" if first is not None else f"no output within {limit:g}s")
+    finally:
+        with contextlib.suppress(Exception):
+            client.close()
+
+
 def _ignore_sigxfsz() -> None:
     signal.signal(signal.SIGXFSZ, signal.SIG_IGN)  # a write past RLIMIT_FSIZE fails with EFBIG instead of killing the process
 
@@ -677,8 +733,9 @@ class WorkerNode:
     """One enrolled worker: its own state, runtime, config and home directories and a ``worker run`` process."""
 
     def __init__(self, name: str, base: Path, *, seed: int = 0, mix: ProviderMix | None = None, speed: float = 1.0,
-                 retry_delays: str = "2,4", question_idle: int = 6, idle_timeout: int = 20) -> None:
+                 retry_delays: str = "2,4", question_idle: int = 6, idle_timeout: int = 20, extra_env: dict[str, str] | None = None) -> None:
         self.name = name
+        self.extra_env = dict(extra_env or {})
         self.base = base
         self.state = base / "state"
         self.runtime = short_temp_dir(f"lbw-{name}-")
@@ -712,6 +769,7 @@ class WorkerNode:
             "LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT": str(self.question_idle), "LLM_SCHEDULER_IDLE_TIMEOUT": str(self.idle_timeout),
             "SOAK_PROVIDER_SEED": str(self.seed), "SOAK_PROVIDER_MIX": self.mix.text(), "SOAK_PROVIDER_SPEED": str(self.speed),
         })
+        env.update(self.extra_env)
         env.update(extra)
         return env
 
@@ -765,10 +823,11 @@ class WorkerNode:
             process.wait(timeout=10)
 
     # -- missions
-    def create_mission(self, label: str, *, prompt: str | None = None, run_provider: bool = True) -> str:
+    def create_mission(self, label: str, *, prompt: str | None = None, run_provider: bool = True, mode: str = "headless") -> str:
+        """Create a mission. ``mode="background"`` gives it a tmux station, which a remote terminal needs."""
         folder = self.base / "projects" / label
         folder.mkdir(parents=True, exist_ok=True)
-        args = ["mission", "create", "--prompt", prompt or f"soak mission {label}", "--cwd", str(folder), "--providers", "codex", "--mode", "headless",
+        args = ["mission", "create", "--prompt", prompt or f"soak mission {label}", "--cwd", str(folder), "--providers", "codex", "--mode", mode,
                 "--new", "--json"]
         if run_provider:
             args += ["--verifier", "true", "--command-template", shlex.join([sys.executable, str(PROVIDER_SCRIPT)])]
@@ -826,9 +885,11 @@ class WorkerNode:
         except sqlite3.Error:
             return Counter()
 
-    def event_ids(self) -> list[int]:
+    def event_ids(self, exclude_kinds: Sequence[str] = ()) -> list[int]:
         with self.database() as connection:
-            return [int(row[0]) for row in connection.execute("SELECT id FROM events ORDER BY id")]
+            marks = ",".join("?" for _ in exclude_kinds)
+            query = "SELECT id FROM events" + (f" WHERE kind NOT IN ({marks})" if exclude_kinds else "") + " ORDER BY id"
+            return [int(row[0]) for row in connection.execute(query, tuple(exclude_kinds))]
 
     def last_event_id(self) -> int:
         with self.database() as connection:

@@ -537,6 +537,175 @@ def test_proxy_reset_ends_every_link_thread_before_it_returns(relay):
     again.close()
 
 
+# ---- link shaping (DOG-019) -------------------------------------------------------------------------------
+
+def test_link_profile_derives_rate_and_delays_from_the_stated_link():
+    profile = dist_ws_proxy.LinkProfile()
+    assert (profile.rtt_seconds, profile.jitter_seconds, profile.bandwidth_bits) == (0.3, 0.05, 1_000_000.0)
+    assert profile.bytes_per_second == 125_000.0 and profile.one_way_seconds == 0.15 and profile.setup_seconds == pytest.approx(0.9)
+
+
+def test_token_bucket_passes_a_burst_then_paces_at_the_rate():
+    bucket = dist_ws_proxy.TokenBucket(rate=1000.0, burst=500.0, clock=lambda: 0.0)
+    assert bucket.reserve(500, now=0.0) == 0.0  # the burst goes through at once
+    waits = [bucket.reserve(250, now=0.0) for _ in range(4)]
+    assert waits == pytest.approx([0.25, 0.5, 0.75, 1.0])  # each further 250 bytes costs 0.25 s of the rate
+    assert bucket.bytes_total == 1500
+
+
+def test_token_bucket_refills_over_idle_time_but_never_beyond_the_burst():
+    bucket = dist_ws_proxy.TokenBucket(rate=1000.0, burst=500.0, clock=lambda: 0.0)
+    assert bucket.reserve(500, now=0.0) == 0.0
+    assert bucket.reserve(250, now=0.25) == 0.0  # a quarter second earned 250 bytes
+    assert bucket.reserve(500, now=60.0) == 0.0  # a minute of idle time earns the burst, not 60 000 bytes
+    assert bucket.reserve(500, now=60.0) == pytest.approx(0.5)
+
+
+def test_token_bucket_makes_a_later_caller_wait_for_the_debt_of_an_earlier_one():
+    bucket = dist_ws_proxy.TokenBucket(rate=1000.0, burst=100.0, clock=lambda: 0.0)
+    assert bucket.reserve(1100, now=0.0) == pytest.approx(1.0)  # 1000 bytes beyond the burst
+    assert bucket.reserve(100, now=0.5) == pytest.approx(0.6)  # arrives mid-wait: the debt ends at 1.0, then 100 more bytes
+    with pytest.raises(ValueError):
+        dist_ws_proxy.TokenBucket(rate=0, burst=1)
+
+
+def test_token_bucket_reports_peak_and_busy_second_rates():
+    bucket = dist_ws_proxy.TokenBucket(rate=1000.0, burst=1000.0, clock=lambda: 0.0)
+    for second in range(4):
+        bucket.reserve(1000, now=float(second))
+    bucket.reserve(100, now=10.0)
+    figures = bucket.achieved_bits_per_second()
+    assert figures == {"peak_bps": 8000.0, "busy_mean_bps": 8000.0, "busy_seconds": 4.0}
+
+
+def test_jitter_delay_is_seeded_bounded_and_centred_on_half_the_round_trip():
+    first, second = dist_ws_proxy.JitterDelay(0.15, 0.05, seed=9), dist_ws_proxy.JitterDelay(0.15, 0.05, seed=9)
+    other = dist_ws_proxy.JitterDelay(0.15, 0.05, seed=10)
+    for index in range(5000):
+        for delay_line in (first, second, other):
+            delay_line.release_time(float(index))  # arrivals a second apart, so the release is arrival plus the drawn delay
+    assert first.samples == second.samples and first.samples != other.samples
+    assert min(first.samples) >= 0.10 - 1e-9 and max(first.samples) <= 0.20 + 1e-9
+    assert sum(first.samples) / len(first.samples) == pytest.approx(0.15, abs=0.003)
+    # The jitter is spread over its whole range, not clustered: every tenth of the interval is used.
+    buckets = {int((value - 0.10) / 0.01) for value in first.samples}
+    assert buckets >= set(range(10))
+
+
+def test_jitter_delay_never_releases_a_frame_before_the_one_in_front_of_it():
+    delay_line = dist_ws_proxy.JitterDelay(0.15, 0.14, seed=4)
+    releases = [delay_line.release_time(index * 0.001) for index in range(2000)]  # arrivals much closer than the jitter
+    assert releases == sorted(releases)
+
+
+def test_paced_socket_takes_bytes_at_the_configured_rate():
+    left, right = socket.socketpair()
+    rate, size = 200_000.0, 100_000
+    bucket = dist_ws_proxy.TokenBucket(rate, burst=2048)
+    paced = dist_ws_proxy._PacedSocket(right, bucket, threading.Event())
+    left.sendall(b"x" * size)
+    started = time.monotonic()
+    received = 0
+    while received < size:
+        received += len(paced.recv(65536))
+    elapsed = time.monotonic() - started
+    left.close()
+    right.close()
+    expected = (size - 2048) / rate
+    assert elapsed >= 0.95 * expected  # never faster than the limit
+    assert elapsed <= expected * 1.5 + scaled(0.2)  # and not much slower (sleep granularity, a loaded host)
+    assert size / elapsed <= 1.06 * rate + 2048 / elapsed
+
+
+def test_paced_socket_wakes_when_the_link_is_closed():
+    left, right = socket.socketpair()
+    closed = threading.Event()
+    paced = dist_ws_proxy._PacedSocket(right, dist_ws_proxy.TokenBucket(100.0, burst=10), closed)
+    left.sendall(b"y" * 1000)  # 10 s of link time
+    threading.Timer(0.2, closed.set).start()
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        paced.recv(1000)
+    assert time.monotonic() - started < scaled(3)
+    left.close()
+    right.close()
+
+
+@pytest.fixture
+def slow_relay(tmp_path):
+    if shutil.which("openssl") is None:
+        pytest.skip("the openssl command line tool is required")
+    (tmp_path / "echo").mkdir()
+    (tmp_path / "proxy").mkdir()
+    server = EchoServer(tmp_path / "echo")
+    profile = dist_ws_proxy.LinkProfile(rtt_seconds=0.2, jitter_seconds=0.04, bandwidth_bits=1_000_000.0, setup_round_trips=2.0)
+    proxy = dist_ws_proxy.WsFrameProxy(server.port, server.certificate, tmp_path / "proxy", seed=5, link=profile)
+    context = ssl.create_default_context(cafile=str(proxy.certificate))
+
+    def connect() -> bridge_ws.WebSocketClient:
+        return bridge_ws.WebSocketClient.connect(f"wss://127.0.0.1:{proxy.port}/slow/path?x=1", context=context, timeout=scaled(10))
+
+    try:
+        yield server, proxy, profile, connect
+    finally:
+        proxy.close()
+        server.close()
+
+
+def test_slow_link_costs_setup_round_trips_and_delays_each_frame_by_the_profile(slow_relay):
+    server, proxy, profile, connect = slow_relay
+    started = time.monotonic()
+    client = connect()
+    assert time.monotonic() - started >= 0.95 * profile.setup_seconds  # two round trips of 0.2 s before the first byte
+    assert proxy.accepted_paths == {"/slow/path": 1}
+    round_trips = []
+    for _ in range(25):
+        before = time.monotonic()
+        assert _ask(client, "probe", timeout=scaled(5)) == "echo-probe"
+        round_trips.append(time.monotonic() - before)
+    ordered = sorted(round_trips)
+    assert ordered[0] >= profile.rtt_seconds - 2 * profile.jitter_seconds - 0.01  # no round trip is shorter than the profile allows
+    assert ordered[len(ordered) // 2] == pytest.approx(profile.rtt_seconds, abs=0.06)  # the median is the stated round trip
+    assert ordered[-1] <= profile.rtt_seconds + 2 * profile.jitter_seconds + scaled(0.3)
+    stats = proxy.shaper.stats()
+    assert stats["one_way_delay"]["up"]["count"] >= 25 and stats["one_way_delay"]["down"]["count"] >= 25
+    assert stats["bytes"]["up"] > 0 and stats["bytes"]["down"] > 0
+    client.close()
+
+
+def test_slow_link_limits_bulk_bandwidth_and_a_sender_blocks_while_the_link_drains(slow_relay):
+    server, proxy, profile, connect = slow_relay
+    client = connect()
+    padding = "x" * 400_000
+    started = time.monotonic()
+    client.send_text(json.dumps({"type": "bulk", "pad": padding}))
+    sent_after = time.monotonic() - started
+    assert client.receive_text(timeout=scaled(30)) is not None
+    total = time.monotonic() - started
+    link_seconds = 400_000 / profile.bytes_per_second
+    assert total >= 0.9 * link_seconds  # 400 KB cannot arrive faster than 125 KB/s allows
+    # The proxy takes bytes at the link rate, so the sender's socket buffers (about 200 KB with the proxy's) fill and the send call is
+    # held back for the rest, which is longer than the 0.5 s receive timeout that the worker's sends once inherited.
+    assert sent_after >= 1.0, (sent_after, link_seconds)
+    figures = proxy.shaper.stats()["bandwidth"][dist_ws_proxy.UP]
+    assert figures["busy_seconds"] >= 1 and figures["busy_mean_bps"] <= 1.1 * profile.bandwidth_bits
+    client.close()
+
+
+def test_a_send_timeout_of_half_a_second_fails_on_the_slow_link_and_the_default_survives(slow_relay):
+    """The worker's pre-PR #53 behaviour (sends inherit the 0.5 s receive timeout) cannot carry a large frame on the slow link."""
+    server, proxy, profile, connect = slow_relay
+    message = json.dumps({"type": "bulk", "pad": "x" * 450_000})
+    short = connect()
+    short.send_timeout = 0.5
+    with pytest.raises(OSError):  # TimeoutError: the write blocked for more than 0.5 s
+        short.send_text(message)
+    healthy = connect()
+    healthy.send_text(message)  # the default send timeout is long enough
+    assert healthy.receive_text(timeout=scaled(30)) is not None
+    healthy.close()
+
+
 def test_frame_message_type_reads_only_protocol_messages():
     assert dist_ws_proxy.frame_message_type(b'{"type":"command","v":1}') == "command"
     assert dist_ws_proxy.frame_message_type(b"not json") is None and dist_ws_proxy.frame_message_type(b'{"type":7}') is None

@@ -7,6 +7,7 @@ tests check the registry, the report and the clock-shift library without a coord
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -24,20 +25,22 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import bridge_chaos  # noqa: E402
 import bridge_soak  # noqa: E402
 import dist_harness as h  # noqa: E402
+import dist_ws_proxy  # noqa: E402
 
 PRD_FAULTS = {
     "coordinator-restart", "coordinator-kill9", "worker-partition", "disk-full", "clock-jump", "ws-slow-frames", "ws-dropped-frames",
     "db-corrupt-page",
 }
+EXTRA_FAULTS = {"slow-link"}  # DOG-019
 DOC = ROOT / "docs" / "distributed" / "soak-and-chaos.md"
 
 
 def test_every_prd_008_fault_is_registered_with_an_expected_outcome():
     ids = [fault.id for fault in bridge_chaos.FAULTS]
-    assert set(ids) == PRD_FAULTS and len(ids) == len(set(ids))
+    assert set(ids) == PRD_FAULTS | EXTRA_FAULTS and len(ids) == len(set(ids))
     for fault in bridge_chaos.FAULTS:
         assert fault.title and len(fault.expected) > 80, fault.id
-        assert fault.link in {"direct", "tcp", "frames"} and callable(fault.run)
+        assert fault.link in {"direct", "tcp", "frames", "slow"} and callable(fault.run)
 
 
 def test_every_fault_and_phase_b_item_is_documented():
@@ -132,9 +135,14 @@ def test_clock_shim_shifts_wall_time_forward_and_backward_while_the_process_runs
 
 @requires_coordinator
 @pytest.mark.parametrize("fault", bridge_chaos.FAULTS, ids=lambda fault: fault.id)
-def test_fault_meets_its_declared_outcome(fault, tmp_path):
+def test_fault_meets_its_declared_outcome(fault, tmp_path, monkeypatch):
     binary = h.find_coordinator_binary()
     assert binary is not None
+    if fault.id == "slow-link":
+        if shutil.which("tmux") is None:
+            pytest.skip("a remote terminal needs tmux")
+        # The test size: long enough for two terminal opens and two large results; the CI job runs the default 180 s.
+        monkeypatch.setattr(bridge_chaos, "SLOW_LINK", dataclasses.replace(bridge_chaos.SLOW_LINK, seconds=40.0, terminal_every=15.0, big_read_every=8.0))
     result = bridge_chaos.run_fault(fault, binary, tmp_path)
     if result.status == "skip":
         pytest.skip(result.reason)
@@ -149,7 +157,7 @@ class _GrowingNode:
         self.reads = reads
         self.position = 0
 
-    def event_ids(self) -> list[int]:
+    def event_ids(self, exclude_kinds: tuple[str, ...] = ()) -> list[int]:
         ids = self.reads[min(self.position, len(self.reads) - 1)]
         self.position += 1
         return list(ids)
@@ -198,4 +206,97 @@ def test_an_acknowledged_event_missing_on_the_coordinator_is_still_reported_as_l
 def test_a_repeated_event_on_the_coordinator_is_still_reported():
     fabric = _fabric_with(_GrowingNode([list(range(1, 52))]), [*range(1, 52), 51])
     with pytest.raises(bridge_chaos.Expectation, match="invented or duplicated"):
+        fabric.assert_events_replicated_exactly(timeout=1)
+
+
+# ---- slow-link (DOG-019) ----------------------------------------------------------------------------------
+
+def _slow_link_observed(**changes):
+    """What a healthy slow-link run measures; each test breaks one thing."""
+    observed = {
+        "reconnects": {"proxy_control_connections": 0, "coordinator_generation_increase": 0, "worker_log_connection_ended": 0, "worker_audit_connection_ended": 0},
+        "terminals": {"opens": 3, "first_output_seconds": [1.4, 1.3, 1.5], "slowest": 1.5, "failed": []},
+        "big_reads": {"count": 4, "slowest_seconds": 9.0, "result_bytes": 450000, "failed": []},
+        "link": {"ping_round_trip": {"count": 100, "p50_ms": 321.0},
+                 "bandwidth": {"up": {"peak_bps": 1.02e6, "busy_mean_bps": 0.96e6, "busy_seconds": 29.0}, "down": {"peak_bps": 8e3, "busy_mean_bps": 0.0, "busy_seconds": 0.0}}},
+    }
+    observed.update(changes)
+    return observed
+
+
+def _problems(**changes):
+    return bridge_chaos.slow_link_problems(bridge_chaos.SlowLinkSettings(), dist_ws_proxy.LinkProfile(), _slow_link_observed(**changes))
+
+
+def test_a_healthy_slow_link_run_has_no_problems():
+    assert _problems() == []
+
+
+def test_a_single_reconnect_seen_by_any_one_source_fails_the_case():
+    for source in ("proxy_control_connections", "coordinator_generation_increase", "worker_log_connection_ended", "worker_audit_connection_ended"):
+        reconnects = {**_slow_link_observed()["reconnects"], source: 1}
+        problems = _problems(reconnects=reconnects)
+        assert len(problems) == 1 and source in problems[0], source
+
+
+def test_a_slow_or_missing_terminal_fails_the_case():
+    slow = {"opens": 2, "first_output_seconds": [1.2, 3.4], "slowest": 3.4, "failed": []}
+    assert "3.40s" in _problems(terminals=slow)[0]
+    failed = {"opens": 2, "first_output_seconds": [1.2], "slowest": 1.2, "failed": [{"error": "no output within 30s"}]}
+    assert "did not open" in _problems(terminals=failed)[0]
+    assert "no terminal was opened" in _problems(terminals={"opens": 0, "first_output_seconds": [], "slowest": None, "failed": []})[0]
+
+
+def test_a_large_result_that_never_arrives_fails_the_case_and_so_does_not_reading_one():
+    assert "did not arrive" in _problems(big_reads={"count": 1, "failed": [{"state": "acked"}]})[0]
+    assert "could not have been caught" in _problems(big_reads={"count": 0, "failed": []})[0]
+
+
+def test_a_link_that_is_not_as_slow_or_as_busy_as_stated_fails_the_case():
+    link = _slow_link_observed()["link"]
+    fast = {**link, "ping_round_trip": {"count": 100, "p50_ms": 40.0}}
+    assert "round trip 40 ms" in _problems(link=fast)[0]
+    unknown = {**link, "ping_round_trip": {"count": 1}}
+    assert "too few ping round trips" in _problems(link=unknown)[0]
+    wide = {**link, "bandwidth": {**link["bandwidth"], "up": {"peak_bps": 5e6, "busy_mean_bps": 4e6, "busy_seconds": 29.0}}}
+    assert "above the 1000000 bit/s limit" in _problems(link=wide)[0]
+    idle = {**link, "bandwidth": {**link["bandwidth"], "up": {"peak_bps": 1e5, "busy_mean_bps": 0.0, "busy_seconds": 0.0}}}
+    assert "never kept the link busy" in _problems(link=idle)[0]
+
+
+def test_worker_reconnect_evidence_counts_the_workers_own_log_and_audit(tmp_path):
+    node = type("Node", (), {})()
+    node.log_path = tmp_path / "worker.log"
+    node.state = tmp_path / "state"
+    (node.state / "worker").mkdir(parents=True)
+    node.log_path.write_text("Worker w connecting\nworker connection ended: TimeoutError: x\nworker connection ended: WebSocketClosed: y\n")
+    (node.state / "worker" / "audit.jsonl").write_text('{"action": "worker.start"}\n{"action": "connection.ended"}\n')
+    (node.state / "worker" / "audit.jsonl.1").write_text('{"action": "connection.ended"}\n')
+    assert bridge_chaos._worker_reconnect_evidence(node) == {"worker_log_connection_ended": 2, "worker_audit_connection_ended": 2}
+    node.log_path = tmp_path / "missing.log"
+    assert bridge_chaos._worker_reconnect_evidence(node)["worker_log_connection_ended"] == 0
+
+
+def test_slow_link_length_is_set_from_the_command_line(monkeypatch):
+    settings = bridge_chaos.SlowLinkSettings()
+    monkeypatch.setattr(bridge_chaos, "SLOW_LINK", settings)
+    assert settings.seconds == 180.0  # the pull request size
+    assert bridge_chaos.main(["--slow-link-seconds", "1800", "--fault", "nonsense"]) == 2
+    assert settings.seconds == 1800.0
+    fault = next(item for item in bridge_chaos.FAULTS if item.id == "slow-link")
+    assert fault.link == "slow" and fault.workers == 1
+
+
+def test_events_a_controller_never_replicates_are_not_reported_as_lost():
+    # The worker holds ids 1..51; ids 10 and 20 are heartbeats that it never sends. The kinds are passed to the worker read.
+    class Node(_GrowingNode):
+        def event_ids(self, exclude_kinds=()):
+            ids = super().event_ids()
+            return [event for event in ids if not (exclude_kinds and event in (10, 20))]
+
+    coordinator_events = [event for event in range(1, 52) if event not in (10, 20)]
+    fabric = _fabric_with(Node([list(range(1, 52))]), coordinator_events)
+    assert fabric.assert_events_replicated_exactly(timeout=1, unreplicated_kinds=("controller-heartbeat",)) == {"chaos-w1": 49}
+    fabric = _fabric_with(Node([list(range(1, 52))]), coordinator_events)
+    with pytest.raises(bridge_chaos.Expectation, match=r"events lost \[10, 20\]"):
         fabric.assert_events_replicated_exactly(timeout=1)
