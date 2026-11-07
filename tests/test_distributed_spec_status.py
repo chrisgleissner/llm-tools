@@ -144,15 +144,17 @@ def test_final_report_counts_match_register() -> None:
 
 
 def test_final_report_count_check_fails_on_stale_total(tmp_path: Path) -> None:
+    total = len(register_rows())
     stale = tmp_path / "FINAL_REPORT.md"
     text = FINAL_REPORT.read_text(encoding="utf-8")
     stale.write_text(
-        text.replace("| **Total** | **283** |", "| **Total** | **282** |").replace("now has 283 IDs", "now has 282 IDs"),
+        text.replace(f"| **Total** | **{total}** |", f"| **Total** | **{total - 1}** |").replace(
+            f"now has {total} IDs", f"now has {total - 1} IDs"
+        ),
         encoding="utf-8",
     )
 
     mismatches = final_report_mismatches(stale)
 
-    assert mismatches
-    assert any("Total: FINAL_REPORT says 282, SPEC_STATUS.md has 283" in item for item in mismatches)
-    assert any("prose 'has 282 IDs': FINAL_REPORT says 282, SPEC_STATUS.md has 283" in item for item in mismatches)
+    assert any(f"Total: FINAL_REPORT says {total - 1}, SPEC_STATUS.md has {total}" in item for item in mismatches)
+    assert any(f"prose 'has {total - 1} IDs': FINAL_REPORT says {total - 1}, SPEC_STATUS.md has {total}" in item for item in mismatches)
