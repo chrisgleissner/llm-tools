@@ -9,6 +9,7 @@ from llm_tools.bridge import _build_parser
 
 ROOT = Path(__file__).resolve().parents[1]
 API_DOC = ROOT / "docs/distributed/api.md"
+COORDINATOR_DOC = ROOT / "docs/distributed/coordinator.md"
 HTTP_RS = ROOT / "coordinator/src/http.rs"
 
 # Intentional local-only commands are named explicitly in the docs. The remaining
@@ -87,3 +88,27 @@ def test_coordinator_routes_are_listed_in_parity_table() -> None:
     documented_routes = {(item.split(" ", 1)[0], item.split(" ", 1)[1]) for item in documented}
     assert len(documented_routes) == len(documented), "each coordinator route must be documented once"
     assert documented_routes == actual, f"update API-015 route table; missing={actual-documented_routes}, stale={documented_routes-actual}"
+
+
+def test_api_reference_covers_auth_concurrency_pagination_errors_and_versioning() -> None:
+    coordinator = COORDINATOR_DOC.read_text()
+    reference = API_DOC.read_text()
+    for term in (
+        "Authorization: Bearer",
+        "terminal:view",
+        "terminal:write",
+        "Idempotency-Key",
+        "If-Match",
+        "412 Precondition Failed",
+        "202 Accepted",
+        "next_cursor",
+        "application/problem+json",
+        "Retry-After",
+        "breaking change requires `/api/v2`",
+        "Deprecation",
+        "Sunset",
+    ):
+        assert term in coordinator, f"coordinator API contract must document {term}"
+    assert '"$COORDINATOR/api/v1/missions?status=RUNNING&limit=100"' in reference
+    assert '"$COORDINATOR/api/v1/missions/$MISSION/tasks/$TASK/verify?worker=$WORKER"' in reference
+    assert '"$COORDINATOR/api/v1/missions/$MISSION/tasks?worker=$WORKER"' in reference

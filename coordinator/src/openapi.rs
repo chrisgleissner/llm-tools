@@ -99,6 +99,12 @@ fn token_create_schema() -> Value {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if path.ends_with("/registration/start") && method == "POST" {
+        return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
+    }
+    if path.ends_with("/assertion/start") && method == "POST" {
+        return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
+    }
     if path == "/api/v1/missions" && method == "GET" {
         return json!({"$ref":"#/components/schemas/MissionListPage"});
     }
@@ -189,6 +195,10 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     if path == "/api/docs" && method == "GET" {
         op["responses"]["200"]["content"] = json!({"text/html":{"schema":{"type":"string"}}});
     }
+    if path == "/api/v1/auth/passkeys/assertion/finish" && method == "POST" {
+        op["security"] = json!([{"passkeyTicket":[]}]);
+        op["x-principal-type"] = json!("single-use-browser-ticket");
+    }
     if path == "/api/v1/workers" && method == "POST" {
         op["requestBody"]["content"]["application/json"]["schema"] = json!({
             "type":"object","additionalProperties":false,"required":["name"],
@@ -222,6 +232,18 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
                 }
             }}}
         });
+    }
+    if path.ends_with("/registration/start") && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string","minLength":1,"maxLength":64}}}}}});
+    }
+    if path.ends_with("/registration/finish") && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","required":["challenge_id","credential"],"additionalProperties":false,"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"credential":{"type":"object"}}}}}});
+    }
+    if path.ends_with("/assertion/start") && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","additionalProperties":false}}}});
+    }
+    if path.ends_with("/assertion/finish") && method == "POST" {
+        op["requestBody"] = json!({"required":true,"content":{"application/json":{"schema":{"type":"object","required":["challenge_id","credential"],"additionalProperties":false,"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"credential":{"type":"object"}}}}}});
     }
     if path == "/api/v1/auth/password" && method == "POST" {
         op["requestBody"] = json!({
@@ -401,6 +423,9 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         } else {
             json!([scope])
         };
+    } else if access == Access::Session {
+        op["security"] = json!([{"cookieSession":[]}]);
+        op["x-principal-type"] = json!("browser-session");
     } else if access == Access::WorkerToken {
         op["security"] = json!([{"workerBearer":[]}]);
     } else {
@@ -439,6 +464,7 @@ pub fn openapi_value() -> Value {
     doc["components"]["securitySchemes"] = json!({
         "bearerAuth":{"type":"http","scheme":"bearer","bearerFormat":"LLM Bridge API token"},
         "cookieSession":{"type":"apiKey","in":"cookie","name":"__Host-bridge_session"},
+        "passkeyTicket":{"type":"apiKey","in":"cookie","name":"__Host-bridge_passkey"},
         "workerBearer":{"type":"http","scheme":"bearer","bearerFormat":"Worker token"}
     });
     doc["components"]["schemas"]["BoundedRequestObject"] = json!({
@@ -559,6 +585,8 @@ mod tests {
                     };
                     assert_eq!(operation["x-required-scope"], expected);
                     assert!(operation["security"][0]["bearerAuth"].as_array().unwrap().is_empty());
+                } else if *access == Access::Session {
+                    assert_eq!(operation["security"], json!([{"cookieSession":[]}]))
                 } else if *access == Access::WorkerToken {
                     assert!(operation["security"][0]["workerBearer"].is_array());
                 }

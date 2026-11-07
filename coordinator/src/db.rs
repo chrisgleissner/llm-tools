@@ -472,6 +472,21 @@ impl Db {
         rows
     }
 
+    pub fn passkey_update(&self, row: &PasskeyCredentialRow) -> R<bool> {
+        Ok(self.c().execute(
+            "UPDATE passkeys SET credential=?,last_used=?,backup_eligible=?,backed_up=?,sign_count=? WHERE credential_id=? AND principal_id=?",
+            params![
+                row.credential,
+                row.last_used,
+                row.backup_eligible as i64,
+                row.backed_up as i64,
+                row.sign_count,
+                row.credential_id,
+                row.principal_id
+            ],
+        )? == 1)
+    }
+
     // ---- admin ----
     pub fn admin_get(&self) -> R<Option<(String, String)>> {
         self.c()

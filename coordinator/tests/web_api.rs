@@ -161,6 +161,107 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn passkey_registration_start_is_bound_to_https_named_origin_and_session() {
+    let origin = "https://bridge.example.test";
+    let env = boot_with(|t| t.replace("allowed_origins = []", "allowed_origins = [\"https://bridge.example.test\"]")).await;
+    let api = env.admin().await;
+    let (status, options) = api
+        .send(
+            api.bare(Method::POST, "/api/v1/auth/passkeys/registration/start")
+                .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+                .header("x-csrf-token", api.csrf.as_deref().unwrap())
+                .header("origin", origin)
+                .json(&json!({"name":"laptop"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{options}");
+    assert_eq!(options["options"]["publicKey"]["rp"]["id"], "bridge.example.test");
+    assert_eq!(options["options"]["publicKey"]["attestation"], "none");
+    assert_eq!(options["options"]["publicKey"]["authenticatorSelection"]["userVerification"], "required");
+    let challenge_id = options["challenge_id"].as_str().unwrap();
+    assert_eq!(challenge_id.len(), 64);
+
+    // A malformed but structurally valid assertion reaches verification and consumes the
+    // single-use ceremony. Replaying the same challenge is rejected as gone.
+    let invalid_credential = json!({"id":"AQ","rawId":"AQ","type":"public-key","response":{"attestationObject":"AQ","clientDataJSON":"AQ"}});
+    let finish = || {
+        api.bare(Method::POST, "/api/v1/auth/passkeys/registration/finish")
+            .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+            .header("x-csrf-token", api.csrf.as_deref().unwrap())
+            .header("origin", origin)
+            .json(&json!({"challenge_id":challenge_id,"credential":invalid_credential}))
+    };
+    let (status, _) = api.send(finish()).await;
+    assert_eq!(status, 400);
+    let (status, body) = api.send(finish()).await;
+    assert_eq!(status, 410, "challenge replay must fail: {body}");
+
+    let (status, _) = api
+        .send(
+            api.bare(Method::POST, "/api/v1/auth/passkeys/registration/start")
+                .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+                .header("x-csrf-token", api.csrf.as_deref().unwrap())
+                .header("origin", "https://attacker.example.test")
+                .json(&json!({"name":"attacker"})),
+        )
+        .await;
+    assert_eq!(status, 403, "an unapproved origin cannot start registration");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_challenge_creation_uses_the_per_address_mutation_budget() {
+    let origin = "https://bridge.example.test";
+    let env = boot_with(|t| {
+        t.replace("allowed_origins = []", "allowed_origins = [\"https://bridge.example.test\"]")
+            .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 1")
+    })
+    .await;
+    let api = env.admin().await;
+    let registration_start = || {
+        api.bare(Method::POST, "/api/v1/auth/passkeys/registration/start")
+            .header("cookie", format!("__Host-bridge_session={}", api.cookie.as_deref().unwrap()))
+            .header("x-csrf-token", api.csrf.as_deref().unwrap())
+            .header("origin", origin)
+            .json(&json!({"name":"laptop"}))
+    };
+
+    let first = registration_start().send().await.unwrap();
+    assert_eq!(first.status().as_u16(), 200);
+    let limited = registration_start().send().await.unwrap();
+    assert_eq!(limited.status().as_u16(), 429);
+    assert_eq!(limited.headers()["content-type"], "application/problem+json");
+    assert!((1..=60).contains(&limited.headers()["retry-after"].to_str().unwrap().parse::<u64>().unwrap()));
+    let body: Value = limited.json().await.unwrap();
+    assert_eq!(body["type"], "https://llm-tools.dev/problems/mutation-rate-limit");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_routes_stay_unavailable_on_ip_origins_and_unknown_credentials_fail_closed() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let (status, body) = api.post("/api/v1/auth/passkeys/registration/start", json!({"name":"phone"})).await;
+    assert_eq!(status, 501, "IP origins cannot be WebAuthn RP IDs: {body}");
+
+    let origin = "https://bridge.example.test";
+    let env = {
+        env.stop().await;
+        boot_with(|t| t.replace("allowed_origins = []", "allowed_origins = [\"https://bridge.example.test\"]")).await
+    };
+    let api = env.admin().await;
+    let (status, body) = api
+        .send(
+            api.bare(Method::POST, "/api/v1/auth/passkeys/assertion/start")
+                .header("origin", origin)
+                .json(&json!({})),
+        )
+        .await;
+    assert_eq!(status, 404, "an account without credentials cannot start assertion: {body}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn bearer_mutations_are_rate_limited_and_audited_without_logging_the_secret() {
     let env = boot().await;
     let admin = env.admin().await;

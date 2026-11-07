@@ -79,3 +79,22 @@ fn challenge_insert_rejects_lifetime_over_five_minutes() {
     drop(db);
     remove_database(&path);
 }
+
+#[test]
+fn expired_challenge_cannot_be_consumed() {
+    let path = db_path();
+    let db = Db::open(&path).unwrap();
+    let now = bridge_coordinator::now();
+    let row = WebauthnChallengeRow {
+        principal_id: "admin".into(),
+        binding: "setup".into(),
+        kind: "authentication".into(),
+        state: "{}".into(),
+        expires_at: now + 1,
+    };
+    db.webauthn_challenge_put("expires", &row).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    assert!(db.webauthn_challenge_take("expires", "admin", "setup", "authentication").unwrap().is_none());
+    drop(db);
+    let _ = std::fs::remove_file(path);
+}

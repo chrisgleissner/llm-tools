@@ -77,6 +77,12 @@ async fn every_route_requires_credentials_except_the_public_ones() {
                         refused_with(env.ws(&url, &[("authorization", "Bearer nope")]).await.expect_err("bad token"), 401);
                     }
                 }
+                Access::Session => {
+                    let (st, _) = anon.send(anon.bare(method.clone(), &url)).await;
+                    assert_eq!(st, 401, "{m} {url} without browser session");
+                    let (st, _) = anon.send(anon.bare(method, &url).header("authorization", "Bearer nope")).await;
+                    assert_eq!(st, 401, "{m} {url} with invalid bearer");
+                }
                 Access::WorkerToken => {
                     refused_with(env.ws(&url, &[]).await.expect_err("no worker token"), 401);
                     refused_with(
@@ -95,7 +101,10 @@ async fn every_route_requires_credentials_except_the_public_ones() {
                     };
                     seen_public.push(url.clone());
                     // setup and login answer an empty body with 400, never with a missing-session 401.
-                    assert!(st == 200 || st == 400, "{m} {url}: {st} {body}");
+                    assert!(
+                        st == 200 || st == 400 || (url.contains("/auth/passkeys/") && st == 403),
+                        "{m} {url}: {st} {body}"
+                    );
                 }
             }
         }
@@ -107,6 +116,8 @@ async fn every_route_requires_credentials_except_the_public_ones() {
             "/api/v1/auth/state",
             "/api/v1/auth/setup",
             "/api/v1/auth/login",
+            "/api/v1/auth/passkeys/assertion/start",
+            "/api/v1/auth/passkeys/assertion/finish",
             "/api/v1/openapi.json",
             "/api/docs"
         ],
@@ -275,6 +286,19 @@ async fn every_authenticated_route_enforces_its_declared_token_scope() {
             .unwrap();
     }
     for (path, methods, access, declared_scope) in ROUTES {
+        if *access == Access::Session {
+            assert!(declared_scope.is_empty(), "{path} is a session principal route, not a token scope");
+            for method in *methods {
+                let method: Method = method.parse().unwrap();
+                for (name, _) in &token_scopes {
+                    let token = format!("secret-{name}");
+                    let request = api.bare(method.clone(), &concrete(path)).header("authorization", format!("Bearer {token}"));
+                    let (status, body) = api.send(request.json(&serde_json::json!({}))).await;
+                    assert_eq!(status, 403, "{method} {path} must reject bearer token {name}: {body}");
+                }
+            }
+            continue;
+        }
         if *access != Access::Authed {
             assert!(!declared_scope.is_empty() || *access == Access::Public, "{path} has no policy");
             continue;

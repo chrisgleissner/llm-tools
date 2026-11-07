@@ -115,9 +115,10 @@ worker protocol is `protocol.md`.
 The generated OpenAPI 3.1 description is served at `/api/v1/openapi.json`; a
 script-free reference page is served locally at `/api/docs`. The document is
 generated from the route policy table and Rust response schemas, and its
-committed snapshot is checked in CI. See [API examples](api.md) for
-authentication and command examples. Resource-oriented mission and task
-endpoints and remaining CLI parity operations are still being added.
+committed snapshot is checked in CI. See the [API reference and examples](api.md)
+for resource requests, CLI parity decisions and curl walkthroughs. Resource
+routes adapt to the existing typed command layer; `/commands` remains available
+for low-level clients.
 
 Public:
 
@@ -134,6 +135,10 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
 | POST | `/auth/password` | `{current, new}`; deletes every session. |
+| POST | `/auth/passkeys/registration/start` | Browser session plus CSRF and exact Origin required; `{name}` returns a five-minute, session-bound registration challenge and WebAuthn creation options. Only HTTPS DNS origins are supported; IP origins are refused. |
+| POST | `/auth/passkeys/registration/finish` | Browser session plus CSRF and the same Origin required; `{challenge_id, credential}` verifies once and stores the passkey. |
+| POST | `/auth/passkeys/assertion/start` | Public sign-in start, exact HTTPS DNS Origin required; `{}` returns assertion options and sets a short-lived, single-use HttpOnly browser ticket. No registered credentials returns 404. |
+| POST | `/auth/passkeys/assertion/finish` | `{challenge_id, credential}` plus the browser ticket and same Origin; verifies UV and creates a normal short-lived session cookie. |
 | GET | `/workers` | name, stable id, state (`online`/`offline`), last_seen, versions, platform, capabilities, enrolled host name, and the active connection's peer address. The address is null while offline. |
 | GET | `/workers/{name}` | The same safe worker summary fields as the list route. |
 | POST | `/workers` | `{name}` → `{token}` shown once. |
@@ -168,6 +173,53 @@ API errors are RFC 9457 problem details (`application/problem+json`) with a
 stable type URI derived from the existing error code. The nested `error` object
 is retained for the current web client. Unknown API paths return a problem
 response; unsupported methods return 405 with an `Allow` header.
+
+## Public API contract and compatibility
+
+Use a token in the `Authorization: Bearer` header over HTTPS. New tokens default
+to `read`; mission and task changes need `operate`; terminal viewing and control
+need `terminal:view` and `terminal:write`; worker administration, token
+management and diagnostics need `admin`. The browser console uses its session
+cookie and CSRF token; worker channel routes accept only that worker's credential.
+Bearer credentials are never accepted in URLs. `/tokens` and `/diagnostics` are
+admin-only even though their methods are `GET`.
+
+For a mission or task action that creates a durable worker command, send an
+`Idempotency-Key` that is unique to the intended action. The coordinator stores
+it as the durable command request ID; retrying the same key replays its stored
+outcome. An offline worker returns `202 Accepted` and a
+`Location` pointing at `/api/v1/commands/{request_id}`. Poll that resource until
+the command is terminal. If the outcome is `uncertain`, treat it as unknown and
+inspect mission state before deciding what to do next; it is not a success receipt.
+
+Task reads return an `ETag` with the task revision when the worker answers
+synchronously. Send that value in `If-Match` on an amend or verification request.
+The coordinator passes it to the worker as `expected_revision`; a stale revision
+returns `412 Precondition Failed`. A body revision and header must agree.
+
+Lists have stable sorting and bounded pages. Mission lists default to 100 entries
+and cap at 500; task and event lists default to 50, and operation lists to 100,
+each with a maximum of 1000. Prefer the opaque `cursor` and the returned
+`next_cursor`; reuse it unchanged with the same worker, mission, resource and
+filters. Cursors are authenticated and encrypted. `offset` and event `after`
+parameters are retained for compatibility where documented. All timestamps are
+RFC 3339 UTC.
+
+Errors use `application/problem+json`. The stable problem `type` and `code`
+identify the existing coordinator error. Common statuses include `401` for a
+missing/invalid credential, `403` for a missing scope, `409` for a conflicting
+state, `412` for a stale task revision, `415` for a non-JSON mutation body, and
+`429` for a rate limit. Bearer-authenticated mutations allow 30 requests per
+token and 120 per client address in each rolling 60-second window. A limited
+request includes `Retry-After`. Every bearer use and mutation is audited with
+token metadata and request ID; the secret itself is never logged.
+
+Within `/api/v1`, additive fields and operations may be introduced without a
+version change. A breaking change requires `/api/v2`. Before retiring a v1
+operation, responses will include `Deprecation` and `Sunset` headers and the API
+reference will state the replacement and removal date. The sunset date will be
+at least 90 days after the deprecation notice. The generated OpenAPI document
+and compatibility test are the reviewable contract for each release.
 
 ## Limits and timeouts (COORD-004, NET-010)
 

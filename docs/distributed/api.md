@@ -91,6 +91,40 @@ export OPERATE_TOKEN='lbr_pat_…'    # read and operate scopes
 export ADMIN_TOKEN='lbr_pat_…'      # admin scope
 export WORKER=build-1
 export MISSION='mission-id-from-the-list'
+export TASK=3
+```
+
+## Find and approve a task waiting for review
+
+List active missions, then inspect each mission's task list and select tasks
+whose status is `REVIEW`. Mission filters apply to mission status; task review
+status is returned by the typed `task.list` result. Replace the example IDs with
+the worker and mission from the response:
+
+```sh
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  "$COORDINATOR/api/v1/missions?status=RUNNING&limit=100"
+
+curl --cacert ca.pem -H "Authorization: Bearer $TOKEN" \
+  "$COORDINATOR/api/v1/missions/$MISSION/tasks?worker=$WORKER&limit=100"
+
+# Read the task's current revision (ETag) before approval.
+curl --cacert ca.pem -i -H "Authorization: Bearer $TOKEN" \
+  "$COORDINATOR/api/v1/missions/$MISSION/tasks/$TASK?worker=$WORKER"
+
+# Use the ETag as If-Match. A stale revision returns 412; an offline worker
+# returns 202 with Location pointing to the durable command result.
+curl --cacert ca.pem -X POST -H "Authorization: Bearer $OPERATE_TOKEN" \
+  -H 'If-Match: "2"' -H 'Idempotency-Key: approve-task-003' \
+  -H 'Content-Type: application/json' \
+  -d '{"approved":true,"evidence":"Reviewed the result and verified the acceptance criteria."}' \
+  "$COORDINATOR/api/v1/missions/$MISSION/tasks/$TASK/verify?worker=$WORKER"
+
+# Add a task using the same typed operation layer as the CLI.
+curl --cacert ca.pem -X POST -H "Authorization: Bearer $OPERATE_TOKEN" \
+  -H 'Idempotency-Key: add-task-005' -H 'Content-Type: application/json' \
+  -d '{"title":"Check the API","prompt":"Verify the resource route.","acceptance":["The API contract is documented."]}' \
+  "$COORDINATOR/api/v1/missions/$MISSION/tasks?worker=$WORKER"
 ```
 
 List missions, then inspect a mission’s tasks. The task operation is read-only
@@ -349,6 +383,10 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `POST /api/v1/auth/login` |
 | `POST /api/v1/auth/logout` |
 | `POST /api/v1/auth/password` |
+| `POST /api/v1/auth/passkeys/registration/start` |
+| `POST /api/v1/auth/passkeys/registration/finish` |
+| `POST /api/v1/auth/passkeys/assertion/start` |
+| `POST /api/v1/auth/passkeys/assertion/finish` |
 | `GET /api/v1/workers` |
 | `POST /api/v1/workers` |
 | `GET /api/v1/workers/{name}` |

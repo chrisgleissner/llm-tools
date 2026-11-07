@@ -14,6 +14,7 @@ use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
+use base64::Engine;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -369,9 +370,12 @@ impl FromRequestParts<St> for Authed {
             let route = ROUTES
                 .iter()
                 .find(|route| route_matches(route.0, path) && route.1.contains(&parts.method.as_str()));
-            let Some((_, _, _, required)) = route else {
+            let Some((_, _, access, required)) = route else {
                 return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "route has no authorization policy"));
             };
+            if *access == Access::Session {
+                return Err(err(StatusCode::FORBIDDEN, "session-required", "a browser session is required"));
+            }
             let required = if *required == "terminal:conditional" {
                 let mode = parts.uri.query().unwrap_or_default().split('&').find_map(|pair| {
                     let (key, value) = pair.split_once('=')?;
@@ -658,6 +662,306 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
             .expect("cookie"),
     );
     Ok(r)
+}
+
+fn webauthn_origin(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+    if !origin_ok(headers, &st.cfg) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "bad-origin",
+            "Origin header missing or not the coordinator's origin",
+        ));
+    }
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
+    crate::passkeys::verifier(origin).map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    Ok(origin.to_string())
+}
+
+fn passkey_ticket(headers: &HeaderMap) -> Result<String, ApiError> {
+    cookie_value_named(headers, "__Host-bridge_passkey").ok_or_else(unauthorized)
+}
+
+fn cookie_value_named(headers: &HeaderMap, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    for h in headers.get_all(header::COOKIE) {
+        for part in h.to_str().ok()?.split(';') {
+            if let Some(v) = part.trim().strip_prefix(prefix.as_str()) {
+                return (!v.is_empty()).then(|| v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn passkey_ticket_cookie(token: &str) -> String {
+    format!("__Host-bridge_passkey={token}; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Strict")
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterStartBody {
+    name: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterFinishBody {
+    challenge_id: String,
+    credential: webauthn_rs::prelude::RegisterPublicKeyCredential,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssertFinishBody {
+    challenge_id: String,
+    credential: webauthn_rs::prelude::PublicKeyCredential,
+}
+
+async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session { token_hash, .. } = p else {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "session-required",
+            "passkey registration requires a browser session",
+        ));
+    };
+    check_passkey_address_limit(&st, &ip)?;
+    let origin = webauthn_origin(&st, &headers)?;
+    let m = parse_body(&body.bytes)?;
+    let body: RegisterStartBody = serde_json::from_value(Value::Object(m)).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "name is required and unknown fields are not allowed",
+        )
+    })?;
+    if body.name.trim().is_empty() || body.name.len() > 64 || body.name.chars().any(char::is_control) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "passkey name must be 1-64 printable characters",
+        ));
+    }
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let wa = crate::passkeys::verifier(&origin)
+        .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    let (options, state) = crate::passkeys::begin_registration(&wa, &username, &username, &body.name)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "could not start passkey registration"))?;
+    let challenge =
+        crate::passkeys::new_challenge(crate::now()).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not generate challenge"))?;
+    let stored = crate::passkeys::StoredCeremony {
+        origin,
+        credential_name: Some(body.name),
+        state,
+    };
+    let row = crate::db::WebauthnChallengeRow {
+        principal_id: username.clone(),
+        binding: token_hash,
+        kind: "registration".into(),
+        state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
+        expires_at: challenge.expires_at,
+    };
+    st.db.webauthn_challenge_put(&challenge.id, &row)?;
+    st.db
+        .audit(&username, "passkey.registration.start", &format!("challenge={}", challenge.id), &ip);
+    Ok(json_ok(StatusCode::OK, json!({"challenge_id":challenge.id,"options":options})))
+}
+
+async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session { token_hash, .. } = p else {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "session-required",
+            "passkey registration requires a browser session",
+        ));
+    };
+    check_passkey_address_limit(&st, &ip)?;
+    let m = parse_body(&body.bytes)?;
+    let body: RegisterFinishBody =
+        serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let Some(row) = st.db.webauthn_challenge_take(&body.challenge_id, &username, &token_hash, "registration")? else {
+        return Err(err(
+            StatusCode::GONE,
+            "challenge-expired",
+            "challenge is expired, consumed or bound to another session",
+        ));
+    };
+    let stored: crate::passkeys::StoredCeremony =
+        serde_json::from_str(&row.state).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored ceremony is invalid"))?;
+    if headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(stored.origin.as_str()) {
+        return Err(err(StatusCode::FORBIDDEN, "bad-origin", "ceremony origin changed"));
+    }
+    let wa = crate::passkeys::verifier(&stored.origin).map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "invalid ceremony origin"))?;
+    let credential = crate::passkeys::finish_registration(&wa, &stored.state, &body.credential)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "passkey registration could not be verified"))?;
+    use base64::Engine as _;
+    let credential_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(credential.cred_id());
+    let transports = serde_json::to_string(&body.credential.response.transports).unwrap_or_else(|_| "[]".into());
+    let passkey_json = serde_json::to_string(&credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store passkey"))?;
+    let row = crate::db::PasskeyCredentialRow {
+        credential_id,
+        principal_id: username.clone(),
+        credential: passkey_json,
+        user_name: stored.credential_name.unwrap_or_else(|| "Passkey".into()),
+        created_at: crate::now(),
+        last_used: None,
+        aaguid: None,
+        transports,
+        backup_eligible: false,
+        backed_up: false,
+        sign_count: 0,
+    };
+    if let Err(e) = st.db.passkey_put(&row) {
+        if matches!(e, rusqlite::Error::SqliteFailure(ref code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY || code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
+        {
+            return Err(err(StatusCode::CONFLICT, "credential-exists", "this passkey is already registered"));
+        }
+        return Err(e.into());
+    }
+    st.db
+        .audit(&username, "passkey.registration.success", &format!("credential_id={}", row.credential_id), &ip);
+    Ok(json_ok(
+        StatusCode::CREATED,
+        json!({"ok":true,"credential_id":row.credential_id,"name":row.user_name}),
+    ))
+}
+
+async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
+    check_public_origin(&st, &headers)?;
+    check_passkey_address_limit(&st, &ip)?;
+    let origin = webauthn_origin(&st, &headers)?;
+    let m = parse_body(&body.bytes)?;
+    no_extra(&m, &[])?;
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let records = st.db.passkeys_for_principal(&username)?;
+    let credentials = records
+        .iter()
+        .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
+        .collect::<Result<Vec<webauthn_rs::prelude::Passkey>, _>>()?;
+    if credentials.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "unknown-credential", "no passkeys are registered"));
+    }
+    let wa = crate::passkeys::verifier(&origin)
+        .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    let (options, state) = crate::passkeys::begin_authentication(&wa, &credentials)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "could not start passkey sign-in"))?;
+    let challenge =
+        crate::passkeys::new_challenge(crate::now()).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not generate challenge"))?;
+    let ticket = auth::random_token();
+    let stored = crate::passkeys::StoredCeremony {
+        origin,
+        credential_name: None,
+        state,
+    };
+    let row = crate::db::WebauthnChallengeRow {
+        principal_id: username.clone(),
+        binding: auth::sha256_hex(&ticket),
+        kind: "authentication".into(),
+        state: serde_json::to_string(&stored).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not store ceremony"))?,
+        expires_at: challenge.expires_at,
+    };
+    st.db.webauthn_challenge_put(&challenge.id, &row)?;
+    st.db
+        .audit("anonymous", "passkey.authentication.start", &format!("challenge={}", challenge.id), &ip);
+    let mut r = json_ok(StatusCode::OK, json!({"challenge_id":challenge.id,"options":options}));
+    r.headers_mut()
+        .insert(header::SET_COOKIE, passkey_ticket_cookie(&ticket).parse().expect("static cookie"));
+    Ok(r)
+}
+
+async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
+    check_passkey_address_limit(&st, &ip)?;
+    let origin = webauthn_origin(&st, &headers)?;
+    let ticket = passkey_ticket(&headers)?;
+    let m = parse_body(&body.bytes)?;
+    let body: AssertFinishBody =
+        serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
+    let Some((username, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let Some(row) = st
+        .db
+        .webauthn_challenge_take(&body.challenge_id, &username, &auth::sha256_hex(&ticket), "authentication")?
+    else {
+        return Err(err(
+            StatusCode::GONE,
+            "challenge-expired",
+            "challenge is expired, consumed or bound to another browser",
+        ));
+    };
+    let stored: crate::passkeys::StoredCeremony =
+        serde_json::from_str(&row.state).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored ceremony is invalid"))?;
+    if origin != stored.origin {
+        return Err(err(StatusCode::FORBIDDEN, "bad-origin", "ceremony origin changed"));
+    }
+    let wa = crate::passkeys::verifier(&stored.origin).map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "invalid ceremony origin"))?;
+    let mut records = st.db.passkeys_for_principal(&username)?;
+    let result = crate::passkeys::finish_authentication(&wa, &stored.state, &body.credential)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "webauthn-error", "passkey assertion could not be verified"))?;
+    if !result.user_verified() {
+        return Err(err(StatusCode::UNAUTHORIZED, "user-verification-required", "passkey did not verify the user"));
+    }
+    let Some(index) = records.iter().position(|r| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&r.credential_id)
+            .is_ok_and(|id| id == result.cred_id().as_slice())
+    }) else {
+        return Err(err(StatusCode::UNAUTHORIZED, "unknown-credential", "credential is not registered"));
+    };
+    let credential: webauthn_rs::prelude::Passkey =
+        serde_json::from_str(&records[index].credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid"))?;
+    let mut updated = credential;
+    updated.update_credential(&result);
+    records[index].credential = serde_json::to_string(&updated).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "could not update passkey"))?;
+    records[index].last_used = Some(crate::now());
+    records[index].backup_eligible = result.backup_eligible();
+    records[index].backed_up = result.backup_state();
+    records[index].sign_count = result.counter();
+    st.db.passkey_update(&records[index])?;
+    let (token, csrf) = (auth::random_token(), auth::random_token());
+    st.db.session_create_with(&auth::sha256_hex(&token), &csrf, false)?;
+    st.db.audit(
+        &username,
+        "passkey.authentication.success",
+        &format!("credential_id={}", records[index].credential_id),
+        &ip,
+    );
+    let mut r = json_ok(StatusCode::OK, json!({"csrf_token":csrf}));
+    r.headers_mut()
+        .insert(header::SET_COOKIE, session_cookie(&token, None).parse().expect("session cookie"));
+    r.headers_mut().append(
+        header::SET_COOKIE,
+        "__Host-bridge_passkey=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"
+            .parse()
+            .expect("static cookie"),
+    );
+    Ok(r)
+}
+
+/// Passkey ceremonies can write challenge rows without an authenticated token. Share the
+/// coordinator's bounded per-address mutation budget so a browser cannot amplify DB writes.
+fn check_passkey_address_limit(st: &St, remote: &str) -> Result<(), ApiError> {
+    let address = remote
+        .parse::<std::net::IpAddr>()
+        .map(|ip| auth::addr_key(&ip))
+        .unwrap_or_else(|_| "unknown".to_string());
+    if let Some(retry_after) = st.mutation_limiter.check(&[(format!("address:{address}"), st.cfg.mutation_limit_per_address)]) {
+        let mut error = err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "mutation-rate-limit",
+            "mutation rate limit exceeded; retry after the indicated delay",
+        );
+        error.retry_after = Some(retry_after);
+        return Err(error);
+    }
+    Ok(())
 }
 
 async fn logout(State(st): State<St>, Authed(p, ip): Authed) -> ApiResult {
@@ -2457,6 +2761,8 @@ pub enum Access {
     Public,
     /// An admin session cookie or an API bearer token (the `Authed` extractor).
     Authed,
+    /// A browser session cookie only; bearer tokens cannot satisfy this route.
+    Session,
     /// A worker token as bearer (worker WebSocket and worker terminal attach).
     WorkerToken,
 }
@@ -2469,6 +2775,10 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/state", &["GET"], Access::Public, ""),
     ("/api/v1/auth/setup", &["POST"], Access::Public, ""),
     ("/api/v1/auth/login", &["POST"], Access::Public, ""),
+    ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/assertion/start", &["POST"], Access::Public, ""),
+    ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
     ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
     ("/api/v1/auth/password", &["POST"], Access::Authed, "session"),
     ("/api/v1/workers", &["GET", "POST"], Access::Authed, "admin"),
@@ -2625,6 +2935,16 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route(
+            "/api/v1/auth/passkeys/registration/start",
+            post(passkey_register_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
+        )
+        .route("/api/v1/auth/passkeys/registration/finish", post(passkey_register_finish))
+        .route(
+            "/api/v1/auth/passkeys/assertion/start",
+            post(passkey_assert_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
+        )
+        .route("/api/v1/auth/passkeys/assertion/finish", post(passkey_assert_finish))
         .route("/api/v1/auth/logout", post(logout).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/password", post(change_password).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/workers", get(list_workers).post(add_worker))
