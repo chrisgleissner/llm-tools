@@ -22,7 +22,18 @@ pub struct CheckOptions {
 enum Kind {
     Bind,
     Bool,
-    UInt { min: i64 },
+    UInt {
+        min: i64,
+    },
+    /// Whole number within an inclusive range.
+    UIntRange {
+        min: i64,
+        max: i64,
+    },
+    /// One of a fixed list of strings.
+    Choice(&'static [&'static str]),
+    /// Optional non-empty file path (TLS certificate provider).
+    FilePath,
     Origins,
     Path,
 }
@@ -49,6 +60,11 @@ fn specs() -> Vec<Spec> {
             default: Some(d.lan_enabled.to_string()),
         },
         Spec {
+            key: "min_tls",
+            kind: Kind::Choice(&["1.3", "1.2"]),
+            default: Some(format!("{:?}", d.min_tls)),
+        },
+        Spec {
             key: "max_events_per_worker",
             kind: Kind::UInt { min: 1 },
             default: n(d.max_events_per_worker),
@@ -61,6 +77,21 @@ fn specs() -> Vec<Spec> {
         Spec {
             key: "web_dir",
             kind: Kind::Path,
+            default: None,
+        },
+        Spec {
+            key: "tls_cert_file",
+            kind: Kind::FilePath,
+            default: None,
+        },
+        Spec {
+            key: "tls_key_file",
+            kind: Kind::FilePath,
+            default: None,
+        },
+        Spec {
+            key: "tls_cert_name",
+            kind: Kind::FilePath,
             default: None,
         },
         Spec {
@@ -97,6 +128,16 @@ fn specs() -> Vec<Spec> {
             key: "ws_idle_timeout_secs",
             kind: Kind::UInt { min: 1 },
             default: n(d.ws_idle_timeout_secs),
+        },
+        Spec {
+            key: "mutation_limit_per_token",
+            kind: Kind::UIntRange { min: 1, max: 10_000 },
+            default: n(d.mutation_limit_per_token as u64),
+        },
+        Spec {
+            key: "mutation_limit_per_address",
+            kind: Kind::UIntRange { min: 1, max: 10_000 },
+            default: n(d.mutation_limit_per_address as u64),
         },
     ]
 }
@@ -222,6 +263,27 @@ fn check_value(spec: &Spec, v: &toml::Value, opts: CheckOptions, errors: &mut Ve
                 ));
             }
         }
+        (Kind::UIntRange { min, max }, toml::Value::Integer(n)) => {
+            if *n < min || *n > max {
+                errors.push(err(
+                    key,
+                    &shown,
+                    &format!("mutation limits must be between {min} and {max} per 60 seconds"),
+                    &format!("use a whole number from {min} to {max} (default {default})"),
+                ));
+            }
+        }
+        (Kind::Choice(allowed), toml::Value::String(s)) => {
+            if !allowed.contains(&s.as_str()) {
+                let list = allowed.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>().join(" or ");
+                errors.push(err(key, &shown, &format!("must be {list}"), &format!("write {key} = {} (default)", default)));
+            }
+        }
+        (Kind::FilePath, toml::Value::String(s)) => {
+            if s.trim().is_empty() {
+                errors.push(err(key, &shown, "must not be empty", "set a value, or remove the key"));
+            }
+        }
         (Kind::Origins, toml::Value::Array(items)) => {
             for (i, item) in items.iter().enumerate() {
                 match item {
@@ -256,7 +318,9 @@ fn check_value(spec: &Spec, v: &toml::Value, opts: CheckOptions, errors: &mut Ve
             let (want, example) = match kind {
                 Kind::Bind => ("a string", format!("\"{}\"", "127.0.0.1:8443")),
                 Kind::Bool => ("true or false", "true".to_string()),
-                Kind::UInt { .. } => ("a whole number", default.to_string()),
+                Kind::UInt { .. } | Kind::UIntRange { .. } => ("a whole number", default.to_string()),
+                Kind::Choice(_) => ("a string", default.to_string()),
+                Kind::FilePath => ("a string", "\"/path/to/file\"".to_string()),
                 Kind::Origins => ("a list of strings", "[\"https://bridge.home.arpa:8443\"]".to_string()),
                 Kind::Path => ("a string", "\"/path/to/web\"".to_string()),
             };
@@ -358,6 +422,27 @@ pub fn evaluate(text: &str, env: &dyn Fn(&str) -> Option<String>, opts: CheckOpt
         }
     }
 
+    // Operator-managed TLS identity: environment overrides win over the file; all three or none.
+    let mut tls_set = [false; 3];
+    for (i, (key, env_name)) in [
+        ("tls_cert_file", "BRIDGE_COORDINATOR_TLS_CERT_FILE"),
+        ("tls_key_file", "BRIDGE_COORDINATOR_TLS_KEY_FILE"),
+        ("tls_cert_name", "BRIDGE_COORDINATOR_TLS_CERT_NAME"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        tls_set[i] = env(env_name).is_some_and(|v| !v.trim().is_empty()) || table.get(*key).is_some();
+    }
+    if tls_set.iter().any(|set| *set) && !tls_set.iter().all(|set| *set) {
+        errors.push(err(
+            "tls_cert_file",
+            "<partly set>",
+            "tls_cert_file, tls_key_file and tls_cert_name must be configured together",
+            "set all three (in config.toml or BRIDGE_COORDINATOR_TLS_CERT_FILE, _KEY_FILE and _CERT_NAME), or none",
+        ));
+    }
+
     // Cross-key checks, only when each value involved is itself valid.
     let effective = |k: &str, default: u64| match table.get(k) {
         None => Some(default as i64),
@@ -405,6 +490,15 @@ pub fn evaluate(text: &str, env: &dyn Fn(&str) -> Option<String>, opts: CheckOpt
     }
     if let Some(l) = lan_source.1 {
         cfg.lan_enabled = l;
+    }
+    for (env_name, slot) in [
+        ("BRIDGE_COORDINATOR_TLS_CERT_FILE", &mut cfg.tls_cert_file),
+        ("BRIDGE_COORDINATOR_TLS_KEY_FILE", &mut cfg.tls_key_file),
+        ("BRIDGE_COORDINATOR_TLS_CERT_NAME", &mut cfg.tls_cert_name),
+    ] {
+        if let Some(v) = env(env_name).filter(|v| !v.trim().is_empty()) {
+            *slot = Some(v);
+        }
     }
     Ok(cfg)
 }
