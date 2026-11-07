@@ -42,6 +42,7 @@ remote CLI, the `llm-usage` sampler service, `llm-scheduler`, `ralph-robin` and
 | Mission runtime and tmux socket directories | 0700, owned by the user, never a symlink. A directory that does not meet this is refused or skipped. | Another user must not reach a mission's controller files or terminal. | `bridge_runtime._runtime_directory`, `mission_socket_path`, `_trusted_tmp_directory`. | `tests/test_safe_defaults.py::test_runtime_and_socket_directories_are_private` |
 | Backups on restore | `llm-bridge restore` keeps the replaced database as `bridge.sqlite3.before-restore-<time>` (mode 0600), and `llm-bridge backup` writes mode 0600 and never overwrites a file. | A restore cannot lose the current data. | `bridge_backup.backup`, `bridge_backup.restore`. | `tests/test_safe_defaults.py::test_backup_is_private_and_restore_keeps_the_replaced_database` |
 | Suspend ledger | Mode 0600. | It records when this host suspends. Before this review it was created with the default umask mode. | `common._append_ledger`. | `tests/test_safe_defaults.py::test_suspend_ledger_is_private` |
+| Cache root and everything under it (`${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools`) | Directories 0700, files 0600: provider usage caches, the usage log, route blocks, Ralph Robin state, the suspend ledger, shared snapshots, scheduler and Ralph Robin run directories (prompt copy, `attempt-N.out`, `attempt-N.status`, the tmux command script). A directory that an earlier release created with the default umask mode, and a file written with it, is tightened the next time llm-tools writes there. Only the cache root and the directories below it are changed; the user's parent directories such as `~/.cache` keep their mode. | The caches name accounts, usage and reset times, and the run directories hold prompts and provider output. | `common.ensure_private_cache_dir`, `common.write_private_text`, `common.open_private_text` and `common.touch_private_file`, used at every creation site (`common.py`, `scheduler.py`, `ralph_robin.py`, `routes.py`, `copilot_refresh.py`, `bridge_power.py`, `usage.py`). | `tests/test_safe_defaults.py::test_cache_directories_and_files_are_private_under_a_permissive_umask`, `tests/test_safe_defaults.py::test_cache_directories_made_by_an_older_release_are_tightened_when_llm_tools_next_writes`, `tests/test_safe_defaults.py::test_scheduler_run_files_and_copilot_refresh_cache_are_private` |
 | Copy of the Claude statusline input | Mode 0600; the cache directory is created 0700 when it does not exist. | The input names working folders, session ids and transcript paths. Before this review it was written with the default umask mode. | `usage.statusline_mode`. | `tests/test_safe_defaults.py::test_claude_statusline_copy_is_private` |
 
 ## llm-usage sampler service
@@ -51,7 +52,7 @@ remote CLI, the `llm-usage` sampler service, `llm-scheduler`, `ralph-robin` and
 | Transport | Unix socket only, in a directory owned by the user with mode 0700, socket mode 0600. A loose directory left by an older release is tightened; one owned by someone else is refused. | The service shares capacity data and accepts a shutdown request. | `usage_service.trusted_directory`, `ThreadingUnixServer`. | `tests/test_safe_defaults.py::test_usage_service_is_a_private_unix_socket_and_nothing_else` |
 | Peers | A connection from another user's process gets no answer (`SO_PEERCRED`). | Defence in depth if the socket directory is ever shared. | `usage_service._peer_is_us`. | `tests/test_safe_defaults.py::test_usage_service_ignores_other_users` |
 | Snapshot and history files | Service directory 0700; `latest.json`, `history.jsonl` and the pid file mode 0600. Before this review `history.jsonl` used the default umask mode. | Snapshots name accounts and usage. | `usage_service._atomic_json_write`, `_append_history`, `run_service`. | `tests/test_safe_defaults.py::test_usage_service_files_are_private` |
-| Service unit | systemd user unit or launchd LaunchAgent in the user's home. Never a system unit. | The service needs no privilege. | `usage_service.systemd_unit_path`, `launchd_plist_path`. | `tests/test_safe_defaults.py::test_service_units_are_user_scoped_and_the_worker_unit_is_hardened` |
+| Service unit | systemd user unit or launchd LaunchAgent in the user's home. Never a system unit. The systemd unit sets `UMask=0077` and `NoNewPrivileges=yes`, as the worker unit does. | The service needs no privilege. The sampler only runs provider CLIs as the user (`codex app-server`, `claude`, `copilot` through `script`, `kilo`, `mmx`, `gh auth token`); it never calls `sudo`, `rtcwake` or another setuid program, so `NoNewPrivileges` blocks nothing it uses. `UMask=0077` makes files that those CLIs create 0600. | `usage_service.systemd_unit_path`, `launchd_plist_path`. | `tests/test_safe_defaults.py::test_service_units_are_user_scoped_and_the_worker_unit_is_hardened` |
 
 ## Suspend, launch and approval
 
@@ -77,19 +78,18 @@ before the change.
    umask mode (0644). They are now 0600.
 4. The copy of the Claude statusline input (`claude-status.json`) was written with the
    default umask mode. It names working folders and session ids. It is now 0600.
+5. The other files under the cache root (provider usage caches, the usage log, route
+   blocks, Ralph Robin state, shared snapshots, scheduler run files) were written with the
+   default umask mode, and the cache directories were 0755. They are now 0600 and 0700,
+   and an existing directory or file from an older release is tightened on the next
+   write. The three `test_cache_*` and `test_scheduler_run_files_*` tests fail on the
+   previous code with modes 0755 and 0644.
+6. The `llm-usage` systemd unit lacked `UMask=0077` and `NoNewPrivileges=yes`. It has
+   both now. `test_service_units_are_user_scoped_and_the_worker_unit_is_hardened` fails on
+   the previous unit text.
 
 ## Open items
 
-- Other files under `${XDG_CACHE_HOME:-$HOME/.cache}/llm-tools` (provider usage caches,
-  route blocks, usage log) are written with the default umask mode, and the cache
-  directories themselves are 0755 when the cache root is created by `llm-usage` or
-  `llm-scheduler`. They hold usage percentages, reset times and route block reasons,
-  not credentials or prompts. Scheduler run directories, the wake planner and the usage
-  service directory are already 0700. Making the whole cache root private needs a change
-  at about fifteen directory creation sites in `common.py` and is not part of this review.
-- The `llm-usage` systemd unit does not set `UMask=0077` or `NoNewPrivileges=yes` as the
-  worker unit does. Adding them changes the umask of the provider CLIs the sampler starts
-  and needs a check against each of them first.
 - The RTC wake paths try `rtcwake -m no` first and fall back to `systemd-run --user`.
   `rtcwake` only succeeds when the process may write the RTC (normally root); the
   fallback needs no privilege. Neither path is reached unless a suspend was requested

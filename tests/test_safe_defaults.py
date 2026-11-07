@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_remote, bridge_runtime, bridge_store, bridge_worker as worker, scheduler, ralph_robin, usage, usage_service
+from llm_tools import bridge_remote, bridge_runtime, bridge_store, bridge_worker as worker, copilot_refresh, routes, scheduler, ralph_robin, usage, usage_service
 from llm_tools import common
 from llm_tools.bridge import _build_parser as build_parser, main
 from llm_tools.bridge_store import BridgeStore
@@ -211,6 +211,102 @@ def test_claude_statusline_copy_is_private(state, monkeypatch, tmp_path):
     assert copy.exists() and mode(copy) == 0o600
 
 
+def cache_tree_modes(root: Path) -> dict[str, int]:
+    """Mode of every directory and regular file under ``root`` (and of ``root``), by relative path."""
+    modes = {".": mode(root)}
+    for path in root.rglob("*"):
+        if not path.is_symlink():
+            modes[str(path.relative_to(root))] = mode(path)
+    return modes
+
+
+def assert_private_tree(root: Path) -> None:
+    """Every directory is 0700 and every regular file is 0600."""
+    modes = cache_tree_modes(root)
+    wrong = {name: oct(value) for name, value in modes.items() if value != (0o700 if (root / name).is_dir() else 0o600)}
+    assert not wrong, wrong
+
+
+def test_cache_directories_and_files_are_private_under_a_permissive_umask(state, tmp_path, monkeypatch):
+    """Every cache file creation path under the cache root gives 0600 files in 0700 directories."""
+    cache = tmp_path / "home" / ".cache"
+    cache.mkdir(parents=True)
+    cache.chmod(0o755)  # the user's own parent directory is not ours to change
+    env = {"HOME": str(tmp_path / "home"), "XDG_CACHE_HOME": str(cache)}
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    root = common.cache_root()
+
+    common.log_usage_sample("Codex", "5h", 50, env)
+    common._record_claude_oauth_rate_limit(env, 5.0)
+    common._cache_claude_usage_response(common.usage_cache_dir() / "claude-usage-api.json", '{"five_hour":{"utilization":10}}')
+    monkeypatch.setattr(common, "_codex_app_server_rate_limits", lambda _env: ({"rateLimits": {}}, None))
+    monkeypatch.setattr(common, "codex_rate_limits_to_wire", lambda _payload, _source: {"available": True})
+    common.read_codex_api(env)
+    routes.record_local_block("route-a", reason="rate-limited", blocked_until=0, last_message="limit", env=env)
+    common._append_ledger(common.suspend_ledger_path(env), {"event": "suspend_start"})
+    common.trim_ledger(common.suspend_ledger_path(env), keep=0)
+    ralph_cfg = ralph_robin.RalphConfig(providers_spec="claude,codex", providers=["claude", "codex"], state_file=common.ralph_state_file(env))
+    ralph_cfg.dry_run = False
+    ralph_robin.save_state(ralph_cfg, 0, "claude")
+    common.shared_usage_snapshot("codex", env, 60, lambda: {"available": True})
+    logs = common.setup_run_logs(common.scheduler_log_dir(env), "t")
+    assert common.load_prompt("secret prompt", "", logs)[0] == "secret prompt"
+
+    assert mode(cache) == 0o755
+    assert_private_tree(root)
+    names = set(cache_tree_modes(root))
+    assert {"llm-usage/llm-usage.log", "llm-usage/claude-usage-api-rate-limit.json", "llm-usage/claude-usage-api.json",
+            "llm-usage/codex-usage-api.json", "ralph-robin/state.json", "ralph-robin/suspend-ledger.jsonl"} <= names, names
+    assert any(name.startswith("routes/blocks/") for name in names) and any(name.endswith("/prompt.txt") for name in names)
+    assert any(name.startswith("shared-usage/") for name in names)
+
+
+def test_cache_directories_made_by_an_older_release_are_tightened_when_llm_tools_next_writes(state, tmp_path, monkeypatch):
+    """A 0755 cache root and a 0644 log from an older release become 0700 and 0600; the parent keeps its mode."""
+    cache = tmp_path / "home" / ".cache"
+    old = cache / "llm-tools" / "llm-usage"
+    old.mkdir(parents=True)
+    for directory in (cache, cache / "llm-tools", old):
+        directory.chmod(0o755)
+    log = old / "llm-usage.log"
+    log.write_text("{}\n", encoding="utf-8")
+    log.chmod(0o644)
+    sibling = cache / "other-tool"
+    sibling.mkdir()
+    sibling.chmod(0o755)
+    env = {"HOME": str(tmp_path / "home"), "XDG_CACHE_HOME": str(cache)}
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    common.log_usage_sample("Codex", "5h", 50, env)
+    assert (mode(cache), mode(sibling)) == (0o755, 0o755)
+    assert (mode(cache / "llm-tools"), mode(old), mode(log)) == (0o700, 0o700, 0o600)
+
+
+def test_scheduler_run_files_and_copilot_refresh_cache_are_private(state, tmp_path, monkeypatch):
+    """The attempt output and status files of a scheduler run, and the background Copilot refresh cache, are 0600."""
+    cache = tmp_path / "home" / ".cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1780430000")
+    monkeypatch.setenv("LLM_SCHEDULER_USAGE_JSON", '{"available":true,"five_hour":{"remaining":50},"week":{"remaining":50}}')
+    monkeypatch.setenv("LLM_SCHEDULER_HEADLESS", "1")
+    monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
+    assert scheduler.main(["--provider", "codex", "--prompt", "x", "--command-template", "true"]) == 0
+    runs = [path for path in (cache / "llm-tools" / "llm-scheduler" / "logs").iterdir() if path.is_dir() and not path.is_symlink()]
+    assert len(runs) == 1
+    assert {"attempt-1.out", "attempt-1.status", "prompt.txt"} <= {path.name for path in runs[0].iterdir()}
+    assert_private_tree(cache / "llm-tools")
+
+    monkeypatch.setattr(common, "read_copilot_live", lambda _env: {"available": True, "source": "fixture"})
+    target = common.usage_cache_dir() / "copilot-usage.json"
+    environment = dict(os.environ)  # copilot_refresh.main replaces os.environ wholesale
+    try:
+        assert copilot_refresh.main([str(target)]) == 0
+    finally:
+        os.environ.clear()
+        os.environ.update(environment)
+    assert target.exists()
+    assert_private_tree(cache / "llm-tools")
+
+
 # --------------------------------------------------------------------------- usage service
 
 
@@ -260,6 +356,10 @@ def test_service_units_are_user_scoped_and_the_worker_unit_is_hardened(state, tm
     assert "Restart=on-failure" in unit and TOKEN not in unit
     for text in (unit, usage_service.systemd_unit_text(60, env)):
         assert "WantedBy=multi-user.target" not in text and "User=root" not in text
+        assert "UMask=0077" in text.splitlines() and "NoNewPrivileges=yes" in text.splitlines()  # both units are in the [Service] section
+    sampler = usage_service.systemd_unit_text(60, env)
+    assert sampler.index("[Service]") < sampler.index("UMask=0077") < sampler.index("[Install]")
+    assert sampler.index("[Service]") < sampler.index("NoNewPrivileges=yes") < sampler.index("[Install]")
 
 
 # --------------------------------------------------------------------------- no listener, no telemetry

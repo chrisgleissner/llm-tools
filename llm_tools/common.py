@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
+from typing import IO, TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 if TYPE_CHECKING:
     from urllib.error import HTTPError
@@ -113,8 +113,9 @@ def migrate_legacy_cache_dirs(env: dict[str, str] | None = None) -> None:
         new = root / name
         if old.is_dir() and not new.exists():
             try:
-                root.mkdir(parents=True, exist_ok=True)
+                ensure_private_cache_dir(root, env)
                 old.rename(new)
+                _tighten_directory(new)
             except OSError:
                 pass
 
@@ -1187,8 +1188,8 @@ def read_codex_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
         norm = codex_rate_limits_to_wire(result, "codex app-server")
         if norm:
             try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
+                ensure_private_cache_dir(cache.parent, env)
+                write_private_text(cache, json.dumps(result, separators=(",", ":")) + "\n")
             except OSError:
                 pass
             return norm
@@ -1399,8 +1400,8 @@ def _record_claude_oauth_rate_limit(env: dict[str, str], retry_after_seconds: fl
     }
     path = _claude_oauth_rate_limit_path(env)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        ensure_private_cache_dir(path.parent, env)
+        write_private_text(path, json.dumps(payload, separators=(",", ":")) + "\n")
     except OSError:
         pass
 
@@ -1506,8 +1507,8 @@ def _fetch_claude_oauth_usage_text(access_token: str, env: dict[str, str] | None
 def _cache_claude_usage_response(cache: Path, text: str) -> dict[str, Any] | None:
     if not text:
         return None
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(text + ("\n" if not text.endswith("\n") else ""), encoding="utf-8")
+    ensure_private_cache_dir(cache.parent)
+    write_private_text(cache, text + ("\n" if not text.endswith("\n") else ""))
     return normalize_claude_obj(json.loads(text), "api.anthropic.com/api/oauth/usage")
 
 
@@ -1580,8 +1581,8 @@ def read_claude_api(env: dict[str, str] | None = None) -> dict[str, Any] | None:
     # or touching any running session. Recheck cache/cooldown after acquiring.
     lock = usage_cache_dir(env) / "claude-usage-api.lock"
     try:
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        lock_file = lock.open("a", encoding="utf-8")
+        ensure_private_cache_dir(lock.parent, env)
+        lock_file = open_private_text(lock)
     except OSError:
         return _read_claude_api_raw(env)
     with lock_file:
@@ -2027,15 +2028,15 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
             return cached
     refresh_started = False
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        lock.mkdir()
+        ensure_private_cache_dir(cache.parent, env)
+        lock.mkdir(mode=0o700)
         refresh_started = True
     except FileExistsError:
         try:
             stale_after = int(env.get("LLM_USAGE_COPILOT_TIMEOUT", "10") or "10") + 5
             if int(time.time()) - int(lock.stat().st_mtime) > stale_after:
                 lock.rmdir()
-                lock.mkdir()
+                lock.mkdir(mode=0o700)
                 refresh_started = True
         except OSError:
             pass
@@ -2078,9 +2079,9 @@ def read_copilot(env: dict[str, str] | None = None) -> dict[str, Any]:
     if ignored_transient_mtime is not None and wait_budget > 0:
         live = read_copilot_live(env)
         try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_cache_dir(cache.parent, env)
             tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(live, separators=(",", ":")) + "\n", encoding="utf-8")
+            write_private_text(tmp, json.dumps(live, separators=(",", ":")) + "\n")
             tmp.replace(cache)
         except OSError:
             pass
@@ -2269,9 +2270,9 @@ def read_copilot_addon(env: dict[str, str] | None = None) -> dict[str, Any] | No
         return _copilot_addon_cache_payload(cache)
     result = {"spent": spent, "currency": "$", "source": "github billing"}
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_cache_dir(cache.parent, env)
         tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n", encoding="utf-8")
+        write_private_text(tmp, json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n")
         tmp.replace(cache)
     except OSError:
         pass
@@ -2543,12 +2544,9 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
         if quota is not None:
             result = _copilot_monthly_result_from_quota(quota, env)
             try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_cache_dir(cache.parent, env)
                 tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-                tmp.write_text(
-                    json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n",
-                    encoding="utf-8",
-                )
+                write_private_text(tmp, json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n")
                 tmp.replace(cache)
             except OSError:
                 pass
@@ -2657,9 +2655,9 @@ def read_copilot_monthly_used(env: dict[str, str] | None = None) -> dict[str, An
         "source": "github billing",
     }
     try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_cache_dir(cache.parent, env)
         tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n", encoding="utf-8")
+        write_private_text(tmp, json.dumps({**result, "ts": int(time.time())}, separators=(",", ":")) + "\n")
         tmp.replace(cache)
     except OSError:
         pass
@@ -2735,8 +2733,8 @@ def log_usage_sample(provider: str, window: str, remaining: Any, env: dict[str, 
         return
     path = usage_cache_dir(env) / "llm-usage.log"
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        ensure_private_cache_dir(path.parent, env)
+        with open_private_text(path) as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             fh.write(json.dumps({"ts": now_epoch(env), "provider": provider, "window": window, "remaining": num(remaining)}, separators=(",", ":")) + "\n")
     except OSError:
@@ -3016,6 +3014,57 @@ def make_private_dirs(path: Path) -> None:
         raise NotADirectoryError(str(path))
 
 
+def _tighten_directory(directory: Path) -> None:
+    """chmod 0700 a directory this user owns; never follow a symlink or touch someone else's directory."""
+    try:
+        info = os.lstat(directory)
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) & 0o077:
+            os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+
+def ensure_private_cache_dir(path: Path, env: dict[str, str] | None = None) -> None:
+    """Create ``path`` for llm-tools cache or state files and make every directory llm-tools owns 0700.
+
+    Missing directories are created 0700. A directory that an earlier release created with the
+    default umask mode is tightened. The tightening covers the cache root (``cache_root``) and the
+    directories between it and ``path``; the user's parent directories (for example ``~/.cache``)
+    keep their mode. A ``path`` outside the cache root, such as an override directory, has only
+    its own directory tightened. Raises ``OSError`` as ``mkdir`` does.
+    """
+    make_private_dirs(path)
+    root = cache_root(env)
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        _tighten_directory(path)
+        return
+    _tighten_directory(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        _tighten_directory(current)
+
+
+def write_private_text(path: Path, text: str, *, append: bool = False) -> None:
+    """Write ``text`` to ``path`` with mode 0600 from creation; an existing file is tightened to 0600."""
+    with open_private_text(path, "a" if append else "w") as stream:
+        stream.write(text)
+
+
+def open_private_text(path: Path, mode: str = "a") -> IO[str]:
+    """Open ``path`` as UTF-8 text (``"a"`` or ``"w"``) created with mode 0600; an existing file is tightened."""
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | (os.O_APPEND if mode == "a" else os.O_TRUNC)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, mode, encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def touch_private_file(path: Path) -> None:
     """Create ``path`` (if absent) with mode 0600 from the start and enforce 0600 on an existing file."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -3029,7 +3078,7 @@ def touch_private_file(path: Path) -> None:
 
 
 def setup_run_logs(log_dir: Path, suffix: str, provider_link: str = "", run_dir: Path | None = None) -> RunLogs:
-    make_private_dirs(log_dir)
+    ensure_private_cache_dir(log_dir)
     try:
         log_dir.chmod(0o700)
     except OSError:
@@ -3110,7 +3159,7 @@ def load_prompt(prompt_text: str, prompt_file: str, logs: RunLogs) -> tuple[str,
         text = dest.read_text(encoding="utf-8", errors="replace")
     else:
         text = prompt_text
-        dest.write_text(text, encoding="utf-8")
+        write_private_text(dest, text)
     try:
         dest.chmod(0o600)
     except OSError:
@@ -3204,8 +3253,7 @@ def shared_usage_snapshot(
         return reader()
     directory = shared_snapshot_dir(env)
     try:
-        make_private_dirs(directory)
-        directory.chmod(0o700)
+        ensure_private_cache_dir(directory, dict(env) if env is not None else None)
         lock_fd = os.open(directory / f"{provider}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError:
         return reader()
@@ -4327,15 +4375,15 @@ def run_pty_capture(
         marker = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n"
         text = marker + text
     if output_path:
-        output_path.write_text(text, encoding="utf-8")
+        write_private_text(output_path, text)
     if status_path:
-        status_path.write_text(str(exit_code), encoding="utf-8")
+        write_private_text(status_path, str(exit_code))
     return exit_code, text
 
 
 def clean_capture_file(path: Path) -> None:
     if path.is_file():
-        path.write_text(strip_ansi(path.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+        write_private_text(path, strip_ansi(path.read_text(encoding="utf-8", errors="replace")))
 
 
 # Provider/transport rate-limit signatures. These must be specific enough that a
@@ -5010,7 +5058,7 @@ def suspend_ledger_path(env: dict[str, str] | None = None) -> Path:
 
 def _append_ledger(path: Path, record: dict[str, Any]) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_cache_dir(path.parent)
         descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
             os.fchmod(fh.fileno(), 0o600)  # a ledger created by an older release is tightened too
@@ -5071,7 +5119,7 @@ def trim_ledger(path: Path, keep: int = 200) -> None:
     if len(lines) <= keep:
         return
     try:
-        path.write_text("\n".join(lines[-keep:]) + "\n", encoding="utf-8")
+        write_private_text(path, "\n".join(lines[-keep:]) + "\n")
     except OSError:
         pass
 
@@ -5090,8 +5138,7 @@ class WakeArm:
 def wake_planner_lock(env: dict[str, str] | None = None) -> Iterator[None]:
     """Serialize wake-plan owners and the full suspend cycle across processes."""
     path = cache_root(env) / "llm-bridge" / "capacity-wakes" / "planner.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    ensure_private_cache_dir(path.parent, env)
     with path.open("a+") as lock:
         os.chmod(path, 0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)

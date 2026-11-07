@@ -206,16 +206,8 @@ def record_local_block(
     }
     path = _route_block_path(route_id, env)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
-        path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+        common.ensure_private_cache_dir(path.parent, env)
+        common.write_private_text(path, json.dumps(payload, separators=(",", ":")))
     except OSError:
         # Recording the block is best-effort. The orchestrator should never
         # crash on a permission error in the cache root.

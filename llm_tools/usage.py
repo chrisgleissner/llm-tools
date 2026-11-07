@@ -3156,7 +3156,7 @@ def handle_service_action(cfg: Config) -> int:
 def main(argv: list[str] | None = None) -> int:
     common.migrate_legacy_cache_dirs()
     cfg = parse_args(list(sys.argv[1:] if argv is None else argv))
-    common.usage_cache_dir().mkdir(parents=True, exist_ok=True)
+    common.ensure_private_cache_dir(common.usage_cache_dir())
     if cfg.service_action:
         return handle_service_action(cfg)
     if cfg.statusline_mode:

@@ -814,11 +814,7 @@ def save_state(
 ) -> None:
     if cfg.dry_run:
         return
-    cfg.state_file.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        cfg.state_file.parent.chmod(0o700)
-    except OSError:
-        pass
+    common.ensure_private_cache_dir(cfg.state_file.parent)
     obj = {
         "providers_spec": cfg.providers_spec,
         "providers": cfg.providers,
@@ -831,11 +827,7 @@ def save_state(
     }
     if completed_counts is not None:
         obj["completed_counts"] = {key: int(max(0, completed_counts.get(key, 0))) for key in rotation_keys(cfg)}
-    cfg.state_file.write_text(json.dumps(obj, separators=(",", ":")) + "\n", encoding="utf-8")
-    try:
-        cfg.state_file.chmod(0o600)
-    except OSError:
-        pass
+    common.write_private_text(cfg.state_file, json.dumps(obj, separators=(",", ":")) + "\n")
 
 
 def rotation_order_indices(length: int, current_index: int) -> list[int]:
@@ -1574,8 +1566,8 @@ def run_scheduler_inline(scfg: scheduler.SchedulerConfig) -> int:
         # launching, leave the reason where the operation log is read, and skip
         # the retry schedule: the same command cannot succeed later.
         attempt_out = child_logs.run_dir / "attempt-1.out"
-        attempt_out.write_text(violation + "\n", encoding="utf-8")
-        (child_logs.run_dir / "attempt-1.status").write_text(str(common.LAUNCH_REFUSED_STATUS), encoding="utf-8")
+        common.write_private_text(attempt_out, violation + "\n")
+        common.write_private_text(child_logs.run_dir / "attempt-1.status", str(common.LAUNCH_REFUSED_STATUS))
         common.log_text(child_logs, f"launch refused: {violation}")
         common.log_event(child_logs, "launch_refused", {"reason": violation, "argv_bytes": sum(len(os.fsencode(a)) for a in argv)})
         common.log_event(child_logs, "final", {"status": "launch-refused"})
