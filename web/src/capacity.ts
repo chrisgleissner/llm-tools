@@ -43,7 +43,7 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
     const shown = narrow ? chips.slice(0, 1) : chips;
     el.replaceChildren(
       ...shown.map((c) =>
-        h("a", { class: "cap-chip", href: "/usage", title: c.title }, c.provider, " ", c.scope, " ", h("span", { class: "meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), " ", `${c.percent}%`, h("span", { class: "sr-only" }, " left")),
+        h("a", { class: "cap-chip", href: "/usage", title: c.title }, c.provider, " ", c.scope, " ", h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), " ", `${c.percent}%`, h("span", { class: "sr-only" }, " left")),
       ),
     );
   };

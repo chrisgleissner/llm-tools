@@ -128,3 +128,27 @@ test("? lists the keyboard map and g i goes to the Inbox", async ({ page }) => {
   await page.keyboard.press("i");
   await expect(page).toHaveURL(/\/$/);
 });
+
+test("p and c reach the page: through bridge:shortcut when a page handles it, else through its data-action button and data-composer field; never while typing", async ({ page }) => {
+  await mockApp(page, IN);
+  await page.goto("/workers");
+  await expect(page.locator("#conn")).toContainText("Live");
+  await page.evaluate(() => {
+    const w = window as unknown as { __hits: string[] };
+    w.__hits = [];
+    const main = document.getElementById("main") as HTMLElement;
+    main.insertAdjacentHTML("beforeend", '<button type="button" data-action="pause" id="t-pause">Pause</button><div data-composer><textarea id="t-composer"></textarea></div><input id="t-other">');
+    document.getElementById("t-pause")?.addEventListener("click", () => w.__hits.push("click"));
+  });
+  const hits = () => page.evaluate(() => (window as unknown as { __hits: string[] }).__hits);
+  await page.keyboard.press("p");
+  expect(await hits(), "fallback: the button is clicked").toEqual(["click"]);
+  await page.keyboard.press("c");
+  await expect(page.locator("#t-composer")).toBeFocused();
+  await page.keyboard.type("p");
+  expect(await hits(), "typing in the composer does not fire shortcuts").toEqual(["click"]);
+  await page.locator("h1").click();
+  await page.evaluate(() => document.addEventListener("bridge:shortcut", (e) => { (window as unknown as { __hits: string[] }).__hits.push(`event:${(e as CustomEvent<{ name: string }>).detail.name}`); e.preventDefault(); }));
+  await page.keyboard.press("p");
+  expect(await hits(), "a page that handles the event suppresses the click").toEqual(["click", "event:pause"]);
+});

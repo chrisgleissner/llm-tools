@@ -154,7 +154,19 @@ function moveRow(step: number): void {
   next.focus();
   next.scrollIntoView({ block: "nearest" });
 }
+/**
+ * A page can take a shortcut itself: the shell first fires a cancelable `bridge:shortcut` event on the document with
+ * `detail.name` of `approve`, `reject`, `pause` or `compose`; a listener that calls `preventDefault()` has handled it.
+ * Otherwise the shell clicks the matching `[data-action]` button (or focuses `[data-composer]`'s field) in the selected row or the page.
+ */
+export const SHORTCUT_EVENT = "bridge:shortcut";
+function pageHandles(name: string): boolean {
+  const event = new CustomEvent(SHORTCUT_EVENT, { detail: { name }, cancelable: true });
+  document.dispatchEvent(event);
+  return event.defaultPrevented;
+}
 function press(action: string): boolean {
+  if (pageHandles(action)) return true;
   const scope: ParentNode = activeRow() ?? mainEl() ?? document;
   const target = scope.querySelector<HTMLElement>(`[data-action="${action}"]:not(:disabled)`);
   target?.click();
@@ -183,6 +195,7 @@ const KEYMAP: Binding[] = [
     group: "Lists and items",
     label: "Focus the composer",
     run: () => {
+      if (pageHandles("compose")) return true;
       const field = mainEl()?.querySelector<HTMLElement>("[data-composer] textarea, [data-composer] input");
       field?.focus();
       return Boolean(field);
@@ -302,6 +315,7 @@ const ago = (ms: number): string => {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
   return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.floor(s / 60)}m ago` : `${Math.floor(s / 3600)}h ago`;
 };
+const FIRST_CONNECT_MS = 10_000; // the first connection of a page load gets longer: a slow device is not a dropped stream
 const SHOW_AFTER_MS = 4000; // a reconnect shorter than this never shows the banner
 const HIDE_AFTER_MS = 1000; // and a recovery must hold this long before the banner goes, so a bouncing stream does not blink it
 
@@ -397,7 +411,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       showTimer = 0;
       shown = store.conn === "live" ? "live" : store.conn;
       paintConn();
-    }, SHOW_AFTER_MS);
+    }, shown === "connecting" ? FIRST_CONNECT_MS : SHOW_AFTER_MS);
   };
 
   // browser notification opt-in (a button the operator presses; never on load)
@@ -479,7 +493,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       "header",
       { class: "top" },
       h("a", { class: "brand", href: "/", "aria-label": "LLM Bridge" }, icon("shield", 24), h("span", { class: "brand-text" }, "LLM Bridge")),
-      h("button", { type: "button", class: "btn search-open", id: "palette-open", "aria-label": "Search missions, sessions and actions", "aria-keyshortcuts": "Control+K Meta+K", onclick: () => void openPaletteLazy() }, icon("search", 18), h("span", { class: "so-text" }, "Search missions, actions"), h("kbd", {}, mac ? "Cmd K" : "Ctrl K")),
+      h("button", { type: "button", class: "btn search-open", id: "palette-open", "aria-label": `Search missions, actions ${mac ? "Cmd K" : "Ctrl K"}`, "aria-keyshortcuts": "Control+K Meta+K", onclick: () => void openPaletteLazy() }, icon("search", 18), h("span", { class: "so-text" }, "Search missions, actions"), " ", h("kbd", {}, mac ? "Cmd K" : "Ctrl K")),
       caps.el,
       conn,
       user,
