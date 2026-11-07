@@ -176,6 +176,22 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
     h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "account-signout", onclick: opts.signOut }, "Sign out")),
     exp ? h("p", { class: "muted small" }, `That is ${relFromMs(exp.getTime()).replace("in ", "in about ")}.`) : null,
   );
-  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement());
+  const passkeyGuidance = h("section", { id: "passkey-support-guidance", class: "card narrow", hidden: true });
+  void import("../passkeys").then(async ({ detectPasskeySupport }) => {
+    const capability = await detectPasskeySupport();
+    if (!capability.supported) {
+      passkeyGuidance.hidden = false;
+      passkeyGuidance.replaceChildren(
+        h("h2", {}, "Passkeys"),
+        h("p", { class: "muted" }, "Passkeys need a trusted address such as Tailscale."),
+        h("a", {
+          href: "https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md#enable-passkeys-optional",
+          target: "_blank",
+          rel: "noopener",
+        }, "Enable passkeys (optional)"),
+      );
+    }
+  }).catch(() => {});
+  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement(), passkeyGuidance);
   return () => {};
 }

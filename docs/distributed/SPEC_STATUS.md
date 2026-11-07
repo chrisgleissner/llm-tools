@@ -339,7 +339,7 @@ negative tests remain incomplete unless explicitly recorded below.
 | PK-007 | [ ] | Recovery codes and local passkey reset remain. |
 | PK-008 | [ ] | Fresh passkey assertions for sensitive actions remain. |
 | PK-009 | [ ] | Passkey step-up for token creation remains. |
-| PK-010 | [~] | Login capability detection uses `isUserVerifyingPlatformAuthenticatorAvailable`, `isConditionalMediationAvailable` and `getClientCapabilities` where available; unsupported browsers keep the password form without a passkey control (`web/e2e/passkey-login.spec.ts`). The calm explanation and install link in settings remain. |
+| PK-010 | [~] | Login capability detection uses `isUserVerifyingPlatformAuthenticatorAvailable`, `isConditionalMediationAvailable` and `getClientCapabilities` where available; unsupported browsers keep the password form without a passkey control (`web/e2e/passkey-login.spec.ts`). Account settings now show the calm trusted-address explanation and local install guide link only when WebAuthn is unavailable (`web/e2e/auth-ux.spec.ts::account explains how to enable passkeys when the browser cannot use them`). Chromium desktop/mobile light/dark account baselines and accessibility checks pass. CI evidence is pending. |
 | PK-011 | [~] | `coordinator/tests/passkeys.rs` and `coordinator/tests/web_api.rs` cover origin binding, IP/wrong-origin rejection, challenge expiry/replay and unknown credentials; `web/e2e/passkey-login.spec.ts` exercises the sign-in UI with mocked WebAuthn responses. Fixed cryptographic vectors, Chromium virtual authenticator flows, and Firefox authenticator coverage remain. |
 | PK-012 | [ ] | Physical Android validation belongs to the separate Pi verification prompt. |
 

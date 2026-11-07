@@ -231,6 +231,19 @@ test.describe("sign-in", () => {
 });
 
 test.describe("account menu and password change", () => {
+  test("account explains how to enable passkeys when the browser cannot use them", async ({ page, coord }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "PublicKeyCredential", { configurable: true, value: undefined });
+    });
+    await setupViaUi(page, coord);
+    await navTo(page, "Account");
+    const guidance = page.locator("#passkey-support-guidance");
+    await expect(guidance).toBeVisible();
+    await expect(guidance).toContainText("Passkeys need a trusted address such as Tailscale.");
+    const link = guidance.getByRole("link", { name: "Enable passkeys (optional)" });
+    await expect(link).toHaveAttribute("href", /install\.md#enable-passkeys-optional$/);
+  });
+
   test("the account menu shows who is signed in and offers password change and sign out", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     const button = page.locator("#account-button");
