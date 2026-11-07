@@ -99,6 +99,12 @@ pub fn check_command_request(p: &Map<String, Value>) -> Result<(), ProtocolError
     if !p.get("mission_id").is_none_or(|m| m.is_null() || m.is_string()) {
         return perr("invalid-request", "mission_id must be a string");
     }
+    if p.get("mission_id")
+        .and_then(Value::as_str)
+        .is_some_and(|mission_id| mission_id.chars().any(char::is_control))
+    {
+        return perr("invalid-request", "mission_id must not contain control characters");
+    }
     if !p.get("target").is_none_or(Value::is_string) || !p.get("request_id").is_some_and(Value::is_string) {
         return perr("invalid-request", "target and request_id must be strings");
     }
