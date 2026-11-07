@@ -110,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--group", action="append", default=[], metavar="NAME=MISSION8[,MISSION8]", help="controllers drawn as their own coloured line (by 8-character mission id)")
     parser.add_argument("--soak-offset", type=float, default=0.0, help="seconds the soak started after the CSV began (the CSV clock is the x axis for controllers)")
     parser.add_argument("--warmup-seconds", type=float, default=0.0, help="shade this many seconds after the start of each series")
+    parser.add_argument("--workers", default="", metavar="PID[,PID]", help="draw a panel with one line per worker process (CSV rows of kind worker with these pids) and the mean")
+    parser.add_argument("--workers-only", action="store_true", help="draw only the worker panel (no controller, report-based worker or coordinator panels)")
     parser.add_argument("--title", default="Resident memory over time")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -128,6 +130,26 @@ def main(argv: list[str] | None = None) -> int:
     t_end = max((t for pts in per_pid.values() for t, _ in pts), default=1.0)
     panels: list[Panel] = []
 
+    if args.workers_only:
+        wanted = set(args.workers.split(",")) if args.workers else set()
+        worker_rows: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        for row in rows:
+            if row["kind"] == "worker" and (not wanted or row["pid"] in wanted):
+                worker_rows[row["pid"]].append((row["t"], row["rss"] / 1024.0))
+        origin = min((pts[0][0] for pts in worker_rows.values()), default=0.0)
+        series = [[(t - origin, v) for t, v in pts] for pts in worker_rows.values()]
+        panel = Panel(f"Workers: resident memory per process ({len(series)} processes)", TOP, max((t for pts in series for t, _ in pts), default=1.0), "MiB")
+        for pts in series:
+            panel.add(pts, "#7f7f7f", 0.6)
+        if len(series) > 1:
+            panel.add(mean_series(series), "#1f77b4", 2.2, "worker mean")
+        elif series:
+            panel.add(series[0], "#1f77b4", 1.8, "worker")
+        if args.warmup_seconds:
+            panel.bands.append((0.0, args.warmup_seconds, "warm-up (ignored by the check)"))
+        panels.append(panel)
+        t0, soak, per_pid, mission_of, t_end = 0.0, [], {}, {}, 1.0
+
     controllers = Panel(f"Mission controllers: resident memory per process ({len(soak)} soak controllers)", TOP, t_end, "MiB")
     for pts in soak:
         controllers.add(pts, "#7f7f7f", 0.6)
@@ -139,9 +161,10 @@ def main(argv: list[str] | None = None) -> int:
             controllers.add(pts, PALETTE[index % len(PALETTE)], 1.8, name)
     if args.warmup_seconds:
         controllers.bands.append((t0, t0 + args.warmup_seconds, "warm-up (ignored by the check)"))
-    panels.append(controllers)
+    if not args.workers_only:
+        panels.append(controllers)
 
-    if args.report:
+    if args.report and not args.workers_only:
         report = json.loads(args.report.read_text())
         samples = report["samples"]
         offset = t0 if soak else 0.0

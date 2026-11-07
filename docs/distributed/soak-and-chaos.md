@@ -70,7 +70,7 @@ Each is a line in the report. Any failure gives exit status 1.
 | Check | Rule |
 |---|---|
 | Commands exactly once | After the load stops, every accepted command reaches `done` within `--settle-seconds`. Then the coordinator journal, the worker `commands` table and the worker `tasks` table are compared. Failures: an `applied` command whose effect is missing (silent loss); an effect present more than once; an effect present for a `rejected` or `failed` command (phantom); a command row count other than one; an accepted command missing from the journal; a command that never finished. `uncertain` outcomes are allowed and counted, and their effect may exist at most once. |
-| Resource slopes | The coordinator, the workers and the controllers are sampled every `--sample-seconds` (default 60) from `/proc` and `diagnostics`. The first `--warmup-seconds` (default 1200, never more than two thirds of the run and never less than `--warmup-fraction` of it, default 25%) of each series is ignored: memory has not settled in the first 20 minutes (see Memory over time). A least-squares line is fitted through the rest. A metric fails when its slope is above the bound per hour **and** the fitted rise over the window is above the floor. The floor stops a few units of cache or allocator noise in a short run from being extrapolated to a failure. With too few samples the result is `inconclusive`, which fails; `bridge_soak.py` refuses a run that cannot collect four samples after warm-up. The controllers are judged one process at a time (see the table below). |
+| Resource slopes | The coordinator, the workers and the controllers are sampled every `--sample-seconds` (default 60) from `/proc` and `diagnostics`. The first `--warmup-seconds` (default 1200, never more than two thirds of the run and never less than `--warmup-fraction` of it, default 25%) of each series is ignored: memory has not settled in the first 20 minutes (see Memory over time). A least-squares line is fitted through the rest. A metric fails when its slope is above the bound per hour **and** the fitted rise over the window is above the floor. The floor stops a few units of cache or allocator noise in a short run from being extrapolated to a failure. With too few samples the result is `inconclusive`, which fails; `bridge_soak.py` refuses a run that cannot collect four samples after warm-up. The controllers and the workers are judged one process at a time (see the table below). |
 | Memory ceilings | The largest sample of any single controller or worker, and of the coordinator, stays under the absolute ceilings in the table below. A process that settles at a size it should never reach fails even when its slope is flat. The warm-up is included. |
 | Database explained by rows | At every sample the coordinator database (main file plus WAL) is at most 8 MiB + 4096 bytes times the row count of `events`, `commands` and `audit`. The database slope floor also grows with the new rows, so the slope check fails only for growth that rows do not explain. |
 | Events within retention | The stored event count never exceeds workers x `max_events_per_worker` (50 000). |
@@ -88,7 +88,7 @@ units per hour, for example `--bound-coordinator-rss-kib 4096`):
 | `coordinator_fds` | 4 | 4 | Open descriptors. A bounded number of workers and API connections means none should accumulate. |
 | `coordinator_threads` | 2 | 4 | Operating-system threads. This is the task metric: the number of async tasks inside the coordinator is not exposed on this branch (see Phase B). |
 | `coordinator_db_bytes` | 32 MiB | 8 MiB + 4096 bytes per new row | `coordinator.sqlite3` plus its WAL. Until the event retention cap is reached the database grows with the stored events by design; the floor allows exactly that. At the cap the slope has to flatten. |
-| `workers_rss_kib` | 3072 KiB per worker | 1024 KiB per worker | Sum over the `llm-bridge worker run` processes; bound and floor are multiplied by the worker count. Measured per worker after minute 20: 1.9 MiB per hour (45-minute run, 25-minute window) and 2.5 MiB per hour (30-minute run, 10-minute window), falling. |
+| `workers_rss_kib` | 512 KiB per worker | 1024 KiB per worker | **Per process, not a sum**, like the controllers: each worker is fitted on its own after `--warmup-seconds`, and the median over the workers is compared with the bound (and the median rise with the floor). Measured after minute 20 of a 3-hour single-worker run: -0.06 to +0.22 MiB per hour depending on where the window starts (see Worker memory below). The bound is 2.3 times the largest of these, 12 MiB per day. It replaces 3 MiB per hour (72 MiB per day) summed over the fleet, which a worker growing by 2 MiB per hour passed. |
 | `workers_fds`, `workers_threads` | 1 per worker | 1 per worker | Same. |
 | `controllers_rss_kib` | 1536 KiB per controller | 512 KiB per controller | **Per process, not a sum.** Each controller is fitted on its own from `--warmup-seconds` after its first sample, and the median over the controllers is compared with the bound (and the median rise with the floor). A sum jumps when a controller exits or is restarted, and a restarted controller starts a new warm-up. Measured median per-controller slope after warm-up: 0.88 MiB per hour (45-minute run, 25-minute window) and 1.12 MiB per hour (30-minute run, 10-minute window). |
 | `controllers_fds` | 1 per controller | 1 per controller | Same. |
@@ -253,9 +253,68 @@ yet, so they compiled the modules in memory. The ceiling covers them (42.8 MiB p
 Workers and the coordinator had the same weakness, warm-up inside the fit. A 30-minute run before this change
 failed `workers_rss_kib` (3.7 MiB per hour per worker) and `coordinator_rss_kib` (18 MiB per hour) on the
 25%-warm-up fit. With the 1200 s warm-up the worker slope is 1.9 to 2.5 MiB per hour per worker and falling
-(bound 3 MiB; the floor of 1 MiB per worker is what protects a short window), and the coordinator's growth is
+(this was judged against 3 MiB per hour summed over the fleet; the bound is now 0.5 MiB per hour per worker, see Worker memory), and the coordinator's growth is
 explained by its row count (256 bytes per row allowed, 81 to 96 measured). The coordinator figures come from
 the debug build; the release build is smaller.
+
+### Worker memory
+
+The first soaks showed each `llm-bridge worker run` process growing by 2.5 and then 1.9 MiB per hour after minute 10 or 20 (about 48 MiB per
+day). The investigation used the same steps as for the controller. Decision D19 in `DECISIONS.md` summarises the result.
+
+**There is no accumulating object in the worker.** The measurements, all on the worker code of this branch with the release coordinator of this
+branch and the fake provider mix 80/5/10/5 (one worker, five missions, 0.2 commands per second, the per-worker share of the 10-worker soak):
+
+| Measurement | Result |
+|---|---|
+| `tracemalloc` (25 frames) inside a real worker, snapshots at minute 26 and minute 66, `gc.collect()` before each | Traced Python heap 7917 KiB, then 7964 KiB: +47 KiB in 40 minutes. About 25 KiB of that is the deferred import of `llm_tools.capacity` on the first status command; no allocation site grows with the number of commands or events. |
+| Live objects (`gc.get_objects()`, sampled once a minute) in the same worker | 20 684 to 21 083 over the 65 minutes (the upper values are garbage not yet collected), no trend. |
+| Interned strings (the controller leak: `pathlib` interns each path component on CPython 3.12) | None. The worker builds paths only from the state directory, the lock directory and mission identifiers, so the set is bounded by the number of missions. `tests/test_bridge_worker_memory.py` counts them. |
+| In-process worker with a real TLS WebSocket (`bridge_ws`), a 16 MB copy of a soak database, events written by a second process at 6 per second, commands at 0.2 per second, 25 minutes | glibc heap in use 4.58 to 4.70 MiB, SQLite memory in use 0 KiB between polls (no connection is kept), Python allocated blocks flat. The same loop at 50 times the rate (20 commands and 100 database opens per second, 15 minutes): heap size and heap in use unchanged. |
+| 3-hour single-worker soak with `mallinfo2`, `sqlite3_memory_used` and a garbage collection before each sample | Heap in use (bytes the program holds in the glibc heap) 4.36 MiB at minute 1, 4.53 MiB at minute 40, 4.55 MiB at minute 171: +0.2 MiB, all of it in the first 50 minutes, +0.02 MiB per hour after that. Python allocated blocks 90 098 to 91 504, no trend. |
+
+**What the earlier 2 MiB per hour was.** Free space inside the glibc heap. In the 3-hour run the heap grew from 5.2 to 7.4 MiB while the bytes in use grew by
+0.2 MiB: free chunks went from 0.9 MiB at minute 1 to 2.8 MiB at minute 55 and stayed between 2.2 and 2.8 MiB for the next two hours. The process
+resident size (31.4 MiB at the start, 33.3 MiB at minute 180, range 31.4 to 34.2) rises by about 1.8 MiB in the first 50 minutes while this free space
+fills, and then moves up and down by up to 1.1 MiB: when the top of the heap is freed, glibc returns the pages in one step (a 2.6 MiB step down at minute 40 of a
+70-minute run, and a 1.1 MiB step at minute 51 of the 3-hour run). The 30- and 45-minute soaks measured the rising part of this curve, 10 and 25
+minutes long, at the plateau of a 1200 s warm-up. `malloc_trim(0)` called inside a worker at minute 24 returned 1.0 MiB, and the free space was back
+200 s later, so it is not a lasting reduction.
+
+| Window of the 3-hour run (180 samples, one per minute) | Resident slope | Live heap slope |
+|---|---|---|
+| After minute 20 (the soak's warm-up) | -0.06 MiB/h | +0.026 MiB/h |
+| After minute 40 | +0.02 MiB/h | +0.023 MiB/h |
+| After minute 50 | +0.22 MiB/h | +0.021 MiB/h |
+| After minute 90 | +0.12 MiB/h | +0.007 MiB/h |
+
+The harness fit of the same run (`bridge_soak.py`, warm-up 1200 s, window 2.2 hours) gave +117 KiB per hour and a fitted rise of 263 KiB.
+
+**Experiment that did not help.** Each pass of the run loop (twice a second) opens and closes a read-only SQLite connection. A single long-lived
+connection was tried in a second 3-hour configuration. The heap grew by the same amount in the first 16 minutes (heap size 5.2 to 6.2 MiB without, 5.8 to
+6.6 MiB with), so connection churn is not the cause. The change was reverted and is not in this branch.
+
+**Gate.** The worker is now judged like the controllers: each process is fitted on its own after `--warmup-seconds`, the median over the workers is
+compared with 512 KiB per hour, and the rise must also exceed 1024 KiB per process (`dist_harness.DEFAULT_BOUNDS`). The ceiling of 56 MiB per process
+stays (measured peaks: 34.2 MiB in the 3-hour run, 33.8 MiB in the 1-worker 70-minute run). The floor is what protects short runs: at 512 KiB per hour a rise of
+1024 KiB takes two hours, so the 30-minute run and the pull-request run rely on the ceiling, and the 4.5-hour nightly run (a window of 3.2 hours, a
+rise of 1.6 MiB at the bound) is the first one that can fail the slope. `tests/test_bridge_worker_memory.py` (new) checks, without clocks or RSS,
+that 240 commands and event polls after a 60-round warm-up leave at most 4 new interned strings and at most 60 live objects; with a
+`Path("/run", request_id)` and a dictionary entry per command added to the worker, the two tests fail (240 new interned strings, 238 live
+objects left). `test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per_hour` fails with the previous bound: a worker
+growing by 2 MiB per hour passed 3 MiB per hour summed over the fleet.
+
+![Worker resident memory, one worker, 3 hours](soak-and-chaos/worker-single-3h.svg)
+
+**30-minute soak on the final limits** (10 workers, 50 missions, `bridge_soak.py` defaults, release coordinator of this branch, 2026-11-07): all
+checks passed. 3893 commands issued, all accepted and `applied`, no violation; 4326 tasks completed. `workers_rss_kib`: median slope 2.81 MiB per hour
+and median rise 474 KiB per process over the 10-minute window after the 1200 s warm-up (slowest worker -0.05 MiB per hour, fastest 5.75 MiB per hour). The slope is above
+the bound of 512 KiB per hour and the rise is below the floor of 1024 KiB, so the check passes on the floor, not on the slope: a 10-minute window
+sees the settling of the heap, as the 3-hour run shows. Worker peak 33.1 MiB (ceiling 56 MiB). Workers grew from 28.7-28.9 MiB at their first sample to
+32.4-33.1 MiB at the end. Controllers: median 1.30 MiB per hour, rise 211 KiB (bound 1.5 MiB per hour above 512 KiB), peak 40.2 MiB. Coordinator peak
+25.1 MiB. p99: read 127 ms, submit 165 ms, round trip 509 ms. 10 of 10 workers online at the end.
+
+![Worker resident memory, 10 workers, 30-minute soak](soak-and-chaos/worker-soak-30min.svg)
 
 **Limits of this evidence.** The longest run is 95 minutes. The plateau is shown for 75 minutes after warm-up,
 not for days. The 4.5-hour nightly run and the 24-hour run by hand are the evidence for a longer plateau, and
