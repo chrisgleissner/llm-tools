@@ -212,7 +212,9 @@ state, `412` for a stale task revision, `415` for a non-JSON mutation body, and
 `429` for a rate limit. Bearer-authenticated mutations allow 30 requests per
 token and 120 per client address in each rolling 60-second window. A limited
 request includes `Retry-After`. Every bearer use and mutation is audited with
-token metadata and request ID; the secret itself is never logged.
+token metadata and request ID; the secret itself is never logged. Cookie-session
+mutations and public passkey ceremony requests also consume the per-address
+budget, without a per-token budget.
 
 Within `/api/v1`, additive fields and operations may be introduced without a
 version change. A breaking change requires `/api/v2`. Before retiring a v1
