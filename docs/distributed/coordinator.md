@@ -249,8 +249,9 @@ identify the existing coordinator error. Common statuses include `401` for a
 missing/invalid credential, `403` for a missing scope, `409` for a conflicting
 state, `412` for a stale task revision, `415` for a non-JSON mutation body, and
 `429` for a rate limit. Bearer-authenticated mutations allow 30 requests per
-token and 120 per client address in each rolling 60-second window. A limited
-request includes `Retry-After`. Every bearer use and mutation is audited with
+token, 120 per client address, and 600 per coordinator in each rolling 60-second window. A limited
+request includes `Retry-After`. Authentication lockouts increase their retry delay exponentially
+after repeated bursts, capped at 15 minutes. Every bearer use and mutation is audited with
 token metadata and request ID; the secret itself is never logged. Cookie-session
 mutations and public passkey ceremony requests also consume the per-address
 budget, without a per-token budget.
@@ -291,7 +292,7 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Stored events per worker | 50 000, oldest deleted first (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | 7 days | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
-| Bearer mutations | 30 per token and 120 per client address by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | `mutation_limit_per_token`, `mutation_limit_per_address` (1–10,000) |
+| Authenticated mutations | 30 per token, 120 per client address and 600 per coordinator by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | token/address configurable with `mutation_limit_per_token`, `mutation_limit_per_address` (1–10,000); global ceiling fixed |
 
 Every bearer-authenticated API request also writes an audit row with the token name,
 granted scopes, method, path, client address and supplied request ID. The bearer

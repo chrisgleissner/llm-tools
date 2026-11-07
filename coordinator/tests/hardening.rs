@@ -91,6 +91,30 @@ async fn concurrent_wrong_logins_from_one_address_are_limited_before_argon2() {
     env.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn global_mutation_budget_limits_writes_across_all_addresses_and_tokens() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let key = [(
+        bridge_coordinator::auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(),
+        bridge_coordinator::auth::GLOBAL_MUTATION_LIMIT_PER_MINUTE,
+    )];
+    for _ in 0..bridge_coordinator::auth::GLOBAL_MUTATION_LIMIT_PER_MINUTE {
+        assert_eq!(env.srv.state.mutation_limiter.check(&key), None);
+    }
+    let response = api
+        .rb(Method::POST, "/api/v1/tokens")
+        .json(&json!({"name":"global-limited","scopes":["read"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 429);
+    assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "mutation-rate-limit");
+    env.stop().await;
+}
+
 #[test]
 fn ipv6_clients_are_keyed_by_their_64() {
     let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
