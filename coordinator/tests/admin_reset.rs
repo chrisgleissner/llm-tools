@@ -276,7 +276,8 @@ async fn tokens_revoked_by_default_and_kept_with_the_option_at_the_api() {
         let env = boot().await;
         let _ = env.admin().await;
         let db = Db::open(&db_path(&env.dir)).unwrap();
-        db.token_create("laptop", &auth::sha256_hex("tok-api"), None).unwrap();
+        db.token_create_scoped("laptop", &auth::sha256_hex("tok-api"), None, &["admin".to_string()])
+            .unwrap();
         let mut api = env.api();
         api.bearer = Some("tok-api".into());
         assert_eq!(api.get("/api/v1/workers").await.0, 200);
