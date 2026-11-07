@@ -146,3 +146,30 @@ skips tests marked `tmux` or `pty` and the console tests in `MACOS_SKIPPED_TESTS
 console and station are not supported there. Nothing is skipped on Linux by that code. The evidence for each skip is the CI run listed in
 `SPEC_STATUS.md`.
 
+## D9 Memory gate of the soak and the controller leak (PRD-007)
+
+PRD-007 forbids unbounded growth. The first 30-minute soak showed the mission controllers growing by what looked like
+20 to 56 KB per completed task, and a first response raised the controller bound to 6 MiB per hour. That was
+rejected: a bound that large (144 MiB per day) hides a leak. The decision rests on measurements, listed in
+`soak-and-chaos.md` (Memory over time) with plots in `soak-and-chaos/`.
+
+- **One leak, removed.** CPython 3.12 makes interned strings immortal and `pathlib` interns every path
+  component. The controller parsed five new names per provider run (iteration directory, two verifier files,
+  two pids), 5.00 new interned strings per task, 0.33 KiB per task on the traced heap. `common.RunPath` (a
+  `PosixPath` whose parser does not intern; the plain class on other Python versions or if the internals
+  differ) and `fileio.read_proc_text` remove them: 0.00 strings per task over 300 tasks, 0.02 KiB per task on
+  the traced heap over 455 tasks. `tests/test_bridge_controller_memory.py` fails before the change (90 new
+  strings after 18 runs) and passes after (at most 4).
+- **No other accumulation.** The remaining growth of a controller is heap fragmentation (`malloc_trim(0)`
+  returns 1.5 to 3.4 MiB) and a bounded SQLite page cache (1.63 to 2.38 MiB); live glibc heap rose 0.13 MiB in 35
+  minutes. It flattens: 50 controllers rose for about 20 minutes, a single controller moved by 0.32 MiB per
+  hour for 74 minutes after that (0.51 after the fix, same spread).
+- **Gate.** The soak ignores a warm-up of 1200 s (at most two thirds of the run) instead of 25% of the run,
+  judges controllers per process on the median of each controller's own post-warm-up slope (bound 1.5 MiB per
+  hour, measured 0.88 to 1.12), and fails any single controller or worker above 56 MiB and the coordinator
+  above 96 MiB (measured peaks 40.9 to 42.8, 34.1 and 34.3 MiB). The coordinator's growth is allowed 256 bytes
+  per new row (measured 81 to 96). The 6 MiB per hour bound is reverted.
+- **Not decided here.** The plateau is shown for 75 minutes after warm-up. The 4.5-hour nightly and the 24-hour
+  runs are the evidence for longer, and the ceilings fail them if it does not hold. Python 3.13 or later should
+  not need `RunPath`; this was not run. A periodic `malloc_trim` was rejected for now: it is glibc-specific and
+  recovers about 1.5 to 3 MiB.
