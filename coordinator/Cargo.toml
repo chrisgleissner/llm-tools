@@ -31,7 +31,7 @@ toml = "0.8"
 argon2 = "0.5"
 rand = "0.8"
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 webauthn-rs = { version = "0.6.2", default-features = false, features = ["resident-key-support", "danger-allow-state-serialisation"] }
 url = "2"
