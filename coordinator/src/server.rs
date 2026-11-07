@@ -35,10 +35,19 @@ pub struct RunningServer {
 impl RunningServer {
     /// Signal shutdown and wait for connections to drain (bounded by 10 s).
     pub async fn stop(self) {
-        let _ = self.shutdown.send(true);
-        for task in self.tasks {
+        let RunningServer {
+            shutdown,
+            tasks,
+            _data_dir_lock: data_dir_lock,
+            ..
+        } = self;
+        let _ = shutdown.send(true);
+        for task in tasks {
             let _ = task.await;
         }
+        // Keep the data-directory lock through listener shutdown, then release it before
+        // returning so an immediate restore cannot race with server teardown.
+        drop(data_dir_lock);
     }
 }
 

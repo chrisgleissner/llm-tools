@@ -387,13 +387,36 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_CONFIG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_config(text: &str) -> std::path::PathBuf {
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("bridge-config-test-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = loop {
+            let nonce = TEMP_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let candidate = std::env::temp_dir().join(format!("bridge-config-test-{}-{nonce}", std::process::id()));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create test config directory {}: {error}", candidate.display()),
+            }
+        };
         std::fs::write(dir.join("config.toml"), text).unwrap();
         dir
+    }
+
+    #[test]
+    fn parallel_test_config_directories_are_unique_and_do_not_overwrite() {
+        let threads: Vec<_> = (0..32)
+            .map(|index| std::thread::spawn(move || (index, temp_config(&format!("# config {index}\n")))))
+            .collect();
+        let configs: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+        let unique: std::collections::HashSet<_> = configs.iter().map(|(_, path)| path).collect();
+        assert_eq!(unique.len(), configs.len());
+        for (index, path) in configs {
+            assert_eq!(std::fs::read_to_string(path.join("config.toml")).unwrap(), format!("# config {index}\n"));
+            std::fs::remove_dir_all(path).unwrap();
+        }
     }
 
     #[test]
