@@ -1,5 +1,5 @@
 import * as api from "../api";
-import { button, copyButton, field, h, isoTime, relFromMs, timeEl } from "../dom";
+import { button, copyButton, field, h, isoTime, timeEl } from "../dom";
 import { menu } from "../menu";
 import { DEFAULT_POLICY } from "../password";
 import { announce, openPanel } from "../ui";
@@ -194,7 +194,6 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       h("dt", {}, "Idle limit"),
       h("dd", {}, s ? `${minutes(s.idle_timeout_secs)} without activity` : "-"),
     ),
-    exp ? h("p", { class: "muted small" }, `That is ${relFromMs(exp.getTime()).replace("in ", "in about ")}.`) : null,
     h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "account-signout", onclick: opts.signOut }, "Sign out")),
   );
   const answers = answerLine({
