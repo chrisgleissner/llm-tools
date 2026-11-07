@@ -18,14 +18,14 @@ from __future__ import annotations
 
 from typing import Any
 
-STATUS_TASK_LIMIT = 8  # tasks listed by default; unfinished ones first
+STATUS_TASK_LIMIT = 5  # tasks listed by default; unfinished ones first
 STATUS_TASK_LIMIT_MAX = 50
 STATUS_PROMPT_CHARS_MAX = 2000
 STATUS_EVENT_LIMIT_MAX = 20
 STATUS_STRING_CHARS = 2048  # longest string kept anywhere in the result (provider questions are at most this long)
 STATUS_LIST_ITEMS = 20
 STATUS_TITLE_CHARS = 200
-STATUS_OBJECTIVE_CHARS = 240
+STATUS_OBJECTIVE_CHARS = 160
 STATUS_BYTE_LIMIT = 16 * 1024
 
 # Task fields kept when the projection lists tasks. Prompts, acceptance text, evidence and amendment
@@ -57,7 +57,8 @@ def _bound_value(value: Any, depth: int = 0) -> Any:
 
 
 def _task(task: dict[str, Any], prompt_chars: int) -> dict[str, Any]:
-    kept = {key: task[key] for key in _TASK_FIELDS if key in task}
+    # Empty values (no dependencies, no pending change, no proposer) are left out: they are about a third of a task's bytes.
+    kept = {key: task[key] for key in _TASK_FIELDS if key in task and task[key] not in (None, [], {})}
     if isinstance(kept.get("title"), str):
         kept["title"] = _clip(kept["title"], STATUS_TITLE_CHARS)
     if prompt_chars > 0:
@@ -68,7 +69,7 @@ def _task(task: dict[str, Any], prompt_chars: int) -> dict[str, Any]:
 
 
 def _mission(mission: dict[str, Any]) -> dict[str, Any]:
-    kept = {key: value for key, value in mission.items() if key not in {"config", "objective"}}
+    kept = {key: value for key, value in mission.items() if key not in {"config", "objective", "repo_identity"}}
     objective = mission.get("objective")
     if isinstance(objective, str):
         kept["objective"] = _clip(objective, STATUS_OBJECTIVE_CHARS)
@@ -136,7 +137,14 @@ def mission_digest(snapshot: dict[str, Any]) -> dict[str, Any]:
 
     station = known(observed.get("station")) or known(context.get("last_launched_station"))
     model = known(observed.get("model")) or (known(models.get(station)) if station and isinstance(models, dict) else None)
+    needs = snapshot.get("needs_you")
+    needs = needs if isinstance(needs, dict) else {}
+    tasks = needs.get("tasks")
     digest: dict[str, Any] = {
+        # What needs the operator, as a kind only (approval, capacity, provider, ...): the console
+        # draws its attention list from it. The question itself travels as ``needs_you``.
+        "needs_kind": needs.get("kind") if isinstance(needs.get("kind"), str) else None,
+        "needs_tasks": len(tasks) if isinstance(tasks, list) else 0,
         "task_counts": {str(key): int(value) for key, value in counts.items() if isinstance(value, int)} if isinstance(counts, dict) else {},
         "current_task": {"ordinal": current.get("ordinal"), "title": _clip(str(current.get("title") or ""), STATUS_TITLE_CHARS)}
         if isinstance(current, dict) and isinstance(current.get("ordinal"), int) else None,

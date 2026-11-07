@@ -52,20 +52,20 @@ def test_status_result_is_a_few_kilobytes_without_prompts_or_event_bodies(big_mi
     assert len(json.dumps(full)) > 100_000  # the projection this replaces
     status = _status(mission_id)
     encoded = json.dumps(status)
-    assert len(encoded) < 8 * 1024
-    assert PROMPT[:300] not in encoded  # the objective is clipped to 240 characters and no task carries a prompt
+    assert len(encoded) < 7 * 1024  # about 5 KB for a mission without long event text
+    assert PROMPT[:300] not in encoded  # the objective is clipped to 160 characters and no task carries a prompt
     assert all("prompt" not in task and "original_prompt" not in task for task in status["tasks"])
     assert status["events"] == [] and status["operator_events"] == []
     assert status["task_total"] == 40 and status["task_counts"] == {"COMPLETED": 36, "QUEUED": 4}
     assert "frozen_tool_config" not in status["mission"]["config"]
-    assert len(status["mission"]["objective"]) <= 240
+    assert len(status["mission"]["objective"]) <= 160
 
 
 def test_status_lists_unfinished_tasks_first_so_the_next_task_is_never_cut_off(big_mission):
     _, mission_id = big_mission
     status = _status(mission_id)
-    assert [task["status"] for task in status["tasks"]] == ["QUEUED"] * 4 + ["COMPLETED"] * 4
-    assert status["task_page"] == {"limit": 8, "offset": 0, "returned": 8, "search": ""}
+    assert [task["status"] for task in status["tasks"]] == ["QUEUED"] * 4 + ["COMPLETED"]
+    assert status["task_page"] == {"limit": 5, "offset": 0, "returned": 5, "search": ""}
     assert len(_status(mission_id, task_limit=2)["tasks"]) == 2
 
 

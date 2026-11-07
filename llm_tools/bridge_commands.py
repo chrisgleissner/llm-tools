@@ -713,7 +713,7 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
                        "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
         OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
-                      {"task_limit": Param(int, default=8), "prompt_chars": Param(int, default=0),
+                      {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
                        "event_limit": Param(int, default=0)}, _mission_status),
         OperationSpec("mission.settings.get", "Read a mission's saved execution settings", False, True, _NO_PARAMS, _mission_settings_get),
         OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
