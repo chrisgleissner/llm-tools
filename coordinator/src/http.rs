@@ -137,8 +137,39 @@ impl IntoResponse for ApiError {
 
 type ApiResult = Result<Response, ApiError>;
 
-fn json_ok(status: StatusCode, v: Value) -> Response {
+fn json_ok(status: StatusCode, mut v: Value) -> Response {
+    normalize_api_timestamps(&mut v);
     (status, axum::Json(v)).into_response()
+}
+
+/// Persisted times are Unix seconds, but timestamps crossing the public JSON API use RFC 3339 UTC.
+/// The field-name allowlist also normalizes timestamps inside worker-provided resource projections.
+fn normalize_api_timestamps(value: &mut Value) {
+    const FIELDS: &[&str] = &[
+        "created_at",
+        "updated_at",
+        "last_seen",
+        "expires_at",
+        "last_used",
+        "last_used_at",
+        "occurred_at",
+        "timestamp",
+    ];
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                if FIELDS.contains(&name.as_str()) {
+                    if let Some(epoch) = value.as_i64() {
+                        *value = json!(timestamp(Some(epoch)));
+                    }
+                } else {
+                    normalize_api_timestamps(value);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(normalize_api_timestamps),
+        _ => {}
+    }
 }
 
 fn unauthorized() -> ApiError {
@@ -1396,6 +1427,9 @@ async fn change_password(State(st): State<St>, Authed(p, ip): Authed, body: Buff
 
 fn timestamp(epoch: Option<i64>) -> Option<String> {
     let epoch = epoch?;
+    if !(0..=253_402_300_799).contains(&epoch) {
+        return None;
+    }
     let days = epoch.div_euclid(86_400);
     let seconds = epoch.rem_euclid(86_400);
     let (year, month, day) = crate::certs::civil_from_days(days);
@@ -3538,6 +3572,21 @@ mod problem_tests {
             ("sec-fetch-dest".parse().unwrap(), "empty".parse().unwrap()),
         ]);
         assert!(!fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &same_site));
+    }
+
+    #[test]
+    fn public_json_timestamp_normalization_is_recursive_and_bounded() {
+        let mut value = json!({
+            "session":{"expires_at":0},
+            "worker":{"last_seen":1},
+            "created_at":i64::MAX,
+            "unrelated_number":123
+        });
+        normalize_api_timestamps(&mut value);
+        assert_eq!(value["session"]["expires_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(value["worker"]["last_seen"], "1970-01-01T00:00:01Z");
+        assert!(value["created_at"].is_null(), "out-of-range epochs are never formatted");
+        assert_eq!(value["unrelated_number"], 123);
     }
 
     #[tokio::test]

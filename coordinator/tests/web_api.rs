@@ -116,6 +116,7 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
         .iter()
         .find(|item| item["category"] == "api_token_created")
         .expect("token creation event");
+    assert!(token_notice["created_at"].as_str().unwrap().ends_with('Z'));
     let id = token_notice["id"].as_str().unwrap();
     let (status, _) = api.send(api.rb(Method::DELETE, &format!("/api/v1/security/notifications/{id}"))).await;
     assert_eq!(status, 200);
@@ -451,7 +452,7 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
     let (_, body) = api.get("/api/v1/auth/state").await;
     assert_eq!(body["authenticated"], true);
     assert_eq!(body["username"], "admin");
-    assert!(body["session"]["expires_at"].as_i64().unwrap() > bridge_coordinator::now());
+    assert!(body["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
     env.stop().await;
 }
 
@@ -523,10 +524,11 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
         let (_, s) = api.get("/api/v1/auth/state").await;
         assert_eq!(s["session"]["remember"], false);
         assert_eq!(s["session"]["idle_timeout_secs"], SESSION_IDLE_SECS_SHORT);
-        let expires = s["session"]["expires_at"].as_i64().unwrap();
+        assert!(s["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
+        let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
+        let expires = env.srv.state.db.session_get(&hash).unwrap().unwrap().expires_at;
         assert!((expires - now - SESSION_ABSOLUTE_SECS_SHORT).abs() < 30, "{expires}");
         // Idle for a little over the short idle limit: expired.
-        let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
         env.srv.state.db.session_age(&hash, now - SESSION_IDLE_SECS_SHORT - 5, now + 1000).unwrap();
         assert_eq!(api.get("/api/v1/workers").await.0, 401, "short idle limit");
     }
@@ -537,6 +539,7 @@ async fn remember_device_selects_a_real_server_side_session_lifetime() {
     let (_, s) = api.get("/api/v1/auth/state").await;
     assert_eq!(s["session"]["remember"], true);
     assert_eq!(s["session"]["idle_timeout_secs"], SESSION_IDLE_SECS);
+    assert!(s["session"]["expires_at"].as_str().unwrap().ends_with('Z'));
     let hash = bridge_coordinator::auth::sha256_hex(api.cookie.as_ref().unwrap());
     env.srv.state.db.session_age(&hash, now - SESSION_IDLE_SECS_SHORT - 5, now + 1000).unwrap();
     assert_eq!(api.get("/api/v1/workers").await.0, 200, "remembered device is still signed in");
@@ -962,6 +965,7 @@ async fn api016_create_suspend_restore_resources_and_worker_policy_are_exposed()
     assert_eq!(status, 200);
     assert_eq!(workers["workers"][0]["policy"]["allow_root_count"], 1);
     assert_eq!(workers["workers"][0]["policy"]["allow_create"], true);
+    assert!(workers["workers"][0]["last_seen"].as_str().unwrap().ends_with('Z'));
     assert!(!serde_json::to_string(&workers).unwrap().contains("/srv/work"));
     let (status, worker) = api.get("/api/v1/workers/build-1").await;
     assert_eq!(status, 200);
