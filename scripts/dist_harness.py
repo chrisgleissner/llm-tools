@@ -473,7 +473,11 @@ class Coordinator:
         self.data.parent.mkdir(parents=True, exist_ok=True)
         self.run("init", "--hostname", "localhost")
         config = self.data / "config.toml"
-        config.write_text(re.sub(r'bind = ".*"', f'bind = "{HOST}:{self.port}"', config.read_text()))
+        text = re.sub(r'bind = ".*"', f'bind = "{HOST}:{self.port}"', config.read_text())
+        # The load generators submit far more mutations than the production budgets (30 per token, 120 per address
+        # per minute) allow; raise only those two budgets to their maximum (DECISIONS.md D12).
+        text = re.sub(r"(?m)^mutation_limit_per_(token|address) = \d+$", r"mutation_limit_per_\1 = 10000", text)
+        config.write_text(text)
 
     @property
     def ca_file(self) -> Path:
@@ -514,7 +518,7 @@ class Coordinator:
         """Init, start, create the API token."""
         self.init()
         self.start()
-        self.api_token = self.run("token", "create", "harness", "--expires-days", "0")
+        self.api_token = self.run("token", "create", "harness", "--expires-days", "0", "--scope", "admin")
 
     def add_worker(self, name: str) -> str:
         return self.run("worker", "add", name)
