@@ -227,7 +227,9 @@ fn authed_post_head(env: &Env, api: &Api, path: &str, length: usize) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn buffered_large_bodies_are_bounded() {
-    let env = boot_with(set("request_body_timeout_secs", "3")).await;
+    // Leave enough time for the final TLS handshake under the slower Windows CI runner; the
+    // test checks the immediate body-slot refusal, not the timeout value itself.
+    let env = boot_with(set("request_body_timeout_secs", "10")).await;
     let api = env.admin().await;
     let slots = env.srv.state.big_bodies.clone();
     assert_eq!(slots.available_permits(), 8);
@@ -254,7 +256,7 @@ async fn buffered_large_bodies_are_bounded() {
     assert_eq!(api.get("/api/v1/workers").await.0, 200);
     // The stalled bodies time out and release their permits.
     for mut s in held {
-        let (text, closed) = read_to_close(&mut s, Duration::from_secs(8)).await;
+        let (text, closed) = read_to_close(&mut s, Duration::from_secs(15)).await;
         assert!(closed && text.starts_with("HTTP/1.1 408"), "{text}");
     }
     assert_eq!(slots.available_permits(), 8);
