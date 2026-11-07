@@ -6,6 +6,31 @@ export const NOW = new Date("2026-11-05T12:00:00Z");
 const nowS = Math.floor(NOW.getTime() / 1000);
 const iso = (secondsAgo: number) => new Date(NOW.getTime() - secondsAgo * 1000).toISOString();
 
+/** Fixed unified diff served for task.diff: two files, DIFF_STATS added and removed lines. */
+export const DIFF_TEXT = [
+  "diff --git a/src/tokenizer.rs b/src/tokenizer.rs",
+  "--- a/src/tokenizer.rs",
+  "+++ b/src/tokenizer.rs",
+  "@@ -1,3 +1,6 @@",
+  " fn tokenize() {",
+  "-    old_one();",
+  "+    new_one();",
+  "+    new_two();",
+  "+    new_three();",
+  " }",
+  "diff --git a/tests/tokenizer.rs b/tests/tokenizer.rs",
+  "--- a/tests/tokenizer.rs",
+  "+++ b/tests/tokenizer.rs",
+  "@@ -10,2 +10,4 @@",
+  "-    assert_eq!(1, 1);",
+  "+    assert_eq!(2, 2);",
+  "+    assert_eq!(3, 3);",
+  "",
+].join("\n");
+export const DIFF_STATS = { files: 2, added: 5, removed: 2 };
+export const OUTPUT_TAIL = ["Reading src/tokenizer.rs", "Editing src/tokenizer.rs +42 -7", "Running cargo test", "128 passed, 0 failed"];
+
+
 export type AuthMode = "setup" | "login" | "in";
 export interface MockOptions {
   auth: AuthMode;
@@ -22,6 +47,45 @@ export interface MockOptions {
   terminalClose?: boolean;
   /** A typed, text-free Codex question indication for Needs attention. */
   providerQuestion?: boolean;
+  /**
+   * Data set. "default" is the eight missions above. "dense" is 40 missions in every state, several waiting for the
+   * operator (approval, provider question, failure), for fold, scroll and Inbox tests. "long-names" has very long mission
+   * titles, an unbroken slug, long folders and long worker names, for the truncation tests.
+   */
+  dataset?: "default" | "dense" | "long-names";
+  /** Whether the worker allows taking control of the terminal. Default "allow"; "deny" answers with a view-only reason. */
+  control?: "allow" | "deny";
+  /** Stream 200 terminal lines per second after the status frame (INP and typing latency under load). */
+  terminalFlood?: boolean;
+  /** Delay every mutation answer by this many milliseconds (optimistic update tests). */
+  mutationDelayMs?: number;
+  /** Answer every mutation with a worker rejection (rollback tests). */
+  failMutations?: boolean;
+  /** Install a controllable fake clock (page.clock.install) instead of freezing time, so a test can fast-forward. */
+  fakeClock?: boolean;
+  /** Answer the list endpoints with HTTP 500 (error states). */
+  apiErrors?: boolean;
+  /** "none": no provider sessions and no usage data (empty-state tests). */
+  sessions?: "none";
+  usage?: "none";
+  /** Delay the GET answers of the worker and mission lists by this many milliseconds (skeleton timing tests). */
+  getDelayMs?: number;
+}
+
+export interface MockRequest {
+  method: string;
+  path: string;
+  query: Record<string, string>;
+  body: Record<string, unknown> | null;
+  /** The typed operation this request carries, e.g. "mission.pause", "task.verify" (see operationOf). */
+  operation: string | null;
+}
+
+export interface TerminalFrameLog {
+  /** Query of the WebSocket URL: worker, mission, mode (view or write), cols, rows. */
+  query: Record<string, string>;
+  /** Every frame the page sent, parsed: {t:"i",d} input, {t:"r",cols,rows} resize. */
+  frames: Array<Record<string, unknown>>;
 }
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
@@ -62,6 +126,49 @@ export const MISSIONS = [
 export const MISSION_PATH = `/missions/alpha/${MISSIONS[0]!.mission.id}`;
 export const MISSION_START_PATH = `/missions/alpha/${MISSIONS[5]!.mission.id}`;
 
+/** How a dense-data mission needs the operator: index modulo 8 picks the shape (see DENSE_MISSIONS). */
+const DENSE_STATUS = ["RUNNING", "RUNNING", "FAILED", "RUNNING", "RUNNING", "PAUSED", "COMPLETED", "STOPPED"] as const;
+const DENSE_TITLES = ["Port the parser to Rust", "Fix the CI flake", "Docs migration", "API v2 migration", "Upgrade dependencies", "Benchmark the scheduler", "Write release notes", "Clean up the CI matrix"];
+const DENSE_WORKERS = ["alpha", "gamma", "alpha", "gamma", "alpha", "gamma", "gamma", "alpha"];
+/** 40 missions: per eight, #0 needs approval, #1 has a provider question, #2 failed, #3-4 run, #5 paused, #6 done, #7 stopped. */
+export const DENSE_MISSIONS = Array.from({ length: 40 }, (_, i) =>
+  mk(i + 1, DENSE_WORKERS[i % 8]!, `${DENSE_TITLES[i % 8]!} ${String(i + 1).padStart(2, "0")}`, DENSE_STATUS[i % 8]!, `project-${i % 5}`, 60 + i * 420));
+/** A running dense mission with nothing for the operator: Pause changes its pill (a mission that needs approval keeps that pill). */
+export const DENSE_CALM = DENSE_MISSIONS[3]!;
+export const DENSE_CALM_URL = `/missions/${DENSE_CALM.worker}/${DENSE_CALM.mission.id}`;
+export const DENSE_APPROVAL = DENSE_MISSIONS[0]!;
+export const DENSE_APPROVAL_URL = `/missions/${DENSE_APPROVAL.worker}/${DENSE_APPROVAL.mission.id}`;
+/** Per-mission "needs you" as the status projection reports it (null: nothing is needed). */
+function denseNeeds(index: number): Record<string, unknown> | null {
+  const shape = index % 8;
+  if (shape === 0) return { kind: "approval", tasks: [2], message: "task 2 awaits approval" };
+  if (shape === 1) return { kind: "provider", tasks: [], message: "Claude asks: Delete the fixture? · Choices: 1. Yes; 2. No · take control of the terminal to answer", command: "llm-bridge attach" };
+  if (shape === 2) return { kind: "failed", tasks: [3], message: "task 3 failed: verify exited 2" };
+  return null;
+}
+const LONG_SLUG = "feature/very-long-branch-name-with-no-spaces-" + "x".repeat(60);
+export const LONG_WORKERS = ["desktop-workstation", "native_creation-runner", "gamma"];
+const LONG_TITLE = "Migrate the entire legacy ingestion pipeline to the new streaming architecture including every downstream consumer, the schema registry, the replay tooling and the operational runbooks";
+export const LONG_MISSIONS = [
+  mk(1, "desktop-workstation", LONG_TITLE, "RUNNING", LONG_SLUG, 95),
+  mk(2, "native_creation-runner", `${LONG_TITLE} (second attempt)`, "FAILED", LONG_SLUG, 3 * 3600),
+  mk(3, "gamma", LONG_SLUG, "PAUSED", LONG_SLUG, 5 * 3600),
+  mk(4, "desktop-workstation", "Short title", "COMPLETED", "docs", 26 * 3600),
+];
+
+/** Answers of the task evidence reads, both through /commands and the task resource routes. */
+const TASK_READS: Record<string, unknown> = {
+  "task.show": { task: { id: 2, ordinal: 2, title: "Implement the new tokenizer", status: "VERIFYING", prompt: "Implement the new tokenizer and keep the golden files unchanged." }, verification: { passed: true, command: "cargo test", exit_code: 0, summary: "128 passed, 0 failed" } },
+  "task.diff": { available: true, text: DIFF_TEXT, diff: DIFF_TEXT },
+  "task.output": { available: true, text: OUTPUT_TAIL.join("\n"), output: OUTPUT_TAIL.join("\n"), lines: OUTPUT_TAIL },
+};
+
+const CALM_TASKS = [
+  { id: 1, ordinal: 1, title: "Plan the change", status: "COMPLETED", priority: 0, revision: 4 },
+  { id: 2, ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING", priority: 1, revision: 6 },
+  { id: 3, ordinal: 3, title: "Write the changelog entry", status: "QUEUED", priority: 0, revision: 1 },
+];
+
 const TASKS = [
   { id: 1, ordinal: 1, title: "Plan the change", status: "COMPLETED", priority: 0, revision: 4 },
   { id: 2, ordinal: 2, title: "Implement the new tokenizer", status: "VERIFYING", priority: 1, revision: 6 },
@@ -84,6 +191,8 @@ const EVENTS = [
   id: 40 - i,
   event: { mission_id: MISSIONS[0]!.mission.id, task_id, kind, data, created_at: iso(120 + i * 600) },
 }));
+
+type EventRow = { id: number; event: Record<string, unknown> };
 
 const SESSIONS = [
   { operation_id: "op-1", mission_id: MISSIONS[0]!.mission.id, mission_name: "Refactor the parser", task_ordinal: 2, provider: "codex", route_id: "codex", model: "gpt-5", state: "RUNNING", restoration_state: "NATIVE_CREATED", native_session_id: "0b0f6d3e-1c2a-4f5b-8d7e-123456789abc", started_at: iso(1800), last_activity_at: iso(60) },
@@ -114,31 +223,103 @@ export interface Mock {
   setAuth(mode: AuthMode): void;
   terminalInputCount(): number;
   emitStream(message: Record<string, unknown>): void;
+  /** Every /api/v1 request the page made after sign-in, in order. */
+  requests(): MockRequest[];
+  /** The typed operations of the mutating requests only (POST, PATCH, DELETE on missions, tasks, commands). */
+  operations(): string[];
+  /** One entry per terminal WebSocket the page opened. */
+  terminalSockets(): TerminalFrameLog[];
+  /** Add an event to the mission's event list and announce it on the stream, as the coordinator does. */
+  pushEvent(event: { kind: string; mission_id?: string; task_id?: number | null; data?: Record<string, unknown> }): void;
+  /** Close the stream and refuse reconnects until restoreStream(). */
+  dropStream(): void;
+  restoreStream(): void;
+  /** Close every open terminal socket from the server side (the page sees a dropped connection). */
+  closeTerminals(): void;
+  /** Change what the status projection reports as needing the operator for one mission (null: nothing). */
+  setNeeds(missionId: string, needs: Record<string, unknown> | null): void;
+}
+
+/** The typed operation a request carries, derived the way the coordinator routes it. */
+export function operationOf(method: string, path: string, body: Record<string, unknown> | null): string | null {
+  if (path === "/commands" && method === "POST") return ((body?.["request"] as { operation?: string } | undefined)?.operation) ?? null;
+  const missionAction = path.match(/^\/missions\/[^/]+\/(start|resume|pause|stop|cancel|continue|steer)$/);
+  if (missionAction && method === "POST") return `mission.${missionAction[1]}`;
+  const tasks = path.match(/^\/missions\/[^/]+\/tasks(?:\/\d+(?:\/([a-z-]+))?)?$/);
+  if (tasks) {
+    if (method === "POST") return tasks[1] === "verify" ? (body?.["approved"] === false ? "task.reject" : "task.verify") : tasks[1] ? `task.${tasks[1]}` : "task.add";
+    if (method === "PATCH") return "task.amend";
+  }
+  return null;
 }
 
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
   let terminalInputs = 0;
   let streamSocket: WebSocketRoute | null = null;
-  await page.clock.setFixedTime(NOW);
-  const workers = opts.workers === "none" ? [] : WORKERS;
+  if (opts.fakeClock) await page.clock.install({ time: NOW });
+  else await page.clock.setFixedTime(NOW);
+  const dataset = opts.dataset ?? "default";
+  const baseWorkers = dataset === "long-names" ? LONG_WORKERS.map((name, i) => ({ ...WORKERS[i]!, name, state: "online", last_seen: nowS - 5 })) : WORKERS;
+  const baseMissions = dataset === "dense" ? DENSE_MISSIONS : dataset === "long-names" ? LONG_MISSIONS : MISSIONS;
+  const workers = opts.workers === "none" ? [] : baseWorkers;
+  const log: MockRequest[] = [];
+  const terminals: TerminalFrameLog[] = [];
+  const extraEvents: Array<{ id: number; event: Record<string, unknown> }> = [];
+  let streamDown = false;
+  const terminalRoutes: WebSocketRoute[] = [];
+  const needsOverride = new Map<string, Record<string, unknown> | null>();
+  const needsFor = (id: string): Record<string, unknown> | null => {
+    if (needsOverride.has(id)) return needsOverride.get(id) ?? null;
+    if (dataset === "dense") {
+      const index = DENSE_MISSIONS.findIndex((entry) => entry.mission.id === id);
+      return index < 0 ? null : denseNeeds(index);
+    }
+    return id === MISSIONS[0]!.mission.id ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : null;
+  };
   const providerNeedsYou = { kind: "provider", tasks: [], message: "Codex asks: Should I continue? · Choices: 1. Continue; 2. Stop · take control of the terminal to answer", command: "llm-bridge attach --mission 01a1b2c3" };
-  const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS.map((entry, i) =>
-    opts.providerQuestion && i === 0 ? { ...entry, mission: { ...entry.mission, needs_you: providerNeedsYou } } : { ...entry, mission: { ...entry.mission } },
+  const missions = opts.missions === "none" || opts.workers === "none" ? [] : baseMissions.map((entry, i) =>
+    opts.providerQuestion && i === 0 ? { ...entry, mission: { ...entry.mission, needs_you: providerNeedsYou } }
+      : dataset === "dense" && denseNeeds(i)?.["kind"] === "provider" ? { ...entry, mission: { ...entry.mission, needs_you: denseNeeds(i) } }
+      : { ...entry, mission: { ...entry.mission } },
   );
   const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
   await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
+    if (streamDown) {
+      ws.close({ code: 1011, reason: "stream down (test)" });
+      return;
+    }
     streamSocket = ws;
   });
   await page.routeWebSocket(/\/api\/v1\/terminal/, (ws) => {
+    const query = Object.fromEntries(new URL(ws.url()).searchParams.entries());
+    const entry: TerminalFrameLog = { query, frames: [] };
+    terminals.push(entry);
+    terminalRoutes.push(ws);
     ws.onMessage((message) => {
       if (typeof message !== "string") return;
-      try { if ((JSON.parse(message) as { t?: string }).t === "i") terminalInputs += 1; } catch { /* ignore malformed test frames */ }
+      try {
+        const frame = JSON.parse(message) as Record<string, unknown>;
+        entry.frames.push(frame);
+        if (frame["t"] === "i") terminalInputs += 1;
+      } catch { /* ignore malformed test frames */ }
     });
+    const wantsWrite = query["mode"] === "write";
+    const granted = wantsWrite && opts.control !== "deny";
+    const reason = opts.control === "deny" ? "This worker allows viewing only" : "";
     setTimeout(() => {
-      ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: "view", reason: "" }));
+      ws.send(JSON.stringify({ t: "s", cols: 92, rows: 14, mode: granted ? "write" : "view", reason }));
       if (opts.terminalScreen) ws.send(JSON.stringify({ t: "o", d: b64(TERMINAL_SCREEN) }));
       if (opts.terminalClose) ws.send(JSON.stringify({ t: "x", reason: "Terminal closed by test" }));
+      if (opts.terminalFlood) {
+        let n = 0;
+        const timer = setInterval(() => {
+          let chunk = "";
+          for (let i = 0; i < 10; i += 1) chunk += `line ${n++} ${"=".repeat(60)}\r\n`;
+          try { ws.send(JSON.stringify({ t: "o", d: b64(chunk) })); } catch { clearInterval(timer); }
+        }, 50);
+        page.once("close", () => clearInterval(timer));
+      }
     }, 50);
   });
   await page.route("**/api/v1/**", async (route) => {
@@ -146,6 +327,16 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     const url = new URL(req.url());
     const path = url.pathname.replace("/api/v1", "");
     const method = req.method();
+    const rawBody = req.postData();
+    let body: Record<string, unknown> | null = null;
+    try { body = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : null; } catch { body = null; }
+    log.push({ method, path, query: Object.fromEntries(url.searchParams.entries()), body, operation: operationOf(method, path, body) });
+    const mutating = method !== "GET" && !path.startsWith("/auth/");
+    if (mutating && opts.mutationDelayMs) await new Promise((r) => setTimeout(r, opts.mutationDelayMs));
+    if (mutating && opts.failMutations && path !== "/tokens")
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: operationOf(method, path, body) ?? "unknown", state: "done", result: { outcome: "rejected", result: null, error: { code: "rejected", message: "The worker refused the change (test)." } } });
+    if (opts.getDelayMs && method === "GET" && (path === "/missions" || path === "/workers")) await new Promise((r) => setTimeout(r, opts.getDelayMs));
+    if (opts.apiErrors && method === "GET" && (path === "/missions" || path === "/workers")) return json(route, 500, { error: { code: "internal", message: "internal error (test)" } });
     if (path === "/auth/state") {
       if (auth === "in")
         return json(route, 200, { setup_required: false, authenticated: true, csrf_token: "csrf", password_policy: POLICY, session_policy: SESSION_POLICY, username: "admin", session: { remember: opts.sessionRemembered ?? false, expires_at: nowS + 43200 - 600, idle_timeout_secs: opts.sessionRemembered ? 28800 : 7200 } });
@@ -179,6 +370,9 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const limit = Number(url.searchParams.get("limit") ?? list.length);
       return json(route, 200, { missions: list.slice(offset, offset + limit), total: list.length, offset, statuses: facets });
     }
+    const steer = path.match(/^\/missions\/([^/]+)\/steer$/);
+    if (steer && method === "POST")
+      return json(route, 200, { request_id: "resource-mock", target: url.searchParams.get("worker"), operation: "mission.steer", state: "done", result: { outcome: "applied", result: { status: "QUEUED", kind: body?.["kind"] ?? null }, error: null } });
     const missionAction = path.match(/^\/missions\/([^/]+)\/(start|resume|pause|stop|cancel|continue)$/);
     if (missionAction && method === "POST") {
       const operation = `mission.${missionAction[2]}`;
@@ -194,16 +388,21 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (missionResource && method === "GET") {
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
       const isProviderQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
-      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : dataset === "default" ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : needsFor(current.mission.id), health: { state: "healthy" } };
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
     }
     if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {
-      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.events", state: "done", result: { outcome: "ok", result: { schema_version: 1, events: [...EVENTS].reverse() }, error: null } });
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.events", state: "done", result: { outcome: "ok", result: { schema_version: 1, events: ([...EVENTS] as EventRow[]).reverse().concat(extraEvents.filter((row) => row.event["mission_id"] === path.split("/")[2])) }, error: null } });
     }
     const taskRoute = path.match(/^\/missions\/([^/]+)\/tasks(?:\/(\d+)(?:\/([a-z-]+))?)?$/);
     if (taskRoute) {
       let operation = "task.list";
-      let result: unknown = { tasks: TASKS, total: TASKS.length, offset: 0 };
+      const taskSet = dataset === "default" || needsFor(taskRoute[1] ?? "") ? TASKS : CALM_TASKS;
+      let result: unknown = { tasks: taskSet, total: taskSet.length, offset: 0 };
+      if (method === "GET" && taskRoute[3] && `task.${taskRoute[3]}` in TASK_READS) {
+        operation = `task.${taskRoute[3]}`;
+        result = TASK_READS[operation];
+      }
       if (method === "POST") {
         operation = taskRoute[3] === "verify"
           ? (JSON.parse(req.postData() ?? "{}").approved === false ? "task.reject" : "task.verify")
@@ -214,12 +413,12 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         operation = "task." + ("prompt" in body ? "amend" : "priority" in body ? "priority" : "order" in body ? "reorder" : "dependency");
         result = { status: "APPLIED" };
       }
-      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: operation === "task.list" ? "ok" : "applied", result, error: null } });
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: method === "GET" ? "ok" : "applied", result, error: null } });
     }
     if (path === "/events") {
       const target = url.searchParams.get("worker");
       const missionIds = new Set(missions.filter((mission) => !target || mission.worker === target).map((mission) => mission.mission.id));
-      return json(route, 200, { events: [...EVENTS].filter((row) => missionIds.has(row.event.mission_id)).reverse() });
+      return json(route, 200, { events: ([...EVENTS] as EventRow[]).filter((row) => missionIds.has(String(row.event["mission_id"]))).reverse().concat(extraEvents.filter((row) => missionIds.has(String(row.event["mission_id"])))) });
     }
     if (path === "/diagnostics") return json(route, 200, DIAG);
     if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });
@@ -236,17 +435,22 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       return json(route, i >= 0 ? 200 : 404, { ok: i >= 0 });
     }
     if (path === "/commands" && method === "POST") {
-      const body = JSON.parse(req.postData() ?? "{}") as { target: string; request: { operation: string; request_id: string } };
-      const op = body.request.operation;
-      const first = (JSON.parse(req.postData() ?? "{}") as { request: { mission_id?: string } }).request.mission_id === MISSIONS[0]!.mission.id;
+      const request = (body?.["request"] ?? {}) as { operation: string; request_id: string; mission_id?: string; params?: Record<string, unknown> };
+      const op = request.operation;
+      const target = String(body?.["target"] ?? "alpha");
+      const missionId = request.mission_id ?? MISSIONS[0]!.mission.id;
+      const entry = missions.find((m) => m.mission.id === missionId) ?? baseMissions[0]!;
+      const needs = needsFor(entry.mission.id);
+      const running = entry.mission.status === "RUNNING";
       const results: Record<string, unknown> = {
-        "mission.status": { mission: { id: MISSIONS[0]!.mission.id, name: MISSIONS[0]!.mission.name, status: "RUNNING", cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: first ? { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 } : { COMPLETED: 2 }, needs_you: first ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : null, health: { state: "healthy" } },
-        "task.list": { tasks: TASKS, total: TASKS.length, offset: 0 },
-        "session.list": { sessions: SESSIONS },
-        "usage.snapshot": USAGE,
+        "mission.status": { mission: { id: entry.mission.id, name: entry.mission.name, status: entry.mission.status, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: entry.mission.updated_at }, task_counts: needs ? { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 } : { COMPLETED: 2 }, current_task: running ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_observation: running ? { station: "codex", model: "gpt-5" } : null, needs_you: needs, health: { state: "healthy" } },
+        "task.list": { tasks: needs || dataset === "default" ? TASKS : CALM_TASKS, total: needs || dataset === "default" ? TASKS.length : CALM_TASKS.length, offset: 0 },
+        ...TASK_READS,
+        "session.list": { sessions: opts.sessions === "none" ? [] : SESSIONS },
+        "usage.snapshot": opts.usage === "none" ? { available: false, observed_at: null, source: "none", providers: [] } : USAGE,
       };
       const read = op in results;
-      return json(route, 200, { request_id: body.request.request_id, target: body.target, operation: op, state: "done", result: { outcome: read ? "ok" : "applied", result: read ? results[op] : { status: "PAUSED" }, error: null } });
+      return json(route, 200, { request_id: request.request_id, target, operation: op, state: "done", result: { outcome: read ? "ok" : "applied", result: read ? results[op] : { status: "PAUSED" }, error: null } });
     }
     return json(route, 404, { error: { code: "not-found", message: `unmocked ${method} ${path}` } });
   });
@@ -254,5 +458,18 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     setAuth: (m) => void (auth = m),
     terminalInputCount: () => terminalInputs,
     emitStream: (message) => streamSocket?.send(JSON.stringify(message)),
+    requests: () => log,
+    operations: () => log.filter((r) => r.method !== "GET" && r.operation).map((r) => r.operation as string),
+    terminalSockets: () => terminals,
+    pushEvent: (ev) => {
+      const id = 100 + extraEvents.length;
+      const row = { id, event: { mission_id: ev.mission_id ?? MISSIONS[0]!.mission.id, task_id: ev.task_id ?? null, kind: ev.kind, data: ev.data ?? {}, created_at: new Date().toISOString() } };
+      extraEvents.push(row);
+      streamSocket?.send(JSON.stringify({ type: "event", worker: "alpha", cursor: id, events: [row] }));
+    },
+    dropStream: () => { streamDown = true; streamSocket?.close({ code: 1011, reason: "stream down (test)" }); },
+    restoreStream: () => { streamDown = false; },
+    setNeeds: (missionId, needs) => void needsOverride.set(missionId, needs),
+    closeTerminals: () => { for (const ws of terminalRoutes) { try { ws.close({ code: 1006, reason: "closed by test" }); } catch { /* already closed */ } } },
   };
 }

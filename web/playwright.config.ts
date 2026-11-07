@@ -7,6 +7,19 @@ import { defineConfig, devices } from "@playwright/test";
 // phone profile (Firefox has no mobile emulation: viewport, device scale factor and touch only).
 // Visual baselines (e2e/screenshots.spec.ts) exist for the two Chromium projects only and are generated in the
 // official Playwright Docker image (see web/README.md); the file name carries no platform suffix for that reason.
+// PRD-037 device matrix (docs/distributed/web-design-spec.md section 12, T45): nine more Chromium projects that run
+// only the matrix spec (e2e/redesign/uxr-matrix.spec.ts: fold budgets, no horizontal scroll, target sizes, reflow, axe,
+// keyboard simulation, navigation). The four projects above run every spec, the matrix spec included.
+const MATRIX_SPEC = /redesign[\\/]uxr-matrix\.spec\.ts$/;
+const matrix = (width: number, height: number, kind: "desktop" | "tablet" | "phone") => ({
+  name: `matrix-${width}x${height}`,
+  testMatch: MATRIX_SPEC,
+  use:
+    kind === "desktop"
+      ? { ...devices["Desktop Chrome"], viewport: { width, height } }
+      : { ...devices["Pixel 4"], viewport: { width, height }, hasTouch: true, isMobile: true, deviceScaleFactor: kind === "tablet" ? 2 : 3 },
+});
+
 export default defineConfig({
   testDir: "e2e",
   // Visual baselines are Linux-only (fonts and anti-aliasing differ on macOS and Windows).
@@ -29,5 +42,14 @@ export default defineConfig({
     { name: "firefox-desktop", use: { ...devices["Desktop Firefox"], viewport: { width: 1440, height: 900 } } },
     // 393x851 CSS px at device scale factor 2.75 (the size the operator asked for); touch enabled.
     { name: "firefox-mobile", use: { ...devices["Desktop Firefox"], viewport: { width: 393, height: 851 }, deviceScaleFactor: 2.75, hasTouch: true } },
+    matrix(2560, 1440, "desktop"),
+    matrix(1280, 720, "desktop"),
+    matrix(768, 1024, "tablet"),
+    matrix(1024, 768, "tablet"),
+    matrix(430, 932, "phone"),
+    matrix(360, 640, "phone"),
+    matrix(320, 568, "phone"),
+    matrix(740, 360, "phone"),
+    matrix(568, 320, "phone"),
   ],
 });

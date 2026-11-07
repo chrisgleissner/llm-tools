@@ -159,14 +159,20 @@ jobs:
           npx playwright install --with-deps chromium firefox
           # Behaviour, layout, accessibility and mobile tests on all four projects. The screenshot comparison is
           # skipped here because font rendering differs between machines; it runs in the pinned image below.
-          BRIDGE_SKIP_VISUAL=1 npm run test:e2e
+          BRIDGE_SKIP_VISUAL=1 npx playwright test --project=chromium-desktop --project=chromium-mobile --project=firefox-desktop --project=firefox-mobile
+      - name: Device matrix (nine viewports, Chromium)
+        working-directory: web
+        run: |
+          # PRD-037 T45: fold budgets, reflow, target sizes, axe and keyboard simulation at 2560x1440, 1280x720,
+          # 768x1024, 1024x768, 430x932, 360x640, 320x568 and the landscape phones 740x360 and 568x320.
+          BRIDGE_SKIP_VISUAL=1 npx playwright test --project="matrix-*"
       - name: Visual regression (official Playwright image, Chromium desktop and Pixel 4)
         working-directory: web
         run: |
           version=$(node -p "require('@playwright/test/package.json').version")
           docker run --rm --ipc=host -e CI=1 -e CARGO_TARGET_DIR=/work/coordinator/target \
             -v "$GITHUB_WORKSPACE":/work -w /work/web "mcr.microsoft.com/playwright:v${version}-noble" \
-            node node_modules/@playwright/test/cli.js test e2e/screenshots.spec.ts --project=chromium-desktop --project=chromium-mobile
+            node node_modules/@playwright/test/cli.js test e2e/screenshots.spec.ts e2e/redesign/uxr-baselines.spec.ts --project=chromium-desktop --project=chromium-mobile
       - name: Keep the Playwright report and the load measurement
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -177,6 +183,52 @@ jobs:
             web/test-results/load-metrics.json
             web/test-results/**/*-actual.png
             web/test-results/**/*-diff.png
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # PRD-037 T37: Lighthouse (mobile preset) on the Inbox, Missions and a mission page of a seeded coordinator and worker.
+  web-lighthouse:
+    name: web UI Lighthouse
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install the Python worker
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e .
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux-release
+      - name: Build the coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Run Lighthouse
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          npx playwright install --with-deps chromium
+          npx playwright test e2e/redesign/uxr-lighthouse.spec.ts --project=chromium-desktop
+      - name: Keep the Lighthouse results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-lighthouse
+          path: web/test-results/lighthouse
           if-no-files-found: ignore
           retention-days: 14
 
