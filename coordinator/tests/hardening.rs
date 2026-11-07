@@ -117,6 +117,20 @@ fn mutation_limiter_enforces_token_and_address_budgets_with_retry_delay() {
 }
 
 #[test]
+fn authentication_limiter_increases_retry_after_for_repeated_bursts() {
+    let limiter = RateLimiter::new(1, Duration::from_secs(1), 8);
+    let key = ["ip:192.0.2.44".to_string()];
+    limiter.acquire(&key, false).unwrap().fail();
+    assert!(matches!(limiter.acquire(&key, false), Err(1)));
+
+    // Let the first window and its first one-second backoff expire, then create another failed
+    // burst. The second lockout must be longer than the first one.
+    std::thread::sleep(Duration::from_millis(1100));
+    limiter.acquire(&key, false).unwrap().fail();
+    assert!(matches!(limiter.acquire(&key, false), Err(2)));
+}
+
+#[test]
 fn full_key_table_refuses_new_keys_instead_of_ignoring_them() {
     let l = RateLimiter::new(5, Duration::from_secs(60), 4);
     let held: Vec<_> = (0..4).map(|i| l.acquire(&[format!("k{i}")], false).unwrap()).collect();

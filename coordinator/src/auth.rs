@@ -78,6 +78,9 @@ pub fn addr_key(ip: &std::net::IpAddr) -> String {
 struct Entry {
     failures: VecDeque<Instant>,
     in_flight: usize,
+    strikes: u32,
+    strike_expires: Option<Instant>,
+    blocked_until: Option<Instant>,
 }
 
 /// Sliding-window limiter: at most `limit` failures per `window` per key. An attempt reserves a
@@ -177,8 +180,17 @@ impl RateLimiter {
     fn prune(map: &mut HashMap<String, Entry>, now: Instant, window: Duration) {
         map.retain(|_, e| {
             Self::expire(e, now, window);
-            !e.failures.is_empty() || e.in_flight > 0
+            if e.strike_expires.is_some_and(|expires| expires <= now) {
+                e.strikes = 0;
+                e.strike_expires = None;
+                e.blocked_until = None;
+            }
+            !e.failures.is_empty() || e.in_flight > 0 || e.blocked_until.is_some_and(|until| until > now) || e.strikes > 0
         });
+    }
+
+    fn retry_seconds(duration: Duration) -> u64 {
+        duration.as_secs() + u64::from(duration.subsec_nanos() > 0)
     }
 
     /// Reserve one attempt on every key, or return the seconds to wait. `privileged` callers may
@@ -191,11 +203,21 @@ impl RateLimiter {
             match m.get_mut(k) {
                 Some(e) => {
                     Self::expire(e, now, self.window);
+                    if e.strike_expires.is_some_and(|expires| expires <= now) {
+                        e.strikes = 0;
+                        e.strike_expires = None;
+                        e.blocked_until = None;
+                    }
+                    if let Some(until) = e.blocked_until.filter(|until| *until > now) {
+                        return Err(Self::retry_seconds(until.duration_since(now)).max(1));
+                    }
                     if e.failures.len() + e.in_flight >= self.limit {
-                        return Err(match e.failures.front() {
-                            Some(oldest) => self.window.saturating_sub(now.duration_since(*oldest)).as_secs() + 1,
-                            None => 1, // only in-flight attempts: they finish within seconds
-                        });
+                        e.strikes = e.strikes.saturating_add(1).max(1);
+                        e.strike_expires = Some(now + Duration::from_secs(3600));
+                        let multiplier = 1u32 << e.strikes.saturating_sub(1).min(6);
+                        let backoff = self.window.max(Duration::from_secs(1)).saturating_mul(multiplier).min(Duration::from_secs(900));
+                        e.blocked_until = Some(now + backoff);
+                        return Err(Self::retry_seconds(backoff).max(1));
                     }
                 }
                 None => new_keys += 1,
@@ -234,7 +256,7 @@ impl RateLimiter {
                         e.failures.pop_front();
                     }
                 }
-                if e.failures.is_empty() && e.in_flight == 0 {
+                if e.failures.is_empty() && e.in_flight == 0 && e.strikes == 0 && e.blocked_until.is_none_or(|until| until <= now) {
                     m.remove(k);
                 }
             }
