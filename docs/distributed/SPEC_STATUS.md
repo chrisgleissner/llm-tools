@@ -206,7 +206,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-SYS-002 | [x] | Docker uses card-backed data root, overlayfs, journald, live restore; Compose plugin works and no orchestration layer is enabled. |
 | PI-SYS-003 | [x] | Swap is only `/dev/zram0` (231 MiB); no file-backed swap is present. |
 | PI-SYS-004 | [x] | `/var/log` and journald are volatile with a 32 MiB journal cap; coordinator logs also use journald while durable state remains on card. |
-| PI-SYS-005 | [x] | `vcgencmd get_throttled` returned `0x0`; targeted kernel-log search found no undervoltage, throttling, storage failure, or OOM. |
+| PI-SYS-005 | [~] | Earlier `vcgencmd get_throttled` returned `0x0`; the post-measurement unprivileged recheck was denied on `/dev/vcio_gencmd`. A bounded kernel-log read found a coordinator memory-cgroup OOM kill (~93 MiB RSS). The current Docker state and post-window throttling state could not be checked as the admin lacks device and Docker-socket permissions. |
 | PI-SYS-006 | [~] | Daily DietPi and APT unattended updates are installed; automatic reboot into a newly installed kernel remains unverified because no newer kernel package was available. |
 | PI-WEAR-001 | [x] | DietPi-RAMlog and volatile journald keep system logs in RAM. |
 | PI-WEAR-002 | [x] | Docker default and Pi-local Compose override use journald; coordinator audit/database state remains durable. |
@@ -216,7 +216,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-WEAR-006 | [x] | APT package indexes are compressed, downloaded packages are not retained, and autoclean runs after upgrades. |
 | PI-WEAR-007 | [x] | Coordinator health interval is 60 seconds; low-value periodic timers were reviewed and disabled where present. |
 | PI-WEAR-008 | [x] | Hourly fake-clock save is retained for sane time before network sync; remaining periodic writer is documented for the wear measurement. |
-| PI-WEAR-009 | [~] | A full 24-hour post-optimization card-write measurement and writer classification are still pending; no pre-change baseline was captured. |
+| PI-WEAR-009 | [~] | Physical 24-hour sample (2026-11-06 15:46:41 to 2026-11-07 15:46:41 UTC): `/sys/block/mmcblk0/stat` field 7 increased by 53,302,256 sectors (27,290,755,072 bytes; 25.42 GiB), or about 27.29 GB/day. There were 1,440 one-minute samples; 1,381 intervals had writes. No per-process write deltas were visible to the unprivileged sampler; an average 106.2 process I/O counters were unreadable (maximum 118). No pre-optimization baseline exists. The high rate and writer attribution remain unresolved. |
 | PI-WEAR-010 | [~] | Daily encrypted off-device backup is configured; coordinator database restore from that archive passed its integrity check and returned healthy. Only restoration from a full microSD re-image remains untested. |
 | PI-UPD-001 | [~] | `unattended-upgrades` covers the configured Debian, Raspberry Pi, DietPi, and Docker origins; dry run succeeded, but no candidate kernel update was available to demonstrate selection. |
 | PI-UPD-002 | [x] | DietPi cron APT action is check-only; DietPi update notice remains enabled. |
@@ -239,15 +239,15 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-VERIFY-002 | [x] | Key-only SSH, firewall rules and active listeners were verified; only SSH, DHCP, and coordinator HTTPS are exposed as required. |
 | PI-VERIFY-003 | [~] | DHCP address and active time synchronization are known; private DNS alias does not resolve from the desktop. |
 | PI-VERIFY-004 | [x] | Pre-container physical host baseline: 462 MiB visible, 325 MiB available, load 0.08/0.07/0.05, one sample 91.2% CPU idle/1.8% I/O wait, dockerd 85 MiB RSS and containerd 44 MiB RSS. |
-| PI-VERIFY-005 | [x] | Physical benchmark and production-container samples are reported in benchmarks.md; benchmark harness peak was 22.3 MiB RSS and the live container sample was 19.02 MiB of its 96 MiB limit. |
+| PI-VERIFY-005 | [~] | Physical benchmark and production-container samples are reported in benchmarks.md; benchmark harness peak was 22.3 MiB RSS and the live container sample was 19.02 MiB of its 96 MiB limit. A later kernel log showed an OOM kill at about 93 MiB RSS; current container state could not be checked without Docker-socket permission. |
 | PI-VERIFY-006 | [~] | Host reboot restored Wi-Fi, SSH, healthy coordinator and online worker. No task was in flight during reboot, so duplicate execution during recovery was not stress-tested. |
 | PI-VERIFY-007 | [!] | Wi-Fi interruption test severed the only SSH path; scheduled link-up did not restore it. User power-cycled the Pi to recover. Do not restart the only network link through its own SSH session. |
 | PI-VERIFY-008 | [!] | Power-loss-under-write test requires an operator to unplug the Pi for ten seconds; no safe unattended equivalent exists and it was not performed. |
 | PI-VERIFY-009 | [x] | Durable Docker volume, UID/GID 65532 ownership, configuration, and certificate persistence were checked after deployment and reboot. |
 | PI-VERIFY-010 | [x] | Daily encrypted off-device OS/coordinator archive is scheduled and verified; coordinator database restore from it passed the integrity check and the service returned healthy. Full microSD re-image restoration is tracked separately under PI-WEAR-010 and remains untested. |
-| PI-VERIFY-011 | [~] | `vcgencmd get_throttled` was `0x0`; no targeted storage errors, OOM, Wi-Fi failures, undervoltage, or throttling were found. Unrelated Bluetooth firmware warnings remain in the boot kernel log. |
+| PI-VERIFY-011 | [~] | A post-measurement unprivileged kernel-log read found a memory-cgroup OOM kill of the coordinator process (about 93 MiB RSS); the current container state could not be checked because the admin account cannot access the Docker socket. `vcgencmd get_throttled` was previously `0x0`, but could not be rechecked after the interval (`/dev/vcio_gencmd` access denied). No storage-error conclusion is drawn from this read. |
 | PI-VERIFY-012 | [x] | Setup and administration were performed headlessly from the desktop; no monitor or keyboard was used. |
-| PI-VERIFY-013 | [!] | Blocked until passkey support from PR #31 reaches main; the overseer will then ask the user about the optional Tailscale path. Password login is the tested path so far. |
+| PI-VERIFY-013 | [!] | Passkey support merged in PR #50 (`0851662d9d7db490f4ce76c4504fe5a7c83316af`); real-phone passkey verification remains unrun pending the required phone/browser action. Password login is verified. |
 | PI-REPO-001 | [x] | `benchmarks.md` records dated physical Pi measurements, units, and benchmark method beside the emulated and runner results; CI run 42250189901 passed all jobs. |
 | PI-REPO-002 | [x] | `install.md` replaces derived target figures with the physical host and coordinator measurements while retaining generic example addresses; CI run 42250189901 passed all jobs. |
 | PI-REPO-003 | [x] | Physical evidence is recorded for the affected IDs; `FINAL_REPORT.md` totals are generated from the 247-row register; CI run 42250189901 passed all jobs. |
