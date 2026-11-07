@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import itertools
 import os
 import pty
 import re
@@ -75,10 +76,15 @@ def run(env: dict[str, str], work: Path, steps: list[tuple[bytes, float]], *, si
     return bytes(output)
 
 
+_SCREEN_SOCKETS = itertools.count()
+
+
 def tmux_screen(env: dict[str, str], work: Path, tmp_path: Path, keys: list[str], *, size: tuple[int, int] = (30, 110), ansi: bool = False,
                 until: Callable[[str], bool] | None = None) -> str:
     """Run the launcher inside a scratch tmux and return the final screen (a terminal emulator for the diffed output)."""
-    socket = tmp_path / "screen.sock"
+    # A fresh socket per call: ``kill-server`` returns before the old server has exited, so a
+    # ``new-session`` on the same path could reach the dying server and fail with status 1.
+    socket = tmp_path / f"screen-{next(_SCREEN_SOCKETS)}.sock"
     root = str(Path(__file__).resolve().parents[1])
     command = f"cd {work} && PYTHONPATH={root} exec {sys.executable} -m llm_tools.bridge"
     base = ["tmux", "-S", str(socket), "-f", "/dev/null"]
