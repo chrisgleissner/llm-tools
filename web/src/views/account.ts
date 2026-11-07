@@ -135,9 +135,11 @@ function activeSessions(): HTMLElement {
       const result = await api.get<{ sessions: Array<{ id: string; created_at: string; last_seen: string; expires_at: string; remember: boolean; current: boolean }> }>("/api/v1/auth/sessions");
       rows.replaceChildren(...result.sessions.map((session) => {
         const created = new Date(session.created_at).toLocaleString();
-        const revoke = h("button", { class: "btn small", type: "button", "aria-label": `Revoke session created ${created}` }, "Revoke");
+        const revoke = h("button", {
+          class: "btn small", type: "button",
+          "aria-label": session.current ? "Current session" : `Revoke session created ${created}`,
+        }, session.current ? "Current session" : "Revoke");
         revoke.disabled = session.current;
-        if (session.current) revoke.setAttribute("aria-label", `Current session created ${created}`);
         revoke.addEventListener("click", async () => {
           revoke.disabled = true;
           try {

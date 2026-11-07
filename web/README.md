@@ -25,7 +25,7 @@ arrows; the test captures the bytes sent on the WebSocket) in portrait and lands
 ## Visual baselines
 
 `e2e/screenshots.spec.ts` renders every page and state (first-run setup and its errors, sign-in and its error
-states, overview, workers, missions, mission detail, dialogs, menus, usage, diagnostics, account) in light and dark
+states, overview, workers, missions, mission detail, dialogs, menus, usage, diagnostics, account and active sessions) in light and dark
 on fixed data (`e2e/mock.ts`) with a fixed clock and animations disabled. The same states are scanned with axe-core
 in both themes on all four projects and must have no violations of any impact.
 

@@ -173,6 +173,16 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         return json(route, 200, { setup_required: false, authenticated: true, csrf_token: "csrf", password_policy: POLICY, session_policy: SESSION_POLICY, username: "admin", session: { remember: opts.sessionRemembered ?? false, expires_at: nowS + 43200 - 600, idle_timeout_secs: opts.sessionRemembered ? 28800 : 7200 } });
       return json(route, 200, { setup_required: auth === "setup", authenticated: false, passkey_sign_in_available: opts.passkeySignInAvailable ?? false, passkey_canonical_origin: opts.passkeyCanonicalOrigin ?? null, password_policy: POLICY, session_policy: SESSION_POLICY });
     }
+    if (path === "/auth/sessions" && method === "GET") {
+      return json(route, 200, { sessions: [{
+        id: "0123456789abcdef0123456789abcdef01234567890",
+        created_at: new Date(NOW.getTime() - 3600000).toISOString(),
+        last_seen: new Date(NOW.getTime() - 60000).toISOString(),
+        expires_at: new Date(NOW.getTime() + (opts.sessionRemembered ? 6 * 86400000 : 11 * 3600000)).toISOString(),
+        remember: opts.sessionRemembered ?? false,
+        current: true,
+      }] });
+    }
     if (path === "/auth/login") {
       if (opts.login === "wrong") return json(route, 401, { error: { code: "invalid-credentials", message: "invalid username or password" } });
       if (opts.login === "limited") return json(route, 429, { error: { code: "rate-limited", message: "too many failed attempts; try again later" } }, { "retry-after": "300" });
