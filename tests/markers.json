@@ -2292,6 +2292,27 @@
    "slow"
   ]
  },
+ "tests/test_bridge_task_notice.py": {
+  "test_a_native_mission_without_a_live_controller_or_with_headless_mode_does_not_promise_delivery": [
+   "subprocess"
+  ],
+  "test_notice_reaches_a_real_provider_pane_at_its_idle_prompt": [
+   "tmux",
+   "subprocess"
+  ],
+  "test_task_add_elsewhere_says_which_task_it_starts_after": [
+   "subprocess"
+  ],
+  "test_task_add_to_a_running_native_mission_says_the_provider_is_told_at_its_next_prompt": [
+   "subprocess"
+  ],
+  "test_the_console_acknowledgement_includes_the_delivery": [
+   "subprocess"
+  ],
+  "test_the_typed_command_result_carries_the_delivery": [
+   "subprocess"
+  ]
+ },
  "tests/test_bridge_theme.py": {
   "test_osc11_exchange_parses_replies_and_leaves_no_input": [
    "pty"

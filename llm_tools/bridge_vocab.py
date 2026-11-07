@@ -223,6 +223,7 @@ class EventKind(StrEnum):
     TASK_INTERRUPTED_RELEASED = "task-interrupted-released"
     TASK_EVIDENCE_RECORDED = "task-evidence-recorded"
     TASK_LAUNCH_REFUSED = "task-launch-refused"
+    TASK_NOTICE_DELIVERED = "task-notice-delivered"
     TASK_PRIORITY = "task-priority"
     TASK_PROPOSAL_ACCEPTED = "task-proposal-accepted"
     TASK_PROPOSAL_REJECTED = "task-proposal-rejected"

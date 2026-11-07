@@ -25,6 +25,7 @@ from .bridge_states import (
     CONTROLLED_MISSION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, HALTED_MISSION_STATUSES,
     OPERATOR_DECLINED_EXIT_CODE, STATION_CLOSING_MISSION_STATUSES,
 )
+from . import bridge_task_notice
 from .bridge_limit_notice import UsageLimitNotice, detect_usage_limit
 from .bridge_refresh import CapacityRefreshWorker
 from .bridge_progress import repository_checkpoint
@@ -163,6 +164,9 @@ class BridgeMissionHooks:
         self._limit_next_look = 0.0
         self._limit_seen_epoch: int | None = None
         self._limit_candidate: UsageLimitNotice | None = None
+        # Task notices (DOG-017): the delivery state of the operation that runs now.
+        self._notice_deliveries: dict[str, bridge_task_notice.TaskNoticeDelivery] = {}
+        self._notice_next_look = 0.0
 
     def bind(self, store: BridgeStore) -> None:
         self._store = store
@@ -855,7 +859,42 @@ class BridgeMissionHooks:
         Returns a status when the watch ended the provider run, else ``None``.
         """
         self._observe_owned_codex_session(operation_id)
-        return self._observe_usage_limit(operation_id, provider, route_id)
+        ended = self._observe_usage_limit(operation_id, provider, route_id)
+        if ended is None and operation_id not in self._usage_limited:
+            self._deliver_task_notices(operation_id, provider)
+        return ended
+
+    # Seconds between looks for tasks the operator added while a native provider works.
+    TASK_NOTICE_LOOK_SECONDS = 2.0
+
+    def _deliver_task_notices(self, operation_id: str, provider: str) -> None:
+        """Type one notice about tasks added or amended during this run into the idle provider pane (DOG-017)."""
+        if self.handle is None or not self.native_tui or self.headless or provider not in bridge_task_notice.NOTICE_PROVIDERS:
+            return
+        moment = time.monotonic()
+        if moment < self._notice_next_look:
+            return
+        self._notice_next_look = moment + self.TASK_NOTICE_LOOK_SECONDS
+        delivery = self._notice_deliveries.get(operation_id)
+        if delivery is None:
+            self._notice_deliveries = {operation_id: bridge_task_notice.TaskNoticeDelivery(self.mission_id, operation_id, store=self.store)}
+            delivery = self._notice_deliveries[operation_id]
+        backend = TmuxTerminalBackend()
+        handle = self.handle
+
+        def capture() -> str | None:
+            try:
+                return backend.capture(handle, pane="provider")
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                return None
+
+        def send(text: str) -> None:
+            bridge_task_notice.type_notice(backend, handle, text)
+
+        try:
+            delivery.poll(capture=capture, send=send, now=moment)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            pass  # the pane or station vanished while typing; the next look decides again
 
     def _observe_usage_limit(self, operation_id: str, provider: str, route_id: str) -> int | None:
         """End a native run whose provider printed its usage-limit notice and keep it from being picked again.

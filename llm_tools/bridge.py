@@ -680,6 +680,7 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
             result = store.get_task(task_id)
             if was_completed:
                 result["mission_reopened"] = True
+            _attach_delivery(store, mission_id, task_id, result)
         elif action == "task.propose":
             task_id = store.propose_task(
                 mission_id,
@@ -712,6 +713,8 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
             if awaiting["status"] == "VERIFYING":
                 result["requeued"] = True
                 result["controller_running"] = controller_running(mission_id)
+            else:
+                _attach_delivery(store, mission_id, task_id, result)
         elif action in {"task.pause", "task.resume", "task.cancel", "task.retry", "task.priority", "task.reorder", "task.dependency"}:
             task_id = int(payload["task_id"])
             _require_task(store, mission_id, task_id)
@@ -764,6 +767,20 @@ def _apply_operator_effect(store: BridgeStore, mission_id: str, payload: dict[st
         raise _RejectedOperatorCommand(str(exc), code="conflict") from exc
     except (ValueError, KeyError, OSError, TransitionError) as exc:
         raise _RejectedOperatorCommand(str(exc)) from exc
+
+
+def _attach_delivery(store: BridgeStore, mission_id: str, task_id: int, result: dict[str, Any]) -> None:
+    """Add when the provider will see an added or amended task: ``delivery`` for clients, ``detail`` for the console."""
+    from .bridge_task_notice import task_delivery
+
+    try:
+        live = controller_running(mission_id)
+    except OSError:
+        live = False
+    delivery = task_delivery(store, mission_id, task_id, controller_live=live)
+    if delivery is not None:
+        result["delivery"] = delivery
+        result.setdefault("detail", delivery["text"])
 
 
 def _task_result(args: argparse.Namespace, *, preserve_receipt: bool = False) -> Any:

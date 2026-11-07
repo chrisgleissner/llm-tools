@@ -62,11 +62,11 @@ def test_task_commands_print_receipts_and_tables(tmp_path, state, capsys) -> Non
     created = _create(tmp_path, capsys)
     mid = created["mission"]["id"]
     out = _out(capsys, "task", "add", "--mission", mid, "--prompt", "second job", "--title", "Second", "--priority", "3")
-    assert out.strip() == 'Added task 2 "Second" · QUEUED · priority 3'
+    assert out.strip() == 'Added task 2 "Second" · QUEUED · priority 3 · starts when the mission starts'
     table = _out(capsys, "task", "list", "--mission", mid).splitlines()
     assert table[0].split() == ["TASK", "STATUS", "RUNS", "PRIORITY", "ORDER", "AFTER", "TITLE"]
     assert ["2", "QUEUED", "1", "3"] == next(line.split()[:4] for line in table if line.startswith("2"))  # priority 3 runs before task 1
-    assert _out(capsys, "task", "amend", "--mission", mid, "--task", "2", "--prompt", "new text").strip() == "Amended · task 2 is now revision 2"
+    assert _out(capsys, "task", "amend", "--mission", mid, "--task", "2", "--prompt", "new text").strip() == "Amended · task 2 is now revision 2 · starts when the mission starts"
     shown = _out(capsys, "task", "show", "--mission", mid, "--task", "2")
     assert 'task 2 "Second"' in shown and "revision 2" in shown and "new text" in shown and "second job" not in shown
     assert "pending amendment" not in shown
