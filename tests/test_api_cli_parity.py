@@ -18,7 +18,7 @@ COMMANDS = {
     "help", "view", "mission create", "mission list", "mission set", "mission settings", "mission colour", "mission color",
     "status", "screen", "agents", "suspend-until-credits", "task add", "task list", "task show",
     "task amend", "task priority", "task reorder", "task dependencies", "task pause", "task resume",
-    "task cancel", "task retry", "task verify", "task reject", "proposal create", "proposal list",
+    "task cancel", "task retry", "task verify", "task approve", "task output", "task diff", "task reject", "proposal create", "proposal list",
     "proposal accept", "proposal reject", "events", "start", "pause", "resume", "continue", "stop",
     "cancel", "attach", "detach", "missions", "gc", "backup", "restore", "worker enroll",
     "worker status", "worker run", "worker audit", "worker install-service", "worker uninstall-service",
