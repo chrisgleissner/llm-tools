@@ -285,7 +285,7 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-029 | [ ] | Not started; waits for PR #31 to merge (phase B). Changelog and versioning. |
 | PRD-030 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate dry run. |
 | PRD-031 | [x] | Expert UX review of the CLI and terminal console in `ux-review-cli.md`: the overseer's pre-review (CLIUX-001 to CLIUX-050) and an independent second reviewer pass (CLIUX-051 to CLIUX-080, 4 high, 12 medium, 14 low). Fixes are tracked under PRD-033 in that file's fix-status table. Second reviewer pass complete; fixes tracked under PRD-033. |
-| PRD-032 | [ ] | Not started; waits for PR #31 to merge (phase B). Expert UX review of the web console and site. |
+| PRD-032 | [~] | Expert UX review of the web console and site. The review of the PR #31 head (5a4d018) is `docs/distributed/ux-review-web.md`: 33 findings (WUX-001 to WUX-033: 5 high, 14 medium, 14 low) at 1440x900 and Pixel 4, light and dark, keyboard only, with axe and accessibility-tree checks, plus a re-check of UX-001 to UX-011 and the Pages site. Remaining: a run with a real screen reader, Firefox and WebKit, and a repeat on the merged product in phase B; the fixes are PRD-033. |
 | PRD-033 | [~] | CLI and terminal console: 78 of 80 CLIUX findings fixed, 2 already correct (CLIUX-070, 078). CLIUX-024, CLIUX-025 and CLIUX-038 were completed in batch 3 (`tests/test_bridge_cliux_batch3.py`). Web findings remain for phase B. |
 | PRD-034 | [~] | `docs/distributed/review-internals.md`: 19 findings (INT-001 to INT-019); 17 fixed, INT-011 partly, INT-016 deferred; see its Fix status table. |
 | PRD-035 | [ ] | Not started; waits for PR #31 to merge (phase B). No open issues. |
