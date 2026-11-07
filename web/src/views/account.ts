@@ -2,6 +2,7 @@ import * as api from "../api";
 import { field, h, relFromMs, timeEl } from "../dom";
 import { DEFAULT_POLICY } from "../password";
 import { announce } from "../ui";
+import { passkeyProviderName } from "../passkey-provider";
 import { minutes, newPasswordFields, revealable } from "./login";
 
 export interface AccountOpts {
@@ -156,7 +157,7 @@ function passkeyList(): HTMLElement {
   const section = h("section", { class: "card narrow", "aria-labelledby": "passkey-list-title" });
   const rows = h("ul", { class: "token-list", "aria-label": "Registered passkeys" });
   const status = h("p", { role: "status", "aria-live": "polite" }, "Loading passkeys…");
-  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Synced means the passkey provider backs it up across devices."), status, rows);
+  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Provider names are best-effort AAGUID labels; some passkeys do not identify a provider. Synced means the passkey provider backs it up across devices."), status, rows);
   void api.get<{ passkeys: Array<{ id: string; name: string; provider_aaguid: string | null; created_at: string; last_used: string | null; synced: boolean }> }>("/api/v1/auth/passkeys")
     .then(({ passkeys }) => {
       status.textContent = "";
@@ -166,7 +167,7 @@ function passkeyList(): HTMLElement {
       }
       rows.replaceChildren(...passkeys.map((passkey) => h("li", {},
         h("strong", {}, passkey.name),
-        h("span", {}, passkey.provider_aaguid ? `Provider ${passkey.provider_aaguid}` : "Provider not reported"),
+        h("span", {}, `Provider ${passkeyProviderName(passkey.provider_aaguid)}`),
         h("span", {}, passkey.synced ? "Synced passkey" : "Not reported as synced"),
         h("span", {}, `Added ${new Date(passkey.created_at).toLocaleString()}`),
         h("span", {}, passkey.last_used ? `Last used ${new Date(passkey.last_used).toLocaleString()}` : "Not used yet"),

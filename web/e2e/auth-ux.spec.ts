@@ -101,12 +101,21 @@ test.describe("sign-in", () => {
     await page.route("**/api/v1/auth/passkeys", (route) => route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ passkeys: [{ id: "opaque-id", name: "Phone", provider_aaguid: "00112233-4455-6677-8899-aabbccddeeff", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: true, backup_eligible: true }] }),
+      body: JSON.stringify({ passkeys: [
+        { id: "opaque-id", name: "Phone", provider_aaguid: "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: true, backup_eligible: true },
+        { id: "unknown-id", name: "Unknown device", provider_aaguid: "00112233-4455-6677-8899-aabbccddeeff", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: false, backup_eligible: false },
+        { id: "zero-id", name: "Private passkey", provider_aaguid: "00000000-0000-0000-0000-000000000000", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: true, backup_eligible: true },
+        { id: "missing-id", name: "Legacy device", provider_aaguid: null, created_at: "2026-11-07T10:00:00Z", last_used: null, synced: false, backup_eligible: false },
+      ] }),
     }));
     await page.goto("/account");
     const list = page.getByRole("list", { name: "Registered passkeys" });
     await expect(list).toContainText("Phone");
-    await expect(list).toContainText("Provider 00112233-4455-6677-8899-aabbccddeeff");
+    await expect(list).toContainText("Provider Google Password Manager");
+    await expect(list).toContainText("Provider Unknown provider");
+    await expect(list).toContainText("Provider not identified");
+    await expect(list).toContainText("Provider not reported");
+    await expect(list).not.toContainText("00112233-4455-6677-8899-aabbccddeeff");
     await expect(list).toContainText("Synced passkey");
     await expect(list).not.toContainText("private-credential");
   });
