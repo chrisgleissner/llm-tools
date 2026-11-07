@@ -152,7 +152,6 @@ function menuItems(m: HeaderModel, hd: HeaderHandlers): MenuItem[] {
 /** The children of `.mission-head` for the current model. */
 export function buildHeader(m: HeaderModel, hd: HeaderHandlers): Node[] {
   const a = answers(m);
-  const worker = m.worker;
   const detail = m.state.detail && m.state.detail.length <= 40 ? m.state.detail : "";
   const pm = providerModel(m.snapshot);
   const updated = m.updatedAt ? Date.parse(m.updatedAt) : NaN;
@@ -178,9 +177,6 @@ export function buildHeader(m: HeaderModel, hd: HeaderHandlers): Node[] {
       ),
       h("div", { class: "head-actions", role: "group", "aria-label": "Mission actions" }, ...actions, menu({ label: "More mission actions", kind: "ghost" }, menuItems(m, hd))),
     ),
-    m.blocked && worker && worker.state === "offline"
-      ? h("p", { class: "head-note muted small", role: "status" }, m.blocked)
-      : null,
     h("p", { class: "mission-answer small", title: `${a.what} ${a.needMe} ${a.next}` }, h("span", { "data-q": "what" }, a.what), " ", h("span", { "data-q": "need-me" }, a.needMe), " ", h("span", { "data-q": "next" }, a.next)),
     meta.length ? h("p", { class: "head-meta muted small" }, ...meta) : null,
   ].flatMap((n) => (n ? [n] : []));
