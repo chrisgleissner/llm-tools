@@ -89,7 +89,8 @@ pull request:
    stated.
 
 A failing audit run is an advisory to triage, not a background warning. The maintainer triages
-the highest severity the run reports within the times above. A failure caused by the advisory
+the highest severity the run reports within the times above. A pull request that changes a lock
+file is not merged while its audit run fails. A failure caused by the advisory
 database or the network, not by an advisory, is rerun once; if it fails again, the maintainer
 opens an issue.
 
@@ -100,9 +101,6 @@ These settings are not stored in the repository and are set by the owner:
 - **Private vulnerability reporting**: Settings, Code security, Private vulnerability reporting,
   Enable. The reporting link above depends on it.
 - **Dependabot alerts and security updates**: Settings, Code security, enable both.
-- **Required audit check**: Settings, Branches, branch protection for the default branch, require the
-  `audit` workflow jobs (`cargo`, `npm`, `python`) to pass before merging. Without this the audit
-  job reports a failure but does not block a merge.
 
 ## Scope
 
