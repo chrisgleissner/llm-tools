@@ -40,6 +40,7 @@ def test_form_lists_save_before_start_and_start_row_says_what_it_costs(tmp_path)
     state.providers = "claude,codex"
     # The hermetic HOME has no Claude state file, so the one-time folder trust prompt is announced.
     assert launcher.field_hint(state) == "Starts claude now · uses provider capacity · Claude asks once to trust this folder: choose Yes"
+    assert launcher.field_hint(state, 80) == "Starts claude · uses capacity · trust folder: choose Yes"
     state.focus = 4
     assert launcher.field_hint(state) == "Enter to save · no provider is started"
 

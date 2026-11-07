@@ -108,6 +108,7 @@ stopped, password reset, certificate renewal, restart with data kept, and stop i
 5. Open `https://bridge.<tailnet>.ts.net:8443` once the renewer has created the certificate.
 
 If you already have a trusted certificate and hostname, supply those files instead; no domain provider integration is required.
+The first completed passkey registration fixes `public_origin`; existing passkeys from an earlier coordinator version need that origin set explicitly in `config.toml` before startup.
 
 ## Windows
 
@@ -187,13 +188,29 @@ the local CA, at most 3 s) and 1 otherwise. Use it from monitoring or a timer;
 - A specific LAN address such as `192.168.1.20:8443`: only that interface.
 - `0.0.0.0:8443` or `[::]:8443`: all interfaces.
 
-A non-loopback bind is refused unless `lan_enabled = true`
-(`BRIDGE_COORDINATOR_LAN_ENABLED`; in the container image the published port decides
-exposure, see `coordinator.md`). **LAN placement is not authentication.** Anyone
+A non-loopback bind is refused unless `exposure = "lan"` or `"internet"`
+(`BRIDGE_COORDINATOR_EXPOSURE`; old `lan_enabled` configs and
+`BRIDGE_COORDINATOR_LAN_ENABLED` are migrated/accepted). In the container image the published
+port decides exposure, see `coordinator.md`. **LAN placement is not authentication.** Anyone
 who can reach the port can attempt a login and can open connections up to the
 connection limits in `coordinator.md`. Every request still needs the administrator session, an API
 token or a worker token, but you should also restrict who can reach the port.
-Never expose the port to the internet.
+Use VPN access first. Direct Internet exposure is refused unless all coordinator-side
+preconditions are configured: TLS 1.3, public certificate or trusted TLS terminator, a 90-day
+token lifetime ceiling, strict rate/connection limits, a security webhook, an enrolled passkey
+and no non-expiring API tokens. Complete first-run setup and passkey enrollment over loopback or
+LAN before changing to `exposure = "internet"`. See `coordinator.md` for each setting.
+
+### Remote access
+
+Use a VPN such as WireGuard or Tailscale first. If a reverse proxy terminates TLS, keep the
+coordinator bound to loopback and configure `trusted_proxies` with only the proxy's exact IP or
+CIDR; the proxy must discard incoming `Forwarded` and `X-Forwarded-For` values before setting its
+own. The coordinator shares connection caps across listeners and trusts forwarding headers only
+from those configured peers. Split listeners can keep the worker channel or health endpoint off
+the browser-facing address by setting `[listener_groups]` in `config.toml`. Direct Internet
+exposure is not supported until the `exposure = "internet"` preconditions in the security
+requirements are implemented.
 
 Firewall examples (documentation only; the installer does not change firewall
 settings). Replace `192.168.1.0/24` with your LAN subnet.

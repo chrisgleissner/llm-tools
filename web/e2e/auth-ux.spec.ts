@@ -90,6 +90,72 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("account lists passkey metadata without exposing credential material", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await page.route("**/api/v1/auth/state", async (route) => {
+      const response = await route.fetch();
+      const state = await response.json();
+      state.passkey_canonical_origin = "https://example.test";
+      await route.fulfill({ response, json: state });
+    });
+    await page.route("**/api/v1/auth/passkeys", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ passkeys: [
+        { id: "opaque-id", name: "Phone", provider_aaguid: "ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: true, backup_eligible: true },
+        { id: "unknown-id", name: "Unknown device", provider_aaguid: "00112233-4455-6677-8899-aabbccddeeff", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: false, backup_eligible: false },
+        { id: "zero-id", name: "Private passkey", provider_aaguid: "00000000-0000-0000-0000-000000000000", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: true, backup_eligible: true },
+        { id: "missing-id", name: "Legacy device", provider_aaguid: null, created_at: "2026-11-07T10:00:00Z", last_used: null, synced: false, backup_eligible: false },
+      ] }),
+    }));
+    await page.goto("/account");
+    const list = page.getByRole("list", { name: "Registered passkeys" });
+    await expect(list).toContainText("Phone");
+    await expect(list).toContainText("Provider Google Password Manager");
+    await expect(list).toContainText("Provider Unknown provider");
+    await expect(list).toContainText("Provider not identified");
+    await expect(list).toContainText("Provider not reported");
+    await expect(list).not.toContainText("00112233-4455-6677-8899-aabbccddeeff");
+    await expect(list).toContainText("Synced passkey");
+    await expect(list).not.toContainText("private-credential");
+  });
+
+  test("passkey re-enrolment requires a password and explicit reset confirmation", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await page.route("**/api/v1/auth/state", async (route) => {
+      const response = await route.fetch();
+      const state = await response.json();
+      state.passkey_canonical_origin = "https://old.example.test";
+      await route.fulfill({ response, json: state });
+    });
+    await page.goto("/account");
+    await page.getByLabel("Current password", { exact: true }).last().fill(PASSWORD);
+    const confirmation = page.getByLabel("I understand this removes every registered passkey.");
+    await confirmation.check();
+    await page.route("**/api/v1/auth/passkeys/re-enroll", async (route) => {
+      const body = route.request().postDataJSON();
+      expect(body).toEqual({ current_password: PASSWORD, new_origin: new URL(page.url()).origin, confirm: true });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, origin: body.new_origin, registration_required: true }) });
+    });
+    await page.getByRole("button", { name: "Reset passkeys for this address" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "Passkeys were removed" })).toContainText("Register a new passkey");
+  });
+
+  test("creating a token produces a dismissible security banner", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await page.goto("/account");
+    await page.getByLabel("Token name").fill("banner-test");
+    await page.getByLabel("Allowed client networks (optional)").fill("192.0.2.0/24");
+    await page.getByRole("button", { name: "Create token" }).click();
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Networks 192.0.2.0/24");
+    const banner = page.getByRole("region", { name: "Security notifications" });
+    await expect(banner).toContainText("An API token was created.");
+    const dismiss = banner.getByRole("button", { name: "Dismiss security notification" });
+    const count = await dismiss.count();
+    await dismiss.first().click();
+    await expect(dismiss).toHaveCount(count - 1);
+  });
+
   test("slow password sign-in shows visible announced progress until the server responds", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await signOutViaUi(page);
@@ -231,6 +297,19 @@ test.describe("sign-in", () => {
 });
 
 test.describe("account menu and password change", () => {
+  test("account explains how to enable passkeys when the browser cannot use them", async ({ page, coord }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(window, "PublicKeyCredential", { configurable: true, value: undefined });
+    });
+    await setupViaUi(page, coord);
+    await navTo(page, "Account");
+    const guidance = page.locator("#passkey-support-guidance");
+    await expect(guidance).toBeVisible();
+    await expect(guidance).toContainText("Passkeys need a trusted address such as Tailscale.");
+    const link = guidance.getByRole("link", { name: "Enable passkeys (optional)" });
+    await expect(link).toHaveAttribute("href", /install\.md#enable-passkeys-optional$/);
+  });
+
   test("the account menu shows who is signed in and offers password change and sign out", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     const button = page.locator("#account-button");
@@ -281,8 +360,23 @@ test.describe("account menu and password change", () => {
     await expect(secret).toContainText(/^.{30,}$/);
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Not used yet");
     await page.getByRole("button", { name: "Revoke automation-key" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
     await expect(secret).toHaveCount(1);
+  });
+
+  test("API tokens can be restricted to selected workers", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    coord.cli("worker", "add", "token-worker-a");
+    coord.cli("worker", "add", "token-worker-b");
+    await page.goto("/account");
+    const workers = page.getByLabel("Allowed workers (optional)");
+    await expect(workers.locator("option")).toHaveCount(2);
+    await workers.selectOption("token-worker-a");
+    await page.getByLabel("Token name").fill("worker-limited-key");
+    await page.getByRole("button", { name: "Create token" }).click();
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Workers token-worker-a");
+    await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("Workers token-worker-b");
   });
 });

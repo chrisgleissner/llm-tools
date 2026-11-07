@@ -16,7 +16,7 @@ use axum::routing::{delete, get, post};
 use axum::{extract::DefaultBodyLimit, extract::FromRequestParts, Extension, Router};
 use base64::Engine;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -42,6 +42,13 @@ const MAX_WAIT_MS: u64 = 30_000;
 
 #[derive(Clone, Copy)]
 pub struct Peer(pub SocketAddr);
+
+#[derive(Clone, Debug)]
+pub struct WorkerCertificate(pub Option<String>);
+
+pub fn with_worker_certificate(app: Router, fingerprint_sha256: Option<String>) -> Router {
+    app.layer(Extension(WorkerCertificate(fingerprint_sha256)))
+}
 
 pub struct AppState {
     pub db: Arc<Db>,
@@ -272,6 +279,7 @@ fn no_extra(m: &Map<String, Value>, allowed: &[&str]) -> Result<(), ApiError> {
 
 pub enum Principal {
     Session {
+        principal_id: String,
         token_hash: String,
         csrf: String,
         remember: bool,
@@ -280,7 +288,10 @@ pub enum Principal {
     },
     Token {
         name: String,
+        principal_id: String,
         scopes: Vec<String>,
+        allowed_cidrs: Vec<String>,
+        allowed_workers: Vec<String>,
     },
 }
 
@@ -299,10 +310,28 @@ fn cookie_value(headers: &HeaderMap) -> Option<String> {
 pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
     if let Some(h) = headers.get(header::AUTHORIZATION) {
         let token = h.to_str().ok().and_then(|s| s.strip_prefix("Bearer ")).ok_or_else(unauthorized)?;
-        return match st.db.token_lookup(&auth::sha256_hex(token))? {
+        let token_record = if let Some(rest) = token.strip_prefix("lbr_pat_") {
+            let Some((token_id, secret)) = rest.split_once('_') else {
+                return Err(unauthorized());
+            };
+            if token_id.len() != 16
+                || !token_id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || secret.len() != 64
+                || !secret.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(unauthorized());
+            }
+            st.db.token_lookup_identified(token_id, &auth::sha256_hex(secret))?
+        } else {
+            st.db.token_lookup(&auth::sha256_hex(token))?
+        };
+        return match token_record {
             Some(token) => Ok(Principal::Token {
                 name: token.name,
+                principal_id: token.principal_id,
                 scopes: token.scopes,
+                allowed_cidrs: token.allowed_cidrs,
+                allowed_workers: token.allowed_workers,
             }),
             None => Err(unauthorized()),
         };
@@ -311,6 +340,7 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
     let hash = auth::sha256_hex(&cookie);
     match st.db.session_get(&hash)? {
         Some(s) => Ok(Principal::Session {
+            principal_id: s.principal_id,
             token_hash: hash,
             csrf: s.csrf,
             remember: s.remember,
@@ -326,7 +356,7 @@ pub fn origin_ok(headers: &HeaderMap, cfg: &Config) -> bool {
     let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    if cfg.allowed_origins.iter().any(|o| o == origin) {
+    if cfg.allowed_origins.iter().any(|o| o == origin) || cfg.public_origin.as_deref() == Some(origin) {
         return true;
     }
     headers
@@ -337,13 +367,79 @@ pub fn origin_ok(headers: &HeaderMap, cfg: &Config) -> bool {
 
 pub struct Authed(pub Principal, pub String);
 
+fn resolved_client_address(parts: &Parts, state: &St) -> String {
+    let Some(peer) = parts.extensions.get::<Peer>().map(|p| p.0.ip()) else {
+        return String::new();
+    };
+    let forwarded = parts.headers.get("forwarded").and_then(|v| v.to_str().ok());
+    let x_forwarded_for = parts.headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    crate::client_ip::resolve(peer, forwarded, x_forwarded_for, &state.cfg.trusted_proxies).to_string()
+}
+
 impl Principal {
+    pub fn principal_id(&self) -> &str {
+        match self {
+            Principal::Session { principal_id, .. } | Principal::Token { principal_id, .. } => principal_id,
+        }
+    }
+
     pub fn actor(&self) -> String {
         match self {
             Principal::Session { .. } => "admin".into(),
             Principal::Token { name, .. } => format!("token:{name}"),
         }
     }
+
+    fn worker_restrictions(&self) -> &[String] {
+        match self {
+            Principal::Session { .. } => &[],
+            Principal::Token { allowed_workers, .. } => allowed_workers,
+        }
+    }
+
+    fn allows_worker(&self, worker: &str) -> bool {
+        let allowed = self.worker_restrictions();
+        allowed.is_empty() || allowed.iter().any(|name| name == worker)
+    }
+}
+
+fn query_values(parts: &Parts, key: &str) -> Vec<String> {
+    parts
+        .uri
+        .query()
+        .into_iter()
+        .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
+        .filter_map(|(candidate, value)| (candidate == key).then(|| value.into_owned()))
+        .collect()
+}
+
+/// Bound tokens may enter worker-owned resources only through a route that names one worker.
+/// Global and low-level command routes are denied because they cannot safely apply this object
+/// restriction at the router boundary.
+fn worker_bound_token_request_allowed(parts: &Parts, principal: &Principal) -> bool {
+    if principal.worker_restrictions().is_empty() {
+        return true;
+    }
+    let path = parts.uri.path();
+    let method = parts.method.as_str();
+    if path == "/api/v1/workers" {
+        return method == "GET";
+    }
+    if path == "/api/v1/missions" {
+        return matches!(method, "GET" | "POST");
+    }
+    if path == "/api/v1/auth/state" || path == "/api/v1/auth/token" {
+        return method == "GET";
+    }
+    let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+    if segments.len() >= 4 && segments[..3] == ["api", "v1", "workers"] {
+        return !segments[3].contains('%') && principal.allows_worker(segments[3]);
+    }
+    if (segments.len() >= 4 && segments[..3] == ["api", "v1", "missions"]) || path == "/api/v1/terminal" {
+        let workers = query_values(parts, "worker");
+        return workers.len() == 1 && principal.allows_worker(&workers[0]);
+    }
+    false
 }
 
 impl FromRequestParts<St> for Authed {
@@ -365,7 +461,33 @@ impl FromRequestParts<St> for Authed {
                 }
             }
         }
-        if let Principal::Token { name, scopes: granted } = &principal {
+        if let Principal::Token {
+            name,
+            scopes: granted,
+            allowed_cidrs,
+            ..
+        } = &principal
+        {
+            if !allowed_cidrs.is_empty() {
+                let remote = resolved_client_address(parts, st);
+                let address = remote.parse::<std::net::IpAddr>().ok();
+                if address.is_none_or(|address| !crate::client_ip::address_matches_any(address, allowed_cidrs)) {
+                    let request_id = parts
+                        .headers
+                        .get("idempotency-key")
+                        .or_else(|| parts.headers.get("x-request-id"))
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("-");
+                    let detail = format!("method={} path={} request_id={}", parts.method, parts.uri.path(), clean(request_id));
+                    st.db
+                        .audit_checked(&format!("token:{name}"), "authorization.denied.address", &detail, &remote)?;
+                    return Err(err(
+                        StatusCode::FORBIDDEN,
+                        "token-address-denied",
+                        "request address is outside this token's allowed networks",
+                    ));
+                }
+            }
             let path = parts.uri.path();
             let route = ROUTES
                 .iter()
@@ -390,7 +512,7 @@ impl FromRequestParts<St> for Authed {
                 *required
             };
             if !scopes::grants(granted, required) {
-                let remote = parts.extensions.get::<Peer>().map(|peer| peer.0.ip().to_string()).unwrap_or_default();
+                let remote = resolved_client_address(parts, st);
                 let request_id = parts
                     .headers
                     .get("idempotency-key")
@@ -409,8 +531,28 @@ impl FromRequestParts<St> for Authed {
                 return Err(err(StatusCode::FORBIDDEN, "insufficient-scope", format!("token requires scope {required}")));
             }
         }
-        let remote = parts.extensions.get::<Peer>().map(|p| p.0.ip().to_string()).unwrap_or_default();
-        if let Principal::Token { name, scopes: granted } = &principal {
+        if matches!(principal, Principal::Token { .. }) && !worker_bound_token_request_allowed(parts, &principal) {
+            let name = match &principal {
+                Principal::Token { name, .. } => name.as_str(),
+                Principal::Session { .. } => unreachable!(),
+            };
+            let remote = resolved_client_address(parts, st);
+            let request_id = parts
+                .headers
+                .get("idempotency-key")
+                .or_else(|| parts.headers.get("x-request-id"))
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-");
+            let detail = format!("method={} path={} request_id={}", parts.method, parts.uri.path(), clean(request_id));
+            st.db.audit_checked(&format!("token:{name}"), "authorization.denied.worker", &detail, &remote)?;
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "token-worker-denied",
+                "request is outside this token's allowed workers",
+            ));
+        }
+        let remote = resolved_client_address(parts, st);
+        if let Principal::Token { name, scopes: granted, .. } = &principal {
             let request_id = parts
                 .headers
                 .get("idempotency-key")
@@ -425,12 +567,9 @@ impl FromRequestParts<St> for Authed {
                 clean(request_id)
             );
             st.db.audit_checked(&format!("token:{name}"), "token.use", &detail, &remote)?;
+            st.db.api_token_record_use(name, &remote)?;
             if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
-                let address_key = parts
-                    .extensions
-                    .get::<Peer>()
-                    .map(|peer| auth::addr_key(&peer.0.ip()))
-                    .unwrap_or_else(|| "unknown".to_string());
+                let address_key = client_key(&remote);
                 let keys = [
                     (format!("token:{name}"), st.cfg.mutation_limit_per_token),
                     (format!("address:{address_key}"), st.cfg.mutation_limit_per_address),
@@ -454,10 +593,10 @@ impl FromRequestParts<St> for Authed {
 }
 
 pub struct Remote(pub String);
-impl<S: Send + Sync> FromRequestParts<S> for Remote {
+impl FromRequestParts<St> for Remote {
     type Rejection = std::convert::Infallible;
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        Ok(Remote(parts.extensions.get::<Peer>().map(|p| p.0.ip().to_string()).unwrap_or_default()))
+    async fn from_request_parts(parts: &mut Parts, state: &St) -> Result<Self, Self::Rejection> {
+        Ok(Remote(resolved_client_address(parts, state)))
     }
 }
 
@@ -502,31 +641,90 @@ async fn healthz() -> Response {
     json_ok(StatusCode::OK, json!({"status": "ok"}))
 }
 
-async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
-    let setup_required = st.db.admin_get()?.is_none();
+async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote) -> ApiResult {
+    let admin = st.db.admin_get()?;
+    let setup_required = admin.is_none();
+    let configured_origin = match (st.cfg.public_origin.clone(), admin.as_ref()) {
+        (Some(origin), _) => Some(origin),
+        (None, Some((username, _))) => st.db.passkey_origin(username)?,
+        (None, None) => None,
+    };
+    let request_origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(|host| format!("https://{host}")))
+        .and_then(|origin| crate::passkeys::canonical_origin(&origin).ok());
+    let passkey_sign_in_available = if let Some((username, _)) = &admin {
+        configured_origin.is_some()
+            && configured_origin == request_origin
+            && crate::passkeys::verifier(request_origin.as_deref().unwrap_or_default()).is_ok()
+            && st.db.passkey_count(username)? > 0
+    } else {
+        false
+    };
     let mut body = json!({
         "setup_required": setup_required,
         "authenticated": false,
+        "passkey_sign_in_available": passkey_sign_in_available,
+        "passkey_canonical_origin": configured_origin,
         "password_policy": {"min_length": auth::MIN_PASSWORD_LEN, "max_length": auth::MAX_PASSWORD_LEN},
         "session_policy": {
             "remembered": {"idle_secs": crate::db::session_policy(true).0, "absolute_secs": crate::db::session_policy(true).1},
             "default": {"idle_secs": crate::db::session_policy(false).0, "absolute_secs": crate::db::session_policy(false).1},
         },
     });
-    if let Ok(Principal::Session {
-        csrf,
-        remember,
-        expires_at,
-        idle_secs,
-        ..
-    }) = authenticate(&st, &headers)
-    {
-        body["authenticated"] = json!(true);
-        body["csrf_token"] = json!(csrf);
-        body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
-        body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
-    } else if matches!(authenticate(&st, &headers), Ok(Principal::Token { .. })) {
-        body["authenticated"] = json!(true);
+    match authenticate(&st, &headers) {
+        Ok(Principal::Session {
+            csrf,
+            remember,
+            expires_at,
+            idle_secs,
+            ..
+        }) => {
+            body["authenticated"] = json!(true);
+            body["csrf_token"] = json!(csrf);
+            body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
+            body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
+        }
+        Ok(Principal::Token {
+            name,
+            scopes: granted,
+            allowed_cidrs,
+            ..
+        }) => {
+            if !allowed_cidrs.is_empty()
+                && !ip
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| crate::client_ip::address_matches_any(address, &allowed_cidrs))
+            {
+                st.db.audit_checked(
+                    &format!("token:{name}"),
+                    "authorization.denied.address",
+                    "method=GET path=/api/v1/auth/state request_id=-",
+                    &ip,
+                )?;
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "token-address-denied",
+                    "request address is outside this token's allowed networks",
+                ));
+            }
+            let request_id = headers
+                .get("idempotency-key")
+                .or_else(|| headers.get("x-request-id"))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-");
+            let detail = format!(
+                "method=GET path=/api/v1/auth/state scopes={} request_id={}",
+                granted.join(","),
+                clean(request_id)
+            );
+            st.db.audit_checked(&format!("token:{name}"), "token.use", &detail, &ip)?;
+            st.db.api_token_record_use(&name, &ip)?;
+            body["authenticated"] = json!(true);
+        }
+        Err(_) => {}
     }
     Ok(json_ok(StatusCode::OK, body))
 }
@@ -605,7 +803,13 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     check_public_origin(&st, &headers)?;
     let addr = client_key(&ip);
     let known_addr = st.db.known_addr(&addr)?;
-    let mut attempt = st.limiter.acquire(&[format!("ip:{addr}")], known_addr).map_err(limited)?;
+    let mut attempt = match st.limiter.acquire(&[format!("ip:{addr}")], known_addr) {
+        Ok(attempt) => attempt,
+        Err(retry) => {
+            security_notification(&st, "admin", "repeated_sign_in_failures");
+            return Err(limited(retry));
+        }
+    };
     let body = match read_body(&st, req).await {
         Ok(b) => b,
         Err(e) => {
@@ -654,8 +858,17 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     }
     attempt.succeed();
     st.db.known_addr_remember(&addr)?;
+    if !known_addr {
+        security_notification(&st, &username, "new_sign_in_address");
+    }
+    remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_with(&auth::sha256_hex(&token), &csrf, remember)?;
+    st.db.session_create_for(
+        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
+        &auth::sha256_hex(&token),
+        &csrf,
+        remember,
+    )?;
     st.db.audit(&username, "login.success", "", &ip);
     let mut r = json_ok(StatusCode::OK, json!({"csrf_token": csrf}));
     r.headers_mut().insert(
@@ -676,8 +889,34 @@ fn webauthn_origin(st: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
         ));
     }
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
-    crate::passkeys::verifier(origin).map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
-    Ok(origin.to_string())
+    let canonical = crate::passkeys::canonical_origin(origin)
+        .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    let principal = st.db.admin_get()?.map(|(username, _)| username);
+    let stored = match principal.as_deref() {
+        Some(username) => st.db.passkey_origin(username)?,
+        None => None,
+    };
+    let expected = st.cfg.public_origin.as_deref().or(stored.as_deref());
+    if expected.is_none() {
+        if let Some(username) = principal.as_deref() {
+            if st.db.passkey_count(username)? > 0 {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "canonical-origin-required",
+                    "existing passkeys need an explicitly configured canonical origin before they can be used",
+                ));
+            }
+        }
+    }
+    if expected.is_some_and(|expected| expected != canonical) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "canonical-origin-required",
+            "passkeys are available only at the coordinator's canonical origin",
+        ));
+    }
+    crate::passkeys::verifier(&canonical).map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    Ok(canonical)
 }
 
 fn passkey_ticket(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -718,6 +957,14 @@ struct RegisterFinishBody {
 struct AssertFinishBody {
     challenge_id: String,
     credential: webauthn_rs::prelude::PublicKeyCredential,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasskeyReenrollBody {
+    current_password: String,
+    new_origin: String,
+    confirm: bool,
 }
 
 async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
@@ -811,18 +1058,34 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
         user_name: stored.credential_name.unwrap_or_else(|| "Passkey".into()),
         created_at: crate::now(),
         last_used: None,
-        aaguid: None,
+        aaguid: crate::passkeys::aaguid_from_attestation_object(body.credential.response.attestation_object.as_ref()),
         transports,
         backup_eligible: false,
         backed_up: false,
         sign_count: 0,
     };
-    if let Err(e) = st.db.passkey_put(&row) {
-        if matches!(e, rusqlite::Error::SqliteFailure(ref code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY || code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
+    match st.db.passkey_put_at_origin(&row, &stored.origin) {
+        Ok(true) => {}
+        Ok(false) => {
+            st.db.audit(&username, "passkey.registration.denied", "canonical origin is already fixed", &ip);
+            return Err(err(
+                StatusCode::CONFLICT,
+                "canonical-origin-locked",
+                "passkeys are bound to the first registered origin; remove all passkeys and explicitly re-enrol to change it",
+            ));
+        }
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY || code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
         {
             return Err(err(StatusCode::CONFLICT, "credential-exists", "this passkey is already registered"));
         }
-        return Err(e.into());
+        Err(e) => return Err(e.into()),
+    }
+    if st.cfg.public_origin.is_none() {
+        if let Err(error) = crate::config::persist_public_origin(&st.data_dir, &stored.origin) {
+            st.db.audit(&username, "passkey.origin-persist-failed", &clean(&error), &ip);
+            eprintln!("could not persist the canonical passkey origin: {}", clean(&error));
+        }
     }
     st.db
         .audit(&username, "passkey.registration.success", &format!("credential_id={}", row.credential_id), &ip);
@@ -830,6 +1093,81 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
         StatusCode::CREATED,
         json!({"ok":true,"credential_id":row.credential_id,"name":row.user_name}),
     ))
+}
+
+async fn passkey_reenroll(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
+    let Principal::Session { .. } = p else {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "session-required",
+            "passkey re-enrolment requires a browser session",
+        ));
+    };
+    let m = parse_body(&body.bytes)?;
+    let body: PasskeyReenrollBody = serde_json::from_value(Value::Object(m)).map_err(|_| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "invalid-request",
+            "current_password, new_origin and confirm are required",
+        )
+    })?;
+    if !body.confirm {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "confirmation-required",
+            "confirm that all passkeys will be removed",
+        ));
+    }
+    let request_origin = headers.get(header::ORIGIN).and_then(|value| value.to_str().ok()).unwrap_or("");
+    if !origin_ok(&headers, &st.cfg) || body.new_origin != request_origin {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "bad-origin",
+            "new_origin must be the exact allowed HTTPS request origin",
+        ));
+    }
+    let origin = crate::passkeys::canonical_origin(&body.new_origin)
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-origin", "passkeys require a canonical HTTPS DNS origin"))?;
+    if origin != body.new_origin {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-origin", "new_origin must be canonical"));
+    }
+    if body.current_password.len() > auth::MAX_PASSWORD_LEN {
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    let Some((username, password_hash)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    if !verify_blocking(&st, body.current_password, password_hash).await {
+        st.db.audit(&username, "passkey.reenrol.failure", "current password did not verify", &ip);
+        return Err(err(StatusCode::UNAUTHORIZED, "invalid-credentials", "current password is incorrect"));
+    }
+    st.db.passkey_rebind_origin(&username, &origin)?;
+    st.db.audit(&username, "passkey.origin.reenrolled", &clean(&origin), &ip);
+    security_notification(&st, &username, "passkey_origin_reenrolled");
+    Ok(json_ok(StatusCode::OK, json!({"ok":true,"origin":origin,"registration_required":true})))
+}
+
+async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
+    let Some((principal, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let passkeys = st
+        .db
+        .passkeys_for_principal(&principal)?
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.credential_id,
+                "name": row.user_name,
+                "provider_aaguid": row.aaguid,
+                "created_at": timestamp(Some(row.created_at)),
+                "last_used": timestamp(row.last_used),
+                "synced": row.backup_eligible && row.backed_up,
+                "backup_eligible": row.backup_eligible,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json_ok(StatusCode::OK, json!({"passkeys":passkeys})))
 }
 
 async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
@@ -904,7 +1242,11 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     }
     let wa = crate::passkeys::verifier(&stored.origin).map_err(|_| err(StatusCode::BAD_REQUEST, "webauthn-error", "invalid ceremony origin"))?;
     let mut records = st.db.passkeys_for_principal(&username)?;
-    let result = crate::passkeys::finish_authentication(&wa, &stored.state, &body.credential)
+    let credentials = records
+        .iter()
+        .map(|row| serde_json::from_str(&row.credential).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "stored passkey is invalid")))
+        .collect::<Result<Vec<webauthn_rs::prelude::Passkey>, _>>()?;
+    let result = crate::passkeys::finish_authentication(&wa, &stored.state, &body.credential, &credentials)
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "webauthn-error", "passkey assertion could not be verified"))?;
     if !result.user_verified() {
         return Err(err(StatusCode::UNAUTHORIZED, "user-verification-required", "passkey did not verify the user"));
@@ -926,8 +1268,14 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     records[index].backed_up = result.backup_state();
     records[index].sign_count = result.counter();
     st.db.passkey_update(&records[index])?;
+    remember_login_device(&st, &username, &headers)?;
     let (token, csrf) = (auth::random_token(), auth::random_token());
-    st.db.session_create_with(&auth::sha256_hex(&token), &csrf, false)?;
+    st.db.session_create_for(
+        &st.db.admin_principal_id()?.unwrap_or_else(|| "admin".into()),
+        &auth::sha256_hex(&token),
+        &csrf,
+        false,
+    )?;
     st.db.audit(
         &username,
         "passkey.authentication.success",
@@ -1032,10 +1380,14 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
         .map(|t| {
             json!({
                 "name": t.name,
+                "id": t.token_id,
                 "scopes": t.scopes,
                 "created_at": timestamp(Some(t.created_at)),
                 "last_used": timestamp(t.last_used),
-                "expires_at": timestamp(t.expires_at)
+                "last_address": t.last_address,
+                "expires_at": timestamp(t.expires_at),
+                "allowed_cidrs": t.allowed_cidrs,
+                "allowed_workers": t.allowed_workers
             })
         })
         .collect();
@@ -1044,7 +1396,7 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
 
 async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
-    no_extra(&m, &["name", "scopes", "expires_days"])?;
+    no_extra(&m, &["name", "scopes", "expires_days", "allowed_cidrs", "allowed_workers"])?;
     let name = str_field(&m, "name")?;
     if !valid_name(name) {
         return Err(err(
@@ -1080,12 +1432,88 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
         None => 90,
         Some(value) => value
             .as_u64()
-            .filter(|days| *days <= 3650)
-            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "expires_days must be an integer from 0 to 3650"))?,
+            .filter(|days| *days == 0 || *days <= st.cfg.max_token_lifetime_days as u64)
+            .ok_or_else(|| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "invalid-request",
+                    format!("expires_days must be 0 or no more than {}", st.cfg.max_token_lifetime_days),
+                )
+            })?,
     };
+    let allowed_cidrs = match m.get("allowed_cidrs") {
+        None => Vec::new(),
+        Some(Value::Array(values)) if values.len() <= 32 => {
+            let mut cidrs = Vec::with_capacity(values.len());
+            for value in values {
+                let cidr = value
+                    .as_str()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "allowed_cidrs must contain CIDR strings"))?;
+                if cidr.len() > 64 || !crate::client_ip::valid_cidr(cidr) || cidrs.iter().any(|existing| existing == cidr) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "invalid-request",
+                        "allowed_cidrs must contain at most 32 unique valid CIDRs",
+                    ));
+                }
+                cidrs.push(cidr.to_string());
+            }
+            cidrs
+        }
+        Some(_) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "allowed_cidrs must be an array of at most 32 CIDRs",
+            ))
+        }
+    };
+    let allowed_workers = match m.get("allowed_workers") {
+        None => Vec::new(),
+        Some(Value::Array(values)) if values.len() <= 32 => {
+            let existing: HashSet<String> = st.db.workers_list()?.into_iter().map(|worker| worker.name).collect();
+            let mut names = Vec::with_capacity(values.len());
+            for value in values {
+                let worker = value
+                    .as_str()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "allowed_workers must contain worker names"))?;
+                if !valid_name(worker) || names.iter().any(|existing| existing == worker) || !existing.contains(worker) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "invalid-request",
+                        "allowed_workers must contain at most 32 unique names of enrolled workers",
+                    ));
+                }
+                names.push(worker.to_string());
+            }
+            names
+        }
+        Some(_) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "allowed_workers must be an array of at most 32 worker names",
+            ))
+        }
+    };
+    validate_token_expiry(days, st.cfg.exposure).map_err(|message| err(StatusCode::BAD_REQUEST, "non-expiring-token-forbidden", message))?;
     let expires_at = (days > 0).then(|| crate::now() + (days as i64) * 86_400);
-    let secret = auth::random_token();
-    if !st.db.token_create_scoped(name, &auth::sha256_hex(&secret), expires_at, &scopes)? {
+    let token_id = auth::sha256_hex(&auth::random_token())[..16].to_string();
+    let token_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(auth::random_token())
+        .map(hex::encode)
+        .expect("URL-safe token generator output decodes");
+    let secret = format!("lbr_pat_{token_id}_{token_secret}");
+    if !st.db.token_create_identified_with_restrictions(crate::db::ApiTokenCreate {
+        name,
+        token_id: &token_id,
+        secret_hash: &auth::sha256_hex(&token_secret),
+        principal_id: p.principal_id(),
+        expires_at,
+        scopes: &scopes,
+        allowed_cidrs: &allowed_cidrs,
+        allowed_workers: &allowed_workers,
+    })? {
         return Err(err(StatusCode::CONFLICT, "token-exists", "a token with this name already exists"));
     }
     let detail = format!(
@@ -1094,13 +1522,86 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
         expires_at.map_or_else(|| "never".into(), |e| e.to_string())
     );
     st.db.audit(&p.actor(), "token.create", &detail, &ip);
+    let principal = st.db.admin_get()?.map(|(name, _)| name).unwrap_or_else(|| p.actor());
+    security_notification(&st, &principal, "api_token_created");
     Ok(json_ok(
         StatusCode::CREATED,
         json!({
-            "token": {"name": name, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "expires_at": timestamp(expires_at)},
+            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "last_address": Value::Null, "expires_at": timestamp(expires_at), "allowed_cidrs": allowed_cidrs, "allowed_workers": allowed_workers},
             "secret": secret
         }),
     ))
+}
+
+fn security_notification(st: &St, principal_id: &str, category: &str) {
+    let id = match st.db.security_notification_add(principal_id, category) {
+        Ok(Some(id)) => id,
+        Ok(None) => return,
+        Err(_) => {
+            eprintln!("security notification could not be persisted");
+            return;
+        }
+    };
+    let Some(endpoint) = st.cfg.security_webhook_url.clone() else { return };
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            eprintln!("security notification webhook client could not be created");
+            return;
+        }
+    };
+    let event = json!({"id":id,"event":category,"occurred_at":timestamp(Some(crate::now()))});
+    tokio::spawn(async move {
+        match client.post(endpoint).json(&event).send().await {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => eprintln!("security notification webhook returned HTTP {}", response.status().as_u16()),
+            Err(_) => eprintln!("security notification webhook delivery failed"),
+        }
+    });
+}
+
+/// User-Agent is only a coarse device hint. Bound it, reject control bytes, and let the database
+/// retain a salted hash only. Missing or malformed values simply disable this notification signal.
+fn remember_login_device(st: &St, principal_id: &str, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(value) = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()) else {
+        return Ok(());
+    };
+    if value.is_empty() || value.len() > 512 || value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Ok(());
+    }
+    if st.db.known_login_device_remember(principal_id, value)? {
+        security_notification(st, principal_id, "new_sign_in_device");
+    }
+    Ok(())
+}
+
+fn validate_token_expiry(days: u64, exposure: crate::config::Exposure) -> Result<(), &'static str> {
+    if days == 0 && exposure == crate::config::Exposure::Internet {
+        Err("Internet exposure requires every API token to expire")
+    } else {
+        Ok(())
+    }
+}
+
+async fn list_security_notifications(State(st): State<St>, Authed(p, _): Authed) -> ApiResult {
+    let principal = st.db.admin_get()?.map(|(name, _)| name).unwrap_or_else(|| p.actor());
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"notifications": st.db.security_notifications_list(&principal)?}),
+    ))
+}
+
+async fn dismiss_security_notification(State(st): State<St>, Authed(p, ip): Authed, Path(id): Path<String>) -> ApiResult {
+    let principal = st.db.admin_get()?.map(|(name, _)| name).unwrap_or_else(|| p.actor());
+    if !st.db.security_notification_dismiss(&principal, &id)? {
+        return Err(err(StatusCode::NOT_FOUND, "unknown-notification", "no such active security notification"));
+    }
+    st.db.audit(&p.actor(), "security.notification.dismiss", &clean(&id), &ip);
+    Ok(json_ok(StatusCode::OK, json!({"ok":true})))
 }
 
 async fn revoke_token(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
@@ -1130,11 +1631,18 @@ fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
            "host_name": w.host_name, "remote_address": if online { w.remote_address.clone() } else { None },
            "last_seen": last_seen, "generation": w.generation, "event_cursor": w.event_cursor,
            "versions": {"software": w.software_version, "protocol": w.protocol_versions},
+           "mutual_tls": w.client_cert_fingerprint.is_some(),
            "platform": w.platform, "capabilities": w.capabilities, "policy": policy})
 }
 
-async fn list_workers(State(st): State<St>, _a: Authed) -> ApiResult {
-    let workers: Vec<Value> = st.db.workers_list()?.iter().map(|w| worker_json(&st, w)).collect();
+async fn list_workers(State(st): State<St>, Authed(principal, _): Authed) -> ApiResult {
+    let workers: Vec<Value> = st
+        .db
+        .workers_list()?
+        .iter()
+        .filter(|worker| principal.allows_worker(&worker.name))
+        .map(|w| worker_json(&st, w))
+        .collect();
     Ok(json_ok(StatusCode::OK, json!({"workers": workers})))
 }
 
@@ -1157,11 +1665,33 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
         ));
     }
     let token = auth::random_token();
-    if !st.db.worker_add(name, &auth::sha256_hex(&token))? {
+    let identity = if st.cfg.worker_mtls {
+        Some(crate::certs::issue_worker_client_identity(&st.data_dir, name).map_err(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "worker-certificate-error",
+                "failed to issue worker client certificate",
+            )
+        })?)
+    } else {
+        None
+    };
+    let added = if let Some(identity) = &identity {
+        st.db
+            .worker_add_with_client_certificate(name, &auth::sha256_hex(&token), &identity.fingerprint_sha256)?
+    } else {
+        st.db.worker_add(name, &auth::sha256_hex(&token))?
+    };
+    if !added {
         return Err(err(StatusCode::CONFLICT, "worker-exists", "a worker with this name exists"));
     }
     st.db.audit(&p.actor(), "worker.add", name, &ip);
-    Ok(json_ok(StatusCode::CREATED, json!({"name": name, "token": token})))
+    let mut response = json!({"name": name, "token": token, "mutual_tls": identity.is_some()});
+    if let Some(identity) = identity {
+        response["client_certificate"] = json!(identity.cert_pem);
+        response["client_private_key"] = json!(identity.key_pem);
+    }
+    Ok(json_ok(StatusCode::CREATED, response))
 }
 
 async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
@@ -1178,10 +1708,17 @@ async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): 
 /// `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`),
 /// `limit` (default 100, maximum 500) and an authenticated, encrypted opaque `cursor`. Legacy `offset` remains
 /// accepted. The reply carries `total`, `next_cursor` and status facets.
-async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+async fn list_missions(State(st): State<St>, Authed(principal, _): Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
     let bad = |m: &str| err(StatusCode::BAD_REQUEST, "invalid-request", m.to_string());
     if q.get("worker").is_some_and(|worker| !valid_name(worker)) {
         return Err(bad("worker must be a valid worker name"));
+    }
+    if q.get("worker").is_some_and(|worker| !principal.allows_worker(worker)) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "token-worker-denied",
+            "request is outside this token's allowed workers",
+        ));
     }
     if let Some(key) = q
         .keys()
@@ -1223,6 +1760,7 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
     let filters = serde_json::to_string(&json!({
         "q": needle,
         "worker": q.get("worker"),
+        "allowed_workers": principal.worker_restrictions(),
         "status": statuses,
         "sort": sort.unwrap_or("worker"),
         "descending": descending,
@@ -1251,7 +1789,8 @@ async fn list_missions(State(st): State<St>, _a: Authed, Query(q): Query<HashMap
             Some((worker, stale, info))
         })
         .filter(|(worker, _, info)| {
-            q.get("worker").is_none_or(|w| w == worker)
+            principal.allows_worker(worker)
+                && q.get("worker").is_none_or(|w| w == worker)
                 && needle.as_ref().is_none_or(|n| {
                     [worker.as_str(), &text(info, "name"), &text(info, "id"), &text(info, "folder")]
                         .iter()
@@ -1449,6 +1988,13 @@ async fn mission_status_resource(
 async fn create_mission_resource(State(st): State<St>, Authed(p, ip): Authed, headers: HeaderMap, body: Buffered) -> ApiResult {
     let mut params = parse_body(&body.bytes)?;
     let worker = str_field(&params, "worker")?.to_string();
+    if !p.allows_worker(&worker) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "token-worker-denied",
+            "request is outside this token's allowed workers",
+        ));
+    }
     let local_only = [
         "auto_continue",
         "command_template",
@@ -2778,6 +3324,8 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/login", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys", &["GET"], Access::Session, ""),
+    ("/api/v1/auth/passkeys/re-enroll", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/assertion/start", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
     ("/api/v1/auth/logout", &["POST"], Access::Authed, "session"),
@@ -2791,6 +3339,8 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
+    ("/api/v1/security/notifications", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/security/notifications/{id}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
@@ -2829,6 +3379,13 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
 #[cfg(test)]
 mod problem_tests {
     use super::*;
+
+    #[test]
+    fn internet_exposure_never_allows_minting_a_non_expiring_token() {
+        assert!(validate_token_expiry(90, crate::config::Exposure::Internet).is_ok());
+        assert!(validate_token_expiry(0, crate::config::Exposure::Lan).is_ok());
+        assert!(validate_token_expiry(0, crate::config::Exposure::Internet).is_err());
+    }
 
     #[test]
     fn json_body_limits_bound_depth_strings_arrays_and_objects() {
@@ -2915,6 +3472,21 @@ mod problem_tests {
         assert_eq!(body["detail"], "request id was reused");
         assert_eq!(body["error"]["code"], "request-id-conflict");
     }
+
+    #[test]
+    fn listener_groups_expose_only_their_route_families() {
+        use crate::config::ListenerGroup::*;
+        assert!(listener_group_allows(Combined, "/healthz"));
+        assert!(listener_group_allows(Combined, "/api/v1/worker/connect"));
+        assert!(listener_group_allows(ConsoleRest, "/api/v1/missions"));
+        assert!(!listener_group_allows(ConsoleRest, "/healthz"));
+        assert!(!listener_group_allows(ConsoleRest, "/api/v1/worker/connect"));
+        assert!(listener_group_allows(WorkerChannel, "/api/v1/worker/connect"));
+        assert!(listener_group_allows(WorkerChannel, "/api/v1/worker/terminal/abc"));
+        assert!(!listener_group_allows(WorkerChannel, "/api/v1/workers"));
+        assert!(listener_group_allows(Health, "/healthz"));
+        assert!(!listener_group_allows(Health, "/api/v1/health"));
+    }
 }
 
 fn route_matches(template: &str, path: &str) -> bool {
@@ -2931,16 +3503,29 @@ fn route_matches(template: &str, path: &str) -> bool {
 }
 
 pub fn router(st: St) -> Router {
-    Router::new()
+    build_router(st, None)
+}
+
+pub fn router_for_group(st: St, group: crate::config::ListenerGroup) -> Router {
+    build_router(st, Some(group))
+}
+
+fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
+    let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/passkeys", get(list_passkeys))
         .route(
             "/api/v1/auth/passkeys/registration/start",
             post(passkey_register_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
         )
         .route("/api/v1/auth/passkeys/registration/finish", post(passkey_register_finish))
+        .route(
+            "/api/v1/auth/passkeys/re-enroll",
+            post(passkey_reenroll).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
+        )
         .route(
             "/api/v1/auth/passkeys/assertion/start",
             post(passkey_assert_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),
@@ -2957,6 +3542,8 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/workers/{name}/gc", post(worker_gc_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
+        .route("/api/v1/security/notifications", get(list_security_notifications))
+        .route("/api/v1/security/notifications/{id}", delete(dismiss_security_notification))
         .route("/api/v1/missions", get(list_missions).post(create_mission_resource))
         .route("/api/v1/missions/{id}", get(mission_status_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))
@@ -2990,12 +3577,35 @@ pub fn router(st: St) -> Router {
         .route("/api/v1/worker/connect", get(crate::ws_worker::connect))
         .route("/api/v1/terminal", get(crate::terminal::browser))
         .route("/api/v1/worker/terminal/{session_id}", get(crate::terminal::worker))
-        .fallback(static_files)
-        .layer(DefaultBodyLimit::max(MAX_BODY))
+        .fallback(static_files);
+    let app = if let Some(group) = group {
+        app.layer(axum::middleware::from_fn_with_state(group, listener_group_gate))
+    } else {
+        app
+    };
+    app.layer(DefaultBodyLimit::max(MAX_BODY))
         .layer(axum::middleware::from_fn_with_state(st.clone(), reserve_gate))
         .layer(axum::middleware::from_fn(fetch_metadata_guard))
         .layer(axum::middleware::map_response(security_headers))
         .with_state(st)
+}
+
+/// The listener groups are enforced before dispatch, including the SPA and API fallbacks.
+fn listener_group_allows(group: crate::config::ListenerGroup, path: &str) -> bool {
+    let worker_path = path == "/api/v1/worker" || path.starts_with("/api/v1/worker/");
+    match group {
+        crate::config::ListenerGroup::Combined => true,
+        crate::config::ListenerGroup::ConsoleRest => !worker_path && path != "/healthz",
+        crate::config::ListenerGroup::WorkerChannel => worker_path,
+        crate::config::ListenerGroup::Health => path == "/healthz",
+    }
+}
+
+async fn listener_group_gate(State(group): State<crate::config::ListenerGroup>, req: Request, next: axum::middleware::Next) -> Response {
+    if !listener_group_allows(group, req.uri().path()) {
+        return err(StatusCode::NOT_FOUND, "route-not-found", "route is not available on this listener").into_response();
+    }
+    next.run(req).await
 }
 
 pub fn with_peer(app: Router, peer: SocketAddr) -> Router {

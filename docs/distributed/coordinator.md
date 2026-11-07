@@ -40,18 +40,29 @@ worker protocol is `protocol.md`.
     new `ca.pem` and workers must be re-enrolled with it. A CA from before name
     constraints existed keeps working; `info` reports it as unconstrained.
   - `--bind` (or `BRIDGE_COORDINATOR_BIND` when the flag is absent) is written to
-    `config.toml`; a non-loopback bind also writes `lan_enabled = true`
-    (or the value of `BRIDGE_COORDINATOR_LAN_ENABLED` when set). The default bind is
+    `config.toml`; a non-loopback bind defaults to `exposure = "lan"`. Exposure is
+    `loopback` by default and may be set to `lan` or `internet`. Old `lan_enabled`
+    configs are migrated in place; `BRIDGE_COORDINATOR_LAN_ENABLED` remains a deprecated
+    compatibility alias for `BRIDGE_COORDINATOR_EXPOSURE`. The default bind is
     `127.0.0.1:8443`.
 - `bridge-coordinator serve --data-dir DIR` serves HTTPS (rustls; TLS 1.3 by
   default, with TLS 1.2 and AEAD suites only when `min_tls = "1.2"` is explicitly
   set for an older client). Session resumption tickets and 0-RTT are disabled. It
-  refuses to start when the bind address is not
-  loopback and `lan_enabled = true` is not set (NET-003). It holds an exclusive
+  refuses to start when a non-loopback bind is configured with `exposure = "loopback"`
+  (NET-003). `exposure = "internet"` is refused unless TLS 1.3, a 90-day token lifetime,
+  a public certificate or trusted TLS terminator, strict mutation/connection caps, a security
+  webhook, an enrolled passkey and no non-expiring API tokens are present. Configure and
+  enroll these controls while still on loopback or LAN, then enable Internet exposure. It holds an exclusive
   lock on `DIR/coordinator.lock` while running (released by the kernel on any
   exit). Logs go to stderr only; nothing is written outside the data directory
   (SQLite temporary storage is in memory). SIGTERM or SIGINT drains connections and
   exits within 10 s.
+- By default `bind` serves the console/REST API, worker channel and health endpoint together. To
+  split them, add `[listener_groups]` to `config.toml` and set any of `console_rest`,
+  `worker_channel` and `health` to `HOST:PORT`. Once one group is configured, only the listed
+  groups listen; omit a group to disable it. Each address follows the same loopback/LAN rule as
+  `bind`. Connection and per-address limits are shared across all listeners. The `info` command
+  reports the active groups; `health` checks the dedicated health listener when configured.
 - `bridge-coordinator info` prints the URLs (flagging any that the server
   certificate does not cover), bind address, LAN state, CA path and SHA-256
   fingerprint and whether an administrator exists.
@@ -69,9 +80,10 @@ worker protocol is `protocol.md`.
 - Environment variables (names in `config.rs`):
   - `BRIDGE_COORDINATOR_DATA_DIR`: data directory when `--data-dir` is not given;
     default `/var/lib/bridge-coordinator`.
-  - `BRIDGE_COORDINATOR_BIND` (`host:port`) and `BRIDGE_COORDINATOR_LAN_ENABLED`
-    (`true`/`false`; `1/0`, `yes/no`, `on/off` are also accepted): take precedence
-    over `config.toml`.
+  - `BRIDGE_COORDINATOR_BIND` (`host:port`) and `BRIDGE_COORDINATOR_EXPOSURE`
+    (`loopback`, `lan` or `internet`): take precedence over `config.toml`.
+    `BRIDGE_COORDINATOR_LAN_ENABLED` (`true`/`false`; `1/0`, `yes/no`, `on/off`)
+    remains a deprecated alias.
   - `BRIDGE_COORDINATOR_PUBLIC_NAMES`: comma-separated host names and addresses that
     browsers and workers use. When set, they replace discovery for the certificate
     (`init`, `cert renew`) and for the URLs `info` prints. It is needed in a
@@ -86,16 +98,36 @@ worker protocol is `protocol.md`.
     names continue using the internal CA. Valid replacement pairs are picked up for
     new TLS handshakes without restarting the server.
   - `BRIDGE_COORDINATOR_CONTAINER`: set by the container image. Network exposure is
-    then decided by the published port, not by `lan_enabled`.
+    then decided by the published port, not by the configured bind.
 
-  All other settings are keys of `config.toml`: `bind`, `lan_enabled`,
-  `max_events_per_worker`, `allowed_origins` (extra exact `Origin` values accepted for
+  All other settings are keys of `config.toml`: `bind`, `exposure`, `tls_terminator`,
+  `security_webhook_url`,
+  `max_events_per_worker`, `max_token_lifetime_days` (maximum expiry for newly created API tokens,
+  default 3650 days), `allowed_origins` (extra exact `Origin` values accepted for
   cookie-authenticated writes), `web_dir` (default: `web` next to the executable, then
   `/usr/share/bridge-coordinator/web`) and the limit keys in the table below. All
   defaults are defined in `config.rs` (`Config::default`); `init` generates
   `config.toml` from them.
 - `bridge-coordinator worker add NAME` prints a new worker token once and
   stores its SHA-256 hash; `worker revoke NAME` deletes it.
+- Optional worker mutual TLS is enabled with `worker_mtls = true` in
+  `config.toml`. Worker enrollment then requires a coordinator-CA-issued client
+  certificate. Run `bridge-coordinator worker add NAME --client-cert-file
+  worker-client.pem --client-key-file worker-client.key`; the private key file
+  is created with mode `0600`. The certificate and key are shown or written
+  only at enrollment. `POST /api/v1/workers` also issues the client identity
+  when this setting is on and returns it with the one-time token; keep the
+  private key on that worker.
+  The worker listener can be isolated with `listener_groups.worker_channel`;
+  when isolated, it requires mTLS. On a combined listener, the worker routes
+  still require a matching client certificate whenever `worker_mtls` is on.
+- To rotate a worker token without re-enrollment, run
+  `bridge-coordinator worker rotate-token NAME`, transfer the printed token
+  securely to the worker, then run `llm-bridge worker rotate-token
+  --token-file PATH` and restart the worker. The previous token remains valid
+  until the staged token completes a worker hello with the enrolled worker ID;
+  the staged token expires after 30 minutes. A wrong worker ID cannot promote
+  it. Rotation keeps the worker ID, generation, opt-ins and mTLS certificate.
 - `bridge-coordinator admin reset-password [--keep-api-tokens]` (local shell only)
   sets a new password from stdin, deletes all sessions and revokes every API token
   (the number is printed) unless `--keep-api-tokens` is given.
@@ -104,10 +136,13 @@ worker protocol is `protocol.md`.
   constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
   installs administrator-provided files.
 - `bridge-coordinator token create NAME [--scope SCOPE]... [--expires-days N]` prints an API
-  token once; only its SHA-256 hash and grants are stored, and `token revoke NAME` revokes it.
+  token once in the identifiable format `lbr_pat_<16-lowercase-hex-id>_<64-hex-character-secret>`; only its
+  SHA-256 secret hash, public ID and grants are stored, and `token revoke NAME` revokes it.
+  Pre-prefix tokens remain accepted with their previous full-token hash until rotated; the coordinator scans their stored digests and compares each using the constant-time digest comparator.
   New tokens default to `read`; repeat `--scope` for `operate`, `terminal:view`, `terminal:write`
-  or `admin`. `admin` grants every scope. Tokens expire after 90 days by default;
-  `--expires-days 0` creates one that never expires. Existing tokens are migrated to `admin`
+  or `admin`. `admin` grants every scope. Tokens expire after 90 days by default, and configured
+  `max_token_lifetime_days` caps explicit expiry values; `--expires-days 0` creates a token with
+  no expiry for LAN use. Existing tokens are migrated to `admin`
   so their previous permissions remain unchanged.
 
 ## HTTP API (all under `/api/v1`, JSON)
@@ -125,7 +160,7 @@ Public:
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/healthz` | `{"status":"ok"}` only. |
-| GET | `/api/v1/auth/state` | `{setup_required, authenticated, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
+| GET | `/api/v1/auth/state` | `{setup_required, authenticated, passkey_sign_in_available, passkey_canonical_origin, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). Passkey sign-in is advertised only on the canonical origin when credentials are registered and the request uses that origin. With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
 | POST | `/api/v1/auth/login` | `{username, password, remember?}`; `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
 
@@ -135,17 +170,21 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
 | POST | `/auth/password` | `{current, new}`; deletes every session. |
-| POST | `/auth/passkeys/registration/start` | Browser session plus CSRF and exact Origin required; `{name}` returns a five-minute, session-bound registration challenge and WebAuthn creation options. Only HTTPS DNS origins are supported; IP origins are refused. |
+| POST | `/auth/passkeys/registration/start` | Browser session plus CSRF and exact Origin required; `{name}` returns a five-minute, session-bound registration challenge and WebAuthn creation options. Only HTTPS DNS origins are supported; IP origins are refused. `public_origin` may be configured in `config.toml`; otherwise the first completed registration binds and persists it. Existing credentials without a recorded origin require this setting before startup. |
 | POST | `/auth/passkeys/registration/finish` | Browser session plus CSRF and the same Origin required; `{challenge_id, credential}` verifies once and stores the passkey. |
+| GET | `/auth/passkeys` | Browser session only; lists credential handle, operator label, AAGUID, creation and last-use times, and backup/synced state. It omits credential data and signature counters. |
+| POST | `/auth/passkeys/re-enroll` | Browser session plus CSRF, exact allowed HTTPS DNS Origin, current password and `{confirm:true}` required. Deletes all passkeys and atomically binds the supplied matching `new_origin`; passkey registration must be completed again. |
 | POST | `/auth/passkeys/assertion/start` | Public sign-in start, exact HTTPS DNS Origin required; `{}` returns assertion options and sets a short-lived, single-use HttpOnly browser ticket. No registered credentials returns 404. |
 | POST | `/auth/passkeys/assertion/finish` | `{challenge_id, credential}` plus the browser ticket and same Origin; verifies UV and creates a normal short-lived session cookie. |
 | GET | `/workers` | name, stable id, state (`online`/`offline`), last_seen, versions, platform, capabilities, enrolled host name, and the active connection's peer address. The address is null while offline. |
 | GET | `/workers/{name}` | The same safe worker summary fields as the list route. |
-| POST | `/workers` | `{name}` → `{token}` shown once. |
+| POST | `/workers` | `{name}` → one-time `{token, mutual_tls}` and, when coordinator `worker_mtls` is enabled, the client certificate/private key. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
-| GET | `/tokens` | Token name, scopes, creation, last-use and expiry metadata. Requires an administrator session or an `admin` token. |
-| POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry). Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
+| GET | `/tokens` | Token name, public ID (null for legacy tokens), scopes, creation, last-use timestamp and client address, expiry metadata, optional `allowed_cidrs`, and optional `allowed_workers`. Requires an administrator session or an `admin` token. |
+| POST | `/tokens` | `{name, scopes?, expires_days?, allowed_cidrs?, allowed_workers?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Up to 32 CIDRs may restrict client addresses; up to 32 existing worker names may restrict object access. Empty worker restrictions mean all workers. Worker-bound tokens see filtered worker/mission lists and must name an allowed worker on worker, mission and terminal routes; global audit, diagnostics, token management, and low-level `/commands` are denied. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
 | DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
+| GET | `/security/notifications` | Active security events for the administrator: new sign-in address, API token creation, and repeated blocked sign-in failures. Requires an administrator session or an `admin` token. |
+| DELETE | `/security/notifications/{id}` | Dismiss one active event. Requires an administrator session with CSRF and exact Origin, or an `admin` token. |
 | GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). A mission may include bounded `needs_you: {kind, message, command}` when its native provider is waiting on a structured question; the message contains only question/choice text and the local answer command. Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (default 100, maximum 500), `cursor`, or legacy `offset`. The reply adds `total`, `offset`, `next_cursor` and `statuses` (match counts per status, ignoring the status filter). Cursors are authenticated and encrypted, opaque, bound to the normalized filters and sort order, and cannot be combined with `offset`; use the returned `next_cursor` unchanged to fetch the next page. |
 | POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
@@ -228,7 +267,11 @@ and compatibility test are the reviewable contract for each release.
 | Limit | Default | Setting |
 |---|---|---|
 | Concurrent TCP connections, all kinds | 256; a connection over the cap is closed immediately after `accept` | `max_connections` |
-| Concurrent connections per client address (IPv6 counted by /64) | 32; over the cap is closed immediately. Behind a proxy or a published container port every client has the proxy's address: raise it | `max_connections_per_ip` |
+| Concurrent connections per client address (IPv6 counted by /64) | 32; over the cap is closed immediately. Behind a proxy or a published container port the connection cap sees the proxy address; authenticated rate limits use the trusted forwarding address when configured | `max_connections_per_ip` |
+
+### Reverse proxy client addresses
+
+The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP peer belongs to a CIDR in `trusted_proxies` (empty by default). Configure only the addresses of proxies that remove client-supplied forwarding headers and set their own. The coordinator accepts at most 2 KiB and 16 hops, walks the chain from the direct proxy toward the client, and falls back to the TCP peer if parsing fails. These headers affect client-address rate limits and audit metadata; they do not change request authentication or origin checks. Do not trust a proxy network shared with untrusted clients.
 | Worker reserve | 16 of the 256 slots (at most a quarter of `max_connections`) are used only after the other slots are full. A connection in the reserve has a 5 s handshake and header limit and may only carry `/api/v1/worker/*` with a valid worker token; any other request gets 503 and the connection is closed. Unauthenticated clients that fill the general slots therefore cannot stop workers from reconnecting | `worker_reserve_connections` |
 | TLS handshake | 10 s | fixed |
 | Wait for the next HTTP request header (keep-alive idle and slow-header limit) | 30 s | `http_idle_timeout_secs` |

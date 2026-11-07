@@ -7,7 +7,7 @@
 //! it in `s` frames.
 
 use crate::auth::sha256_hex;
-use crate::http::{err, origin_ok, ApiError, Authed, Principal, St};
+use crate::http::{err, origin_ok, ApiError, Authed, Principal, St, WorkerCertificate};
 use crate::hub::{SendResult, TermReg, TermStatus};
 use crate::protocol::{valid_id, valid_name};
 use axum::extract::ws::{close_code, CloseFrame, Message as Ws, WebSocket, WebSocketUpgrade};
@@ -384,20 +384,40 @@ async fn relay(
 
 // ---------------------------------------------------------------- worker endpoint
 
-pub async fn worker(State(st): State<St>, Path(session_id): Path<String>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+pub async fn worker(
+    State(st): State<St>,
+    Path(session_id): Path<String>,
+    cert: Option<axum::Extension<WorkerCertificate>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     let fail = |status: StatusCode, code: &'static str, m: &'static str| err(status, code, m).into_response();
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
-    let name = match token.map(|t| st.db.worker_by_token(&sha256_hex(t))) {
-        Some(Ok(Some(w))) => w.name,
+    let worker = match token.map(|t| st.db.worker_by_token(&sha256_hex(t))) {
+        Some(Ok(Some(w))) => w,
         Some(Err(e)) => {
             eprintln!("database error: {e}");
             return fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error");
         }
         _ => return fail(StatusCode::UNAUTHORIZED, "unauthorized", "invalid or revoked worker token"),
     };
+    if st.cfg.worker_mtls {
+        let Some(fingerprint) = cert.and_then(|axum::Extension(c)| c.0) else {
+            return fail(StatusCode::UNAUTHORIZED, "unauthorized", "worker client certificate required");
+        };
+        match st.db.worker_client_certificate_matches(&worker.name, &fingerprint) {
+            Ok(true) => {}
+            Ok(false) => return fail(StatusCode::UNAUTHORIZED, "unauthorized", "worker client certificate does not match token"),
+            Err(e) => {
+                eprintln!("database error: {e}");
+                return fail(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error");
+            }
+        }
+    }
+    let name = worker.name;
     if !valid_id(&session_id) {
         return fail(StatusCode::NOT_FOUND, "unknown-session", "no such terminal session");
     }

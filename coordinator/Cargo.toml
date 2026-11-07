@@ -33,16 +33,21 @@ rand = "0.10"
 sha2 = "0.11"
 base64 = "0.23"
 hex = "0.4"
-webauthn-rs = { version = "0.6.2", default-features = false, features = ["resident-key-support", "danger-allow-state-serialisation"] }
+serde_cbor_2 = "0.13"
+webauthn-rs = { version = "0.6.2", default-features = false, features = ["resident-key-support", "conditional-ui", "danger-allow-state-serialisation"] }
 url = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 utoipa = { version = "6.0.0", default-features = false, features = ["macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 
 [dev-dependencies]
 # Plain tungstenite client over our own tokio-rustls stream (no TLS feature, so no second crypto provider).
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-# reqwest with manual roots + ring only, cookie jar for the session tests.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"] }
+
+[patch.crates-io]
+# Upstream 0.6.2 exposes resident-key registration only through its attestation-root API.
+# This local one-line patch makes the normal no-attestation passkey API request discoverable keys.
+webauthn-rs = { path = "vendor/webauthn-rs" }
 
 [profile.dev.package.argon2]
 opt-level = 3

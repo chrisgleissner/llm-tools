@@ -21,7 +21,7 @@ COMMANDS = {
     "task cancel", "task retry", "task verify", "task reject", "proposal create", "proposal list",
     "proposal accept", "proposal reject", "events", "start", "pause", "resume", "continue", "stop",
     "cancel", "attach", "detach", "missions", "gc", "backup", "restore", "worker enroll",
-    "worker status", "worker run", "worker audit", "worker install-service", "worker uninstall-service",
+    "worker status", "worker run", "worker audit", "worker install-service", "worker uninstall-service", "worker rotate-token",
     "worker unenroll", "worker list", "remote login", "remote status", "remote logout", "finish", "doctor",
     "theme", "console", "control", "usage", "station", "rotation", "steer", "_station-gc", "_controller",
 }

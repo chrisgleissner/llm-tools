@@ -2,6 +2,7 @@ import * as api from "../api";
 import { field, h, relFromMs, timeEl } from "../dom";
 import { DEFAULT_POLICY } from "../password";
 import { announce } from "../ui";
+import { passkeyProviderName } from "../passkey-provider";
 import { minutes, newPasswordFields, revealable } from "./login";
 
 export interface AccountOpts {
@@ -29,6 +30,10 @@ function tokenManagement(): HTMLElement {
     h("option", { value: "365" }, "1 year"),
     h("option", { value: "0" }, "Never"),
   );
+  const allowedNetworks = field("api-token-networks", "Allowed client networks (optional)", "text", {
+    autocomplete: "off", maxlength: 2048, placeholder: "192.0.2.0/24, 2001:db8::/32",
+  });
+  const allowedWorkers = h("select", { id: "api-token-workers", name: "allowed_workers", multiple: true, size: 4, "aria-label": "Allowed workers (optional)" });
   const create = h("button", { type: "submit", class: "btn primary" }, "Create token");
   const form = h(
     "form",
@@ -38,6 +43,11 @@ function tokenManagement(): HTMLElement {
     h("fieldset", {}, h("legend", {}, "Permissions"), ...scopeInputs.map((x) => x.label)),
     h("label", { for: "api-token-expiry" }, "Expires after"),
     expiry,
+    allowedNetworks.wrap,
+    h("p", { class: "hint" }, "Leave blank to allow requests from any address. Separate CIDR ranges with commas."),
+    h("label", { for: allowedWorkers.id }, "Restrict to workers (optional)"),
+    allowedWorkers,
+    h("p", { class: "hint" }, "Leave no workers selected to allow every worker. Worker-bound tokens cannot use global diagnostics, audit, token, or low-level command endpoints."),
     h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
     status,
     create,
@@ -45,6 +55,8 @@ function tokenManagement(): HTMLElement {
   const refresh = async (): Promise<void> => {
     try {
       const result = await api.get<{ tokens: api.ApiTokenInfo[] }>("/api/v1/tokens");
+      const workers = await api.get<{ workers: Array<{ name: string }> }>("/api/v1/workers");
+      allowedWorkers.replaceChildren(...workers.workers.map((worker) => h("option", { value: worker.name }, worker.name)));
       rows.replaceChildren();
       for (const token of result.tokens) {
         const revoke = h("button", { class: "btn small", type: "button", "aria-label": `Revoke ${token.name}` }, "Revoke");
@@ -59,7 +71,10 @@ function tokenManagement(): HTMLElement {
             status.textContent = err instanceof api.ApiError ? err.message : "Could not revoke token.";
           }
         });
-        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, `Last used ${token.last_used ? new Date(token.last_used).toLocaleString() : "never"}`), revoke));
+        const lastUsed = token.last_used
+          ? `Last used ${new Date(token.last_used).toLocaleString()} from ${token.last_address ?? "unknown address"}`
+          : "Not used yet";
+        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, token.allowed_cidrs.length ? `Networks ${token.allowed_cidrs.join(", ")}` : "Any client network"), h("span", {}, token.allowed_workers.length ? `Workers ${token.allowed_workers.join(", ")}` : "All workers"), h("span", {}, lastUsed), revoke));
       }
       if (!result.tokens.length) rows.append(h("li", { class: "muted" }, "No API tokens yet."));
     } catch (err) {
@@ -86,6 +101,8 @@ function tokenManagement(): HTMLElement {
     try {
       const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", {
         name: name.input.value.trim(), scopes, expires_days: Number(expiry.value),
+        allowed_cidrs: allowedNetworks.input.value.split(",").map((value) => value.trim()).filter(Boolean),
+        allowed_workers: Array.from(allowedWorkers.selectedOptions, (option) => option.value),
       });
       oneTime.hidden = false;
       oneTime.replaceChildren(
@@ -95,6 +112,8 @@ function tokenManagement(): HTMLElement {
       );
       status.textContent = `Token ${created.token.name} created.`;
       name.input.value = "";
+      allowedNetworks.input.value = "";
+      Array.from(allowedWorkers.options).forEach((option) => { option.selected = false; });
       await refresh();
     } catch (err) {
       status.textContent = err instanceof api.ApiError ? err.message : "Could not create token.";
@@ -104,6 +123,65 @@ function tokenManagement(): HTMLElement {
   });
   section.append(h("h2", { id: "api-tokens-title" }, "API tokens"), h("p", { class: "muted" }, "Use tokens for scripts and tools. Grant only the permissions they need."), rows, form, oneTime);
   void refresh();
+  return section;
+}
+
+function passkeyReenrollment(): HTMLElement {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "passkey-reenroll-title" });
+  const current = field("passkey-reenroll-password", "Current password", "password", { autocomplete: "current-password", required: true });
+  const confirm = h("input", { id: "passkey-reenroll-confirm", type: "checkbox", required: true });
+  const status = h("p", { role: "status", "aria-live": "polite" });
+  const submit = h("button", { class: "btn danger", type: "submit" }, "Reset passkeys for this address");
+  const form = h("form", { novalidate: true },
+    h("p", { class: "muted" }, "To change the trusted address, open this page at the new HTTPS address. All existing passkeys will be removed and must be registered again; your password remains available."),
+    current.wrap,
+    h("label", { class: "check", for: confirm.id }, confirm, h("span", {}, "I understand this removes every registered passkey.")),
+    status,
+    submit,
+  );
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    status.textContent = "";
+    if (!current.input.value || !confirm.checked) {
+      status.textContent = "Enter your current password and confirm the passkey reset.";
+      return;
+    }
+    submit.disabled = true;
+    try {
+      const result = await api.reenrollPasskeys(current.input.value, confirm.checked);
+      current.input.value = "";
+      status.textContent = `Passkeys were removed. Register a new passkey for ${result.origin}.`;
+    } catch (error) {
+      status.textContent = error instanceof api.ApiError ? error.message : "Could not reset passkeys.";
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  section.append(h("h2", { id: "passkey-reenroll-title" }, "Change passkey address"), form);
+  return section;
+}
+
+function passkeyList(): HTMLElement {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "passkey-list-title" });
+  const rows = h("ul", { class: "token-list", "aria-label": "Registered passkeys" });
+  const status = h("p", { role: "status", "aria-live": "polite" }, "Loading passkeys…");
+  section.append(h("h2", { id: "passkey-list-title" }, "Passkeys"), h("p", { class: "muted" }, "Registered sign-in devices. Provider names are best-effort AAGUID labels; some passkeys do not identify a provider. Synced means the passkey provider backs it up across devices."), status, rows);
+  void api.get<{ passkeys: Array<{ id: string; name: string; provider_aaguid: string | null; created_at: string; last_used: string | null; synced: boolean }> }>("/api/v1/auth/passkeys")
+    .then(({ passkeys }) => {
+      status.textContent = "";
+      if (!passkeys.length) {
+        rows.replaceChildren(h("li", { class: "muted" }, "No passkeys registered."));
+        return;
+      }
+      rows.replaceChildren(...passkeys.map((passkey) => h("li", {},
+        h("strong", {}, passkey.name),
+        h("span", {}, `Provider ${passkeyProviderName(passkey.provider_aaguid)}`),
+        h("span", {}, passkey.synced ? "Synced passkey" : "Not reported as synced"),
+        h("span", {}, `Added ${new Date(passkey.created_at).toLocaleString()}`),
+        h("span", {}, passkey.last_used ? `Last used ${new Date(passkey.last_used).toLocaleString()}` : "Not used yet"),
+      )));
+    })
+    .catch((error) => { status.textContent = error instanceof api.ApiError ? error.message : "Could not load passkeys."; });
   return section;
 }
 
@@ -176,6 +254,24 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
     h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "account-signout", onclick: opts.signOut }, "Sign out")),
     exp ? h("p", { class: "muted small" }, `That is ${relFromMs(exp.getTime()).replace("in ", "in about ")}.`) : null,
   );
-  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement());
+  const passkeyGuidance = h("section", { id: "passkey-support-guidance", class: "card narrow", hidden: true });
+  void import("../passkeys").then(async ({ detectPasskeySupport, supportsPasskeysOnHost }) => {
+    const capability = await detectPasskeySupport();
+    if (!capability.supported || !supportsPasskeysOnHost(window.location.hostname)) {
+      passkeyGuidance.hidden = false;
+      passkeyGuidance.replaceChildren(
+        h("h2", {}, "Passkeys"),
+        h("p", { class: "muted" }, "Passkeys need a trusted address such as Tailscale."),
+        h("a", {
+          href: "https://github.com/chrisgleissner/llm-tools/blob/main/docs/distributed/install.md#enable-passkeys-optional",
+          target: "_blank",
+          rel: "noopener",
+        }, "Enable passkeys (optional)"),
+      );
+    }
+  }).catch(() => {});
+  root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement(),
+    me?.passkey_canonical_origin ? passkeyList() : h("div", {}),
+    me?.passkey_canonical_origin ? passkeyReenrollment() : h("div", {}), passkeyGuidance);
   return () => {};
 }

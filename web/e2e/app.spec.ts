@@ -99,7 +99,9 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
   expect(await page.evaluate(() => getComputedStyle(document.activeElement as Element).outlineStyle)).not.toBe("none");
   const name = () => page.evaluate(() => (document.activeElement?.getAttribute("aria-label") || document.activeElement?.textContent || "").trim().slice(0, 40));
   const reached: string[] = [];
-  for (let i = 0; i < 14; i++) {
+  // Security notices add dismiss buttons ahead of navigation; keep the keyboard walk tied to
+  // landmarks rather than a fragile fixed number of tab stops.
+  for (let i = 0; i < 24; i++) {
     await page.keyboard.press("Tab");
     reached.push(await name());
   }
