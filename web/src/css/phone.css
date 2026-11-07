@@ -6,10 +6,11 @@
 .token-create .dialog-body { display: grid; gap: var(--sp-3); align-content: start; }
 .bar-btn > .icon { display: none; }
 
-/* Typing on a phone (a soft keyboard exists on touch devices only; body[data-typing] is set by shell.ts while a text field has focus): the half of the screen the
-   keyboard leaves holds the two sign-in fields, "Remember this device", the error and Sign in, so the heading, the intro and the hints give way and come back
-   when focus leaves the field (Tab reaches them). The first-run form keeps its help. In a dialog a field that shows its error does not also show its hint. */
-@media (max-width: 47.99rem) and (pointer: coarse) {
+/* Typing on a phone: a soft keyboard exists on touch devices only, body[data-typing] is set by shell.ts while a text field has focus, and the screen is as short as
+   it is with the keyboard open (24rem, 384 px: half of a 745 px screen is 372). The half of the screen the keyboard leaves holds the two sign-in fields, "Remember
+   this device", the error and Sign in, so the heading, the intro and the hints give way and come back when focus leaves the field (Tab reaches them). A page that
+   autofocuses its first field at load keeps its full layout. The first-run form keeps its help. In a dialog a field that shows its error does not also show its hint. */
+@media (max-width: 47.99rem) and (pointer: coarse) and (max-height: 24rem) {
   html body[data-typing] main.auth:has(#login-form) { padding-block: var(--sp-1); align-items: flex-start; }
   html body[data-typing] #login-form { margin: 0; padding: var(--sp-1) var(--sp-3); }
   html body[data-typing] #login-form .field { margin: var(--sp-1) 0; }
@@ -30,14 +31,13 @@
 
 /* The state's actions (Approve, Pause, Stop, Resume, Start, Retry) are docked above the bottom bar, where the thumb of the hand that holds the phone rests, not in
    the top third of the screen. Not on a very short screen (400% zoom, a landscape phone), where two fixed bars would leave no room. The dock gives its place back
-   while a field has the keyboard. */
+   while a field has the keyboard, because the screen is then below 30 rem tall. */
 @media (max-width: 47.99rem) and (min-height: 30.01rem) {
   body:has(.mission-wrap) { --dock-h: 3.4rem; }
   html .shell > main:has(> .mission-wrap) { padding-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom) + var(--dock-h) + var(--sp-4)); }
   html .mission-head .head-actions { position: fixed; inset-inline: 0; inset-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom)); z-index: 27; box-sizing: border-box; block-size: var(--dock-h); padding: var(--sp-1) var(--gutter); background: var(--surface-1); border-block-start: 1px solid var(--border); }
   html .mission-session > [data-pane] { block-size: max(14rem, calc(100svh - var(--head-h) - var(--tab-h) - var(--dock-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: min-content; }
 }
-@media (max-width: 47.99rem) and (min-height: 30.01rem) and (pointer: coarse) { html body[data-typing] .mission-head .head-actions { display: none; } }
 
 /* 640 px tall and below: keys that cannot be used (view only) give their row to the terminal; taking control brings them back. At 568 px: the session bar is one row of
    icon buttons (the labels stay for screen readers), the terminal keeps 6 rows, and the pane is as tall as its content, so the composer ends above the dock. */
