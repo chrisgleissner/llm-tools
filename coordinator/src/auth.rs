@@ -1,8 +1,9 @@
 //! Password hashing, opaque tokens and the login rate limiter.
 
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
+use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
@@ -22,12 +23,11 @@ fn argon() -> Argon2<'static> {
 }
 
 pub fn hash_password(password: &str) -> String {
-    let salt = SaltString::generate(&mut OsRng);
-    argon().hash_password(password.as_bytes(), &salt).expect("argon2 hashing").to_string()
+    argon().hash_password(password.as_bytes()).expect("argon2 hashing").to_string()
 }
 
 pub fn verify_password(password: &str, phc: &str) -> bool {
-    PasswordHash::new(phc).is_ok_and(|h| argon().verify_password(password.as_bytes(), &h).is_ok())
+    argon().verify_password(password.as_bytes(), phc).is_ok()
 }
 
 /// 32 random bytes, URL-safe base64 without padding (43 characters).
