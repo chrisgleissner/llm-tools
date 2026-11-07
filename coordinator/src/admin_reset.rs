@@ -12,7 +12,7 @@ use crate::db::Db;
 use rand::Rng;
 use rusqlite::{params, OptionalExtension};
 use std::io::{BufRead, IsTerminal};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Error code of the 403 the API answers while a temporary password is still in place.
 pub const CHANGE_REQUIRED_CODE: &str = "password-change-required";
@@ -251,8 +251,9 @@ impl Drop for EchoOff {
 /// run through sudo) and that must belong to the owner of the data directory, which is the
 /// service user. Empty when ownership already matches.
 #[cfg(unix)]
-pub fn files_needing_chown(dir: &Path) -> Vec<PathBuf> {
+pub fn files_needing_chown(dir: &Path) -> Vec<std::path::PathBuf> {
     use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
     let Ok(owner) = std::fs::metadata(dir) else {
         return vec![];
     };
