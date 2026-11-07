@@ -68,9 +68,9 @@ def default_station_probe(mission_id: str) -> bool:
     on a station (close, attach, switch) check ownership themselves.
     """
     try:
-        from .bridge_runtime import mission_socket_path
+        from . import bridge_sockets
 
-        return socket_listening(mission_socket_path(mission_id))
+        return socket_listening(bridge_sockets.mission_socket_path(mission_id))
     except (OSError, RuntimeError, ValueError):
         return False
 

@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge_runtime
-from llm_tools.bridge_runtime import mission_socket_path
+from llm_tools import bridge_sockets
+from llm_tools.bridge_sockets import mission_socket_path
 from tests.test_bridge_socket_discovery import MISSION, _name
 
 
 @pytest.fixture()
 def tmp_root(monkeypatch: pytest.MonkeyPatch) -> Path:
     root = Path(tempfile.mkdtemp(prefix="lbs", dir="/tmp"))
-    monkeypatch.setattr(bridge_runtime, "_TMP_ROOT", root)
-    monkeypatch.setattr(bridge_runtime, "_RUN_USER_ROOT", root / "no-run-user")
+    monkeypatch.setattr(bridge_sockets, "_TMP_ROOT", root)
+    monkeypatch.setattr(bridge_sockets, "_RUN_USER_ROOT", root / "no-run-user")
     yield root
     shutil.rmtree(root, ignore_errors=True)
 
@@ -55,14 +55,14 @@ def test_directory_with_loose_permissions_is_skipped_not_fatal(tmp_root: Path) -
 def test_directory_owned_by_someone_else_is_skipped(tmp_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_root / preferred()).mkdir(mode=0o700)
     # Pretend the preferred directory belongs to another user by treating our uid as different there only.
-    original = bridge_runtime._private_owned_directory
+    original = bridge_sockets._private_owned_directory
 
     def owned(directory: Path, uid: int) -> bool:
         if directory.name == preferred():
             return original(directory, uid + 1)
         return original(directory, uid)
 
-    monkeypatch.setattr(bridge_runtime, "_private_owned_directory", owned)
+    monkeypatch.setattr(bridge_sockets, "_private_owned_directory", owned)
     path = mission_socket_path(MISSION, env={})
     assert path.parent.name == f"{preferred()}-1"
 

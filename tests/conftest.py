@@ -567,9 +567,9 @@ def _kill_tmux_servers_in(directory: Path) -> None:
 @pytest.fixture(autouse=True)
 def _record_socket_escapes(request: pytest.FixtureRequest, _private_runtime_dir: Path):
     """Remember any in-process Bridge socket path that resolves outside the test's runtime dir."""
-    from llm_tools import bridge_runtime
+    from llm_tools import bridge_runtime, bridge_sockets
 
-    original = bridge_runtime.mission_socket_path
+    original = bridge_sockets.mission_socket_path
     sandbox = str(_private_runtime_dir)
 
     def recording(mission_id: str, *, env: dict[str, str] | None = None) -> Path:
@@ -578,12 +578,16 @@ def _record_socket_escapes(request: pytest.FixtureRequest, _private_runtime_dir:
             _ESCAPED_SOCKETS.setdefault(str(path), request.node.nodeid)
         return path
 
+    # ``bridge_runtime`` re-exports the function and calls it through its own name; ``mission list`` reaches it
+    # through ``bridge_sockets``. Record both paths.
+    bridge_sockets.mission_socket_path = recording  # type: ignore[assignment]
     bridge_runtime.mission_socket_path = recording  # type: ignore[assignment]
     try:
         yield
     finally:
-        if bridge_runtime.mission_socket_path is recording:
-            bridge_runtime.mission_socket_path = original  # type: ignore[assignment]
+        for module in (bridge_sockets, bridge_runtime):
+            if module.mission_socket_path is recording:
+                module.mission_socket_path = original  # type: ignore[assignment]
 
 
 @pytest.fixture(autouse=True)
