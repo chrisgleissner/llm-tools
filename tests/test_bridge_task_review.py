@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-import time
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,7 @@ from llm_tools import bridge_help, bridge_missions, bridge_remote, bridge_tui
 from llm_tools.bridge import dispatch_console_command, main
 from llm_tools.bridge_progress import repository_checkpoint
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import wait_for
 
 
 @pytest.fixture()
@@ -285,26 +286,65 @@ def test_approval_summary_lists_the_changed_files() -> None:
     assert "Workspace: changed during the run" in bridge_tui._approval_summary(_snapshot(), ("task", "1"))
 
 
+def _pump_until(state: bridge_tui._ConsoleState, predicate: object) -> object:
+    """Call ``state.refresh`` until ``predicate()`` holds, as the input loop does between keys."""
+    def attempt() -> object:
+        state.refresh(force=True)
+        return predicate()  # type: ignore[operator]
+
+    return wait_for(attempt, timeout=5, interval=0.01, message="the console did not reach the expected state")
+
+
 def test_approval_dialog_offers_output_and_diff_keys_that_open_the_pager() -> None:
     dispatched: list[str] = []
-    state = _console(_snapshot(files=["hello.txt"]), dispatched)
+    snapshot = _snapshot(files=["hello.txt"])
+
+    def dispatch(_mission: str, command: str) -> str:
+        dispatched.append(command)
+        return "body of " + command
+
+    state = bridge_tui._ConsoleState("M1", dispatch, lambda *_: snapshot, full=True)
+    state.snapshot = bridge_tui._bounded_snapshot(snapshot)
     assert state._confirm_or_dispatch("approve 1")
     assert "Y approve · N or Esc cancel · o output · d diff" in state.output[-1]
     state.handle_key("o")
     assert state.confirm_command is not None  # the dialog stays open behind the pager
-    deadline = time.monotonic() + 5
-    while state.document_viewer is None and time.monotonic() < deadline:
-        state.refresh(force=True)
-        time.sleep(0.01)
+    _pump_until(state, lambda: state.document_viewer is not None)
     assert dispatched == ["task output --task 1"]
-    assert state.document_viewer is not None
     state.close_document()
     state.handle_key("d")
-    deadline = time.monotonic() + 5
-    while state.document_viewer is None and time.monotonic() < deadline:
-        state.refresh(force=True)
-        time.sleep(0.01)
-    assert dispatched[-1] == "task diff --task 1" and state.document_viewer is not None
+    _pump_until(state, lambda: state.document_viewer is not None)
+    assert dispatched[-1] == "task diff --task 1"
+
+
+def test_approval_evidence_keys_work_after_a_refresh_replaced_the_task_list() -> None:
+    """The keys name the task from the approval command, not from whatever list is loaded when they are pressed.
+
+    The output read is held until a snapshot without the task has been applied, which is the
+    ordering a slow runner produced. Before the fix `d` found no task in the list and was dropped.
+    """
+    dispatched: list[str] = []
+    release = threading.Event()
+
+    def dispatch(_mission: str, command: str) -> str:
+        if command.startswith("task output"):
+            assert release.wait(5)
+        dispatched.append(command)
+        return "body of " + command
+
+    state = bridge_tui._ConsoleState("M1", dispatch, lambda *_: {}, full=True)
+    state.snapshot = bridge_tui._bounded_snapshot(_snapshot(files=["hello.txt"]))
+    assert state._confirm_or_dispatch("approve 1")
+    state.handle_key("o")
+    assert state.document_pending
+    _pump_until(state, lambda: not state.snapshot.get("tasks"))  # the refresh dropped the task from the list
+    assert state.document_viewer is None and state.document_pending
+    release.set()
+    _pump_until(state, lambda: state.document_viewer is not None)
+    state.close_document()
+    state.handle_key("d")
+    _pump_until(state, lambda: state.document_viewer is not None)
+    assert dispatched == ["task output --task 1", "task diff --task 1"]
 
 
 def test_pager_shows_the_error_when_there_is_no_output() -> None:
@@ -315,10 +355,7 @@ def test_pager_shows_the_error_when_there_is_no_output() -> None:
     state.snapshot = bridge_tui._bounded_snapshot(_snapshot())
     state.view_index = bridge_tui.VIEWS.index("Tasks")
     state.handle_key("o")
-    deadline = time.monotonic() + 5
-    while state.document_pending and time.monotonic() < deadline:
-        state.refresh(force=True)
-        time.sleep(0.01)
+    _pump_until(state, lambda: not state.document_pending)
     assert state.document_viewer is None
     assert any("has not run" in line for line in state.output)
 
@@ -392,10 +429,7 @@ def test_output_on_a_terminal_opens_the_pager(tmp_path, state, monkeypatch, caps
 
 
 def _wait_for_viewer(state: bridge_tui._ConsoleState) -> None:
-    deadline = time.monotonic() + 5
-    while state.document_viewer is None and time.monotonic() < deadline:
-        state.refresh(force=True)
-        time.sleep(0.01)
+    _pump_until(state, lambda: state.document_viewer is not None)
 
 
 def test_the_tasks_view_opens_output_and_diff_with_o_and_d() -> None:
