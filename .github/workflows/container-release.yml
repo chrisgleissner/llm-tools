@@ -33,7 +33,7 @@ jobs:
       - name: Install pinned cross-build tools
         run: python -m pip install cargo-zigbuild==0.24.1 ziglang==0.17.1
       - uses: ./.github/actions/rust-toolchain
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.11.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v3.11.1
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.5.0
         with:
