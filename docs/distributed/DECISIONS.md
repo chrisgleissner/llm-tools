@@ -297,3 +297,46 @@ and is unchanged in `budget.json`.
 The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working tree can differ by a
 byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
 
+
+## D18 Web route chunks and the separate routes budget (PRD-037 WP-0, UXR-039)
+
+The redesign adds a state model, shared components and several new pages, so the first load needs room.
+WP-0 moves the seven routes that are not needed on the first page out of the entry chunk and gives
+them their own cap. The initial JavaScript caps stay as D17 set them (91000 raw / 31750 gzip) and the
+terminal chunk cap stays at 360000 raw / 93000 gzip. Sizes are bytes from `e2e/budget.spec.ts` (gzip
+level 9); per-module numbers are the esbuild metafile `bytesInOutput` of the same build settings.
+
+| Measure | Before (D17 tree) | After WP-0 | Change |
+|---|---:|---:|---:|
+| Initial JavaScript, raw | 90997 | 70785 | -20212 |
+| Initial JavaScript, gzip | 31721 | 26199 | -5522 |
+| Initial CSS, raw / gzip | 30037 / 7534 | 31706 / 6947 | +1669 / -587 |
+| Terminal chunk, raw / gzip | 352470 / 91000 (as `lazy`) | 352588 / 91040 | +118 / +40 |
+| Route chunks (new cap), raw / gzip | 0 | 30997 / 13725 | |
+
+Modules moved to lazy chunks (raw, minified): `login` 10343, `account` 6185, `workers` 4737,
+`remote` 1919 (shared by sessions, usage and diagnostics), `diagnostics` 1531, `password` 1368,
+`usage` 1250, `reset` 1086, `sessions` 830; 29249 in total. The new foundation adds `state.ts` (3196),
+a larger `dom.ts` and `ui.ts`, and the toast policy; the menu component is not in the first load until a page imports it.
+
+Two further changes keep the first load inside the unchanged caps:
+
+- The xterm.js stylesheet (5175 raw / 1908 gzip) was part of `app.css`. It is now a separate hashed
+  file (`xterm-css.ts`) that the mission route starts fetching in parallel with the terminal chunk and that the
+  terminal module awaits, so only a mission page pays for it. The first-load CSS therefore fits the 34000 / 9000 cap with 2294 bytes of headroom even
+  though the new design tokens and components were added next to the legacy rules that the page
+  packages still use.
+- `reset.ts`, rejected as a lazy import in D17, is lazy now. D17 rejected it because the shared code of
+  `reset.ts` and `account.ts` moved into extra static chunks of the first load. Here `login.ts`,
+  `account.ts`, `password.ts` and `reset.ts` are all lazy, so the code they share is in lazy chunks as
+  well. The first load is the entry plus three shared chunks (api, icons, state and dom; the store;
+  the toast code with the event humanizer and its phrase table) where it was the entry plus one.
+
+A route chunk costs one more request the first time a route is opened. The first-run page now waits
+for the `login` chunk before the form renders. The load test (`setupFormMsMax` 5000 ms at 4x CPU) still
+applies and is run after this change.
+
+The new `routes` cap is interim: 40000 raw / 17000 gzip, which is the measured 30997 / 13725 plus about
+30 percent for the growth of the lazy pages (the palette, the fleet pages and the account pages are
+rebuilt in WP-1 to WP-5). It is replaced by the value measured after WP-5. If the first load exceeds a
+cap before then, `missions` and `overview` may move behind `import()` before any cap is raised.

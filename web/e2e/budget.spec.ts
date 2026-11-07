@@ -8,7 +8,9 @@ const web = resolve(import.meta.dirname, "..");
 const dist = join(web, "dist");
 const budget = JSON.parse(readFileSync(join(web, "budget.json"), "utf8")) as {
   initial: Record<string, number>;
-  lazy: Record<string, number>;
+  terminal: Record<string, number>;
+  routes: Record<string, number>;
+  lazyRoutes: Record<string, string>;
   load: { cpuThrottle: number; fcpMsMax: number; setupFormMsMax: number };
 };
 
@@ -47,11 +49,22 @@ test("JavaScript and CSS stay within the recorded budget; the terminal loads laz
   const staticChunkImports = bundleSources.flatMap(staticImports);
   expect(staticChunkImports, "the terminal chunk (xterm.js) is not imported statically by any app chunk").not.toContain(biggest);
   expect(bundleSources.some((source) => source.includes(`import("./${biggest}")`)), "the terminal chunk is loaded with a dynamic import").toBe(true);
-  const lazy = chunks.filter((file) => !initialFiles.has(file)).reduce((a, f) => ({ raw: a.raw + size(f).raw, gzip: a.gzip + size(f).gzip }), { raw: 0, gzip: 0 });
-  expect(lazy.raw, `lazy raw (budget ${budget.lazy["jsRaw"]})`).toBeLessThanOrEqual(budget.lazy["jsRaw"] ?? 0);
-  expect(lazy.gzip, `lazy gzip (budget ${budget.lazy["jsGzip"]})`).toBeLessThanOrEqual(budget.lazy["jsGzip"] ?? 0);
+  // Terminal chunk (xterm.js) and route chunks have separate caps: the terminal is one large chunk, routes are many small ones.
+  const terminal = size(biggest);
+  expect(terminal.raw, `terminal raw (budget ${budget.terminal["jsRaw"]})`).toBeLessThanOrEqual(budget.terminal["jsRaw"] ?? 0);
+  expect(terminal.gzip, `terminal gzip (budget ${budget.terminal["jsGzip"]})`).toBeLessThanOrEqual(budget.terminal["jsGzip"] ?? 0);
+  const routes = chunks.filter((file) => !initialFiles.has(file) && file !== biggest).reduce((a, f) => ({ raw: a.raw + size(f).raw, gzip: a.gzip + size(f).gzip }), { raw: 0, gzip: 0 });
+  expect(routes.raw, `routes raw (budget ${budget.routes["jsRaw"]})`).toBeLessThanOrEqual(budget.routes["jsRaw"] ?? 0);
+  expect(routes.gzip, `routes gzip (budget ${budget.routes["jsGzip"]})`).toBeLessThanOrEqual(budget.routes["jsGzip"] ?? 0);
+  // The lazy routes are not in the initial graph: a marker string of each route module is absent from every initial file and present in a lazy chunk.
+  const initialSource = [...initialFiles].map((file) => readFileSync(join(dist, file), "utf8")).join("\n");
+  const lazySource = chunks.filter((file) => !initialFiles.has(file)).map((file) => readFileSync(join(dist, file), "utf8")).join("\n");
+  for (const [route, marker] of Object.entries(budget.lazyRoutes)) {
+    expect(initialSource.includes(marker), `route "${route}" (marker "${marker}") must not be in the initial graph`).toBe(false);
+    expect(lazySource.includes(marker), `route "${route}" (marker "${marker}") must be in a lazy chunk`).toBe(true);
+  }
   expect(statSync(join(dist, js)).size).toBe(size(js).raw);
-  console.log(`BUNDLE initial js ${initialJs.raw}/${initialJs.gzip} css ${c.raw}/${c.gzip} lazy ${lazy.raw}/${lazy.gzip} (raw/gzip bytes)`);
+  console.log(`BUNDLE initial js ${initialJs.raw}/${initialJs.gzip} css ${c.raw}/${c.gzip} terminal ${terminal.raw}/${terminal.gzip} routes ${routes.raw}/${routes.gzip} (raw/gzip bytes)`);
 });
 
 interface Sample {

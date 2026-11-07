@@ -1,18 +1,22 @@
 import * as api from "./api";
-import { h, startClock } from "./dom";
+import { deferSkeleton, errorBlock, h, startClock } from "./dom";
 import { applyTheme, installShortcuts, savedTheme, shell } from "./shell";
 import { startLive, stopLive, refresh } from "./store";
 import { announce, mountFeedback } from "./ui";
-import { account } from "./views/account";
-import { diagnostics } from "./views/diagnostics";
-import { loginView, type NoticeKind } from "./views/login";
+import { ensureXtermCss } from "./xterm-css";
+import type { NoticeKind } from "./views/login";
 import { missionDetail } from "./views/mission";
 import { missions } from "./views/missions";
 import { overview } from "./views/overview";
-import { forcedChangeView, resetNotice } from "./views/reset";
-import { sessions } from "./views/sessions";
-import { usage } from "./views/usage";
-import { workers } from "./views/workers";
+
+// Routes that are not part of the first load: each is a separate chunk fetched when the route is first opened (spec 11.4, budget D18).
+const loadLogin = () => import("./views/login");
+const loadReset = () => import("./views/reset");
+const loadAccount = () => import("./views/account");
+const loadWorkers = () => import("./views/workers");
+const loadSessions = () => import("./views/sessions");
+const loadUsage = () => import("./views/usage");
+const loadDiagnostics = () => import("./views/diagnostics");
 
 const app = document.getElementById("app") as HTMLElement;
 let authed = false;
@@ -95,7 +99,15 @@ async function route(): Promise<void> {
     const n = notice;
     notice = null;
     document.title = state.setup_required ? "First-run setup - LLM Bridge" : "Sign in - LLM Bridge";
-    loginView(app, {
+    let login: typeof import("./views/login");
+    try {
+      login = await loadLogin();
+    } catch {
+      if (generation === routeGeneration) showLoadError(app, generation);
+      return;
+    }
+    if (generation !== routeGeneration) return;
+    login.loginView(app, {
       setupRequired: state.setup_required,
       policy: state.password_policy,
       sessionPolicy: state.session_policy,
@@ -112,7 +124,15 @@ async function route(): Promise<void> {
   }
   if (state.password_change_required) {
     stopLive();
-    forcedChangeView(app, state, {
+    let reset: typeof import("./views/reset");
+    try {
+      reset = await loadReset();
+    } catch {
+      if (generation === routeGeneration) showLoadError(app, generation);
+      return;
+    }
+    if (generation !== routeGeneration) return;
+    reset.forcedChangeView(app, state, {
       onChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }),
       signOut: () => void signOut(),
     });
@@ -132,21 +152,52 @@ async function route(): Promise<void> {
   const main = app.querySelector<HTMLElement>("#main") as HTMLElement;
   document.title = "LLM Bridge";
   const m = /^\/missions\/([^/]+)\/([^/]+)$/.exec(path);
-  if (path === "/") cleanup = overview(main);
-  else if (path === "/workers") cleanup = workers(main);
-  else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
-  else if (path === "/sessions") cleanup = sessions(main, new URLSearchParams(location.search));
-  else if (path === "/usage") cleanup = usage(main, new URLSearchParams(location.search));
-  else if (m && m[1] && m[2]) cleanup = missionDetail(main, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
-  else if (path === "/diagnostics") cleanup = diagnostics(main);
-  else if (path === "/account") cleanup = account(main, { me, signOut: () => void signOut(), onPasswordChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }) });
-  else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the overview")));
+  const signedOut = () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." });
+  if (m) void ensureXtermCss();
+  try {
+    if (path === "/") cleanup = overview(main);
+    else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
+    else if (m && m[1] && m[2]) cleanup = missionDetail(main, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+    else if (path === "/workers") cleanup = await lazyView(main, generation, loadWorkers, (v) => v.workers(main));
+    else if (path === "/sessions") cleanup = await lazyView(main, generation, loadSessions, (v) => v.sessions(main, new URLSearchParams(location.search)));
+    else if (path === "/usage") cleanup = await lazyView(main, generation, loadUsage, (v) => v.usage(main, new URLSearchParams(location.search)));
+    else if (path === "/diagnostics") cleanup = await lazyView(main, generation, loadDiagnostics, (v) => v.diagnostics(main));
+    else if (path === "/account") cleanup = await lazyView(main, generation, loadAccount, (v) => v.account(main, { me, signOut: () => void signOut(), onPasswordChanged: signedOut }));
+    else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the overview")));
+  } catch {
+    if (generation === routeGeneration) main.replaceChildren(h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => void route(), code: "chunk-load-failed" }));
+  }
+  if (generation !== routeGeneration) return;
   const reset = state.password_reset_notice;
-  const box = reset ? resetNotice(reset) : null;
-  if (box) main.prepend(box);
+  if (reset) {
+    try {
+      const box = (await loadReset()).resetNotice(reset);
+      if (box && generation === routeGeneration) main.prepend(box);
+    } catch {
+      /* the notice is optional; the page itself is already shown */
+    }
+  }
+  if (generation !== routeGeneration) return;
   const heading = main.querySelector("h1");
   if (heading) document.title = `${heading.textContent ?? ""} - LLM Bridge`;
   main.focus({ preventScroll: true });
+}
+
+/** Fetch a route chunk (showing skeleton rows if it takes longer than 150 ms) and mount it; a newer navigation discards the result. */
+async function lazyView<T>(main: HTMLElement, generation: number, load: () => Promise<T>, mount: (module: T) => () => void): Promise<() => void> {
+  const done = deferSkeleton(main, 4);
+  let module: T;
+  try {
+    module = await load();
+  } finally {
+    done();
+  }
+  if (generation !== routeGeneration) return () => {};
+  return mount(module);
+}
+
+function showLoadError(into: HTMLElement, generation: number): void {
+  into.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => generation === routeGeneration && void route(), code: "chunk-load-failed" }))));
 }
 
 void route();

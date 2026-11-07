@@ -29,6 +29,10 @@ states, overview, workers, missions, mission detail, dialogs, menus, usage, diag
 on fixed data (`e2e/mock.ts`) with a fixed clock and animations disabled. The same states are scanned with axe-core
 in both themes on all four projects and must have no violations of any impact.
 
+The screens are listed per work package in `e2e/screens/<package>.ts` (`auth`, `shell`, `session`, `mission`, `inbox`,
+`fleet`), aggregated by `e2e/screens/index.ts`. A package adds or changes screens only in its own file, and a screen's
+name is its baseline file name, so names stay unique across packages.
+
 Baselines (`e2e/__screenshots__/<project>/`) exist for `chromium-desktop` and `chromium-mobile` only. Firefox
 renders text with different anti-aliasing and the runs would need a loose threshold; the Firefox projects run the
 same states for behaviour and axe but are not compared pixel by pixel. Font rendering also differs between machines,
@@ -47,7 +51,9 @@ the pixel comparison and keep the axe checks. Update the image tag together with
 
 ## Bundle budget and load time
 
-`e2e/budget.spec.ts` counts the app entry and its transitive static JavaScript imports as initial load, and counts
-chunks reachable only through dynamic imports as lazy load. It fails when either group or CSS exceeds `budget.json`,
-or when the terminal chunk is imported statically. It also measures the
+`e2e/budget.spec.ts` counts the app entry and its transitive static JavaScript imports as initial load. Chunks reachable
+only through dynamic imports are counted twice: the xterm.js chunk against the `terminal` cap and all other lazy chunks
+(login, reset, account, workers, sessions, usage, diagnostics) against the `routes` cap. It fails when a group or the CSS
+exceeds `budget.json`, when the terminal chunk is imported statically, or when a route listed under `lazyRoutes` is found in
+the initial graph. The xterm.js stylesheet is a separate file loaded by the terminal chunk, not part of the first-load CSS. It also measures the
 first-run page on Pixel 4 emulation with and without 4x CPU throttling and writes `test-results/load-metrics.json`.

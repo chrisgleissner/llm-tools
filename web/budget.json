@@ -1,6 +1,33 @@
 {
-  "comment": "Initial load counts the app entry and every transitive static JavaScript import, plus CSS. Lazy counts chunks only reached by dynamic imports (the terminal). The previous check counted static shared chunks as lazy and missed them from initial, so these caps were corrected to match the built asset graph. Sizes are bytes; gzip level 9 approximates a compressing proxy. The UX status skeleton adds under 200 raw bytes and reduced the latest five-run Pixel 4 CLS max from 0.409 to 0.000. The password-reset hint, notice and forced password change (PRD-036) raised the initial JavaScript caps from 90000 raw / 31000 gzip to 91000 / 31750; measurements are in DECISIONS.md D17.",
-  "initial": { "jsRaw": 91000, "jsGzip": 31750, "cssRaw": 34000, "cssGzip": 9000, "totalRaw": 124000, "totalGzip": 40000 },
-  "lazy": { "jsRaw": 360000, "jsGzip": 93000 },
-  "load": { "cpuThrottle": 4, "fcpMsMax": 4000, "setupFormMsMax": 5000 }
+  "comment": "Initial load counts the app entry and every transitive static JavaScript import, plus the app stylesheet. terminal is the single xterm.js chunk loaded on a mission page (its stylesheet is a separate file the chunk loads). routes is the sum of the other lazily loaded chunks: login, reset, account, workers, sessions, usage and diagnostics (lazyRoutes lists one string of each route module, which must be absent from the initial graph and present in a lazy chunk). The initial JavaScript and CSS caps are those of D17; the routes cap is interim and is re-measured after WP-5 (D18). Sizes are bytes; gzip level 9 approximates a compressing proxy.",
+  "initial": {
+    "jsRaw": 91000,
+    "jsGzip": 31750,
+    "cssRaw": 34000,
+    "cssGzip": 9000,
+    "totalRaw": 124000,
+    "totalGzip": 40000
+  },
+  "load": {
+    "cpuThrottle": 4,
+    "fcpMsMax": 4000,
+    "setupFormMsMax": 5000
+  },
+  "terminal": {
+    "jsRaw": 360000,
+    "jsGzip": 93000
+  },
+  "routes": {
+    "jsRaw": 40000,
+    "jsGzip": 17000
+  },
+  "lazyRoutes": {
+    "login": "Administrator created",
+    "reset": "bridge-reset-notice-seen",
+    "account": "Create token",
+    "workers": "A worker runs missions on a machine",
+    "sessions": "No provider sessions yet",
+    "usage": "Guidance / reason",
+    "diagnostics": "Coordinator diagnostics"
+  }
 }
