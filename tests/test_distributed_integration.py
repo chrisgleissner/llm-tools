@@ -64,7 +64,13 @@ class Coordinator:
         self.data = data
         self.run("init", "--hostname", "localhost")
         config = data / "config.toml"
-        config.write_text(re.sub(r'bind = ".*"', 'bind = "127.0.0.1:0"', config.read_text()))
+        config_text = config.read_text()
+        config_text = re.sub(r'bind = ".*"', 'bind = "127.0.0.1:0"', config_text)
+        # Stress the offline queue independently of the production address budget. The Rust
+        # hardening tests exercise the default per-address limit; Mac loopback does not bind
+        # arbitrary 127/8 aliases, so this integration suite uses one stable source address.
+        config_text = config_text.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2000")
+        config.write_text(config_text)
         self.process = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(data)], stderr=subprocess.PIPE, text=True, start_new_session=True)
         line = self.process.stderr.readline()
         match = re.search(r"https://(\S+)", line)

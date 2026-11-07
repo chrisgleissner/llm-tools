@@ -170,7 +170,7 @@ async fn accept_loop(
     db: Arc<Db>,
     mut shutdown: watch::Receiver<bool>,
     limits: ConnLimits,
-    _lock: std::fs::File,
+    lock: std::fs::File,
 ) {
     let slots = Arc::new(Semaphore::new(limits.max_connections - limits.reserve));
     let reserve = Arc::new(Semaphore::new(limits.reserve));
@@ -222,4 +222,8 @@ async fn accept_loop(
     if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
         conns.abort_all();
     }
+    // Release explicitly once the listener and connection drain have stopped. This is
+    // especially important for callers that restore the data directory immediately after
+    // awaiting shutdown on platforms with advisory file locks.
+    let _ = lock.unlock();
 }

@@ -427,7 +427,10 @@ impl FromRequestParts<St> for Authed {
                     .get::<Peer>()
                     .map(|peer| auth::addr_key(&peer.0.ip()))
                     .unwrap_or_else(|| "unknown".to_string());
-                let keys = [(format!("token:{name}"), 30), (format!("address:{address_key}"), 120)];
+                let keys = [
+                    (format!("token:{name}"), st.cfg.mutation_limit_per_token),
+                    (format!("address:{address_key}"), st.cfg.mutation_limit_per_address),
+                ];
                 if let Some(retry_after) = st.mutation_limiter.check(&keys) {
                     let mut error = err(
                         StatusCode::TOO_MANY_REQUESTS,

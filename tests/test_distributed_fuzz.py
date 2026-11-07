@@ -156,6 +156,10 @@ def template(tmp_path_factory):
     root = tmp_path_factory.mktemp("reconcile-template")
     mp = pytest.MonkeyPatch()
     mp.setenv("LLM_BRIDGE_STATE_DIR", str(root / "state"))
+    # The fixture creates an ordinary operator mission; the surrounding test
+    # runner may itself be a managed provider process.
+    mp.delenv("LLM_BRIDGE_MANAGED", raising=False)
+    mp.delenv("LLM_BRIDGE_MISSION_ID", raising=False)
     try:
         assert main(["mission", "create", "--prompt", "Objective\n", "--cwd", str(root), "--providers", "codex", "--json"]) == 0
         with BridgeStore(root / "state" / "bridge.sqlite3") as store:

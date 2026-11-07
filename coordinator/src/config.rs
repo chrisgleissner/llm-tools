@@ -41,6 +41,10 @@ pub struct Config {
     pub ws_ping_interval_secs: u64,
     /// Close a browser WebSocket that has sent nothing (not even a pong) for this many seconds.
     pub ws_idle_timeout_secs: u64,
+    /// Authenticated mutation budget per token in a rolling 60-second window.
+    pub mutation_limit_per_token: usize,
+    /// Authenticated mutation budget per client address in a rolling 60-second window.
+    pub mutation_limit_per_address: usize,
 }
 
 impl Default for Config {
@@ -62,6 +66,8 @@ impl Default for Config {
             http_idle_timeout_secs: 30,
             ws_ping_interval_secs: 30,
             ws_idle_timeout_secs: 90,
+            mutation_limit_per_token: 30,
+            mutation_limit_per_address: 120,
         }
     }
 }
@@ -114,7 +120,10 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
     http_idle_timeout_secs = {}\n\
     # Browser WebSockets (/stream, /terminal): server ping interval and inactivity close.\n\
     ws_ping_interval_secs = {}\n\
-    ws_idle_timeout_secs = {}\n",
+    ws_idle_timeout_secs = {}\n\
+    # Authenticated mutation budget per token and client address per rolling 60 seconds.\n\
+    mutation_limit_per_token = {}\n\
+    mutation_limit_per_address = {}\n",
         d.min_tls,
         d.max_events_per_worker,
         d.max_connections,
@@ -123,7 +132,9 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
         d.request_body_timeout_secs,
         d.http_idle_timeout_secs,
         d.ws_ping_interval_secs,
-        d.ws_idle_timeout_secs
+        d.ws_idle_timeout_secs,
+        d.mutation_limit_per_token,
+        d.mutation_limit_per_address
     )
 }
 
@@ -181,6 +192,9 @@ impl Config {
         if cfg.ws_idle_timeout_secs <= cfg.ws_ping_interval_secs {
             return Err("ws_idle_timeout_secs must be larger than ws_ping_interval_secs".into());
         }
+        if !(1..=10_000).contains(&cfg.mutation_limit_per_token) || !(1..=10_000).contains(&cfg.mutation_limit_per_address) {
+            return Err("mutation limits must be between 1 and 10000 per 60 seconds".into());
+        }
         cfg.bind_addr()?;
         Ok(cfg)
     }
@@ -198,5 +212,32 @@ impl Config {
             ));
         }
         Ok(addr)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config(text: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("bridge-config-test-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+        dir
+    }
+
+    #[test]
+    fn mutation_limits_default_and_are_bounded() {
+        let defaults = Config::default();
+        assert_eq!((defaults.mutation_limit_per_token, defaults.mutation_limit_per_address), (30, 120));
+
+        let valid = temp_config(&config_text("127.0.0.1:8443", false));
+        assert_eq!(Config::load(&valid).unwrap().mutation_limit_per_token, 30);
+        std::fs::remove_dir_all(valid).unwrap();
+
+        let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 0"));
+        assert!(Config::load(&invalid).unwrap_err().contains("mutation limits"));
+        std::fs::remove_dir_all(invalid).unwrap();
     }
 }

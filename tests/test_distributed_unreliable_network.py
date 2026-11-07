@@ -290,7 +290,7 @@ def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
 
     def submit(index: int) -> int:
         request = CommandRequest("mission.list", target="ws", request_id=f"queue-{index}")
-        return link.submit(request, token=tokens[index % len(tokens)], source_ip=f"127.0.0.{2 + index % 9}")[0]
+        return link.submit(request, token=tokens[index % len(tokens)], source_ip="127.0.0.1")[0]
 
     with ThreadPoolExecutor(16) as pool:
         statuses = list(pool.map(submit, range(MAX_OPEN_COMMANDS + 1)))
@@ -304,7 +304,7 @@ def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
     queue_full_token = link.coordinator.run("token", "create", "queue-over", "--scope", "admin")
     status, body = link.submit(
         CommandRequest("mission.list", target="ws", request_id="queue-over"),
-        token=queue_full_token, source_ip="127.0.0.11",
+        token=queue_full_token, source_ip="127.0.0.1",
     )
     assert status == 429 and body["error"]["code"] == "queue-full"
 
@@ -319,7 +319,7 @@ def test_queues_stay_bounded_while_the_worker_is_cut_off(link):
     queue_after_token = link.coordinator.run("token", "create", "queue-after", "--scope", "admin")
     status, _ = link.submit(
         CommandRequest("mission.list", target="ws", request_id="queue-after"), wait_ms=int(scaled(10) * 1000),
-        token=queue_after_token, source_ip="127.0.0.11",
+        token=queue_after_token, source_ip="127.0.0.1",
     )
     assert status == 200  # the queue accepts work again
 

@@ -167,6 +167,12 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/BoundedRequestObject"}}}
         });
     }
+    // Logout revokes the authenticated session and has no request payload.
+    // Describing the generic POST body here makes Schemathesis correctly flag
+    // the handler for accepting the documented-invalid empty request.
+    if path == "/api/v1/auth/logout" && method == "POST" {
+        op.as_object_mut().expect("operation object").remove("requestBody");
+    }
     if path == "/api/v1/tokens" && method == "POST" {
         op["requestBody"] = json!({
             "required":true,
@@ -532,5 +538,11 @@ mod tests {
         assert_eq!(schema["properties"]["password"]["type"], "string");
         assert_eq!(schema["properties"]["password"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
         assert_eq!(schema["properties"]["remember"]["type"], "boolean");
+    }
+
+    #[test]
+    fn logout_has_no_request_body() {
+        let doc = openapi_value();
+        assert!(doc["paths"]["/api/v1/auth/logout"]["post"]["requestBody"].is_null());
     }
 }

@@ -258,7 +258,14 @@ def test_status_row_format_prefers_the_styled_state_and_wraps_the_label_in_the_c
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
-def test_real_station_draws_the_label_as_a_filled_chip_and_colours_the_state(tmp_path) -> None:
+def test_real_station_draws_the_label_as_a_filled_chip_and_colours_the_state(tmp_path, monkeypatch) -> None:
+    # This integration test validates the color path even when the suite is
+    # launched from a user's NO_COLOR shell.
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("LLM_BRIDGE_THEME", "dark")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("LLM_USAGE_NO_COLOR", raising=False)
+    theme.reset_cache()
     backend = TmuxTerminalBackend()
     handle = backend.start(
         provider_argv=[sys.executable, "-c", "import time; time.sleep(30)"], bridge_argv=[sys.executable, "-c", "import time; time.sleep(30)"],
@@ -290,3 +297,4 @@ def test_real_station_draws_the_label_as_a_filled_chip_and_colours_the_state(tmp
     finally:
         subprocess.run([*base, "kill-server"], check=False, capture_output=True)
         backend.stop(handle)
+        theme.reset_cache()
