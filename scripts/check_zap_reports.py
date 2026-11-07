@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 REPORTS = ("zap-api-report.json", "zap-console-report.json")
@@ -28,6 +29,7 @@ def accepted_terminal_style_alert(report_name: str, alert: dict[str, object]) ->
         evidence = str(instance.get("evidence", ""))
         if (
             instance.get("param") != "content-security-policy"
+            or urlsplit(str(instance.get("uri", ""))).path not in {"/", "/robots.txt", "/sitemap.xml"}
             or "script-src 'self'" not in evidence
             or "style-src 'self' 'unsafe-inline'" not in evidence
             or "default-src 'self'" not in evidence

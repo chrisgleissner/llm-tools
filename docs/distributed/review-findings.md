@@ -17,9 +17,10 @@ independent security/distributed-consistency second opinion are still pending.
   renderer injects inline style rules; removing inline styles breaks terminal rendering. Script
   execution remains restricted to `script-src 'self'`, and the console also sets `default-src
   'self'`, `object-src 'none'`, `base-uri 'none'` and `form-action 'self'`. The report checker accepts
-  only plugin 10055 named `CSP: style-src unsafe-inline` in the console report and only when every
-  reported instance has the expected policy evidence. API-report CSP findings, missing policy
-  directives, inline-script allowances, and all other medium-or-higher alerts still fail the gate.
+  only plugin 10055 named `CSP: style-src unsafe-inline` in the console report, on `/`,
+  `/robots.txt` or `/sitemap.xml`, and only when every reported instance has the expected policy
+  evidence. API-report CSP findings, findings at other paths, missing policy directives,
+  inline-script allowances, and all other medium-or-higher alerts still fail the gate.
 - **Regression evidence:** `tests/test_zap_reports.py::test_zap_alert_gate_accepts_only_reviewed_xterm_style_csp_alert`
   and `::test_zap_alert_gate_does_not_accept_inline_script_csp`.
 
