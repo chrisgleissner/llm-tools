@@ -505,8 +505,10 @@ export const RUNS: PathRun[] = [
       await expect(page.locator("[data-event-class]").first()).toBeVisible();
     },
     keys: async ({ page }) => {
-      await tabTo(page, page.getByRole("tab", { name: /^Activity\b/i }));
-      await page.keyboard.press("Enter");
+      // A tablist has one tab stop; the arrow keys move between the tabs and select the one they reach.
+      await tabTo(page, page.getByRole("tab", { name: /^Tasks\b/i }));
+      await page.keyboard.press("ArrowRight");
+      await expect(page.getByRole("tab", { name: /^Activity\b/i })).toBeFocused();
       await expect(page.locator("[data-event-class]").first()).toBeVisible();
     },
   },

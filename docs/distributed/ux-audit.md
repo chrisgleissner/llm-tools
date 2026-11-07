@@ -113,7 +113,7 @@ Three tasks are not offered by the web console and are listed so the gap is visi
 | Add a task | Mission page | (phone: Tasks tab,) Add task, type, Enter | 3 | 4 | Tab to Add task, Enter, type, Enter |
 | Cancel a task | Mission page | (phone: Tasks tab,) the task's menu, Cancel task, Cancel task in the dialog | 3 | 4 | Tab to the task menu, Enter, ArrowDown to Cancel task, Enter, Enter |
 | Read the evidence of a task | Mission page | (phone: Tasks tab,) the task title | 1 | 2 | Tab to the task title, Enter |
-| Read what happened (Activity) | Mission page | Activity tab | 1 | 1 | Tab to the Activity tab, Enter |
+| Read what happened (Activity) | Mission page | Activity tab | 1 | 1 | Tab to the tab list, ArrowRight to Activity |
 | Find a mission by name | Any page | search button or Ctrl+K, type the name, Enter | 3 | 3 | Ctrl+K, type, Enter |
 | Check provider capacity | Any page | the chips in the header show provider, scope and percent | 0 | 0 | none needed |
 | Open Usage for every provider | Any page | a capacity chip (phone: Usage in the bottom bar) | 1 | 1 | g u |

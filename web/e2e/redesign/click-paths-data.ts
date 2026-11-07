@@ -44,7 +44,7 @@ export const PATH_ROWS: PathRow[] = [
   { id: "add-task", task: "Add a task", start: "Mission page", path: "(phone: Tasks tab,) Add task, type, Enter", desktop: 3, phone: 4, keys: "Tab to Add task, Enter, type, Enter" },
   { id: "cancel-task", task: "Cancel a task", start: "Mission page", path: "(phone: Tasks tab,) the task's menu, Cancel task, Cancel task in the dialog", desktop: 3, phone: 4, keys: "Tab to the task menu, Enter, ArrowDown to Cancel task, Enter, Enter" },
   { id: "task-evidence", task: "Read the evidence of a task", start: "Mission page", path: "(phone: Tasks tab,) the task title", desktop: 1, phone: 2, keys: "Tab to the task title, Enter" },
-  { id: "activity", task: "Read what happened (Activity)", start: "Mission page", path: "Activity tab", desktop: 1, phone: 1, keys: "Tab to the Activity tab, Enter" },
+  { id: "activity", task: "Read what happened (Activity)", start: "Mission page", path: "Activity tab", desktop: 1, phone: 1, keys: "Tab to the tab list, ArrowRight to Activity" },
   { id: "find-mission", task: "Find a mission by name", start: "Any page", path: "search button or Ctrl+K, type the name, Enter", desktop: 3, phone: 3, keys: "Ctrl+K, type, Enter" },
   { id: "capacity", task: "Check provider capacity", start: "Any page", path: "the chips in the header show provider, scope and percent", desktop: 0, phone: 0, keys: "none needed" },
   { id: "usage", task: "Open Usage for every provider", start: "Any page", path: "a capacity chip (phone: Usage in the bottom bar)", desktop: 1, phone: 1, keys: "g u" },
