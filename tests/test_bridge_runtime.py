@@ -2176,6 +2176,32 @@ def test_force_stop_marks_uncertain_then_terminates_only_recorded_headless_group
             process.wait()
 
 
+def test_force_stop_accepts_a_stop_the_controller_finished_while_it_ran(tmp_path, monkeypatch, capsys) -> None:
+    """The controller removes the station and records STOPPED once it sees STOPPING.
+
+    If that lands between the force-stop's operation snapshot and its station lookup, the operation
+    has no process identity and the station is gone. The mission is already STOPPED, so `stop`
+    reports success instead of "no verifiable process identity".
+    """
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path, config={"headless": False})
+    task = store.add_task(mission["id"], "active task")
+    store.set_mission_status(mission["id"], "RUNNING")
+    operation = store.begin_operation(task, iteration=1, station="codex")
+    store.mark_operation_running(operation)
+
+    def controller_finishes_first(mission_id: str):
+        store.set_mission_status(mission_id, "STOPPED")
+        raise RuntimeError("no station")
+
+    monkeypatch.setattr(bridge, "_load_handle", controller_finishes_first)
+    assert bridge.main(["stop", "--mission", mission["id"], "--force", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["mission"]["status"] == "STOPPED"
+    assert store.get_operation(operation)["status"] == "UNCERTAIN"
+
+
 def test_force_stop_refuses_unidentified_headless_process_and_leaves_stopping(tmp_path, monkeypatch, capsys) -> None:
     import subprocess
     import sys
