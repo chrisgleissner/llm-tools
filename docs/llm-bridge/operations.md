@@ -209,15 +209,21 @@ machine-readable form.
 With `--json`, an error is printed on standard output (not standard error) as
 
 ```json
-{"error": {"code": "mission-not-found", "message": "no mission matches 'zzzz'", "hint": "run llm-bridge mission list"}}
+{"error": {"code": "mission-not-found", "help": "https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/troubleshooting.md#mission-not-found", "hint": "run llm-bridge mission list", "message": "no mission matches 'zzzz'"}}
 ```
 
-with the same exit status. `hint` is the command that fixes the problem, or an empty string.
+with the same exit status. `hint` is the command that fixes the problem, or an empty string. `help` is the
+address of the entry for the code in the [troubleshooting guide](troubleshooting.md); the entry heading is
+the code. In text mode an error exit (status 1 to 4) ends with the same address on its own line, `see: URL#CODE`.
 The codes are `usage` (exit 2), `invalid-argument` (2), `mission-not-found` (3), `task-not-found`
 (3), `not-found` (3), `mission-ambiguous` (3), `wrong-state` (4), `conflict` (4, a task changed
 since you read it), `schema-too-new` (4, the database was written by a newer llm-bridge; see
 "Database upgrades, backups and downgrades"), `refused-in-managed-session` (2) and `failed` (1). The same table is in
-`llm-bridge --help` under "Exit status".
+`llm-bridge --help` under "Exit status". Every code, and the common symptoms, are explained in
+[troubleshooting](troubleshooting.md); `tests/test_docs_coverage.py` fails when a code produced by the source has
+no entry there. The [user guide](guide.md) covers the concepts and the five tasks every operator does,
+including `llm-bridge task amend`, `llm-bridge proposal list|accept|reject|create`, `llm-bridge pause`, `llm-bridge finish`,
+`llm-bridge usage`, `llm-bridge backup`, `llm-bridge restore` and the remote and worker commands.
 
 Mission creation accepts `--verifier 'COMMAND'` (split like a shell, not run through one) or the command last after `--`, `--verifier-arg` (repeat once per argv element),
 `--verifier-timeout` (default 300 seconds), `--log-max-bytes` (default 4 MiB),

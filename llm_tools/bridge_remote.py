@@ -26,6 +26,7 @@ from typing import Any, Callable
 
 from . import bridge_commands as commands
 from . import bridge_format as fmt
+from .bridge_help import error_text
 from .bridge_store import default_state_dir
 from .bridge_worker import _atomic_private_write
 
@@ -277,7 +278,7 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
             envelope = client.submit(target, request)
             code, message = _envelope_exit(envelope)
             if message:
-                print(f"llm-bridge: {target}: {message}", file=sys.stderr)
+                print(error_text(f"{target}: {message}", str((envelope.get("error") or {}).get("code") or "failed")), file=sys.stderr)
                 return code
             return _print(envelope.get("result"), as_json, human)
         if spec.mutating:
@@ -298,10 +299,10 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
         _print({"schema_version": 1, "targets": results}, as_json, lambda value: _format_all(value["targets"], human))
         return 0 if failures == 0 else EXIT_UNAVAILABLE
     except RemoteError as exc:
-        print(f"llm-bridge: {exc}", file=sys.stderr)
+        print(error_text(str(exc), "unreachable"), file=sys.stderr)
         return exc.exit_code
     except (ValueError, commands.CommandFailure) as exc:
-        print(f"llm-bridge: {exc}", file=sys.stderr)
+        print(error_text(str(exc), "usage"), file=sys.stderr)
         return 2
 
 

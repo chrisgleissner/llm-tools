@@ -106,7 +106,7 @@ providers = ["claude", "codex"]
 | `--service-start`        | Start the installed continuous sampler.                                                                |
 | `--service-stop`         | Stop the installed continuous sampler.                                                                 |
 | `--service-status`       | Show whether the local sampler is running.                                                             |
-| `--service-run`          | Run the sampler in the foreground, useful for supervisors or debugging.                                 |
+| `--service-run`          | Run the sampler in the foreground, useful for supervisors or debugging (`--service-foreground` is the same). |
 | `--service-interval SECONDS` | Continuous sampler refresh interval; default: `60`.                                                |
 | `-h`, `--help`           | Show help.                                                                                              |
 

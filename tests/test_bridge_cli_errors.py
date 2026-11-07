@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from llm_tools import bridge, bridge_tui, usage
+from llm_tools import bridge, bridge_help, bridge_tui, usage
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import without_help_reference
 
 
 def _fail(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> str:
@@ -16,7 +18,7 @@ def _fail(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> str:
     assert raised.value.code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    return captured.err
+    return without_help_reference(captured.err)
 
 
 def test_unknown_command_suggests_the_closest_public_command(capsys: pytest.CaptureFixture[str]) -> None:
@@ -101,14 +103,14 @@ def test_control_without_a_terminal_explains_itself(mission_id: str, monkeypatch
     _forbid_curses(monkeypatch)
     assert bridge.main(["control", "--mission", mission_id]) == 2
     captured = capsys.readouterr()
-    assert captured.err == "llm-bridge: control needs an interactive terminal; use llm-bridge status\n"
+    assert without_help_reference(captured.err) == "llm-bridge: control needs an interactive terminal; use llm-bridge status\n"
     assert captured.out == "" and "Traceback" not in captured.err
 
 
 def test_console_without_a_terminal_explains_itself(mission_id: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     _forbid_curses(monkeypatch)
     assert bridge.main(["console", "--mission", mission_id]) == 2
-    assert capsys.readouterr().err == "llm-bridge: console needs an interactive terminal; use llm-bridge status\n"
+    assert without_help_reference(capsys.readouterr().err) == "llm-bridge: console needs an interactive terminal; use llm-bridge status\n"
 
 
 def test_usage_without_a_terminal_prints_the_usage_table(mission_id: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -137,4 +139,41 @@ def test_usage_fallback_reports_a_failed_read_without_a_traceback(tmp_path: Path
 
     monkeypatch.setattr(usage, "dashboard_snapshot", broken)
     assert bridge.main(["usage"]) == 2
-    assert capsys.readouterr().err == "llm-bridge: usage cache unreadable\n"
+    assert without_help_reference(capsys.readouterr().err) == "llm-bridge: usage cache unreadable\n"
+
+
+def test_error_exits_end_with_the_troubleshooting_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    assert bridge.main(["status", "--mission", "zzzz"]) == 3
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0].startswith("llm-bridge: ") and lines[-1] == f"see: {bridge_help.troubleshooting_reference('mission-not-found')}"
+    assert lines[-1].endswith("/docs/llm-bridge/troubleshooting.md#mission-not-found")
+    assert sum(line.startswith("see: ") for line in lines) == 1
+
+
+def test_argparse_errors_carry_the_reference_after_the_standard_report(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        bridge.main(["theme", "--color", "bogus"])
+    assert raised.value.code == 2
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0].startswith("usage: llm-bridge theme") and "invalid choice: 'bogus'" in lines[-2]
+    assert lines[-1] == f"see: {bridge_help.troubleshooting_reference('usage')}"
+
+
+def test_json_errors_keep_the_hint_and_add_the_help_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    assert bridge.main(["status", "--mission", "zzzz", "--json"]) == 3
+    captured = capsys.readouterr()
+    error = json.loads(captured.out)["error"]
+    assert captured.err == ""
+    assert error["code"] == "mission-not-found"
+    assert error["hint"] == "run llm-bridge mission list"
+    assert error["help"] == bridge_help.troubleshooting_reference("mission-not-found")
+    assert set(error) == {"code", "message", "hint", "help"}
+
+
+def test_successful_commands_print_no_reference(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    assert bridge.main(["mission", "list"]) == 0
+    captured = capsys.readouterr()
+    assert "see: " not in captured.out + captured.err

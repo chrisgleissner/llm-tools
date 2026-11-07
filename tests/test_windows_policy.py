@@ -6,6 +6,7 @@ import json
 import pytest
 
 from llm_tools import bridge, bridge_remote  # noqa: F401  (imported before sys.platform is patched; ssl branches on it)
+from tests.conftest import without_help_reference
 
 
 @pytest.fixture()
@@ -25,7 +26,7 @@ def test_local_commands_are_refused_without_a_traceback(windows: None, arguments
     assert bridge.main(arguments) == 2
     captured = capsys.readouterr()
     assert captured.out == ""
-    lines = captured.err.strip().splitlines()
+    lines = without_help_reference(captured.err).strip().splitlines()
     assert len(lines) == 1 and lines[0].startswith("llm-bridge: ") and "not supported on Windows" in lines[0]
     assert "llm-bridge --target NAME COMMAND" in lines[0] and "Traceback" not in captured.err
 
@@ -37,6 +38,7 @@ def test_json_refusal_is_an_error_envelope(windows: None, capsys: pytest.Capture
     assert captured.err == ""
     assert envelope["schema_version"] == 1 and envelope["outcome"] == "failed"
     assert envelope["error"]["code"] == "unsupported-platform"
+    assert envelope["error"]["help"].endswith("/troubleshooting.md#unsupported-platform")
     assert envelope["error"]["details"] == {"platform": "windows", "command": "status"}
 
 

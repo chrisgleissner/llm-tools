@@ -862,9 +862,25 @@ EXIT_STATUS_TEXT = """Exit status
   0  success or nothing to do         3  not found or ambiguous
   1  runtime failure                  4  wrong state
   2  usage error
-  With --json an error is {"error": {"code", "message", "hint"}} on standard
-  output, with the same status."""
+  With --json an error is {"error": {"code", "message", "hint", "help"}} on
+  standard output, with the same status. help and the last "see:" line of an
+  error name the troubleshooting entry for that code."""
 ROOT_HELP_TRAILER = EXIT_STATUS_TEXT
+
+# Where every error message points. The troubleshooting page has one heading per error code, and
+# the heading text is the code, so ``PAGE#CODE`` is the anchor. This is the only place that knows
+# the base; tests/test_docs_coverage.py checks that each code the source produces has its heading.
+TROUBLESHOOTING_URL = "https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/troubleshooting.md"
+
+
+def troubleshooting_reference(code: str) -> str:
+    """The documentation address of the troubleshooting entry for error ``code``."""
+    return f"{TROUBLESHOOTING_URL}#{code}"
+
+
+def error_text(message: str, code: str) -> str:
+    """The text of an error exit: ``llm-bridge: MESSAGE`` and a final ``see:`` line with the entry address."""
+    return f"llm-bridge: {message}\nsee: {troubleshooting_reference(code)}"
 
 
 

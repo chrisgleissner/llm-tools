@@ -242,12 +242,19 @@ def _split_hint(message: str) -> tuple[str, str]:
 
 
 def _fail(message: str, code: str, exit_status: int, as_json: bool) -> int:
-    """Report an error: ``llm-bridge: MESSAGE`` on stderr, or with ``--json`` an error object on stdout."""
+    """Report an error: ``llm-bridge: MESSAGE`` and a ``see:`` line on stderr, or with ``--json`` an error object on stdout.
+
+    The ``see:`` line and the JSON ``help`` field name the troubleshooting entry for ``code``
+    (``bridge_help.troubleshooting_reference``).
+    """
+    from .bridge_help import error_text, troubleshooting_reference
+
     if as_json:
         text, hint = _split_hint(message)
-        print(json.dumps({"error": {"code": code, "message": text, "hint": hint}}, ensure_ascii=False, indent=2, sort_keys=True))
+        error = {"code": code, "message": text, "hint": hint, "help": troubleshooting_reference(code)}
+        print(json.dumps({"error": error}, ensure_ascii=False, indent=2, sort_keys=True))
     else:
-        print(f"llm-bridge: {message}", file=sys.stderr)
+        print(error_text(message, code), file=sys.stderr)
     return exit_status
 
 
@@ -913,7 +920,11 @@ def _cli_parser_class() -> type[argparse.ArgumentParser]:
                 self._usage_exit(f"unrecognized arguments: {' '.join(words)} · {command.prog} --help shows the arguments")
             if {"--json", "-j"} & set(self._arguments):
                 self._usage_exit(message)
-            super().error(message)
+            from .bridge_help import troubleshooting_reference
+
+            # argparse's own report (usage, then "PROG: error: MESSAGE"), with the troubleshooting address added.
+            self.print_usage(sys.stderr)
+            self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\nsee: {troubleshooting_reference('usage')}\n")
 
     globals()["_CliParser"] = _CliParser
     return _CliParser
@@ -1358,7 +1369,7 @@ def _add_mission_arg(parser: argparse.ArgumentParser, default_mission: str | Non
 
 
 def _add_json_arg(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--json", "-j", action="store_true", help="print the stable machine-readable JSON response instead of text; an error is then {\"error\": {\"code\", \"message\", \"hint\"}} on standard output")
+    parser.add_argument("--json", "-j", action="store_true", help="print the stable machine-readable JSON response instead of text; an error is then {\"error\": {\"code\", \"message\", \"hint\", \"help\"}} on standard output")
 
 
 def _verifier_config(args: argparse.Namespace) -> dict[str, Any] | None:
@@ -1948,7 +1959,10 @@ def _confirm_cancel(args: argparse.Namespace, reference: str, name: str = "") ->
             return True
         print(f"Kept mission {label}; nothing was cancelled", file=sys.stderr)
         return False
-    print(f"llm-bridge: {question} Pass --yes to confirm when there is no terminal to ask on, for example: llm-bridge cancel --mission {reference} --yes", file=sys.stderr)
+    from .bridge_help import error_text
+
+    hint = f"{question} Pass --yes to confirm when there is no terminal to ask on, for example: llm-bridge cancel --mission {reference} --yes"
+    print(error_text(hint, "usage"), file=sys.stderr)
     return False
 
 
@@ -2426,8 +2440,7 @@ def _print_task_evidence(args: argparse.Namespace, result: dict[str, Any]) -> in
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return EXIT_OK if available else EXIT_NOT_FOUND
     if not available:
-        print(f"llm-bridge: {result.get('message')}", file=sys.stderr)
-        return EXIT_NOT_FOUND
+        return _fail(str(result.get("message")), "not-found", EXIT_NOT_FOUND, False)
     if args.task_action == "diff":
         sys.stdout.write(str(result["text"]))
         return 0
@@ -2660,8 +2673,7 @@ def _remote_command(args: argparse.Namespace) -> int:
         try:
             config = remote.load()
         except remote.RemoteError as exc:
-            print(f"llm-bridge: {exc}", file=sys.stderr)
-            return 2
+            return _fail(str(exc), "usage", EXIT_USAGE, False)
         _print_result(config.public(), args.json, lambda value: f"coordinator_url: {value['coordinator_url']}")
         return 0
     print("Remote configuration removed." if remote.logout() else "No coordinator is configured.")
@@ -2672,7 +2684,7 @@ def _split_target(arguments: list[str]) -> tuple[str | None, list[str]]:
     """Remove a leading ``--target NAME`` and validate the name."""
     if arguments[0] == "--target":
         if len(arguments) < 2 or arguments[1].startswith("-"):
-            print("llm-bridge: --target needs a name: local, all, or a worker name", file=sys.stderr)
+            _fail("--target needs a name: local, all, or a worker name", "usage", EXIT_USAGE, False)
             return None, arguments
         raw, rest = arguments[1], arguments[2:]
     else:
@@ -2680,7 +2692,7 @@ def _split_target(arguments: list[str]) -> tuple[str | None, list[str]]:
     try:
         return commands.validate_target(raw), rest
     except commands.CommandFailure as exc:
-        print(f"llm-bridge: {exc}", file=sys.stderr)
+        _fail(str(exc), "usage", EXIT_USAGE, False)
         return None, arguments
 
 
@@ -2710,9 +2722,12 @@ def _refuse_on_windows(arguments: list[str]) -> int | None:
     if refusal is None:
         return None
     if "--json" in arguments:
+        from .bridge_help import troubleshooting_reference
+
+        refusal["error"]["help"] = troubleshooting_reference("unsupported-platform")
         print(json.dumps(refusal, ensure_ascii=False, indent=2, sort_keys=True))
     else:
-        print(f"llm-bridge: {refusal['error']['message']}", file=sys.stderr)
+        _fail(refusal["error"]["message"], "unsupported-platform", EXIT_USAGE, False)
     return 2
 
 
@@ -2754,8 +2769,7 @@ def _main(argv: list[str] | None = None) -> int:
             try:
                 return run_launcher(main)
             except (OSError, RuntimeError, ValueError) as exc:
-                print(f"llm-bridge: {exc}", file=sys.stderr)
-                return 2
+                return _fail(str(exc), "usage", EXIT_USAGE, False)
         # Say why before the help, so that a missing terminal is not mistaken for a broken home screen.
         reason, status = blocker
         print(f"llm-bridge: the home screen needs {reason}; showing help instead", file=sys.stderr)
@@ -2769,8 +2783,7 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         topic = " ".join(arguments[1:])
         if not is_known_topic(topic):
-            print(f"llm-bridge: {topic_text(topic)}", file=sys.stderr)
-            return 2
+            return _fail(topic_text(topic), "usage", EXIT_USAGE, False)
         print(topic_text(topic))
         return 0
     target: str = commands.LOCAL_TARGET
@@ -2780,8 +2793,7 @@ def _main(argv: list[str] | None = None) -> int:
             return 2
         target = parsed_target
         if not arguments:
-            print("llm-bridge: --target needs a command, for example: llm-bridge --target local status", file=sys.stderr)
-            return 2
+            return _fail("--target needs a command, for example: llm-bridge --target local status", "usage", EXIT_USAGE, False)
     if arguments == ["--version"]:
         print(f"llm-bridge {package_version()}")
         return 0
@@ -2791,13 +2803,11 @@ def _main(argv: list[str] | None = None) -> int:
             return refused
     if arguments and arguments[0] in {"--prompt-file", "--file", "--prompt"}:
         if _managed_session():
-            print(f"llm-bridge: {MANAGED_REFUSAL}", file=sys.stderr)
-            return 2
+            return _fail(MANAGED_REFUSAL, "refused-in-managed-session", EXIT_USAGE, False)
         try:
             return _legacy_prompt_mode(arguments)
         except (ValueError, KeyError, OSError, TransitionError) as exc:
-            print(f"llm-bridge: {exc}", file=sys.stderr)
-            return 2
+            return _fail(str(exc), "usage", EXIT_USAGE, False)
     args = _parse_arguments(arguments)
     if _managed_session() and not _managed_allows(args):
         return _fail(MANAGED_REFUSAL, "refused-in-managed-session", EXIT_USAGE, bool(getattr(args, "json", False)))
@@ -2822,11 +2832,9 @@ def _main(argv: list[str] | None = None) -> int:
             try:
                 print_usage_table()
             except (OSError, ValueError) as exc:
-                print(f"llm-bridge: {exc}", file=sys.stderr)
-                return 2
+                return _fail(str(exc), "usage", EXIT_USAGE, False)
             return 0
-        print(f"llm-bridge: {args.command} needs an interactive terminal; use llm-bridge status", file=sys.stderr)
-        return 2
+        return _fail(f"{args.command} needs an interactive terminal; use llm-bridge status", "usage", EXIT_USAGE, False)
     if args.command in {"control", "usage", "console", "start", "resume", "attach", "view"}:
         from . import bridge_theme
 
@@ -2835,8 +2843,7 @@ def _main(argv: list[str] | None = None) -> int:
             prune_old_drafts()
     try:
         if args.command == "attach" and args.client:
-            print("llm-bridge: --client is only used by attach from an active Bridge console", file=sys.stderr)
-            return 2
+            return _fail("--client is only used by attach from an active Bridge console", "usage", EXIT_USAGE, False)
         if args.command != "_controller":
             _resolve_parsed_mission(args, optional=args.command == "doctor")
             if _managed_session() and _managed_scope_violation(args):
