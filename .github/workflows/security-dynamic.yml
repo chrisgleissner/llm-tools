@@ -130,7 +130,7 @@ jobs:
           -J /zap/wrk/zap-api-report.json
           -r /zap/wrk/zap-api-report.html
           -I
-          -z "-config connection.sslInsecure=true -config insights.exitAutoOnHigh=false"
+          -z "-config connection.sslInsecure=true -config insights.exitAuto=false"
 
       - name: Run the ZAP console baseline scan
         run: >-
@@ -142,7 +142,7 @@ jobs:
           -J /zap/wrk/zap-console-report.json
           -r /zap/wrk/zap-console-report.html
           -I
-          -z "-config connection.sslInsecure=true -config insights.exitAutoOnHigh=false"
+          -z "-config connection.sslInsecure=true -config insights.exitAuto=false"
 
       - name: Fail on medium or high ZAP alerts
         run: |
