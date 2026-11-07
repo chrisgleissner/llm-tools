@@ -143,15 +143,88 @@ def test_old_diagnostic_events_of_a_finished_mission_go_while_audit_events_stay(
     assert result["cutoffs"]["events_before"] == _stamp(90)
 
 
-def test_a_mission_that_is_not_finished_keeps_every_event(store: BridgeStore, tmp_path: Path) -> None:
-    missions = {}
-    for name, status in (("running", "RUNNING"), ("paused", "PAUSED"), ("stopped", "STOPPED"), ("failed", "FAILED"), ("created", "CREATED")):
-        missions[name] = _seed_mission(store, name, tmp_path)
-        _finish(store, missions[name], days_ago=1000, status=status)  # even a very old, unfinished mission
-    before = {name: _kinds(store, mission_id) for name, mission_id in missions.items()}
+@pytest.mark.parametrize("status", ["RUNNING", "PAUSED", "STOPPED", "FAILED", "CREATED"])
+def test_a_mission_that_is_not_finished_loses_only_old_diagnostic_events(store: BridgeStore, tmp_path: Path, status: str) -> None:
+    mission_id = _seed_mission(store, "open", tmp_path)
+    _finish(store, mission_id, days_ago=1000, status=status)  # even a very old, unfinished mission
     result = bridge_retention.run_pass(store, policy=RetentionPolicy(), now=NOW)
-    assert result["deleted"] == {} and result["missions"] == {}
-    assert {name: _kinds(store, mission_id) for name, mission_id in missions.items()} == before
+    kept = _kinds(store, mission_id)
+    for kind, klass in SEED:
+        # Audit records and summaries keep both copies. A diagnostic kind keeps its newest copy.
+        assert kept[kind] == (1 if klass == "diagnostic" else 2), kind
+    assert result["deleted"] == {"events": 3}
+    assert mission_id in result["missions"]
+
+
+def test_the_newest_event_of_a_diagnostic_kind_survives_in_a_mission_that_is_not_finished(store: BridgeStore, tmp_path: Path) -> None:
+    mission_id = _seed_mission(store, "only", tmp_path)
+    _insert(store, mission_id, "controller-mode", 400)  # the only one of its kind, long ago: status still reads it
+    bridge_retention.run_pass(store, policy=RetentionPolicy(), now=NOW)
+    kept = _kinds(store, mission_id)
+    assert kept["controller-mode"] == 1
+
+
+def test_events_of_an_active_operation_survive_in_a_mission_that_is_not_finished(store: BridgeStore, tmp_path: Path) -> None:
+    mission_id = _seed_mission(store, "busy-open", tmp_path)
+    task = store.add_task(mission_id, "work")
+    with store._transaction():
+        store.db.execute(
+            "INSERT INTO operations(id,mission_id,task_id,iteration,station,status,created_at,updated_at) VALUES('live',?,?,1,'s','RUNNING',?,?)",
+            (mission_id, task, _stamp(300), _stamp(300)),
+        )
+    _insert(store, mission_id, "operation-progress", 300, operation_id="live")
+    _insert(store, mission_id, "operation-progress", 300, operation_id="live")
+    _insert(store, mission_id, "operation-progress", 299)  # same kind and age, no operation: goes
+    before = _kinds(store, mission_id)["operation-progress"]
+    bridge_retention.run_pass(store, policy=RetentionPolicy(), now=NOW)
+    owned = store.db.execute("SELECT COUNT(*) FROM events WHERE mission_id=? AND operation_id='live'", (mission_id,)).fetchone()[0]
+    assert owned == 2
+    assert _kinds(store, mission_id)["operation-progress"] < before
+
+
+def _refreshes(store: BridgeStore, mission_id: str, *, first_day: float, hours: int) -> None:
+    """Capacity refreshes every 10 minutes for ``hours`` hours, the first ``first_day`` days ago."""
+    for step in range(hours * 6):
+        _insert(store, mission_id, "capacity-refresh", first_day - step * 10 / 1440)
+
+
+def test_old_capacity_refreshes_of_an_unfinished_mission_are_thinned_to_one_per_hour(store: BridgeStore, tmp_path: Path) -> None:
+    mission_id = store.create_mission("thin", "o", cwd=tmp_path)["id"]
+    store.db.execute("DELETE FROM events WHERE mission_id=?", (mission_id,))
+    _refreshes(store, mission_id, first_day=200, hours=5)  # 30 rows older than events_days
+    _refreshes(store, mission_id, first_day=10, hours=2)   # 12 recent rows
+    result = bridge_retention.run_pass(store, policy=RetentionPolicy(), now=NOW)
+    old = store.db.execute("SELECT created_at FROM events WHERE mission_id=? AND kind='capacity-refresh' AND created_at<? ORDER BY id", (mission_id, _stamp(90))).fetchall()
+    hours = [row[0][:13] for row in old]
+    assert len(hours) == len(set(hours)) and 5 <= len(hours) <= 6  # one per hour (a span of 5 hours can touch 6 clock hours)
+    assert store.db.execute("SELECT COUNT(*) FROM events WHERE mission_id=? AND kind='capacity-refresh' AND created_at>=?", (mission_id, _stamp(90))).fetchone()[0] == 12
+    assert result["missions"][mission_id]["capacity_refreshes"] == 30 - len(hours)
+    again = bridge_retention.run_pass(store, policy=RetentionPolicy(), now=NOW)
+    assert again["deleted"] == {}
+
+
+def test_all_old_capacity_refreshes_of_a_finished_mission_go(store: BridgeStore, tmp_path: Path) -> None:
+    mission_id = store.create_mission("done-thin", "o", cwd=tmp_path)["id"]
+    store.db.execute("DELETE FROM events WHERE mission_id=?", (mission_id,))
+    _refreshes(store, mission_id, first_day=200, hours=2)
+    _refreshes(store, mission_id, first_day=10, hours=1)
+    _finish(store, mission_id, days_ago=150)
+    bridge_retention.run_pass(store, policy=RetentionPolicy(), now=NOW)
+    assert _kinds(store, mission_id) == {"capacity-refresh": 6}
+
+
+def test_thinning_respects_the_batch_bound(store: BridgeStore, tmp_path: Path) -> None:
+    mission_id = store.create_mission("thin-bulk", "o", cwd=tmp_path)["id"]
+    store.db.execute("DELETE FROM events WHERE mission_id=?", (mission_id,))
+    _refreshes(store, mission_id, first_day=200, hours=10)  # 60 rows in 10-11 clock hours
+    steps = []
+    for _ in range(20):
+        step = store.prune_retention(events_before=_stamp(90), chunk=10, budget_seconds=0)
+        steps.append(step["missions"].get(mission_id, {}).get("capacity_refreshes", 0))
+        if step["complete"]:
+            break
+    assert step["complete"] is True and max(steps) <= 10 and len(steps) > 1
+    assert store.db.execute("SELECT COUNT(*) FROM events WHERE mission_id=? AND kind='capacity-refresh'", (mission_id,)).fetchone()[0] <= 11
 
 
 def test_a_finished_mission_with_an_unresolved_operation_is_not_touched(store: BridgeStore, tmp_path: Path) -> None:
@@ -306,15 +379,16 @@ def test_background_pass_records_one_audit_event_with_counts_per_category(store:
     events = [json.loads(row[0]) for row in store.db.execute("SELECT data_json FROM events WHERE mission_id=? AND kind='events-pruned'", (running,))]
     retention = [event for event in events if "retention" in event]
     assert len(retention) == 1
-    assert retention[0]["deleted"] == {"events": 3, "migration_backups": 2}
-    assert retention[0]["total"] == 5
-    assert retention[0]["retention"]["missions"] == {done: {"events": 3}}
+    # Three old diagnostic events in the finished mission and three in the running one (its newest of each kind stays).
+    assert retention[0]["deleted"] == {"events": 6, "migration_backups": 2}
+    assert retention[0]["total"] == 8
+    assert retention[0]["retention"]["missions"] == {done: {"events": 3}, running: {"events": 3}}
     assert retention[0]["retention"]["cutoffs"]["events_before"] == _stamp(90)
     # The finished mission carries its own audit record of what it lost.
     mine = [json.loads(row[0]) for row in store.db.execute("SELECT data_json FROM events WHERE mission_id=? AND kind='events-pruned'", (done,))]
     assert [event["deleted"] for event in mine] == [{"events": 3}]
-    # The running mission lost nothing.
-    assert all(kind != "events-pruned" or count == 1 for kind, count in _kinds(store, running).items())
+    # The running mission kept its audit records and summaries.
+    assert _kinds(store, running)["operation-exited"] == 2 and _kinds(store, running)["task-verified"] == 2
     # A second pass finds nothing and records nothing new.
     assert worker._prune_pass() is True
     worker._discard_connection()
@@ -330,3 +404,24 @@ def test_background_pass_falls_back_to_defaults_when_the_config_is_unreadable(st
 
     monkeypatch.setattr(config, "load_config", broken)
     assert worker._retention_policy() == RetentionPolicy()
+
+
+def test_routine_retention_is_audited_at_most_once_an_hour_and_flushed_on_stop(store: BridgeStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mission_id = _seed_mission(store, "long-running", tmp_path)
+    worker = CapacityRefreshWorker(mission_id, store.path)
+    monkeypatch.setattr(worker, "_retention_policy", lambda: RetentionPolicy())
+    monkeypatch.setattr(bridge_retention, "datetime", type("Clock", (), {"now": staticmethod(lambda tz=None: NOW)}))
+    assert worker._prune_pass() is True  # first routine pass is recorded
+    _insert(store, mission_id, "repository-checkpoint", 100)
+    _insert(store, mission_id, "repository-checkpoint", 50)
+    assert worker._prune_pass() is True  # deletes the 100-day-old checkpoint, but an hour has not passed
+    worker._discard_connection()
+
+    def audits() -> list[dict[str, Any]]:
+        rows = store.db.execute("SELECT data_json FROM events WHERE mission_id=? AND kind='events-pruned'", (mission_id,))
+        return [json.loads(row[0]) for row in rows if "retention" in json.loads(row[0])]
+
+    assert len(audits()) == 1 and audits()[0]["deleted"] == {"events": 3}
+    worker.flush_retention_audit()
+    flushed = audits()
+    assert len(flushed) == 2 and flushed[1]["deleted"] == {"events": 1}

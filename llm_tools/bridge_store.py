@@ -2028,23 +2028,28 @@ class BridgeStore:
         chunk: int = 2000,
         budget_seconds: float = 1.0,
     ) -> dict[str, Any]:
-        """Apply the data-retention rules to finished missions, in ``chunk``-sized transactions.
+        """Apply the data-retention rules, in ``chunk``-sized transactions.
 
-        Only missions that are COMPLETED or CANCELLED and have no unresolved operation are touched.
-        A mission that is running, paused, stopped, failed or created keeps every row.
+        Finished missions (COMPLETED or CANCELLED with no unresolved operation) get all three rules.
+        A mission that is not finished (running, paused, stopped, failed or created) gets only the
+        ``events_before`` rule below, limited to diagnostic events; its audit records, audit summaries,
+        tasks, operations and commands are never touched.
 
         * ``events_before``: diagnostic events (``bridge_events.DIAGNOSTIC_KINDS``) created before this
-          ISO time are deleted. Audit records and audit summaries stay.
-        * ``finished_before``: for a mission last updated before this time, every event except the audit
-          summaries (``bridge_events.AUDIT_SUMMARY_KINDS``) is deleted. Mission and task rows stay.
+          ISO time are deleted. Audit records and audit summaries stay. In a mission that is not finished
+          the newest event of each kind is kept (status reads the latest ``controller-config``,
+          ``controller-mode`` and similar), and ``capacity-refresh`` events are thinned to the last one in
+          each hour instead of being deleted. Events of an operation that is still active are never deleted.
+        * ``finished_before``: for a finished mission last updated before this time, every event except
+          the audit summaries (``bridge_events.AUDIT_SUMMARY_KINDS``) is deleted. Mission and task rows stay.
         * ``operations_before``: operation and managed-process rows of a finished mission that ended
           before this time and no longer reference a log file are deleted. The size and SHA-256 of a
           pruned log stay in the ``operation-log-pruned`` event.
 
         A cutoff of ``None`` skips its rule. The pass stops after ``budget_seconds``; ``complete`` is false
         when more remains and the call should be repeated. Returns ``{"missions": {mission_id: {category:
-        count}}, "complete": bool}`` with the categories ``events``, ``finished_mission_events``,
-        ``operations`` and ``managed_processes``.
+        count}}, "complete": bool}`` with the categories ``events``, ``capacity_refreshes`` (thinned),
+        ``finished_mission_events``, ``operations`` and ``managed_processes``.
         """
         from .bridge_events import AUDIT_SUMMARY_KINDS, DIAGNOSTIC_KINDS
 
@@ -2068,6 +2073,27 @@ class BridgeStore:
                     bucket[category] = bucket.get(category, 0) + count
                 if count < limit:
                     return True
+                if time.monotonic() >= deadline:
+                    return False
+
+        def thin(mission_id: str, kind: str, before: str) -> bool:
+            """Keep the last event of each hour among those older than ``before``; ``False`` when the budget ran out."""
+            last = 0
+            while True:
+                rows = self.db.execute(
+                    "SELECT id,substr(created_at,1,13) FROM events INDEXED BY events_mission_kind_id "
+                    "WHERE mission_id=? AND kind=? AND id>? AND created_at<? ORDER BY id LIMIT ?",
+                    (mission_id, kind, last, before, limit + 1),
+                ).fetchall()
+                doomed = [(int(rows[i][0]),) for i in range(len(rows) - 1) if rows[i][1] == rows[i + 1][1]]
+                if doomed:
+                    with self._transaction():
+                        self.db.executemany("DELETE FROM events WHERE id=?", doomed)
+                    bucket = missions.setdefault(mission_id, {})
+                    bucket["capacity_refreshes"] = bucket.get("capacity_refreshes", 0) + len(doomed)
+                if len(rows) <= limit:
+                    return True
+                last = int(rows[-1][0]) - 1
                 if time.monotonic() >= deadline:
                     return False
 
@@ -2103,6 +2129,28 @@ class BridgeStore:
                 ))
             for category, sql, params in steps:
                 if not run(mission_id, category, sql, params):
+                    return {"missions": missions, "complete": False}
+        if events_before is not None:
+            # Missions that are not finished: diagnostic events only, never the newest of a kind.
+            others = [
+                str(row[0]) for row in self.db.execute(
+                    f"SELECT id FROM missions WHERE status NOT IN ({','.join('?' * len(FINISHED_MISSION_STATUSES))}) ORDER BY id",
+                    sorted(FINISHED_MISSION_STATUSES),
+                )
+            ]
+            timed = sorted(DIAGNOSTIC_KINDS - {"capacity-refresh"})
+            for mission_id in others:
+                if not run(
+                    mission_id,
+                    "events",
+                    "DELETE FROM events WHERE id IN (SELECT e.id FROM events e WHERE e.mission_id=? "
+                    f"AND e.kind IN ({','.join('?' * len(timed))}) AND e.created_at<? "
+                    f"AND (e.operation_id IS NULL OR e.operation_id NOT IN (SELECT id FROM operations WHERE status IN ({in_active}))) "
+                    "AND e.id<(SELECT MAX(l.id) FROM events l WHERE l.mission_id=e.mission_id AND l.kind=e.kind) ORDER BY e.id LIMIT ?)",
+                    [mission_id, *timed, events_before, *active],
+                ):
+                    return {"missions": missions, "complete": False}
+                if not thin(mission_id, "capacity-refresh", events_before):
                     return {"missions": missions, "complete": False}
         return {"missions": missions, "complete": True}
 

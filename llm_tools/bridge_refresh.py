@@ -36,6 +36,9 @@ _VOLATILE_OBSERVATION_KEYS = frozenset({"observed_at", "estimated_remaining"})
 PRUNE_INTERVAL_SECONDS = 900
 PRUNE_BUDGET_SECONDS = 0.5
 PRUNE_RETRY_SECONDS = 0.25
+# Retention that happens on most passes is audited at most this often (counts accumulate in between).
+RETENTION_AUDIT_INTERVAL_SECONDS = 3600.0
+_ROUTINE_RETENTION_CATEGORIES = frozenset({"events", "capacity_refreshes"})
 # A background observation reuses a provider snapshot another Bridge process
 # read within this many seconds (see common.shared_usage_reads), so N missions
 # cause about one live read per provider per minute instead of N.
@@ -200,6 +203,7 @@ class CapacityRefreshWorker:
         self._retention_deleted: dict[str, int] = {}
         self._retention_missions: dict[str, dict[str, int]] = {}
         self._retention_cutoffs: dict[str, str] = {}
+        self._retention_record_after = 0.0
         self._last_wake_plan: tuple[int | None, bool] | None = None
         self._last_wake_signature: tuple[Any, ...] | None = None
         self._last_clock_pair: tuple[int, tuple[float, float] | None] | None = None
@@ -232,6 +236,7 @@ class CapacityRefreshWorker:
                     })
             except (OSError, ValueError):
                 pass
+        self.flush_retention_audit()
         # Capacity readers have bounded subprocess/network timeouts but can be
         # slower than a stop request. They are daemonized; the stop flag keeps
         # a late result from reaching SQLite after this method returns.
@@ -307,13 +312,44 @@ class CapacityRefreshWorker:
         except (SystemExit, OSError, ValueError):
             return bridge_retention.RetentionPolicy()
 
+    def flush_retention_audit(self) -> None:
+        """Record retention work that is still waiting for its hourly audit event (called when the worker stops)."""
+        with self._write_lock:
+            try:
+                if self._retention_deleted:
+                    with BridgeStore(self.database) as store:
+                        self._record_retention(store)
+            except (OSError, ValueError, sqlite3.Error):
+                pass
+
+    def _record_retention(self, store: BridgeStore) -> None:
+        """Write the audit events for the retention work accumulated since the last record, and reset the counts.
+
+        Routine pruning (old diagnostic events, thinned capacity refreshes) happens on most passes, so it is
+        recorded at most once per ``RETENTION_AUDIT_INTERVAL_SECONDS``; the counts keep accumulating in between
+        and are flushed when the worker stops. Any other category is recorded on the pass that removed it.
+        """
+        if not self._retention_deleted:
+            return
+        for mission_id, counts in self._retention_missions.items():
+            if mission_id != self.mission_id:
+                store.record_retention_pruned(mission_id, {"deleted": counts, "cutoffs": self._retention_cutoffs})
+        store.record_retention_pruned(self.mission_id, {
+            "deleted": self._retention_deleted,
+            "missions": self._retention_missions,
+            "mission_count": len(self._retention_missions),
+            "cutoffs": self._retention_cutoffs,
+        })
+        self._retention_deleted, self._retention_missions = {}, {}
+        self._retention_record_after = time.monotonic() + RETENTION_AUDIT_INTERVAL_SECONDS
+
     def _prune_pass(self) -> bool:
         """Delete one budgeted slice of expired rows; ``True`` when the pass is finished.
 
         The pass first bounds heartbeats and capacity refreshes (INT-011), then applies the data-retention
-        policy to finished missions and migration backups. A finished pass that removed anything leaves
+        policy to every mission and to the migration backups. A finished pass that removed anything leaves
         one ``events-pruned`` audit event on this mission with the totals of the whole pass, and one on each
-        finished mission that lost rows or files.
+        other mission that lost rows or files (routine pruning is audited at most hourly; see ``_record_retention``).
         """
         with self._write_lock:
             if self._stop.is_set():
@@ -340,16 +376,9 @@ class CapacityRefreshWorker:
                     store.record_events_pruned(self.mission_id, {**result, "deleted": self._pruned})
                     self._pruned = {}
                 if self._retention_deleted:
-                    for mission_id, counts in self._retention_missions.items():
-                        if mission_id != self.mission_id:
-                            store.record_retention_pruned(mission_id, {"deleted": counts, "cutoffs": self._retention_cutoffs})
-                    store.record_retention_pruned(self.mission_id, {
-                        "deleted": self._retention_deleted,
-                        "missions": self._retention_missions,
-                        "mission_count": len(self._retention_missions),
-                        "cutoffs": self._retention_cutoffs,
-                    })
-                    self._retention_deleted, self._retention_missions = {}, {}
+                    routine = set(self._retention_deleted) <= _ROUTINE_RETENTION_CATEGORIES
+                    if not routine or time.monotonic() >= self._retention_record_after:
+                        self._record_retention(store)
                 return True
             except sqlite3.Error:
                 self._discard_connection()

@@ -6,11 +6,11 @@ database, writes the rows one provider run produces (through the store's own met
 payloads of the sizes measured from the fake-provider end-to-end tests), and reports the bytes
 per run, per command and per thinned capacity refresh, including SQLite page and index overhead.
 
-The projection assumes one mission running continuously with the default retention settings. The
-mission is not finished, so event pruning applies only to the controller's timer events (heartbeats
-and capacity refreshes); every task, operation and verification event is kept.
+The projection assumes one mission that is never finished, with the default retention settings: events
+older than 90 days lose their diagnostic kinds (the newest of each kind stays), capacity observations
+older than 90 days are thinned to one per hour, and audit records, task rows and operation rows stay.
 
-    python scripts/bridge_retention_budget.py [--runs-per-day 144] [--json]
+    python scripts/bridge_retention_budget.py [--runs-per-day 144 480] [--json]
 """
 from __future__ import annotations
 
@@ -71,6 +71,12 @@ def measure(runs: int) -> dict[str, float]:
                 store.finish_operation(operation, exit_code=0, logs_path=None)
             per_run = (database_bytes(store) - baseline) / runs
             events_per_run = store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0] / runs
+            # The same rows after the retention rules for a mission that is not finished have removed every
+            # diagnostic event (the newest of each kind stays).
+            store.prune_retention(events_before="9999-01-01T00:00:00+00:00", chunk=5000, budget_seconds=600)
+            store.db.execute("VACUUM")
+            retained_per_run = (database_bytes(store) - baseline) / runs
+            retained_events_per_run = store.db.execute("SELECT COUNT(*) FROM events").fetchone()[0] / runs
             before = database_bytes(store)
             for index in range(runs):
                 store.record_runtime_event(mission, "capacity-refresh", padded(CAPACITY_REFRESH_PAYLOAD))
@@ -80,36 +86,57 @@ def measure(runs: int) -> dict[str, float]:
                 command = store.enqueue_command(mission, {"action": "task.add", "prompt": "p" * PROMPT_BYTES})
                 store.finish_command(command["id"], status="APPLIED", result={"task_id": index})
             per_command = (database_bytes(store) - before) / runs
+            before = database_bytes(store)
+            for index in range(runs):
+                store.record_events_pruned(mission, {"deleted": {"controller-heartbeat": 180, "capacity-refresh": 6}, "heartbeat_before": "2027-01-01T00:00:00+00:00", "capacity_before": "2027-01-01T00:00:00+00:00"})
+            per_pruned_event = (database_bytes(store) - before) / runs
             store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    return {"bytes_per_run": per_run, "events_per_run": events_per_run, "bytes_per_capacity_refresh": per_refresh, "bytes_per_command": per_command}
+    return {
+        "bytes_per_run": per_run,
+        "events_per_run": events_per_run,
+        "bytes_per_run_after_retention": retained_per_run,
+        "events_per_run_after_retention": retained_events_per_run,
+        "bytes_per_capacity_refresh": per_refresh,
+        "bytes_per_command": per_command,
+        "bytes_per_prune_audit_event": per_pruned_event,
+    }
 
 
-def project(measured: dict[str, float], runs_per_day: float) -> dict[str, float]:
-    runs = runs_per_day * 365
-    run_bytes = runs * measured["bytes_per_run"]
-    refresh_bytes = CAPACITY_REFRESH_THINNED_PER_DAY * 365 * measured["bytes_per_capacity_refresh"]
+def project(measured: dict[str, float], runs_per_day: float, *, events_days: int = 90) -> dict[str, float]:
+    """One year of a mission that is never finished, with the default retention settings."""
+    recent_days = events_days
+    old_days = 365 - events_days
+    run_recent = runs_per_day * recent_days * measured["bytes_per_run"]
+    run_old = runs_per_day * old_days * measured["bytes_per_run_after_retention"]
+    # Capacity observations: one per 10 minutes (INT-011) for the last events_days, one per hour before.
+    refresh = (144 * recent_days + 24 * old_days) * measured["bytes_per_capacity_refresh"]
     # One task per run, added by one command; commands are deleted after 30 days.
     command_bytes = runs_per_day * 30 * measured["bytes_per_command"]
     # Heartbeats: the last hour at one per 5 s.
     heartbeat_bytes = 720 * 280
+    # One events-pruned audit event per 15-minute pass (heartbeat pruning) plus at most one retention audit event per hour.
+    audit = (96 + 24) * 365 * measured["bytes_per_prune_audit_event"]
     # Provider run directories: the latest 20 are kept at up to (1 + 3 rotations) x 4 MiB per output file.
     log_worst = 20 * 4 * 4 * 1024 * 1024
+    database = run_recent + run_old + refresh + command_bytes + heartbeat_bytes + audit
     return {
-        "runs_per_year": runs,
-        "database_run_rows": run_bytes,
-        "database_thinned_capacity_refreshes": refresh_bytes,
+        "runs_per_year": runs_per_day * 365,
+        "database_run_rows_last_90_days": run_recent,
+        "database_run_rows_older": run_old,
+        "database_capacity_refreshes": refresh,
         "database_commands": command_bytes,
         "database_heartbeats": heartbeat_bytes,
-        "database_total": run_bytes + refresh_bytes + command_bytes + heartbeat_bytes,
+        "database_pruning_audit_events": audit,
+        "database_total": database,
         "provider_logs_worst_case": log_worst,
-        "state_total_worst_case": run_bytes + refresh_bytes + command_bytes + heartbeat_bytes + log_worst,
+        "state_total_worst_case": database + log_worst,
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", type=int, default=2000, help="provider runs to write for the measurement")
-    parser.add_argument("--runs-per-day", type=float, default=144.0, help="provider runs per day for the projection (default: one every 10 minutes, around the clock)")
+    parser.add_argument("--runs-per-day", type=float, nargs="+", default=[144.0, 480.0], help="provider runs per day to project (default: one every 10 minutes and one every 3 minutes, around the clock)")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if not 100 <= args.runs <= 20000:
@@ -117,17 +144,18 @@ def main() -> None:
     if sqlite3.sqlite_version_info < (3, 25):
         parser.error("SQLite 3.25 or newer is required")
     measured = measure(args.runs)
-    projected = project(measured, args.runs_per_day)
+    projections = {rate: project(measured, rate) for rate in args.runs_per_day}
     if args.json:
-        print(json.dumps({"measured": measured, "projected": projected, "runs_per_day": args.runs_per_day}, indent=2))
+        print(json.dumps({"measured": measured, "projected": {str(rate): value for rate, value in projections.items()}}, indent=2))
         return
     for key, value in measured.items():
         print(f"{key:34s} {value:12.1f}")
-    print(f"projection at {args.runs_per_day:g} runs/day:")
-    for key, value in projected.items():
-        shown = f"{value:14.0f}" if key == "runs_per_year" else f"{value / 1024 / 1024:10.1f} MiB"
-        print(f"  {key:36s} {shown}")
-    print(f"  fraction of a 1 GiB budget          {projected['state_total_worst_case'] / GIB:10.1%}")
+    for rate, projected in projections.items():
+        print(f"projection at {rate:g} runs/day:")
+        for key, value in projected.items():
+            shown = f"{value:14.0f}" if key == "runs_per_year" else f"{value / 1024 / 1024:10.1f} MiB"
+            print(f"  {key:36s} {shown}")
+        print(f"  fraction of a 1 GiB budget          {projected['state_total_worst_case'] / GIB:10.1%}")
 
 
 if __name__ == "__main__":

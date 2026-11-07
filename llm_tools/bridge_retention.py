@@ -3,7 +3,9 @@
 The policy has four settings (see "Data retention" in docs/llm-bridge/operations.md):
 
 ``events_days``
-    Diagnostic events of a finished mission older than this many days are deleted.
+    Diagnostic events older than this many days are deleted. In a mission that is not finished the newest event
+    of each kind stays and ``capacity-refresh`` events are thinned to one per hour; audit records are never
+    deleted from such a mission.
 ``finished_missions_days``
     A mission that finished (COMPLETED or CANCELLED) longer ago than this keeps its mission and task rows
     and its audit summary events. Its other events, its remaining operation logs and its verifier files
@@ -14,9 +16,9 @@ The policy has four settings (see "Data retention" in docs/llm-bridge/operations
 ``migration_backups_keep``
     The newest schema-migration backups to keep (``bridge.sqlite3.v*.bak``).
 
-A value of 0 for one of the three ``*_days`` settings turns that rule off. A mission that is not finished
-is never touched by these rules; its controller-bookkeeping events are bounded separately by
-``BridgeStore.prune_plumbing_events``.
+A value of 0 for one of the three ``*_days`` settings turns that rule off. A mission that is not finished is
+subject only to ``events_days``, and only for diagnostic events; its controller-bookkeeping events are also
+bounded by ``BridgeStore.prune_plumbing_events``.
 
 The module imports only the standard library at import time so ``config`` can validate the table.
 """
@@ -168,7 +170,8 @@ def run_pass(
 
     Returns ``{"deleted": {category: count}, "missions": {mission_id: {category: count}}, "complete": bool,
     "cutoffs": {...}}``. ``complete`` is false when the time budget or the per-pass file limit stopped it
-    early; the controller repeats the pass shortly. Categories: ``events``, ``finished_mission_events``,
+    early; the controller repeats the pass shortly. Categories: ``events``, ``capacity_refreshes`` (thinned),
+    ``finished_mission_events``,
     ``operations``, ``managed_processes``, ``operation_logs``, ``verifier_files`` and ``migration_backups``.
     """
     moment = now or datetime.now(timezone.utc)
