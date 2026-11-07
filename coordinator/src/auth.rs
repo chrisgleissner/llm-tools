@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 pub const MIN_PASSWORD_LEN: usize = 15;
 pub const MAX_PASSWORD_LEN: usize = 256;
 pub const GLOBAL_MUTATION_BUDGET_KEY: &str = "global:mutations";
-pub const GLOBAL_MUTATION_LIMIT_PER_MINUTE: usize = 600;
+pub const DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE: usize = 600;
 
 fn argon() -> Argon2<'static> {
     // 19 MiB, t=2, p=1 (coordinator.md "Storage").

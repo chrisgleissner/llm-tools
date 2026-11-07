@@ -97,9 +97,9 @@ async fn global_mutation_budget_limits_writes_across_all_addresses_and_tokens() 
     let api = env.admin().await;
     let key = [(
         bridge_coordinator::auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(),
-        bridge_coordinator::auth::GLOBAL_MUTATION_LIMIT_PER_MINUTE,
+        bridge_coordinator::auth::DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE,
     )];
-    for _ in 0..bridge_coordinator::auth::GLOBAL_MUTATION_LIMIT_PER_MINUTE {
+    for _ in 0..bridge_coordinator::auth::DEFAULT_GLOBAL_MUTATION_LIMIT_PER_MINUTE {
         assert_eq!(env.srv.state.mutation_limiter.check(&key), None);
     }
     let response = api

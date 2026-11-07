@@ -618,7 +618,7 @@ impl FromRequestParts<St> for Authed {
                 let keys = [
                     (format!("token:{name}"), st.cfg.mutation_limit_per_token),
                     (format!("address:{address_key}"), st.cfg.mutation_limit_per_address),
-                    (auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(), auth::GLOBAL_MUTATION_LIMIT_PER_MINUTE),
+                    (auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(), st.cfg.mutation_limit_global),
                 ];
                 if let Some(retry_after) = st.mutation_limiter.check(&keys) {
                     let mut error = err(
@@ -1367,7 +1367,7 @@ fn check_address_mutation_limit(st: &St, remote: &str) -> Result<(), ApiError> {
         .unwrap_or_else(|_| "unknown".to_string());
     if let Some(retry_after) = st.mutation_limiter.check(&[
         (format!("address:{address}"), st.cfg.mutation_limit_per_address),
-        (auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(), auth::GLOBAL_MUTATION_LIMIT_PER_MINUTE),
+        (auth::GLOBAL_MUTATION_BUDGET_KEY.to_string(), st.cfg.mutation_limit_global),
     ]) {
         let mut error = err(
             StatusCode::TOO_MANY_REQUESTS,

@@ -309,7 +309,8 @@ async fn bench_coordinator_flood_memory_stays_below_64_mib() {
     let config = std::fs::read_to_string(&config_path)
         .unwrap()
         .replace("mutation_limit_per_token = 30", "mutation_limit_per_token = 1000")
-        .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 1000");
+        .replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 1000")
+        .replace("mutation_limit_global = 600", "mutation_limit_global = 1000");
     std::fs::write(config_path, config).unwrap();
     let ca = std::fs::read(dir.join("ca.pem")).unwrap();
     let tls = client_tls(&ca);

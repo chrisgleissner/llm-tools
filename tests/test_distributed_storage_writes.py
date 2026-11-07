@@ -192,7 +192,14 @@ def test_one_thousand_replicated_events_stay_within_the_write_and_growth_bounds(
 
 
 def test_one_thousand_command_round_trips_stay_within_the_write_bound(tmp_path, monkeypatch, capsys, block_dir):
-    with running_system(tmp_path, monkeypatch, capsys, allow_control=False, data_dir=block_dir / "coordinator") as system:
+    with running_system(
+        tmp_path, monkeypatch, capsys, allow_control=False, data_dir=block_dir / "coordinator",
+        coordinator_config={
+            "mutation_limit_per_token": "1500",
+            "mutation_limit_per_address": "1500",
+            "mutation_limit_global": "1500",
+        },
+    ) as system:
         store_path = system.state / "bridge.sqlite3"
         _synced(system, store_path)
         pid = system.coordinator.process.pid

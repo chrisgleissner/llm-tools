@@ -60,19 +60,19 @@ def strict_context(ca: Path) -> ssl.SSLContext:
 
 
 class Coordinator:
-    def __init__(self, data: Path) -> None:
+    def __init__(self, data: Path, config_overrides: dict[str, str] | None = None) -> None:
         self.data = data
         self.run("init", "--hostname", "localhost")
         config = data / "config.toml"
         config_text = config.read_text()
         config_text = re.sub(r'bind = ".*"', 'bind = "127.0.0.1:0"', config_text)
-        # Stress the offline queue independently of the production address budget. The Rust
-        # hardening tests exercise the default per-address limit; Mac loopback does not bind
-        # arbitrary 127/8 aliases, so this integration suite uses one stable source address.
-        # Keep reconnect churn from consuming the production per-IP connection budget while
-        # the queue test launches 16 concurrent API clients.
+        # Stress the offline queue independently of production mutation limits. Rust hardening
+        # tests exercise the defaults; this integration fixture raises only its address budget
+        # because queue tests launch 16 concurrent API clients during reconnect churn.
         config_text = config_text.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 2000")
         config_text = config_text.replace("max_connections_per_ip = 32", "max_connections_per_ip = 128")
+        for key, value in (config_overrides or {}).items():
+            config_text = re.sub(rf"(?m)^{re.escape(key)} = .*?$", f"{key} = {value}", config_text)
         config.write_text(config_text)
         self.process = subprocess.Popen([str(BINARY), "serve", "--data-dir", str(data)], stderr=subprocess.PIPE, text=True, start_new_session=True)
         line = self.process.stderr.readline()
