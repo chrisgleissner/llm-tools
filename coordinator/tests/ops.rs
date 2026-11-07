@@ -146,6 +146,8 @@ async fn backup_and_restore_round_trip() {
     assert!(err.contains("stop the coordinator"), "{err}");
     let (dir, srv) = (env.dir.clone(), env.srv);
     srv.stop().await;
+    let released_lock = ops::lock_data_dir(&dir).expect("stopped server releases its data-directory lock");
+    drop(released_lock);
     let kept = ops::restore(&dir, &out).unwrap();
     assert!(kept.file_name().unwrap().to_str().unwrap().contains(".before-restore-"));
     let db = Db::open(&db_path(&dir)).unwrap();

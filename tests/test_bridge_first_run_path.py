@@ -83,6 +83,15 @@ class Terminal:
         raise AssertionError(f"timed out waiting for {texts!r}; the screen shows:\n{screen}")
 
     def close(self) -> None:
+        # Killing a client attached to a completed mission triggers the station's
+        # client-detached hook, which launches a background `_station-gc` process.
+        # This fixture owns the whole tmux server, so remove that hook before
+        # shutdown instead of creating work that can outlive the test.
+        subprocess.run(
+            ["tmux", "-S", str(self.socket), "set-hook", "-gu", "client-detached"],
+            capture_output=True,
+            timeout=20,
+        )
         subprocess.run(["tmux", "-S", str(self.socket), "kill-server"], capture_output=True, timeout=20)
 
 
