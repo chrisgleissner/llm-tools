@@ -9,7 +9,8 @@
 
 use crate::auth;
 use crate::db::Db;
-use rand::Rng;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use rusqlite::{params, OptionalExtension};
 use std::io::{BufRead, IsTerminal};
 use std::path::Path;
@@ -67,17 +68,30 @@ impl Report {
 
 /// A random password of four groups of four characters, for example `kQ7m-Xe2p-...`.
 pub fn temporary_password() -> String {
-    let mut rng = rand::rngs::OsRng;
     let mut out = String::new();
     for group in 0..4 {
         if group > 0 {
             out.push('-');
         }
         for _ in 0..4 {
-            out.push(TEMP_ALPHABET[rng.gen_range(0..TEMP_ALPHABET.len())] as char);
+            out.push(TEMP_ALPHABET[random_index(TEMP_ALPHABET.len())] as char);
         }
     }
     out
+}
+
+/// A uniformly distributed index below `len` (at most 256) from the operating system random source.
+/// Bytes at or above the largest multiple of `len` are drawn again, so no index is more likely than another.
+fn random_index(len: usize) -> usize {
+    debug_assert!(len > 0 && len <= 256);
+    let limit = 256 - 256 % len;
+    loop {
+        let mut byte = [0u8; 1];
+        SysRng.try_fill_bytes(&mut byte).expect("operating system random source");
+        if (byte[0] as usize) < limit {
+            return byte[0] as usize % len;
+        }
+    }
 }
 
 /// Reset the administrator password. Nothing is changed unless every check passes.
