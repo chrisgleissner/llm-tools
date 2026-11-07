@@ -391,10 +391,14 @@ impl Db {
         {
             return Err(rusqlite::Error::InvalidParameterName("invalid WebAuthn challenge bounds".into()));
         }
-        self.c().execute(
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM webauthn_challenges WHERE expires_at <= ?", [now])?;
+        tx.execute(
             "INSERT INTO webauthn_challenges(id,principal_id,binding,kind,state,created_at,expires_at) VALUES(?,?,?,?,?,?,?)",
             params![id, row.principal_id, row.binding, row.kind, row.state, now, row.expires_at],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

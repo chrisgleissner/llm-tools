@@ -98,3 +98,30 @@ fn expired_challenge_cannot_be_consumed() {
     drop(db);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn new_challenge_write_prunes_expired_rows() {
+    let path = db_path();
+    let db = Db::open(&path).unwrap();
+    let first = WebauthnChallengeRow {
+        principal_id: "admin".into(),
+        binding: "browser-a".into(),
+        kind: "authentication".into(),
+        state: "{}".into(),
+        expires_at: bridge_coordinator::now() + 1,
+    };
+    db.webauthn_challenge_put("expired", &first).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+
+    let second = WebauthnChallengeRow {
+        expires_at: bridge_coordinator::now() + 300,
+        ..first
+    };
+    db.webauthn_challenge_put("active", &second).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let rows: i64 = connection.query_row("SELECT COUNT(*) FROM webauthn_challenges", [], |row| row.get(0)).unwrap();
+    assert_eq!(rows, 1, "only unexpired challenge state should remain");
+    drop(connection);
+    drop(db);
+    remove_database(&path);
+}
