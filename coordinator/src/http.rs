@@ -76,20 +76,25 @@ pub struct ApiError {
     code: &'static str,
     message: String,
     retry_after: Option<u64>,
+    correlation_id: Option<String>,
 }
 
 pub fn err(status: StatusCode, code: &'static str, message: impl Into<String>) -> ApiError {
+    let correlation_id = status.is_server_error().then(auth::random_token);
+    if let Some(id) = &correlation_id {
+        eprintln!("coordinator internal error correlation_id={id}");
+    }
     ApiError {
         status,
         code,
         message: message.into(),
         retry_after: None,
+        correlation_id,
     }
 }
 
 impl From<rusqlite::Error> for ApiError {
-    fn from(e: rusqlite::Error) -> Self {
-        eprintln!("database error: {e}");
+    fn from(_error: rusqlite::Error) -> Self {
         err(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
     }
 }
@@ -97,18 +102,26 @@ impl From<rusqlite::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status;
-        let mut r = (
-            status,
-            axum::Json(json!({
-                "type": format!("https://llm-tools.dev/problems/{}", self.code),
-                "title": "Coordinator request failed",
-                "status": status.as_u16(),
-                "detail": self.message,
-                "code": self.code,
-                "error": {"code": self.code, "message": self.message}
-            })),
-        )
-            .into_response();
+        let is_internal = status.is_server_error();
+        let code = if is_internal { "internal" } else { self.code };
+        let message = if is_internal { "internal server error" } else { &self.message };
+        let mut problem = json!({
+            "type": format!("https://llm-tools.dev/problems/{code}"),
+            "title": "Coordinator request failed",
+            "status": status.as_u16(),
+            "detail": message,
+            "code": code,
+            "error": {"code": code, "message": message}
+        });
+        if let Some(id) = &self.correlation_id {
+            problem["correlation_id"] = json!(id);
+        }
+        let mut r = (status, axum::Json(problem)).into_response();
+        if let Some(id) = self.correlation_id {
+            if let Ok(value) = id.parse::<header::HeaderValue>() {
+                r.headers_mut().insert("x-correlation-id", value);
+            }
+        }
         r.headers_mut()
             .insert(header::CONTENT_TYPE, "application/problem+json".parse().expect("static content type"));
         if let Some(s) = self.retry_after {
@@ -3421,6 +3434,26 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
 #[cfg(test)]
 mod problem_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn internal_problem_is_generic_and_has_a_correlation_id() {
+        let response = err(StatusCode::INTERNAL_SERVER_ERROR, "database", "/private/path: secret detail").into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
+        let id = response
+            .headers()
+            .get("x-correlation-id")
+            .expect("correlation header")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let problem: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(problem["type"], "https://llm-tools.dev/problems/internal");
+        assert_eq!(problem["detail"], "internal server error");
+        assert_eq!(problem["correlation_id"], id);
+        assert!(!body.windows(b"/private/path".len()).any(|part| part == b"/private/path"));
+    }
 
     #[test]
     fn internet_exposure_never_allows_minting_a_non_expiring_token() {

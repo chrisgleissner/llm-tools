@@ -352,6 +352,12 @@
           "code": {
             "type": "string"
           },
+          "correlation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "detail": {
             "type": "string"
           },

@@ -22,6 +22,8 @@ struct ProblemDetails {
     detail: String,
     code: String,
     error: ErrorDetail,
+    #[schema(required = false)]
+    correlation_id: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
