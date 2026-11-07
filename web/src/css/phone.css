@@ -36,11 +36,11 @@
   body:has(.mission-wrap) { --dock-h: 3.4rem; }
   html .shell > main:has(> .mission-wrap) { padding-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom) + var(--dock-h) + var(--sp-4)); }
   html .mission-head .head-actions { position: fixed; inset-inline: 0; inset-block-end: calc(var(--tab-h) + env(safe-area-inset-bottom)); z-index: 27; box-sizing: border-box; block-size: var(--dock-h); padding: var(--sp-1) var(--gutter); background: var(--surface-1); border-block-start: 1px solid var(--border); }
-  html .mission-session > [data-pane] { block-size: max(14rem, calc(100svh - var(--head-h) - var(--tab-h) - var(--dock-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: min-content; }
+  html .mission-session > [data-pane] { block-size: max(var(--pane-min, 14rem), calc(100svh - var(--head-h) - var(--tab-h) - var(--dock-h) - var(--mission-above, 14rem) - var(--sp-5))); min-block-size: min-content; }
 }
 
 /* 640 px tall and below: keys that cannot be used (view only) give their row to the terminal; taking control brings them back. At 568 px: the session bar is one row of
-   icon buttons (the labels stay for screen readers), the terminal keeps 6 rows, and the pane is as tall as its content, so the composer ends above the dock. */
+   icon buttons (the labels stay for screen readers), the terminal keeps 6 rows, and the pane is as tall as the space under the head (at least 12.5rem), so the composer ends above the dock. */
 @media (max-width: 47.99rem) and (min-height: 30.01rem) and (max-height: 40rem) { html .keybar:has(> .key:disabled) { display: none; } }
 @media (max-width: 47.99rem) and (min-height: 30.01rem) and (max-height: 36rem) {
   html .session-bar { flex-wrap: nowrap; padding-block: 1px; }
@@ -49,7 +49,7 @@
   html .bar-btn > .icon { display: inline; }
   html .bar-btn > span { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   html body:not([data-kb]) .session-main { min-block-size: 6.75rem; }
-  html .mission-session > [data-pane] { block-size: 12.5rem; }
+  html .mission-session { --pane-min: 12.5rem; }
   html .head-id h1 { margin-block-end: 0; }
   html .mission-answer { margin-block-start: 0; }
 }
