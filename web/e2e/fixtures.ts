@@ -16,6 +16,8 @@ export interface Coordinator {
   setupToken: () => string;
   /** Run a bridge-coordinator subcommand against this data directory; returns stdout. */
   cli: (...args: string[]) => string;
+  /** `admin reset-password` on the host, the way an SSH session would run it; `input` is what is typed or piped. */
+  resetPassword: (args: string[], input?: string) => string;
 }
 
 async function startCoordinator(): Promise<{ coord: Coordinator; stop: () => Promise<void> }> {
@@ -43,6 +45,7 @@ async function startCoordinator(): Promise<{ coord: Coordinator; stop: () => Pro
     dir: data,
     setupToken: () => readFileSync(join(data, "setup-token"), "utf8").trim(),
     cli: (...args) => execFileSync(BIN, [...args, "--data-dir", data], { encoding: "utf8" }).trim(),
+    resetPassword: (args, input = "") => execFileSync(BIN, ["admin", "reset-password", ...args, "--data-dir", data], { encoding: "utf8", input }).trim(),
   };
   return {
     coord,
