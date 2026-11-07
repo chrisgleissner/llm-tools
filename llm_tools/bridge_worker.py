@@ -507,11 +507,15 @@ class WorkerSession:
         return Message("hello", self.config.worker_id, 0, payload)
 
     def _attention_snapshot(self, store: BridgeStore, mission_id: str) -> dict[str, Any] | None:
-        """The bounded status projection of one mission (task page of one), or ``None`` when it cannot be read."""
+        """The bounded status projection of one mission (the default task page), or ``None`` when it cannot be read.
+
+        ``needs_attention`` looks for a task awaiting review in the page of tasks, so the page must hold the tasks
+        of a mission, not only the first one: with a page of one, a review of task 2 was reported as "nothing needed".
+        """
         try:
             from .bridge_monitor import project_snapshot
 
-            return dict(project_snapshot(store, mission_id, task_limit=1))
+            return dict(project_snapshot(store, mission_id))
         except Exception:  # noqa: BLE001 - observation must never stop worker replication
             return None
 

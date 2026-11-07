@@ -65,6 +65,17 @@ def test_summary_carries_task_counts_and_the_attention_of_an_awaiting_review(sta
     decode(batch.encode())  # a valid protocol message
 
 
+def test_attention_sees_an_awaiting_review_that_is_not_the_first_task(state):
+    directory, mission_id, _ = state
+    with BridgeStore(directory / "bridge.sqlite3") as store:
+        second = store.add_task(mission_id, "Second task", title="Second")
+        store.db.execute("UPDATE tasks SET status='VERIFYING' WHERE id=?", (second,))
+        store.set_mission_status(mission_id, "RUNNING")
+    summary = _session(directory).hello().payload["missions"][0]
+    assert summary["attention"] is not None and summary["attention"]["kind"] == "approval"
+    assert summary["attention"]["tasks"] == [2]
+
+
 def test_summary_of_a_finished_mission_says_nothing_is_needed(state, capsys):
     directory, mission_id, _ = state
     assert main(["cancel", "--mission", mission_id, "--yes"]) == 0
