@@ -386,3 +386,12 @@ def test_welcome_resets_replication_state_for_the_new_connection(tmp_path):
     session.handle(Message("welcome", "coordinator", 2, {"generation": 2, "protocol_version": 1, "event_cursor": 0}))
     assert session.inflight is None and session.send_not_before == 0.0 and not session.pending_pongs
     assert session.next_events() is not None
+
+
+def test_nothing_is_sent_when_caught_up_even_if_the_question_scan_is_due(tmp_path):
+    path = tmp_path / "bridge.sqlite3"
+    _seed(path, events=10)
+    clock = Clock()
+    session = _welcomed(path, clock, cursor=_all_events(path)[-1]["id"])
+    session.last_question_refresh = 0.0
+    assert session.next_events() is None and session.inflight is None
