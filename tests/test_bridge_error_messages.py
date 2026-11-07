@@ -12,6 +12,7 @@ import pytest
 
 from llm_tools import bridge, bridge_missions
 from llm_tools.bridge import main
+from tests.conftest import without_help_reference
 
 PACKAGE = Path(bridge.__file__).resolve().parent
 
@@ -33,7 +34,7 @@ def mission(tmp_path, state, capsys) -> str:
 
 def _error(capsys, *argv: str) -> str:
     assert main(list(argv)) == 2, capsys.readouterr()
-    return capsys.readouterr().err.strip()
+    return without_help_reference(capsys.readouterr().err).strip()
 
 
 def test_a_missing_prompt_file_says_what_could_not_be_read(tmp_path, state, capsys, monkeypatch) -> None:

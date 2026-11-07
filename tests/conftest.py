@@ -19,6 +19,16 @@ import pytest
 from tests import process_hygiene, state_guard
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def without_help_reference(text: str) -> str:
+    """``text`` without the final ``see: URL#CODE`` line that every llm-bridge error exit ends with.
+
+    Fails when that line is missing, so tests that compare the message also check the reference.
+    """
+    lines = text.rstrip("\n").split("\n")
+    assert lines[-1].startswith("see: https://") and "/troubleshooting.md#" in lines[-1], text
+    return "\n".join(lines[:-1]) + ("\n" if text.endswith("\n") else "")
 LOCAL_COMMANDS = {"./llm-usage", "./llm-scheduler", "./ralph-robin"}
 try:
     import coverage as _coverage

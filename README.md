@@ -57,7 +57,7 @@ If tmux is missing, or no provider is signed in, the `Next` line says what to fi
 
 To report a problem, `llm-bridge doctor --bundle` writes `llm-bridge-bundle-<UTC time>.tar.gz` (mode 0600, never overwrites; `--bundle PATH` chooses the file). It holds versions, the doctor report, the configuration, a mission and event count summary, controller health and the tail of recent logs, with tokens, e-mail addresses, private addresses, host names, prompts and task text removed and your home folder shown as `~`. Read it before you attach it to a public issue. Details: [diagnostic bundle](./docs/llm-bridge/operations.md#diagnostic-bundle-for-bug-reports).
 
-For scripts, `llm-bridge` exits 0 on success or nothing to do, 1 on a runtime failure, 2 on a usage error, 3 when a mission or task is not found or the name is ambiguous, and 4 when the mission or task is in the wrong state. With `--json` an error is `{"error": {"code", "message", "hint"}}` on standard output and every list is an object. See [command-line conventions](./docs/llm-bridge/operations.md#command-line-conventions).
+For scripts, `llm-bridge` exits 0 on success or nothing to do, 1 on a runtime failure, 2 on a usage error, 3 when a mission or task is not found or the name is ambiguous, and 4 when the mission or task is in the wrong state. With `--json` an error is `{"error": {"code", "message", "hint", "help"}}` on standard output and every list is an object. An error also ends with a `see:` line (and `help` in JSON) that points at its entry in [troubleshooting](./docs/llm-bridge/troubleshooting.md). See [command-line conventions](./docs/llm-bridge/operations.md#command-line-conventions).
 
 ## Your first Bridge mission
 
@@ -192,7 +192,7 @@ mission; older missions without saved policy keep their original prompts until
 explicitly configured. The [Bridge operations guide](./docs/llm-bridge/operations.md#provider-native-teams-and-token-spend-preference)
 covers the three preferences, provider fallback, and repeated-invocation prompt overhead.
 
-[Go deeper →](./docs/llm-bridge/operations.md)
+[User guide →](./docs/llm-bridge/guide.md) · [Go deeper →](./docs/llm-bridge/operations.md)
 
 ### Distributed use (optional)
 
@@ -317,7 +317,7 @@ No telemetry and no network listener. Quota reads use your existing provider cre
 
 ## More
 
-- Docs: [Bridge](./docs/llm-bridge/operations.md) · [llm-usage](./docs/llm-usage.md) · [llm-scheduler](./docs/llm-scheduler.md) · [ralph-robin](./docs/ralph-robin.md) · [Configuration](./docs/configuration.md) · [Reference](./docs/reference.md)
+- Docs: [Bridge user guide](./docs/llm-bridge/guide.md) · [Bridge troubleshooting](./docs/llm-bridge/troubleshooting.md) · [Bridge operations](./docs/llm-bridge/operations.md) · [llm-usage](./docs/llm-usage.md) · [llm-scheduler](./docs/llm-scheduler.md) · [ralph-robin](./docs/ralph-robin.md) · [Configuration](./docs/configuration.md) · [Reference](./docs/reference.md)
 - Needs Python 3.11+ and your provider CLIs; Bridge needs Linux and `tmux` (macOS runs the usage tools and the remote client).
 - Contributing: [small, focused PRs](./docs/reference.md#contributing).
 - License: Apache 2.0.

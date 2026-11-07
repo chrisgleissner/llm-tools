@@ -15,6 +15,7 @@ import pytest
 from llm_tools import bridge_missions, bridge, bridge_format
 from llm_tools.bridge import dispatch_console_command, main
 from llm_tools.bridge_store import SCHEMA_VERSION, BridgeStore
+from tests.conftest import without_help_reference
 
 LONG_ID = re.compile(r"[0-9a-f]{32}")
 
@@ -31,7 +32,7 @@ def state(tmp_path, monkeypatch) -> Path:
 def _run(capsys, *argv: str, code: int = 0) -> str:
     assert main(list(argv)) == code, capsys.readouterr()
     captured = capsys.readouterr()
-    return captured.out if code == 0 else captured.err
+    return captured.out if code == 0 else without_help_reference(captured.err)
 
 
 def _folder(tmp_path: Path, name: str) -> Path:

@@ -106,6 +106,8 @@ llm-sleep-soak --cycles 50 --period 90s        # 50 real suspend/wake cycles
 llm-sleep-soak --cycles 20 --period 2m --watchdog --json
 ```
 
+Use `--gap SECONDS` to set the awake time between cycles (default 15s) and `--min-lead SECONDS` to set the minimum lead before a wake is armed (default 30s).
+
 Each cycle suspends the machine, wakes it via the same verified RTC path Ralph uses, measures wake drift, scrapes the kernel log for resume errors, and records the cycle in the durable ledger. It prints a `PASS`/`FAIL` summary and exits non-zero if any cycle resumed late or logged an error — or if an earlier run left a cycle unfinished (the fingerprint of a past wedged resume).
 
 This is a **real-hardware test**: it genuinely suspends the machine and cannot run in CI. `LLM_SCHEDULER_NO_ACTUAL_SUSPEND=1` runs the whole loop in simulation (no real sleep) if you just want to see the flow.

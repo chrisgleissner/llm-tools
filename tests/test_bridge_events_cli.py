@@ -12,6 +12,7 @@ import pytest
 from llm_tools import bridge, bridge_missions
 from llm_tools.bridge import main
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import without_help_reference
 
 
 @pytest.fixture()
@@ -65,7 +66,7 @@ def test_json_keeps_raw_fields_and_still_hides_bookkeeping_unless_verbose(tmp_pa
 def test_a_rejected_command_event_records_and_shows_the_reason(tmp_path, state, capsys) -> None:
     mission = _mission(tmp_path, capsys)
     assert main(["task", "verify", "--mission", mission, "--task", "1", "--approve"]) == 4
-    error = capsys.readouterr().err.strip().removeprefix("llm-bridge: ")
+    error = without_help_reference(capsys.readouterr().err).strip().removeprefix("llm-bridge: ")
     assert error
     out, _ = _events(capsys, "--mission", mission, "--verbose")
     rejected = [line for line in out.splitlines() if "rejected" in line.lower()]

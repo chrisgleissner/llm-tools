@@ -13,6 +13,7 @@ from llm_tools import bridge, bridge_launcher as launcher, bridge_runtime, bridg
 from llm_tools.bridge import _build_parser, main
 from llm_tools.bridge_help import TOPICS, topic_text
 from llm_tools.bridge_store import BridgeStore
+from tests.conftest import without_help_reference
 
 from .test_bridge_launcher_home import Grid, prepare, run_with, set_status, start_keys
 from .test_bridge_tui_experience import full_snapshot, make_state
@@ -60,7 +61,7 @@ def test_json_mode_follows_the_legacy_flags_and_the_default(state: Path, tmp_pat
 def test_conflicting_mode_options_are_rejected_briefly_and_save_nothing(state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], extra: list[str]) -> None:
     assert main(["mission", "create", "--prompt", "work", "--cwd", str(tmp_path), "--providers", "codex", *extra]) == 2
     err = capsys.readouterr().err
-    assert "cannot be combined" in err and len(err.strip().splitlines()) == 1
+    assert "cannot be combined" in err and len(without_help_reference(err).strip().splitlines()) == 1
     assert main(["mission", "list", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["missions"] == []
 
