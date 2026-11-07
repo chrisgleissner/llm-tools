@@ -411,6 +411,7 @@
       "TokenCreated": {
         "properties": {
           "secret": {
+            "pattern": "^lbr_pat_[0-9a-f]{16}_[0-9a-f]{64}$",
             "type": "string"
           },
           "token": {

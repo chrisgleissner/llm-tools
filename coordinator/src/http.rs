@@ -1158,7 +1158,11 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
             })?,
     };
     let expires_at = (days > 0).then(|| crate::now() + (days as i64) * 86_400);
-    let secret = auth::random_token();
+    let token_id = auth::sha256_hex(&auth::random_token())[..16].to_string();
+    let token_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(auth::random_token())
+        .expect("URL-safe token generator output decodes");
+    let secret = format!("lbr_pat_{token_id}_{}", hex::encode(token_secret));
     if !st.db.token_create_scoped(name, &auth::sha256_hex(&secret), expires_at, &scopes)? {
         return Err(err(StatusCode::CONFLICT, "token-exists", "a token with this name already exists"));
     }

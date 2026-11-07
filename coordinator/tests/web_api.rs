@@ -194,16 +194,28 @@ async fn token_management_lists_metadata_and_shows_secret_only_at_creation() {
         .await;
     assert_eq!(status, 201, "{created}");
     let secret = created["secret"].as_str().expect("one-time token secret");
-    assert!(!secret.is_empty());
+    let mut token_parts = secret.split('_');
+    assert_eq!(token_parts.next(), Some("lbr"));
+    assert_eq!(token_parts.next(), Some("pat"));
+    assert_eq!(
+        token_parts.next().map(str::len),
+        Some(16),
+        "token id is visible for scanning and identification"
+    );
+    assert_eq!(token_parts.next().map(str::len), Some(64), "token secret encodes 256 random bits");
+    assert!(token_parts.next().is_none());
     assert_eq!(created["token"]["scopes"], json!(["read", "operate"]));
     assert!(created["token"]["created_at"].as_str().unwrap().ends_with('Z'));
     assert!(created["token"]["expires_at"].as_str().unwrap().ends_with('Z'));
+    let mut bearer = env.api();
+    bearer.bearer = Some(secret.to_string());
+    assert_eq!(bearer.get("/api/v1/missions").await.0, 200, "prefixed bearer token authenticates");
 
     let (status, listed) = api.get("/api/v1/tokens").await;
     assert_eq!(status, 200);
     let token = listed["tokens"].as_array().unwrap().iter().find(|t| t["name"] == "automation").unwrap();
     assert_eq!(token["scopes"], json!(["read", "operate"]));
-    assert!(token["last_used"].is_null());
+    assert!(token["last_used"].as_str().is_some_and(|value| value.ends_with('Z')));
     assert!(token.get("secret").is_none() && token.get("token_hash").is_none());
 
     let (status, revoked) = api.send(api.rb(Method::DELETE, "/api/v1/tokens/automation")).await;

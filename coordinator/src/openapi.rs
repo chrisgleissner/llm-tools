@@ -63,6 +63,7 @@ struct TokenCreate {
 #[derive(Serialize, utoipa::ToSchema)]
 struct TokenCreated {
     token: TokenInfo,
+    #[schema(pattern = "^lbr_pat_[0-9a-f]{16}_[0-9a-f]{64}$")]
     secret: String,
 }
 

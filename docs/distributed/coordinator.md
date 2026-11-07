@@ -105,7 +105,9 @@ worker protocol is `protocol.md`.
   constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
   installs administrator-provided files.
 - `bridge-coordinator token create NAME [--scope SCOPE]... [--expires-days N]` prints an API
-  token once; only its SHA-256 hash and grants are stored, and `token revoke NAME` revokes it.
+  token once in the identifiable format `lbr_pat_<16-lowercase-hex-id>_<64-hex-character-secret>`; only its
+  SHA-256 hash and grants are stored, and `token revoke NAME` revokes it. Pre-prefix tokens
+  remain accepted until rotated.
   New tokens default to `read`; repeat `--scope` for `operate`, `terminal:view`, `terminal:write`
   or `admin`. `admin` grants every scope. Tokens expire after 90 days by default, and configured
   `max_token_lifetime_days` caps explicit expiry values; `--expires-days 0` creates a token with
