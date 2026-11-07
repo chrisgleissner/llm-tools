@@ -158,7 +158,7 @@ async fn command_round_trip() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let (mut fw, _) = Fw::connect_settled(&env, &token, "wid1", 0).await;
 
     let (st, entry) = api.post("/api/v1/commands", submit("req-1")).await;
     assert_eq!(st, 202, "{entry}");
@@ -237,6 +237,15 @@ async fn redelivery_after_reconnect_and_generation() {
     assert_eq!(cmd["generation"], 2);
     b.ws.close(None).await.ok();
     drop(b);
+    // The coordinator notices the close asynchronously. A command submitted before it has unregistered the
+    // connection is queued on the dying connection and journaled as `sent`, not `pending`.
+    for _ in 0..400 {
+        if !env.srv.state.hub.online("w1") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(!env.srv.state.hub.online("w1"), "the coordinator never noticed the closed connection");
     // offline: the command is journaled and queued
     assert_eq!(api.post("/api/v1/commands", submit("req-off")).await.0, 202);
     let (st, e) = api.get("/api/v1/commands/req-off").await;
@@ -355,7 +364,7 @@ async fn request_id_idempotence_and_refusals() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let (mut fw, _) = Fw::connect_settled(&env, &token, "wid1", 0).await;
     let (s1, e1) = api.post("/api/v1/commands", submit("same")).await;
     let (s2, e2) = api.post("/api/v1/commands", submit("same")).await;
     assert_eq!((s1, s2), (202, 202));

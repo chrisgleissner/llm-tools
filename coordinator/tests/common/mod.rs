@@ -255,6 +255,18 @@ impl Fw {
         (fw, welcome)
     }
 
+    /// Like `connect`, but also waits until the connection is past the coordinator's resend pass.
+    /// After the welcome, the coordinator redelivers every unfinished command. A command submitted
+    /// over HTTP before that pass finishes would reach the worker twice: once through the live queue
+    /// and once through the pass (documented at-least-once delivery). Use this when the test submits a
+    /// command right after connecting and does not itself test redelivery; use `connect` for tests
+    /// that expect the redelivered commands.
+    pub async fn connect_settled(env: &Env, token: &str, worker_id: &str, cursor: u64) -> (Fw, Value) {
+        let (mut fw, welcome) = Fw::connect(env, token, worker_id, cursor).await;
+        fw.barrier().await;
+        (fw, welcome)
+    }
+
     pub async fn send_raw(&mut self, text: String) {
         self.ws.send(WsMsg::Text(text.into())).await.unwrap();
     }
