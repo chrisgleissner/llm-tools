@@ -8,6 +8,7 @@ therefore kept about five strings per run for as long as it lived.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -18,10 +19,26 @@ from llm_tools import bridge_runtime, common, fileio
 from llm_tools.bridge_runtime import BridgeMissionHooks, run_controller
 from llm_tools.bridge_store import BridgeStore
 
+def _plain_pathlib_interns() -> bool:
+    """Whether this interpreter's pathlib keeps every path component as an immortal interned string.
+
+    CPython 3.12 makes interned strings immortal, and its pathlib interned each component when
+    parsing. Later 3.12 patch releases (3.12.16 on the CI runners, for example) no longer intern
+    in pathlib, so the leak and the measurements below exist only on the earlier ones (3.12.3 here).
+    """
+    if not hasattr(sys, "getunicodeinternedsize") or sys.version_info[:2] != (3, 12):
+        return False
+    before = sys.getunicodeinternedsize()
+    for number in range(8):
+        str(Path("/", f"pathlib-intern-probe-{os.getpid()}-{number}"))
+    return sys.getunicodeinternedsize() - before >= 8
+
+
 needs_interned_count = pytest.mark.skipif(
-    not hasattr(sys, "getunicodeinternedsize") or sys.version_info[:2] != (3, 12),
-    reason="interned strings are immortal, and countable, only on CPython 3.12",
+    not _plain_pathlib_interns(),
+    reason="only CPython 3.12 releases whose pathlib interns path components keep run-specific names forever",
 )
+needs_proc = pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads process state from /proc (Linux only)")
 
 
 class _NoWorker:
@@ -72,9 +89,8 @@ def test_run_path_behaves_like_path(tmp_path: Path) -> None:
     assert common.RunPath("/").parts == ("/",)
 
 
+@needs_proc
 def test_proc_files_are_read_by_string_name() -> None:
-    import os
-
     assert fileio.read_proc_text(f"/proc/{os.getpid()}/stat").startswith(f"{os.getpid()} ")
 
 
@@ -109,6 +125,7 @@ def _start_controller_with_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 @needs_interned_count
+@needs_proc
 def test_controller_keeps_no_strings_per_provider_run(tmp_path, monkeypatch) -> None:
     """Real controller code path: iteration directory, provider pid, verifier files and log pruning, 24 runs.
 
