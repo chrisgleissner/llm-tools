@@ -56,6 +56,7 @@ export const screens: ScreenDef[] = [
   { name: "missions-finished-open", mock: IN, path: "/missions", run: async (p) => {
     await p.locator('[data-section="finished"] summary').click();
     await expect(p.locator('[data-section="finished"] [data-entity^="mission:"]')).toHaveCount(3);
+    await p.evaluate(() => window.scrollTo(0, 0)); // opening the group scrolls the page by an amount that depends on timing; the capture starts at the top
   } },
   { name: "missions-provider-question", mock: { ...IN, providerQuestion: true }, path: "/missions", run: async (p) => {
     const row = p.locator(`[data-entity="mission:alpha/${MISSIONS[0]!.mission.id}"]`);

@@ -433,7 +433,7 @@ export function missionRow(item: Item, o: RowOptions): HTMLElement {
       h("span", { class: "cell nowrap", "data-cell": "worker", title: e.worker }, e.worker),
       h("span", { class: "cell num nowrap", "data-cell": "updated", title: "Time since the last update" }, updated))
     : h("div", { class: "row-sub" },
-      ...reasons.map((line) => h("span", { class: "row-reason clamp-2", title: line, style: item.state.id === "needs-approval" ? "-webkit-line-clamp:1;flex-basis:100%" : null }, line)),
+      ...reasons.map((line) => h("span", { class: item.state.id === "needs-approval" ? "row-reason one" : "row-reason clamp-2", title: line }, line)),
       h("span", { class: "row-meta" }, ...[providerLabel(e), e.worker, updated ? `updated ${updated}` : ""].filter(Boolean).map((part) => h("span", { class: "nowrap" }, part))));
   const pill = h("span", { class: "pill", "data-state": item.state.id, "data-tier": item.state.tier }, icon(item.state.icon, 16), item.state.label);
   const actions = o.actions ? inlineActions(item, () => o.done?.(item)) : [];
