@@ -33,6 +33,8 @@ python scripts/bridge_soak.py --duration 86400                                  
 python scripts/bridge_chaos.py --list                     # faults with their expected outcomes
 python scripts/bridge_chaos.py                            # all faults, JSON report in chaos-report.json
 python scripts/bridge_chaos.py --fault disk-full --fault ws-dropped-frames
+python scripts/bridge_chaos.py --fault slow-link                         # DOG-019, pull request size (180 s under load)
+python scripts/bridge_chaos.py --fault slow-link --slow-link-seconds 1800   # DOG-019, the full 30-minute case
 ```
 
 The binary is `--coordinator-bin`, then `BRIDGE_COORDINATOR_BIN`, then
@@ -296,6 +298,7 @@ outcome below. All of them require, as PRD-008 does:
 | `clock-jump` | The coordinator runs with `LD_PRELOAD=chaos_clock_shim.so`; the wall clock is moved forward one hour, back two hours, then to real time while traffic continues. A reconnect after each step shows the shifted `last_seen`. | The coordinator stays up and keeps its worker connections (liveness uses monotonic time). Nothing lost or applied twice, event order by id intact, and the stamps the coordinator writes follow its shifted clock. | `[clock-jump]` |
 | `ws-slow-frames` | `scripts/dist_ws_proxy.py` terminates TLS on both sides and holds every data frame for 250 ms in each direction. | Commands finish with a round trip of at least the injected delay, nothing lost or duplicated, events replicate exactly, and the worker does not reconnect. | `[ws-slow-frames]` |
 | `ws-dropped-frames` | The same proxy swallows one `command` frame (coordinator to worker), one `command.result` frame (worker to coordinator) and one `events` batch. | A lost command or result leaves the command unfinished (`sent` or `acked`), never `done`, and the effect is absent (lost command) or present once (lost result). After the connection is renewed the command finishes and has its effect exactly once. A lost event batch is detected by the next batch (`events.nack`) and resent without a reconnect. | `[ws-dropped-frames]` |
+| `slow-link` | A worker connects through `scripts/dist_ws_proxy.py` shaped to a 300 ms round trip (150 ms each way, plus or minus 50 ms of jitter) and 1 Mbit/s in each direction. A background mission with a tmux station keeps producing output; the harness reads a 450 KB command result every 12 s, opens a remote terminal every 30 s and sends a `task.add` every 10 s for the whole run (see Slow link below). | The worker keeps its single connection for the whole run: zero reconnects according to the proxy, the coordinator's generation counter and the worker's own log and audit. Every terminal shows its first screen in under 3 s. Every 450 KB result arrives. The measured round trip matches the profile (median within 25% of 300 ms) and the link carries no more than 1.15 times its rate. No command is lost or applied twice and events replicate exactly. | `[slow-link]`, `test_a_*` and `test_slow_link_*` |
 | `db-corrupt-page` | The coordinator is stopped after a backup, the b-tree header of every page that holds one command is overwritten (the file then fails `PRAGMA integrity_check`), and the coordinator is started again. | The coordinator never serves a row from a corrupt page as intact: it refuses to start with a non-zero exit, or it answers the affected request with an error. Restoring the backup (the procedure in `install.md`) brings it back, the workers reconnect, and no command or event is lost. | `[db-corrupt-page]` |
 
 The tests are in `tests/test_distributed_chaos.py`: one `test_fault_meets_its_declared_outcome` case per
@@ -312,6 +315,8 @@ soak with two workers and four missions.
   throw-away certificate (made with `openssl`, valid for 127.0.0.1 only), and the proxy verifies the
   coordinator's CA as a normal worker would. It parses the WebSocket frames of the worker protocol, so it
   can hold or drop a frame by direction and message `type`. No root, namespace or `iptables` is used.
+- Slow link. `scripts/dist_ws_proxy.py` can also shape the link (`LinkProfile`, `WsFrameProxy(link=...)`) without root or
+  `tc netem`. See Slow link (DOG-019) below.
 - Disk full. A loopback device or a small file system needs root. The harness instead limits the file
   size of the running coordinator with `RLIMIT_FSIZE` (`resource.prlimit`, allowed for a process of the
   same user). Linux checks the limit against the write offset, so lowering it below the current database
@@ -336,6 +341,110 @@ soak with two workers and four missions.
   the worker up to the id the coordinator had acknowledged is on the coordinator (none lost), and every event
   on the coordinator is in the worker's database read after the coordinator was read (none invented), with no
   id repeated. Events written and replicated while the check runs are legitimate.
+
+### Slow link (DOG-019)
+
+**What it protects.** Before PR #53 the worker's WebSocket sends used the socket's receive timeout, 0.5 s, because the worker
+polls with `receive_text(timeout=0.5)` and `send_text` used the same socket. A write that blocked for longer than 0.5 s raised
+`TimeoutError` and the worker dropped the connection and reconnected, every few seconds, on a slow wireless link. Remote
+terminals could not open. PR #53 gave sends their own 30 s timeout (`bridge_ws.SEND_TIMEOUT_SECONDS`).
+
+**How the link is shaped.** `LinkProfile` states the link: round trip (default 300 ms), jitter (50 ms each way), bandwidth
+(1 Mbit/s each direction), and how many round trips a new connection costs (3: TCP, TLS 1.3 and the upgrade request). The proxy
+terminates TLS on both sides and relays WebSocket frames, as for the other `ws-*` faults, with three additions:
+
+- Bandwidth: a token bucket per direction (`TokenBucket`, 2 KiB deep), shared by every connection that goes through the proxy,
+  so the control connection and the terminal connections compete for the same 125 KB/s. The proxy takes bytes from the sender's
+  socket no faster than the bucket allows (`_PacedSocket`). The sender's socket buffers therefore fill and its writes block, as
+  on a real bottleneck. This is what makes a large write slow; delaying frames alone would not. The listening socket asks for a
+  32 KiB receive buffer and a 1380-byte maximum segment, so the worker's send buffer is about 46 KB, like a real path and unlike the
+  64 KiB segments and megabyte buffers of the loopback interface. The rate is applied to decrypted frame bytes: TLS record
+  overhead (about 22 bytes per record) is not counted.
+- Delay: each frame is delivered `rtt / 2` plus a uniform jitter of at most 50 ms later (`JitterDelay`), in order: a frame is never
+  released before the one in front of it. Delivery runs on its own thread, so one frame's delay does not stop the next frame from
+  being read. A new connection waits `setup_round_trips * rtt` (0.9 s) before the first byte is served, because the TLS handshake
+  and the upgrade request are not frames and would otherwise cost nothing.
+- Determinism: the delays come from `random.Random(seed)`, one stream per direction, and the bucket and the delay line are pure
+  functions of the call sequence (the time is an argument), so the unit tests need no sleeping. A live run is as repeatable as
+  the host's scheduling allows.
+
+**What the case does** (`fault_slow_link`, one worker behind the shaped proxy, the release coordinator, real tmux):
+
+1. A background-mode mission with the fake provider (output only, 30 lines per run) gets 400 queued tasks and 600 padded events,
+   and starts. The case waits until the worker's event backlog has crossed the link.
+2. For `--slow-link-seconds` the harness runs four activities at once: a remote terminal is opened through
+   `GET /api/v1/terminal` and timed from the upgrade request to the first output frame (every 30 s); `mission.events` with
+   `limit=500` is read, a result of about 450 KB that needs 3.6 s of the uplink on its own (every 12 s); `mission.list` is read
+   (every 5 s); and a `task.add` with a unique request ID is sent (every 10 s). The worker also replicates events (at most 20 KiB/s)
+   and the mission controller keeps writing them. Terminal opens and large reads take turns, because a terminal opened
+   during a 3.6 s transfer would be slow by the link's arithmetic, not by a defect.
+3. The case stops at the first reconnect. Otherwise, after the run, it applies the criteria below, sends five more commands,
+   checks exactly-once delivery and exact event replication (heartbeats and superseded capacity refreshes are not expected on
+   the coordinator).
+
+**Pass criteria** (`slow_link_problems`; each is a failure line in the report):
+
+| Check | Rule |
+|---|---|
+| Zero reconnects | Four counts are all zero: the proxy's accepted upgrades of `/api/v1/worker/connect` after the first, the increase of the worker's generation on the coordinator (`GET /api/v1/workers`), and the worker's own `worker connection ended` log lines and `connection.ended` audit entries. A difference between the counts is itself a finding. |
+| Terminal opens | Every terminal shows its first `o` frame in under 3 s (`SlowLinkSettings.terminal_limit`) and none fails to open. |
+| Large results | Every 450 KB `mission.events` result reaches `done`, and at least one was read. |
+| The link is as stated | At least 3 worker pings were paired with the coordinator's pongs; the median round trip, from the proxy reading the ping to releasing the pong, is within 25% of 300 ms. In neither direction does the mean over busy seconds (seconds with at least half the link rate) exceed 1.15 times 1 Mbit/s, and the uplink is busy for at least 3 s. A pass on a link that was never slow or never busy would not show that a blocked write is survived. |
+| Exactly once, events | The same checks as the other faults. |
+
+**Sizes.**
+
+| Where | Size |
+|---|---|
+| Pull requests (`soak-chaos` job, `bridge_chaos.py`, which runs every fault) | 180 s under load, plus about 40 s of set-up and settling: 226 s in total in the measured run |
+| `tests/test_distributed_chaos.py` | 40 s under load |
+| Nightly (`slow-link-30min` in `soak-nightly.yml`) | `--slow-link-seconds 1800`: 30 minutes under load, 1842 s (30.7 minutes) in total in the measured run |
+
+The job needs `tmux` (the workflow installs it). Without it the terminal cannot open and the case fails.
+
+**Measured figures.** Release coordinator of this branch, Linux 8-core host that was running other jobs (load average 23 at the
+start of the 30-minute run, 28 at the start of the 3-minute run). Both runs passed.
+
+| | 180 s run (pull request size) | 1800 s run (nightly size) |
+|---|---|---|
+| Reconnects (proxy, coordinator generation, worker log, worker audit) | 0, 0, 0, 0 | 0, 0, 0, 0 |
+| Control connections / terminal connections seen by the proxy | 1 / 6 | 1 / 54 |
+| Terminal first output | 6 opens, 1.30 to 1.48 s | 54 opens, 1.21 to 1.47 s (mean 1.33 s) |
+| 450 KB results | 11, slowest 5.69 s | 108, slowest 4.73 s |
+| `mission.list` round trip (includes waiting behind a transfer) | median 381 ms, worst 1.94 s | median 367 ms, worst 2.18 s |
+| One-way delay, up / down (mean, range) | 149 / 150 ms, 100 to 200 ms | 150.7 / 150.0 ms, 100.0 to 200.0 ms |
+| Ping round trip as the proxy saw it (median, p90, count) | 329 ms, 390 ms, 127 | 328 ms, 379 ms, 729 |
+| Uplink rate: peak over any second, mean over busy seconds | 1.016 Mbit/s, 0.925 Mbit/s (40 busy s) | 1.016 Mbit/s, 0.928 Mbit/s (390 busy s) |
+| Bytes up / down | 5.7 MB / 38 KB | 51.2 MB / 301 KB |
+| Commands | 23 applied | 185 applied |
+| Replicated events | 1755 | 4561 |
+| Duration | 226 s | 1842 s |
+
+The ping round trip is above 300 ms because it includes the serialisation of the ping and the pong behind other traffic. The
+downlink carries little (command requests and acknowledgements), so its busy-second figures are zero.
+
+**Bounds.** Reconnects: 0 (`SlowLinkSettings.reconnects_allowed`). Terminal open: 3 s (the requirement; measured 1.2 to 1.5 s, of which
+0.9 s is the connection set-up the profile charges and the rest is `terminal.open` crossing the link, tmux starting its control client and the first frame crossing back). Round trip: 300 ms
+plus or minus 25%. Bandwidth: 1.15 times the limit.
+
+**The case catches the original defect.** `bridge_ws.py` was changed back to the pre-PR #53 `_send` (no `send_timeout`; the write
+inherits the 0.5 s receive timeout) and the case run again. With 90 s requested, the case stopped itself after 42 s with 9 reconnects, and all four counts agreed:
+proxy 9, coordinator generation 9, worker log 9, worker audit 9. The first reconnect came about 15 s into the run, during
+the first 450 KB result, which never arrived (the command stayed `acked`). The case failed with "the worker reconnected 1 time(s) after
+15s; the run was stopped early; a large command result did not arrive over the slow link". With the fix in place the same
+case holds one connection. The change to `bridge_ws.py` was removed again afterwards.
+
+Unit tests of the shaper are in `tests/test_distributed_soak_harness.py`: the token bucket (burst, rate, refill, debt of an earlier
+caller), the delay line (seeded, bounded, centred, in order), the paced socket (rate within tolerance, wakes on close) and the proxy
+(set-up cost, round trip per profile, bulk bandwidth, a sender blocked while the link drains).
+`test_a_send_timeout_of_half_a_second_fails_on_the_slow_link_and_the_default_survives` is the same defect at unit level: a client with
+a 0.5 s send timeout cannot send a 450 KB frame through the proxy and one with the default can; the same send through an unshaped
+proxy succeeds with either.
+
+**Limits.** The 1 Mbit/s and the delay are set per direction at the proxy, not in the kernel: the worker and the coordinator
+see ordinary loopback TCP on both sides of the proxy, and the proxy has no packet loss, reordering or retransmission timeouts.
+A real weak wireless link adds those, so this case covers the blocked-write defect (a write that takes seconds) and not loss
+recovery.
 
 ### Behaviour observed on this branch
 

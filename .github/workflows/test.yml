@@ -183,12 +183,13 @@ jobs:
   # PRD-007 soak (scaled down) and PRD-008 fault injection against the release coordinator. The soak
   # here runs 5 minutes with 3 workers and 10 missions: the same harness as the nightly 30-minute and
   # long runs (soak-nightly.yml), small enough to give a result within a pull request's wait. Fault
-  # injection runs every fault of scripts/bridge_chaos.py. docs/distributed/soak-and-chaos.md has the
-  # pass criteria, the bounds and the reason for these sizes. Linux only: it reads /proc.
+  # injection runs every fault of scripts/bridge_chaos.py, including slow-link (DOG-019: a 300 ms RTT,
+  # 1 Mbit/s link held for 180 s; the nightly run holds it for 30 minutes). docs/distributed/soak-and-chaos.md
+  # has the pass criteria, the bounds and the reason for these sizes. Linux only: it reads /proc.
   soak-chaos:
     name: distributed soak (5 min) and fault injection
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     permissions:
       contents: read
     steps:
@@ -203,6 +204,11 @@ jobs:
         with:
           workspaces: coordinator
           shared-key: x86-64-linux-release
+      - name: Install tmux (the slow-link case opens remote terminals)
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tmux
+          tmux -V
       - name: Build the release coordinator
         run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
       - name: Soak, scaled down (5 minutes, 3 workers, 10 missions)
