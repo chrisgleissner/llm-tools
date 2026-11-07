@@ -5,14 +5,15 @@ import type { Page } from "@playwright/test";
 import { DENSE_APPROVAL_URL, DENSE_CALM_URL, DENSE_MISSIONS } from "../mock";
 import { evidence } from "./evidence";
 import { expect, uxr } from "./gate";
-import { closeKeyboard, insideFold, isPhone, MISSION_URL, openApp, openKeyboard, openTab, pillsIn, viewport } from "./harness";
+import { type App, closeKeyboard, insideFold, isPhone, MISSION_URL, openApp, openKeyboard, openTab, pillsIn, viewport } from "./harness";
 
 const ALL_MISSION_WPS = ["WP-0", "WP-1", "WP-2", "WP-3"] as const;
 const composerField = (page: Page) => page.locator("[data-composer]").locator("textarea, input[type=text], input:not([type])").first();
 const missionUrl = (index: number) => `/missions/${DENSE_MISSIONS[index]!.worker}/${DENSE_MISSIONS[index]!.mission.id}`;
 
-async function showTasks(page: Page): Promise<void> {
-  if (!(await page.locator('[data-entity^="task:"]').first().isVisible().catch(() => false))) await openTab(page, "Tasks");
+/** Make the task rows visible (a tab on phones) and, when `app` is given, restart the interaction count after the tab switch. */
+async function showTasks(page: Page, app?: App): Promise<void> {
+  if (!(await page.locator('[data-entity^="task:"]').first().isVisible().catch(() => false))) await openTab(page, "Tasks", app?.ix);
   await page.locator('[data-entity^="task:"]').first().waitFor();
 }
 
@@ -200,7 +201,7 @@ uxr({ t: "T15", uxr: ["UXR-009"], needs: [...ALL_MISSION_WPS] }, "activity shows
 // ---- T21: add task and steer ---------------------------------------------------------------------------------------
 uxr({ t: "T21", uxr: ["UXR-020"], needs: [...ALL_MISSION_WPS] }, "Add task takes at most 3 interactions plus typing and posts task.add", async ({ page }, info) => {
   const app = await openApp(page, { auth: "in" }, MISSION_URL);
-  await showTasks(page);
+  await showTasks(page, app);
   await page.getByRole("button", { name: /add task/i }).click();
   await expect.poll(() => page.evaluate(() => /^(textarea|input)$/i.test(document.activeElement?.tagName ?? "")), { message: "the new-task field takes focus" }).toBe(true);
   await page.keyboard.type("Write the migration guide");

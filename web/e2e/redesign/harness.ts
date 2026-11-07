@@ -85,13 +85,17 @@ export async function insideFold(el: Locator, line: number): Promise<boolean> {
 /** Rendered pill elements of one entity container. */
 export const pillsIn = (root: Locator): Locator => root.locator(".pill");
 
-/** Open a segmented tab of the mission page ("Tasks", "Activity", "Session") whatever role the control has. */
-export async function openTab(page: Page, name: "Session" | "Tasks" | "Activity"): Promise<void> {
+/**
+ * Open a segmented tab of the mission page ("Tasks", "Activity", "Session") whatever role the control has. On phones the Tasks and
+ * Activity views are tabs; pass the interaction counter to start counting after the switch (the task under test begins there).
+ */
+export async function openTab(page: Page, name: "Session" | "Tasks" | "Activity", ix?: Interactions): Promise<void> {
   const pattern = new RegExp(`^${name}\\b`, "i");
   for (const role of ["tab", "button", "link"] as const) {
     const control = page.getByRole(role, { name: pattern }).first();
     if (await control.isVisible().catch(() => false)) {
       await control.click();
+      await ix?.reset(); // switching to a view is not part of the task being counted
       return;
     }
   }
@@ -136,6 +140,71 @@ export async function axeViolations(page: Page, label: string): Promise<string[]
   }
   await page.evaluate(() => document.documentElement.removeAttribute("data-theme"));
   return out;
+}
+
+/**
+ * What breaks reflow at the current viewport (T32): horizontal scroll, text clipped with no revealable full text, overlapping
+ * targets, targets under a fixed bar when centred, and a page end that cannot scroll its last element above the bottom bar.
+ * Visually hidden elements (.sr-only and the clip pattern) are not text and are never reported.
+ */
+export async function reflowProblems(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    /** The standard visually-hidden pattern (.sr-only): a box of at most 1px, clipped. It is not visible, so it cannot be clipped text. */
+    const visuallyHidden = (el: Element): boolean => {
+      for (let e: Element | null = el; e && e !== document.body; e = e.parentElement) {
+        if ((e as HTMLElement).classList?.contains("sr-only")) return true;
+        const r = e.getBoundingClientRect();
+        const s = getComputedStyle(e);
+        const clipped = /rect\(\s*0(px)?[ ,]+0(px)?[ ,]+0(px)?[ ,]+0(px)?\s*\)/.test(s.clip) || /inset\(\s*(50|100)%/.test(s.clipPath);
+        if (r.width <= 1 && r.height <= 1 && (clipped || s.overflow === "hidden")) return true;
+      }
+      return false;
+    };
+    if (document.documentElement.scrollWidth > window.innerWidth + 1) out.push(`horizontal scroll: ${document.documentElement.scrollWidth} > ${window.innerWidth}`);
+    for (const el of document.querySelectorAll<HTMLElement>("body *")) {
+      if (el.closest(".xterm, pre, [data-scroll-x], .diff, [hidden]") || el.offsetWidth === 0 || visuallyHidden(el)) continue;
+      const s = getComputedStyle(el);
+      const clamp = s.getPropertyValue("-webkit-line-clamp");
+      const clipsX = s.overflowX !== "visible" && el.scrollWidth > el.clientWidth + 1;
+      const clipsY = s.overflowY === "hidden" && el.scrollHeight > el.clientHeight + 1 && (!clamp || clamp === "none");
+      if ((clipsX || clipsY) && !el.closest("[title]") && (s.textOverflow === "ellipsis" || clipsY) && (el.textContent ?? "").trim().length > 0) out.push(`clipped without a revealable full text: ${el.tagName.toLowerCase()}.${el.className}`);
+    }
+    const fixedAncestor = (e: Element): Element | null => { for (let a: Element | null = e; a && a !== document.body; a = a.parentElement) { const p = getComputedStyle(a).position; if (p === "fixed" || p === "sticky") return a; } return null; };
+    const label = (e: Element) => `${e.tagName.toLowerCase()} "${(e.textContent ?? "").trim().slice(0, 16)}"`;
+    const targets = [...document.querySelectorAll<HTMLElement>("button, a[href], input, select, textarea")].filter((e) => e.offsetWidth > 0 && !e.closest("[hidden], .xterm") && !visuallyHidden(e));
+    // 1. Targets that scroll with the page must not overlap each other (measured in the page's own flow).
+    const flow = targets.filter((e) => !fixedAncestor(e)).map((e) => ({ e, r: e.getBoundingClientRect() }));
+    for (let i = 0; i < flow.length; i += 1) for (let j = i + 1; j < flow.length; j += 1) {
+      const a = flow[i]!, b = flow[j]!;
+      if (a.e.contains(b.e) || b.e.contains(a.e)) continue;
+      const w = Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left), h = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top);
+      if (w > 4 && h > 4) out.push(`overlap: ${label(a.e)} and ${label(b.e)}`);
+    }
+    // 2. Every scrolling target, centred in the viewport, must not sit under a fixed bar. Covered while scrolled elsewhere is not a failure.
+    const bars = targets.length ? [...document.querySelectorAll<HTMLElement>("body *")].filter((e) => { const p = getComputedStyle(e).position; return (p === "fixed" || p === "sticky") && e.offsetWidth > window.innerWidth * 0.5 && e.offsetHeight > 0 && !e.closest("[hidden], dialog"); }) : [];
+    const barRects = () => bars.map((b) => b.getBoundingClientRect());
+    const free = window.innerHeight - barRects().reduce((n, r) => (r.top < window.innerHeight / 2 ? Math.max(n, r.bottom) : n), 0) - barRects().reduce((n, r) => (r.top >= window.innerHeight / 2 ? Math.max(n, window.innerHeight - r.top) : n), 0);
+    for (const e of flow.map((f) => f.e)) {
+      if (bars.some((b) => b.contains(e))) continue;
+      e.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" as ScrollBehavior });
+      const r = e.getBoundingClientRect();
+      if (r.height > free) continue; // taller than the space between the bars: cannot avoid them at this zoom
+      const hit = barRects().find((b) => b.left < r.right && b.right > r.left && b.top < r.bottom && b.bottom > r.top);
+      if (hit) out.push(`${label(e)} is under a fixed bar even when centred in the viewport`);
+    }
+    // 3. The page has enough room at its end for the last element to scroll fully above the bottom bar.
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    const bottomBars = barRects().filter((r) => r.top > window.innerHeight / 2);
+    if (bottomBars.length) {
+      const barTop = Math.min(...bottomBars.map((r) => r.top));
+      const main = document.querySelector("main") ?? document.body;
+      const last = Math.max(0, ...[...main.querySelectorAll<HTMLElement>("*")].filter((e) => e.offsetWidth > 0 && !fixedAncestor(e) && !visuallyHidden(e) && getComputedStyle(e).position !== "absolute").map((e) => e.getBoundingClientRect().bottom));
+      if (last > barTop + 1) out.push(`the last element ends at ${Math.round(last)}px, under the bottom bar (top ${Math.round(barTop)}px) even at the end of the page: add bottom padding`);
+    }
+    window.scrollTo(0, 0);
+    return out;
+  });
 }
 
 export { expect };

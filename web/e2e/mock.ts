@@ -158,7 +158,6 @@ export const LONG_MISSIONS = [
 
 /** Answers of the task evidence reads, both through /commands and the task resource routes. */
 const TASK_READS: Record<string, unknown> = {
-  "task.show": { task: { id: 2, ordinal: 2, title: "Implement the new tokenizer", status: "VERIFYING", prompt: "Implement the new tokenizer and keep the golden files unchanged." }, verification: { passed: true, command: "cargo test", exit_code: 0, summary: "128 passed, 0 failed" } },
   "task.diff": { available: true, text: DIFF_TEXT, diff: DIFF_TEXT },
   "task.output": { available: true, text: OUTPUT_TAIL.join("\n"), output: OUTPUT_TAIL.join("\n"), lines: OUTPUT_TAIL },
 };
@@ -177,6 +176,28 @@ const TASKS = [
   { id: 5, ordinal: 5, title: "Write the changelog entry", status: "QUEUED", priority: 0, revision: 1 },
   { id: 6, ordinal: 6, title: "Tag the release", status: "PAUSED", priority: 0, revision: 2 },
 ];
+
+interface TaskLite { id: number; ordinal: number; title: string; status: string; priority: number; revision: number }
+const TASK_LABELS: Record<string, string> = { COMPLETED: "completed", RUNNING: "running", QUEUED: "queued", VERIFYING: "verifying", FAILED: "failed", BLOCKED: "blocked", PAUSED: "paused", CANCELLED: "cancelled" };
+/** A task as `task.show` and `task.list` report it (the Python store's task dictionary): the verifier result is an entry of `evidence`. */
+function fullTask(t: TaskLite, missionId: string): Record<string, unknown> {
+  const evidence: Array<Record<string, unknown>> = [];
+  if (t.status === "VERIFYING" || t.status === "COMPLETED") evidence.push({ text: "cargo test exited 0: 128 passed, 0 failed", at: iso(600), source: "verifier", revision: t.revision, exit_code: 0 });
+  if (t.status === "COMPLETED") evidence.push({ text: "operator approved", at: iso(300), source: "approval", revision: t.revision });
+  return { ...t, mission_id: missionId, original_prompt: `${t.title} in detail`, prompt: `${t.title} in detail`, ordering: t.ordinal * 10, acceptance: [], evidence, pending: {}, origin: "operator", proposal_status: "NONE", status_label: TASK_LABELS[t.status] ?? t.status.toLowerCase(), depends_on: [], created_at: iso(86400), updated_at: iso(600) };
+}
+const countsOf = (tasks: TaskLite[]): Record<string, number> => tasks.reduce<Record<string, number>>((n, t) => ({ ...n, [t.status]: (n[t.status] ?? 0) + 1 }), {});
+const task = (ordinal: number, title: string, status: string): TaskLite => ({ id: ordinal, ordinal, title, status, priority: 0, revision: 2 });
+/** A mission's own task list: one with something for the operator has the full set; the others follow their status. */
+function tasksOf(status: string, needs: boolean): TaskLite[] {
+  if (needs) return TASKS;
+  if (status === "COMPLETED") return [task(1, "Plan the change", "COMPLETED"), task(2, "Write the changelog entry", "COMPLETED")];
+  if (status === "CREATED") return [task(1, "Plan the change", "QUEUED"), task(2, "Write the changelog entry", "QUEUED")];
+  if (status === "FAILED") return [task(1, "Plan the change", "COMPLETED"), task(2, "Update the golden files", "FAILED")];
+  if (status === "PAUSED") return [task(1, "Plan the change", "COMPLETED"), task(2, "Implement the new tokenizer", "PAUSED"), task(3, "Write the changelog entry", "QUEUED")];
+  if (status === "STOPPED") return [task(1, "Plan the change", "COMPLETED"), task(2, "Implement the new tokenizer", "CANCELLED")];
+  return CALM_TASKS;
+}
 
 const EVENTS = [
   ["mission-created", null, { name: "Refactor the parser" }],
@@ -388,7 +409,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (missionResource && method === "GET") {
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
       const isProviderQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
-      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : dataset === "default" ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : needsFor(current.mission.id), health: { state: "healthy" } };
+      const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: countsOf(tasksOf(current.mission.status, needsFor(current.mission.id) !== null || (dataset === "default" && current.mission.id === MISSIONS[0]!.mission.id))), current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : dataset === "default" ? { kind: "approval", tasks: [2], message: "task 2 awaits approval" } : needsFor(current.mission.id), health: { state: "healthy" } };
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation: "mission.status", state: "done", result: { outcome: "ok", result, error: null } });
     }
     if (/^\/missions\/[^/]+\/events$/.test(path) && method === "GET") {
@@ -397,8 +418,16 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     const taskRoute = path.match(/^\/missions\/([^/]+)\/tasks(?:\/(\d+)(?:\/([a-z-]+))?)?$/);
     if (taskRoute) {
       let operation = "task.list";
-      const taskSet = dataset === "default" || needsFor(taskRoute[1] ?? "") ? TASKS : CALM_TASKS;
-      let result: unknown = { tasks: taskSet, total: taskSet.length, offset: 0 };
+      const owner = missions.find((m) => m.mission.id === taskRoute[1]) ?? baseMissions[0]!;
+      const taskSet = tasksOf(owner.mission.status, needsFor(owner.mission.id) !== null);
+      let result: unknown = { tasks: taskSet.map((t) => fullTask(t, owner.mission.id)), total: taskSet.length, offset: 0 };
+      let etag: string | null = null;
+      if (method === "GET" && taskRoute[2] && !taskRoute[3]) {
+        const found = taskSet.find((t) => t.ordinal === Number(taskRoute[2]));
+        operation = "task.show";
+        result = found ? fullTask(found, owner.mission.id) : null;
+        etag = found ? `"${found.revision}"` : null;
+      }
       if (method === "GET" && taskRoute[3] && `task.${taskRoute[3]}` in TASK_READS) {
         operation = `task.${taskRoute[3]}`;
         result = TASK_READS[operation];
@@ -413,7 +442,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         operation = "task." + ("prompt" in body ? "amend" : "priority" in body ? "priority" : "order" in body ? "reorder" : "dependency");
         result = { status: "APPLIED" };
       }
-      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: method === "GET" ? "ok" : "applied", result, error: null } });
+      return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: method === "GET" ? "ok" : "applied", result, error: null } }, etag ? { etag } : {});
     }
     if (path === "/events") {
       const target = url.searchParams.get("worker");
@@ -442,9 +471,11 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       const entry = missions.find((m) => m.mission.id === missionId) ?? baseMissions[0]!;
       const needs = needsFor(entry.mission.id);
       const running = entry.mission.status === "RUNNING";
+      const ownTasks = tasksOf(entry.mission.status, needs !== null);
       const results: Record<string, unknown> = {
-        "mission.status": { mission: { id: entry.mission.id, name: entry.mission.name, status: entry.mission.status, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: entry.mission.updated_at }, task_counts: needs ? { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 } : { COMPLETED: 2 }, current_task: running ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_observation: running ? { station: "codex", model: "gpt-5" } : null, needs_you: needs, health: { state: "healthy" } },
-        "task.list": { tasks: needs || dataset === "default" ? TASKS : CALM_TASKS, total: needs || dataset === "default" ? TASKS.length : CALM_TASKS.length, offset: 0 },
+        "mission.status": { mission: { id: entry.mission.id, name: entry.mission.name, status: entry.mission.status, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: entry.mission.updated_at }, task_counts: countsOf(ownTasks), current_task: running ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_observation: running ? { station: "codex", model: "gpt-5" } : null, needs_you: needs, health: { state: "healthy" } },
+        "task.list": { tasks: ownTasks.map((t) => fullTask(t, entry.mission.id)), total: ownTasks.length, offset: 0 },
+        "task.show": ((): unknown => { const n = Number(request.params?.["task_number"] ?? request.params?.["task_id"] ?? 0); const found = ownTasks.find((t) => t.ordinal === n || t.id === n); return found ? fullTask(found, entry.mission.id) : null; })(),
         ...TASK_READS,
         "session.list": { sessions: opts.sessions === "none" ? [] : SESSIONS },
         "usage.snapshot": opts.usage === "none" ? { available: false, observed_at: null, source: "none", providers: [] } : USAGE,

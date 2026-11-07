@@ -1,5 +1,7 @@
-// T39 (UXR-039): bundle caps. The existing budget.spec.ts keeps the initial, CSS, terminal and lazy caps; these two tests
-// add what PRD-037 changes: the route modules are not in the initial graph, and a measured `routes` cap exists.
+// T39 (UXR-039): bundle caps. e2e/budget.spec.ts keeps the initial, terminal and routes caps. These tests read the same
+// numbers the same way (the routes figure is the sum of the lazily loaded chunks other than the terminal chunk, which is the
+// biggest chunk) and add the PRD-037 checks: the route modules named in budget.json are not in the initial graph, and lazy
+// route stylesheets stay within `routes.cssRaw`/`routes.cssGzip` when budget.json records them.
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -7,38 +9,58 @@ import { expect, uxrStatic } from "./gate";
 
 const web = resolve(import.meta.dirname, "../..");
 const dist = join(web, "dist");
+interface Budget { routes: Record<string, number>; lazyRoutes: Record<string, string> }
+const budget = (): Budget => JSON.parse(readFileSync(join(web, "budget.json"), "utf8")) as Budget;
 
-function initialFiles(): string[] {
+const read = (file: string) => readFileSync(join(dist, file));
+const size = (file: string) => ({ raw: read(file).length, gzip: gzipSync(read(file), { level: 9 }).length });
+const staticImports = (source: string) => [...source.matchAll(/from"\.\/(chunk-[A-Z0-9]+\.js)"/g)].map((m) => m[1] ?? "");
+
+/** The graph budget.spec.ts uses: the entry named in index.html and every transitive static chunk import. */
+function graph() {
   const html = readFileSync(join(dist, "index.html"), "utf8");
-  const entry = /src="\/(app-[A-Z0-9]+\.js)"/.exec(html)?.[1] ?? "";
-  const seen = new Set<string>();
-  const pending = [entry];
+  const js = /src="\/(app-[A-Z0-9]+\.js)"/.exec(html)?.[1] ?? "";
+  const css = /href="\/(app-[A-Z0-9]+\.css)"/.exec(html)?.[1] ?? "";
+  const initial = new Set<string>();
+  const pending = [js];
   while (pending.length) {
     const file = pending.pop() ?? "";
-    if (!file || seen.has(file)) continue;
-    seen.add(file);
-    pending.push(...[...readFileSync(join(dist, file), "utf8").matchAll(/from"\.\/(chunk-[A-Z0-9]+\.js)"/g)].map((m) => m[1] ?? ""));
+    if (!file || initial.has(file)) continue;
+    initial.add(file);
+    pending.push(...staticImports(read(file).toString("utf8")));
   }
-  return [...seen];
+  const chunks = readdirSync(dist).filter((f) => f.startsWith("chunk-") && f.endsWith(".js"));
+  const biggest = [...chunks].sort((a, b) => size(b).raw - size(a).raw)[0] ?? "";
+  return { initial, css, chunks, biggest };
 }
 
-uxrStatic({ t: "T39", uxr: ["UXR-039"], needs: ["WP-0"] }, "the sign-in, account and workers routes are not in the initial JavaScript graph", async () => {
-  const initial = initialFiles().map((f) => readFileSync(join(dist, f), "utf8")).join("\n");
-  // One string that only the route's module renders (src/views/login.ts, account.ts, workers.ts). "Change password" is not one: the shell's account menu also has it.
-  for (const [route, marker] of [["login", "Create administrator"], ["account", "Create token"], ["workers", "Add worker"]] as const)
-    expect(initial.includes(marker), `${route} module code ("${marker}") is in the initial graph; load it with import()`).toBe(false);
-  const lazy = readdirSync(dist).filter((f) => f.startsWith("chunk-") && f.endsWith(".js") && !initialFiles().includes(f)).map((f) => readFileSync(join(dist, f), "utf8")).join("\n");
-  for (const marker of ["Create administrator", "Create token", "Add worker"]) expect(lazy.includes(marker), `"${marker}" is in a lazy chunk`).toBe(true);
+uxrStatic({ t: "T39", uxr: ["UXR-039"], needs: ["WP-0"] }, "the lazy route modules named in budget.json are not in the initial graph and are in a lazy chunk", async () => {
+  const { initial, chunks } = graph();
+  const initialSource = [...initial].map((f) => read(f).toString("utf8")).join("\n");
+  const lazySource = chunks.filter((f) => !initial.has(f)).map((f) => read(f).toString("utf8")).join("\n");
+  const markers = Object.entries(budget().lazyRoutes);
+  expect(markers.length, "budget.json lists lazyRoutes markers").toBeGreaterThan(0);
+  for (const [route, marker] of markers) {
+    expect(initialSource.includes(marker), `route "${route}" ("${marker}") is in the initial graph; load it with import()`).toBe(false);
+    expect(lazySource.includes(marker), `route "${route}" ("${marker}") is in no lazy chunk`).toBe(true);
+  }
 });
 
-uxrStatic({ t: "T39", uxr: ["UXR-039"], needs: ["WP-5"] }, "budget.json records a routes cap and the lazy route chunks stay within it", async () => {
-  const budget = JSON.parse(readFileSync(join(web, "budget.json"), "utf8")) as { routes?: { jsRaw?: number; jsGzip?: number } };
-  expect(budget.routes?.jsRaw, "budget.json has routes.jsRaw (measured after WP-5, recorded as D18)").toBeGreaterThan(0);
-  expect(budget.routes?.jsGzip, "budget.json has routes.jsGzip").toBeGreaterThan(0);
-  const initial = new Set(initialFiles());
-  const chunks = readdirSync(dist).filter((f) => f.startsWith("chunk-") && f.endsWith(".js") && !initial.has(f));
-  // The terminal chunk is the biggest; the rest are route chunks.
-  const sized = chunks.map((f) => ({ f, raw: readFileSync(join(dist, f)).length, gzip: gzipSync(readFileSync(join(dist, f)), { level: 9 }).length })).sort((a, b) => b.raw - a.raw).slice(1);
-  expect(sized.reduce((n, c) => n + c.raw, 0), "route chunks, raw bytes").toBeLessThanOrEqual(budget.routes?.jsRaw ?? 0);
-  expect(sized.reduce((n, c) => n + c.gzip, 0), "route chunks, gzip bytes").toBeLessThanOrEqual(budget.routes?.jsGzip ?? 0);
+uxrStatic({ t: "T39", uxr: ["UXR-039"], needs: ["WP-0"] }, "lazy route chunks (all lazy chunks but the terminal) stay within budget.json routes, the figure budget.spec.ts reports", async () => {
+  const { initial, chunks, biggest } = graph();
+  const b = budget().routes;
+  expect(b["jsRaw"], "budget.json routes.jsRaw").toBeGreaterThan(0);
+  expect(b["jsGzip"], "budget.json routes.jsGzip").toBeGreaterThan(0);
+  const routes = chunks.filter((f) => !initial.has(f) && f !== biggest).reduce((a, f) => ({ raw: a.raw + size(f).raw, gzip: a.gzip + size(f).gzip }), { raw: 0, gzip: 0 });
+  console.log(`T39 routes ${routes.raw}/${routes.gzip} (raw/gzip bytes)`);
+  expect(routes.raw, `routes raw (budget ${b["jsRaw"]})`).toBeLessThanOrEqual(b["jsRaw"] ?? 0);
+  expect(routes.gzip, `routes gzip (budget ${b["jsGzip"]})`).toBeLessThanOrEqual(b["jsGzip"] ?? 0);
+  // Lazy route stylesheets: every .css in dist except the app stylesheet and the one the terminal chunk loads.
+  if (b["cssRaw"] !== undefined) {
+    const terminalSource = read(biggest).toString("utf8");
+    const lazyCss = readdirSync(dist).filter((f) => f.endsWith(".css") && f !== graph().css && !terminalSource.includes(f));
+    const css = lazyCss.reduce((a, f) => ({ raw: a.raw + size(f).raw, gzip: a.gzip + size(f).gzip }), { raw: 0, gzip: 0 });
+    expect(css.raw, `lazy route css raw (budget ${b["cssRaw"]})`).toBeLessThanOrEqual(b["cssRaw"] ?? 0);
+    expect(css.gzip, `lazy route css gzip (budget ${b["cssGzip"] ?? 0})`).toBeLessThanOrEqual(b["cssGzip"] ?? Infinity);
+  }
 });

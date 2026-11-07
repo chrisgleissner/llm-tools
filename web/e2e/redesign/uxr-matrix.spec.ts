@@ -6,7 +6,7 @@
 import { test as pw } from "@playwright/test";
 import { evidence } from "./evidence";
 import { expect, uxr } from "./gate";
-import { axeViolations, FOLD, foldClass, foldLine, insideFold, isLandscapePhone, isPhone, l0Rows, MISSION_URL, obscuredFocus, openApp, openKeyboard, viewport } from "./harness";
+import { axeViolations, reflowProblems, FOLD, foldClass, foldLine, insideFold, isLandscapePhone, isPhone, l0Rows, MISSION_URL, obscuredFocus, openApp, openKeyboard, viewport } from "./harness";
 import { needsFor, PAGES } from "./pages";
 
 const rowHeightOf = async (page: import("@playwright/test").Page): Promise<number> => page.evaluate(() => document.querySelector<HTMLElement>("#terminal-host .xterm-rows > div")?.offsetHeight ?? 16);
@@ -126,28 +126,7 @@ for (const def of PAGES) {
   uxr({ t: "T32", uxr: ["UXR-026"], needs: needsFor(def) }, `${def.id}: reflows at 320x225 (400%), with 200% text, with text spacing and in both orientations`, async ({ page }, info) => {
     await openApp(page, def.mock, def.path);
     await page.locator(def.ready).first().waitFor();
-    const problems = () => page.evaluate(() => {
-      const out: string[] = [];
-      if (document.documentElement.scrollWidth > window.innerWidth + 1) out.push(`horizontal scroll: ${document.documentElement.scrollWidth} > ${window.innerWidth}`);
-      for (const el of document.querySelectorAll<HTMLElement>("body *")) {
-        if (el.closest(".xterm, pre, [data-scroll-x], .diff, [hidden]") || el.offsetWidth === 0) continue;
-        const s = getComputedStyle(el);
-        const clamp = s.getPropertyValue("-webkit-line-clamp");
-        const clipsX = s.overflowX !== "visible" && el.scrollWidth > el.clientWidth + 1;
-        const clipsY = s.overflowY === "hidden" && el.scrollHeight > el.clientHeight + 1 && (!clamp || clamp === "none");
-        if ((clipsX || clipsY) && !el.closest("[title]") && !(el.textContent ?? "").trim().length) continue;
-        if ((clipsX || clipsY) && !el.closest("[title]") && (s.textOverflow === "ellipsis" || clipsY)) out.push(`clipped without a revealable full text: ${el.tagName.toLowerCase()}.${el.className}`);
-      }
-      const targets = [...document.querySelectorAll<HTMLElement>("button, a[href], input, select, textarea")].filter((e) => e.offsetWidth > 0 && !e.closest("[hidden], .xterm"));
-      const rects = targets.map((e) => ({ e, r: e.getBoundingClientRect() }));
-      for (let i = 0; i < rects.length; i += 1) for (let j = i + 1; j < rects.length; j += 1) {
-        const a = rects[i]!, b = rects[j]!;
-        if (a.e.contains(b.e) || b.e.contains(a.e)) continue;
-        const w = Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left), h = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top);
-        if (w > 4 && h > 4) out.push(`overlap: ${a.e.tagName.toLowerCase()} "${(a.e.textContent ?? "").trim().slice(0, 16)}" and ${b.e.tagName.toLowerCase()} "${(b.e.textContent ?? "").trim().slice(0, 16)}"`);
-      }
-      return out;
-    });
+    const problems = () => reflowProblems(page);
     await page.setViewportSize({ width: 320, height: 225 });
     expect(await problems(), "400% zoom (320x225)").toEqual([]);
     await evidence(page, info, ["UXR-026"], `reflow-400-${def.id}`);
