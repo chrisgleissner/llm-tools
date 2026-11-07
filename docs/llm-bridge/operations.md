@@ -936,7 +936,8 @@ Mission state defaults to
 `${XDG_STATE_HOME:-~/.local/state}/llm-tools/llm-bridge`. Set
 `LLM_BRIDGE_STATE_DIR` to use another directory. Bridge stores its SQLite
 database, private runtime files, and logs there. Shared `config.toml` supports
-`[bridge]` team and execution defaults plus `[bridge.theme]` appearance settings;
+`[bridge]` team and execution defaults, `[bridge.theme]` appearance settings and
+`[bridge.retention]` data-retention settings;
 choose providers, routes, and execution mode on mission creation/start commands.
 The selected shared tool configuration is
 captured for the mission so later changes do not silently alter its routing.
@@ -956,8 +957,11 @@ one hour, thins capacity observations and the `provider-wait` and
 `provider-selection` events written on every pass of a capacity wait older than
 one hour to one per 10 minutes, deletes finished commands (applied, rejected or
 failed) older than 30 days, and records an `events-pruned` event for each pass
-that removed rows. The newest event of each thinned kind is always kept. Task,
-operation, verification, command and operator events are never pruned. A
+that removed rows. The newest event of each thinned kind is always kept. These
+rules apply to every mission. The longer-term rules for finished missions are in
+[Data retention](#data-retention). While a mission is not finished, its audit records
+(task, operation outcome, verification, command and operator events) are never pruned;
+only its diagnostic events older than `events_days` are. A
 `command-applied` or `command-rejected` event carries a short summary of a
 result larger than 4 KiB (for example the full prompt returned by `task.add`);
 the command record keeps the whole result. An observation identical to the
@@ -989,6 +993,126 @@ recorded as a `provider-orphaned` event with its pid. Two `start` commands for o
 mission are serialized, and the controller records its pid and start token in its
 lock file, which `stop --force` uses when `controller-ready.json` is missing.
 
+### Data retention
+
+Bridge keeps four kinds of data on disk: the SQLite database (events, operations,
+commands, tasks), provider run logs, verifier files, and schema-migration backups.
+Each is bounded as follows. Terminal scrollback is not one of them (see the end of
+this section).
+
+Settings live in `[bridge.retention]` of `~/.config/llm-tools/config.toml`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `events_days` | 90 | Diagnostic events older than this are deleted, in finished missions and in missions that are not finished. In a mission that is not finished the newest event of each kind stays and `capacity-refresh` events are thinned to one per hour instead of deleted. |
+| `finished_missions_days` | 365 | A mission that finished longer ago than this keeps its mission and task rows and its audit summary events. Its other events, remaining provider run logs and verifier files are deleted. |
+| `operations_days` | 180 | Operation rows of a finished mission are deleted this many days after they ended, once their logs are already pruned. |
+| `migration_backups_keep` | 3 | Newest `bridge.sqlite3.v*.bak` files to keep; older ones are deleted. Allowed range 1 to 1000. |
+
+The three `*_days` keys accept 0 to 3650; 0 turns that rule off. Values must be whole
+numbers. A misspelt key or an out-of-range value stops the tool with exit status 2 and a
+message such as `bridge.retention: unknown key 'event_days' (...); did you mean
+'events_days'?`. A config file that cannot be read when the controller prunes leaves the
+defaults in force.
+
+The log settings that are chosen per mission, not in the config file, belong to the same
+budget: `--log-max-bytes` (4 MiB per output file), `--log-rotations` (3) and
+`--log-retained-runs` (the latest 20 run directories) on `mission create`. When older run
+directories are pruned, Bridge records each log's size and SHA-256 in an
+`operation-log-pruned` event before it deletes the files.
+
+**What counts as finished.** A mission is finished when its status is COMPLETED or CANCELLED
+and it has no operation that is still preparing or running. Only a finished mission is subject to
+`finished_missions_days`, `operations_days` and the deletion of audit records. A mission that is
+not finished (running, paused, stopped, failed or created) is subject only to `events_days`, and
+only for diagnostic events: its audit records, audit summaries, tasks, operations and commands are
+never pruned, however old they are, and the events of an operation that is still preparing or
+running are never deleted. The age of a finished mission is the time of its last update. Reopening
+a completed mission changes its status and restarts the clock.
+
+**Event classes.** Every event kind belongs to one of three classes
+(`llm_tools/bridge_events.py`: `AUDIT_SUMMARY_KINDS`, `AUDIT_RECORD_KINDS`, `DIAGNOSTIC_KINDS`;
+a test requires each kind to be in exactly one):
+
+* Audit summary: `mission-created`, `mission-status`, `mission-reopened`, `task-verified`,
+  `verification-failed`, `events-pruned`, `operation-log-pruned`, `controller-failed` and
+  `controller-exited-unexpectedly`. Retention never deletes these.
+* Audit record: what the operator or controller decided or did, for example task edits and
+  proposals, `operation-exited`, `operation-uncertain`, provider handoffs and switches, rotation
+  changes, steering requests, review holds, suspend decisions, `command-failed` and
+  `command-rejected`. They stay while the mission is not finished and until
+  `finished_missions_days` after it finishes.
+* Diagnostic: bookkeeping that explains how the controller got there, for example
+  `repository-checkpoint`, `prompt-assembled`, `operation-progress`, `operation-process`,
+  `operation-prepared`, `provider-selection`, `task-status-transition`, `controller-config`,
+  `station-observation` and the capacity, heartbeat and wake events. A kind that this version does
+  not know (an old database may hold one) is treated as an audit record.
+
+**Enforcement.** The controller's background pruning pass (the same pass and 15-minute
+cadence as the heartbeat and capacity-refresh pruning above) applies the policy to every finished
+mission in the database, so a running mission's controller also cleans up finished ones and other
+missions' diagnostic events. Each pass
+deletes in transactions of at most 2000 rows and stops after about half a second; if work remains,
+it continues 0.25 seconds later. A pass that removed anything writes one `events-pruned` event
+on the controller's own mission with the number removed per category (`events`,
+`finished_mission_events`, `operations`, `managed_processes`, `operation_logs`, `verifier_files`,
+`migration_backups`), the cutoff times and the first 20 missions affected, and one `events-pruned`
+event on each other mission that lost rows or files. Deletion of old diagnostic events and thinning
+of capacity observations happen on most passes, so they are audited at most once an hour (the
+counts accumulate in between and are written when the controller stops); every other category is
+audited on the pass that removed it. Rows of an operation that is still active
+are never deleted. Event IDs keep their gaps, so replication cursors are not affected.
+The database file does not shrink; freed pages are reused.
+
+**Disk budget.** `scripts/bridge_retention_budget.py` writes the rows of provider runs through the
+store (event payload sizes taken from the fake-provider end-to-end tests) into a throwaway database
+and measures the file growth, including SQLite page and index overhead. Measured with SQLite page
+size 4096:
+
+| Row | Size |
+| --- | --- |
+| One provider run (task, operation, 12 events) | 8.7 KB |
+| One `capacity-refresh` event (two providers, four windows) | 2.2 KB |
+| One command record (`task.add`) | 1.6 KB |
+| One `events-pruned` audit event | 0.4 KB |
+
+The budget assumes **1 GiB for all Bridge state on a Pi's card**. This is an assumption, not
+a value Bridge enforces. The projection is for one mission that is never finished, running
+continuously for a year under the defaults: events are full size for the last 90 days; older
+events lose their diagnostic kinds, leaving the task row, the operation row and the three audit
+records of each run (3.7 KB per run instead of 8.7 KB); capacity observations are one per 10
+minutes for 90 days and one per hour before that. The script measures the 3.7 KB by running the
+retention rule over the rows it wrote.
+
+| Component | One run every 10 minutes (52,560 runs) | One run every 3 minutes (175,200 runs) |
+| --- | --- | --- |
+| Run rows, last 90 days | 107 MiB | 357 MiB |
+| Run rows, older | 140 MiB | 467 MiB |
+| Capacity observations | 40 MiB | 40 MiB |
+| Commands (30 days) | 6.5 MiB | 22 MiB |
+| Audit events written by pruning itself (about 120 a day) | 18 MiB | 18 MiB |
+| Heartbeats (last hour) | 0.2 MiB | 0.2 MiB |
+| Database total | 312 MiB | 904 MiB |
+| Provider run logs, worst case (20 runs, one output file each, 4 rotated files of 4 MiB) | 320 MiB | 320 MiB |
+| State total, worst case | 632 MiB (62% of 1 GiB) | 1224 MiB (120%) |
+
+A run every 10 minutes around the clock fits with a wide margin. A run every 3 minutes fits only
+because the provider logs rarely reach their worst case: the database alone is 904 MiB (88%),
+and the logs bring the worst case over 1 GiB. Creating the mission with
+`--log-max-bytes 1048576` lowers the log bound to 80 MiB and the worst case to 984 MiB (96%).
+Tasks, operations and audit records of a mission that is not finished are never pruned, so the
+database of such a mission still grows by about 3.7 KB per run (one task, one operation and
+three audit events); beyond one run every 3 minutes, finish the mission or split the work so
+the finished-mission rules can apply. Finished missions shrink: after `events_days` their
+diagnostic events go, and after `finished_missions_days` only mission and task rows and a
+handful of summary events remain (a few KB per task).
+
+**Terminal scrollback.** Bridge stores provider logs, not tmux scrollback. The isolated tmux server
+that runs a station keeps scrollback in memory only, bounded per pane by `history-limit`, which
+Bridge sets to 50,000 lines (`llm_tools/terminal.py`). It is discarded when the pane or the
+station ends and is never written to the state directory. Provider output that is kept on disk is
+the rotated log described above.
+
 ### Database upgrades, backups and downgrades
 
 The database records its schema version in SQLite's `PRAGMA user_version`
@@ -1009,8 +1133,10 @@ in the same private state directory, mode 0600. It also appends
 database that does not exist yet is created without a backup, and opening a
 database that is already current writes nothing. The migration runs in one
 transaction: if it fails, the database stays at the old version and the backup
-remains. Backups are never deleted automatically; each schema change adds one, so
-remove old ones when you no longer need them.
+remains. Each schema change adds one backup. The background retention pass
+removes the oldest beyond the newest `migration_backups_keep` (3 by default; see
+[Data retention](#data-retention)) and appends a `pruned schema ... backup` line
+to `migrations.log` for each one it deletes.
 
 An older `llm-bridge` refuses to open a database written by a newer one. It exits
 with status 4 (JSON error code `schema-too-new`) and changes nothing:
