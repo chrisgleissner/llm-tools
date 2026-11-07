@@ -239,6 +239,7 @@ textarea { min-height: 88px; }
 input[aria-invalid="true"] { border-color: var(--danger); border-width: 2px; }
 .hint { color: var(--muted); font-size: var(--tsm); margin: 0; }
 .hint:empty, .field-error:empty { display: none; }
+#passkey-support-guidance > a { display: inline-flex; align-items: center; min-height: 44px; }
 .field-error { color: var(--danger); font-size: var(--tsm); font-weight: 600; margin: 0; }
 .field-error::before { content: "\26A0\FE0E "; }
 .input-row { position: relative; display: flex; }
