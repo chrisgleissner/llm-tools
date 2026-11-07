@@ -31,16 +31,49 @@ fn init_is_idempotent_and_private() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn non_loopback_bind_needs_lan_enabled() {
+async fn non_loopback_bind_needs_non_loopback_exposure() {
     let dir = tmp_dir();
     bridge_coordinator::init::init(&dir, &sans()).unwrap();
     edit_config(&dir, |t| t.replace("127.0.0.1:8443", "0.0.0.0:0"));
     let err = bridge_coordinator::server::start(&dir).await.err().expect("must refuse");
-    assert!(err.contains("lan_enabled"), "{err}");
-    edit_config(&dir, |t| t.replace("lan_enabled = false", "lan_enabled = true"));
-    let srv = bridge_coordinator::server::start(&dir).await.expect("allowed with lan_enabled");
+    assert!(err.contains("exposure"), "{err}");
+    edit_config(&dir, |t| t.replace("exposure = \"loopback\"", "exposure = \"lan\""));
+    let srv = bridge_coordinator::server::start(&dir).await.expect("allowed with LAN exposure");
     srv.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn split_listener_groups_expose_only_the_selected_route_family() {
+    let env = boot_with(|text| {
+        format!(
+            "{}\n[listener_groups]\nconsole_rest = \"127.0.0.1:0\"\nworker_channel = \"127.0.0.1:0\"\nhealth = \"127.0.0.1:0\"\n",
+            text
+        )
+    })
+    .await;
+    let address = |group| env.srv.listeners.iter().find(|(candidate, _)| *candidate == group).unwrap().1;
+    let request = |addr: std::net::SocketAddr, path: &str| env.client.get(format!("https://127.0.0.1:{}{path}", addr.port()));
+    let console = address(bridge_coordinator::config::ListenerGroup::ConsoleRest);
+    let worker = address(bridge_coordinator::config::ListenerGroup::WorkerChannel);
+    let health = address(bridge_coordinator::config::ListenerGroup::Health);
+
+    assert_eq!(request(console, "/api/v1/auth/state").send().await.unwrap().status(), 200);
+    let blocked_health = request(console, "/healthz").send().await.unwrap();
+    assert_eq!(blocked_health.status(), 404);
+    assert_eq!(blocked_health.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(request(console, "/api/v1/worker/connect").send().await.unwrap().status(), 404);
+
+    assert_eq!(request(worker, "/api/v1/auth/state").send().await.unwrap().status(), 404);
+    assert_eq!(request(worker, "/healthz").send().await.unwrap().status(), 404);
+    assert_ne!(request(worker, "/api/v1/worker/connect").send().await.unwrap().status(), 404);
+
+    assert_eq!(request(health, "/healthz").send().await.unwrap().status(), 200);
+    assert_eq!(request(health, "/api/v1/auth/state").send().await.unwrap().status(), 404);
+    let info = bridge_coordinator::ops::report(&env.dir, false).unwrap();
+    assert!(info.contains("Listener groups:"));
+    assert!(info.contains("worker channel: 127.0.0.1:"));
+    env.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

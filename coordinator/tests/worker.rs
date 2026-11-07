@@ -5,6 +5,7 @@ use reqwest::Method;
 use rustls::pki_types::pem::PemObject;
 use serde_json::{json, Value};
 use std::time::Duration;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
 fn submit(id: &str) -> Value {
@@ -55,6 +56,121 @@ async fn worker_authentication() {
     let audit = env.srv.state.db.audit_list(50).unwrap();
     assert!(audit.iter().any(|r| r["action"] == "worker.add") && audit.iter().any(|r| r["action"] == "worker.revoke"));
     assert!(!audit.iter().any(|r| r.to_string().contains(&token)));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_client_certificate_is_issued_once_and_token_rotation_is_staged() {
+    let env = boot_with(|t| t.replace("worker_mtls = false", "worker_mtls = true")).await;
+    let api = env.admin().await;
+    let (status, enrollment) = api.post("/api/v1/workers", json!({"name":"mtls-1"})).await;
+    assert_eq!(status, 201, "{enrollment}");
+    assert_eq!(enrollment["mutual_tls"], true);
+    assert!(enrollment["client_certificate"].as_str().unwrap().contains("BEGIN CERTIFICATE"));
+    assert!(enrollment["client_private_key"].as_str().unwrap().contains("PRIVATE KEY"));
+    let (_, list) = api.get("/api/v1/workers").await;
+    assert_eq!(list["workers"][0]["mutual_tls"], true);
+    assert!(!list.to_string().contains("PRIVATE KEY"));
+    assert!(!list.to_string().contains(enrollment["token"].as_str().unwrap()));
+
+    let old = enrollment["token"].as_str().unwrap();
+    let new = "new-staged-token-which-is-long-enough-0123456789";
+    let hash = bridge_coordinator::auth::sha256_hex(new);
+    let db = &env.srv.state.db;
+    let cert = enrollment["client_certificate"].as_str().unwrap();
+    let der = rustls::pki_types::CertificateDer::pem_slice_iter(cert.as_bytes()).next().unwrap().unwrap();
+    use sha2::Digest;
+    let fingerprint = hex::encode(sha2::Sha256::digest(der.as_ref()));
+    assert!(db.worker_client_certificate_matches("mtls-1", &fingerprint).unwrap());
+    assert!(!db.worker_client_certificate_matches("mtls-1", "00-wrong-certificate").unwrap());
+    assert!(!db.worker_client_certificate_matches("different-worker", &fingerprint).unwrap());
+    assert!(db.worker_stage_token_rotation("mtls-1", &hash, bridge_coordinator::now() + 60).unwrap());
+    assert!(db
+        .worker_by_connection_token(&bridge_coordinator::auth::sha256_hex(old), bridge_coordinator::now())
+        .unwrap()
+        .is_some());
+    assert!(db.worker_by_connection_token(&hash, bridge_coordinator::now()).unwrap().unwrap().1);
+    assert!(db.worker_by_connection_token(&hash, bridge_coordinator::now() + 61).unwrap().is_none());
+    assert!(!db.worker_promote_token_rotation("different-worker", &hash, bridge_coordinator::now()).unwrap());
+    let superseding = bridge_coordinator::auth::sha256_hex("superseding-token-which-is-long-enough-012345");
+    assert!(db.worker_stage_token_rotation("mtls-1", &superseding, bridge_coordinator::now() + 60).unwrap());
+    assert!(db.worker_by_connection_token(&hash, bridge_coordinator::now()).unwrap().is_none());
+    assert!(db.worker_by_connection_token(&superseding, bridge_coordinator::now()).unwrap().unwrap().1);
+    assert!(!db.worker_promote_token_rotation("mtls-1", &hash, bridge_coordinator::now()).unwrap());
+    assert!(db.worker_promote_token_rotation("mtls-1", &superseding, bridge_coordinator::now()).unwrap());
+    assert!(db
+        .worker_by_connection_token(&bridge_coordinator::auth::sha256_hex(old), bridge_coordinator::now())
+        .unwrap()
+        .is_none());
+    assert!(!db.worker_by_connection_token(&superseding, bridge_coordinator::now()).unwrap().unwrap().1);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_only_listener_requires_a_matching_ca_issued_client_certificate() {
+    let env = boot_with(|t| {
+        t.replace("worker_mtls = false", "worker_mtls = true")
+            .replace("# [listener_groups]", "listener_groups = { worker_channel = \"127.0.0.1:0\" }")
+    })
+    .await;
+    let addr = env
+        .srv
+        .listeners
+        .iter()
+        .find(|(group, _)| *group == bridge_coordinator::config::ListenerGroup::WorkerChannel)
+        .unwrap()
+        .1;
+    let good = bridge_coordinator::certs::issue_worker_client_identity(&env.dir, "w1").unwrap();
+    let wrong = bridge_coordinator::certs::issue_worker_client_identity(&env.dir, "w2").unwrap();
+    let token = "worker-token-long-enough-for-test-0123456789";
+    env.srv
+        .state
+        .db
+        .worker_add_with_client_certificate("w1", &bridge_coordinator::auth::sha256_hex(token), &good.fingerprint_sha256)
+        .unwrap();
+
+    async fn connect(
+        env: &Env,
+        addr: std::net::SocketAddr,
+        identity: Option<&bridge_coordinator::certs::WorkerClientIdentity>,
+        token: &str,
+    ) -> Result<tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::Error> {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(&std::fs::read(env.dir.join("ca.pem")).unwrap()) {
+            roots.add(cert.unwrap()).unwrap();
+        }
+        let builder = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots);
+        let tls_cfg = if let Some(identity) = identity {
+            let certs = CertificateDer::pem_slice_iter(identity.cert_pem.as_bytes()).map(Result::unwrap).collect();
+            let key = PrivateKeyDer::from_pem_slice(identity.key_pem.as_bytes()).unwrap();
+            builder.with_client_auth_cert(certs, key).unwrap()
+        } else {
+            builder.with_no_client_auth()
+        };
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let tls = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_cfg))
+            .connect(ServerName::try_from("127.0.0.1").unwrap(), tcp)
+            .await?;
+        let request = format!("wss://127.0.0.1:{}/api/v1/worker/connect", addr.port()).into_client_request().unwrap();
+        let mut request = request;
+        request.headers_mut().insert("authorization", format!("Bearer {token}").parse().unwrap());
+        Ok(tokio_tungstenite::client_async(request, tls).await?.0)
+    }
+
+    assert!(
+        connect(&env, addr, None, token).await.is_err(),
+        "no client certificate must fail the TLS handshake"
+    );
+    assert!(
+        connect(&env, addr, Some(&wrong), token).await.is_err(),
+        "a different worker certificate must fail route authentication"
+    );
+    let socket = connect(&env, addr, Some(&good), token).await.expect("matching certificate and token accepted");
+    drop(socket);
     env.stop().await;
 }
 

@@ -56,7 +56,10 @@ export interface ApiTokenInfo {
   scopes: string[];
   created_at: string;
   last_used: string | null;
+  last_address: string | null;
   expires_at: string | null;
+  allowed_cidrs: string[];
+  allowed_workers: string[];
 }
 
 export interface ApiTokenCreated {
@@ -122,7 +125,29 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
 
 export const get = <T>(path: string): Promise<T> => request<T>("GET", path);
 export const del = <T>(path: string): Promise<T> => request<T>("DELETE", path);
-export const post = <T>(path: string, body: unknown = {}): Promise<T> => request<T>("POST", path, body);
+export async function post<T>(path: string, body: unknown = {}): Promise<T> {
+  const result = await request<T>("POST", path, body);
+  if (path === "/api/v1/tokens" || path === "/api/v1/auth/passkeys/re-enroll") {
+    window.dispatchEvent(new Event("bridge-security-notification"));
+  }
+  return result;
+}
+
+export interface SecurityNotification { id: string; category: string; created_at: number }
+export async function securityNotifications(): Promise<SecurityNotification[]> {
+  return (await get<{ notifications: SecurityNotification[] }>("/api/v1/security/notifications")).notifications;
+}
+export async function dismissSecurityNotification(id: string): Promise<void> {
+  await del<{ ok: boolean }>(`/api/v1/security/notifications/${encodeURIComponent(id)}`);
+}
+
+export function reenrollPasskeys(currentPassword: string, confirm: boolean): Promise<{ ok: boolean; origin: string; registration_required: boolean }> {
+  return post("/api/v1/auth/passkeys/re-enroll", {
+    current_password: currentPassword,
+    new_origin: location.origin,
+    confirm,
+  });
+}
 
 export interface PasswordPolicy {
   min_length: number;
@@ -132,6 +157,8 @@ export interface PasswordPolicy {
 export interface AuthState {
   setup_required: boolean;
   authenticated: boolean;
+  passkey_sign_in_available?: boolean;
+  passkey_canonical_origin?: string | null;
   csrf_token?: string;
   password_policy?: PasswordPolicy;
   session_policy?: { remembered: { idle_secs: number; absolute_secs: number }; default: { idle_secs: number; absolute_secs: number } };
@@ -152,6 +179,22 @@ export async function authState(): Promise<AuthState> {
 export async function login(username: string, password: string, remember = false): Promise<void> {
   const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/login", { username, password, remember }, true);
   setCsrf(r.csrf_token);
+  window.dispatchEvent(new Event("bridge-security-notification"));
+}
+
+export interface PasskeyAssertionStart {
+  challenge_id: string;
+  options: { publicKey: unknown; mediation?: string };
+}
+
+export async function beginPasskeySignIn(): Promise<PasskeyAssertionStart> {
+  return request<PasskeyAssertionStart>("POST", "/api/v1/auth/passkeys/assertion/start", {}, true);
+}
+
+export async function finishPasskeySignIn(challenge_id: string, credential: unknown): Promise<void> {
+  const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/passkeys/assertion/finish", { challenge_id, credential }, true);
+  setCsrf(r.csrf_token);
+  window.dispatchEvent(new Event("bridge-security-notification"));
 }
 
 export const setup = (setup_token: string, username: string, password: string) =>

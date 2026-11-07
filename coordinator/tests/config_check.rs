@@ -20,7 +20,7 @@ const STRICT: CheckOptions = CheckOptions {
     check_paths: true,
 };
 
-const ALL_KEYS: &str = "bind, lan_enabled, min_tls, max_events_per_worker, allowed_origins, web_dir, tls_cert_file, tls_key_file, tls_cert_name, \
+const ALL_KEYS: &str = "bind, exposure, lan_enabled, listener_groups, worker_mtls, tls_terminator, security_webhook_url, trusted_proxies, public_origin, max_token_lifetime_days, min_tls, max_events_per_worker, allowed_origins, web_dir, tls_cert_file, tls_key_file, tls_cert_name, \
 max_connections, max_connections_per_ip, worker_reserve_connections, request_body_timeout_secs, http_idle_timeout_secs, ws_ping_interval_secs, \
 ws_idle_timeout_secs, mutation_limit_per_token, mutation_limit_per_address";
 
@@ -94,10 +94,22 @@ const ROWS: &[Row] = &[
         errors: &["config error: bind = 8443: must be a string, found a whole number; fix: write bind = \"127.0.0.1:8443\" (no quotes around numbers and booleans)"],
     },
     Row {
-        name: "non-loopback bind without lan_enabled",
+        name: "non-loopback bind without LAN exposure",
         config: "bind = \"0.0.0.0:8443\"\n",
         env: &[],
-        errors: &["config error: bind = \"0.0.0.0:8443\": 0.0.0.0:8443 is not a loopback address and lan_enabled is not true (it is false in lan_enabled, or unset); fix: set lan_enabled = true in config.toml (or BRIDGE_COORDINATOR_LAN_ENABLED=true) to serve the LAN, or bind a loopback address such as \"127.0.0.1:8443\""],
+        errors: &["config error: bind = \"0.0.0.0:8443\": 0.0.0.0:8443 is not a loopback address and exposure is loopback (the default); fix: set exposure = \"lan\" in config.toml (or BRIDGE_COORDINATOR_EXPOSURE=lan) to serve the LAN, or bind a loopback address such as \"127.0.0.1:8443\""],
+    },
+    Row {
+        name: "exposure must be a known level",
+        config: "exposure = \"public\"\n",
+        env: &[],
+        errors: &["config error: exposure = \"public\": must be \"loopback\" or \"lan\" or \"internet\"; fix: write exposure = \"loopback\" (default)"],
+    },
+    Row {
+        name: "exposure lan from the environment allows a non-loopback bind",
+        config: "bind = \"0.0.0.0:8443\"\n",
+        env: &[("BRIDGE_COORDINATOR_EXPOSURE", "lan")],
+        errors: &[],
     },
     Row {
         name: "ws_idle_timeout_secs must exceed ws_ping_interval_secs",
@@ -176,7 +188,7 @@ const ROWS: &[Row] = &[
         name: "environment lan_enabled=false refuses a non-loopback bind from the file",
         config: "bind = \"0.0.0.0:8443\"\nlan_enabled = true\n",
         env: &[("BRIDGE_COORDINATOR_LAN_ENABLED", "false")],
-        errors: &["config error: bind = \"0.0.0.0:8443\": 0.0.0.0:8443 is not a loopback address and lan_enabled is not true (it is false in BRIDGE_COORDINATOR_LAN_ENABLED, or unset); fix: set lan_enabled = true in config.toml (or BRIDGE_COORDINATOR_LAN_ENABLED=true) to serve the LAN, or bind a loopback address such as \"127.0.0.1:8443\""],
+        errors: &["config error: bind = \"0.0.0.0:8443\": 0.0.0.0:8443 is not a loopback address and exposure is loopback (set by BRIDGE_COORDINATOR_LAN_ENABLED); fix: set exposure = \"lan\" in config.toml (or BRIDGE_COORDINATOR_EXPOSURE=lan) to serve the LAN, or bind a loopback address such as \"127.0.0.1:8443\""],
     },
     Row {
         name: "file and environment problems are reported together",

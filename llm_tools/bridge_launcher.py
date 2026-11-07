@@ -1335,7 +1335,11 @@ def _field_hint(state: Launcher, width: int) -> str:
         from . import bridge_doctor
 
         if bridge_doctor.claude_folder_trusted(state.directory or state.cwd) is False:
-            text += " · Claude asks once to trust this folder: choose Yes"
+            trust_hint = "Claude asks once to trust this folder: choose Yes"
+            full = f"{text} · {trust_hint}"
+            if cell_width(localize(full)) < width:
+                return full
+            return "Starts claude · uses capacity · trust folder: choose Yes"
     return text
 
 

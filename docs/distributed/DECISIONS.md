@@ -6,7 +6,7 @@ Use `webauthn-rs` 0.6.2 (Kanidm, MPL-2.0) for server-side WebAuthn verification.
 
 The library exposes typed registration/authentication state and credential types, verifies origins/RP IDs and authenticator assertions, and documents that ceremony state must be persisted. The coordinator serializes that state only in its private SQLite database, with a single-use session/setup-bound challenge row capped at five minutes. The `danger-allow-state-serialisation` feature is required because the library deliberately gates persistence of in-flight ceremony state behind an explicit opt-in; the state remains private and is never returned to a client.
 
-The coordinator now wires registration and assertion start/finish routes through the library and persists the returned passkeys and verifier state. This is still partial: `start_passkey_registration` hardcodes `require_resident_key(false)` and the wrapper exposes no general resident-key option. The alternate resident-key helper requires direct attestation and rejects synchronized authenticators, so it does not satisfy the requested profile. Do not mutate the generated options as a workaround: the verifier state would not match what it can actually validate. Expose a configurable no-attestation/required-resident-key method through a maintained upstream version or a narrow vendored wrapper before claiming this requirement. Canonical-origin configuration, AAGUID extraction, and fixed-vector ceremony verification plus explicit ES256/Ed25519/RS256 policy verification also remain. The exact RUSTSEC-2023-0071 exception is limited to this reviewed public-key-only call path; do not broaden it to other advisories.
+The coordinator wires registration and assertion start/finish routes through the library and persists the returned passkeys and verifier state. A narrow MPL-2.0 vendor patch makes normal no-attestation registration require resident credentials and exposes the library's configured credential algorithm list. The coordinator explicitly advertises ES256, EdDSA (Ed25519), and RS256; a live API contract test checks COSE identifiers `-7`, `-8`, and `-257`. Discoverable sign-in requires the administrator's user handle, matches the returned credential ID and requires user verification. The coordinator serializes ceremony state only into its private database and binds each challenge to a session or short-lived browser ticket. Remaining PK-003 work includes AAGUID extraction and fixed-vector valid and user-verification-negative ceremony tests. The exact RUSTSEC-2023-0071 exception is limited to this reviewed public-key-only call path; do not broaden it to other advisories.
 
 Only consequential decisions. Architecture contracts for standalone Bridge stay in
 `docs/llm-bridge/architecture.md`.
@@ -297,6 +297,28 @@ and is unchanged in `budget.json`.
 The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working tree can differ by a
 byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
 
+Addendum after merging the passkey, token-restriction and listener work (PR #50) into this branch.
+`web/budget.json` now allows 93000 raw / 33500 gzip of initial JavaScript and 41000 gzip of initial
+JavaScript plus CSS (the raw total cap of 124000 is unchanged). Same measurement method as above:
+
+| State | Initial JS raw | gzip | Initial total gzip |
+|---|---:|---:|---:|
+| Merge base | 88506 | 30848 | 38382 |
+| `main` with PR #50 (account page and passkey code load lazily) | 87052 | 31408 | 38992 |
+| This branch before the merge (already above its 91000 / 31750 caps: DOG-021 and later console work) | 92390 | 32176 | 39710 |
+| Merge with `passwordForm` still exported from `account.ts` | 102090 | 36331 | 43915 |
+| Merge with `passwordForm` moved to `password-form.ts` | 92638 | 33163 | 40747 |
+
+The forced password-change screen (`reset.ts`) is part of the first load and imported
+`passwordForm` from `account.ts`. PR #50 made the account page a lazy chunk and grew it by about 8 KB
+(API token restrictions, passkey list and re-enrolment). The static import pulled that whole module
+into the first load, which added 9.5 KB raw. `passwordForm` now lives in `views/password-form.ts`, so
+`account.ts` stays lazy and only the form is shared. What remains above the old caps is the sum of the
+two branches: this branch was already 1390 raw / 426 gzip bytes over its own caps before the merge, and
+PR #50 adds the passkey sign-in button, the canonical-origin link and the new API fields to the sign-in
+view and `api.ts` (+560 gzip bytes on `main`). The new caps leave 362 raw / 337 gzip / 253 total-gzip
+bytes of headroom.
+
 ## D19 Worker memory: no leak, per-process gate (PRD-007)
 
 The soaks showed `llm-bridge worker run` processes growing by 2.5 and then 1.9 MiB per hour after warm-up (about 48 MiB per day). The
@@ -322,4 +344,97 @@ investigation followed D16. Measurements are in `soak-and-chaos.md` (Worker memo
   code because there is nothing to fix. `test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per_hour` fails with the
   previous bound and the summed check.
 - **Not decided here.** Whether a 24-hour worker stays inside 0.5 MiB per hour is unmeasured; the longest run is 3 hours.
+
+## D20 Canonical passkey origin (PK-002)
+
+Bind the administrator's passkeys to one HTTPS DNS origin. The first successful
+registration binds the origin and credential in one SQLite transaction; an operator may
+preconfigure the same value as `public_origin`. The value is persisted in coordinator
+configuration after registration and remains database-authoritative if that write fails.
+Startup rejects a changed configured origin while credentials remain. Older credentials
+without a recorded origin require the operator to set `public_origin` explicitly before
+startup, so an upgrade cannot silently choose a new RP ID from whichever address is visited
+first. IP literals are rejected because they cannot be WebAuthn RP IDs. Explicit, confirmed
+re-enrolment UX remains future work.
+
+In the code: `coordinator/src/passkeys.rs::canonical_origin`, `coordinator/src/config.rs`,
+`coordinator/src/db.rs::passkey_put_at_origin`, and `coordinator/src/server.rs`; regressions
+are covered by `coordinator/tests/passkeys.rs` and `coordinator/tests/web_api.rs`.
+
+## D21 Require discoverable passkeys (PK-003, PK-004)
+
+The maintained `webauthn-rs` 0.6.2 no-attestation registration method hardcodes
+`require_resident_key(false)`. Its separate resident-key API requires attestation roots and
+rejects synced authenticators, which conflicts with the product's no-attestation and synced
+passkey requirements. Keep upstream's normal passkey API and make a narrow, licensed local
+vendor patch that sets the builder to require resident keys. Enable its conditional UI API
+and start a discoverable authentication ceremony with an empty allow-credentials list and
+user verification required. Before finishing, match the credential ID and verify the fixed
+user handle against the administrator, then use the library's discoverable authentication
+verification. Do not enable synced passkeys through the attestation-only API.
+
+In the code: `coordinator/vendor/webauthn-rs/src/lib.rs` contains the one-line builder patch;
+`coordinator/src/passkeys.rs` starts and finishes the conditional ceremony. The regression
+tests assert required resident keys, conditional mediation and an empty allow list. Completion
+checks the fixed user handle, registered credential ID and user-verification flag; valid
+cryptographic vectors for that path remain required under PK-011.
+
+## D22 Configurable API token lifetime ceiling (SEC2-009)
+
+Keep the existing 90-day default and allow a deployment to lower or raise the explicit
+expiry ceiling through `max_token_lifetime_days`, bounded to 1–3650 days. Preserve
+`expires_days = 0` for non-expiring LAN tokens for compatibility. When Internet exposure is
+implemented, its startup precondition must reject that value and enforce the 90-day ceiling.
+
+In the code: `coordinator/src/config.rs` defines and validates the setting;
+`coordinator/src/http.rs::create_token` enforces it. Boundary tests live in
+`coordinator/src/config.rs::tests::api_token_lifetime_default_is_ten_years_and_config_is_bounded`
+and `coordinator/tests/web_api.rs::token_expiry_respects_the_configured_maximum_but_allows_lan_nonexpiry`.
+
+## D23 Identifiable API token strings (SEC2-009)
+
+New API tokens use `lbr_pat_<id>_<secret>`. The random 16-character lowercase-hex ID makes
+the credential recognizable to scanners; the independently generated 32-byte secret is
+encoded as 64 lowercase-hex characters and provides 256 bits of entropy. Store the ID and
+only the SHA-256 hash of the secret. Look up by public ID, then compare the secret hash in
+constant time. Continue accepting existing unprefixed tokens through their legacy full-token
+hash lookup until operators rotate them. The generated OpenAPI schema constrains the new
+format. Do not log either component.
+
+In the code: token minting is in `coordinator/src/http.rs::create_token`, and the response
+schema is in `coordinator/src/openapi.rs::TokenCreated`; the format regression is in
+`coordinator/tests/web_api.rs::token_management_lists_metadata_and_shows_secret_only_at_creation`.
+
+## D24 Certificate provisioning boundary (SEC2-019)
+
+Keep certificate source selection behind `CertificateProvider`, with implementations for the
+internal coordinator CA and operator-supplied certificate files. File reload keeps the last
+valid certificate when replacement files are incomplete. ACME remains an unimplemented future
+provider; the project does not operate certificate or DNS infrastructure.
+
+In the code: `coordinator/src/certs.rs` owns the trait and both current providers;
+`coordinator/src/server.rs` selects a provider from the validated config. Existing file-reload
+and TLS tests cover the provider implementations.
+
+## D25 Stable principal ownership and sender binding extension points (SEC2-019)
+
+Use a durable `principals` table with stable IDs (`admin` and `system` today) and role metadata.
+Sessions, API tokens and audit rows point to the principal ID rather than deriving ownership from
+the current administrator display name. Keep DPoP or mutual-TLS token sender constraints as two
+nullable typed fields until a sender-constrained credential is actually implemented; do not imply
+that bearer tokens are sender-constrained today.
+
+In the code: schema migration 17 adds the principal registry and ownership fields in
+`coordinator/src/db.rs`; `coordinator/tests/principals.rs` verifies new records, and
+`coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place` verifies legacy rows.
+
+## D26 Allow the bundled webpki trust data license (SEC2-015)
+
+Allow `CDLA-Permissive-2.0` in the Rust license audit because `reqwest` reaches `webpki-roots`,
+which bundles root-certificate data. The official license permits use, modification and sharing;
+if the data is redistributed, the license text must accompany it. Keep this explicit allow narrow
+to the license identifier and retain `cargo deny`'s default deny for all other unknown licenses.
+
+In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
+[the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
 

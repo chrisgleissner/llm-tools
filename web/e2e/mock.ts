@@ -13,6 +13,11 @@ export interface MockOptions {
   login?: "ok" | "wrong" | "limited";
   /** Response of POST /auth/setup. */
   setup?: "ok" | "bad-token";
+  /** Report that one or more passkeys are enrolled on the canonical origin. */
+  passkeySignInAvailable?: boolean;
+  passkeyCanonicalOrigin?: string | null;
+  /** Return discoverable-only assertion options so conditional UI can be exercised. */
+  passkeyDiscoverable?: boolean;
   workers?: "none" | "some";
   missions?: "none" | "some";
   sessionRemembered?: boolean;
@@ -115,6 +120,8 @@ export interface Mock {
   /** Switch what /auth/state reports (used to simulate an expired session). */
   setAuth(mode: AuthMode): void;
   terminalInputCount(): number;
+  passkeyAssertionStartCount(): number;
+  passkeyAssertionFinish(): Record<string, unknown> | null;
   emitStream(message: Record<string, unknown>): void;
   /** Requests answered so far, by kind: `status` is GET /missions/{id} (a worker command), `tasks` the task list, `events` GET /events (coordinator only). */
   requestCounts(): { status: number; tasks: number; events: number };
@@ -125,6 +132,8 @@ export interface Mock {
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
   let terminalInputs = 0;
+  let passkeyStarts = 0;
+  let passkeyFinish: Record<string, unknown> | null = null;
   let streamSocket: WebSocketRoute | null = null;
   const requestCounts = { status: 0, tasks: 0, events: 0 };
   const digestOf = (entry: (typeof MISSIONS)[number]) => entry.mission.status === "RUNNING"
@@ -137,7 +146,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     const withDigest = opts.digest ? { ...entry, mission: { ...entry.mission, ...digestOf(entry) } } : { ...entry, mission: { ...entry.mission } };
     return opts.providerQuestion && i === 0 ? { ...withDigest, mission: { ...withDigest.mission, needs_you: providerNeedsYou } } : withDigest;
   });
-  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
+  const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; last_address: string | null; expires_at: string | null; allowed_cidrs: string[]; allowed_workers: string[] }> = [];
   await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
     streamSocket = ws;
   });
@@ -160,13 +169,33 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/auth/state") {
       if (auth === "in")
         return json(route, 200, { setup_required: false, authenticated: true, csrf_token: "csrf", password_policy: POLICY, session_policy: SESSION_POLICY, username: "admin", session: { remember: opts.sessionRemembered ?? false, expires_at: nowS + 43200 - 600, idle_timeout_secs: opts.sessionRemembered ? 28800 : 7200 } });
-      return json(route, 200, { setup_required: auth === "setup", authenticated: false, password_policy: POLICY, session_policy: SESSION_POLICY });
+      return json(route, 200, { setup_required: auth === "setup", authenticated: false, passkey_sign_in_available: opts.passkeySignInAvailable ?? false, passkey_canonical_origin: opts.passkeyCanonicalOrigin ?? null, password_policy: POLICY, session_policy: SESSION_POLICY });
     }
     if (path === "/auth/login") {
       if (opts.login === "wrong") return json(route, 401, { error: { code: "invalid-credentials", message: "invalid username or password" } });
       if (opts.login === "limited") return json(route, 429, { error: { code: "rate-limited", message: "too many failed attempts; try again later" } }, { "retry-after": "300" });
       auth = "in";
       return json(route, 200, { csrf_token: "csrf" });
+    }
+    if (path === "/auth/passkeys/assertion/start" && method === "POST") {
+      passkeyStarts += 1;
+      return json(route, 200, {
+        challenge_id: "mock-challenge-1",
+        options: {
+          publicKey: {
+            challenge: "AQID",
+            rpId: "localhost",
+            timeout: 60_000,
+            allowCredentials: opts.passkeyDiscoverable ? [] : [{ type: "public-key", id: "BAUG", transports: ["internal"] }],
+            userVerification: "required",
+          },
+        },
+      }, { "set-cookie": "__Host-bridge_passkey=mock-ticket; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Strict" });
+    }
+    if (path === "/auth/passkeys/assertion/finish" && method === "POST") {
+      passkeyFinish = JSON.parse(req.postData() ?? "{}") as Record<string, unknown>;
+      auth = "in";
+      return json(route, 200, { csrf_token: "csrf" }, { "set-cookie": "__Host-bridge_session=mock-session; Path=/; Secure; HttpOnly; SameSite=Strict" });
     }
     if (path === "/auth/setup") {
       if (opts.setup === "bad-token") return json(route, 403, { error: { code: "invalid-setup-token", message: "invalid setup token" } });
@@ -238,8 +267,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/diagnostics") return json(route, 200, DIAG);
     if (path === "/tokens" && method === "GET") return json(route, 200, { tokens });
     if (path === "/tokens" && method === "POST") {
-      const body = JSON.parse(req.postData() ?? "{}") as { name: string; scopes: string[]; expires_days: number };
-      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null };
+      const body = JSON.parse(req.postData() ?? "{}") as { name: string; scopes: string[]; expires_days: number; allowed_cidrs?: string[]; allowed_workers?: string[] };
+      const token = { name: body.name, scopes: body.scopes, created_at: NOW.toISOString(), last_used: null, last_address: null, expires_at: body.expires_days ? new Date(NOW.getTime() + body.expires_days * 86400000).toISOString() : null, allowed_cidrs: body.allowed_cidrs ?? [], allowed_workers: body.allowed_workers ?? [] };
       tokens.push(token);
       return json(route, 201, { token, secret: "lbr_pat_mock-secret" });
     }
@@ -267,6 +296,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   return {
     setAuth: (m) => void (auth = m),
     terminalInputCount: () => terminalInputs,
+    passkeyAssertionStartCount: () => passkeyStarts,
+    passkeyAssertionFinish: () => passkeyFinish,
     emitStream: (message) => streamSocket?.send(JSON.stringify(message)),
     requestCounts: () => ({ ...requestCounts }),
     patchMission: (id, patch) => {
