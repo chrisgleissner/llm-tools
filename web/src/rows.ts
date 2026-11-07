@@ -319,10 +319,6 @@ export function blockedReason(e: MissionEntry): string | undefined {
   return undefined;
 }
 
-function markConfirm(): void {
-  document.getElementById("dialog-confirm")?.setAttribute("data-confirm", "");
-}
-
 /** Report the outcome of the operator's own action as one toast, then let the page re-read the mission. */
 function report(label: string, r: api.MutationResult): boolean {
   announce(`${label}.`, r.outcome, r.message);
@@ -338,7 +334,6 @@ export async function approve(item: Item, task: number, done: () => void): Promi
     confirmLabel: "Approve",
     details: body,
   });
-  markConfirm();
   void evidenceBlock(body, e, task);
   if ((await pending) === null) return;
   report(`Approved task ${task}`, await api.mutateTask(e.worker, e.mission.id, task, "task.verify", { approved: true, evidence: "approved in web UI" }));
@@ -354,7 +349,6 @@ export async function reject(item: Item, task: number, done: () => void): Promis
     danger: true,
     reasonLabel: "Reason",
   });
-  markConfirm();
   const reason = await pending;
   if (reason === null) return;
   report(`Rejected task ${task}`, await api.mutateTask(e.worker, e.mission.id, task, "task.reject", { reason }));

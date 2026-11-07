@@ -14,6 +14,8 @@ export interface MenuItem {
   /** Why the item is disabled; shown beside it. */
   reason?: string;
   id?: string;
+  /** Extra attributes on the item button, for example `{ "data-steer": "replace" }`. */
+  attrs?: Record<string, string>;
 }
 
 export interface MenuTrigger {
@@ -44,6 +46,7 @@ function itemButton(item: MenuItem, close: () => void): HTMLButtonElement {
     item.disabled && item.reason ? h("span", { class: "why" }, item.reason) : null,
   );
   if (item.disabled && item.reason) b.title = item.reason;
+  for (const [name, value] of Object.entries(item.attrs ?? {})) b.setAttribute(name, value);
   b.addEventListener("click", () => {
     close();
     item.onSelect();

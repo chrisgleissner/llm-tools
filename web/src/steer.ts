@@ -68,7 +68,6 @@ export async function runSteer(o: SteerTarget, kind: api.SteerKind, label: strin
           pick.disabled = !list.length;
         });
     const answer = confirmDialog({ title: label, message: "This is queued and applied at the next safe point.", confirmLabel: handoff ? "Hand off" : "Queue", details: h("div", {}, ...body) });
-    document.getElementById("dialog-confirm")?.setAttribute("data-confirm", "");
     (withPrompt ? text : handoff ? route : pick).focus();
     if ((await answer) === null) return;
     await loaded.catch(() => {});

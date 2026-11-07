@@ -16,7 +16,6 @@ export const transcriptText = (t: Terminal): string => {
 /** The explicit "resize the shared session to this screen" confirmation. */
 export async function confirmResize(): Promise<boolean> {
   const answer = confirmDialog({ title: "Resize the session to this screen?", message: "Other viewers and the tmux station will change size.", confirmLabel: "Resize" });
-  document.getElementById("dialog-confirm")?.setAttribute("data-confirm", "");
   return (await answer) !== null;
 }
 

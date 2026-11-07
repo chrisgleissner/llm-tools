@@ -73,11 +73,7 @@ export function composer(o: ComposerOpts): Composer {
   // Fetched when the composer mounts, so a dialog opens in the same task as the click that chose the item.
   const loading = import("./session-extras");
   const steer = (kind: api.SteerKind, label: string): void => void loading.then((m) => m.runSteer({ ...o, chips, own: (stop) => stops.push(stop) }, kind, label));
-  const steerMenu = menu({ label: "Steer the mission", text: "Steer" }, KINDS.map(([kind, label]) => ({ label, id: `steer-${kind}`, onSelect: () => steer(kind, label) })));
-  // The menu builds its items when it opens; tag them with the steering kind they send.
-  const tag = (): void => document.querySelectorAll('[role="menuitem"][id^="steer-"]').forEach((e) => e.setAttribute("data-steer", e.id.slice(6)));
-  steerMenu.addEventListener("click", tag);
-  steerMenu.addEventListener("keydown", tag);
+  const steerMenu = menu({ label: "Steer the mission", text: "Steer" }, KINDS.map(([kind, label]) => ({ label, id: `steer-${kind}`, attrs: { "data-steer": kind }, onSelect: () => steer(kind, label) })));
 
   const element = h("div", { class: "composer", "data-composer": "" }, chips, h("div", { class: "cluster" }, take, input, sendBtn, steerMenu), note);
   return {

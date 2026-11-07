@@ -7,12 +7,12 @@ import { absTime, copyText, emptyState, button, h, hooks } from "../../dom";
 import { humanizeEvent } from "../../event-humanizer";
 import { missionState, onStream, refresh, store, subscribe, worker } from "../../store";
 import type { DerivedState } from "../../state";
-import { announce, announceStreamEvent } from "../../ui";
+import { announce, announceStreamEvent, confirmDialog as confirm } from "../../ui";
 import { aboutBlock } from "./about";
 import { activityPanel, type ActivityData } from "./activity";
 import { taskActions } from "./actions";
-import { confirm } from "./dialogs";
 import { approvalOrdinals, buildHeader, providerModel, type HeaderHandlers, type HeaderModel } from "./header";
+import { SHORTCUT_EVENT } from "../../shell";
 import { sessionReserve } from "../../session-box";
 import { loadSession, type SessionHandle } from "./session";
 import { tasksPanel } from "./tasks";
@@ -487,6 +487,15 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   resizeObserver?.observe(head);
   resizeObserver?.observe(tabsEl);
 
+  // The shell's `c` key: show the session and move focus into it. A pane that cannot take typing yet focuses Take control instead (spec 8.2).
+  const onShortcut = (e: Event): void => {
+    if ((e as CustomEvent<{ name: string }>).detail.name !== "compose" || !session) return;
+    setTab("session");
+    session.focusComposer();
+    e.preventDefault();
+  };
+  document.addEventListener(SHORTCUT_EVENT, onShortcut);
+
   setTab(tab, false);
   renderHeader();
   renderTasks();
@@ -500,6 +509,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   return () => {
     disposed = true;
     resizeObserver?.disconnect();
+    document.removeEventListener(SHORTCUT_EVENT, onShortcut);
     offStream();
     offStore();
     session?.dispose();

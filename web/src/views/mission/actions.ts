@@ -1,8 +1,7 @@
 // Task actions shared by the task rows, the evidence block and the header: Approve and Reject (with evidence and a reason),
 // Retry, Pause, Resume and Cancel. Each sends one request; the page toasts the outcome once and reloads.
-import { announce } from "../../ui";
+import { announce, confirmDialog as confirm } from "../../ui";
 import { evidenceBody } from "./evidence";
-import { confirm } from "./dialogs";
 import type { PageCtx, Task } from "./types";
 
 export interface TaskActions {
