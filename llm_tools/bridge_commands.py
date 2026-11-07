@@ -182,6 +182,25 @@ def _validated_params(spec: OperationSpec, raw: Mapping[str, Any]) -> dict[str, 
     return values
 
 
+def with_task_numbers(value: Any) -> Any:
+    """A copy of ``value`` in which every task also carries ``number``, an alias of ``ordinal``.
+
+    ``number`` is what users type after ``--task``; ``id`` is the global ID, which only
+    ``--task-id`` accepts.
+    """
+    if isinstance(value, dict):
+        copy: dict[str, Any] = {}
+        task = "ordinal" in value and ("mission_id" in value or "title" in value) and "number" not in value
+        for key, item in value.items():
+            copy[key] = with_task_numbers(item)
+            if task and key == "ordinal" and isinstance(item, int) and not isinstance(item, bool):
+                copy["number"] = item
+        return copy
+    if isinstance(value, list):
+        return [with_task_numbers(item) for item in value]
+    return value
+
+
 # --------------------------------------------------------------------------- handlers
 # Each handler calls the CLI module's implementation through ``bridge`` so
 # existing tests that patch those names keep observing a single code path.
@@ -199,7 +218,8 @@ def _mission_list(store: BridgeStore | None, request: CommandRequest, params: di
     missions = cli.order_missions(store.list_missions())
     for item in missions:
         item["controller_running"] = cli.controller_running(str(item["id"]))
-    result: dict[str, Any] = {"missions": missions}
+    # "total" is the count before any display limit, so local and remote JSON have the same shape (CLIUX-015).
+    result: dict[str, Any] = {"missions": missions, "total": len(missions)}
     return result if params["include_config"] else cli.strip_frozen_config(result)
 
 

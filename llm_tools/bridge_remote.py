@@ -307,7 +307,7 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
 
 def _print(value: Any, as_json: bool, human: Callable[[Any], str]) -> int:
     if as_json:
-        print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+        print(json.dumps(commands.with_task_numbers(value), ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print(human(value))
     return 0

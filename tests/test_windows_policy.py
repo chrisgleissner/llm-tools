@@ -61,3 +61,21 @@ def test_other_platforms_are_never_refused(monkeypatch: pytest.MonkeyPatch) -> N
     for platform in ("linux", "darwin"):
         monkeypatch.setattr(bridge.sys, "platform", platform)
         assert bridge.unsupported_on_windows(["status"]) is None
+
+
+def test_the_windows_modules_import_without_curses() -> None:
+    """Windows has no curses; every module the remote client and the test harness load must import without it."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    program = (
+        "import sys, importlib\n"
+        "sys.modules['curses'] = None\n"
+        "sys.modules['_curses'] = None\n"
+        "for name in ('bridge', 'bridge_remote', 'bridge_runtime', 'terminal', 'bridge_commands', 'bridge_protocol', 'bridge_ws', 'bridge_input'):\n"
+        "    importlib.import_module('llm_tools.' + name)\n"
+    )
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run([sys.executable, "-c", program], cwd=root, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr

@@ -58,7 +58,10 @@ jobs:
           cd "$(mktemp -d)"
           llm-bridge --help >/dev/null
           llm-bridge mission create --help >/dev/null
-          llm-bridge </dev/null >/dev/null
+          # Without a terminal the home screen prints help and exits 2 (see _home_screen_blocker).
+          status=0
+          llm-bridge </dev/null >/dev/null 2>&1 || status=$?
+          if [ "$status" -ne 2 ]; then echo "::error::llm-bridge without a TTY exited $status, expected 2"; exit 1; fi
 
       - uses: ./.github/actions/rust-toolchain
       - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3

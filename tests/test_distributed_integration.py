@@ -196,7 +196,7 @@ def test_remote_cli_has_local_semantics(system, tmp_path, capsys):
         remote_code, remote_out, err = run("--target", "ws", *argv)
         assert (code, remote_code) == (0, 0), err
         local, remote = json.loads(local_out), json.loads(remote_out)
-        assert (remote["tasks"] if "tasks" in remote else remote) == local
+        assert remote == local
 
     code, out, _ = run("--target", "ws", "status", "--mission", mission_id[:8])
     assert code == 0 and mission_id[:8] in out

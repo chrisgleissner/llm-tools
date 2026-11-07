@@ -304,6 +304,13 @@ PROCFS_ONLY_TESTS = frozenset({
     "tests/test_bridge_review_regressions.py::test_complete_stop_terminates_owned_descendant_in_a_new_session",
     "tests/test_bridge_review_regressions.py::test_owned_group_termination_kills_descendant_after_leader_exits",
     "tests/test_bridge_security_prompt_delivery.py::test_headless_run_delivers_the_prompt_on_stdin",
+    "tests/test_bridge_internals_fixes.py::test_controller_exception_stops_the_provider_process_group",
+    "tests/test_bridge_internals_fixes.py::test_provider_that_cannot_be_stopped_is_recorded_as_orphaned",
+    "tests/test_bridge_internals_fixes.py::test_force_stop_finds_the_controller_through_the_lock_when_the_ready_file_is_gone",
+    "tests/test_bridge_internals_review.py::test_int003_controller_start_retries_a_failed_provider_termination",
+    "tests/test_bridge_internals_review.py::test_int003_second_force_stop_retries_a_failed_provider_termination",
+    "tests/test_bridge_internals_review.py::test_int018_cancel_ends_the_running_provider_process",
+    "tests/test_bridge_native_usage_limit.py::test_the_provider_process_tree_is_stopped_before_the_pane_is_reused",
 })
 
 

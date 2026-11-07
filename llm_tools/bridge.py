@@ -179,23 +179,7 @@ def console_snapshot(
     return result
 
 
-def _with_task_numbers(value: Any) -> Any:
-    """A copy of ``value`` in which every task also carries ``number``, an alias of ``ordinal``.
-
-    ``number`` is what users type after ``--task``; ``id`` is the global ID, which only
-    ``--task-id`` accepts.
-    """
-    if isinstance(value, dict):
-        copy: dict[str, Any] = {}
-        task = "ordinal" in value and ("mission_id" in value or "title" in value) and "number" not in value
-        for key, item in value.items():
-            copy[key] = _with_task_numbers(item)
-            if task and key == "ordinal" and isinstance(item, int) and not isinstance(item, bool):
-                copy["number"] = item
-        return copy
-    if isinstance(value, list):
-        return [_with_task_numbers(item) for item in value]
-    return value
+_with_task_numbers = commands.with_task_numbers  # shared with the remote client so both print the same JSON
 
 
 def _json_print(value: Any, *, compact: bool = False) -> None:
@@ -3042,8 +3026,8 @@ def _main(argv: list[str] | None = None) -> int:
                     return 0
                 else:
                     result = commands.dispatch(commands.CommandRequest("mission.list", {"include_config": bool(args.include_config)}))
-                    total = len(result["missions"])
-                    result = {**result, "total": total, "missions": result["missions"] if args.limit is None else result["missions"][:max(0, args.limit)]}
+                    if args.limit is not None:
+                        result = {**result, "missions": result["missions"][:max(0, args.limit)]}
             human = fmt.format_mission_created if args.mission_action == "create" else (lambda value: fmt.format_mission_list(value["missions"]))
             if not args.include_config:
                 result = strip_frozen_config(result)
