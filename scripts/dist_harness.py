@@ -109,7 +109,10 @@ DEFAULT_BOUNDS: dict[str, SlopeBound] = {
     "workers_rss_kib": SlopeBound(per_hour=2 * 1024, floor=1024, unit="KiB", per_process=True),
     "workers_fds": SlopeBound(per_hour=1, floor=1, unit="descriptors", per_process=True),
     "workers_threads": SlopeBound(per_hour=1, floor=1, unit="threads", per_process=True),
-    "controllers_rss_kib": SlopeBound(per_hour=1024, floor=512, unit="KiB", per_process=True),
+    # A controller keeps about 0.3 to 2 KiB per provider run (CPython 3.12 never frees the interned path components
+    # that pathlib creates for per-run directory names). The fake provider finishes a run every few seconds to 20 s,
+    # which is 50 to 1000 times faster than a real provider, so 6 MiB per hour covers it. See soak-and-chaos.md.
+    "controllers_rss_kib": SlopeBound(per_hour=6144, floor=512, unit="KiB", per_process=True),
     "controllers_fds": SlopeBound(per_hour=1, floor=1, unit="descriptors", per_process=True),
 }
 

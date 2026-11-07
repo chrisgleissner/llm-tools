@@ -87,7 +87,7 @@ units per hour, for example `--bound-coordinator-rss-kib 4096`):
 | `coordinator_db_bytes` | 32 MiB | 8 MiB + 4096 bytes per new row | `coordinator.sqlite3` plus its WAL. Until the event retention cap is reached the database grows with the stored events by design; the floor allows exactly that. At the cap the slope has to flatten. |
 | `workers_rss_kib` | 2048 KiB per worker | 1024 KiB per worker | Sum over the `llm-bridge worker run` processes; bound and floor are multiplied by the worker count. |
 | `workers_fds`, `workers_threads` | 1 per worker | 1 per worker | Same. |
-| `controllers_rss_kib` | 1024 KiB per controller | 512 KiB per controller | Sum over the mission controller processes, multiplied by the mission count. |
+| `controllers_rss_kib` | 6144 KiB per controller | 512 KiB per controller | Sum over the mission controller processes, multiplied by the mission count. The bound is sized for the fake provider, which finishes a provider run every few seconds to 20 s; see the controller finding under Reading of the results. |
 | `controllers_fds` | 1 per controller | 1 per controller | Same. |
 
 `--bound-<metric>` replaces the per-hour number (per process for the last four rows). The floors are fixed.
@@ -137,14 +137,47 @@ Reading of the results:
 - Coordinator memory, descriptors, threads, API latency and exactly-once delivery are well inside the
   bounds with a wide margin. The latency budgets are about 24 times the worst measured p99 for reads and
   100 times for submissions, which leaves room for a loaded shared runner.
-- The mission controllers grow with the number of completed tasks (20 to 56 KB per task, linear through
-  the longest run). With the fake provider a mission completes a task about every 21 s, which is far
-  faster than a real provider; at that rate the 30-minute nightly run with 50 missions grows each controller by about 2.7 MB in the
-  fit window and fails `controllers_rss_kib` (bound 1 MiB per hour, floor 0.5 MiB). This is
-  a finding about the controller, not a fault of the harness, and it was not investigated here. The
-  five-minute pull-request run (10 controllers, about 15 tasks each in the fit window) stays under the
-  floor and passes. If the growth turns out to be a bounded cache, raise the bound with
-  `--bound-controllers-rss-kib` and record why.
+- The mission controllers grow slowly and in steps, in proportion to the number of provider runs. This
+  was investigated (PRD-007 follow-up) with a single headless mission, the same fake provider and no
+  coordinator (`scripts/bridge_soak_provider.py`, 2500 to 4000 queued tasks, controller RSS sampled from
+  `/proc`):
+  - Steady-state growth is 0.7 KiB per completed task with instant tasks, and about 1.4 KiB per task
+    (1 KiB per provider run, 3.7 MiB per hour at 43 tasks per minute) with the soak's mix of crashes,
+    rate limits and injected capacity limits. A controller that only waits for a provider (no task
+    completes) grows 12 KiB per minute or less. The first 4 to 5 MiB, from 36 MiB at start to about
+    41 MiB, come within the first 50 tasks (module imports and first use of each code path).
+  - The memory is not held by Python objects that the controller can release. `tracemalloc` shows the
+    traced heap growing by 0.4 KiB per task (8.93 to 9.03 MiB over 240 tasks) while the interpreter's
+    live object counts stay flat, with the thread count (3 to 5) and the descriptor count (11 to 14)
+    constant. The traced growth is the interned path components of pathlib (`pathlib.py:404`,
+    `sys.intern(str(x))`): about five new strings of about 58 bytes per provider run, for example
+    `iter-N-codex` and the per-run log directory names. CPython 3.12 makes interned strings immortal,
+    so these are never freed. This is reproducible without Bridge: on Python 3.12.3 `sys.intern` of
+    20000 unique strings leaves 2.4 MB allocated after the references are dropped, plain strings leave
+    nothing, and parsing 20000 unique paths with `pathlib.Path` leaves 2.1 MB.
+  - The immortal strings are small and scattered, so they also pin allocator pools. RSS grows about twice
+    as fast as the traced bytes and in steps of 0.25 to 0.5 MiB when a new arena is touched.
+  - Experiment that moves the number: with `sys.intern` replaced by the identity function in the
+    controller process, the steady-state slope over 2000 tasks falls from 0.72 to 0.27 KiB per task
+    (RSS 41.3 to 42.6 MiB against 40.3 to 40.8 MiB). The remaining 0.27 KiB per task is the bounded
+    `functools.lru_cache` of capacity forecasts (`bridge_refresh._sample_forecast`, 256 entries) and
+    allocator slack. The patch was only an experiment and is not in the code: replacing a
+    global interpreter function in production is a worse trade than the growth it removes.
+  - The earlier figure of 20 to 56 KB per task was the growth of the summed RSS of 50 controllers over
+    ten minutes divided by the tasks completed in that time. The single-controller reproduction does not
+    show a per-task cost of that size. The difference is probably warm-up (the first 4 to 5 MiB per
+    controller) and allocator steps on a loaded host with 50 controllers; this was not reproduced with 50
+    controllers, so the 30-minute nightly run has to confirm it.
+
+  At one provider run every 21 s, steady-state growth is about 0.2 MiB per hour per controller. A real
+  provider run takes minutes to hours, so a production controller grows well under 1 MiB per day. The
+  growth is small, proportional to provider runs and has no effect on correctness, so it is treated as benign
+  rather than fixed. The default bound `controllers_rss_kib` is raised from 1 MiB to 6 MiB per hour per
+  controller. That covers the 2.7 MB per 30 minutes seen in the 50-mission run and the 3.7 MiB per hour
+  measured in the single-controller reproduction, and it still fails a leak of about 35 KB or more per run at the
+  fake provider's rate. Running the soak under Python 3.13 or later is expected to remove the interned
+  string part of the growth; this was not checked on this host.
+
 - Worker memory rose about 9 MiB in ten minutes with 50 missions (about 0.9 MiB per worker, mostly early),
   which the per-worker floor accepts; the single-worker run was flat.
 - The database stayed at about 1.2 KiB per row (rows are `events`, `commands` and `audit`), against the
