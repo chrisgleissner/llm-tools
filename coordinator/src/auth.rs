@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-pub const MIN_PASSWORD_LEN: usize = 12;
+pub const MIN_PASSWORD_LEN: usize = 15;
 pub const MAX_PASSWORD_LEN: usize = 256;
 pub const GLOBAL_MUTATION_BUDGET_KEY: &str = "global:mutations";
 pub const GLOBAL_MUTATION_LIMIT_PER_MINUTE: usize = 600;
@@ -299,5 +299,18 @@ impl Drop for Attempt<'_> {
             let keys = std::mem::take(&mut self.keys);
             self.limiter.finish(&keys, true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn password_policy_uses_the_single_factor_minimum_and_allows_long_passphrases() {
+        assert!(valid_password(&"x".repeat(MIN_PASSWORD_LEN - 1)).is_err());
+        assert!(valid_password(&"x".repeat(MIN_PASSWORD_LEN)).is_ok());
+        assert!(valid_password(&"correct horse battery staple".repeat(8)).is_ok());
+        assert!(valid_password(&"x".repeat(MAX_PASSWORD_LEN + 1)).is_err());
     }
 }
