@@ -3,6 +3,7 @@
 import * as api from "../api";
 import { button, deferSkeleton, disclosure, emptyState, errorBlock, h } from "../dom";
 import { icon } from "../icons";
+import { setAttentionCount } from "../shell";
 import { onStream, refresh, store, subscribe } from "../store";
 import {
   attentionChecked, attentionGaps, attentionPending, hasLine, hasStatus, itemOf, loadLines, loadStatuses, missionHref, missionRow, onDetails,
@@ -158,6 +159,7 @@ export function inbox(root: HTMLElement): () => void {
 
     // The answer line: does it need me, what is happening, what next. Counts are not shown as zero while still being read.
     const checking = !store.loaded || (pending && needs.length === 0);
+    setAttentionCount(checking || !store.loaded ? null : needs.length);
     need.textContent = checking ? "Checking..." : needs.length ? `${needs.length} ${needs.length === 1 ? "needs" : "need"} you` : "Nothing needs you";
     what.textContent = !store.loaded ? "" : running.length ? `${running.length} running` : workers === 0 ? "No workers yet" : items.length === 0 ? "No missions yet" : "Nothing is running";
     const first = needs[0]?.state.id;
@@ -283,6 +285,7 @@ export function inbox(root: HTMLElement): () => void {
     window.clearTimeout(probeTimer);
     window.clearInterval(clock);
     cancelSkeleton?.();
+    setAttentionCount(null);
     unsubscribe();
     unDetails();
     unStream();
