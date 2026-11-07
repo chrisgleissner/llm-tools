@@ -316,6 +316,7 @@ A [Ralph loop](https://venturebeat.com/technology/how-ralph-wiggum-went-from-the
 - With everything exhausted, suspends the machine and wakes it at the earliest reset.
 - Holds an idle inhibitor, so your desktop cannot suspend it mid-task.
 - Never suspends without a wake alarm.
+- Records every resume. A USB keyboard with wakeup enabled can wake the machine before the alarm; that is logged as an early wake, not as a failed resume. Only a machine that rebooted during a suspend triggers the wedged-resume warning. Details: [Reliable sleep/wake](./docs/ralph-robin.md#reliable-sleepwake).
 
 ```bash
 ralph-robin --prompt-file task.md

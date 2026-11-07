@@ -5122,12 +5122,21 @@ def ledger_record_start(path: Path, cycle_id: str, target_epoch: int, env: dict[
     ``done`` -- ground truth that a cycle failed to resume.
     """
     record = {"event": "suspend_start", "cycle_id": cycle_id, "target_epoch": int(target_epoch), "started_epoch": now_epoch(env), **diagnostic_clock_fields()}
+    boot_id = read_boot_id(env)
+    if boot_id:
+        record["boot_id"] = boot_id
+    success = read_suspend_success_count(env)
+    if success is not None:
+        record["suspend_success"] = success
     record.update(extra)
     _append_ledger(path, record)
 
 
 def ledger_record_done(path: Path, cycle_id: str, woke_epoch: int, reliable: bool, env: dict[str, str] | None = None, **extra: Any) -> None:
     record = {"event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": int(woke_epoch), "reliable": bool(reliable), **diagnostic_clock_fields()}
+    boot_id = read_boot_id(env)
+    if boot_id:
+        record["boot_id"] = boot_id
     record.update(extra)
     _append_ledger(path, record)
 
@@ -5154,6 +5163,202 @@ def incomplete_suspend_cycles(path: Path) -> list[dict[str, Any]]:
         elif obj.get("event") == "suspend_done":
             done.add(cid)
     return [rec for cid, rec in starts.items() if cid not in done]
+
+
+def _read_text_file(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+
+
+def _sys_root(env: Mapping[str, str] | None = None) -> Path:
+    """Root of the sysfs tree read for wake diagnostics (``LLM_TOOLS_SYS_ROOT``; tests)."""
+    return Path((env or os.environ).get("LLM_TOOLS_SYS_ROOT") or "/sys")
+
+
+def read_boot_id(env: Mapping[str, str] | None = None) -> str | None:
+    """The kernel boot ID, or None where the platform does not expose one.
+
+    ``LLM_TOOLS_BOOT_ID_FILE`` overrides ``/proc/sys/kernel/random/boot_id`` (tests).
+    """
+    configured = (env or os.environ).get("LLM_TOOLS_BOOT_ID_FILE")
+    value = _read_text_file(Path(configured or "/proc/sys/kernel/random/boot_id"))
+    return value or None
+
+
+def read_suspend_success_count(env: Mapping[str, str] | None = None) -> int | None:
+    """Kernel count of completed suspend cycles (``/sys/power/suspend_stats/success``)."""
+    text = _read_text_file(_sys_root(env) / "power" / "suspend_stats" / "success")
+    try:
+        return int(text) if text is not None else None
+    except ValueError:
+        return None
+
+
+def wakeup_event_counts(env: Mapping[str, str] | None = None) -> dict[str, int]:
+    """Event count per kernel wakeup source (``/sys/class/wakeup/wakeup*``), keyed ``wakeupN:name``."""
+    counts: dict[str, int] = {}
+    root = _sys_root(env) / "class" / "wakeup"
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return counts
+    for entry in entries:
+        name = _read_text_file(entry / "name")
+        raw = _read_text_file(entry / "event_count")
+        if not name or raw is None:
+            continue
+        try:
+            counts[f"{entry.name}:{name}"] = int(raw)
+        except ValueError:
+            continue
+    return counts
+
+
+def wake_source_report(before: Mapping[str, int] | None, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Best-effort description of what woke the machine, from whatever sysfs exposes.
+
+    ``wake_irq`` is the first IRQ of the last resume (``/sys/power/pm_wakeup_irq``)
+    and ``wake_irq_actions`` the drivers attached to it; ``wakeup_sources`` lists
+    the wakeup sources whose event count rose since ``before``. Absent data is
+    omitted, so an empty dict means the platform exposes nothing.
+    """
+    report: dict[str, Any] = {}
+    root = _sys_root(env)
+    irq_text = _read_text_file(root / "power" / "pm_wakeup_irq")
+    if irq_text and irq_text.isdigit():
+        report["wake_irq"] = int(irq_text)
+        actions = _read_text_file(root / "kernel" / "irq" / irq_text / "actions")
+        if actions:
+            report["wake_irq_actions"] = actions
+    if before is not None:
+        after = wakeup_event_counts(env)
+        fired = sorted(name.split(":", 1)[1] for name, count in after.items() if count > before.get(name, count))
+        if fired:
+            report["wakeup_sources"] = fired
+    return report
+
+
+def _boottime_seconds() -> float | None:
+    sample = suspend_clock_sample()
+    return sample[0] if sample is not None else None
+
+
+def _planner_lock_free(env: dict[str, str] | None = None) -> bool:
+    """True when no process is inside a suspend cycle (the planner lock is free)."""
+    if fcntl is None:
+        return True
+    path = cache_root(env) / "llm-bridge" / "capacity-wakes" / "planner.lock"
+    try:
+        ensure_private_cache_dir(path.parent, env)
+        with path.open("a+") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            return True
+    except OSError:
+        return False
+
+
+@dataclass
+class SuspendLedgerReport:
+    """Outcome of :func:`reconcile_suspend_ledger`.
+
+    ``wedged``: starts followed by a different boot ID -- the machine never resumed
+    from them. ``unverified``: starts written by an older release (no boot ID) that
+    predate the current boot; they were marked closed so the note appears once.
+    ``recovered``: starts from this boot whose process ended after a normal resume.
+    """
+
+    wedged: list[dict[str, Any]]
+    unverified: list[dict[str, Any]]
+    recovered: list[dict[str, Any]]
+
+
+def reconcile_suspend_ledger(path: Path, env: dict[str, str] | None = None) -> SuspendLedgerReport:
+    """Classify suspend cycles that have a start but no done record.
+
+    A start with no done can mean three things, told apart by the boot ID that
+    ``suspend_start`` records:
+
+    * same boot ID as now: the machine resumed (it is running this process) and the
+      process that waited for the target ended before it could record the resume
+      (stopped, crashed, or killed after an early wake). Not a failure: a
+      ``suspend_done`` with ``reason="process-ended-after-resume"`` is appended.
+    * different boot ID: the machine rebooted after the suspend began, so it never
+      resumed normally. This is the wedge fingerprint and stays reported on every
+      start until its lines are removed from the ledger.
+    * no boot ID (written by an older release): if the start is after this boot's
+      start time it is treated like the same-boot case; if it predates this boot
+      nothing can be proven, so it is reported once as unverified and closed with
+      ``reason="legacy-unverified"``.
+
+    A cycle that may still be in flight (the planner lock is held) is neither
+    reported nor closed.
+    """
+    report = SuspendLedgerReport([], [], [])
+    incomplete = incomplete_suspend_cycles(path)
+    if not incomplete:
+        return report
+    current_boot = read_boot_id(env)
+    uptime = _boottime_seconds()
+    now = now_epoch(env)
+    boot_started = now - uptime if uptime is not None else None
+    settled = _planner_lock_free(env)
+    success_now = read_suspend_success_count(env)
+    for record in incomplete:
+        cycle_id = str(record.get("cycle_id") or "")
+        recorded_boot = record.get("boot_id")
+        if isinstance(recorded_boot, str) and recorded_boot:
+            if current_boot and recorded_boot != current_boot:
+                report.wedged.append(record)
+                continue
+            same_boot = True  # an unreadable boot ID now cannot show a reboot, so do not alarm
+        else:
+            started = record.get("started_epoch")
+            same_boot = boot_started is not None and isinstance(started, (int, float)) and started >= boot_started
+        if not settled:
+            continue
+        if same_boot:
+            before = record.get("suspend_success")
+            confirmed = isinstance(before, int) and success_now is not None and success_now > before
+            _append_ledger(path, {
+                "event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": None, "reliable": True,
+                "reason": "process-ended-after-resume", "resume_confirmed": confirmed,
+                "boot_id": current_boot, **diagnostic_clock_fields(),
+            })
+            report.recovered.append(record)
+        else:
+            _append_ledger(path, {
+                "event": "suspend_done", "cycle_id": cycle_id, "woke_epoch": None, "reliable": False,
+                "reason": "legacy-unverified", "boot_id": current_boot, **diagnostic_clock_fields(),
+            })
+            report.unverified.append(record)
+    return report
+
+
+def suspend_ledger_messages(report: SuspendLedgerReport, ledger: Path) -> list[tuple[str, str]]:
+    """Operator-facing ``(level, text)`` lines for a reconcile result; empty when all is well."""
+    messages: list[tuple[str, str]] = []
+    for record in report.wedged:
+        started = int(record.get("started_epoch") or 0)
+        messages.append((
+            "warn",
+            f"warning: suspend cycle {record.get('cycle_id')} (started {format_local_epoch(started)}) never resumed: "
+            "the machine booted again afterwards, so a wake may have wedged it. "
+            "Consider --watchdog, or longer reset windows so the machine suspends less often. "
+            f"To clear this warning, delete the lines for that cycle from {ledger}.",
+        ))
+    if report.unverified:
+        messages.append((
+            "dim",
+            f"note: {len(report.unverified)} suspend record(s) from an older release have no boot ID and predate this boot, "
+            "so whether they resumed cannot be checked. They are now marked unverified and this note will not repeat.",
+        ))
+    return messages
 
 
 def trim_ledger(path: Path, keep: int = 200) -> None:
@@ -5259,6 +5464,7 @@ class SuspendOutcome:
     reason: str              # includes sleep-not-observed and sleep-unverified after accepted requests
     detail: str = ""
     sleep_observed: bool | None = False
+    early_by_seconds: int = 0  # the machine resumed this long before the target (a non-timer wake)
 
 
 SUSPEND_OBSERVED_MIN_GAP_SECONDS = 2.0
@@ -5299,6 +5505,7 @@ def wall_clock_wait_until(
     target_epoch: int,
     env: dict[str, str] | None = None,
     should_interrupt: Callable[[], bool] | None = None,
+    on_poll: Callable[[], None] | None = None,
 ) -> bool:
     """Wait until wall-clock time reaches ``target_epoch``, in bounded chunks.
 
@@ -5311,16 +5518,20 @@ def wall_clock_wait_until(
     Returns True at the target, or False when ``should_interrupt`` ended the
     wait early. With a callback the chunk is at most one second, so an operator
     request is seen promptly when a suspend was accepted but the machine stayed
-    awake.
+    awake. ``on_poll`` runs before every check (the suspend cycle uses it to
+    record an early resume as soon as it happens) and also shortens the chunk to
+    one second.
     """
     raw = (env or os.environ).get("LLM_TOOLS_WAIT_POLL_SECONDS", "30") or "30"
     try:
         chunk = max(1.0, float(raw))
     except ValueError:
         chunk = 30.0
-    if callable(should_interrupt):
+    if callable(should_interrupt) or callable(on_poll):
         chunk = 1.0
     while True:
+        if callable(on_poll):
+            on_poll()
         if callable(should_interrupt) and should_interrupt():
             return False
         remaining = target_epoch - now_epoch(env)
@@ -5431,6 +5642,7 @@ def _suspend_with_wake_locked(
 
     subprocess.run(["sync"], check=False)
     clock_before = suspend_clock_sample()
+    wakeups_before = wakeup_event_counts(env)
     suspend = subprocess.run(["systemctl", "suspend"], check=False)
     if suspend.returncode != 0:
         disarm_rtc_wake(arm, env)
@@ -5447,7 +5659,38 @@ def _suspend_with_wake_locked(
 
     # systemctl suspend returns asynchronously; poll the wall clock so we proceed
     # exactly when real time reaches the target (the RTC wake), not before.
-    wall_clock_wait_until(int(target_epoch), env, should_interrupt)
+    early_record: dict[str, Any] = {}
+
+    def observe_resume() -> None:
+        # Record the resume the moment it is seen. A wake before the target (USB
+        # keyboard, lid, network) leaves this process waiting for the target; if it
+        # were stopped meanwhile the ledger would keep a start with no done.
+        if early_record:
+            return
+        gap = suspend_clock_gap_seconds(clock_before, suspend_clock_sample())
+        if gap is None or gap < SUSPEND_OBSERVED_MIN_GAP_SECONDS:
+            return
+        woke_now = now_epoch(env)
+        early = int(target_epoch) - woke_now
+        if early <= 0:
+            return
+        early_record.update(early_by_seconds=early, woke_epoch=woke_now, sleep_gap_seconds=round(gap, 3))
+        ledger_record_done(
+            ledger, cycle_id, woke_now, True, env,
+            drift_seconds=-early, early_by_seconds=early, method=arm.method, sleep_gap_seconds=round(gap, 3),
+            sleep_observed=True, phase="resume-observed", **wake_source_report(wakeups_before, env),
+        )
+        trim_ledger(ledger)
+        _log("suspend_woke_early", {"cycle_id": cycle_id, "early_by_seconds": early, "method": arm.method})
+
+    try:
+        wall_clock_wait_until(int(target_epoch), env, should_interrupt, observe_resume)
+    except BaseException:
+        # Interrupted (signal, error) while waiting: make sure a resume that already
+        # happened is on record before propagating.
+        if not early_record:
+            observe_resume()
+        raise
     clock_after = suspend_clock_sample()
     sleep_gap = suspend_clock_gap_seconds(clock_before, clock_after)
     if dog is not None:
@@ -5484,17 +5727,26 @@ def _suspend_with_wake_locked(
             False, woke, int(target_epoch), drift, False, arm.method, "sleep-not-observed",
             f"accepted suspend request but observed only {sleep_gap:.3f}s of suspend time", False,
         )
-    reliable = abs(drift) <= suspend_drift_tolerance(env)
-    ledger_record_done(
-        ledger, cycle_id, woke, reliable, env,
-        drift_seconds=drift, method=arm.method, sleep_gap_seconds=round(sleep_gap, 3), sleep_observed=True,
-    )
-    trim_ledger(ledger)
+    early_by = max(0, -drift)
+    if early_record:
+        early_by = max(early_by, int(early_record["early_by_seconds"]))
+    # Only a wake that lands late by more than the tolerance shows an unreliable
+    # wake timer. An early wake is a different event (something else woke the
+    # machine) and says nothing against the timer.
+    reliable = drift <= suspend_drift_tolerance(env)
+    if not early_record:
+        ledger_record_done(
+            ledger, cycle_id, woke, reliable, env,
+            drift_seconds=drift, method=arm.method, sleep_gap_seconds=round(sleep_gap, 3), sleep_observed=True,
+            early_by_seconds=early_by, **wake_source_report(wakeups_before, env),
+        )
+        trim_ledger(ledger)
     _log("suspend_resumed", {
         "cycle_id": cycle_id, "woke_epoch": woke, "drift_seconds": drift,
         "reliable": reliable, "method": arm.method, "sleep_gap_seconds": round(sleep_gap, 3),
+        "early_by_seconds": early_by,
     })
-    return SuspendOutcome(True, woke, int(target_epoch), drift, reliable, arm.method, "ok", "", True)
+    return SuspendOutcome(True, woke, int(target_epoch), drift, reliable, arm.method, "ok", "", True, early_by)
 
 
 def suspend_with_wake(
