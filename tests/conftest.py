@@ -304,7 +304,7 @@ PROCFS_ONLY_MODULES = frozenset({
     "test_bridge_force_stop", "test_bridge_process_scans", "test_bridge_runtime", "test_bridge_verifier",
     "test_bridge_verifier_guard", "test_bridge_review_hold", "test_bridge_steering", "test_bridge_sessions",
     "test_bridge_end_to_end", "test_bridge_completed_stop", "test_bridge_first_run_start", "test_bridge_native_e2e",
-    "test_process_hygiene", "test_distributed_offline",
+    "test_process_hygiene", "test_distributed_offline", "test_distributed_soak_harness", "test_distributed_chaos",
 })
 # Single tests in otherwise portable modules that read a process start token or /proc/self/cmdline.
 PROCFS_ONLY_TESTS = frozenset({

@@ -178,6 +178,49 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # PRD-007 soak (scaled down) and PRD-008 fault injection against the release coordinator. The soak
+  # here runs 5 minutes with 3 workers and 10 missions: the same harness as the nightly 30-minute and
+  # long runs (soak-nightly.yml), small enough to give a result within a pull request's wait. Fault
+  # injection runs every fault of scripts/bridge_chaos.py. docs/distributed/soak-and-chaos.md has the
+  # pass criteria, the bounds and the reason for these sizes. Linux only: it reads /proc.
+  soak-chaos:
+    name: distributed soak (5 min) and fault injection
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/rust-toolchain
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+        with:
+          workspaces: coordinator
+          shared-key: x86-64-linux-release
+      - name: Build the release coordinator
+        run: cargo build --locked --release --manifest-path coordinator/Cargo.toml
+      - name: Soak, scaled down (5 minutes, 3 workers, 10 missions)
+        run: |
+          mkdir -p out
+          python scripts/bridge_soak.py --duration 300 --workers 3 --missions 10 --sample-seconds 15 --report out/soak-report.json
+      - name: Fault injection
+        if: always()
+        run: |
+          mkdir -p out
+          python scripts/bridge_chaos.py --report out/chaos-report.json
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-chaos-reports
+          path: out
+          if-no-files-found: warn
+          retention-days: 14
+
   # Static type check of the Bridge modules (llm_tools/bridge*.py and terminal.py; see [tool.mypy] in
   # pyproject.toml). mypy is a development tool and is not a runtime dependency.
   typecheck:
