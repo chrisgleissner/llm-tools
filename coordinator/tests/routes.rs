@@ -130,6 +130,45 @@ async fn every_route_requires_credentials_except_the_public_ones() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_api_and_worker_credentials_cannot_cross_route_groups() {
+    let env = boot().await;
+    let browser = env.admin().await;
+    let worker_token = browser.add_worker("w1").await;
+    let (_worker, _) = Fw::connect(&env, &worker_token, "principal-isolation", 0).await;
+    let (created_status, created) = browser.post("/api/v1/tokens", serde_json::json!({"name":"admin-api","scopes":["admin"]})).await;
+    assert_eq!(created_status, 201, "{created}");
+    let api_token = created["secret"].as_str().unwrap();
+
+    let worker_token_on_api = browser
+        .send(
+            browser
+                .bare(Method::GET, "/api/v1/workers")
+                .header("authorization", format!("Bearer {worker_token}")),
+        )
+        .await;
+    assert_eq!(worker_token_on_api.0, 401, "worker tokens must not authenticate API routes");
+
+    for (label, headers) in [
+        ("API token", vec![("authorization", format!("Bearer {api_token}"))]),
+        (
+            "browser cookie",
+            vec![("cookie", format!("__Host-bridge_session={}", browser.cookie.as_deref().unwrap()))],
+        ),
+    ] {
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
+        refused_with(env.ws("/api/v1/worker/connect", &headers).await.expect_err(label), 401);
+    }
+    let api_read = browser
+        .bare(Method::GET, "/api/v1/workers")
+        .header("authorization", format!("Bearer {api_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api_read.status().as_u16(), 200, "API token remains valid on API routes");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn openapi_route_is_public_and_matches_the_runtime_generator() {
     let env = boot().await;
     let api = env.api();
