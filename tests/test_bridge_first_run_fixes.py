@@ -475,7 +475,7 @@ def _completed_mission(tmp_path, state, capsys, name="done"):
 def test_task_add_reopens_a_completed_mission(tmp_path, state, capsys) -> None:
     mid, _ = _completed_mission(tmp_path, state, capsys)
     out = _run(capsys, "task", "add", "--mission", mid, "--prompt", "follow-up work", "--title", "Follow-up")
-    assert out.splitlines() == ['Added task 2 "Follow-up" · QUEUED · priority 0', f"Mission {mid[:8]} reopened · start it with: llm-bridge start --mission {mid[:8]}"]
+    assert out.splitlines() == ['Added task 2 "Follow-up" · QUEUED · priority 0 · starts when the mission starts', f"Mission {mid[:8]} reopened · start it with: llm-bridge start --mission {mid[:8]}"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_mission(mid)["status"] == "CREATED"
         reopened = [e for e in store.events(mid) if e["kind"] == "mission-reopened"]
@@ -660,7 +660,7 @@ def test_amend_of_a_not_running_task_applies_immediately(tmp_path, state, capsys
     _run(capsys, "task", "add", "--mission", mid, "--prompt", "second")
     _run(capsys, "task", "amend", "--mission", mid, "--task", "2", "--prompt", "second v2")
     out = _run(capsys, "task", "amend", "--mission", mid, "--task", "2", "--prompt", "second v3")
-    assert out.strip() == "Amended · task 2 is now revision 3"
+    assert out.strip() == "Amended · task 2 is now revision 3 · starts after task 1"
     shown = _run(capsys, "task", "show", "--mission", mid, "--task", "2")
     assert "second v3" in shown and "revision 3" in shown and "pending amendment" not in shown
     with BridgeStore(state / "bridge.sqlite3") as store:

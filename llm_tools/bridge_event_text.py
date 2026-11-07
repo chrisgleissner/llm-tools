@@ -594,6 +594,23 @@ def _h_task_amended(ctx: _EventContext) -> str:
     return f"{ctx.task} amended"
 
 
+@_humanizer(EventKind.TASK_NOTICE_DEFERRED)
+def _h_task_notice_deferred(ctx: _EventContext) -> str:
+    waited = ctx.data.get("waited_seconds")
+    minutes = f" for {int(waited) // 60} min" if isinstance(waited, (int, float)) and not isinstance(waited, bool) and waited >= 60 else ""
+    return f"Provider not told about queued task changes yet{minutes} · its prompt holds unsent text"
+
+
+@_humanizer(EventKind.TASK_NOTICE_DELIVERED)
+def _h_task_notice_delivered(ctx: _EventContext) -> str:
+    tasks = ctx.data.get("tasks")
+    numbers = [str(item.get("ordinal")) for item in tasks if isinstance(item, dict) and item.get("ordinal") is not None] if isinstance(tasks, list) else []
+    if not numbers:
+        return "Provider told about queued task changes"
+    shown = ", ".join(_text(number, 8) for number in numbers[:6]) + (f" and {len(numbers) - 6} more" if len(numbers) > 6 else "")
+    return f"Provider told about task{'s' if len(numbers) > 1 else ''} {shown}"
+
+
 @_humanizer(EventKind.TASK_AMENDMENT_APPLIED)
 def _h_task_amendment_applied(ctx: _EventContext) -> str:
     return f"{ctx.task} amendment applied"

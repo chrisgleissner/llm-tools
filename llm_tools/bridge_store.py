@@ -2281,6 +2281,61 @@ class BridgeStore:
             self._event(mission_id, kind, bounded)
             return int(self.db.execute("SELECT last_insert_rowid()").fetchone()[0])
 
+    def task_notice_cursor(self, mission_id: str, operation_id: str) -> int:
+        """Event ID after which task changes are news for a running provider.
+
+        The newer of the operation's `operation-prepared` event and the `through_event_id` of its last
+        `task-notice-delivered` event, so a restarted controller does not announce a task twice.
+        """
+        row = self.db.execute(
+            "SELECT COALESCE(MAX(CASE WHEN kind='operation-prepared' THEN id END),0) AS prepared FROM events WHERE mission_id=? AND operation_id=?",
+            (mission_id, operation_id),
+        ).fetchone()
+        cursor = int(row["prepared"])
+        last = self.db.execute(
+            "SELECT data_json FROM events WHERE mission_id=? AND operation_id=? AND kind='task-notice-delivered' ORDER BY id DESC LIMIT 1",
+            (mission_id, operation_id),
+        ).fetchone()
+        if last is not None:
+            try:
+                cursor = max(cursor, int(json.loads(last["data_json"]).get("through_event_id", 0)))
+            except (ValueError, TypeError):
+                pass
+        return cursor
+
+    def task_notice_candidates(self, mission_id: str, after_id: int, *, limit: int = 200) -> list[dict[str, Any]]:
+        """`task-added` and `task-amended` events above ``after_id`` with the task's number, title and current status."""
+        rows = self.db.execute(
+            "SELECT e.id,e.kind,e.task_id,t.ordinal,t.title,t.status FROM events e JOIN tasks t ON t.id=e.task_id "
+            "WHERE e.mission_id=? AND e.id>? AND e.kind IN ('task-added','task-amended') AND t.origin='operator' ORDER BY e.id LIMIT ?",
+            (mission_id, int(after_id), int(limit)),
+        )
+        return [dict(row) for row in rows]
+
+    def record_task_notice(self, mission_id: str, operation_id: str, *, through_event_id: int, tasks: list[dict[str, Any]], text_bytes: int = 0) -> None:
+        """Record that a running provider was told about ``tasks`` (the durable half of the no-duplicate rule)."""
+        with self._transaction():
+            self._mission_row(mission_id)
+            self._event(mission_id, "task-notice-delivered", {
+                "operation_id": operation_id,
+                "through_event_id": int(through_event_id),
+                "tasks": tasks[:50],
+                "task_count": len(tasks),
+                "text_bytes": int(text_bytes),
+            }, operation_id=operation_id)
+
+    def record_task_notice_deferred(self, mission_id: str, operation_id: str, *, reason: str, tasks: list[dict[str, Any]], waited_seconds: int) -> None:
+        """Record once that a notice could not be typed (for example the composer holds an unsent draft)."""
+        with self._transaction():
+            self._mission_row(mission_id)
+            self._event(mission_id, "task-notice-deferred", {
+                "operation_id": operation_id,
+                "reason": reason,
+                "tasks": tasks[:50],
+                "task_count": len(tasks),
+                "waited_seconds": int(waited_seconds),
+            }, operation_id=operation_id)
+
     def set_mission_config_value(self, mission_id: str, key: str, value: Any, *, event_kind: str) -> dict[str, Any]:
         if not key or key in {"id", "cwd", "objective"}:
             raise ValueError("invalid mutable mission config key")

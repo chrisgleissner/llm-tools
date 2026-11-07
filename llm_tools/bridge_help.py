@@ -793,7 +793,7 @@ EFFECTS: dict[str, str] = {
     "mission create": "saves a new mission in Bridge's database; starts no provider.",
     "mission set": "changes a saved setting of the mission.",
     "mission colour": "changes the mission's saved colour.",
-    "task add": "adds a task to the mission; if the mission is running, the provider uses paid capacity on it when its turn comes.",
+    "task add": "adds a task to the mission; if the mission is running, the provider uses paid capacity on it when its turn comes. A running native Claude Code, Codex or Copilot is also told about the task at its next idle prompt.",
     "task amend": "replaces the task's text; a provider that is working on it sees the change after its current step.",
     "task priority": "changes the order in which tasks run.",
     "task reorder": "changes the order in which tasks run.",

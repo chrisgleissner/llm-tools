@@ -100,7 +100,7 @@ def test_console_commands_use_the_mission_task_number_not_the_global_id(two_miss
     monkeypatch.setattr(bridge_tui.curses, "reset_prog_mode", lambda: None)
     bridge_tui._edit_task_prompt(FakeWindow(24, 80), state, bridge_tui._selected_task_id(state))  # type: ignore[arg-type]
     settle(state)
-    assert state.status_message() == "Task 1 amended (revision 2)"
+    assert state.status_message() == "Task 1 amended (revision 2) — starts next"
     with bridge.open_store() as store:
         assert "amended" in store.task_by_ordinal(second, 1)["prompt"]
         assert "amended" not in store.task_by_ordinal(first, 1)["prompt"]

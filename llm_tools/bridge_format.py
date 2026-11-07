@@ -392,12 +392,19 @@ def _runs_after_text(task: dict[str, Any]) -> str:
     return f" · runs after task{'s' if len(ahead) > 1 else ''} {_list_numbers(ahead)}"
 
 
+def _delivery_text(task: dict[str, Any]) -> str:
+    """` · delivered to the running provider at its next prompt` or ` · starts after task 2`; empty when unknown."""
+    delivery = task.get("delivery")
+    text = delivery.get("text") if isinstance(delivery, dict) else None
+    return f" · {text}" if isinstance(text, str) and text else ""
+
+
 def format_task_result(action: str, result: dict[str, Any]) -> str:
     """Receipt for one task command (add, amend, verify, pause, ...)."""
     inner = result.get("result") if isinstance(result.get("result"), dict) and "status" in result and "payload" in result else result
     inner = inner if isinstance(inner, dict) else {}
     if action == "add":
-        text = f"Added {format_task_line(inner)} · priority {inner.get('priority', 0)}"
+        text = f"Added {format_task_line(inner)} · priority {inner.get('priority', 0)}{_delivery_text(inner)}"
         if inner.get("mission_reopened"):
             text += f"\nMission {short_id(inner.get('mission_id'))} reopened · start it with: llm-bridge start{_mission_option(inner)}"
         return text
@@ -407,7 +414,7 @@ def format_task_result(action: str, result: dict[str, Any]) -> str:
         if inner.get("requeued"):
             when = "will run now" if inner.get("controller_running") is not False else "runs when the mission starts"
             return text + f" · the earlier result was sent back; revision {inner.get('revision')} {when} (uses capacity)"
-        return text if inner.get("applied", True) else text + " · applies after the current step"
+        return (text if inner.get("applied", True) else text + " · applies after the current step") + _delivery_text(inner)
     if action in {"verify", "approve"}:
         if inner.get("status") == "VERIFYING":
             number = task_number(inner)
