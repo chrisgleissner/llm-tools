@@ -78,7 +78,7 @@ test.describe("keyboard shortcuts", () => {
 test.describe("with a seeded worker", () => {
   test.skip(!havePython, "repo .venv python is missing");
 
-  test("overview shows live counts, attention items and recent activity; missions can be searched, filtered, sorted and paged", async ({ page, coord }) => {
+  test("overview shows live counts, attention items and recent activity; missions can be searched, filtered, sorted and paged", async ({ page, coord, browserName, isMobile }) => {
     const w = await startSeededWorker(coord, { missions: 30 });
     try {
       await setupViaUi(page, coord);
@@ -94,6 +94,14 @@ test.describe("with a seeded worker", () => {
       await expect(page.locator('[data-tile="failed-tasks"] .tile-value')).toHaveText("1");
       await expectAccessible(page, "overview with attention items");
       await expectNoHorizontalScroll(page);
+
+      const approvalLink = attention.locator('li[data-attention="mission"]').filter({ hasText: "task waiting for approval" }).getByRole("link");
+      const approvalMission = await approvalLink.getAttribute("href");
+      const findStarted = Date.now();
+      await approvalLink.click();
+      await expect(page.locator(".page-head h1")).toContainText("Parser refactor 00");
+      const findElapsedMs = Date.now() - findStarted;
+      if (browserName === "chromium") console.log(`UX task find approval: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${findElapsedMs} ms`);
 
       // Missions: paged (25 per page), searchable, filterable, sortable; the state is in the URL.
       await navTo(page, "Missions");
@@ -130,6 +138,24 @@ test.describe("with a seeded worker", () => {
       await expect(first.locator("time .rel")).toHaveText(/ago|just now|never/);
       await expect(first.locator("time .abs")).toHaveText(/^\d{4}-\d\d-\d\d \d\d:\d\d$/);
       await expectAccessible(page, "missions list");
+
+      expect(approvalMission).toBeTruthy();
+      await page.goto(new URL(approvalMission!, page.url()).toString());
+      const approvalTask = page.locator("#tasks-table tbody tr", { hasText: "Implement it" });
+      await expect(approvalTask).toBeVisible();
+      const approveStarted = Date.now();
+      await approvalTask.getByRole("button", { name: "Approve task 2" }).click();
+      await page.locator("#dialog-confirm").click();
+      await expect(page.locator(".toast", { hasText: "Approve task 2" })).toBeVisible();
+      const approveElapsedMs = Date.now() - approveStarted;
+      if (browserName === "chromium") console.log(`UX task approve: ${isMobile ? "Pixel 4" : "1440x900"}, two clicks, ${approveElapsedMs} ms`);
+
+      await page.goto("/");
+      const workerStarted = Date.now();
+      await navTo(page, "Workers");
+      await expect(page.locator('#workers-table tbody tr[data-worker="seed-worker"] [data-label="State"]')).toContainText("online");
+      const workerElapsedMs = Date.now() - workerStarted;
+      if (browserName === "chromium") console.log(`UX task worker health: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${workerElapsedMs} ms`);
     } finally {
       w.cleanup();
     }

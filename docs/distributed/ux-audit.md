@@ -39,13 +39,15 @@ The event stream does not currently persist worker online/offline or terminal li
 
 ## Before / after task measures
 
-| Task | Before | After |
+| Task | Before (pre-redesign `9ad0c03`) | After (current UI) |
 |---|---|---|
-| Sign in | One submit action; baseline time was not instrumented. | One submit action; DOG-012 copy/focus fix verified by `auth-ux.spec.ts`. No timing claim. |
-| Find a mission waiting for approval | Attention was present but followed the summary tiles; selecting the mission required one link click. | Attention is first after the page heading; one mission link click. No separate search or scroll is needed. |
-| Approve a task | Two actions: Approve, then confirm. | Two actions: Approve, then confirm; server outcome time not instrumented. |
+| First-run sign-in | One submit click; **555 ms desktop / 604 ms Pixel 4** from page navigation to Overview. | One submit click; **517 ms desktop / 503 ms Pixel 4** on the same setup fixture. Failure recovery copy/focus is separately verified by `auth-ux.spec.ts`. |
+| Find a mission waiting for approval | Approval link followed the summary tiles; one link click, **53 ms desktop / 56 ms Pixel 4** to mission heading. | Attention is above the summary tiles; one mission link click, **68 ms desktop / 44 ms Pixel 4** to mission heading. Neither version needs a search or scroll action in this seeded scenario. |
+| Approve a task | Two clicks (Approve, then confirm), **151 ms desktop / 150 ms Pixel 4** to outcome toast. | Two clicks, **171 ms desktop / 141 ms Pixel 4** to outcome toast. |
 | Open provider output from mission detail | One “Open terminal” click after scrolling past status, tasks and events. | Zero clicks: the view-only terminal connects automatically for a running mission. Latest pinned Chromium status-response to visible output measurements are **280 ms desktop** and **126 ms Pixel 4** in the fixed WebSocket fixture (2026-11-07 rerun). The regression test enforces under 1,000 ms and no input frames. |
-| Check worker health | One Workers navigation click, then scan the table. | One Workers navigation click; host/address and state are visible in the table. No task timer instrumented. |
+| Check worker health | One Workers navigation click, **106 ms desktop / 87 ms Pixel 4** to online state. | One Workers navigation click, **100 ms desktop / 96 ms Pixel 4** to online state; host/address are also visible in the table. |
+
+The task timings are single-run deterministic Playwright measurements on seeded state, not representative user-study timings. They start at navigation/submit/click and stop when the destination heading, toast or online state is visible; the UI timings have normal local-run noise, so differences of a few dozen milliseconds are not treated as product speedups. Click counts are the actual visible actions in those flows. The before run used the old source and bundled assets at `9ad0c03`; both before and after used the same current coordinator binary and worker fixture.
 
 The output latency is the interval from the mission-status HTTP response to visible provider output, not total navigation latency or a live-network measurement. The seeded output is on a WebSocket fixture; it does not include worker or LAN delays.
 
@@ -82,4 +84,4 @@ For a site stability probe, Chromium loaded the built local site five times at P
 
 ## Remaining work
 
-This audit closes the live-output discovery gap, adds current-work summaries, records the site Lighthouse scores and Pixel 4 mission-journey metrics, and documents the site hero/distributed-section changes. The broader principal UX pass remains incomplete: capture repeatable timing for the other core tasks, complete the three persona walk-throughs, review/resolve every hesitation on every screen, obtain field INP (the lab proxy above is not a field sample), and finish the remaining console refinements. Do not mark UX-001–006 complete on the strength of this document alone.
+This audit closes the live-output discovery gap, adds current-work summaries, records the site Lighthouse scores and Pixel 4 mission-journey metrics, and documents the site hero/distributed-section changes. The broader principal UX pass remains incomplete: complete the three persona walk-throughs, review/resolve every hesitation on every screen, obtain field INP (the lab proxy above is not a field sample), and finish the remaining console refinements. Do not mark UX-001–006 complete on the strength of this document alone.

@@ -70,7 +70,8 @@ test.describe("first-run registration", () => {
     await expect(page.getByRole("button", { name: "Create administrator" })).toBeEnabled();
   });
 
-  test("success is shown and leads straight into the signed-in app", async ({ page, coord }) => {
+  test("success is shown and leads straight into the signed-in app", async ({ page, coord, browserName, isMobile }) => {
+    const started = Date.now();
     await page.goto("/");
     await page.getByLabel("Setup token").fill(coord.setupToken());
     await page.getByLabel("Administrator username").fill("operator");
@@ -78,6 +79,8 @@ test.describe("first-run registration", () => {
     await page.getByLabel("Repeat password").fill(PASSWORD);
     await page.getByRole("button", { name: "Create administrator" }).click();
     await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    const elapsedMs = Date.now() - started;
+    if (browserName === "chromium") console.log(`UX task first sign-in: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${elapsedMs} ms`);
     await expect(page.locator(".toast.applied")).toContainText("Setup complete. You are signed in as operator");
     await expect(page.locator("#account-button")).toContainText("operator");
     // The first-run state is gone for good.
