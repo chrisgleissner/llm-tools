@@ -379,19 +379,19 @@ All page packages are merged. The caps that were fixed before (initial JavaScrip
 
 | Measure | Measured | Cap |
 |---|---:|---:|
-| Initial JavaScript, raw / gzip | 81869 / 31595 | 91000 / 31750 (unchanged) |
+| Initial JavaScript, raw / gzip | 81867 / 31590 | 91000 / 31750 (unchanged) |
 | Initial CSS, raw / gzip | 29105 / 6583 | 34000 / 9000 (unchanged) |
-| Terminal chunk, raw / gzip | 354858 / 92148 | 360000 / 93000 (unchanged) |
-| Route JavaScript (all lazy chunks but the terminal), raw / gzip | 89710 / 36952 | 94000 / 38700 |
-| Route CSS (`fleet`, `auth`, `mission`), raw / gzip | 17613 / 4682 | 18400 / 4900 |
+| Terminal chunk, raw / gzip | 354858 / 92149 | 360000 / 93000 (unchanged) |
+| Route JavaScript (all lazy chunks but the terminal), raw / gzip | 90026 / 37084 | 94000 / 38700 |
+| Route CSS (`fleet`, `auth`, `mission`), raw / gzip | 17937 / 4739 | 18400 / 4900 |
 
-The initial gzip figure is 155 bytes below its cap, so any further first-load code needs a matching removal.
+The initial gzip figure is 160 bytes below its cap, so any further first-load code needs a matching removal.
 
 Per-chunk figures (raw / gzip) and the package that added each one:
 
 | Chunk | Raw / gzip | Added by |
 |---|---:|---|
-| `views/mission` (header, tasks, evidence, activity, about, page) | 31329 / 11554 | WP-3 |
+| `views/mission` (header, tasks, evidence, activity, about, page) | 31645 / 11692 | WP-3 |
 | `views/login` (sign-in, setup) | 12397 / 4822 | WP-0 moved it; WP-5 restyled it |
 | `views/account` and the tokens dialog | 7229 / 2901 | WP-0 moved it; WP-5 |
 | `views/usage` | 6780 / 2982 | WP-0 moved it; WP-5 (meters) |
@@ -406,7 +406,7 @@ Per-chunk figures (raw / gzip) and the package that added each one:
 
 The session pane itself is part of the terminal chunk (xterm.js plus `session.ts`, `composer.ts`); the page reserves its box
 with `sessionReserve()` (`session-box.ts`, a few bytes in the first load) until that chunk arrives. Route CSS: `auth`
-3313 / 982, `fleet` 3639 / 1003, `mission` (session.css and mission.css) 10458 / 2658 at the first measurement.
+3313 / 982, `fleet` 3695 / 1014, `mission` (session.css and mission.css) 10929 / 2743.
 
 Dead code removed at integration: the `statusBadge` shim, `sortHeader`, the legacy table CSS (`table`, `table.rt`,
 `table.kv`, `.table-wrap`, `.sort`), the `.grid-auto`, `.pane-split` and `.grid-2` helpers and `@xterm/addon-fit`.
