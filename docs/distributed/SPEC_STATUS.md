@@ -256,16 +256,16 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PI-REPO-006 | [x] | The private research notes now label physical, emulated, assumed, and blocked results and replace former pending entries with physical evidence or exact blockers. |
 | PRD-001 | [ ] | Not started. Five-minute first success. |
 | PRD-002 | [ ] | Not started. Release artifacts (signed multi-arch image, package, checksums, release dry run). |
-| PRD-003 | [ ] | Not started. Versioned upgrades and migrations. |
+| PRD-003 | [~] | Python Bridge store: fixtures of every earlier schema version (`tests/fixtures/bridge-schema/`, `scripts/make_bridge_schema_fixtures.py`), backup before migration, refusal of a newer database naming the backup with exit 4, and worker protocol version negotiation (`tests/test_bridge_schema_migrations.py`, `tests/test_bridge_protocol.py`). Coordinator database migrations and old/new worker–coordinator CI tests remain for phase B. |
 | PRD-004 | [~] | `bridge-coordinator check-config` and the start-up path report every configuration error at once (`config error: <key> = <value>: <problem>; fix: ...`), with a did-you-mean for unknown keys and checks of environment overrides; `coordinator/tests/config_check.rs` is table-driven (25 rows) and its three CLI tests failed before the change. Waiting for a green CI run ID. |
-| PRD-005 | [ ] | Not started. Uninstall and data portability. |
+| PRD-005 | [~] | `docs/llm-bridge/uninstall.md` with a drift test, service uninstall tests and backup portability (`tests/test_uninstall_portability.py`). Coordinator install methods remain for phase B. |
 | PRD-006 | [ ] | Not started. Documentation as product. |
 | PRD-007 | [ ] | Not started. Soak test. |
 | PRD-008 | [ ] | Not started. Chaos. |
 | PRD-009 | [ ] | Not started. Capacity limits. |
 | PRD-010 | [ ] | Not started. Data retention. |
 | PRD-011 | [ ] | Not started. Observability for the operator. |
-| PRD-012 | [ ] | Not started. Diagnostic bundle. |
+| PRD-012 | [~] | `llm-bridge doctor --bundle` writes a redacted archive; `tests/test_bridge_bundle.py` proves that seeded secrets, tokens, prompt text and private addresses are absent. `bridge-coordinator support-bundle` remains for phase B. |
 | PRD-013 | [ ] | Not started. Backups by default. |
 | PRD-014 | [ ] | Not started; waits for PR #31 to merge (phase B). Mission control at a glance (web). |
 | PRD-015 | [ ] | Not started; waits for PR #31 to merge (phase B). Live session view (web). |
@@ -279,15 +279,15 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-023 | [ ] | Not started. External-style penetration test. |
 | PRD-024 | [~] | `SECURITY.md` gives the private reporting link, response times, supported versions, the advisory and CVE process and the dependency response policy. Private vulnerability reporting is disabled on the repository (`gh api repos/chrisgleissner/llm-tools/private-vulnerability-reporting` returned `{"enabled":false}` on 2026-11-06); enabling it is the owner's action. |
 | PRD-025 | [x] | `.github/dependabot.yml` covers Cargo (`coordinator/`), npm (`web/`), GitHub Actions and pip weekly; `.github/workflows/audit.yml` runs `cargo audit`, `npm audit --audit-level=moderate` and `pip-audit` weekly, on demand and on lock-file changes; the response policy is in `SECURITY.md`. Local runs on 2026-11-06: npm audit 0 vulnerabilities, cargo audit 0 vulnerabilities in 185 crates. Green audit runs on this branch: 42274626417 and 42288447025. |
-| PRD-026 | [ ] | Not started. Safe defaults review. |
+| PRD-026 | [~] | `docs/distributed/safe-defaults.md` and `tests/test_safe_defaults.py` for the Python side. Four unsafe defaults fixed: the state directory was created 0755 by worker enroll and remote login; a plaintext coordinator URL was accepted on load; the suspend ledger and usage history were 0644; the Claude statusline copy was 0644. Coordinator defaults remain for phase B. |
 | PRD-027 | [ ] | Not started; waits for PR #31 to merge (phase B). Abuse resistance at scale. |
 | PRD-028 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate checklist. |
 | PRD-029 | [ ] | Not started; waits for PR #31 to merge (phase B). Changelog and versioning. |
 | PRD-030 | [ ] | Not started; waits for PR #31 to merge (phase B). Release candidate dry run. |
-| PRD-031 | [~] | Expert UX review of the CLI and terminal console in `ux-review-cli.md`: the overseer's pre-review (CLIUX-001 to CLIUX-050) and an independent second reviewer pass (CLIUX-051 to CLIUX-080, 4 high, 12 medium, 14 low). Fixes are tracked under PRD-033 in that file's fix-status table. |
+| PRD-031 | [x] | Expert UX review of the CLI and terminal console in `ux-review-cli.md`: the overseer's pre-review (CLIUX-001 to CLIUX-050) and an independent second reviewer pass (CLIUX-051 to CLIUX-080, 4 high, 12 medium, 14 low). Fixes are tracked under PRD-033 in that file's fix-status table. Second reviewer pass complete; fixes tracked under PRD-033. |
 | PRD-032 | [ ] | Not started; waits for PR #31 to merge (phase B). Expert UX review of the web console and site. |
-| PRD-033 | [ ] | Not started. Every UX finding fixed. |
-| PRD-034 | [ ] | Not started. Review of the inner workings. |
+| PRD-033 | [~] | CLI and terminal console: 78 of 80 CLIUX findings fixed, 2 already correct (CLIUX-070, 078). CLIUX-024, CLIUX-025 and CLIUX-038 were completed in batch 3 (`tests/test_bridge_cliux_batch3.py`). Web findings remain for phase B. |
+| PRD-034 | [~] | `docs/distributed/review-internals.md`: 19 findings (INT-001 to INT-019); 17 fixed, INT-011 partly, INT-016 deferred; see its Fix status table. |
 | PRD-035 | [ ] | Not started; waits for PR #31 to merge (phase B). No open issues. |
 
 ## Operator addendum (2026-11-05, task revision 4)
