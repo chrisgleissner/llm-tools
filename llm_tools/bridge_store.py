@@ -1439,6 +1439,25 @@ class BridgeStore:
                 released.append(int(task["ordinal"]))
         return released
 
+    def pending_question(self, mission_id: str, task_id: int) -> dict[str, Any] | None:
+        """The question a task's latest provider run stopped on, or ``None``.
+
+        Read from the ``task-awaiting-answer`` event Bridge records when the scheduler
+        watchdog stops a run that ended on an unanswered question. It counts only while
+        no later operation has run for the task.
+        """
+        row = self.db.execute(
+            "SELECT data_json FROM events INDEXED BY events_mission_kind_id WHERE mission_id=? AND kind='task-awaiting-answer' "
+            "AND json_extract(data_json,'$.task_id')=? ORDER BY id DESC LIMIT 1", (mission_id, int(task_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        data = json.loads(row["data_json"])
+        latest = self.db.execute("SELECT id FROM operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1", (int(task_id),)).fetchone()
+        if latest is None or data.get("operation_id") != latest["id"]:
+            return None
+        return dict(data)
+
     def continue_task_after_provider_failure(self, operation_id: str, *, max_failures: int, max_autonomy_aborts: int = 0) -> dict[str, Any] | None:
         """Requeue known provider failures at a safe boundary, within a budget.
 

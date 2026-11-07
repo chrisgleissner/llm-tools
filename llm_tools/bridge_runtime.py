@@ -408,13 +408,29 @@ class BridgeMissionHooks:
                 command = f"llm-bridge task approve --mission {short} --task {first}"
             else:
                 command = f"llm-bridge task retry --mission {short} --task {first}"
-        self.store.record_runtime_event(self.mission_id, "mission-waiting-for-operator", {
+        data: dict[str, Any] = {
             "reason": reason,
             "summary": f"{reason} · {command}",
             "tasks": [{"ordinal": ordinal, "status": status} for ordinal, status in state],
             "command": command,
-        })
+        }
+        asked_ordinal, asked = self._question_of_first_blocked_task(state)
+        if asked:
+            data["question"] = asked
+            data["summary"] = f'{reason} · task {asked_ordinal} asked "{asked[:120]}" · {command}'
+        self.store.record_runtime_event(self.mission_id, "mission-waiting-for-operator", data)
         return state
+
+    def _question_of_first_blocked_task(self, state: tuple[Any, ...]) -> tuple[int, str]:
+        """The ordinal and question of the first BLOCKED task that stopped on a question, else ``(0, "")``."""
+        for ordinal, status in state:
+            if status != "BLOCKED":
+                continue
+            row = self.store.db.execute("SELECT id FROM tasks WHERE mission_id=? AND ordinal=?", (self.mission_id, ordinal)).fetchone()
+            asked = self.store.pending_question(self.mission_id, int(row["id"])) if row else None
+            if asked:
+                return int(ordinal), str(asked["question"])
+        return 0, ""
 
     def _apply_pending_boundary_requests(self) -> None:
         mission = self.store.get_mission(self.mission_id)
@@ -1000,6 +1016,15 @@ class BridgeMissionHooks:
                 "failure": failure,
                 **common.diagnostic_clock_fields(),
             })
+            if status == common.AUTONOMY_ABORT_STATUS and failure["cause"] == "question-timeout":
+                question = _unanswered_question(provider_output)
+                if question:
+                    self.store.record_runtime_event(self.mission_id, "task-awaiting-answer", {
+                        "operation_id": operation_id,
+                        "task_id": int(task["id"]),
+                        "provider": str(selection.get("provider") or scheduler_config.provider),
+                        "question": question,
+                    })
             if task_before["status"] != task["status"]:
                 self.store.record_runtime_event(self.mission_id, "task-status-transition", {
                     "task_id": int(task["id"]),
@@ -1099,6 +1124,12 @@ class BridgeMissionHooks:
             # A force stop may have durably reconciled this operation before
             # the scheduler noticed that its owned tmux server disappeared.
             return
+
+
+def _unanswered_question(provider_output: str) -> str:
+    """The question a run ended on, bounded for an event; the scheduler's own abort lines are ignored."""
+    kept = [line for line in provider_output.splitlines() if not line.startswith("llm-scheduler: autonomous abort")]
+    return (common.pending_question("\n".join(kept)) or "")[:300]
 
 
 def _private_verifier_dir(runtime: Path) -> Path:

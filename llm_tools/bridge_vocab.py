@@ -228,6 +228,7 @@ class EventKind(StrEnum):
     TASK_PROPOSED = "task-proposed"
     TASK_PROVIDER_CONTINUATION = "task-provider-continuation"
     TASK_READY = "task-ready"
+    TASK_AWAITING_ANSWER = "task-awaiting-answer"
     TASK_STATUS_TRANSITION = "task-status-transition"
     TASK_REJECTED = "task-rejected"
     TASK_REORDERED = "task-reordered"

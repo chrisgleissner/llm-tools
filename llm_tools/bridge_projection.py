@@ -95,5 +95,6 @@ class Snapshot(TypedDict, total=False):
     persistence: dict[str, Any]
     last_meaningful_progress: dict[str, Any] | None
     hold: dict[str, Any] | None
+    awaiting_answer: dict[str, Any] | None
     needs_you: Any
     usage: dict[str, Any]

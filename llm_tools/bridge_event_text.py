@@ -344,6 +344,11 @@ def _h_mission_waiting_for_operator(ctx: _EventContext) -> str:
     return "Waiting for you · " + _text(ctx.data.get("summary") or ctx.data.get("reason") or "no task can run", 140)
 
 
+@_humanizer(EventKind.TASK_AWAITING_ANSWER)
+def _h_task_awaiting_answer(ctx: _EventContext) -> str:
+    return f"{ctx.task} asked a question and is waiting for you · {_text(ctx.data.get('question') or 'see the provider output', 160)}"
+
+
 @_humanizer(EventKind.MISSION_COLOUR)
 def _h_mission_colour(ctx: _EventContext) -> str:
     value = ctx.data.get("value")
