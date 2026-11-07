@@ -71,7 +71,7 @@ async fn worker_client_certificate_is_issued_once_and_token_rotation_is_staged()
     let (_, list) = api.get("/api/v1/workers").await;
     assert_eq!(list["workers"][0]["mutual_tls"], true);
     assert!(!list.to_string().contains("PRIVATE KEY"));
-    assert!(!list.to_string().contains(&enrollment["token"].as_str().unwrap()));
+    assert!(!list.to_string().contains(enrollment["token"].as_str().unwrap()));
 
     let old = enrollment["token"].as_str().unwrap();
     let new = "new-staged-token-which-is-long-enough-0123456789";
@@ -137,7 +137,7 @@ async fn worker_only_listener_requires_a_matching_ca_issued_client_certificate()
     ) -> Result<tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>, tokio_tungstenite::tungstenite::Error> {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
         let mut roots = rustls::RootCertStore::empty();
-        for cert in CertificateDer::pem_slice_iter(&std::fs::read(&env.dir.join("ca.pem")).unwrap()) {
+        for cert in CertificateDer::pem_slice_iter(&std::fs::read(env.dir.join("ca.pem")).unwrap()) {
             roots.add(cert.unwrap()).unwrap();
         }
         let builder = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
