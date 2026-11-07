@@ -6,11 +6,11 @@ import { announce, mountFeedback } from "./ui";
 import { ensureRouteCss, withCss } from "./route-css";
 import { ensureXtermCss } from "./xterm-css";
 import type { NoticeKind } from "./views/login";
-import { missionDetail } from "./views/mission";
 import { missions } from "./views/missions";
 import { overview } from "./views/overview";
 
 // Routes that are not part of the first load: each is a separate chunk fetched when the route is first opened (spec 11.4, budget D18).
+const loadMission = withCss("mission", () => import("./views/mission"));
 const loadLogin = withCss("auth", () => import("./views/login"));
 const loadReset = withCss("auth", () => import("./views/reset"));
 const loadAccount = withCss("auth", () => import("./views/account"));
@@ -159,7 +159,7 @@ async function route(): Promise<void> {
   try {
     if (path === "/") cleanup = overview(main);
     else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
-    else if (m && m[1] && m[2]) cleanup = await lazyView(main, generation, () => ensureRouteCss("mission"), () => missionDetail(main, decodeURIComponent(m[1] as string), decodeURIComponent(m[2] as string)));
+    else if (m && m[1] && m[2]) cleanup = await lazyView(main, generation, loadMission, (v) => v.missionDetail(main, decodeURIComponent(m[1] as string), decodeURIComponent(m[2] as string)));
     else if (path === "/workers") cleanup = await lazyView(main, generation, loadWorkers, (v) => v.workers(main));
     else if (path === "/sessions") cleanup = await lazyView(main, generation, loadSessions, (v) => v.sessions(main, new URLSearchParams(location.search)));
     else if (path === "/usage") cleanup = await lazyView(main, generation, loadUsage, (v) => v.usage(main, new URLSearchParams(location.search)));
