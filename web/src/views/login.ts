@@ -90,34 +90,39 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     user.wrap,
     pass.wrap,
     h("label", { class: "check", for: "remember" }, remember, h("span", {}, "Remember this device")),
-    h("p", { class: "hint", id: "remember-hint" }, rememberHint),
+    h("details", { class: "aside" }, h("summary", {}, "What does this do?"), h("p", { class: "hint", id: "remember-hint" }, rememberHint)),
     error,
     progress,
     h("div", { class: "actions" }, submit),
     h(
-      "p",
-      { class: "hint", id: "forgot-password-hint" },
-      "Forgot the password? Over SSH on the coordinator host run ",
-      h("code", {}, "llm-bridge-coordinator reset-password"),
-      ". See ",
-      h("a", { href: RESET_DOCS_URL, target: "_blank", rel: "noopener noreferrer" }, "Locked out or forgot the password"),
+      "div",
+      { id: "forgot-password-hint" },
+      h("p", { class: "hint" }, "Forgot the password? See ", h("a", { href: RESET_DOCS_URL, target: "_blank", rel: "noopener noreferrer" }, "Locked out or forgot the password"), "."),
+      h("details", { class: "aside" }, h("summary", {}, "Reset it from the host"), h("p", { class: "hint" }, "Over SSH on the coordinator host run ", h("code", {}, "llm-bridge-coordinator reset-password"), ".")),
     ),
   );
   remember.setAttribute("aria-describedby", "remember-hint");
   let timer = 0;
   let blockedUntil = 0;
+  let announcedAt = 0;
   const label = "Sign in";
+  const clockText = (at: Date): string => `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}:${String(at.getSeconds()).padStart(2, "0")}`;
+  const lockoutMessage = (left: number): string => `Too many failed sign-in attempts from this network. You can try again in ${left >= 60 ? `${Math.floor(left / 60)} min ${left % 60} s` : `${left} s`} (at ${clockText(new Date(blockedUntil))}).`;
+  /** The button counts down every second; the message in the live region is rewritten only every 30 s and on a minute boundary, so a screen reader is not interrupted each second. */
   const tick = (): void => {
     const left = Math.ceil((blockedUntil - Date.now()) / 1000);
     if (left <= 0) {
       window.clearInterval(timer);
       error.textContent = "";
+      error.setAttribute("role", "alert");
       submit.disabled = false;
       submit.textContent = label;
       return;
     }
-    const at = new Date(blockedUntil);
-    error.textContent = `Too many failed sign-in attempts from this network. You can try again in ${left >= 60 ? `${Math.floor(left / 60)} min ${left % 60} s` : `${left} s`} (at ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}:${String(at.getSeconds()).padStart(2, "0")}).`;
+    if (announcedAt === 0 || left % 30 === 0) {
+      announcedAt = left;
+      error.textContent = lockoutMessage(left);
+    }
     submit.textContent = `Try again in ${left >= 60 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : `${left} s`}`;
   };
   form.addEventListener("submit", async (e) => {
@@ -149,6 +154,8 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
       progress.textContent = "";
       if (err instanceof api.ApiError && err.status === 429) {
         blockedUntil = Date.now() + (err.retryAfter ?? 60) * 1000;
+        announcedAt = 0;
+        error.setAttribute("role", "status");
         tick();
         window.clearInterval(timer);
         timer = window.setInterval(tick, 1000);
@@ -157,6 +164,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
       }
       submit.disabled = false;
       submit.textContent = label;
+      error.setAttribute("role", "alert");
       if (err instanceof api.ApiError && err.status === 401) error.textContent = "Username or password is incorrect. Check both and try again.";
       else if (err instanceof api.ApiError && err.status === 0) error.textContent = "Cannot reach the coordinator. Check your network connection and try again.";
       else error.textContent = err instanceof api.ApiError ? err.message : "Unexpected error. Try again.";
@@ -181,7 +189,8 @@ function setupView(root: HTMLElement, opts: LoginOpts): void {
 
   function validateToken(focus: boolean): boolean {
     const bad = !token.input.value.trim();
-    token.setError(bad ? "Enter the setup token. See the steps above for where to find it." : "");
+    token.setError(bad ? "Enter the setup token. Open \"Where do I find the setup token?\" above if you need help." : "");
+    if (bad) document.getElementById("token-help")?.setAttribute("open", "");
     if (bad && focus) token.input.focus();
     return !bad;
   }
@@ -203,9 +212,9 @@ function setupView(root: HTMLElement, opts: LoginOpts): void {
     h("p", {}, "This coordinator has no administrator yet. Create one to start using it."),
     noticeEl(opts.notice),
     h(
-      "div",
-      { class: "notice info", id: "token-help" },
-      h("strong", {}, "Where to find the setup token"),
+      "details",
+      { class: "notice info aside", id: "token-help" },
+      h("summary", {}, "Where do I find the setup token?"),
       h(
         "ol",
         { class: "steps" },
@@ -244,7 +253,8 @@ function setupView(root: HTMLElement, opts: LoginOpts): void {
       submit.disabled = false;
       submit.classList.remove("busy");
       if (err instanceof api.ApiError && err.code === "invalid-setup-token") {
-        token.setError("This is not the setup token. Copy it again from the file or command above.");
+        token.setError("This is not the setup token. Copy it again from the file or command described above.");
+        document.getElementById("token-help")?.setAttribute("open", "");
         token.input.focus();
       } else if (err instanceof api.ApiError && err.code === "invalid-password") {
         pass.setError(err.message.charAt(0).toUpperCase() + err.message.slice(1) + ".");

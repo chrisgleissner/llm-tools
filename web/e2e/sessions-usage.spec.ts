@@ -65,14 +65,14 @@ test.describe("sessions and usage views", () => {
     try {
       await setupViaUi(page, coord);
       await navTo(page, "Workers");
-      await expect(page.locator('tr[data-worker="su-worker"]').getByText("Online", { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('[data-entity="worker:su-worker"] .pill')).toHaveText("Online", { timeout: 20_000 });
 
       await navTo(page, "Sessions");
       await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
-      await expect(page.getByLabel("Worker", { exact: true })).toHaveValue("su-worker");
-      const row = page.locator("#sessions-table tbody tr").first();
+      const row = page.locator('[data-entity^="session:"]').first();
       await expect(row).toBeVisible({ timeout: 20_000 });
       await expect(row).toContainText("codex");
+      await row.getByRole("button", { name: "Details" }).click();
       await expect(row.locator(`code[title="${SESSION_ID}"]`)).toBeVisible();
       await expect(row.getByRole("link", { name: "Session mission" })).toBeVisible();
       await expectNoHorizontalScroll(page);
@@ -80,20 +80,21 @@ test.describe("sessions and usage views", () => {
 
       await navTo(page, "Usage");
       await expect(page.getByRole("heading", { name: "Provider usage" })).toBeVisible();
-      const usage = page.locator("#usage-table tbody tr");
-      await expect(usage).toHaveCount(2, { timeout: 20_000 });
-      await expect(usage.nth(0)).toContainText("codex");
-      await expect(usage.nth(0)).toContainText("75%");
-      await expect(usage.nth(0)).toContainText("25%");
-      await expect(usage.nth(1)).toContainText("weekly");
-      await expect(usage.nth(1)).toContainText("90%");
+      const card = page.locator('[data-entity="provider:codex"]');
+      await expect(card).toBeVisible({ timeout: 20_000 });
+      const fiveHour = card.getByRole("meter", { name: /5 hours/ });
+      await expect(fiveHour).toHaveAttribute("aria-valuenow", "75");
+      await expect(card).toContainText("75% left");
+      await expect(card.getByRole("meter", { name: /Weekly/ })).toHaveAttribute("aria-valuenow", "90");
+      await expect(card).toContainText("90% left");
+      await expect(card).toContainText("resets");
       await expectNoHorizontalScroll(page);
       await expectAccessible(page, "usage");
 
       // Worker goes away: the page says so instead of failing silently.
       fake.stop();
       await expect(page.locator("#view-status")).toContainText("offline", { timeout: 30_000 });
-      await expect(page.locator("#usage-table")).toHaveCount(0);
+      await expect(page.locator('[data-entity^="provider:"]')).toHaveCount(0);
       await expectAccessible(page, "usage offline");
     } finally {
       fake.cleanup();

@@ -19,9 +19,14 @@ test.describe("workers page", () => {
     await expect(result).toContainText("llm-bridge worker enroll --name build-1");
     await expect(page.locator(".toast.applied")).toContainText("Worker build-1 added");
     await expectAccessible(page, "worker added dialog");
+    // Escape and the close button do not discard a token that is shown once without asking first.
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "Close without saving it?" })).toBeVisible();
+    await page.getByRole("dialog", { name: "Close without saving it?" }).getByRole("button", { name: "Go back" }).click();
+    await expect(result).toBeVisible();
     await result.getByRole("button", { name: "Done" }).click();
-    const row = page.locator('tr[data-worker="build-1"]');
-    await expect(row.locator('[data-label="State"]')).toContainText(/offline/i);
+    const row = page.locator('[data-entity="worker:build-1"]');
+    await expect(row.locator(".pill")).toContainText(/offline/i);
     // Duplicate names are refused inline.
     await page.locator("#add-worker-button").click();
     await page.getByRole("dialog", { name: "Add a worker" }).getByLabel("Worker name").fill("build-1");
@@ -29,12 +34,14 @@ test.describe("workers page", () => {
     await expect(page.locator("#worker-name-error")).toContainText("already exists");
     await page.keyboard.press("Escape");
     // Removing needs confirmation; declining changes nothing.
-    await row.getByRole("button", { name: "Remove worker build-1" }).click();
+    await row.getByRole("button", { name: "Actions for worker build-1" }).click();
+    await page.getByRole("menuitem", { name: "Remove worker" }).click();
     const confirm = page.getByRole("dialog");
     await expect(confirm).toContainText("Remove worker build-1?");
     await confirm.getByRole("button", { name: "Go back" }).click();
     await expect(row).toBeVisible();
-    await row.getByRole("button", { name: "Remove worker build-1" }).click();
+    await row.getByRole("button", { name: "Actions for worker build-1" }).click();
+    await page.getByRole("menuitem", { name: "Remove worker" }).click();
     await page.locator("#dialog-confirm").click();
     await expect(page.locator(".toast.applied", { hasText: "removed" })).toContainText("Worker build-1 removed");
     await expect(page.getByRole("heading", { name: "No workers enrolled" })).toBeVisible();
@@ -140,7 +147,7 @@ test.describe("with a seeded worker", () => {
       await page.goto("/");
       const workerStarted = Date.now();
       await navTo(page, "Workers");
-      await expect(page.locator('#workers-table tbody tr[data-worker="seed-worker"] [data-label="State"]')).toContainText("Online");
+      await expect(page.locator('[data-entity="worker:seed-worker"] .pill')).toContainText("Online");
       const workerElapsedMs = Date.now() - workerStarted;
       if (browserName === "chromium") console.log(`UX task worker health: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${workerElapsedMs} ms`);
     } finally {

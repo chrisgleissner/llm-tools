@@ -274,16 +274,26 @@ test.describe("account menu and password change", () => {
     await setupViaUi(page, coord);
     await navTo(page, "Account");
     await expect(page.getByRole("heading", { name: "API tokens" })).toBeVisible();
-    await page.getByLabel("Token name").fill("automation-key");
-    await page.getByLabel("read", { exact: true }).uncheck();
-    await page.getByLabel("operate", { exact: true }).check();
+    // Creating a token happens in a dialog that ends in the one-time secret.
     await page.getByRole("button", { name: "Create token" }).click();
-    const secret = page.locator(".token-secret code");
+    const form = page.getByRole("dialog", { name: "Create an API token" });
+    await form.getByLabel("Token name").fill("automation-key");
+    await form.getByLabel("read", { exact: true }).uncheck();
+    await form.getByLabel("operate", { exact: true }).check();
+    await form.getByRole("button", { name: "Create token" }).click();
+    const shown = page.getByRole("dialog", { name: "Token created" });
+    const secret = shown.locator(".token-secret code");
     await expect(secret).toContainText(/^.{30,}$/);
+    await expect(shown.getByRole("button", { name: "Copy token" })).toBeFocused();
+    // Escape asks before the secret is discarded.
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog", { name: "Close without saving it?" }).getByRole("button", { name: "Go back" }).click();
+    await expect(secret).toBeVisible();
+    await shown.getByRole("button", { name: "Done" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
-    await page.getByRole("button", { name: "Revoke automation-key" }).click();
+    await page.getByRole("button", { name: "Actions for token automation-key" }).click();
+    await page.getByRole("menuitem", { name: "Revoke token" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
-    await expect(secret).toHaveCount(1);
   });
 });
