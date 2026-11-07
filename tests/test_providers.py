@@ -1151,15 +1151,27 @@ def test_progress_reporter_is_silent_when_disabled() -> None:
 
 def test_progress_reporter_animates_then_erases() -> None:
     import io
+    import threading
 
-    buf = io.StringIO()
+    rendered_complete = threading.Event()
+
+    class ObservedStringIO(io.StringIO):
+        def write(self, value: str) -> int:
+            result = super().write(value)
+            if "6/6" in value:
+                rendered_complete.set()
+            return result
+
+    buf = ObservedStringIO()
     reporter = usage.ProgressReporter(enabled=True, stream=buf, interval=0.01)
     reporter.start()
     reporter.begin(6)
     for _ in range(6):
         reporter.advance()
-    time.sleep(0.05)
-    reporter.stop()
+    try:
+        assert rendered_complete.wait(timeout=1), "progress thread did not render the completed count"
+    finally:
+        reporter.stop()
     output = buf.getvalue()
     assert "refreshing usage" in output
     assert "6/6" in output
