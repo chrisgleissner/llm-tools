@@ -1,256 +1,245 @@
+// The Missions list (spec 8.4): a list of MissionRow, needs-you and active missions first in state order, finished ones in a
+// collapsed group with a count. State, worker, search and sort are in the URL.
 import * as api from "../api";
-import { debounce, emptyState, h, idChip, pager, searchBox, sortHeader, statePill, timeEl } from "../dom";
-import { icon } from "../icons";
-import { currentWorkSummary } from "../current-work";
-import { missionState, store, subscribe } from "../store";
+import { debounce, deferSkeleton, disclosure, emptyState, errorBlock, h, searchBox } from "../dom";
+import { store, subscribe } from "../store";
+import {
+  attentionGaps, attentionPending, hasLine, hasStatus, isFinishedStatus, itemOf, loadLines, loadStatuses, missionRow, onDetails, reconcile, rowSig, sectionOf, stateOrder,
+  type Item, type RowOptions, type RowSpec,
+} from "../rows";
 
-const PAGE = 25;
-type Sort = "updated" | "name" | "status" | "worker";
+type Sort = "state" | "updated" | "name";
 const SORTS: Array<[Sort, string]> = [
+  ["state", "Needs you first"],
   ["updated", "Recently updated"],
   ["name", "Name"],
-  ["status", "Status"],
-  ["worker", "Worker"],
 ];
 
 interface Reply {
   missions: api.MissionEntry[];
   total: number;
-  offset: number;
-  statuses: Record<string, number>;
 }
+
+const updatedMs = (i: Item) => Date.parse(i.entry.mission.updated_at ?? "") || 0;
 
 export function missions(root: HTMLElement, query: URLSearchParams): () => void {
   let q = query.get("q") ?? "";
-  let statuses = (query.get("status") ?? "").split(",").filter(Boolean).map((s) => s.toUpperCase());
   let workerFilter = query.get("worker") ?? "";
+  const legacy = (query.get("status") ?? "").split(",").filter(Boolean).map((s) => s.toUpperCase());
+  let stateFilter = query.get("state") ?? "";
   const rawSort = query.get("sort");
-  let sort: Sort = SORTS.some(([k]) => k === rawSort) ? (rawSort as Sort) : "updated";
-  let order: "asc" | "desc" = query.get("order") === "asc" ? "asc" : query.get("order") === "desc" ? "desc" : sort === "updated" ? "desc" : "asc";
-  let offset = Math.max(0, (Number(query.get("page")) || 1) - 1) * PAGE;
+  let sort: Sort = SORTS.some(([k]) => k === rawSort) ? (rawSort as Sort) : "state";
   let reply: Reply | null = null;
   let error = "";
   let seq = 0;
   let disposed = false;
-  const nowDoing = new Map<string, string>();
+  let cancelSkeleton: (() => void) | null = null;
+  let renderTimer = 0;
+  let detailTimer = 0;
 
-  const body = h("div", { id: "missions-body" });
-  const rest = h("div", { class: "toolbar-rest" });
-  const controls = h("div", { class: "toolbar", id: "missions-controls" });
+  const need = h("span", { "data-q": "need-me" });
+  const what = h("span", { "data-q": "what" });
+  const next = h("span", { "data-q": "next" });
+  const answer = h("p", { class: "answer", "data-l0": "missions.answer", "aria-live": "polite" }, need, what, next);
   const live = h("p", { class: "sr-only", role: "status", id: "missions-live" });
-  root.append(h("h1", {}, workerFilter ? `Missions on ${workerFilter}` : "Missions"), controls, live, body);
+  const controls = h("div", { class: "toolbar", id: "missions-controls", "data-l0": "missions.controls" });
+  const stateBox = h("div", { class: "page-state" });
+  const list = h("ul", { class: "rows", "aria-label": "Missions", "data-section": "active" });
+  const finishedList = h("ul", { class: "rows", "aria-label": "Finished missions" });
+  const finished = disclosure("Finished", finishedList, { count: 0 });
+  finished.dataset["section"] = "finished";
+  finished.hidden = true;
+  const total = h("p", { class: "muted small", id: "missions-total" });
+  root.append(h("h1", { class: "page-title" }, workerFilter ? `Missions on ${workerFilter}` : "Missions"), answer, live, controls, stateBox, list, finished, total);
 
   // The search box is created once: rebuilding it on every result would drop focus and the caret while the user types.
   const search = searchBox("mission-search", "Search missions", q, (v) => {
     q = v.trim();
     changed();
   });
-  controls.append(search, rest);
-  const filtered = () => Boolean(q || statuses.length || workerFilter);
+  const stateSelect = h("select", { id: "state-filter", "aria-label": "State" });
+  const workerSelect = h("select", { id: "worker-filter", "aria-label": "Worker" });
+  const sortSelect = h("select", { id: "sort-select", "aria-label": "Sort by" }, ...SORTS.map(([k, label]) => h("option", { value: k, selected: k === sort }, label)));
+  controls.append(search, h("div", { class: "selects" }, stateSelect, workerSelect, sortSelect));
+  stateSelect.addEventListener("change", () => { stateFilter = stateSelect.value; syncUrl(); render(); });
+  workerSelect.addEventListener("change", () => { workerFilter = workerSelect.value; changed(); });
+  sortSelect.addEventListener("change", () => { sort = sortSelect.value as Sort; syncUrl(); render(); });
+
+  const filtered = () => Boolean(q || workerFilter || stateFilter || legacy.length);
 
   function syncUrl(): void {
     const p = new URLSearchParams();
     if (q) p.set("q", q);
-    if (statuses.length) p.set("status", statuses.join(","));
+    if (stateFilter) p.set("state", stateFilter);
     if (workerFilter) p.set("worker", workerFilter);
-    if (sort !== "updated" || order !== "desc") {
-      p.set("sort", sort);
-      p.set("order", order);
-    }
-    if (offset > 0) p.set("page", String(offset / PAGE + 1));
+    if (legacy.length) p.set("status", legacy.join(","));
+    if (sort !== "state") p.set("sort", sort);
     const s = p.toString();
     history.replaceState(null, "", location.pathname + (s ? `?${s}` : ""));
   }
 
   async function load(): Promise<void> {
     const mine = ++seq;
-    const p = new URLSearchParams({ sort, order, limit: String(PAGE), offset: String(offset) });
+    const p = new URLSearchParams({ sort: "updated", order: "desc", limit: "500" });
     if (q) p.set("q", q);
-    if (statuses.length) p.set("status", statuses.join(","));
     if (workerFilter) p.set("worker", workerFilter);
     try {
       const r = await api.get<Reply>(`/api/v1/missions?${p.toString()}`);
       if (disposed || mine !== seq) return;
-      if (r.total > 0 && r.offset >= r.total) {
-        offset = Math.floor((r.total - 1) / PAGE) * PAGE;
-        return void load();
-      }
       reply = r;
       error = "";
-      live.textContent = `${r.total} mission${r.total === 1 ? "" : "s"} found.`;
-      void loadCurrentWork(r, mine);
+      cancelSkeleton?.();
+      cancelSkeleton = null;
     } catch (e) {
       if (disposed || mine !== seq) return;
-      error = e instanceof api.ApiError ? e.message : "Cannot load missions.";
+      cancelSkeleton?.();
+      cancelSkeleton = null;
+      error = e instanceof api.ApiError ? `${e.status} ${e.code}` : "network";
     }
-    renderBody();
-    renderControls();
-  }
-  async function loadCurrentWork(r: Reply, requestSeq: number): Promise<void> {
-    const active = r.missions.filter((m) => m.mission.status.toUpperCase() === "RUNNING" && !m.stale).slice(0, 12);
-    let next = 0;
-    const lane = async (): Promise<void> => {
-      while (next < active.length && !disposed && requestSeq === seq) {
-        const mission = active[next++];
-        if (!mission) continue;
-        try {
-          const status = await api.missionStatus(mission.worker, mission.mission.id);
-          if (disposed || requestSeq !== seq) return;
-          nowDoing.set(`${mission.worker}/${mission.mission.id}`, currentWorkSummary(status));
-        } catch { /* list remains useful if a worker status read is unavailable */ }
-      }
-    };
-    await Promise.all([lane(), lane(), lane()]);
-    if (!disposed && requestSeq === seq) renderBody();
+    render();
   }
   const reload = debounce(() => void load(), 250);
-  const changed = (resetPage = true): void => {
-    if (resetPage) offset = 0;
+  const changed = (): void => {
     syncUrl();
     reload();
   };
 
-  function setSort(key: string): void {
-    if (sort === key) order = order === "asc" ? "desc" : "asc";
-    else {
-      sort = key as Sort;
-      order = key === "updated" ? "desc" : "asc";
-    }
-    changed();
-    renderControls();
+  const matches = (i: Item): boolean => {
+    if (legacy.length && !legacy.includes(i.entry.mission.status.toUpperCase())) return false;
+    if (!stateFilter) return true;
+    if (stateFilter === "needs-you") return i.state.tier === "alert";
+    return i.state.id === stateFilter;
+  };
+
+  const rowOptions = (item: Item): RowOptions => ({ l0: "missions.mission-row", layout: "cells", done: () => reload() });
+  const specs = (items: Item[]): RowSpec[] => items.map((item) => {
+    const o = rowOptions(item);
+    return { key: item.key, sig: rowSig(item, o), build: () => missionRow(item, o) };
+  });
+
+  function fetchDetails(everything: boolean, shown: Item[]): void {
+    if (disposed || store.conn !== "live" || !reply) return;
+    const running = shown.filter((i) => i.state.id === "running").slice(0, 8).map((i) => i.entry);
+    const gaps = attentionGaps(reply.missions).slice(0, 12);
+    const union = new Map([...gaps, ...running].map((e) => [`${e.worker}/${e.mission.id}`, e]));
+    const s = [...union.values()].filter((e) => everything || !hasStatus(e));
+    const l = running.filter((e) => everything || !hasLine(e));
+    if (s.length) void loadStatuses(s, () => disposed);
+    if (l.length) void loadLines(l, () => disposed);
   }
 
-  function renderControls(): void {
-    const facets = reply?.statuses ?? {};
-    const names = [...new Set([...Object.keys(facets), ...statuses])].sort();
-    const sel = h("select", { id: "sort-select", "aria-label": "Sort by" }, ...SORTS.map(([k, label]) => h("option", { value: k, selected: k === sort }, label)));
-    sel.addEventListener("change", () => setSort2(sel.value as Sort));
-    const dir = h("button", { type: "button", class: "btn icon", id: "sort-order", "aria-label": order === "asc" ? "Ascending. Activate for descending." : "Descending. Activate for ascending." }, icon(order === "asc" ? "chevronUp" : "chevronDown", 20));
-    dir.addEventListener("click", () => {
-      order = order === "asc" ? "desc" : "asc";
-      changed();
-      renderControls();
-    });
-    const workerSel =
-      store.workers.length > 1
-        ? h("select", { id: "worker-filter", "aria-label": "Worker" }, h("option", { value: "" }, "All workers"), ...store.workers.map((w) => h("option", { value: w.name, selected: w.name === workerFilter }, w.name)))
-        : null;
-    workerSel?.addEventListener("change", () => {
-      workerFilter = workerSel.value;
-      changed();
-    });
-    const active = document.activeElement?.id;
-    rest.replaceChildren(
-      sel,
-      dir,
-      ...(workerSel ? [workerSel] : []),
-      h(
-        "ul",
-        { class: "chips", "aria-label": "Filter by status", style: "flex-basis:100%" },
-        ...names.map((n) => {
-          const chip = h("button", { type: "button", class: "chip", "aria-pressed": String(statuses.includes(n.toUpperCase())), "data-status": n }, n.toLowerCase(), h("span", { class: "n" }, String(facets[n] ?? 0)));
-          chip.addEventListener("click", () => {
-            const u = n.toUpperCase();
-            statuses = statuses.includes(u) ? statuses.filter((s) => s !== u) : [...statuses, u];
-            changed();
-            renderControls();
-          });
-          return h("li", {}, chip);
-        }),
-      ),
-    );
-    if (active && active !== "mission-search") document.getElementById(active)?.focus();
-    const box = search.querySelector("input");
-    if (box && box.value !== q && document.activeElement !== box) box.value = q;
-  }
-  function setSort2(k: Sort): void {
-    sort = k;
-    order = k === "updated" ? "desc" : "asc";
-    changed();
-    renderControls();
-  }
-
-  function renderBody(): void {
-    if (error) return body.replaceChildren(h("p", { class: "notice", role: "status" }, error));
-    if (!reply) return body.replaceChildren(h("p", { class: "muted" }, "Loading..."));
-    if (reply.total === 0) {
-      body.replaceChildren(
-        filtered()
-          ? emptyState({
-              icon: "search",
-              title: "No missions match",
-              text: "Nothing matches the current search and filters.",
-              action: h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "clear-filters", onclick: clearFilters }, "Clear search and filters")),
-            })
-          : emptyState({
-              icon: "missions",
-              title: "No missions yet",
-              text: h("span", {}, "Missions are created on a worker, then appear here. On a worker machine run ", h("code", {}, "llm-bridge mission create"), "."),
-              action: store.workers.length === 0 ? h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/workers" }, "Add a worker first")) : undefined,
-            }),
-      );
+  function render(): void {
+    window.clearTimeout(renderTimer);
+    if (disposed) return;
+    if (error) {
+      stateBox.replaceChildren(errorBlock({ message: "The missions could not be loaded.", code: error, retry: () => { error = ""; void load(); } }));
+      list.replaceChildren();
+      finished.hidden = true;
       return;
     }
-    const sh = (label: string, key: Sort) => sortHeader(label, key, sort, order, setSort);
-    body.replaceChildren(
-      h(
-        "div",
-        { class: "table-wrap rt", role: "region", "aria-label": "Missions table", tabindex: "0" },
-        h(
-          "table",
-          { id: "missions-table", class: "rt" },
-          h("caption", { class: "sr-only" }, "Missions"),
-          h("thead", {}, h("tr", {}, sh("Mission", "name"), sh("Worker", "worker"), sh("Status", "status"), h("th", { scope: "col" }, "Folder"), sh("Updated", "updated"))),
-          h(
-            "tbody",
-            {},
-            ...reply.missions.map((m) =>
-              h(
-                "tr",
-                { "data-mission": m.mission.id },
-                h("th", { scope: "row", "data-label": "Mission" }, h("span", { class: "cell-stack" }, h("a", { class: "cell-link", href: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(m.mission.id)}` }, m.mission.name || m.mission.id), idChip(m.mission.id, "mission ID"), nowDoing.has(`${m.worker}/${m.mission.id}`) ? h("span", { class: "now-doing" }, h("span", { class: "activity-dot", "aria-hidden": "true" }), nowDoing.get(`${m.worker}/${m.mission.id}`)!) : null, m.mission.needs_you?.kind === "provider" && m.mission.needs_you.message ? h("span", { class: "mission-needs-you", "data-needs-you": "provider" }, m.mission.needs_you.message, h("a", { href: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(m.mission.id)}` }, "Open mission to answer")) : null)),
-                h("td", { "data-label": "Worker" }, m.worker),
-                h("td", { "data-label": "Status" }, h("span", { "data-entity": `mission:${m.worker}/${m.mission.id}` }, statePill(missionState(m)))),
-                h("td", { "data-label": "Folder" }, m.mission.folder),
-                h("td", { "data-label": "Updated" }, timeEl(m.mission.updated_at)),
-              ),
-            ),
-          ),
-        ),
-      ),
-      reply.total > PAGE
-        ? pager("Mission pages", reply.offset, PAGE, reply.total, (o) => {
-            offset = o;
-            syncUrl();
-            void load();
-            window.scrollTo({ top: 0 });
-          })
-        : h("p", { class: "muted small" }, `${reply.total} mission${reply.total === 1 ? "" : "s"}`),
+    if (!reply) {
+      if (!stateBox.firstChild && !cancelSkeleton) cancelSkeleton = deferSkeleton(stateBox, 6, 250); // the list answer takes about 100 ms on a cold page: a skeleton only for a slower one
+      return;
+    }
+    stateBox.querySelector(".skeleton")?.remove();
+    const items = reply.missions.map(itemOf);
+    renderControls(items);
+    const shown = items.filter(matches);
+    const active = shown.filter((i) => sectionOf(i.state) !== "finished");
+    const done = shown.filter((i) => sectionOf(i.state) === "finished");
+    const byUpdated = (a: Item, b: Item) => updatedMs(b) - updatedMs(a);
+    const byName = (a: Item, b: Item) => a.entry.mission.name.localeCompare(b.entry.mission.name) || byUpdated(a, b);
+    const compare = sort === "name" ? byName : sort === "updated" ? byUpdated : (a: Item, b: Item) => stateOrder(a.state) - stateOrder(b.state) || byUpdated(a, b);
+    active.sort(compare);
+    done.sort(sort === "name" ? byName : byUpdated);
+
+    const needs = items.filter((i) => i.state.tier === "alert").length;
+    const pending = attentionPending(reply.missions);
+    const open = items.filter((i) => sectionOf(i.state) !== "finished").length;
+    need.textContent = pending && needs === 0 ? "Checking..." : needs ? `${needs} ${needs === 1 ? "needs" : "need"} you` : "None need you";
+    what.textContent = `${open} active`;
+    next.textContent = items.length === 0 ? "Create a mission" : "Open one to act";
+    live.textContent = `${shown.length} mission${shown.length === 1 ? "" : "s"} shown.`;
+
+    if (items.length === 0 && !filtered()) {
+      stateBox.replaceChildren(emptyState({ icon: "missions", title: "No missions yet", text: store.workers.length === 0 ? "Missions are created on a worker. Add a worker first, then create a mission on it." : "Missions are created on a worker, then appear here with their state.", command: "llm-bridge mission create", action: store.workers.length === 0 ? h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/workers" }, "Add a worker first")) : undefined }));
+    } else if (shown.length === 0) {
+      stateBox.replaceChildren(emptyState({ icon: "search", title: "No missions match", text: "Nothing matches the current search and filters.", action: h("div", { class: "actions" }, h("button", { type: "button", class: "btn", id: "clear-filters", onclick: clearFilters }, "Clear search and filters")) }));
+    } else stateBox.replaceChildren();
+
+    reconcile(list, specs(active));
+    finished.hidden = done.length === 0;
+    const count = finished.querySelector(".count");
+    if (count) count.textContent = `(${done.length})`;
+    if (stateFilter === "done" || stateFilter === "stopped" || legacy.some(isFinishedStatus)) finished.open = true;
+    reconcile(finishedList, finished.open || done.length <= 100 ? specs(done) : []);
+    total.textContent = shown.length ? `${shown.length} mission${shown.length === 1 ? "" : "s"}` : "";
+    fetchDetails(false, active);
+  }
+
+  function renderControls(items: Item[]): void {
+    const counts = new Map<string, number>();
+    const first = new Map<string, Item>();
+    for (const i of items) {
+      counts.set(i.state.id, (counts.get(i.state.id) ?? 0) + 1);
+      if (!first.has(i.state.id)) first.set(i.state.id, i);
+    }
+    const needs = items.filter((i) => i.state.tier === "alert").length;
+    const ids = [...counts.keys()].sort((a, b) => stateOrder(first.get(a)!.state) - stateOrder(first.get(b)!.state));
+    const want = ["", "needs-you", ...ids];
+    const signature = JSON.stringify([want, [...counts], stateFilter, store.workers.map((w) => w.name), workerFilter]);
+    if (controls.dataset["sig"] === signature) return;
+    controls.dataset["sig"] = signature;
+    stateSelect.replaceChildren(
+      h("option", { value: "" }, "All states"),
+      h("option", { value: "needs-you", selected: stateFilter === "needs-you" }, `Needs you (${needs})`),
+      ...ids.map((id) => h("option", { value: id, selected: stateFilter === id }, `${first.get(id)!.state.label.replace(/^Verifying$/, "Running")} (${counts.get(id) ?? 0})`)),
     );
+    if (stateFilter && !want.includes(stateFilter)) stateSelect.append(h("option", { value: stateFilter, selected: true }, `${stateFilter} (0)`));
+    stateSelect.value = stateFilter;
+    workerSelect.replaceChildren(h("option", { value: "" }, "All workers"), ...store.workers.map((w) => h("option", { value: w.name, selected: w.name === workerFilter }, w.name)));
+    workerSelect.value = workerFilter;
+    workerSelect.hidden = store.workers.length < 2 && !workerFilter;
+    const box = search.querySelector("input");
+    if (box && box.value !== q && document.activeElement !== box) box.value = q;
   }
 
   function clearFilters(): void {
     q = "";
-    statuses = [];
+    stateFilter = "";
     workerFilter = "";
+    legacy.length = 0;
+    const box = search.querySelector("input");
+    if (box) box.value = "";
     changed();
-    renderControls();
+    render();
   }
 
-  // The coordinator pushes changes through the store; re-run the query when the mission list changes.
+  // The coordinator pushes changes through the store; read the list again when it changes.
   let last = "";
   const un = subscribe(() => {
-    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, missionState(m).id]), store.workers.length]);
+    const k = JSON.stringify([store.missions.map((m) => [m.worker, m.mission.id, m.mission.status, m.mission.name, m.mission.updated_at, itemOf(m).state.id]), store.workers.map((w) => [w.name, w.state]), store.conn]);
     if (k !== last) {
       last = k;
       reload();
+      window.clearTimeout(detailTimer);
+      detailTimer = window.setTimeout(() => reply && fetchDetails(true, reply.missions.map(itemOf).filter((i) => sectionOf(i.state) !== "finished")), 600);
     }
   });
-  renderControls();
-  renderBody();
+  const unDetails = onDetails(() => {
+    window.clearTimeout(renderTimer);
+    renderTimer = window.setTimeout(render, 30);
+  });
+  const clock = window.setInterval(() => document.visibilityState === "visible" && render(), 30000);
+  render();
   void load();
   return () => {
     disposed = true;
+    window.clearTimeout(renderTimer);
+    window.clearTimeout(detailTimer);
+    window.clearInterval(clock);
+    cancelSkeleton?.();
     un();
+    unDetails();
   };
 }
