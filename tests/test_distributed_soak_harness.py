@@ -515,6 +515,28 @@ def test_proxy_reset_and_refusal_cut_the_link(relay):
     again.close()
 
 
+def test_proxy_reset_ends_every_link_thread_before_it_returns(relay):
+    """``reset_all`` must stop the threads that were blocked on the link's sockets, not just close the descriptors.
+
+    A thread still inside a read on a closed descriptor keeps using that descriptor number after the kernel hands it
+    to the next connection, and its TLS layer then writes into an unrelated handshake (SSL record layer failure).
+    """
+    server, proxy, connect = relay
+    before = set(threading.enumerate())
+    clients = [connect() for _ in range(4)]
+    for client in clients:
+        assert _ask(client, "a") == "echo-a"
+    link_threads = [thread for thread in threading.enumerate() if thread not in before]
+    assert len(link_threads) >= 8  # at least a serve thread and a pump thread per link
+    assert proxy.reset_all() == 4
+    for thread in link_threads:
+        thread.join(scaled(2))
+    assert [thread.name for thread in link_threads if thread.is_alive()] == []
+    again = connect()  # a fresh connection straight after the reset works
+    assert _ask(again, "b") == "echo-b"
+    again.close()
+
+
 def test_frame_message_type_reads_only_protocol_messages():
     assert dist_ws_proxy.frame_message_type(b'{"type":"command","v":1}') == "command"
     assert dist_ws_proxy.frame_message_type(b"not json") is None and dist_ws_proxy.frame_message_type(b'{"type":7}') is None

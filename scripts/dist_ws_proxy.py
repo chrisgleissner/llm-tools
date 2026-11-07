@@ -70,7 +70,9 @@ def make_proxy_certificate(directory: Path) -> tuple[Path, Path]:
 class _Link:
     client: socket.socket
     upstream: socket.socket
-    closed: threading.Event = field(default_factory=threading.Event)
+    closed: threading.Event = field(default_factory=threading.Event)  # set once the link is being torn down
+    released: threading.Event = field(default_factory=threading.Event)  # set once the owning thread has closed both sockets
+    reset: bool = False  # close with a TCP reset instead of a normal FIN
 
 
 @dataclass
@@ -156,6 +158,9 @@ class WsFrameProxy:
             links, self._links = self._links, []
         for link in links:
             self._close(link, reset=True)
+        # Return only after every link's sockets are closed (with a reset), so the caller can rely on the cut.
+        for link in links:
+            link.released.wait(10)
         self.resets += len(links)
         return len(links)
 
@@ -208,17 +213,36 @@ class WsFrameProxy:
             pass
 
     def _close(self, link: _Link, *, reset: bool) -> None:
-        if link.closed.is_set():
-            return
-        link.closed.set()
+        """Start tearing the link down from any thread: wake every thread blocked on its sockets.
+
+        The sockets are not closed here. The thread that owns them (``_serve``) closes them after both
+        pump threads have returned. Closing a descriptor while another thread is still inside
+        ``recv``/``send`` on it lets the kernel hand the same descriptor number to the next
+        connection while the old thread (and its TLS object) still writes to that number, which injects
+        stray bytes into an unrelated connection.
+        """
+        with self._lock:
+            if link.closed.is_set():
+                return
+            link.reset = reset
+            link.closed.set()
         for sock in (link.client, link.upstream):
-            if reset:
-                self._abort(sock)
-            else:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
+            try:
+                if reset:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                # The socket-level call: SSLSocket.shutdown would drop the TLS object under a running reader.
+                socket.socket.shutdown(sock, socket.SHUT_RD if reset else socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _release(link: _Link) -> None:
+        for sock in (link.client, link.upstream):
+            try:
+                sock.close()
+            except OSError:
+                pass
+        link.released.set()
 
     @staticmethod
     def _read_head(sock: socket.socket) -> bytes:
@@ -234,11 +258,16 @@ class WsFrameProxy:
 
     def _serve(self, raw_client: socket.socket) -> None:
         link: _Link | None = None
+        pump: threading.Thread | None = None
+        opened: list[socket.socket] = [raw_client]
         try:
             raw_client.settimeout(10)
             client = self._server_context.wrap_socket(raw_client, server_side=True)
+            opened.append(client)
             raw_upstream = socket.create_connection(self.upstream, timeout=10)
+            opened.append(raw_upstream)
             upstream = self._upstream_context.wrap_socket(raw_upstream, server_hostname=self.upstream[0])
+            opened.append(upstream)
             for sock in (client, upstream):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             link = _Link(client, upstream)
@@ -253,10 +282,9 @@ class WsFrameProxy:
             with self._lock:
                 self._links.append(link)
             self.accepted += 1
-            pump = threading.Thread(target=self._pump, args=(link, client, upstream, UP), daemon=True)
+            pump = threading.Thread(target=self._pump, args=(link, client, upstream, UP), daemon=True, name="ws-frame-proxy-pump")
             pump.start()
             self._pump(link, upstream, client, DOWN)
-            pump.join(1)
         except (OSError, ssl.SSLError, bridge_ws.WebSocketError):
             pass
         finally:
@@ -265,11 +293,15 @@ class WsFrameProxy:
                     if link in self._links:
                         self._links.remove(link)
                 self._close(link, reset=False)
+                if pump is not None:
+                    pump.join()  # the sockets were shut down, so the pump thread returns promptly
+                self._release(link)
             else:
-                try:
-                    raw_client.close()
-                except OSError:
-                    pass
+                for sock in opened:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
 
     def _should_drop(self, direction: str, kind: str | None) -> bool:
         with self._lock:
@@ -296,7 +328,7 @@ class WsFrameProxy:
                         continue
                     delay = self._delay[direction]
                     if delay:
-                        time.sleep(delay)
+                        link.closed.wait(delay)  # a torn-down link ends the wait early
                 if link.closed.is_set():
                     break
                 # Counted before the send: a reader that has received the frame must already see it counted.
