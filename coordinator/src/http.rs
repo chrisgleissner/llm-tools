@@ -446,6 +446,9 @@ impl FromRequestParts<St> for Authed {
                 }
             }
         }
+        if matches!(&principal, Principal::Session { .. }) && !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+            check_address_mutation_limit(st, &remote)?;
+        }
         Ok(Authed(principal, remote))
     }
 }
@@ -725,7 +728,6 @@ async fn passkey_register_start(State(st): State<St>, Authed(p, ip): Authed, hea
             "passkey registration requires a browser session",
         ));
     };
-    check_passkey_address_limit(&st, &ip)?;
     let origin = webauthn_origin(&st, &headers)?;
     let m = parse_body(&body.bytes)?;
     let body: RegisterStartBody = serde_json::from_value(Value::Object(m)).map_err(|_| {
@@ -777,7 +779,6 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
             "passkey registration requires a browser session",
         ));
     };
-    check_passkey_address_limit(&st, &ip)?;
     let m = parse_body(&body.bytes)?;
     let body: RegisterFinishBody =
         serde_json::from_value(Value::Object(m)).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "challenge_id and credential are required"))?;
@@ -833,7 +834,7 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
 
 async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
     check_public_origin(&st, &headers)?;
-    check_passkey_address_limit(&st, &ip)?;
+    check_address_mutation_limit(&st, &ip)?;
     let origin = webauthn_origin(&st, &headers)?;
     let m = parse_body(&body.bytes)?;
     no_extra(&m, &[])?;
@@ -877,7 +878,7 @@ async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers:
 }
 
 async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
-    check_passkey_address_limit(&st, &ip)?;
+    check_address_mutation_limit(&st, &ip)?;
     let origin = webauthn_origin(&st, &headers)?;
     let ticket = passkey_ticket(&headers)?;
     let m = parse_body(&body.bytes)?;
@@ -945,9 +946,9 @@ async fn passkey_assert_finish(State(st): State<St>, Remote(ip): Remote, headers
     Ok(r)
 }
 
-/// Passkey ceremonies can write challenge rows without an authenticated token. Share the
-/// coordinator's bounded per-address mutation budget so a browser cannot amplify DB writes.
-fn check_passkey_address_limit(st: &St, remote: &str) -> Result<(), ApiError> {
+/// Session mutations and public passkey ceremonies have no token-specific budget. Share the
+/// coordinator's bounded per-address mutation budget so either path stays bounded.
+fn check_address_mutation_limit(st: &St, remote: &str) -> Result<(), ApiError> {
     let address = remote
         .parse::<std::net::IpAddr>()
         .map(|ip| auth::addr_key(&ip))

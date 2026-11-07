@@ -238,6 +238,23 @@ async fn passkey_challenge_creation_uses_the_per_address_mutation_budget() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_session_mutations_share_the_per_address_budget() {
+    let env = boot_with(|t| t.replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 1")).await;
+    let api = env.admin().await;
+    let request = || api.rb(Method::POST, "/api/v1/commands").json(&json!({}));
+
+    let first = request().send().await.unwrap();
+    assert_eq!(first.status().as_u16(), 400, "invalid command must reach handler validation");
+    let limited = request().send().await.unwrap();
+    assert_eq!(limited.status().as_u16(), 429);
+    assert_eq!(limited.headers()["content-type"], "application/problem+json");
+    assert!((1..=60).contains(&limited.headers()["retry-after"].to_str().unwrap().parse::<u64>().unwrap()));
+    let body: Value = limited.json().await.unwrap();
+    assert_eq!(body["code"], "mutation-rate-limit");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn passkey_routes_stay_unavailable_on_ip_origins_and_unknown_credentials_fail_closed() {
     let env = boot().await;
     let api = env.admin().await;
