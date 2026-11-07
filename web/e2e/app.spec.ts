@@ -1,6 +1,6 @@
 import { expect, expectAccessible, expectNoHorizontalScroll, loginViaUi, navTo, PASSWORD, setupViaUi, signOutViaUi, test } from "./fixtures";
 
-test("first-run setup signs in and shows the overview; unauthenticated visits go to login", async ({ page, coord }) => {
+test("first-run setup signs in and shows the Inbox; unauthenticated visits go to login", async ({ page, coord }) => {
   await setupViaUi(page, coord);
   await expect(page).toHaveURL(/\/$/);
   await expect(page.locator("#conn")).toContainText("Live");
@@ -83,7 +83,7 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
   await page.keyboard.type(PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).focus();
   await page.keyboard.press("Enter");
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
   // main has focus after navigation; the first Tab stop is the skip link.
   // Move the sequential focus starting point to the top of the document, as a fresh page load does.
   await page.evaluate(() => {
@@ -111,27 +111,6 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/workers$/);
   await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" })).toHaveAttribute("aria-current", "page");
-});
-
-test("a live refresh of the overview keeps keyboard focus on the same tile", async ({ page, coord }) => {
-  await setupViaUi(page, coord);
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
-  // Hold the diagnostics reply so the re-render it causes happens after a tile has focus.
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => (release = resolve));
-  await page.route("**/api/v1/diagnostics", async (route) => {
-    await held;
-    await route.continue();
-  });
-  await page.goto("/");
-  const tile = page.locator('[data-tile="missions-running"]');
-  await tile.focus();
-  await tile.evaluate((el) => el.setAttribute("data-before-refresh", ""));
-  release();
-  await expect(page.locator("#ov-health")).toContainText("Coordinator healthy");
-  // The tile element was replaced by the re-render, and focus moved to its replacement.
-  await expect(page.locator("[data-before-refresh]")).toHaveCount(0);
-  await expect(tile).toBeFocused();
 });
 
 test("theme toggle cycles and persists", async ({ page, coord }) => {
