@@ -366,6 +366,16 @@ impl<'a> WebauthnBuilder<'a> {
         self
     }
 
+    /// Set the public-key algorithms advertised for new credential registration.
+    ///
+    /// Keep this list aligned with the verification algorithms supported by the
+    /// configured crypto backend. An empty list causes WebAuthn registration to
+    /// fail on clients because no credential algorithm can be selected.
+    pub fn credential_algorithms(mut self, algorithms: Vec<COSEAlgorithm>) -> Self {
+        self.algorithms = algorithms;
+        self
+    }
+
     /// Set the relying party name. This may be shown to the user. This value can be changed in
     /// the future without affecting credentials that have already registered.
     ///

@@ -3,7 +3,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use url::Url;
 use webauthn_rs::prelude::{
-    CreationChallengeResponse, DiscoverableAuthentication, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
+    COSEAlgorithm, CreationChallengeResponse, DiscoverableAuthentication, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
     RegisterPublicKeyCredential, RequestChallengeResponse, Uuid, Webauthn, WebauthnBuilder,
 };
 
@@ -81,6 +81,7 @@ pub fn verifier(origin: &str) -> Result<Webauthn, String> {
     WebauthnBuilder::new(rp_id, &url)
         .map_err(|_| "invalid WebAuthn RP ID/origin".to_string())?
         .rp_name("LLM Bridge")
+        .credential_algorithms(vec![COSEAlgorithm::ES256, COSEAlgorithm::EDDSA, COSEAlgorithm::RS256])
         .build()
         .map_err(|_| "invalid WebAuthn configuration".to_string())
 }

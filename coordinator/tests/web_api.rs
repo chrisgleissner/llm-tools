@@ -292,6 +292,13 @@ async fn passkey_registration_start_is_bound_to_https_named_origin_and_session()
     assert_eq!(options["options"]["publicKey"]["attestation"], "none");
     assert_eq!(options["options"]["publicKey"]["authenticatorSelection"]["userVerification"], "required");
     assert_eq!(options["options"]["publicKey"]["authenticatorSelection"]["residentKey"], "required");
+    let algorithms = options["options"]["publicKey"]["pubKeyCredParams"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|parameter| parameter["alg"].as_i64())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(algorithms, [-257, -8, -7].into_iter().collect());
     let challenge_id = options["challenge_id"].as_str().unwrap();
     assert_eq!(challenge_id.len(), 64);
 
