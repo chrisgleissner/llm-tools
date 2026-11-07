@@ -86,3 +86,5 @@
 .notify-offer p { margin: 0; font-size: var(--fs-sm); }
 .notify-offer .actions { margin: var(--sp-2) 0 0; }
 @media (max-width: 47.99rem) { .notify-offer { inset-inline: var(--sp-3); inset-block-end: calc(var(--tab-h) + 5rem + env(safe-area-inset-bottom)); max-inline-size: none; } }
+/* Typing in a field on a phone: the bottom bar gives its height to the keyboard's half of the screen (body[data-typing] is set by shell.ts). */
+@media (max-width: 47.99rem) and (max-aspect-ratio: 3/2) { body[data-typing] .main-nav { display: none; } }

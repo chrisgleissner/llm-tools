@@ -17,7 +17,9 @@ uxrStatic({ t: "T45", uxr: ["UXR-037"], needs: [] }, "playwright.config.ts defin
     expect(project?.use?.viewport, `viewport of matrix-${w}x${h}`).toEqual({ width: w, height: h });
     expect(String(project?.testMatch), `matrix-${w}x${h} runs the matrix spec only`).toContain("uxr-matrix");
   }
-  expect(projects.length, "four existing projects and nine matrix projects").toBe(13);
+  // Two more projects run only the click-path specs (UXR-043 to UXR-046) at the two smallest phone sizes.
+  for (const name of ["paths-320x568", "paths-360x640"]) expect(names, `click-path project ${name}`).toContain(name);
+  expect(projects.length, "four existing projects, nine matrix projects and two click-path projects").toBe(15);
 });
 
 uxrStatic({ t: "T45", uxr: ["UXR-037"], needs: [] }, "the CI workflow runs the matrix projects", async () => {

@@ -60,14 +60,15 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   const status = h("p", { id: "terminal-status", class: "term-status", role: "status", "aria-live": "polite", "data-state": "idle", "data-mode": "view" }, "Not connected.");
   const host = h("div", { id: "terminal-host", class: "term-host", role: "region", "aria-label": "Terminal output", hidden: true });
   const transcript = h("pre", { class: "transcript", tabindex: "0", "aria-label": "Session transcript", hidden: true });
-  const panNote = h("p", { class: "small muted", hidden: true });
+  // The note was an empty visible paragraph that took 16 px of margin in the pane; the fade on the terminal edge is the visual cue, this is its text.
+  const panNote = h("p", { class: "sr-only", hidden: true }, "The session is wider than the screen. Scroll sideways to read all of it.");
   const jump = button("Jump to latest", () => toBottom(), { kind: "small", icon: "chevronDown" });
   jump.classList.add("jump");
   jump.hidden = true;
   const watch = button("Watch live", () => start("view"), { kind: "small", id: "terminal-open" });
-  const followBtn = button("Following", () => (follow ? pause() : toBottom()), { kind: "small ghost" });
-  const transcriptBtn = button("Transcript", () => showTranscript(!!transcript.hidden), { kind: "small ghost" });
-  const expandBtn = button("Expand", () => toggleFull(), { kind: "small ghost", label: "Expand to full screen" });
+  const followBtn = button("Following", () => (follow ? pause() : toBottom()), { kind: "small ghost bar-btn", icon: "chevronDown" });
+  const transcriptBtn = button("Transcript", () => showTranscript(!!transcript.hidden), { kind: "small ghost bar-btn", icon: "sessions" });
+  const expandBtn = button("Expand", () => toggleFull(), { kind: "small ghost bar-btn", icon: "chevronUp", label: "Expand to full screen" });
   const menuSlot = h("span", { class: "pane-menu" });
   const bar = h("div", { class: "session-bar" }, status, watch, followBtn, transcriptBtn, expandBtn, menuSlot);
 

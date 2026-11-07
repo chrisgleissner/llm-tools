@@ -28,12 +28,16 @@ function createTokenDialog(onCreated: (created: api.ApiTokenCreated) => void): v
   const form = h(
     "form",
     { class: "token-create", id: "api-token-form", novalidate: true },
-    name.wrap,
-    h("fieldset", { "aria-describedby": "token-scope-error" }, h("legend", {}, "Permissions"), ...scopeInputs.map((x) => x.label)),
-    scopeError,
-    h("div", { class: "field" }, h("label", { for: "api-token-expiry" }, "Expires after"), expiry),
-    h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
-    failure,
+    h(
+      "div",
+      { class: "dialog-body" },
+      name.wrap,
+      h("fieldset", { "aria-describedby": "token-scope-error" }, h("legend", {}, "Permissions"), ...scopeInputs.map((x) => x.label)),
+      scopeError,
+      h("div", { class: "field" }, h("label", { for: "api-token-expiry" }, "Expires after"), expiry),
+      h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
+      failure,
+    ),
     h("div", { class: "actions end" }, h("button", { type: "button", class: "btn", onclick: () => (document.getElementById("token-dialog") as HTMLDialogElement | null)?.close() }, "Cancel"), create),
   );
   form.addEventListener("submit", async (event) => {

@@ -22,7 +22,7 @@ const matrix = (width: number, height: number, kind: "desktop" | "tablet" | "pho
 
 // The click-path inventory (UXR-043 to UXR-046): the paths, on-screen keyboard and thumb-reach specs also run at 320x568 and 360x640,
 // the two smallest phones of the addendum, in two projects of their own. The four standard projects run them at 1440x900 and 353x745.
-const PATHS_SPEC = /redesign[\\/]uxr-(paths|keyboard|reach)\.spec\.ts$/;
+const PATHS_SPEC = /redesign[\\/]uxr-(paths|keyboard|keyboard-only|reach)\.spec\.ts$/;
 const phonePaths = (width: number, height: number) => ({ name: `paths-${width}x${height}`, testMatch: PATHS_SPEC, use: { ...devices["Pixel 4"], viewport: { width, height }, hasTouch: true, isMobile: true, deviceScaleFactor: 3 } });
 
 export default defineConfig({

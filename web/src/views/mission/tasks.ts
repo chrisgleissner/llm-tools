@@ -90,6 +90,7 @@ export function tasksPanel(ctx: PageCtx, actions: TaskActions, onAdd: (prompt: s
       promptError.textContent = "Enter the task prompt.";
       prompt.setAttribute("aria-invalid", "true");
       prompt.focus();
+      promptError.scrollIntoView?.({ block: "nearest" });
       return;
     }
     if (submit.getAttribute("aria-busy") === "true") return;

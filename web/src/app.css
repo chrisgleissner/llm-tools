@@ -5,3 +5,4 @@
 @import "./css/inbox.css";
 @import "./css/missions.css";
 /* css/fleet.css, css/auth.css and css/route-mission.css (session.css and mission.css) are separate route stylesheets (build.mjs, src/route-css.ts), not part of the first load. */
+@import "./css/phone.css";

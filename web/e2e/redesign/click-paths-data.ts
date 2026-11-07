@@ -47,7 +47,7 @@ export const PATH_ROWS: PathRow[] = [
   { id: "activity", task: "Read what happened (Activity)", start: "Mission page", path: "Activity tab", desktop: 1, phone: 1, keys: "Tab to the Activity tab, Enter" },
   { id: "find-mission", task: "Find a mission by name", start: "Any page", path: "search button or Ctrl+K, type the name, Enter", desktop: 3, phone: 3, keys: "Ctrl+K, type, Enter" },
   { id: "capacity", task: "Check provider capacity", start: "Any page", path: "the chips in the header show provider, scope and percent", desktop: 0, phone: 0, keys: "none needed" },
-  { id: "usage", task: "Open Usage for every provider", start: "Any page", path: "a capacity chip", desktop: 1, phone: 1, keys: "g u" },
+  { id: "usage", task: "Open Usage for every provider", start: "Any page", path: "a capacity chip (phone: Usage in the bottom bar)", desktop: 1, phone: 1, keys: "g u" },
   { id: "worker-status", task: "Check a worker", start: "Any page", path: "Workers in the navigation", desktop: 1, phone: 1, keys: "g w" },
   { id: "add-worker", task: "Add a worker and read its enrolment token", start: "Workers page", path: "Add worker, type the name, Enter", desktop: 3, phone: 3, keys: "Tab to Add worker, Enter, type, Enter" },
   { id: "reset-hint", task: "Find out how to reset a forgotten password", start: "Sign-in page", path: "the hint is on the page; Reset it from the host shows the command", desktop: 1, phone: 1, keys: "Tab to Reset it from the host, Enter" },

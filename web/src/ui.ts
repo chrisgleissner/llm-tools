@@ -170,10 +170,15 @@ export function confirmDialog(opts: ConfirmOptions): Promise<string | null> {
     const form = h(
       "form",
       { method: "dialog", novalidate: true },
-      h("h2", { id: "dialog-title" }, opts.title),
-      h("p", { id: "dialog-msg" }, opts.message),
-      opts.details ?? null,
-      reason && h("div", { class: "field" }, h("label", { for: "dialog-reason" }, opts.reasonLabel ?? ""), reason, reasonError),
+      // The body scrolls and the buttons stay below it, so with the keyboard open nothing can sit over the field (phones, see components.css).
+      h(
+        "div",
+        { class: "dialog-body" },
+        h("h2", { id: "dialog-title" }, opts.title),
+        h("p", { id: "dialog-msg" }, opts.message),
+        opts.details ?? null,
+        reason && h("div", { class: "field" }, h("label", { for: "dialog-reason" }, opts.reasonLabel ?? ""), reason, reasonError),
+      ),
       h(
         "div",
         { class: "actions end" },

@@ -514,9 +514,10 @@ export const RUNS: PathRun[] = [
     id: "find-mission",
     mock: IN,
     path: "/workers",
-    run: async ({ page }) => {
+    run: async ({ page, field }) => {
       await page.locator("#palette-open").click();
       await expect(dialog(page).getByRole("combobox")).toBeFocused();
+      await field(dialog(page).getByRole("combobox"), null);
       await page.keyboard.type("Refactor the parser");
       await expect(dialog(page).getByRole("option").first()).toContainText("Refactor the parser");
       await page.keyboard.press("Enter");
@@ -545,9 +546,9 @@ export const RUNS: PathRun[] = [
     id: "usage",
     mock: IN,
     path: "/",
-    run: async ({ page, primary }) => {
-      const chip = page.locator("header .cap-chip").first();
-      await primary(chip, "capacity chip");
+    run: async ({ page, phone }) => {
+      // On a phone the Usage item of the bottom bar is in reach of the thumb; the capacity chip in the top bar is the same one interaction.
+      const chip = phone ? nav(page, "Usage") : page.locator("header .cap-chip").first();
       await chip.click();
       await expect(page).toHaveURL(/\/usage$/);
       await expect(page.locator('[data-entity^="provider:"]').first()).toBeVisible();

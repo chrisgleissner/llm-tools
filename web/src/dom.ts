@@ -344,3 +344,4 @@ export function searchBox(id: string, label: string, value: string, onInput: (v:
   input.addEventListener("input", () => onInput(input.value));
   return h("div", { class: "search" }, icon("search", 18), input);
 }
+

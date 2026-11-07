@@ -168,6 +168,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
       if (err instanceof api.ApiError && err.status === 401) error.textContent = "Username or password is incorrect. Check both and try again.";
       else if (err instanceof api.ApiError && err.status === 0) error.textContent = "Cannot reach the coordinator. Check your network connection and try again.";
       else error.textContent = err instanceof api.ApiError ? err.message : "Unexpected error. Try again.";
+      error.scrollIntoView?.({ block: "nearest" });
       pass.input.focus();
       pass.input.select();
     }
