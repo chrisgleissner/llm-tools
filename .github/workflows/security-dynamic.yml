@@ -64,6 +64,11 @@ jobs:
           cat "$RUNNER_TEMP/bridge-security-scan.log"
           exit 1
 
+      - name: Prepare writable ZAP report directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/zap-reports"
+          chmod 0777 "$RUNNER_TEMP/zap-reports"
+
       - name: Scan TLS policy with testssl.sh
         run: |
           git init "$RUNNER_TEMP/testssl-src"
@@ -120,12 +125,12 @@ jobs:
       - name: Run the ZAP OpenAPI API scan
         # The runtime and OpenAPI schema both bound arbitrary JSON nesting to eight levels,
         # keeping ZAP's recursive Swagger parser within its tested memory budget. Keep Insights
-        # auto-stop disabled so its 95% warning does not pre-empt the alert report is evaluated by our gate.
+        # This prevents the memory warning from stopping ZAP; the alert report is evaluated by our gate.
         # Bypass runner proxies for the scanner's localhost control API.
         run: >-
           docker run --rm --network host
           -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1
-          -v "$GITHUB_WORKSPACE:/zap/wrk/:rw"
+          -v "$RUNNER_TEMP/zap-reports:/zap/wrk/:rw"
           zaproxy/zap-stable:2.17.0
           zap-api-scan.py
           -t https://localhost:18443/api/v1/openapi.json
@@ -139,7 +144,7 @@ jobs:
         run: >-
           docker run --rm --network host
           -e NO_PROXY=localhost,127.0.0.1 -e no_proxy=localhost,127.0.0.1
-          -v "$GITHUB_WORKSPACE:/zap/wrk/:rw"
+          -v "$RUNNER_TEMP/zap-reports:/zap/wrk/:rw"
           zaproxy/zap-stable:2.17.0
           zap-baseline.py
           -t https://localhost:18443/
@@ -149,25 +154,7 @@ jobs:
           -z "-config connection.sslInsecure=true -config insights.exitAuto=false"
 
       - name: Fail on medium or high ZAP alerts
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          findings = []
-          for filename in ("zap-api-report.json", "zap-console-report.json"):
-              report = json.loads(Path(filename).read_text(encoding="utf-8"))
-              for site in report.get("site", []):
-                  for alert in site.get("alerts", []):
-                      risk = int(alert.get("riskcode", 0))
-                      if risk >= 2:
-                          findings.append((filename, alert.get("riskdesc", str(risk)), alert.get("alert", "unknown"), alert.get("url", "")))
-          for finding in findings:
-              print("medium-or-higher ZAP alert:", " | ".join(finding))
-          if findings:
-              raise SystemExit(f"{len(findings)} ZAP alert(s) at medium severity or above")
-          print("No ZAP alerts at medium severity or above")
-          PY
+        run: python scripts/check_zap_reports.py "$RUNNER_TEMP/zap-reports"
 
       - name: Keep scan reports
         if: always()
@@ -176,10 +163,7 @@ jobs:
           name: dynamic-security-reports
           path: |
             ${{ runner.temp }}/schemathesis/
-            zap-api-report.json
-            zap-api-report.html
-            zap-console-report.json
-            zap-console-report.html
+            ${{ runner.temp }}/zap-reports/
             ${{ runner.temp }}/testssl-report.json
             ${{ runner.temp }}/bridge-security-scan.log
           if-no-files-found: warn

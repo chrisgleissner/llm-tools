@@ -74,25 +74,17 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert workflow.count("-e no_proxy=localhost,127.0.0.1") == 2
     assert "insights.exitAutoOnHigh" not in workflow
     assert "alert report is evaluated by our gate" in workflow
-    assert "if risk >= 2:" in workflow
+    assert "scripts/check_zap_reports.py" in workflow
+    assert "if risk >= 2:" in (ROOT / "scripts" / "check_zap_reports.py").read_text()
     assert "dynamic-security-reports" in workflow
+    assert 'chmod 0777 "$RUNNER_TEMP/zap-reports"' in workflow
+    assert workflow.count('"$RUNNER_TEMP/zap-reports:/zap/wrk/:rw"') == 2
+    assert 'python scripts/check_zap_reports.py "$RUNNER_TEMP/zap-reports"' in workflow
     assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow
     assert "--severity CRITICAL" in workflow
     assert 'severity in {"MEDIUM", "HIGH", "CRITICAL"}' in workflow
     assert 'mutation_limit_per_token = 10000' in workflow
     assert 'mutation_limit_per_address = 10000' in workflow
-
-
-def test_openapi_json_depth_schema_stays_within_scanner_budget() -> None:
-    document = json.loads((ROOT / "docs" / "distributed" / "openapi.json").read_text())
-    schemas = document["components"]["schemas"]
-    depth_names = sorted(
-        (name for name in schemas if name.startswith("BoundedJsonValueDepth")),
-        key=lambda name: int(name.removeprefix("BoundedJsonValueDepth")),
-    )
-    assert depth_names == [f"BoundedJsonValueDepth{depth}" for depth in range(9)]
-    assert len(schemas["BoundedJsonValueDepth8"]["anyOf"]) == 5
-    assert "8 nested levels" in schemas["BoundedRequestObject"]["description"]
 
 
 def test_openapi_json_depth_schema_stays_within_scanner_budget() -> None:
