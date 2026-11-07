@@ -44,6 +44,7 @@ export function fullScreen(button: HTMLButtonElement, keepEscape: () => boolean)
     } else if (pushed) {
       pushed = false;
       expecting = true;
+      document.body.setAttribute("data-session-back", ""); // tells the guard in session-box.ts to swallow the popstate of our own back()
       history.back();
     }
     button.focus({ preventScroll: true });
@@ -51,20 +52,23 @@ export function fullScreen(button: HTMLButtonElement, keepEscape: () => boolean)
   const onKey = (e: KeyboardEvent): void => {
     if (e.key === "Escape" && on && !document.querySelector("dialog[open], .menu-popover") && !keepEscape()) set(false);
   };
-  const onPop = (e: PopStateEvent): void => {
-    if (!on && !expecting) return;
-    e.stopImmediatePropagation(); // Back leaves full screen; it must not re-render the page behind it
-    if (expecting) return void (expecting = false);
-    pushed = false;
-    set(false);
+  const onPop = (): void => {
+    document.body.removeAttribute("data-session-back");
+    if (expecting) {
+      expecting = false;
+      button.focus({ preventScroll: true });
+    } else {
+      pushed = false; // Back leaves full screen
+      set(false);
+    }
   };
-  window.addEventListener("popstate", onPop, true);
+  document.addEventListener("session-pop", onPop);
   document.addEventListener("keydown", onKey);
   return {
     set,
     on: () => on,
     dispose(): void {
-      window.removeEventListener("popstate", onPop, true);
+      document.removeEventListener("session-pop", onPop);
       document.removeEventListener("keydown", onKey);
       document.body.removeAttribute("data-session-fs");
     },
@@ -82,12 +86,19 @@ export function keyboardLayout(pane: HTMLElement, composer: HTMLElement, narrow:
   const paint = (): void => {
     if (vv && document.body.hasAttribute("data-kb")) root.style.setProperty("--vvh", `${vv.height}px`);
   };
-  const update = (): void => {
-    const open = narrow.matches && pane.contains(document.activeElement) && Boolean(document.activeElement?.matches("textarea, input"));
-    if (open === document.body.hasAttribute("data-kb")) return;
+  let closing = 0;
+  const set = (open: boolean): void => {
     document.body.toggleAttribute("data-kb", open);
     if (open) paint();
     else root.style.removeProperty("--vvh");
+  };
+  // The layout changes when the keyboard opens or closes, not when a tap on a button inside the pane moves focus off the field:
+  // closing waits briefly, so the press that caused the blur still ends in a click on the same button.
+  const update = (): void => {
+    const open = narrow.matches && pane.contains(document.activeElement) && Boolean(document.activeElement?.matches("textarea, input"));
+    window.clearTimeout(closing);
+    if (open) set(true);
+    else if (document.body.hasAttribute("data-kb")) closing = window.setTimeout(() => set(false), 400);
   };
   const out = (): number => window.setTimeout(update, 0);
   pane.addEventListener("focusin", update);
@@ -102,8 +113,8 @@ export function keyboardLayout(pane: HTMLElement, composer: HTMLElement, narrow:
       pane.removeEventListener("focusout", out);
       vv?.removeEventListener("resize", paint);
       sizer.disconnect();
-      document.body.removeAttribute("data-kb");
-      root.style.removeProperty("--vvh");
+      window.clearTimeout(closing);
+      set(false);
       root.style.removeProperty("--composer-h");
     },
   };
@@ -126,7 +137,7 @@ export function keyBar(bar: HTMLElement, io: KeyIo): { enable(on: boolean, why: 
   };
   const add = (to: HTMLElement, keys: string[][]): void => {
     for (const [id = "", text = "", label = "", bytes = ""] of keys) {
-      const b = h("button", { type: "button", class: "btn key", id: `key-${id}`, "aria-label": label }, text);
+      const b = h("button", { type: "button", class: "btn key", id: `key-${id}`, "aria-label": label || null }, text);
       b.addEventListener("mousedown", (e) => e.preventDefault());
       b.addEventListener("click", () => {
         if (!io.writer()) return;
@@ -138,11 +149,11 @@ export function keyBar(bar: HTMLElement, io: KeyIo): { enable(on: boolean, why: 
       to.append(b);
     }
   };
-  add(bar, [["esc", "Esc", "Escape", "\x1b"], ["tab", "Tab", "Tab", "\t"], ["ctrl", "Ctrl", "Ctrl, applies to the next key"], ["alt", "Alt", "Alt, applies to the next key"], ["up", "\u2191", "Arrow up", "A"], ["down", "\u2193", "Arrow down", "B"]]);
+  add(bar, [["esc", "Esc", "Esc, the Escape key", "\x1b"], ["tab", "Tab", "Tab", "\t"], ["ctrl", "Ctrl", "Ctrl, applies to the next key"], ["alt", "Alt", "Alt, applies to the next key"], ["up", "\u2191", "Arrow up", "A"], ["down", "\u2193", "Arrow down", "B"]]);
   const more = h("button", { type: "button", class: "btn more", id: "key-more", "aria-label": "More keys", "aria-expanded": "false", "aria-controls": "terminal-keys-more" }, "...");
   more.addEventListener("mousedown", (e) => e.preventDefault());
   more.addEventListener("click", () => more.setAttribute("aria-expanded", String((extra.hidden = !extra.hidden) === false)));
-  add(extra, [["left", "\u2190", "Arrow left", "D"], ["right", "\u2192", "Arrow right", "C"], ["pipe", "|", "Pipe", "|"], ["tilde", "~", "Tilde", "~"], ["slash", "/", "Slash", "/"], ["dash", "-", "Dash", "-"], ["pgup", "PgUp", "Page up", "\x1b[5~"], ["pgdn", "PgDn", "Page down", "\x1b[6~"]]);
+  add(extra, [["left", "\u2190", "Arrow left", "D"], ["right", "\u2192", "Arrow right", "C"], ["pipe", "|", "", "|"], ["tilde", "~", "", "~"], ["slash", "/", "", "/"], ["dash", "-", "", "-"], ["pgup", "PgUp", "PgUp, page up", "\x1b[5~"], ["pgdn", "PgDn", "PgDn, page down", "\x1b[6~"]]);
   bar.append(more, extra);
   return {
     enable(on, why): void {

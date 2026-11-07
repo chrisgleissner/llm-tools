@@ -72,7 +72,7 @@ export async function runSteer(o: SteerTarget, kind: api.SteerKind, label: strin
           pick.value = String(list.find((t) => t["status"] === "RUNNING")?.["ordinal"] ?? list[0]?.["ordinal"] ?? "");
           pick.disabled = !list.length;
         });
-    const answer = confirmDialog({ title: label, message: "This is queued for the mission and applied at the next safe point. Nothing is typed into the session.", confirmLabel: handoff ? "Hand off" : "Queue", details: h("div", {}, ...body) });
+    const answer = confirmDialog({ title: label, message: "This is queued and applied at the next safe point.", confirmLabel: handoff ? "Hand off" : "Queue", details: h("div", {}, ...body) });
     document.getElementById("dialog-confirm")?.setAttribute("data-confirm", "");
     (withPrompt ? text : handoff ? route : pick).focus();
     if ((await answer) === null) return;

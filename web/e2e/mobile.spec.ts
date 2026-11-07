@@ -155,12 +155,13 @@ test.describe("terminal on a phone", () => {
       }).toPass({ timeout: 30_000 });
       const keys = page.locator("#terminal-keys");
       const status = page.locator("#terminal-status");
-      // View mode: never a key bar (nothing could be sent).
+      // View mode: the key bar is shown on a phone but every key is disabled (nothing could be sent).
       await expect(async () => {
         if ((await status.getAttribute("data-state")) === "idle") await page.locator("#terminal-open").click({ timeout: 2000 });
         await expect(status).toHaveAttribute("data-state", "live", { timeout: 4000 });
       }).toPass({ timeout: 30_000 });
-      await expect(keys).toBeHidden();
+      if (isNarrow(page)) await expect(page.locator("#key-esc")).toBeDisabled();
+      await page.locator("#session-menu").click();
       await page.locator("#terminal-close").click();
       await expect(async () => {
         if ((await status.getAttribute("data-state")) === "idle") await page.locator("#terminal-control").click({ timeout: 2000 });
@@ -172,7 +173,9 @@ test.describe("terminal on a phone", () => {
         return;
       }
       await expect(keys).toBeVisible();
-      for (const k of ["esc", "tab", "ctrl", "up", "down", "left", "right"]) await expect(page.locator(`#key-${k}`)).toBeVisible();
+      for (const k of ["esc", "tab", "ctrl", "up", "down"]) await expect(page.locator(`#key-${k}`)).toBeVisible();
+      await page.locator("#key-more").click(); // Left and Right are on the second row
+      for (const k of ["left", "right"]) await expect(page.locator(`#key-${k}`)).toBeVisible();
       expect(await smallTargets(page)).toEqual([]);
       await expectNoHorizontalScroll(page);
 
@@ -211,8 +214,9 @@ test.describe("terminal on a phone", () => {
         expect(cols, "visible terminal rows").toBeGreaterThanOrEqual(3);
       }
       // Without the writer role the keys send nothing.
+      await page.locator("#session-menu").click();
       await page.locator("#terminal-close").click();
-      await expect(keys).toBeHidden();
+      await expect(page.locator("#key-esc")).toBeDisabled();
     } finally {
       st.cleanup();
     }

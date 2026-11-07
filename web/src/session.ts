@@ -44,6 +44,7 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
 /** Phones, tablets and anything touch: the shared PTY is never resized to such a screen unless the operator asks. */
 const NARROW = "(pointer: coarse), (max-width: 60rem)";
 const SCROLLBAR = 14;
+const OFFLINE = "The worker is offline.";
 const enc = new TextEncoder();
 
 function toBase64(bytes: Uint8Array): string {
@@ -124,7 +125,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     const live = state === "live";
     let text: string;
     if (live) text = mode === "write" ? "You have control" : `Watching, read only${reason ? `: ${reason}` : ""}`;
-    else if (state === "idle") text = available ? "Not connected." : "Session not available: the worker is offline.";
+    else if (state === "idle") text = available ? "Not connected." : OFFLINE;
     else text = ({ connecting: "Connecting...", reconnecting: "Connection lost, reconnecting...", ended: "Session ended" } as Record<string, string>)[state] ?? "";
     status.textContent = detail && !live ? `${text} ${detail}` : text;
     status.dataset["state"] = state;
@@ -133,7 +134,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
     watch.disabled = !available;
     const controlling = live && mode === "write";
     let takeReason = "";
-    if (!available) takeReason = "The worker is offline.";
+    if (!available) takeReason = OFFLINE;
     else if (busy) takeReason = state === "connecting" ? "Connecting..." : "Reconnecting...";
     else if (live && mode === "view" && reason) takeReason = reason;
     input.set({
@@ -318,8 +319,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
       }
       if (f.t === "o" && typeof f.d === "string") {
         t.write(fromBase64(f.d), () => {
-          if (follow) t.scrollToBottom();
-          else paintFollow();
+          if (!follow) paintFollow(); // xterm itself stays at the bottom while the reader has not scrolled up
           if (!transcript.hidden && !transcriptTimer) transcriptTimer = window.setTimeout(renderTranscript, 1000);
         });
       } else if (f.t === "s" && typeof f.cols === "number" && typeof f.rows === "number") {

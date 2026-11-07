@@ -187,11 +187,12 @@ uxr({ t: "T34", uxr: ["UXR-006", "UXR-045"], needs: ["WP-0", "WP-1", "WP-2", "WP
   await openApp(page, { auth: "in", terminalScreen: true }, MISSION_URL);
   await page.locator('[data-pane="session"]').waitFor();
   await page.locator('[data-action="take-control"]').click();
+  const visibleHeight = viewport(page).height - 300; // openKeyboard shrinks the viewport, so read the height first
   await openKeyboard(page, 300);
   const field = page.locator("[data-composer]").locator("textarea, input").first();
   await field.focus();
   await page.waitForTimeout(150);
-  const vh = viewport(page).height - 300;
+  const vh = visibleHeight;
   const box = (await page.locator("[data-composer]").boundingBox())!;
   expect(box.y >= -0.5 && box.y + box.height <= vh + 0.5, "composer inside the visible part of the screen").toBe(true);
   expect(await obscuredFocus(page), "the focused element is covered by something").toBeNull();

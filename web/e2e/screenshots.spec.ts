@@ -56,7 +56,7 @@ test("running mission streams output read-only without a click or sending input"
   const status = page.locator("#terminal-status");
   await expect(status).toHaveAttribute("data-state", "live");
   await expect(status).toHaveAttribute("data-mode", "view");
-  await expect(status).toContainText("view only");
+  await expect(status).toContainText("Watching, read only");
   await expect(page.locator("#terminal-host")).toBeVisible();
   await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
   await expect(page.locator("#terminal-host .xterm-rows")).toBeInViewport({ ratio: 0.25 });
@@ -69,7 +69,7 @@ test("running mission streams output read-only without a click or sending input"
   await page.keyboard.press("Enter");
   expect(mock.terminalInputCount()).toBe(0);
   await page.getByRole("button", { name: "Take control" }).click();
-  await expect(status).toHaveAttribute("data-mode", "view");
+  await expect(status).toHaveAttribute("data-mode", "write");
   expect(mock.terminalInputCount()).toBe(0);
 });
 

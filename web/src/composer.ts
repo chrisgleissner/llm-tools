@@ -54,11 +54,13 @@ export function composer(o: ComposerOpts): Composer {
     const text = input.value;
     if (input.disabled || !text.trim() || !o.send(text)) return;
     input.value = "";
-    grow();
+    if (!sizes) grow();
     sendBtn.disabled = true;
   }
+  // Chromium sizes the field itself (field-sizing in session.css); elsewhere measure on input.
+  const sizes = CSS.supports("field-sizing", "content");
   input.addEventListener("input", () => {
-    grow();
+    if (!sizes) grow();
     sendBtn.disabled = input.disabled || !input.value.trim();
   });
   input.addEventListener("keydown", (e) => {
@@ -68,7 +70,9 @@ export function composer(o: ComposerOpts): Composer {
   });
 
   const stops: Array<() => void> = [];
-  const steer = (kind: api.SteerKind, label: string): void => void import("./steer").then((m) => m.runSteer({ ...o, chips, own: (stop) => stops.push(stop) }, kind, label));
+  // Fetched when the composer mounts, so a dialog opens in the same task as the click that chose the item.
+  const loading = import("./steer");
+  const steer = (kind: api.SteerKind, label: string): void => void loading.then((m) => m.runSteer({ ...o, chips, own: (stop) => stops.push(stop) }, kind, label));
   const steerMenu = menu({ label: "Steer the mission", text: "Steer" }, KINDS.map(([kind, label]) => ({ label, id: `steer-${kind}`, onSelect: () => steer(kind, label) })));
   // The menu builds its items when it opens; tag them with the steering kind they send.
   const tag = (): void => document.querySelectorAll('[role="menuitem"][id^="steer-"]').forEach((e) => e.setAttribute("data-steer", e.id.slice(6)));
