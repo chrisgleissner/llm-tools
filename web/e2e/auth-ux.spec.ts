@@ -90,6 +90,19 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("creating a token produces a dismissible security banner", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await page.goto("/account");
+    await page.getByLabel("Token name").fill("banner-test");
+    await page.getByRole("button", { name: "Create token" }).click();
+    const banner = page.getByRole("region", { name: "Security notifications" });
+    await expect(banner).toContainText("An API token was created.");
+    const dismiss = banner.getByRole("button", { name: "Dismiss security notification" });
+    const count = await dismiss.count();
+    await dismiss.first().click();
+    await expect(dismiss).toHaveCount(count - 1);
+  });
+
   test("slow password sign-in shows visible announced progress until the server responds", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await signOutViaUi(page);

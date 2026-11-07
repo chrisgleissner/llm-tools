@@ -28,8 +28,8 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   token create NAME [--scope SCOPE]... [--expires-days N] | token revoke NAME
                                 (default scope read, default expiry 90 days, 0 = never)
 --data-dir defaults to $BRIDGE_COORDINATOR_DATA_DIR, then /var/lib/bridge-coordinator.
-Environment: BRIDGE_COORDINATOR_BIND (host:port) and BRIDGE_COORDINATOR_LAN_ENABLED (true/false)
-override config.toml.";
+Environment: BRIDGE_COORDINATOR_BIND (host:port) and BRIDGE_COORDINATOR_EXPOSURE
+(loopback/lan/internet) override config.toml. BRIDGE_COORDINATOR_LAN_ENABLED remains a deprecated alias.";
 
 /// API tokens expire after this many days unless `--expires-days` says otherwise.
 const DEFAULT_TOKEN_DAYS: u32 = 90;

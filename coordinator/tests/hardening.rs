@@ -56,7 +56,7 @@ fn set(key: &str, value: &str) -> impl FnOnce(String) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_wrong_logins_from_one_address_are_limited_before_argon2() {
     let env = boot_with(set("max_connections_per_ip", "200")).await;
-    let _admin = env.admin().await; // creates the administrator; the successful login makes 127.0.0.1 a known address
+    let admin = env.admin().await; // creates the administrator; the successful login makes 127.0.0.1 a known address
     let api = env.api();
     let mut tasks = Vec::new();
     for _ in 0..60 {
@@ -80,6 +80,14 @@ async fn concurrent_wrong_logins_from_one_address_are_limited_before_argon2() {
     let refused = codes.iter().filter(|c| **c == 429).count();
     assert_eq!(verified, 5, "only the limit reaches Argon2: {codes:?}");
     assert_eq!(refused, 55, "{codes:?}");
+    let (_, notifications) = admin.get("/api/v1/security/notifications").await;
+    let failures: Vec<_> = notifications["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["category"] == "repeated_sign_in_failures")
+        .collect();
+    assert_eq!(failures.len(), 1, "a burst creates one bounded security alert");
     env.stop().await;
 }
 

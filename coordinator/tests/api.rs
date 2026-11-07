@@ -31,14 +31,14 @@ fn init_is_idempotent_and_private() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn non_loopback_bind_needs_lan_enabled() {
+async fn non_loopback_bind_needs_non_loopback_exposure() {
     let dir = tmp_dir();
     bridge_coordinator::init::init(&dir, &sans()).unwrap();
     edit_config(&dir, |t| t.replace("127.0.0.1:8443", "0.0.0.0:0"));
     let err = bridge_coordinator::server::start(&dir).await.err().expect("must refuse");
-    assert!(err.contains("lan_enabled"), "{err}");
-    edit_config(&dir, |t| t.replace("lan_enabled = false", "lan_enabled = true"));
-    let srv = bridge_coordinator::server::start(&dir).await.expect("allowed with lan_enabled");
+    assert!(err.contains("exposure"), "{err}");
+    edit_config(&dir, |t| t.replace("exposure = \"loopback\"", "exposure = \"lan\""));
+    let srv = bridge_coordinator::server::start(&dir).await.expect("allowed with LAN exposure");
     srv.stop().await;
     let _ = std::fs::remove_dir_all(&dir);
 }

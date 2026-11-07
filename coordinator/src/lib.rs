@@ -94,5 +94,6 @@ pub fn write_replace(path: &Path, contents: &[u8], mode: u32) -> std::io::Result
     let mut f = private_options(mode).write(true).create_new(true).open(&tmp)?;
     f.write_all(contents)?;
     f.sync_all()?;
+    drop(f);
     std::fs::rename(&tmp, path)
 }

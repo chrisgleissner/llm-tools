@@ -45,10 +45,21 @@ async fn split_listeners_share_the_global_connection_budget() {
     drop((first, over_limit));
 
     let reopened = tokio::time::timeout(Duration::from_secs(3), async {
-        let tcp = TcpStream::connect(worker_addr).await.unwrap();
-        TlsConnector::from(env.tls.clone())
-            .connect(rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(), tcp)
-            .await
+        loop {
+            let tcp = TcpStream::connect(worker_addr).await.unwrap();
+            match TlsConnector::from(env.tls.clone())
+                .connect(rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap(), tcp)
+                .await
+            {
+                Ok(stream) => break Ok(stream),
+                Err(error) => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    if error.to_string().contains("connection refused") {
+                        break Err(error);
+                    }
+                }
+            }
+        }
     })
     .await
     .expect("a shared slot must be released when the original listener's client disconnects");

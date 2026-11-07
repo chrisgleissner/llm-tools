@@ -85,7 +85,7 @@ fn explicit_names_replace_discovery_and_bind_enables_lan() {
     assert!(contains(&cert, &[192, 0, 2, 7]));
     assert!(!contains(&cert, b".home.arpa"));
     let cfg = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-    assert!(cfg.contains("bind = \"0.0.0.0:9443\"") && cfg.contains("lan_enabled = true"), "{cfg}");
+    assert!(cfg.contains("bind = \"0.0.0.0:9443\"") && cfg.contains("exposure = \"lan\""), "{cfg}");
     let info = text(&run(&["info", "--data-dir", d], None));
     assert!(info.contains("LAN access:") && info.contains("enabled"), "{info}");
     assert!(info.contains("Bind address:      0.0.0.0:9443"), "{info}");
@@ -284,7 +284,7 @@ fn environment_variables_select_data_dir_and_override_config() {
     );
     // init wrote a config.toml consistent with the environment it ran in.
     let cfg = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-    assert!(cfg.contains(&format!("bind = \"{bind}\"")) && cfg.contains("lan_enabled = true"), "{cfg}");
+    assert!(cfg.contains(&format!("bind = \"{bind}\"")) && cfg.contains("exposure = \"lan\""), "{cfg}");
     assert!(run_env(&["setup-token"], None, &env).status.success());
     assert!(run_env(&["backup", "--output", dir.join("b.db").to_str().unwrap()], None, &env)
         .status
@@ -324,7 +324,7 @@ fn environment_variables_select_data_dir_and_override_config() {
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
     assert!(!run_env(&["health"], None, &env).status.success());
 
-    // The environment wins over config.toml: lan_enabled=false refuses the non-loopback bind.
+    // The legacy environment alias still wins over config.toml and refuses a non-loopback bind.
     let env2 = [
         ("BRIDGE_COORDINATOR_DATA_DIR", d),
         ("BRIDGE_COORDINATOR_BIND", bind.as_str()),
@@ -332,7 +332,7 @@ fn environment_variables_select_data_dir_and_override_config() {
     ];
     let o = run_env(&["serve"], None, &env2);
     assert_eq!(o.status.code(), Some(1));
-    assert!(text(&o).contains("lan_enabled"), "{}", text(&o));
+    assert!(text(&o).contains("exposure"), "{}", text(&o));
     let _ = std::fs::remove_dir_all(dir);
 }
 

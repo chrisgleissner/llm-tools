@@ -152,8 +152,12 @@ pub fn report(dir: &Path, with_trust_steps: bool) -> Result<String, String> {
         "LAN access:        {}\n",
         if in_container() {
             "decided by the container's published port (BRIDGE_PUBLISH_ADDRESS in compose.yaml)"
-        } else if cfg.lan_enabled {
-            "enabled (lan_enabled = true)"
+        } else if cfg.exposure != crate::config::Exposure::Loopback {
+            match cfg.exposure {
+                crate::config::Exposure::Lan => "enabled (exposure = \"lan\")",
+                crate::config::Exposure::Internet => "enabled (exposure = \"internet\")",
+                crate::config::Exposure::Loopback => unreachable!(),
+            }
         } else {
             "disabled (loopback only)"
         }
@@ -172,8 +176,8 @@ pub fn report(dir: &Path, with_trust_steps: bool) -> Result<String, String> {
             dir.join(SETUP_TOKEN_FILE).display()
         );
     }
-    if !cfg.lan_enabled {
-        out += "To serve the LAN, set bind (for example \"0.0.0.0:8443\") and lan_enabled = true in config.toml.\n\
+    if cfg.exposure == crate::config::Exposure::Loopback {
+        out += "To serve the LAN, set bind (for example \"0.0.0.0:8443\") and exposure = \"lan\" in config.toml.\n\
                 LAN placement is not authentication; restrict the port with a firewall.\n";
     }
     if with_trust_steps {

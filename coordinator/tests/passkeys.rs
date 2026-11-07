@@ -25,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 11);
+    assert_eq!(SCHEMA_VERSION, 12);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),

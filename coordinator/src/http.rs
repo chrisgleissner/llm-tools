@@ -663,7 +663,13 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     check_public_origin(&st, &headers)?;
     let addr = client_key(&ip);
     let known_addr = st.db.known_addr(&addr)?;
-    let mut attempt = st.limiter.acquire(&[format!("ip:{addr}")], known_addr).map_err(limited)?;
+    let mut attempt = match st.limiter.acquire(&[format!("ip:{addr}")], known_addr) {
+        Ok(attempt) => attempt,
+        Err(retry) => {
+            security_notification(&st, "admin", "repeated_sign_in_failures");
+            return Err(limited(retry));
+        }
+    };
     let body = match read_body(&st, req).await {
         Ok(b) => b,
         Err(e) => {
@@ -712,6 +718,9 @@ async fn login(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, req
     }
     attempt.succeed();
     st.db.known_addr_remember(&addr)?;
+    if !known_addr {
+        security_notification(&st, &username, "new_sign_in_address");
+    }
     let (token, csrf) = (auth::random_token(), auth::random_token());
     st.db.session_create_with(&auth::sha256_hex(&token), &csrf, remember)?;
     st.db.audit(&username, "login.success", "", &ip);
@@ -1195,6 +1204,7 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
                 )
             })?,
     };
+    validate_token_expiry(days, st.cfg.exposure).map_err(|message| err(StatusCode::BAD_REQUEST, "non-expiring-token-forbidden", message))?;
     let expires_at = (days > 0).then(|| crate::now() + (days as i64) * 86_400);
     let token_id = auth::sha256_hex(&auth::random_token())[..16].to_string();
     let token_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1214,6 +1224,8 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
         expires_at.map_or_else(|| "never".into(), |e| e.to_string())
     );
     st.db.audit(&p.actor(), "token.create", &detail, &ip);
+    let principal = st.db.admin_get()?.map(|(name, _)| name).unwrap_or_else(|| p.actor());
+    security_notification(&st, &principal, "api_token_created");
     Ok(json_ok(
         StatusCode::CREATED,
         json!({
@@ -1221,6 +1233,62 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
             "secret": secret
         }),
     ))
+}
+
+fn security_notification(st: &St, principal_id: &str, category: &str) {
+    let id = match st.db.security_notification_add(principal_id, category) {
+        Ok(Some(id)) => id,
+        Ok(None) => return,
+        Err(_) => {
+            eprintln!("security notification could not be persisted");
+            return;
+        }
+    };
+    let Some(endpoint) = st.cfg.security_webhook_url.clone() else { return };
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            eprintln!("security notification webhook client could not be created");
+            return;
+        }
+    };
+    let event = json!({"id":id,"event":category,"occurred_at":timestamp(Some(crate::now()))});
+    tokio::spawn(async move {
+        match client.post(endpoint).json(&event).send().await {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => eprintln!("security notification webhook returned HTTP {}", response.status().as_u16()),
+            Err(_) => eprintln!("security notification webhook delivery failed"),
+        }
+    });
+}
+
+fn validate_token_expiry(days: u64, exposure: crate::config::Exposure) -> Result<(), &'static str> {
+    if days == 0 && exposure == crate::config::Exposure::Internet {
+        Err("Internet exposure requires every API token to expire")
+    } else {
+        Ok(())
+    }
+}
+
+async fn list_security_notifications(State(st): State<St>, Authed(p, _): Authed) -> ApiResult {
+    let principal = st.db.admin_get()?.map(|(name, _)| name).unwrap_or_else(|| p.actor());
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"notifications": st.db.security_notifications_list(&principal)?}),
+    ))
+}
+
+async fn dismiss_security_notification(State(st): State<St>, Authed(p, ip): Authed, Path(id): Path<String>) -> ApiResult {
+    let principal = st.db.admin_get()?.map(|(name, _)| name).unwrap_or_else(|| p.actor());
+    if !st.db.security_notification_dismiss(&principal, &id)? {
+        return Err(err(StatusCode::NOT_FOUND, "unknown-notification", "no such active security notification"));
+    }
+    st.db.audit(&p.actor(), "security.notification.dismiss", &clean(&id), &ip);
+    Ok(json_ok(StatusCode::OK, json!({"ok":true})))
 }
 
 async fn revoke_token(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {
@@ -2911,6 +2979,8 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
+    ("/api/v1/security/notifications", &["GET"], Access::Authed, "admin"),
+    ("/api/v1/security/notifications/{id}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/missions", &["GET"], Access::Authed, "read"),
     ("/api/v1/missions", &["POST"], Access::Authed, "operate"),
     ("/api/v1/missions/{id}", &["GET"], Access::Authed, "read"),
@@ -2949,6 +3019,13 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
 #[cfg(test)]
 mod problem_tests {
     use super::*;
+
+    #[test]
+    fn internet_exposure_never_allows_minting_a_non_expiring_token() {
+        assert!(validate_token_expiry(90, crate::config::Exposure::Internet).is_ok());
+        assert!(validate_token_expiry(0, crate::config::Exposure::Lan).is_ok());
+        assert!(validate_token_expiry(0, crate::config::Exposure::Internet).is_err());
+    }
 
     #[test]
     fn json_body_limits_bound_depth_strings_arrays_and_objects() {
@@ -3100,6 +3177,8 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/workers/{name}/gc", post(worker_gc_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
+        .route("/api/v1/security/notifications", get(list_security_notifications))
+        .route("/api/v1/security/notifications/{id}", delete(dismiss_security_notification))
         .route("/api/v1/missions", get(list_missions).post(create_mission_resource))
         .route("/api/v1/missions/{id}", get(mission_status_resource))
         .route("/api/v1/missions/{id}/events", get(mission_events))

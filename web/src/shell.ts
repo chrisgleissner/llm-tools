@@ -151,7 +151,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   let last: string = store.conn;
   // The first connection after page load is expected and not announced; later changes are.
   let seenLive = store.conn === "live";
-  const dispose = subscribe(() => {
+  const disposeConnection = subscribe(() => {
     if (store.conn === last) return;
     last = store.conn;
     if (store.conn === "live" && !seenLive) {
@@ -172,6 +172,28 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   const moreActive = !TABS.some(active) || MORE.some(active);
   const more = h("button", { type: "button", id: "more-button", "aria-haspopup": "dialog", "aria-current": moreActive && path !== "/" ? "true" : null }, icon("more", 24), "More");
   more.addEventListener("click", () => moreSheet(hooks));
+  const security = h("section", { class: "notice security-notice", "aria-label": "Security notifications", hidden: true });
+  const refreshSecurity = (): void => { void api.securityNotifications().then((items) => {
+    const labels: Record<string, string> = {
+      new_sign_in_address: "A sign-in came from a new address.",
+      api_token_created: "An API token was created.",
+      repeated_sign_in_failures: "Repeated sign-in failures were blocked.",
+    };
+    security.replaceChildren(...items.map((item) => {
+      const row = h("div", { class: "security-notice-row" },
+        h("span", {}, labels[item.category] ?? "A security event occurred."),
+        h("button", { class: "btn ghost", type: "button", "aria-label": "Dismiss security notification" }, "Dismiss"));
+      row.querySelector("button")?.addEventListener("click", () => {
+        void api.dismissSecurityNotification(item.id).then(() => row.remove()).catch(() => announce("Could not dismiss security notification", "error"));
+      });
+      return row;
+    }));
+    security.hidden = items.length === 0;
+  }).catch(() => {}); };
+  const onSecurityChange = (): void => refreshSecurity();
+  window.addEventListener("bridge-security-notification", onSecurityChange);
+  const securityRefreshTimer = window.setInterval(refreshSecurity, 60_000);
+  refreshSecurity();
   const el = h(
     "div",
     { class: "shell" },
@@ -183,10 +205,18 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
       h("span", { class: "spacer" }),
       h("div", { class: "tools" }, h("span", { role: "status", "aria-label": "Connection state" }, conn), themeBtn, accountMenu(hooks)),
     ),
+    security,
     h("div", { class: "layout" }, h("nav", { class: "side", "aria-label": "Main" }, h("ul", {}, ...NAV.map(link))), h("main", { id: "main", tabindex: "-1" })),
     h("nav", { class: "tabbar", "aria-label": "Main" }, h("ul", {}, ...tabs.map(link), h("li", {}, more))),
   );
-  return { el, dispose };
+  return {
+    el,
+    dispose: () => {
+      disposeConnection();
+      window.removeEventListener("bridge-security-notification", onSecurityChange);
+      window.clearInterval(securityRefreshTimer);
+    },
+  };
 }
 
 // ---- keyboard shortcuts

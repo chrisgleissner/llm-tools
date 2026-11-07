@@ -256,6 +256,8 @@ input[aria-invalid="true"] { border-color: var(--danger); border-width: 2px; }
 .notice { border-color: var(--warn); background: var(--warnbg); margin: var(--sp2) 0; }
 .notice.info { border-color: var(--info); background: var(--infobg); }
 .notice.ok { border-color: var(--ok); background: var(--okbg); }
+.security-notice { margin: var(--sp2) var(--sp4) 0; }
+.security-notice-row { display: flex; align-items: center; justify-content: space-between; gap: var(--sp3); min-height: 44px; }
 
 /* ---------------------------------------------------------------- cards, tiles, empty states */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--rad-lg); padding: var(--sp4) var(--sp5); margin: var(--sp3) 0; box-shadow: var(--shadow); }

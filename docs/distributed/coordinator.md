@@ -40,14 +40,19 @@ worker protocol is `protocol.md`.
     new `ca.pem` and workers must be re-enrolled with it. A CA from before name
     constraints existed keeps working; `info` reports it as unconstrained.
   - `--bind` (or `BRIDGE_COORDINATOR_BIND` when the flag is absent) is written to
-    `config.toml`; a non-loopback bind also writes `lan_enabled = true`
-    (or the value of `BRIDGE_COORDINATOR_LAN_ENABLED` when set). The default bind is
+    `config.toml`; a non-loopback bind defaults to `exposure = "lan"`. Exposure is
+    `loopback` by default and may be set to `lan` or `internet`. Old `lan_enabled`
+    configs are migrated in place; `BRIDGE_COORDINATOR_LAN_ENABLED` remains a deprecated
+    compatibility alias for `BRIDGE_COORDINATOR_EXPOSURE`. The default bind is
     `127.0.0.1:8443`.
 - `bridge-coordinator serve --data-dir DIR` serves HTTPS (rustls; TLS 1.3 by
   default, with TLS 1.2 and AEAD suites only when `min_tls = "1.2"` is explicitly
   set for an older client). Session resumption tickets and 0-RTT are disabled. It
-  refuses to start when the bind address is not
-  loopback and `lan_enabled = true` is not set (NET-003). It holds an exclusive
+  refuses to start when a non-loopback bind is configured with `exposure = "loopback"`
+  (NET-003). `exposure = "internet"` is refused unless TLS 1.3, a 90-day token lifetime,
+  a public certificate or trusted TLS terminator, strict mutation/connection caps, a security
+  webhook, an enrolled passkey and no non-expiring API tokens are present. Configure and
+  enroll these controls while still on loopback or LAN, then enable Internet exposure. It holds an exclusive
   lock on `DIR/coordinator.lock` while running (released by the kernel on any
   exit). Logs go to stderr only; nothing is written outside the data directory
   (SQLite temporary storage is in memory). SIGTERM or SIGINT drains connections and
@@ -75,9 +80,10 @@ worker protocol is `protocol.md`.
 - Environment variables (names in `config.rs`):
   - `BRIDGE_COORDINATOR_DATA_DIR`: data directory when `--data-dir` is not given;
     default `/var/lib/bridge-coordinator`.
-  - `BRIDGE_COORDINATOR_BIND` (`host:port`) and `BRIDGE_COORDINATOR_LAN_ENABLED`
-    (`true`/`false`; `1/0`, `yes/no`, `on/off` are also accepted): take precedence
-    over `config.toml`.
+  - `BRIDGE_COORDINATOR_BIND` (`host:port`) and `BRIDGE_COORDINATOR_EXPOSURE`
+    (`loopback`, `lan` or `internet`): take precedence over `config.toml`.
+    `BRIDGE_COORDINATOR_LAN_ENABLED` (`true`/`false`; `1/0`, `yes/no`, `on/off`)
+    remains a deprecated alias.
   - `BRIDGE_COORDINATOR_PUBLIC_NAMES`: comma-separated host names and addresses that
     browsers and workers use. When set, they replace discovery for the certificate
     (`init`, `cert renew`) and for the URLs `info` prints. It is needed in a
@@ -92,9 +98,10 @@ worker protocol is `protocol.md`.
     names continue using the internal CA. Valid replacement pairs are picked up for
     new TLS handshakes without restarting the server.
   - `BRIDGE_COORDINATOR_CONTAINER`: set by the container image. Network exposure is
-    then decided by the published port, not by `lan_enabled`.
+    then decided by the published port, not by the configured bind.
 
-  All other settings are keys of `config.toml`: `bind`, `lan_enabled`,
+  All other settings are keys of `config.toml`: `bind`, `exposure`, `tls_terminator`,
+  `security_webhook_url`,
   `max_events_per_worker`, `max_token_lifetime_days` (maximum expiry for newly created API tokens,
   default 3650 days), `allowed_origins` (extra exact `Origin` values accepted for
   cookie-authenticated writes), `web_dir` (default: `web` next to the executable, then
@@ -156,6 +163,8 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/tokens` | Token name, public ID (null for legacy tokens), scopes, creation, last-use timestamp and client address, and expiry metadata. Requires an administrator session or an `admin` token. |
 | POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
 | DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
+| GET | `/security/notifications` | Active security events for the administrator: new sign-in address, API token creation, and repeated blocked sign-in failures. Requires an administrator session or an `admin` token. |
+| DELETE | `/security/notifications/{id}` | Dismiss one active event. Requires an administrator session with CSRF and exact Origin, or an `admin` token. |
 | GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). A mission may include bounded `needs_you: {kind, message, command}` when its native provider is waiting on a structured question; the message contains only question/choice text and the local answer command. Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (default 100, maximum 500), `cursor`, or legacy `offset`. The reply adds `total`, `offset`, `next_cursor` and `statuses` (match counts per status, ignoring the status filter). Cursors are authenticated and encrypted, opaque, bound to the normalized filters and sort order, and cannot be combined with `offset`; use the returned `next_cursor` unchanged to fetch the next page. |
 | POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |

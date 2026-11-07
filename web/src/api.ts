@@ -110,7 +110,19 @@ async function request<T>(method: string, path: string, body?: unknown, quiet401
 
 export const get = <T>(path: string): Promise<T> => request<T>("GET", path);
 export const del = <T>(path: string): Promise<T> => request<T>("DELETE", path);
-export const post = <T>(path: string, body: unknown = {}): Promise<T> => request<T>("POST", path, body);
+export async function post<T>(path: string, body: unknown = {}): Promise<T> {
+  const result = await request<T>("POST", path, body);
+  if (path === "/api/v1/tokens") window.dispatchEvent(new Event("bridge-security-notification"));
+  return result;
+}
+
+export interface SecurityNotification { id: string; category: string; created_at: number }
+export async function securityNotifications(): Promise<SecurityNotification[]> {
+  return (await get<{ notifications: SecurityNotification[] }>("/api/v1/security/notifications")).notifications;
+}
+export async function dismissSecurityNotification(id: string): Promise<void> {
+  await del<{ ok: boolean }>(`/api/v1/security/notifications/${encodeURIComponent(id)}`);
+}
 
 export interface PasswordPolicy {
   min_length: number;

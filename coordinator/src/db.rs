@@ -238,7 +238,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -285,6 +285,13 @@ CREATE UNIQUE INDEX api_tokens_token_id ON api_tokens(token_id) WHERE token_id I
 ";
 /// Version 11: expose the address of a token's most recent use to administrators.
 const MIGRATE_V11: &str = "ALTER TABLE api_tokens ADD COLUMN last_address TEXT;";
+/// Version 12: durable, dismissible security notifications. Payloads contain no credentials.
+const MIGRATE_V12: &str = "
+CREATE TABLE security_notifications(
+  id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, category TEXT NOT NULL,
+  created_at INTEGER NOT NULL, dismissed_at INTEGER);
+CREATE INDEX security_notifications_principal ON security_notifications(principal_id, dismissed_at, created_at DESC);
+";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -399,6 +406,9 @@ impl Db {
             })? > 0;
             let alter = if has_table { MIGRATE_V11 } else { "" };
             conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 11; COMMIT;"))?;
+        }
+        if version < 12 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V12} PRAGMA user_version = 12; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -740,6 +750,10 @@ impl Db {
         })?;
         rows.collect()
     }
+    /// Internet exposure requires every API token to have an explicit expiry.
+    pub fn non_expiring_api_token_count(&self) -> R<i64> {
+        self.c().query_row("SELECT COUNT(*) FROM api_tokens WHERE expires_at IS NULL", [], |r| r.get(0))
+    }
     /// Record a bounded token-use projection. Repeated calls from the same address update only
     /// the timestamp at the existing low-write touch interval.
     pub fn api_token_record_use(&self, name: &str, address: &str) -> R<()> {
@@ -852,6 +866,53 @@ impl Db {
         let h = Self::addr_hash(&c, addr_key)?;
         c.execute("UPDATE known_addrs SET last_success=? WHERE hash=?", params![last_success, h])?;
         Ok(())
+    }
+
+    pub fn security_notification_add(&self, principal_id: &str, category: &str) -> R<Option<String>> {
+        let now = crate::now();
+        let id = crate::auth::sha256_hex(&format!("{}:{}:{}", principal_id, category, crate::auth::random_token()))[..24].to_string();
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM security_notifications WHERE created_at < ?", [now - 30 * 86_400])?;
+        if category == "repeated_sign_in_failures" {
+            let recent: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM security_notifications WHERE principal_id=? AND category=? AND created_at>? )",
+                params![principal_id, category, now - 900],
+                |r| r.get(0),
+            )?;
+            if recent {
+                tx.commit()?;
+                return Ok(None);
+            }
+        }
+        tx.execute(
+            "INSERT INTO security_notifications(id, principal_id, category, created_at) VALUES(?,?,?,?)",
+            params![id, principal_id, category, now],
+        )?;
+        tx.execute(
+            "DELETE FROM security_notifications WHERE id IN (SELECT id FROM security_notifications WHERE principal_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 100)",
+            [principal_id],
+        )?;
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    pub fn security_notifications_list(&self, principal_id: &str) -> R<Vec<Value>> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT id, category, created_at FROM security_notifications WHERE principal_id=? AND dismissed_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 20")?;
+        let rows = st
+            .query_map([principal_id], |r| {
+                Ok(json!({"id":r.get::<_,String>(0)?,"category":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?}))
+            })?
+            .collect();
+        rows
+    }
+
+    pub fn security_notification_dismiss(&self, principal_id: &str, id: &str) -> R<bool> {
+        Ok(self.c().execute(
+            "UPDATE security_notifications SET dismissed_at=? WHERE principal_id=? AND id=? AND dismissed_at IS NULL",
+            params![crate::now(), principal_id, id],
+        )? == 1)
     }
 
     // ---- workers ----

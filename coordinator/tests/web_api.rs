@@ -36,6 +36,28 @@ async fn mutation_bodies_require_json_content_type() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn security_notifications_are_durable_scoped_and_dismissible() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let (status, created) = api.post("/api/v1/tokens", json!({"name":"notice-token","scopes":["read"]})).await;
+    assert_eq!(status, 201, "{created}");
+    let (status, body) = api.get("/api/v1/security/notifications").await;
+    assert_eq!(status, 200, "{body}");
+    let notices = body["notifications"].as_array().unwrap();
+    assert!(notices.iter().any(|item| item["category"] == "new_sign_in_address"));
+    let token_notice = notices
+        .iter()
+        .find(|item| item["category"] == "api_token_created")
+        .expect("token creation event");
+    let id = token_notice["id"].as_str().unwrap();
+    let (status, _) = api.send(api.rb(Method::DELETE, &format!("/api/v1/security/notifications/{id}"))).await;
+    assert_eq!(status, 200);
+    let (_, body) = api.get("/api/v1/security/notifications").await;
+    assert!(!body["notifications"].as_array().unwrap().iter().any(|item| item["id"] == id));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn malformed_numeric_path_parameters_use_problem_json() {
     let env = boot().await;
     let api = env.admin().await;

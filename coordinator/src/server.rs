@@ -63,6 +63,7 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     let (tls_config, file_cert_resolver) = cert_provider.load(data_dir, &cfg.min_tls)?;
     let tls = TlsAcceptor::from(tls_config);
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
+    validate_internet_runtime(&cfg, &db)?;
     if let Some((principal, _)) = db.admin_get().map_err(|e| format!("cannot read coordinator administrator: {e}"))? {
         let passkey_count = db.passkey_count(&principal).map_err(|e| format!("cannot count passkeys: {e}"))?;
         if let Some(configured_origin) = cfg.public_origin.as_deref() {
@@ -184,6 +185,83 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         tasks,
         _data_dir_lock: lock,
     })
+}
+
+fn validate_internet_runtime(cfg: &Config, db: &Db) -> Result<(), String> {
+    if cfg.exposure != crate::config::Exposure::Internet {
+        return Ok(());
+    }
+    let Some((principal, _)) = db.admin_get().map_err(|e| format!("cannot read administrator for Internet exposure: {e}"))? else {
+        return Err("internet exposure refused: enroll a phishing-resistant passkey before enabling Internet exposure".into());
+    };
+    if db
+        .passkey_count(&principal)
+        .map_err(|e| format!("cannot read passkey enrollment for Internet exposure: {e}"))?
+        == 0
+    {
+        return Err("internet exposure refused: enroll a phishing-resistant passkey before enabling Internet exposure".into());
+    }
+    if db
+        .non_expiring_api_token_count()
+        .map_err(|e| format!("cannot check API token expiry for Internet exposure: {e}"))?
+        > 0
+    {
+        return Err("internet exposure refused: revoke or rotate every non-expiring API token".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod internet_exposure_tests {
+    use super::*;
+    use crate::db::PasskeyCredentialRow;
+
+    fn temp_db() -> (std::path::PathBuf, Db) {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("bridge-internet-exposure-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("coordinator.db")).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn internet_exposure_requires_enrolled_passkey_and_expiring_tokens() {
+        let mut cfg = Config::default();
+        cfg.exposure = crate::config::Exposure::Internet;
+        let (dir, db) = temp_db();
+        db.admin_create("admin", "hash").unwrap();
+        assert!(validate_internet_runtime(&cfg, &db).unwrap_err().contains("phishing-resistant passkey"));
+
+        db.passkey_put_at_origin(
+            &PasskeyCredentialRow {
+                credential_id: "credential".into(),
+                principal_id: "admin".into(),
+                credential: "stored-passkey".into(),
+                user_name: "admin".into(),
+                created_at: crate::now(),
+                last_used: None,
+                aaguid: None,
+                transports: "[]".into(),
+                backup_eligible: false,
+                backed_up: false,
+                sign_count: 0,
+            },
+            "https://bridge.example.test",
+        )
+        .unwrap();
+        assert!(validate_internet_runtime(&cfg, &db).is_ok());
+
+        db.token_create_identified("unbounded", "token-id", "secret-hash", None, &["read".into()])
+            .unwrap();
+        assert!(validate_internet_runtime(&cfg, &db).unwrap_err().contains("non-expiring API token"));
+
+        db.token_revoke("unbounded").unwrap();
+        db.token_create_identified("bounded", "token-id-2", "secret-hash-2", Some(crate::now() + 86_400), &["read".into()])
+            .unwrap();
+        assert!(validate_internet_runtime(&cfg, &db).is_ok());
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[derive(Clone, Copy)]
