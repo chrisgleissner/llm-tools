@@ -676,7 +676,20 @@ def test_slow_link_costs_setup_round_trips_and_delays_each_frame_by_the_profile(
 def test_slow_link_limits_bulk_bandwidth_and_a_sender_blocks_while_the_link_drains(slow_relay):
     server, proxy, profile, connect = slow_relay
     client = connect()
+    # Pin the sender's send buffer. Left alone, Linux autotunes SO_SNDBUF upward while the transfer runs (46 KB at connect to
+    # 184 KB during this send on the development host; the limit is tcp_wmem[2]), so the amount of data the kernel can hold
+    # before send() blocks depends on the kernel and its sysctls. Setting SO_SNDBUF switches autotuning off for this socket.
+    client.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 64 * 1024)
+    send_buffer = client.sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)  # the kernel doubles the requested size
+    receive_buffer = proxy._listener.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)  # accepted sockets inherit it (profile.window_bytes)
+    tls_records_in_flight = 2 * 16 * 1024  # one record being encrypted on the client, one being decrypted by the proxy
+    # Upper bound on the bytes that can be absorbed without the proxy having read them. The kernel counts per-packet overhead
+    # against both buffers, so the payload they really hold is smaller; using the full sizes keeps the bound on the safe side.
+    absorbed = send_buffer + receive_buffer + tls_records_in_flight
     padding = "x" * 400_000
+    assert absorbed < 300_000, absorbed  # otherwise the frame would fit and nothing would block
+    blocked_floor = 0.8 * (400_000 - absorbed) / profile.bytes_per_second
+    assert blocked_floor > 0.75, (blocked_floor, absorbed)  # still well above the 0.5 s receive timeout that the worker's sends once inherited
     started = time.monotonic()
     client.send_text(json.dumps({"type": "bulk", "pad": padding}))
     sent_after = time.monotonic() - started
@@ -684,9 +697,9 @@ def test_slow_link_limits_bulk_bandwidth_and_a_sender_blocks_while_the_link_drai
     total = time.monotonic() - started
     link_seconds = 400_000 / profile.bytes_per_second
     assert total >= 0.9 * link_seconds  # 400 KB cannot arrive faster than 125 KB/s allows
-    # The proxy takes bytes at the link rate, so the sender's socket buffers (about 200 KB with the proxy's) fill and the send call is
-    # held back for the rest, which is longer than the 0.5 s receive timeout that the worker's sends once inherited.
-    assert sent_after >= 1.0, (sent_after, link_seconds)
+    # The proxy takes bytes at the link rate, so the buffers above fill and the send call is held back while the link drains
+    # the rest of the frame.
+    assert sent_after >= blocked_floor, (sent_after, blocked_floor, send_buffer, receive_buffer, link_seconds)
     figures = proxy.shaper.stats()["bandwidth"][dist_ws_proxy.UP]
     assert figures["busy_seconds"] >= 1 and figures["busy_mean_bps"] <= 1.1 * profile.bandwidth_bits
     client.close()
