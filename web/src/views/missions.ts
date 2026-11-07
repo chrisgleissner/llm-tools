@@ -10,7 +10,7 @@ import {
 
 type Sort = "state" | "updated" | "name";
 /** How long the first list render waits for the status of the missions that need one. */
-const HOLD_MS = 700;
+const HOLD_MS = 1200;
 const SORTS: Array<[Sort, string]> = [
   ["state", "Needs you first"],
   ["updated", "Recently updated"],
