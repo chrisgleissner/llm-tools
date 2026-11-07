@@ -14,6 +14,8 @@ verified. This report is derived from `SPEC_STATUS.md`; the decisions it cites a
 `DECISIONS.md`.
 Standalone Bridge is unchanged and opens no network connection. This report is derived
 from `SPEC_STATUS.md`; the decisions it cites are in `DECISIONS.md`.
+Main CI run 42258350255 exposed a tmux 3.4 first-run test expectation mismatch. PR #33
+corrected it and merged; main CI run 42269767860 is green on every job.
 
 ## 1. Implementation summary
 
