@@ -3,7 +3,6 @@ import { h, startClock } from "./dom";
 import { applyTheme, installShortcuts, savedTheme, shell } from "./shell";
 import { startLive, stopLive, refresh } from "./store";
 import { announce, mountFeedback } from "./ui";
-import { account } from "./views/account";
 import { diagnostics } from "./views/diagnostics";
 import { loginView, type NoticeKind } from "./views/login";
 import { missionDetail } from "./views/mission";
@@ -126,7 +125,11 @@ async function route(): Promise<void> {
   else if (path === "/usage") cleanup = usage(main, new URLSearchParams(location.search));
   else if (m && m[1] && m[2]) cleanup = missionDetail(main, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
   else if (path === "/diagnostics") cleanup = diagnostics(main);
-  else if (path === "/account") cleanup = account(main, { me, signOut: () => void signOut(), onPasswordChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }) });
+  else if (path === "/account") {
+    const { account } = await import("./views/account");
+    if (generation !== routeGeneration) return;
+    cleanup = account(main, { me, signOut: () => void signOut(), onPasswordChanged: () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." }) });
+  }
   else main.append(h("h1", {}, "Not found"), h("p", {}, h("a", { href: "/" }, "Back to the overview")));
   const heading = main.querySelector("h1");
   if (heading) document.title = `${heading.textContent ?? ""} - LLM Bridge`;

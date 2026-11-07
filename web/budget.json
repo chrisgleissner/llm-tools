@@ -1,6 +1,6 @@
 {
-  "comment": "Initial load counts the app entry and every transitive static JavaScript import, plus CSS. Lazy counts chunks only reached by dynamic imports (the terminal). The previous check counted static shared chunks as lazy and missed them from initial, so these caps were corrected to match the built asset graph. Sizes are bytes; gzip level 9 approximates a compressing proxy. The UX status skeleton adds under 200 raw bytes and reduced the latest five-run Pixel 4 CLS max from 0.409 to 0.000.",
+  "comment": "Initial load counts the app entry and every transitive static JavaScript import, plus CSS. Lazy counts chunks reached only by dynamic imports, including the terminal, passkey credential helpers and account settings. The previous check counted static shared chunks as lazy and missed them from initial, so these caps match the built asset graph. Sizes are bytes; gzip level 9 approximates a compressing proxy. The UX status skeleton adds under 200 raw bytes and reduced the latest five-run Pixel 4 CLS max from 0.409 to 0.000. Deferring account settings and passkey helpers keeps initial JavaScript under its existing caps; the measured lazy bundle is 360439 raw / 94401 gzip bytes, so caps are 361000 / 95000.",
   "initial": { "jsRaw": 90000, "jsGzip": 31000, "cssRaw": 34000, "cssGzip": 9000, "totalRaw": 124000, "totalGzip": 40000 },
-  "lazy": { "jsRaw": 360000, "jsGzip": 93000 },
+  "lazy": { "jsRaw": 361000, "jsGzip": 95000 },
   "load": { "cpuThrottle": 4, "fcpMsMax": 4000, "setupFormMsMax": 5000 }
 }
