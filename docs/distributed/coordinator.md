@@ -161,8 +161,8 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | GET | `/workers/{name}` | The same safe worker summary fields as the list route. |
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
-| GET | `/tokens` | Token name, public ID (null for legacy tokens), scopes, creation, last-use timestamp and client address, and expiry metadata. Requires an administrator session or an `admin` token. |
-| POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
+| GET | `/tokens` | Token name, public ID (null for legacy tokens), scopes, creation, last-use timestamp and client address, expiry metadata, and optional `allowed_cidrs`. Requires an administrator session or an `admin` token. |
+| POST | `/tokens` | `{name, scopes?, expires_days?, allowed_cidrs?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Up to 32 CIDRs may restrict client addresses. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
 | DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
 | GET | `/security/notifications` | Active security events for the administrator: new sign-in address, API token creation, and repeated blocked sign-in failures. Requires an administrator session or an `admin` token. |
 | DELETE | `/security/notifications/{id}` | Dismiss one active event. Requires an administrator session with CSRF and exact Origin, or an `admin` token. |

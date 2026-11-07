@@ -58,6 +58,55 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn api_token_cidr_binding_rejects_out_of_range_clients_and_audits_denial() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    let (status, created) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({
+                "name":"network-limited", "scopes":["read"], "allowed_cidrs":["192.0.2.0/24"]
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["token"]["allowed_cidrs"], json!(["192.0.2.0/24"]));
+    let secret = created["secret"].as_str().unwrap();
+    let response = admin.bare(Method::GET, "/api/v1/missions").bearer_auth(secret).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 403);
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["code"], "token-address-denied");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/token-address-denied");
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    let audit = db.audit_list(20).unwrap();
+    assert!(audit.iter().any(|row| row["action"] == "authorization.denied.address"));
+    let (status, allowed) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({"name":"local-network", "scopes":["read"], "allowed_cidrs":["127.0.0.0/8"]}),
+        )
+        .await;
+    assert_eq!(status, 201, "{allowed}");
+    let response = admin
+        .bare(Method::GET, "/api/v1/missions")
+        .bearer_auth(allowed["secret"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let (status, problem) = admin
+        .post(
+            "/api/v1/tokens",
+            json!({
+                "name":"bad-network", "scopes":["read"], "allowed_cidrs":["192.0.2.1"]
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{problem}");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn passkey_origin_reenrollment_requires_password_and_atomically_clears_credentials() {
     let env = boot_with(|text| text.replace("allowed_origins = []", "allowed_origins = [\"https://new.example.test\"]")).await;
     let api = env.admin().await;

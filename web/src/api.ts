@@ -51,6 +51,7 @@ export interface ApiTokenInfo {
   last_used: string | null;
   last_address: string | null;
   expires_at: string | null;
+  allowed_cidrs: string[];
 }
 
 export interface ApiTokenCreated {

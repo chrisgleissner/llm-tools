@@ -585,6 +585,7 @@ fn version_1_database_is_migrated_in_place() {
     );
     assert_eq!(db.token_lookup("h2").unwrap().unwrap().scopes, vec!["admin"]);
     assert_eq!(db.api_tokens_list().unwrap()[0].token_id, None, "migrated tokens have no public ID");
+    assert!(db.api_tokens_list().unwrap()[0].allowed_cidrs.is_empty(), "migrated tokens remain unrestricted");
     let v: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))

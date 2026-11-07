@@ -281,6 +281,7 @@ pub enum Principal {
     Token {
         name: String,
         scopes: Vec<String>,
+        allowed_cidrs: Vec<String>,
     },
 }
 
@@ -318,6 +319,7 @@ pub fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Api
             Some(token) => Ok(Principal::Token {
                 name: token.name,
                 scopes: token.scopes,
+                allowed_cidrs: token.allowed_cidrs,
             }),
             None => Err(unauthorized()),
         };
@@ -389,7 +391,32 @@ impl FromRequestParts<St> for Authed {
                 }
             }
         }
-        if let Principal::Token { name, scopes: granted } = &principal {
+        if let Principal::Token {
+            name,
+            scopes: granted,
+            allowed_cidrs,
+        } = &principal
+        {
+            if !allowed_cidrs.is_empty() {
+                let remote = resolved_client_address(parts, st);
+                let address = remote.parse::<std::net::IpAddr>().ok();
+                if address.is_none_or(|address| !crate::client_ip::address_matches_any(address, allowed_cidrs)) {
+                    let request_id = parts
+                        .headers
+                        .get("idempotency-key")
+                        .or_else(|| parts.headers.get("x-request-id"))
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("-");
+                    let detail = format!("method={} path={} request_id={}", parts.method, parts.uri.path(), clean(request_id));
+                    st.db
+                        .audit_checked(&format!("token:{name}"), "authorization.denied.address", &detail, &remote)?;
+                    return Err(err(
+                        StatusCode::FORBIDDEN,
+                        "token-address-denied",
+                        "request address is outside this token's allowed networks",
+                    ));
+                }
+            }
             let path = parts.uri.path();
             let route = ROUTES
                 .iter()
@@ -434,7 +461,7 @@ impl FromRequestParts<St> for Authed {
             }
         }
         let remote = resolved_client_address(parts, st);
-        if let Principal::Token { name, scopes: granted } = &principal {
+        if let Principal::Token { name, scopes: granted, .. } = &principal {
             let request_id = parts
                 .headers
                 .get("idempotency-key")
@@ -569,7 +596,7 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap, Remote(ip): Remote
             body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
             body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
         }
-        Ok(Principal::Token { name, scopes: granted }) => {
+        Ok(Principal::Token { name, scopes: granted, .. }) => {
             let request_id = headers
                 .get("idempotency-key")
                 .or_else(|| headers.get("x-request-id"))
@@ -1233,7 +1260,8 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
                 "created_at": timestamp(Some(t.created_at)),
                 "last_used": timestamp(t.last_used),
                 "last_address": t.last_address,
-                "expires_at": timestamp(t.expires_at)
+                "expires_at": timestamp(t.expires_at),
+                "allowed_cidrs": t.allowed_cidrs
             })
         })
         .collect();
@@ -1242,7 +1270,7 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
 
 async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
     let m = parse_body(&body.bytes)?;
-    no_extra(&m, &["name", "scopes", "expires_days"])?;
+    no_extra(&m, &["name", "scopes", "expires_days", "allowed_cidrs"])?;
     let name = str_field(&m, "name")?;
     if !valid_name(name) {
         return Err(err(
@@ -1287,6 +1315,33 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
                 )
             })?,
     };
+    let allowed_cidrs = match m.get("allowed_cidrs") {
+        None => Vec::new(),
+        Some(Value::Array(values)) if values.len() <= 32 => {
+            let mut cidrs = Vec::with_capacity(values.len());
+            for value in values {
+                let cidr = value
+                    .as_str()
+                    .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid-request", "allowed_cidrs must contain CIDR strings"))?;
+                if cidr.len() > 64 || !crate::client_ip::valid_cidr(cidr) || cidrs.iter().any(|existing| existing == cidr) {
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        "invalid-request",
+                        "allowed_cidrs must contain at most 32 unique valid CIDRs",
+                    ));
+                }
+                cidrs.push(cidr.to_string());
+            }
+            cidrs
+        }
+        Some(_) => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "invalid-request",
+                "allowed_cidrs must be an array of at most 32 CIDRs",
+            ))
+        }
+    };
     validate_token_expiry(days, st.cfg.exposure).map_err(|message| err(StatusCode::BAD_REQUEST, "non-expiring-token-forbidden", message))?;
     let expires_at = (days > 0).then(|| crate::now() + (days as i64) * 86_400);
     let token_id = auth::sha256_hex(&auth::random_token())[..16].to_string();
@@ -1297,7 +1352,7 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
     let secret = format!("lbr_pat_{token_id}_{token_secret}");
     if !st
         .db
-        .token_create_identified(name, &token_id, &auth::sha256_hex(&token_secret), expires_at, &scopes)?
+        .token_create_identified_with_cidrs(name, &token_id, &auth::sha256_hex(&token_secret), expires_at, &scopes, &allowed_cidrs)?
     {
         return Err(err(StatusCode::CONFLICT, "token-exists", "a token with this name already exists"));
     }
@@ -1312,7 +1367,7 @@ async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffere
     Ok(json_ok(
         StatusCode::CREATED,
         json!({
-            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "last_address": Value::Null, "expires_at": timestamp(expires_at)},
+            "token": {"name": name, "id": token_id, "scopes": scopes, "created_at": timestamp(Some(crate::now())), "last_used": Value::Null, "last_address": Value::Null, "expires_at": timestamp(expires_at), "allowed_cidrs": allowed_cidrs},
             "secret": secret
         }),
     ))

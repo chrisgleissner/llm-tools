@@ -29,6 +29,9 @@ function tokenManagement(): HTMLElement {
     h("option", { value: "365" }, "1 year"),
     h("option", { value: "0" }, "Never"),
   );
+  const allowedNetworks = field("api-token-networks", "Allowed client networks (optional)", "text", {
+    autocomplete: "off", maxlength: 2048, placeholder: "192.0.2.0/24, 2001:db8::/32",
+  });
   const create = h("button", { type: "submit", class: "btn primary" }, "Create token");
   const form = h(
     "form",
@@ -38,6 +41,8 @@ function tokenManagement(): HTMLElement {
     h("fieldset", {}, h("legend", {}, "Permissions"), ...scopeInputs.map((x) => x.label)),
     h("label", { for: "api-token-expiry" }, "Expires after"),
     expiry,
+    allowedNetworks.wrap,
+    h("p", { class: "hint" }, "Leave blank to allow requests from any address. Separate CIDR ranges with commas."),
     h("p", { class: "hint" }, "The secret appears once. Save it in your password manager; it cannot be shown again."),
     status,
     create,
@@ -62,7 +67,7 @@ function tokenManagement(): HTMLElement {
         const lastUsed = token.last_used
           ? `Last used ${new Date(token.last_used).toLocaleString()} from ${token.last_address ?? "unknown address"}`
           : "Not used yet";
-        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, lastUsed), revoke));
+        rows.append(h("li", {}, h("strong", {}, token.name), h("span", {}, token.scopes.join(", ")), h("span", {}, `Expires ${token.expires_at ? new Date(token.expires_at).toLocaleString() : "never"}`), h("span", {}, token.allowed_cidrs.length ? `Networks ${token.allowed_cidrs.join(", ")}` : "Any client network"), h("span", {}, lastUsed), revoke));
       }
       if (!result.tokens.length) rows.append(h("li", { class: "muted" }, "No API tokens yet."));
     } catch (err) {
@@ -89,6 +94,7 @@ function tokenManagement(): HTMLElement {
     try {
       const created = await api.post<api.ApiTokenCreated>("/api/v1/tokens", {
         name: name.input.value.trim(), scopes, expires_days: Number(expiry.value),
+        allowed_cidrs: allowedNetworks.input.value.split(",").map((value) => value.trim()).filter(Boolean),
       });
       oneTime.hidden = false;
       oneTime.replaceChildren(
@@ -98,6 +104,7 @@ function tokenManagement(): HTMLElement {
       );
       status.textContent = `Token ${created.token.name} created.`;
       name.input.value = "";
+      allowedNetworks.input.value = "";
       await refresh();
     } catch (err) {
       status.textContent = err instanceof api.ApiError ? err.message : "Could not create token.";

@@ -27,6 +27,10 @@ pub fn valid_cidr(value: &str) -> bool {
     parse_network(value).is_some()
 }
 
+pub fn address_matches_any(address: IpAddr, cidrs: &[String]) -> bool {
+    cidrs.iter().filter_map(|cidr| parse_network(cidr)).any(|network| contains(network, address))
+}
+
 fn contains(network: Network, address: IpAddr) -> bool {
     match (network, address) {
         (Network::V4(base, prefix), IpAddr::V4(address)) => {

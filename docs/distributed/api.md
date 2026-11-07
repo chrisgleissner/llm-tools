@@ -182,7 +182,7 @@ once; the list response contains metadata only:
 ```sh
 curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"automation","scopes":["read","operate"],"expires_days":90}' \
+  -d '{"name":"automation","scopes":["read","operate"],"expires_days":90,"allowed_cidrs":["192.0.2.0/24"]}' \
   "$COORDINATOR/api/v1/tokens"
 
 curl --cacert ca.pem -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -204,6 +204,12 @@ documented removal date before removal.
 `docs/distributed/openapi-v1-baseline.json` is the initial published v1
 contract; `tests/test_openapi_compat.py` fails on removed paths, operations or
 fields and on newly required fields.
+
+`allowed_cidrs` is optional; when present, every use of that token must come
+from one of the listed IPv4 or IPv6 CIDR ranges. The coordinator uses the peer
+address unless the request arrived through a configured trusted proxy. Invalid,
+duplicate, or more than 32 ranges are rejected. An empty or omitted list allows
+any client address.
 
 Mutation requests with a body must use `Content-Type: application/json` (UTF-8
 is accepted); other media types receive `415 unsupported-media-type`.

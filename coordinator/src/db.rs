@@ -181,6 +181,7 @@ pub struct Session {
 pub struct ApiToken {
     pub name: String,
     pub scopes: Vec<String>,
+    pub allowed_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +193,7 @@ pub struct ApiTokenInfo {
     pub last_used: Option<i64>,
     pub last_address: Option<String>,
     pub expires_at: Option<i64>,
+    pub allowed_cidrs: Vec<String>,
 }
 
 fn json_col(s: Option<String>) -> Option<Value> {
@@ -238,7 +240,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -292,12 +294,14 @@ CREATE TABLE security_notifications(
   created_at INTEGER NOT NULL, dismissed_at INTEGER);
 CREATE INDEX security_notifications_principal ON security_notifications(principal_id, dismissed_at, created_at DESC);
 ";
+/// Version 13: optionally restrict API tokens to explicitly configured client networks.
+const MIGRATE_V13: &str = "ALTER TABLE api_tokens ADD COLUMN allowed_cidrs TEXT NOT NULL DEFAULT '[]';";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 
 type R<T> = rusqlite::Result<T>;
-type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String);
+type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String);
 
 impl Db {
     pub fn open(path: &Path) -> R<Db> {
@@ -409,6 +413,9 @@ impl Db {
         }
         if version < 12 {
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V12} PRAGMA user_version = 12; COMMIT;"))?;
+        }
+        if version < 13 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V13} PRAGMA user_version = 13; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -727,15 +734,27 @@ impl Db {
     }
     /// Create an identifiable token, storing only its secret hash and public ID.
     pub fn token_create_identified(&self, name: &str, token_id: &str, secret_hash: &str, expires_at: Option<i64>, scopes: &[String]) -> R<bool> {
+        self.token_create_identified_with_cidrs(name, token_id, secret_hash, expires_at, scopes, &[])
+    }
+    pub fn token_create_identified_with_cidrs(
+        &self,
+        name: &str,
+        token_id: &str,
+        secret_hash: &str,
+        expires_at: Option<i64>,
+        scopes: &[String],
+        allowed_cidrs: &[String],
+    ) -> R<bool> {
         Ok(self.c().execute(
-            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id) VALUES(?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO api_tokens(name, token_hash, created_at, expires_at, scopes, token_id, allowed_cidrs) VALUES(?,?,?,?,?,?,?)",
             params![
                 name,
                 secret_hash,
                 crate::now(),
                 expires_at,
                 serde_json::to_string(scopes).unwrap_or_else(|_| "[]".into()),
-                token_id
+                token_id,
+                serde_json::to_string(allowed_cidrs).unwrap_or_else(|_| "[]".into())
             ],
         )? == 1)
     }
@@ -748,7 +767,8 @@ impl Db {
     }
     pub fn api_tokens_list(&self) -> R<Vec<ApiTokenInfo>> {
         let c = self.c();
-        let mut st = c.prepare("SELECT name, token_id, scopes, created_at, last_used, last_address, expires_at FROM api_tokens ORDER BY name")?;
+        let mut st =
+            c.prepare("SELECT name, token_id, scopes, created_at, last_used, last_address, expires_at, allowed_cidrs FROM api_tokens ORDER BY name")?;
         let rows = st.query_map([], |r| {
             let scopes_json: String = r.get(2)?;
             Ok(ApiTokenInfo {
@@ -759,6 +779,7 @@ impl Db {
                 last_used: r.get(4)?,
                 last_address: r.get(5)?,
                 expires_at: r.get(6)?,
+                allowed_cidrs: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -788,7 +809,8 @@ impl Db {
     pub fn token_lookup(&self, hash: &str) -> R<Option<ApiToken>> {
         let c = self.c();
         let now = crate::now();
-        let mut stmt = c.prepare("SELECT name, token_hash, last_used, expires_at, scopes FROM api_tokens WHERE token_id IS NULL ORDER BY name")?;
+        let mut stmt =
+            c.prepare("SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs FROM api_tokens WHERE token_id IS NULL ORDER BY name")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -796,24 +818,31 @@ impl Db {
                 r.get::<_, Option<i64>>(2)?,
                 r.get::<_, Option<i64>>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?;
         let mut matched = None;
         for row in rows {
-            let (name, stored_hash, last, expires_at, scopes_json) = row?;
+            let (name, stored_hash, last, expires_at, scopes_json, cidrs_json) = row?;
             let matches = crate::auth::ct_eq(hash, &stored_hash);
             let unexpired = expires_at.is_none_or(|expires| now < expires);
             if matches & unexpired {
-                matched = Some((name, last, scopes_json));
+                matched = Some((name, last, scopes_json, cidrs_json));
             }
         }
         drop(stmt);
-        let Some((name, last, scopes_json)) = matched else { return Ok(None) };
+        let Some((name, last, scopes_json, cidrs_json)) = matched else {
+            return Ok(None);
+        };
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
         let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
-        Ok(Some(ApiToken { name, scopes }))
+        Ok(Some(ApiToken {
+            name,
+            scopes,
+            allowed_cidrs: serde_json::from_str(&cidrs_json).unwrap_or_default(),
+        }))
     }
     /// Look up an identifiable token by its public ID, then compare the supplied secret hash
     /// against the stored hash in constant time.
@@ -821,12 +850,12 @@ impl Db {
         let c = self.c();
         let row: Option<IdentifiedTokenRow> = c
             .query_row(
-                "SELECT name, token_hash, last_used, expires_at, scopes FROM api_tokens WHERE token_id=?",
+                "SELECT name, token_hash, last_used, expires_at, scopes, allowed_cidrs FROM api_tokens WHERE token_id=?",
                 params![token_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .optional()?;
-        let Some((name, stored_hash, last, expires_at, scopes_json)) = row else {
+        let Some((name, stored_hash, last, expires_at, scopes_json, cidrs_json)) = row else {
             return Ok(None);
         };
         if !crate::auth::ct_eq(secret_hash, &stored_hash) || expires_at.is_some_and(|e| crate::now() >= e) {
@@ -837,7 +866,11 @@ impl Db {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }
         let scopes = serde_json::from_str(&scopes_json).unwrap_or_default();
-        Ok(Some(ApiToken { name, scopes }))
+        Ok(Some(ApiToken {
+            name,
+            scopes,
+            allowed_cidrs: serde_json::from_str(&cidrs_json).unwrap_or_default(),
+        }))
     }
 
     // ---- known addresses ----

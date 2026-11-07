@@ -49,6 +49,7 @@ struct TokenInfo {
     last_used: Option<String>,
     last_address: Option<String>,
     expires_at: Option<String>,
+    allowed_cidrs: Vec<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -61,6 +62,7 @@ struct TokenCreate {
     name: String,
     scopes: Option<Vec<String>>,
     expires_days: Option<u32>,
+    allowed_cidrs: Option<Vec<String>>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -97,7 +99,8 @@ fn token_create_schema() -> Value {
         "properties":{
             "name":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"},
             "scopes":{"type":"array","minItems":1,"maxItems":5,"uniqueItems":true,"items":{"type":"string","enum":["read","operate","terminal:view","terminal:write","admin"]}},
-            "expires_days":{"type":"integer","minimum":0,"maximum":3650}
+            "expires_days":{"type":"integer","minimum":0,"maximum":3650},
+            "allowed_cidrs":{"type":"array","maxItems":32,"uniqueItems":true,"items":{"type":"string","maxLength":64,"pattern":"^[0-9a-fA-F:.]+/[0-9]{1,3}$"}}
         }
     })
 }
@@ -106,7 +109,7 @@ fn response_schema(path: &str, method: &str) -> Value {
     if path == "/api/v1/auth/passkeys" && method == "GET" {
         return json!({
             "type":"object","required":["passkeys"],"additionalProperties":false,
-            "properties":{"passkeys":{"type":"array","maxItems":128,"items":{
+            "properties":{"passkeys":{"type":"array","items":{
                 "type":"object","required":["id","name","provider_aaguid","created_at","last_used","synced","backup_eligible"],"additionalProperties":false,
                 "properties":{
                     "id":{"type":"string","minLength":1,"maxLength":1024},
@@ -735,9 +738,11 @@ mod tests {
             json!(["read", "operate", "terminal:view", "terminal:write", "admin"])
         );
         assert_eq!(schema["properties"]["expires_days"]["maximum"], 3650);
+        assert_eq!(schema["properties"]["allowed_cidrs"]["maxItems"], 32);
         assert_eq!(schema["additionalProperties"], false);
         let response = &doc["components"]["schemas"]["TokenInfo"]["properties"];
         assert_eq!(response["last_address"]["type"], json!(["string", "null"]));
+        assert_eq!(response["allowed_cidrs"]["type"], "array");
     }
 
     #[test]

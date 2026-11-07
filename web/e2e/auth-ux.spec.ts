@@ -136,7 +136,9 @@ test.describe("sign-in", () => {
     await setupViaUi(page, coord);
     await page.goto("/account");
     await page.getByLabel("Token name").fill("banner-test");
+    await page.getByLabel("Allowed client networks (optional)").fill("192.0.2.0/24");
     await page.getByRole("button", { name: "Create token" }).click();
+    await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Networks 192.0.2.0/24");
     const banner = page.getByRole("region", { name: "Security notifications" });
     await expect(banner).toContainText("An API token was created.");
     const dismiss = banner.getByRole("button", { name: "Dismiss security notification" });
