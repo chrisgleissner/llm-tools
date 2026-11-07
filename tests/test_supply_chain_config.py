@@ -80,6 +80,9 @@ def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     assert 'chmod 0777 "$RUNNER_TEMP/zap-reports"' in workflow
     assert workflow.count('"$RUNNER_TEMP/zap-reports:/zap/wrk/:rw"') == 2
     assert 'python scripts/check_zap_reports.py "$RUNNER_TEMP/zap-reports"' in workflow
+    for report in ("zap-api-report.json", "zap-api-report.html", "zap-console-report.json", "zap-console-report.html"):
+        assert f"-J {report}" in workflow or f"-r {report}" in workflow
+    assert "/zap/wrk/zap-console-report" not in workflow
     assert "4f17be931a9d60f3f987975aea8221f1a8eaf7aa" in workflow
     assert "--severity CRITICAL" in workflow
     assert 'severity in {"MEDIUM", "HIGH", "CRITICAL"}' in workflow

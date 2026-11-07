@@ -135,8 +135,8 @@ jobs:
           zap-api-scan.py
           -t https://localhost:18443/api/v1/openapi.json
           -f openapi
-          -J /zap/wrk/zap-api-report.json
-          -r /zap/wrk/zap-api-report.html
+          -J zap-api-report.json
+          -r zap-api-report.html
           -I
           -z "-config connection.sslInsecure=true -config insights.exitAuto=false"
 
@@ -148,8 +148,8 @@ jobs:
           zaproxy/zap-stable:2.17.0
           zap-baseline.py
           -t https://localhost:18443/
-          -J /zap/wrk/zap-console-report.json
-          -r /zap/wrk/zap-console-report.html
+          -J zap-console-report.json
+          -r zap-console-report.html
           -I
           -z "-config connection.sslInsecure=true -config insights.exitAuto=false"
 
