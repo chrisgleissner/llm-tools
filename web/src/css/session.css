@@ -19,7 +19,7 @@
 .queued-chip { border: 1px solid var(--alert-attention-bar); border-radius: var(--r-pill); background: var(--alert-attention-bg); color: var(--alert-attention-fg); padding: 2px var(--sp-3); }
 .keybar { display: flex; flex-wrap: wrap; gap: 2px; min-block-size: var(--control-h); padding: 0 var(--sp-1); }
 .keybar-row { display: flex; flex-wrap: wrap; flex: 1 0 100%; gap: 2px; }
-.key, .more { flex: 1 1 var(--control-h); min-inline-size: var(--control-h); padding: 0; font-family: var(--mono); }
+.key, .more { flex: 1 1 var(--control-h); min-inline-size: max(var(--control-h), min-content); padding: 0; font-family: var(--mono); white-space: nowrap; overflow-wrap: normal; }
 .key[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
 @media (hover: hover) and (pointer: fine) and (min-width: 60rem) { .keybar { display: none; } }
 /* Full screen: the pane covers the viewport and the navigation chrome is removed. */

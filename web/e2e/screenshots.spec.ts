@@ -6,7 +6,7 @@
 // axe-core on all four projects, in both themes, and must have no violations of any impact.
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
-import { mockApp, MISSION_PATH, MISSION_START_PATH } from "./mock";
+import { DENSE_CALM_URL, mockApp, MISSION_PATH, MISSION_START_PATH } from "./mock";
 import { showTab } from "./redesign/harness";
 import { SCREENS } from "./screens";
 import { IN } from "./screens/types";
@@ -46,13 +46,13 @@ test("Codex queued-question attention opens the mission's live terminal", async 
 });
 
 test("running mission streams output read-only without a click or sending input", async ({ page }) => {
-  const mock = await mockApp(page, { ...IN, terminalScreen: true });
+  const mock = await mockApp(page, { ...IN, dataset: "dense", terminalScreen: true });
   const journeyStartedAt = Date.now();
   let statusReceivedAt = 0;
   page.on("response", (response) => {
-    if (new URL(response.url()).pathname.endsWith(`/missions/${MISSION_PATH.split("/").at(-1)}`) && response.request().method() === "GET") statusReceivedAt = Date.now();
+    if (new URL(response.url()).pathname.endsWith(`/missions/${DENSE_CALM_URL.split("/").at(-1)}`) && response.request().method() === "GET") statusReceivedAt = Date.now();
   });
-  await page.goto(MISSION_PATH);
+  await page.goto(DENSE_CALM_URL); // a calm running mission: the header leaves the terminal room on a phone
   const status = page.locator("#terminal-status");
   await expect(status).toHaveAttribute("data-state", "live");
   await expect(status).toHaveAttribute("data-mode", "view");
