@@ -33,7 +33,7 @@ import pytest
 from llm_tools.bridge_store import BridgeStore
 
 from tests.fuzz import generators as gen
-from tests.conftest import scaled
+from tests.conftest import scaled, wait_for
 from tests.fuzz.harness import db_diff, db_rows
 
 pytestmark = [pytest.mark.fuzz, pytest.mark.pty, pytest.mark.subprocess]
@@ -202,12 +202,15 @@ def test_ctrl_s_does_not_freeze_the_screen(tmp_path: Path, screen: str) -> None:
     os.close(slave)
     view = Screen(master, process)
     try:
-        view.pump(scaled(1.5))
+        # Wait for the first screen instead of a fixed delay: a key written while the program is still
+        # starting (slow on a loaded host) is discarded, which would look like a frozen screen.
+        wait_for(lambda: view.pump(0.05) or len(view.output) > 50, 15, message="the screen was never drawn")
+        view.pump(scaled(1.0))  # startup draws more than once
         mark = len(view.output)
         os.write(master, b"\x13")
         view.pump(0.3)
         os.write(master, b"n" if screen == "home" else b"status")
-        view.pump(scaled(1.5))
+        wait_for(lambda: view.pump(0.05) or ((b"Objective" in bytes(view.output[mark:])) if screen == "home" else (len(view.output) - mark > 50)), 5)
         fresh = bytes(view.output[mark:])
         assert (b"Objective" in fresh) if screen == "home" else (len(fresh) > 50), f"screen froze after Ctrl-S: {fresh[-200:]!r}"
         os.write(master, b"\x11\x15\x04\x04\x04")
