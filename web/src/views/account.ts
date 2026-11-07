@@ -185,6 +185,66 @@ function passkeyList(): HTMLElement {
   return section;
 }
 
+function securityActivity(): { element: HTMLElement; dispose: () => void } {
+  const section = h("section", { class: "card narrow", "aria-labelledby": "security-activity-title" });
+  const status = h("p", { role: "status", "aria-live": "polite" }, "Loading security activity…");
+  const chain = h("p", { class: "muted small", "aria-live": "polite" });
+  const rows = h("ul", { class: "token-list", "aria-label": "Security activity" });
+  const older = h("button", { class: "btn", type: "button", hidden: true }, "Load older activity");
+  let cursor: string | null = null;
+  let loading = false;
+  let reloadAfterLoad = false;
+  const load = async (next: string | null, append: boolean): Promise<void> => {
+    if (loading) return;
+    loading = true;
+    status.textContent = "Loading security activity…";
+    older.disabled = true;
+    try {
+      const query = new URLSearchParams({ limit: "50" });
+      if (next) query.set("cursor", next);
+      const page = await api.get<{
+        entries: Array<{ id: number; ts: string; actor: string; action: string; remote: string }>;
+        chain_valid: boolean;
+        next_cursor: string | null;
+      }>(`/api/v1/audit?${query}`);
+      const items = page.entries.map((entry) => h("li", {},
+        h("strong", {}, entry.action),
+        h("span", {}, `By ${entry.actor}`),
+        h("span", {}, entry.remote ? `From ${entry.remote}` : "Address unavailable"),
+        h("time", { datetime: entry.ts }, new Date(entry.ts).toLocaleString()),
+      ));
+      if (append) rows.append(...items);
+      else rows.replaceChildren(...items);
+      if (!rows.childElementCount) rows.append(h("li", { class: "muted" }, "No security activity yet."));
+      cursor = page.next_cursor;
+      older.hidden = !cursor;
+      chain.textContent = page.chain_valid ? "Audit integrity verified." : "Audit integrity check failed.";
+      chain.className = page.chain_valid ? "muted small" : "form-error";
+      status.textContent = "";
+    } catch (err) {
+      status.textContent = err instanceof api.ApiError ? err.message : "Could not load security activity.";
+    } finally {
+      loading = false;
+      older.disabled = false;
+      if (reloadAfterLoad) {
+        reloadAfterLoad = false;
+        void load(null, false);
+      }
+    }
+  };
+  older.addEventListener("click", () => { void load(cursor, true); });
+  const events = new AbortController();
+  window.addEventListener("bridge-security-notification", () => {
+    if (loading) reloadAfterLoad = true;
+    else void load(null, false);
+  }, { signal: events.signal });
+  section.append(h("h2", { id: "security-activity-title" }, "Security activity"),
+    h("p", { class: "muted" }, "Recent sign-ins, token activity and security changes. Sensitive request details and credential material are not shown."),
+    chain, status, rows, older);
+  void load(null, false);
+  return { element: section, dispose: () => events.abort() };
+}
+
 export function account(root: HTMLElement, opts: AccountOpts): () => void {
   const me = opts.me;
   const policy = me?.password_policy ?? DEFAULT_POLICY;
@@ -233,7 +293,7 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       else error.textContent = err instanceof api.ApiError ? err.message : "Unexpected error. Try again.";
     }
   });
-  const exp = s ? new Date(s.expires_at * 1000) : null;
+  const exp = s ? new Date(s.expires_at) : null;
   const session = h(
     "section",
     { class: "card narrow", "aria-labelledby": "acct-session" },
@@ -270,8 +330,9 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
       );
     }
   }).catch(() => {});
+  const activity = securityActivity();
   root.append(h("h1", {}, "Account"), h("div", { class: "grid-2" }, session, form), tokenManagement(),
-    me?.passkey_canonical_origin ? passkeyList() : h("div", {}),
+    activity.element, me?.passkey_canonical_origin ? passkeyList() : h("div", {}),
     me?.passkey_canonical_origin ? passkeyReenrollment() : h("div", {}), passkeyGuidance);
-  return () => {};
+  return activity.dispose;
 }

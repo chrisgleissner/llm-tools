@@ -79,7 +79,7 @@ function connLabel(): string {
 function sessionLine(me: api.AuthState | null): string {
   const s = me?.session;
   if (!s) return "";
-  return `${s.remember ? "Remembered device" : "This browser session"}, valid until ${absTime(new Date(s.expires_at * 1000))}`;
+  return `${s.remember ? "Remembered device" : "This browser session"}, valid until ${absTime(new Date(s.expires_at))}`;
 }
 
 function accountMenu(hooks: ShellHooks): HTMLElement {

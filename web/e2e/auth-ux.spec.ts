@@ -358,9 +358,15 @@ test.describe("account menu and password change", () => {
     await page.getByRole("button", { name: "Create token" }).click();
     const secret = page.locator(".token-secret code");
     await expect(secret).toContainText(/^.{30,}$/);
+    const secretValue = await secret.textContent();
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("automation-key");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("operate");
     await expect(page.getByRole("list", { name: "API tokens" })).toContainText("Not used yet");
+    const activity = page.getByRole("list", { name: "Security activity" });
+    await expect(activity).toContainText("token.create");
+    await expect(activity).toContainText("By admin");
+    await expect(page.getByText("Audit integrity verified.")).toBeVisible();
+    await expect(activity).not.toContainText(secretValue ?? "");
     await page.getByRole("button", { name: "Revoke automation-key" }).click();
     await expect(page.getByRole("list", { name: "API tokens" })).not.toContainText("automation-key");
     await expect(secret).toHaveCount(1);

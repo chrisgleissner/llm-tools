@@ -154,7 +154,7 @@ export interface AuthState {
   password_policy?: PasswordPolicy;
   session_policy?: { remembered: { idle_secs: number; absolute_secs: number }; default: { idle_secs: number; absolute_secs: number } };
   username?: string | null;
-  session?: { remember: boolean; expires_at: number; idle_timeout_secs: number };
+  session?: { remember: boolean; expires_at: string; idle_timeout_secs: number };
 }
 
 export async function authState(): Promise<AuthState> {
