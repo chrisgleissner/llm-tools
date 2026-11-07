@@ -228,6 +228,39 @@ uxr({ t: "T35", uxr: ["UXR-029", "UXR-042"], needs: ["WP-0", "WP-1"] }, "the fiv
   await evidence(page, info, ["UXR-029"], "bottom-bar");
 });
 
+/** Header elements whose text is cut off: wider than their own box, or sticking out of the header, the viewport or an ancestor that clips. */
+async function clippedTopBarText(page: import("@playwright/test").Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const header = document.querySelector<HTMLElement>("header.top")!;
+    const out: string[] = [];
+    for (const e of header.querySelectorAll<HTMLElement>("*")) {
+      if (![...e.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() !== "")) continue;
+      const r = e.getBoundingClientRect();
+      if (r.width <= 2 || r.height <= 2) continue; // visually hidden text (screen reader only) or display: none
+      const name = `${e.tagName.toLowerCase()}.${String(e.className)} "${(e.textContent ?? "").trim().slice(0, 24)}"`;
+      const cs = getComputedStyle(e);
+      if (cs.overflowX !== "visible" && e.scrollWidth > e.clientWidth + 0.5) out.push(`${name} is wider than its box`);
+      const box = [{ left: 0, right: window.innerWidth, what: "the viewport" }, { left: header.getBoundingClientRect().left, right: header.getBoundingClientRect().right, what: "the header" }];
+      for (let a = e.parentElement; a && a !== header; a = a.parentElement) {
+        if (getComputedStyle(a).overflowX !== "visible") box.push({ left: a.getBoundingClientRect().left, right: a.getBoundingClientRect().right, what: `.${String(a.className)}` });
+      }
+      for (const b of box) if (r.left < b.left - 0.5 || r.right > b.right + 0.5) out.push(`${name} sticks out of ${b.what}`);
+    }
+    return out;
+  });
+}
+
+uxr({ t: "T35", uxr: ["UXR-029", "UXR-042"], needs: ["WP-0", "WP-1"] }, "no top bar text is clipped, at the project viewport and at 320x568", async ({ page }) => {
+  const sizes = [viewport(page), { width: 320, height: 568 }];
+  await openApp(page, { auth: "in" }, "/");
+  for (const size of sizes) {
+    await page.setViewportSize(size);
+    await page.waitForTimeout(150);
+    if (!isLandscapePhone(page)) await expect(page.locator("#capacity .cap-chip").first(), `capacity chip at ${size.width}x${size.height}`).toBeVisible();
+    expect(await clippedTopBarText(page), `clipped top bar text at ${size.width}x${size.height}`).toEqual([]);
+  }
+});
+
 uxr({ t: "T35", uxr: ["UXR-029"], needs: ["WP-0", "WP-1", "WP-4"] }, "the last list item is not covered by the bottom bar after scrolling to the end", async ({ page }) => {
   pw.skip(!isPhone(page), "the bottom bar exists below 768 px");
   await openApp(page, { auth: "in", dataset: "dense" }, "/missions");

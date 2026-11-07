@@ -17,6 +17,8 @@
 /* capacity chips: neutral text and a small meter */
 .cap-chips { flex: 1 1 0; min-inline-size: 0; display: flex; justify-content: flex-end; gap: var(--sp-2); overflow: hidden; }
 .cap-chip { display: inline-flex; align-items: center; gap: var(--sp-2); min-block-size: var(--control-h-sm); padding-inline: var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-pill); color: var(--text); font-size: var(--fs-sm); text-decoration: none; white-space: nowrap; }
+.tight .cap-meter { display: none; }
+.tight .cap-scope { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); }
 .cap-meter { inline-size: 2rem; block-size: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
 .cap-meter i { display: block; block-size: 100%; inline-size: var(--v); background: var(--text-muted); }
 @media (hover: hover) { .cap-chip:hover { background: var(--surface-3); } }

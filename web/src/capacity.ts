@@ -39,13 +39,16 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
   let timer = 0;
   let disposed = false;
 
+  // When the chips do not fit they lose their scope and meter (class "tight"; the scope stays for screen readers).
+  // The container clips on its start edge, where scrollWidth shows nothing, so the first chip's position tells.
   const paint = (): void => {
-    const shown = narrow ? chips.slice(0, 1) : chips;
+    el.classList.remove("tight");
     el.replaceChildren(
-      ...shown.map((c) =>
-        h("a", { class: "cap-chip", href: "/usage", title: c.title }, c.provider, " ", c.scope, " ", h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), " ", `${c.percent}%`, h("span", { class: "sr-only" }, " left")),
+      ...(narrow ? chips.slice(0, 1) : chips).map((c) =>
+        h("a", { class: "cap-chip", href: "/usage", title: c.title }, h("span", {}, c.provider, h("span", { class: "cap-scope" }, ` ${c.scope}`)), h("span", { class: "cap-meter", "aria-hidden": "true", style: `--v:${Math.max(0, Math.min(100, c.percent))}%` }, h("i")), ` ${c.percent}%`, h("span", { class: "sr-only" }, " left")),
       ),
     );
+    el.classList.toggle("tight", (el.firstElementChild?.getBoundingClientRect().left ?? 0) < el.getBoundingClientRect().left - 0.5);
   };
 
   const load = async (): Promise<void> => {
@@ -76,11 +79,8 @@ export function capacityChips(): { el: HTMLElement; dispose: () => void } {
   document.addEventListener("visibilitychange", tick);
   const watch = new ResizeObserver(([entry]) => {
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
-    const next = (entry?.contentRect.width ?? 0) < NARROW_REM * rem;
-    if (next !== narrow) {
-      narrow = next;
-      paint();
-    }
+    narrow = (entry?.contentRect.width ?? 0) < NARROW_REM * rem;
+    paint();
   });
   watch.observe(el);
   sync();
