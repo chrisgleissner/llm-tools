@@ -86,6 +86,33 @@ def test_warmup_ramp_is_excluded_from_the_fit():
     assert h.check_slope("m", ramp, BOUND, warmup_fraction=0.0).verdict == "fail"
 
 
+def test_stated_warmup_window_is_ignored_in_seconds_not_as_a_share_of_the_run():
+    # 20 minutes of ramp, then flat for 40 minutes: only a warm-up in seconds can cut exactly at the knee
+    ramp = [(index * 60.0, 5000.0 - 400.0 * max(0, 20 - index)) for index in range(60)]
+    assert h.check_slope("m", ramp, BOUND, warmup_seconds=20 * 60.0).verdict == "pass"
+    assert h.check_slope("m", ramp, BOUND, warmup_seconds=10 * 60.0).verdict == "fail"
+    # the fraction is used only when no number of seconds is given
+    assert h.check_slope("m", ramp, BOUND, warmup_fraction=0.4).verdict == "pass"
+
+
+def test_ceiling_fails_on_the_peak_even_when_the_slope_is_flat():
+    assert h.check_ceiling("m", [(0.0, 1000.0), (60.0, 1400.0)], 1500.0, "units").verdict == "pass"
+    over = h.check_ceiling("m", [(0.0, 1000.0), (60.0, 1600.0), (120.0, 1000.0)], 1500.0, "units")
+    assert over.verdict == "fail" and "1600" in over.detail and over.metric == "m ceiling"
+    assert h.check_ceiling("m", [], 1500.0, "units").verdict == "inconclusive"
+
+
+def test_resources_include_a_ceiling_per_process_and_it_sees_one_large_process():
+    def sample(t, largest):
+        return {"t": t, "coordinator": {"rss_kib": 1000}, "workers": {"rss_kib": 3000, "max_rss_kib": 1000}, "controllers": {"rss_kib": 3000, "max_rss_kib": largest}}
+
+    samples = [sample(index * 30.0, 1000 if index != 5 else 70_000) for index in range(10)]
+    results = {item.metric: item for item in h.evaluate_resources(samples, {}, ceilings={"controllers_max_rss_kib": (64 * 1024, "KiB")})}
+    assert results["controllers_max_rss_kib ceiling"].verdict == "fail"
+    assert {"controllers_max_rss_kib", "workers_max_rss_kib", "coordinator_rss_kib"} == set(h.DEFAULT_CEILINGS)
+    assert [h.metric_value(samples[0], name) for name in ("controllers_max_rss_kib", "workers_max_rss_kib")] == [1000.0, 1000.0]
+
+
 def test_too_few_samples_is_inconclusive_not_a_silent_pass():
     assert h.check_slope("m", _series(0.0, samples=4), BOUND, min_samples=4).verdict == "inconclusive"
     assert h.check_slope("m", [], BOUND).verdict == "inconclusive"
@@ -135,6 +162,14 @@ def test_soak_defaults_are_the_prd_scaled_run():
     args = bridge_soak.parse_args([])
     assert (args.workers, args.missions, args.duration, args.sample_seconds) == (10, 50, 1800.0, 60.0)
     assert bridge_soak.validate(args) is None
+
+
+def test_effective_warmup_is_the_stated_time_capped_at_two_thirds_of_the_run():
+    assert bridge_soak.effective_warmup(2700.0, 0.25, 1200.0) == 1200.0
+    assert bridge_soak.effective_warmup(1800.0, 0.25, 1200.0) == 1200.0  # the 30 minute run keeps 10 minutes
+    assert bridge_soak.effective_warmup(900.0, 0.25, 1200.0) == 600.0
+    assert bridge_soak.effective_warmup(300.0, 0.25, 1200.0) == 200.0  # the pull request run
+    assert bridge_soak.effective_warmup(300.0, 0.8, 1200.0) == 240.0  # the fraction is a floor
 
 
 def test_soak_refuses_a_configuration_without_enough_samples():
@@ -504,3 +539,53 @@ def test_short_soak_with_real_coordinator_workers_and_fake_providers(tmp_path):
     assert len(report["samples"]) >= 6 and {item["class"] for item in report["latency"]} == {"read", "submit", "roundtrip"}
     assert report["workload"]["task_statuses"].get("COMPLETED", 0) > 0
     assert time.monotonic() - started < scaled(300)
+
+
+def test_coordinator_memory_growth_with_its_rows_is_not_a_leak_but_growth_without_rows_is():
+    bound = {"coordinator_rss_kib": h.SlopeBound(per_hour=1024.0, floor=512.0, unit="KiB")}
+
+    def run(rows_per_sample: int):
+        samples = [{"t": index * 30.0, "coordinator": {"rss_kib": 20_000 + index * 100}, "rows": {"events": index * rows_per_sample}} for index in range(60)]
+        return h.evaluate_resources(samples, bound, warmup_seconds=300.0, ceilings={})[0]
+
+    assert run(rows_per_sample=1000).verdict == "pass"  # 100 KiB per 1000 rows is 102 bytes per row, under the allowance
+    assert run(rows_per_sample=0).verdict == "fail"  # the same growth with no new rows is a leak
+
+
+def _fleet(slope_kib_per_hour: float, *, processes: int = 5, restart_at: float | None = None) -> list[dict]:
+    samples = []
+    for index in range(80):
+        t = index * 30.0
+        by_pid = {}
+        for number in range(processes):
+            started = restart_at if (restart_at is not None and number == 0 and t >= restart_at) else 0.0
+            by_pid[str(100 + number + (1000 if started else 0))] = 36_000 + 4_000 * (1 - 0.5 ** ((t - started) / 300.0)) + slope_kib_per_hour / 3600.0 * max(0.0, t - started - 900.0)
+        samples.append({"t": t, "controllers": {"rss_kib": sum(by_pid.values()), "running": len(by_pid), "by_pid": by_pid}})
+    return samples
+
+
+def test_controllers_are_judged_per_process_after_each_ones_own_warmup():
+    bound = {"controllers_rss_kib": h.SlopeBound(per_hour=512.0, floor=256.0, unit="KiB", per_process=True)}
+    scaled = h.scale_bounds(bound, workers=1, controllers=5)
+
+    def verdict(rate, **kw):
+        return h.evaluate_resources(_fleet(rate, **kw), scaled, warmup_seconds=1200.0, ceilings={}, process_bounds=bound)[0]
+
+    assert verdict(0.0).verdict == "pass"
+    assert verdict(4000.0).verdict == "fail" and "median slope" in verdict(4000.0).detail
+
+
+def test_a_restarted_controller_does_not_look_like_a_leak_in_the_fleet():
+    bound = {"controllers_rss_kib": h.SlopeBound(per_hour=512.0, floor=256.0, unit="KiB", per_process=True)}
+    scaled = h.scale_bounds(bound, workers=1, controllers=5)
+    samples = _fleet(0.0, restart_at=900.0)  # one controller is replaced half way: its pid changes and its memory starts over
+    summed = h.check_slope("controllers_rss_kib", [(s["t"], s["controllers"]["rss_kib"]) for s in samples], scaled["controllers_rss_kib"], warmup_seconds=1200.0)
+    per_process = h.evaluate_resources(samples, scaled, warmup_seconds=1200.0, ceilings={}, process_bounds=bound)[0]
+    assert per_process.verdict == "pass", per_process.detail
+    assert "median" in per_process.detail and summed.metric == "controllers_rss_kib"
+
+
+def test_per_process_check_is_inconclusive_when_no_process_lives_past_its_warmup():
+    bound = h.SlopeBound(per_hour=512.0, floor=256.0, unit="KiB", per_process=True)
+    result = h.check_per_process_slope("controllers_rss_kib", {"1": [(0.0, 1.0), (30.0, 1.0)]}, bound, warmup_seconds=1200.0)
+    assert result.verdict == "inconclusive"

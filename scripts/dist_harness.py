@@ -33,6 +33,7 @@ import signal
 import socket
 import sqlite3
 import ssl
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -106,14 +107,20 @@ DEFAULT_BOUNDS: dict[str, SlopeBound] = {
     "coordinator_fds": SlopeBound(per_hour=4, floor=4, unit="descriptors"),
     "coordinator_threads": SlopeBound(per_hour=2, floor=4, unit="threads"),
     "coordinator_db_bytes": SlopeBound(per_hour=32 * 1024 * 1024, floor=8 * 1024 * 1024, unit="bytes"),
-    "workers_rss_kib": SlopeBound(per_hour=2 * 1024, floor=1024, unit="KiB", per_process=True),
+    "workers_rss_kib": SlopeBound(per_hour=3 * 1024, floor=1024, unit="KiB", per_process=True),
     "workers_fds": SlopeBound(per_hour=1, floor=1, unit="descriptors", per_process=True),
     "workers_threads": SlopeBound(per_hour=1, floor=1, unit="threads", per_process=True),
-    # A controller keeps about 0.3 to 2 KiB per provider run (CPython 3.12 never frees the interned path components
-    # that pathlib creates for per-run directory names). The fake provider finishes a run every few seconds to 20 s,
-    # which is 50 to 1000 times faster than a real provider, so 6 MiB per hour covers it. See soak-and-chaos.md.
-    "controllers_rss_kib": SlopeBound(per_hour=6144, floor=512, unit="KiB", per_process=True),
+    "controllers_rss_kib": SlopeBound(per_hour=1536, floor=512, unit="KiB", per_process=True),
     "controllers_fds": SlopeBound(per_hour=1, floor=1, unit="descriptors", per_process=True),
+}
+
+
+# Largest value any single sample may have, whatever the slope: a process that settles at a size it should never
+# reach is a failure even when it stops growing. The ``*_max_rss_kib`` series are the largest single process of the fleet.
+DEFAULT_CEILINGS: dict[str, tuple[float, str]] = {
+    "controllers_max_rss_kib": (56 * 1024, "KiB"),
+    "workers_max_rss_kib": (56 * 1024, "KiB"),
+    "coordinator_rss_kib": (96 * 1024, "KiB"),
 }
 
 
@@ -130,6 +137,9 @@ def scale_bounds(bounds: dict[str, SlopeBound], *, workers: int, controllers: in
 # The database must also be explained by its rows: size <= BASE + rows * BYTES_PER_ROW at every sample.
 DB_BASE_BYTES = 8 * 1024 * 1024  # the write-ahead log alone reaches 4 MiB before SQLite checkpoints it
 DB_BYTES_PER_ROW = 4096
+# The coordinator keeps an index of its stored events, so its memory grows with the row count until the retention cap.
+# Measured on a debug build: 96 bytes per row (21.9 to 33.2 MiB for 3.6k to 125k rows); the allowance is 2.7 times that.
+COORDINATOR_RSS_BYTES_PER_ROW = 256
 
 # p99 budgets in milliseconds per request class (loopback, one coordinator).
 DEFAULT_LATENCY_BUDGET_MS: dict[str, float] = {
@@ -154,15 +164,17 @@ class SlopeResult:
 
 
 def check_slope(metric: str, points: Sequence[tuple[float, float]], bound: SlopeBound, *, warmup_fraction: float = 0.25,
-                min_samples: int = 4, explained: Callable[[float, float], float] | None = None) -> SlopeResult:
+                min_samples: int = 4, explained: Callable[[float, float], float] | None = None, warmup_seconds: float | None = None) -> SlopeResult:
     """Fit a line through the samples after the warm-up part of the run and compare it with ``bound``.
+
+    The warm-up is ``warmup_seconds`` from the first sample when that is given, else ``warmup_fraction`` of the run.
 
     ``explained(first, last)`` gives growth that the workload accounts for between two sample times
     (for the database: the new rows times a per-row budget); it is added to the floor.
     """
     if not points:
         return SlopeResult(metric, 0, 0.0, 0.0, 0.0, bound.per_hour, bound.floor, bound.unit, "inconclusive", "no samples")
-    start = points[0][0] + (points[-1][0] - points[0][0]) * warmup_fraction
+    start = points[0][0] + (warmup_seconds if warmup_seconds is not None else (points[-1][0] - points[0][0]) * warmup_fraction)
     window = [point for point in points if point[0] >= start]
     if len(window) < min_samples:
         return SlopeResult(metric, len(window), 0.0, 0.0, 0.0, bound.per_hour, bound.floor, bound.unit, "inconclusive",
@@ -175,6 +187,48 @@ def check_slope(metric: str, points: Sequence[tuple[float, float]], bound: Slope
     grows = per_hour > bound.per_hour and rise > floor
     detail = f"slope {per_hour:.1f}/h, fitted rise {rise:.1f} over {span:.0f}s (bound {bound.per_hour:.1f}/h above {floor:.1f})"
     return SlopeResult(metric, len(window), span, per_hour, rise, bound.per_hour, floor, bound.unit, "fail" if grows else "pass", detail)
+
+
+def check_per_process_slope(metric: str, series: dict[str, list[tuple[float, float]]], bound: SlopeBound, *, warmup_seconds: float,
+                            min_samples: int = 4) -> SlopeResult:
+    """The median over processes of the slope after each process's own warm-up, for a fleet whose members come and go.
+
+    A summed series jumps whenever a controller is stopped, started again or exits, and a restarted process starts a
+    new warm-up. Each process is fitted on its own, from ``warmup_seconds`` after its first sample. A leak shows in the
+    median of the fleet; one process with an odd step does not decide the verdict. A process counts as growing when its
+    slope is above ``bound.per_hour`` and its fitted rise above ``bound.floor``; the verdict fails when the median
+    slope is above the bound and the median rise above the floor. Both are per process.
+    """
+    slopes: list[float] = []
+    rises: list[float] = []
+    for points in series.values():
+        if not points:
+            continue
+        window = [point for point in points if point[0] >= points[0][0] + warmup_seconds]
+        if len(window) < min_samples:
+            continue
+        slope, _ = least_squares(window)
+        slopes.append(slope * 3600.0)
+        rises.append(slope * (window[-1][0] - window[0][0]))
+    if not slopes:
+        return SlopeResult(metric, 0, 0.0, 0.0, 0.0, bound.per_hour, bound.floor, bound.unit, "inconclusive",
+                           f"no process has {min_samples} samples after its {warmup_seconds:.0f}s warm-up")
+    slopes.sort()
+    rises.sort()
+    median_slope, median_rise = statistics.median(slopes), statistics.median(rises)
+    detail = (f"median slope {median_slope:.1f}/h and rise {median_rise:.1f} per process over {len(slopes)} of {len(series)} processes "
+              f"(bound {bound.per_hour:.1f}/h above {bound.floor:.1f}; slowest {slopes[0]:.1f}/h, fastest {slopes[-1]:.1f}/h)")
+    grows = median_slope > bound.per_hour and median_rise > bound.floor
+    return SlopeResult(metric, len(slopes), 0.0, median_slope, median_rise, bound.per_hour, bound.floor, bound.unit, "fail" if grows else "pass", detail)
+
+
+def check_ceiling(metric: str, points: Sequence[tuple[float, float]], ceiling: float, unit: str) -> SlopeResult:
+    """The largest sample against ``ceiling``; the warm-up is included."""
+    if not points:
+        return SlopeResult(f"{metric} ceiling", 0, 0.0, 0.0, 0.0, 0.0, ceiling, unit, "inconclusive", "no samples")
+    peak_time, peak = max(points, key=lambda point: point[1])
+    return SlopeResult(f"{metric} ceiling", len(points), points[-1][0] - points[0][0], 0.0, 0.0, 0.0, ceiling, unit,
+                       "fail" if peak > ceiling else "pass", f"peak {peak:.0f} {unit} at {peak_time:.0f}s (ceiling {ceiling:.0f})")
 
 
 def check_database_explained_by_rows(samples: Sequence[dict[str, Any]], *, base: int = DB_BASE_BYTES, per_row: int = DB_BYTES_PER_ROW) -> list[str]:
@@ -989,8 +1043,8 @@ class Sampler:
     def take(self) -> dict[str, Any]:
         elapsed = self.clock() - self._origin
         coordinator = self.coordinator.stats() or {}
-        workers = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0}
-        controllers = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0}
+        workers = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0}
+        controllers: dict[str, Any] = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0, "by_pid": {}}
         tasks: Counter[str] = Counter()
         nodes = list(self.nodes())
         by_runtime = scan_controllers([node.runtime for node in nodes])
@@ -1000,12 +1054,15 @@ class Sampler:
                 workers["running"] += 1
                 for key in ("rss_kib", "fds", "threads"):
                     workers[key] += stats[key]
+                workers["max_rss_kib"] = max(workers["max_rss_kib"], stats["rss_kib"])
             for pid in by_runtime.get(str(node.runtime), []):
                 stats = proc_stats(pid)
                 if stats:
                     controllers["running"] += 1
                     for key in ("rss_kib", "fds", "threads"):
                         controllers[key] += stats[key]
+                    controllers["max_rss_kib"] = max(controllers["max_rss_kib"], stats["rss_kib"])
+                    controllers["by_pid"][str(pid)] = stats["rss_kib"]
             tasks.update(node.task_statuses())
         diagnostics = {}
         with contextlib.suppress(Exception):
@@ -1044,12 +1101,17 @@ def metric_value(sample: dict[str, Any], metric: str) -> float | None:
         "coordinator_db_bytes": sample.get("db_bytes"), "workers_rss_kib": workers.get("rss_kib"), "workers_fds": workers.get("fds"),
         "workers_threads": workers.get("threads"),
         "controllers_rss_kib": controllers.get("rss_kib"), "controllers_fds": controllers.get("fds"),
+        "controllers_max_rss_kib": controllers.get("max_rss_kib"), "workers_max_rss_kib": workers.get("max_rss_kib"),
     }
     value = table.get(metric)
     return None if value is None else float(value)
 
 
-def evaluate_resources(samples: list[dict[str, Any]], bounds: dict[str, SlopeBound], *, warmup_fraction: float = 0.25, min_samples: int = 4) -> list[SlopeResult]:
+def evaluate_resources(samples: list[dict[str, Any]], bounds: dict[str, SlopeBound], *, warmup_fraction: float = 0.25, min_samples: int = 4,
+                       warmup_seconds: float | None = None, ceilings: dict[str, tuple[float, str]] | None = None,
+                       process_bounds: dict[str, SlopeBound] | None = None) -> list[SlopeResult]:
+    """Slope and ceiling checks. ``process_bounds`` holds the unscaled bound of ``controllers_rss_kib``: when the samples carry
+    the per-process sizes of the controllers, that metric is judged per process (``check_per_process_slope``), not on the sum."""
     results = []
     rows = [(float(s["t"]), float(sum((s.get("rows") or {}).values()))) for s in samples]
 
@@ -1059,10 +1121,27 @@ def evaluate_resources(samples: list[dict[str, Any]], bounds: dict[str, SlopeBou
     def database_growth_explained_by_rows(first: float, last: float) -> float:
         return max(0.0, rows_at(last) - rows_at(first)) * DB_BYTES_PER_ROW
 
+    def coordinator_memory_explained_by_rows(first: float, last: float) -> float:
+        return max(0.0, rows_at(last) - rows_at(first)) * COORDINATOR_RSS_BYTES_PER_ROW / 1024.0
+
+    controllers_by_pid: dict[str, list[tuple[float, float]]] = {}
+    for sample in samples:
+        for pid, kib in ((sample.get("controllers") or {}).get("by_pid") or {}).items():
+            controllers_by_pid.setdefault(str(pid), []).append((float(sample["t"]), float(kib)))
+
     for metric, bound in bounds.items():
+        if metric == "controllers_rss_kib" and controllers_by_pid and process_bounds and metric in process_bounds:
+            results.append(check_per_process_slope(metric, controllers_by_pid, process_bounds[metric],
+                                                   warmup_seconds=warmup_seconds if warmup_seconds is not None else 0.0, min_samples=min_samples))
+            continue
         points = [(float(s["t"]), float(v)) for s in samples if (v := metric_value(s, metric)) is not None]
-        explained = database_growth_explained_by_rows if metric == "coordinator_db_bytes" else None
-        results.append(check_slope(metric, points, bound, warmup_fraction=warmup_fraction, min_samples=min_samples, explained=explained))
+        explained = (database_growth_explained_by_rows if metric == "coordinator_db_bytes"
+                     else coordinator_memory_explained_by_rows if metric == "coordinator_rss_kib" else None)
+        results.append(check_slope(metric, points, bound, warmup_fraction=warmup_fraction, min_samples=min_samples, explained=explained,
+                                   warmup_seconds=warmup_seconds))
+    for metric, (ceiling, unit) in (ceilings if ceilings is not None else DEFAULT_CEILINGS).items():
+        points = [(float(s["t"]), float(v)) for s in samples if (v := metric_value(s, metric)) is not None]
+        results.append(check_ceiling(metric, points, ceiling, unit))
     return results
 
 

@@ -11,8 +11,10 @@ Pass criteria (each is a line of the report, and any failure gives exit status 1
   ``applied`` effect exists exactly once in the worker database, and no effect exists for a command
   that did not apply (``dist_harness.verify_exactly_once``);
 * no unbounded growth of coordinator memory, file descriptors, threads or database size, and of the
-  workers' memory, descriptors and threads: the least-squares slope after warm-up is compared with
-  ``dist_harness.DEFAULT_BOUNDS``; the database must also be explained by its row count;
+  workers' memory, descriptors and threads: the least-squares slope after warm-up (``--warmup-seconds``,
+  20 minutes by default) is compared with ``dist_harness.DEFAULT_BOUNDS``, the controllers one process at a
+  time; the database must also be explained by its row count; no single controller, worker or coordinator
+  may pass the memory ceilings of ``dist_harness.DEFAULT_CEILINGS``;
 * p99 API latency inside the budgets of ``dist_harness.DEFAULT_LATENCY_BUDGET_MS``;
 * the coordinator process survived without a panic, and every worker is online at the end.
 
@@ -44,6 +46,8 @@ EXIT_FAILED = 1
 EXIT_USAGE = 2
 EXIT_NO_BINARY = 3
 MIN_SAMPLES_AFTER_WARMUP = 4
+WARMUP_SECONDS = 1200.0  # memory of controllers, workers and the coordinator is settled 20 minutes after the start (soak-and-chaos.md)
+WARMUP_MAX_SHARE = 2 / 3  # a short run cannot ignore more than two thirds of itself
 
 # Items that need features which are not on this branch (PR #31); each names what it expects.
 PHASE_B: list[dict[str, str]] = [
@@ -52,6 +56,11 @@ PHASE_B: list[dict[str, str]] = [
     {"id": "worker-command-backlog", "todo": "TODO(phase B): sample per-worker unfinished command counts from GET /api/v1/workers (expected field "
      "`queue_depth`) so a growing backlog is a metric, not only the final `unfinished` check."},
 ]
+
+
+def effective_warmup(duration: float, fraction: float, seconds: float) -> float:
+    """Seconds of the run that the slope fit ignores: ``seconds`` capped at two thirds of the run, and at least ``fraction`` of it."""
+    return max(duration * fraction, min(seconds, duration * WARMUP_MAX_SHARE))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -69,7 +78,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--provider-speed", type=float, default=0.1, help="multiplier for the fake provider delays; 0.1 makes one task take about 16 s (default: 0.1)")
     parser.add_argument("--limit-every", type=float, default=240.0, help="seconds between injected capacity limits per worker; 0 disables (default: 240)")
     parser.add_argument("--limit-seconds", type=float, default=20.0, help="how long an injected capacity limit lasts (default: 20)")
-    parser.add_argument("--warmup-fraction", type=float, default=0.25, help="share of the samples ignored by the slope fit (default: 0.25)")
+    parser.add_argument("--warmup-fraction", type=float, default=0.25, help="smallest share of the run ignored by the slope fit (default: 0.25)")
+    parser.add_argument("--warmup-seconds", type=float, default=WARMUP_SECONDS,
+                        help=f"seconds ignored by the slope fit, at most two thirds of the run (default: {WARMUP_SECONDS:g}, the time memory takes to settle; see soak-and-chaos.md)")
     parser.add_argument("--settle-seconds", type=float, default=120.0, help="time allowed for outstanding commands to finish after the load stops")
     parser.add_argument("--p99-read-ms", type=float, default=h.DEFAULT_LATENCY_BUDGET_MS["read"])
     parser.add_argument("--p99-submit-ms", type=float, default=h.DEFAULT_LATENCY_BUDGET_MS["submit"])
@@ -88,7 +99,7 @@ def validate(args: argparse.Namespace) -> str | None:
         return "--missions must be at least --workers (every worker needs a mission) and --workers at least 1"
     if args.sample_seconds <= 0 or args.duration <= 0:
         return "--duration and --sample-seconds must be positive"
-    usable = args.duration / args.sample_seconds * (1 - args.warmup_fraction)
+    usable = (args.duration - effective_warmup(args.duration, args.warmup_fraction, args.warmup_seconds)) / args.sample_seconds
     if usable < MIN_SAMPLES_AFTER_WARMUP:
         return (f"{args.duration:g}s with a sample every {args.sample_seconds:g}s leaves {usable:.1f} samples after warm-up; "
                 f"the slope check needs {MIN_SAMPLES_AFTER_WARMUP}. Lower --sample-seconds or raise --duration")
@@ -264,7 +275,9 @@ class Soak:
         chosen = {metric: h.SlopeBound(getattr(args, f"bound_{metric}"), bound.floor, bound.unit, bound.per_process)
                   for metric, bound in h.DEFAULT_BOUNDS.items()}
         bounds = h.scale_bounds(chosen, workers=len(self.nodes), controllers=len(self.mission_nodes))
-        slopes = h.evaluate_resources(self.sampler.samples, bounds, warmup_fraction=args.warmup_fraction, min_samples=MIN_SAMPLES_AFTER_WARMUP)
+        warmup = effective_warmup(args.duration, args.warmup_fraction, args.warmup_seconds)
+        slopes = h.evaluate_resources(self.sampler.samples, bounds, warmup_fraction=args.warmup_fraction, min_samples=MIN_SAMPLES_AFTER_WARMUP,
+                                      warmup_seconds=warmup, process_bounds=chosen)
         explained = h.check_database_explained_by_rows(self.sampler.samples)
         events_cap = len(self.nodes) * h.MAX_EVENTS_PER_WORKER
         max_events = max((int((s.get("rows") or {}).get("events", 0)) for s in self.sampler.samples), default=0)
@@ -285,7 +298,7 @@ class Soak:
             {"check": "commands exactly once", "verdict": "pass" if verification.ok else "fail",
              "detail": f"{verification.issued} issued, {verification.accepted} accepted, outcomes {dict(verification.outcomes)}, "
                        f"{len(verification.violations)} violations, {len(verification.unfinished)} unfinished, {len(verification.uncertain)} uncertain"},
-            *[{"check": f"slope {item.metric}", "verdict": item.verdict, "detail": item.detail} for item in slopes],
+            *[{"check": item.metric if item.metric.endswith(" ceiling") else f"slope {item.metric}", "verdict": item.verdict, "detail": item.detail} for item in slopes],
             {"check": "database explained by rows", "verdict": "fail" if explained else "pass", "detail": "; ".join(explained[:3]) or "ok"},
             {"check": "events within retention cap", "verdict": "fail" if max_events > events_cap else "pass", "detail": f"max {max_events}, cap {events_cap}"},
             *[{"check": f"p99 latency {item['class']}", "verdict": item["verdict"],
