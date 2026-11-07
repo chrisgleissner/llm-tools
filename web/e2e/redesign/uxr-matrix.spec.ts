@@ -159,6 +159,7 @@ for (const def of PAGES) {
     await page.locator(def.ready).first().waitFor();
     const found: string[] = await axeViolations(page, `${def.id} page`);
     await page.keyboard.press("Control+k");
+    await page.getByRole("dialog").waitFor({ timeout: 10_000 }).catch(() => undefined); // the palette is a lazy chunk
     if (await page.getByRole("dialog").isVisible().catch(() => false)) { found.push(...(await axeViolations(page, `${def.id} palette`))); await page.keyboard.press("Escape"); }
     if (def.id === "inbox" || def.id === "mission") {
       const approve = page.locator('[data-action="approve"]').first();
