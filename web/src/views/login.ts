@@ -9,6 +9,7 @@ export type NoticeKind = "expired" | "signed-out" | "changed" | "info";
 export interface LoginOpts {
   setupRequired: boolean;
   passkeySignInAvailable?: boolean;
+  passkeyCanonicalOrigin?: string | null;
   policy?: api.PasswordPolicy;
   sessionPolicy?: api.AuthState["session_policy"];
   notice?: { kind: NoticeKind; text: string } | null;
@@ -80,6 +81,22 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     : "Leave this off on a shared computer.";
   const submit = h("button", { type: "submit", class: "btn primary", id: "login-submit" }, "Sign in");
   const passkey = h("button", { type: "button", class: "btn", id: "passkey-login", hidden: true }, "Sign in with a passkey");
+  let canonicalLink: HTMLElement | null = null;
+  if (!opts.passkeySignInAvailable && opts.passkeyCanonicalOrigin) {
+    try {
+      const canonical = new URL(opts.passkeyCanonicalOrigin);
+      if (canonical.protocol === "https:" && canonical.origin !== window.location.origin) {
+        canonicalLink = h(
+          "p",
+          { class: "hint", id: "passkey-canonical-link" },
+          "Passkeys are available at ",
+          h("a", { href: canonical.origin }, "the canonical coordinator address"),
+        );
+      }
+    } catch {
+      // Ignore an invalid origin; the password form remains available.
+    }
+  }
   const form = h(
     "form",
     { class: "card auth-card", id: "login-form", novalidate: true },
@@ -93,6 +110,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     error,
     progress,
     h("div", { class: "actions login-actions" }, passkey, submit),
+    canonicalLink,
   );
   remember.setAttribute("aria-describedby", "remember-hint");
   let timer = 0;

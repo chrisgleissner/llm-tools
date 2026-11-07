@@ -15,6 +15,7 @@ export interface MockOptions {
   setup?: "ok" | "bad-token";
   /** Report that one or more passkeys are enrolled on the canonical origin. */
   passkeySignInAvailable?: boolean;
+  passkeyCanonicalOrigin?: string | null;
   /** Return discoverable-only assertion options so conditional UI can be exercised. */
   passkeyDiscoverable?: boolean;
   workers?: "none" | "some";
@@ -157,7 +158,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/auth/state") {
       if (auth === "in")
         return json(route, 200, { setup_required: false, authenticated: true, csrf_token: "csrf", password_policy: POLICY, session_policy: SESSION_POLICY, username: "admin", session: { remember: opts.sessionRemembered ?? false, expires_at: nowS + 43200 - 600, idle_timeout_secs: opts.sessionRemembered ? 28800 : 7200 } });
-      return json(route, 200, { setup_required: auth === "setup", authenticated: false, passkey_sign_in_available: opts.passkeySignInAvailable ?? false, password_policy: POLICY, session_policy: SESSION_POLICY });
+      return json(route, 200, { setup_required: auth === "setup", authenticated: false, passkey_sign_in_available: opts.passkeySignInAvailable ?? false, passkey_canonical_origin: opts.passkeyCanonicalOrigin ?? null, password_policy: POLICY, session_policy: SESSION_POLICY });
     }
     if (path === "/auth/login") {
       if (opts.login === "wrong") return json(route, 401, { error: { code: "invalid-credentials", message: "invalid username or password" } });

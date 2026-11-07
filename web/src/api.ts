@@ -120,6 +120,7 @@ export interface AuthState {
   setup_required: boolean;
   authenticated: boolean;
   passkey_sign_in_available?: boolean;
+  passkey_canonical_origin?: string | null;
   csrf_token?: string;
   password_policy?: PasswordPolicy;
   session_policy?: { remembered: { idle_secs: number; absolute_secs: number }; default: { idle_secs: number; absolute_secs: number } };

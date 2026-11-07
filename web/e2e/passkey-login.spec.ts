@@ -95,3 +95,15 @@ test("no passkey control appears when browser WebAuthn support is unavailable", 
   await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
 });
+
+test("another hostname keeps password sign-in and links to the canonical passkey address", async ({ page }) => {
+  await installPasskeySupport(page);
+  await mockApp(page, { auth: "login", passkeySignInAvailable: false, passkeyCanonicalOrigin: "https://bridge.example.test:8443" });
+  await page.goto("/login");
+
+  await expect(page.getByRole("button", { name: "Sign in with a passkey" })).toBeHidden();
+  await expect(page.getByLabel("Username", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
+  await expect(page.locator("#passkey-canonical-link")).toContainText("Passkeys are available at");
+  await expect(page.locator("#passkey-canonical-link a")).toHaveAttribute("href", "https://bridge.example.test:8443");
+});
