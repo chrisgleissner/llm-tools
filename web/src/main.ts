@@ -7,7 +7,7 @@ import { ensureRouteCss, withCss } from "./route-css";
 import { ensureXtermCss } from "./xterm-css";
 import type { NoticeKind } from "./views/login";
 import { missions } from "./views/missions";
-import { overview } from "./views/overview";
+import { inbox } from "./views/inbox";
 
 // Routes that are not part of the first load: each is a separate chunk fetched when the route is first opened (spec 11.4, budget D18).
 const loadMission = withCss("mission", () => import("./views/mission"));
@@ -157,7 +157,7 @@ async function route(): Promise<void> {
   const signedOut = () => toLogin({ kind: "changed", text: "Password changed. Every session was signed out. Sign in with the new password." });
   if (m) void ensureXtermCss();
   try {
-    if (path === "/") cleanup = overview(main);
+    if (path === "/") cleanup = inbox(main);
     else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
     else if (m && m[1] && m[2]) cleanup = await lazyView(main, generation, loadMission, (v) => v.missionDetail(main, decodeURIComponent(m[1] as string), decodeURIComponent(m[2] as string)));
     else if (path === "/workers") cleanup = await lazyView(main, generation, loadWorkers, (v) => v.workers(main));

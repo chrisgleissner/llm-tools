@@ -78,7 +78,7 @@ test.describe("first-run registration", () => {
     await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
     await page.getByLabel("Repeat password").fill(PASSWORD);
     await page.getByRole("button", { name: "Create administrator" }).click();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
     const elapsedMs = Date.now() - started;
     if (browserName === "chromium") console.log(`UX task first sign-in: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${elapsedMs} ms`);
     await expect(page.locator(".toast.applied")).toContainText("Setup complete. You are signed in as operator");
@@ -106,7 +106,7 @@ test.describe("sign-in", () => {
     await expect(progress).toHaveText("Signing in…");
     await expect(progress).toHaveAttribute("aria-live", "polite");
     await expect(page.getByRole("button", { name: "Signing in…" })).toBeDisabled();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
   });
 
   test("wrong credentials give the same message for a wrong password and an unknown user", async ({ page, coord }) => {
@@ -209,7 +209,7 @@ test.describe("sign-in", () => {
     await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await expect(page.getByLabel("Remember this device")).not.toBeChecked();
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
     expect((await cookie())?.expires).toBe(-1);
     await navTo(page, "Account");
     await expect(page.locator("#acct-session").locator("..")).toContainText("Not remembered");
@@ -220,7 +220,7 @@ test.describe("sign-in", () => {
     await page.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await page.getByLabel("Remember this device").check();
     await page.getByRole("button", { name: "Sign in" }).click();
-    await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
     const days = ((await cookie())?.expires ?? 0) - Date.now() / 1000;
     expect(days).toBeGreaterThan(6.9 * 86400);
     expect(days).toBeLessThan(7.1 * 86400);

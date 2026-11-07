@@ -78,24 +78,22 @@ test.describe("keyboard shortcuts", () => {
 test.describe("with a seeded worker", () => {
   test.skip(!havePython, "repo .venv python is missing");
 
-  test("overview shows live counts, attention items and recent activity; missions can be searched, filtered, sorted and paged", async ({ page, coord, browserName, isMobile }) => {
+  test("the Inbox lists what needs the operator with its actions; missions can be searched, filtered and sorted", async ({ page, coord, browserName, isMobile }) => {
     const w = await startSeededWorker(coord, { missions: 30 });
     try {
       await setupViaUi(page, coord);
-      await expect(page.locator('[data-tile="workers-online"] .tile-value')).toHaveText("1/1", { timeout: 20_000 });
-      await expect(page.locator('[data-tile="missions-running"] .tile-value')).toHaveText("1");
-      // Attention: a task waits for approval, one failed, one blocked, and a mission failed.
-      const attention = page.locator("#attention");
-      await expect(attention.locator('[data-attention="approval"]')).toContainText("1 task waiting for approval", { timeout: 45_000 });
-      await expect(attention.locator('[data-attention="failed-task"]')).toContainText("1 failed task");
-      await expect(attention.locator('[data-attention="blocked-task"]')).toContainText("1 blocked task");
-      await expect(attention.locator('[data-attention="failed-mission"]')).toContainText("failed");
-      await expect(page.locator('[data-tile="awaiting-approval"] .tile-value')).toHaveText("1");
-      await expect(page.locator('[data-tile="failed-tasks"] .tile-value')).toHaveText("1");
-      await expectAccessible(page, "overview with attention items");
+      // Needs you: a task waits for approval (with Approve and Reject inline) and a mission or task failed.
+      const needs = page.locator('[data-section="needs-you"]');
+      const approvalRow = needs.locator('.mrow[data-state="needs-approval"]');
+      await expect(approvalRow).toHaveCount(1, { timeout: 45_000 });
+      await expect(approvalRow.locator('[data-action="approve"]')).toBeVisible();
+      await expect(approvalRow.locator('[data-action="reject"]')).toBeVisible();
+      await expect(needs.locator('.mrow[data-state="failed"]').first()).toBeVisible();
+      await expect(page.locator('[data-q="need-me"]')).toContainText(/need/);
+      await expectAccessible(page, "inbox with attention items");
       await expectNoHorizontalScroll(page);
 
-      const approvalLink = attention.locator('li[data-attention="mission"]').filter({ hasText: "task waiting for approval" }).getByRole("link");
+      const approvalLink = approvalRow.locator("a.row-title");
       const approvalMission = await approvalLink.getAttribute("href");
       const findStarted = Date.now();
       await approvalLink.click();
@@ -103,40 +101,29 @@ test.describe("with a seeded worker", () => {
       const findElapsedMs = Date.now() - findStarted;
       if (browserName === "chromium") console.log(`UX task find approval: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${findElapsedMs} ms`);
 
-      // Missions: paged (25 per page), searchable, filterable, sortable; the state is in the URL.
+      // Missions: one list (no paging below 500), searchable, filterable by state, sortable; the state is in the URL.
       await navTo(page, "Missions");
-      await expect(page.locator("#missions-table tbody tr")).toHaveCount(25, { timeout: 20_000 });
-      await expect(page.locator(".pager-count")).toHaveText("1-25 of 30");
-      await page.getByRole("button", { name: "Next" }).click();
-      await expect(page.locator("#missions-table tbody tr")).toHaveCount(5);
-      await expect(page).toHaveURL(/page=2/);
-      await page.getByRole("button", { name: "Previous" }).click();
+      const total = page.locator("#missions-total");
+      await expect(total).toHaveText("30 missions", { timeout: 20_000 });
       await page.getByLabel("Search missions").fill("docs sweep 04");
-      await expect(page.locator("#missions-table tbody tr")).toHaveCount(1);
+      await expect(total).toHaveText("1 mission");
       await expect(page.getByLabel("Search missions"), "typing keeps focus while results arrive").toBeFocused();
-      await expect(page.locator("#missions-table tbody tr")).toContainText("Docs sweep 04");
+      await expect(page.locator('[data-entity^="mission:"]:visible')).toContainText("Docs sweep 04");
       await expect(page).toHaveURL(/q=docs/);
       await page.getByLabel("Search missions").fill("zzz-no-such-mission");
       await expect(page.getByRole("heading", { name: "No missions match" })).toBeVisible();
       await page.locator("#clear-filters").click();
-      await expect(page.locator("#missions-table tbody tr")).toHaveCount(25);
-      // Status filter chips come with counts.
-      const failedChip = page.locator('#missions-controls [data-status="FAILED"]');
-      await expect(failedChip).toContainText("1");
-      await failedChip.click();
-      await expect(page.locator("#missions-table tbody tr")).toHaveCount(1);
-      await expect(failedChip).toHaveAttribute("aria-pressed", "true");
-      await failedChip.click();
-      // Sorting by name, both directions, through the control and the column header.
+      await expect(total).toHaveText("30 missions");
+      // State filter: the options carry counts; one failed mission.
+      await page.locator("#state-filter").selectOption("failed");
+      await expect(page.locator('[data-entity^="mission:"]:visible .pill[data-state="failed"]').first()).toBeVisible();
+      await expect(page).toHaveURL(/state=failed/);
+      await page.locator("#state-filter").selectOption("");
+      // Sorting by name orders the active rows alphabetically.
       await page.locator("#sort-select").selectOption("name");
-      await expect(page.locator("#missions-table tbody tr").first()).toContainText("Docs sweep 01");
-      await page.locator("#sort-order").click();
-      await expect(page.locator("#missions-table tbody tr").first()).toContainText("Release prep 29");
-      await expect(page.locator('#missions-table th[aria-sort="descending"]')).toHaveCount(1);
-      // Relative and absolute timestamps, and copy buttons for IDs.
-      const first = page.locator("#missions-table tbody tr").first();
-      await expect(first.locator("time .rel")).toHaveText(/ago|just now|never/);
-      await expect(first.locator("time .abs")).toHaveText(/^\d{4}-\d\d-\d\d \d\d:\d\d$/);
+      const names = await page.locator('[data-section="active"] a.row-title').allInnerTexts();
+      expect(names.length).toBeGreaterThan(1);
+      expect(names).toEqual([...names].sort((x, y) => x.localeCompare(y)));
       await expectAccessible(page, "missions list");
 
       expect(approvalMission).toBeTruthy();
@@ -209,15 +196,6 @@ test.describe("with a seeded worker", () => {
 test("mission activity humanizes, filters, and collapses system events", async ({ page }) => {
   const { mockApp, MISSION_PATH } = await import("./mock");
   const mock = await mockApp(page, { auth: "in", terminalClose: true });
-  await page.goto("/");
-  const overviewActivity = page.locator("#activity");
-  await expect(overviewActivity).toContainText("Mission created");
-  await expect(overviewActivity).toContainText("Command queued: task.verify");
-  await expect(overviewActivity).toContainText("Selected codex (gpt-5)");
-  await expect(overviewActivity).not.toContainText("Controller heartbeat");
-  await page.getByRole("button", { name: /Show \d+ system events/ }).click();
-  await expect(overviewActivity).toContainText("controller alive");
-
   await page.goto(MISSION_PATH);
   const events = page.locator("#events-list");
   await expect(events).toContainText("Terminal opened");

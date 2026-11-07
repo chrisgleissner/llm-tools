@@ -1,30 +1,65 @@
-/* Legacy Overview rules (tiles, attention list, running list), deleted by WP-4 when the Inbox replaces the page. */
-.tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); }
-@media (min-width: 720px) { .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-2); padding: var(--sp-3) var(--sp-4); text-decoration: none; color: var(--text); display: block; }
-@media (hover: hover) { a.tile:hover { border-color: var(--accent); } }
-.tile-value { font-size: var(--fs-display); font-weight: 700; line-height: 1.2; }
-.tile-label { font-weight: 600; font-size: var(--fs-md); }
-.tile.warn .tile-value { color: var(--alert-attention-fg); }
-.tile.bad .tile-value { color: var(--danger); }
-.grid-2 { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); }
+/* Inbox page (spec 8.3) and the MissionRow component it shares with the Missions page (rows.ts). */
+.page-title { margin-block: var(--sp-2) var(--sp-1); }
+.answer { display: flex; flex-wrap: wrap; margin: 0 0 var(--sp-3); color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.answer > span:empty { display: none; }
+.answer > [data-q="need-me"] { color: var(--text); font-weight: 600; }
+.answer > span:not(:last-child):not(:empty)::after { content: "\00b7"; margin-inline: var(--sp-2); }
+.page-state:empty, .more:empty { display: none; }
+.section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-1) var(--sp-3); margin-block: var(--sp-3) var(--sp-1); }
+.section-head h2 { margin: 0; font-size: var(--fs-lg); line-height: var(--lh-lg); }
+.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); container-type: inline-size; }
+.quiet { margin-block: var(--sp-4); }
+
+/* MissionRow: pill, title, reason or cells, inline actions, menu. The layout follows the width of the list, not the device. */
+.mrow {
+  display: grid; align-items: center; column-gap: var(--sp-3); padding: 4px var(--sp-3);
+  grid-template-columns: 11rem minmax(0, 1fr) auto auto; grid-template-areas: "pill title actions menu" "pill sub actions menu";
+  background: var(--surface-1); border: 1px solid var(--border); border-inline-start: 3px solid var(--border); border-radius: var(--r-2);
+}
+.mrow[data-layout="cells"] { grid-template-areas: "pill title sub menu"; padding-block: 3px; }
+.mrow[data-tier="alert"] { border-inline-start-color: var(--alert-attention-bar); }
+.mrow[data-state="failed"] { border-inline-start-color: var(--alert-failed-bar); }
+.mrow.selected { background: var(--accent-tint); }
+.mrow > .pill { grid-area: pill; justify-self: start; }
+.row-title { grid-area: title; display: flex; align-items: center; min-block-size: var(--target); min-inline-size: 0; color: var(--text); font-weight: 500; text-decoration: none; }
+@media (hover: hover) { .row-title:hover { text-decoration: underline; } }
+.row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.row-reason { flex: 1 1 14rem; min-inline-size: 0; }
+.row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
+.row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }
+.row-cells { flex-wrap: nowrap; gap: var(--sp-4); }
+.row-cells .cell:nth-child(2), .row-cells .cell:nth-child(3) { min-inline-size: 7rem; }
+.row-cells .cell:first-child, .row-cells .cell:last-child { min-inline-size: 3rem; }
+.row-actions { grid-area: actions; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--sp-2); }
+.row-menu { grid-area: menu; }
+/* From 60rem an Inbox row is one line: pill, title, reason and age, actions, menu. */
+@container (min-width: 60rem) {
+  .mrow[data-layout="stack"] { grid-template-columns: 11rem minmax(0, 1fr) minmax(0, 1.1fr) auto auto; grid-template-areas: "pill title sub actions menu"; }
+}
+/* Below 36rem the title shares the first line with the pill (Missions) or gets its own full-width line (Inbox). */
+@container (max-width: 36rem) {
+  .mrow, .mrow[data-layout="cells"] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "pill title menu" "sub sub menu" "actions actions actions"; padding-block: 4px; }
+  .mrow > .pill { block-size: 24px; }
+  .mrow[data-layout="cells"] { padding-block: 1px; }
+  .mrow[data-layout="stack"] { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "pill menu" "title title" "sub sub"; }
+  .mrow.has-actions { grid-template-areas: "pill pill" "title title" "sub sub" "actions menu"; }
+  .row-actions { justify-content: flex-start; }
+  .row-cells { flex-wrap: wrap; gap: 0 var(--sp-2); }
+  .row-cells .cell { min-inline-size: 0 !important; }
+  .row-cells .cell:empty { display: none; }
+  .row-cells .cell:not(:empty) ~ .cell:not(:empty)::before { content: "\00b7"; margin-inline-end: var(--sp-2); }
+}
+
+/* Preview of the selected row, only when the list column leaves room (container 70rem and wider); no second terminal is opened. */
+.inbox-layout { container: inbox / inline-size; }
+.inbox-grid { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); }
+.inbox-preview { display: none; }
+@container inbox (min-width: 70rem) {
+  .inbox-grid { grid-template-columns: minmax(0, 1fr) minmax(18rem, 26rem); }
+  .inbox-preview { display: block; position: sticky; inset-block-start: calc(var(--head-h) + var(--sp-3)); align-self: start; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-3) var(--sp-4); margin-block-start: var(--sp-3); }
+  .inbox-preview h2 { margin-block-start: 0; }
+}
+.inbox-preview pre { max-block-size: 22rem; overflow: auto; font: var(--fs-xs)/var(--lh-xs) var(--mono); }
+
+.grid-2 { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); } /* used by the Account page until WP-5 replaces it */
 @media (min-width: 960px) { .grid-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
-.attention { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--sp-2); }
-.attention li { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--r-2); background: var(--surface-1); min-height: var(--control-h); }
-.attention-details { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-1); min-width: 0; }
-.attention-details > span[data-attention] { display: inline-block; padding-right: var(--sp-1); }
-.attention li.warn { border-left-color: var(--alert-attention-fg); }
-.attention li.bad { border-left-color: var(--danger); }
-.attention li.ok { border-left-color: var(--icon-done); }
-.attention li > .icon { color: var(--text-muted); }
-.attention li .grow { flex: 1 1 auto; min-width: 0; }
-.timeline { list-style: none; margin: 0; padding: 0; }
-.timeline li { padding: var(--sp-3) 0; border-bottom: 1px solid var(--border); }
-.timeline li:last-child { border-bottom: 0; }
-.running-list { list-style: none; display: grid; gap: var(--sp-2); padding: 0; }
-.running-list li { display: flex; align-items: baseline; gap: var(--sp-2); min-width: 0; }
-.running-list li > a { flex: none; }
-.running-list li > .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.activity-dot { flex: none; inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--icon-running); }
-.now-doing { display: flex; align-items: baseline; gap: var(--sp-2); color: var(--text-muted); font-size: var(--fs-md); font-weight: 400; }
-.mission-needs-you { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-2); color: var(--alert-attention-fg); font-size: var(--fs-md); font-weight: 600; white-space: normal; }

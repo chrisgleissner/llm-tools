@@ -65,7 +65,7 @@ test.describe("with a connected worker", () => {
       const link = page.getByRole("link", { name: "Browser E2E mission" });
       await expect(link).toBeVisible({ timeout: 20_000 });
       await expect(link).toHaveAttribute("href", `/missions/e2e-worker/${fake.missionId}`);
-      const row = page.locator("#missions-table tbody tr").first();
+      const row = page.locator('[data-entity^="mission:"]').first();
       await expect(row).toContainText("e2e-worker");
       await expect(row.locator('.pill[data-state="offline"]')).toHaveCount(0);
       await expect(row).not.toContainText(/stale/i);
@@ -115,7 +115,7 @@ test.describe("with a connected worker", () => {
       await navTo(page, "Workers");
       await expect(page.locator('tr[data-worker="e2e-worker"] .pill[data-state="offline"]')).toHaveText("Offline");
       await navTo(page, "Missions");
-      await expect(page.locator('#missions-table .pill[data-state="offline"]')).toBeVisible();
+      await expect(page.locator('[data-entity^="mission:"] .pill[data-state="offline"]')).toBeVisible();
     } finally {
       fake.cleanup();
     }
