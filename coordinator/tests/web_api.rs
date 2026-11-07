@@ -1173,11 +1173,7 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut worker, _) = Fw::connect(&env, &token, "etag-worker", 0).await;
-    // The coordinator redelivers every unfinished command after the welcome. A command submitted
-    // before that pass finishes is delivered both by the live queue and by the pass (documented
-    // at-least-once delivery), so wait until the connection is past it.
-    worker.barrier().await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "etag-worker", 0).await;
     let read_api = Api {
         c: api.c.clone(),
         base: api.base.clone(),
@@ -1239,11 +1235,7 @@ async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
     let env = boot().await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    let (mut worker, _) = Fw::connect(&env, &token, "cursor-worker", 0).await;
-    // The coordinator redelivers every unfinished command after the welcome. A command submitted
-    // before that pass finishes is delivered both by the live queue and by the pass (documented
-    // at-least-once delivery), so wait until the connection is past it.
-    worker.barrier().await;
+    let (mut worker, _) = Fw::connect_settled(&env, &token, "cursor-worker", 0).await;
 
     let filters = "worker=w1;mission=m1;resource=tasks;limit=1";
     let cursor = bridge_coordinator::cursor::issue(&env.srv.state.cursor_key, "missions/tasks", filters, 3);
