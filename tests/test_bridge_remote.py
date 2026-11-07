@@ -114,13 +114,18 @@ def test_login_status_logout(state, tmp_path, capsys):
         (["worker", "audit"], "worker.audit", {"limit": 50}),
         (["gc"], "worker.gc", {}),
         (["status", "--mission", "m1"], "mission.status", {}),
-        (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100}),
+        (["events", "--mission", "m1", "--after", "3"], "mission.events", {"after": 3, "limit": 100, "hide_bookkeeping": True}),
         (["stop", "--mission", "m1"], "mission.stop", {"force": False}),
         (["stop", "--mission", "m1", "--force"], "mission.stop", {"force": True}),
-        (["start", "--mission", "m1", "--headless", "--providers", "codex"], "mission.start", {"headless": True, "native_tui": None, "providers": "codex", "routes": None}),
+        (["start", "--mission", "m1", "--headless", "--providers", "codex"], "mission.start", {"headless": True, "native_tui": False, "providers": "codex", "routes": None}),
         (["suspend-until-credits", "--mission", "m1"], "mission.suspend_until_credits", {}),
         (["restore", "--input", "/tmp/backup.db"], "worker.restore", {"input": "/tmp/backup.db"}),
         (["resume", "--mission", "m1"], "mission.resume", {}),
+        (["events", "--mission", "m1"], "mission.events", {"limit": 100, "newest": True, "hide_bookkeeping": True}),
+        (["events", "--mission", "m1", "--after", "7", "--since", "10m", "--verbose"], "mission.events", {"limit": 100, "after": 7, "since_seconds": 600}),
+        (["start", "--mission", "m1", "--mode", "native"], "mission.start", {"headless": False, "native_tui": True, "providers": None, "routes": None}),
+        (["task", "reject", "--mission", "m1", "--task", "2", "--reason", "no", "--hold"], "task.reject", {"task_number": 2, "reason": "no", "hold": True}),
+        (["task", "amend", "--mission", "m1", "--task", "2", "--prompt", "again", "--requeue"], "task.amend", {"task_number": 2, "prompt": "again", "requeue": True}),
         (["task", "list", "--mission", "m1"], "task.list", {"limit": 200, "offset": 0}),
         (["task", "list", "--mission", "m1", "--all"], "task.list", {"limit": 200, "offset": 0, "all": True}),
         (["task", "show", "--mission", "m1", "--task-id", "4"], "task.show", {"task_id": 4}),
@@ -147,6 +152,28 @@ def test_create_maps_trust_folder_and_names_unsupported_local_options():
     request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--trust-folder", "--include-config", "--verifier-arg", "true"), "ws")
     assert request.params["trust_folder"] is True
     assert request.params["unsupported_options"] == ["--include-config", "--verifier-arg"]
+
+
+def test_create_maps_the_run_mode_and_refuses_the_local_only_verifier_forms():
+    request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--mode", "native"), "ws")
+    assert (request.params["native_tui"], request.params["headless"]) == (True, False)
+    request, _ = remote.request_for(args("mission", "create", "--prompt", "new", "--cwd", ".", "--verifier", "pytest -q"), "ws")
+    assert request.params["unsupported_options"] == ["--verifier"]
+
+
+@pytest.mark.parametrize("argv", [["pause", "--mission", "m1", "--after-task"], ["stop", "--mission", "m1", "--after-task", "2"]])
+def test_after_task_is_refused_remotely_instead_of_acting_now(argv):
+    with pytest.raises(ValueError, match="--after-task is not available remotely"):
+        remote.request_for(args(*argv), "ws")
+
+
+def test_events_filters_use_the_typed_command_route_and_the_task_list_has_no_cursor():
+    routes = {("GET", "/api/v1/missions/m1/tasks"): (200, {"state": "done", "result": {"outcome": "ok", "result": {"tasks": [], "total": 0, "offset": 0, "next_cursor": None}}})}
+    api = client(routes)
+    events, _ = remote.request_for(args("events", "--mission", "m1"), "ws")
+    assert api.submit_resource("ws", events) is None
+    tasks, _ = remote.request_for(args("task", "list", "--mission", "m1"), "ws")
+    assert api.submit_resource("ws", tasks) == {"outcome": "ok", "result": {"tasks": [], "total": 0, "offset": 0}}
 
 
 def test_create_suspend_and_restore_use_resource_endpoints():

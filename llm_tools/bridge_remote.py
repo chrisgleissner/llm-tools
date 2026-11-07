@@ -247,6 +247,8 @@ class Client:
                 query = urllib.parse.urlencode({"worker": target, "limit": params.get("limit", 50), "offset": initial_offset, "wait_ms": wait_ms})
                 status, body = self.call("GET", f"{base}/tasks?{query}", timeout=wait + 15)
         elif op == "mission.events":
+            if {"newest", "since_seconds", "hide_bookkeeping"} & params.keys():
+                return None  # the events resource pages by cursor only; these filters go through the typed command route
             query = urllib.parse.urlencode({"worker": target, "after": params.get("after", 0), "limit": params.get("limit", 50), "wait_ms": wait_ms})
             status, body = self.call("GET", f"{base}/events?{query}", timeout=wait + 15)
         elif op == "session.list":
@@ -293,7 +295,13 @@ class Client:
                 "delivered when the worker reconnects",
                 exit_code=EXIT_UNAVAILABLE,
             )
-        return dict(body["result"])
+        result = dict(body["result"])
+        if op == "task.list":
+            # The coordinator adds a cursor to the command result; the local task list has none (page with --offset and --limit).
+            for page in (result, result.get("result")):
+                if isinstance(page, dict):
+                    page.pop("next_cursor", None)
+        return result
 
 
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
@@ -357,11 +365,32 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
     if command == "status":
         return make("mission.status"), fmt.format_status
     if command == "events":
-        return make("mission.events", {"after": args.after, "limit": args.limit}), lambda value: fmt.format_events(value["events"])
+        if args.follow:
+            raise ValueError("events --follow is not available remotely; run events again to see newer events")
+        # The same request the local command sends: the newest events unless --after names a cursor.
+        params: dict[str, Any] = {"limit": args.limit}
+        if args.after is None:
+            params["newest"] = True
+        else:
+            params["after"] = args.after
+        if args.since:
+            params["since_seconds"] = args.since
+        if not args.verbose:
+            params["hide_bookkeeping"] = True
+        return make("mission.events", params), lambda value: fmt.format_events(
+            value["events"], total=value.get("total"), newest=args.after is None, verbose=args.verbose, after=args.after or 0
+        )
     if command == "mission" and args.mission_action == "list":
         return make("mission.list", {"include_config": bool(args.include_config)}, with_mission=False), lambda value: fmt.format_mission_list(value["missions"])
     if command == "mission" and args.mission_action == "create":
+        from .bridge import _resolve_mode_args
+
+        _resolve_mode_args(args)  # --mode and the older --native/--headless flags become one choice
         unsupported_options: list[str] = []
+        if args.verifier_command is not None:
+            unsupported_options.append("--verifier")
+        if getattr(args, "verifier_after_dashes", None):
+            unsupported_options.append("-- COMMAND")
         if bool(args.auto_continue):
             unsupported_options.append("--auto-continue")
         if args.command_template:
@@ -418,6 +447,9 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         request = commands.CommandRequest("mission.agents", {"mission": args.agent_mission}, mission_id=args.agent_mission, target=target)
         return request, lambda value: "\n".join(__import__("llm_tools.bridge_agents", fromlist=["format_agent_map"]).format_agent_map(value))
     if command == "start":
+        from .bridge import _resolve_mode_args
+
+        _resolve_mode_args(args)
         params = {
             "headless": getattr(args, "headless", None),
             "native_tui": getattr(args, "native_tui", None),
@@ -438,6 +470,8 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
         request = make("mission.resume")
         return request, lambda value: fmt.format_command_receipt("resume", value, request.mission_id or "")
     if command in {"pause", "cancel", "continue", "stop"}:
+        if getattr(args, "after_task", None) not in (None, False):
+            raise ValueError(f"{command} --after-task is not available remotely; it would act now. Run it on the worker, or use steer")
         params = {"force": bool(getattr(args, "force", False))} if command == "stop" else {}
         request = make(f"mission.{command}", params)
         return request, lambda value: fmt.format_command_receipt(command, value, request.mission_id or "")
@@ -497,10 +531,10 @@ def request_for(args: argparse.Namespace, target: str) -> tuple[commands.Command
                 params["depends_on_numbers"] = depends_on
             return make("task.add", params), lambda value: fmt.format_task_result("add", value.get("result") or value)
         extra: dict[str, Any] = {
-            "amend": lambda: {"prompt": _read_text(args)},
+            "amend": lambda: {"prompt": _read_text(args), **({"requeue": True} if args.requeue else {})},
             "verify": lambda: {"evidence": args.evidence, "approved": bool(args.approve)},
             "approve": lambda: {"evidence": args.evidence, "approved": True},
-            "reject": lambda: {"reason": args.reason},
+            "reject": lambda: {"reason": args.reason, **({"hold": True} if args.hold else {})},
             "priority": lambda: {"priority": args.value},
             "reorder": lambda: {"order": args.value},
         }.get(action, lambda: {})()
