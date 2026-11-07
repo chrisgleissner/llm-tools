@@ -641,7 +641,7 @@ def test_main_start_resume_attach_and_detach_entrypoints(tmp_path, monkeypatch) 
 
     class NoopLock:
         def __init__(self, *_args): pass
-        def acquire(self): pass
+        def acquire(self, **_kwargs): pass
         def release(self): pass
 
     monkeypatch.setattr("llm_tools.bridge.MissionLock", NoopLock)
