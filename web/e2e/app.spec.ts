@@ -54,7 +54,7 @@ test("workers added with the CLI are listed as offline", async ({ page, coord })
   await expect(rows).toHaveCount(2);
   for (const name of ["alpha", "beta"]) {
     const row = page.locator(`tr[data-worker="${name}"]`);
-    await expect(row.getByText("offline", { exact: true })).toBeVisible();
+    await expect(row.locator('[data-label="State"]')).toContainText("offline");
     await expect(row).toContainText("never");
   }
   await expectNoHorizontalScroll(page);

@@ -2543,6 +2543,18 @@ mod problem_tests {
             ("sec-fetch-dest".parse().unwrap(), "empty".parse().unwrap()),
         ]);
         assert!(fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &same_origin));
+        let same_origin_module = HeaderMap::from_iter([
+            ("sec-fetch-site".parse().unwrap(), "same-origin".parse().unwrap()),
+            ("sec-fetch-mode".parse().unwrap(), "cors".parse().unwrap()),
+            ("sec-fetch-dest".parse().unwrap(), "script".parse().unwrap()),
+        ]);
+        assert!(fetch_metadata_allowed(&Method::GET, "/chunk-terminal.js", &same_origin_module));
+        let same_origin_style = HeaderMap::from_iter([
+            ("sec-fetch-site".parse().unwrap(), "same-origin".parse().unwrap()),
+            ("sec-fetch-mode".parse().unwrap(), "no-cors".parse().unwrap()),
+            ("sec-fetch-dest".parse().unwrap(), "style".parse().unwrap()),
+        ]);
+        assert!(fetch_metadata_allowed(&Method::GET, "/app.css", &same_origin_style));
         assert!(fetch_metadata_allowed(&Method::GET, "/api/v1/tokens", &HeaderMap::new()));
         let malformed_same_origin = HeaderMap::from_iter([
             ("sec-fetch-site".parse().unwrap(), "same-origin".parse().unwrap()),
@@ -2702,7 +2714,9 @@ fn fetch_metadata_allowed(method: &Method, path: &str, headers: &HeaderMap) -> b
         return false;
     }
     match (mode, dest) {
-        (Some("cors" | "same-origin"), Some("empty")) => true,
+        // Same-origin ES modules use mode=cors and dest=script. Rejecting every
+        // destination except `empty` breaks the lazy terminal bundle.
+        (Some("cors" | "same-origin"), Some("empty" | "script" | "style" | "font" | "image" | "worker" | "sharedworker")) => true,
         (Some("websocket"), Some("empty")) => true,
         (Some("no-cors"), Some("image" | "script" | "style" | "font")) => true,
         (Some("navigate"), Some("document")) => top_level_console_navigation,
