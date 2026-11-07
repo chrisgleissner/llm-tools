@@ -76,6 +76,9 @@ uxr({ t: "T12", uxr: ["UXR-006", "UXR-020"], needs: [...ALL_MISSION_WPS] }, "the
   await page.evaluate(() => { window.scrollTo(0, document.documentElement.scrollHeight); for (const el of document.querySelectorAll<HTMLElement>("*")) if (el.scrollHeight > el.clientHeight + 40 && getComputedStyle(el).overflowY.match(/auto|scroll/)) el.scrollTop = el.scrollHeight; });
   expect(await inView(), "composer in view after scrolling the page and the side column to the end").toBe(true);
   const original = viewport(page);
+  // A keyboard opens for a field that takes typing: the view-only composer is disabled, so take control first.
+  await page.locator('[data-action="take-control"]').click();
+  await expect(composerField(page)).toBeEnabled();
   await openKeyboard(page, 300);
   await composerField(page).focus();
   expect(await inView(), "composer above a 300 px on-screen keyboard").toBe(true);
@@ -219,8 +222,10 @@ for (const kind of STEER_KINDS) {
     const app = await openApp(page, { auth: "in", terminalScreen: true }, MISSION_URL);
     await page.locator('[data-composer] button[aria-haspopup="menu"]').click();
     await page.locator(`[data-steer="${kind}"]`).click();
-    const dialog = page.getByRole("dialog");
-    if (await dialog.isVisible().catch(() => false)) {
+    // Every kind but pause-after-iteration asks what it needs first; the dialog's code is a lazy chunk, so wait for it.
+    if (kind !== "pause-after-iteration") {
+      const dialog = page.getByRole("dialog");
+      await dialog.waitFor();
       const field = dialog.locator("textarea, input[type=text], input:not([type])").first();
       if (await field.isVisible().catch(() => false)) await field.fill("please");
       await dialog.locator("[data-confirm]").click();

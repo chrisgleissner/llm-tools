@@ -43,7 +43,11 @@ for (const def of TEXT_PAGES) {
           const text = (el.textContent ?? "").trim();
           const box = el.getBoundingClientRect();
           if (box.width === 0 || !text) continue;
-          if (/^[\w.:+-]+$/.test(text) && text.length <= 30 && box.height > lineHeight(el) * 1.6) wrapped.push(`"${text}" wraps (${Math.round(box.height)}px high)`);
+          // The height of the text itself, not of the element: a button or chip has a 44px minimum height around one line of text.
+          const textRange = document.createRange();
+          textRange.selectNodeContents(el);
+          const textHeight = textRange.getBoundingClientRect().height;
+          if (/^[\w.:+-]+$/.test(text) && text.length <= 30 && textHeight > lineHeight(el) * 1.6) wrapped.push(`"${text}" wraps (${Math.round(textHeight)}px high)`);
         }
         const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT);
         for (let node = walker.nextNode(); node; node = walker.nextNode()) {

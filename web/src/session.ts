@@ -84,7 +84,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   });
   const element = h(
     "section",
-    { id: "terminal-region", class: "session-pane", "data-pane": "session", "aria-label": "Live session" },
+    { id: "terminal-region", class: "session-pane", "data-pane": "session", "aria-label": "Live session", tabindex: "-1" },
     bar,
     h("div", { class: "session-main" }, host, transcript, jump),
     panNote,
@@ -442,6 +442,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
   return {
     element,
     focusComposer(): void {
+      // The field when it takes typing, else Take control, else (still connecting, or not allowed) the pane itself.
       if (!input.focus()) (element.querySelector<HTMLElement>("#terminal-control:not(:disabled)") ?? element).focus();
     },
     takeControl(): void {

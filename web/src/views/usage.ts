@@ -64,13 +64,13 @@ function meterRow(p: Provider, s: Scope): HTMLElement {
   const label = scopeLabel(s);
   const reset = resetText(s.reset_epoch);
   if (!measured(s)) {
-    return h("div", { class: "mrow" }, h("div", { class: "mhead" }, h("span", { class: "nowrap" }, label), h("strong", { class: "muted" }, "Not measured")), h("div", { class: "mfoot muted small" }, s.guidance ?? "This scope has no percentage.", reset ? " " : null, reset));
+    return h("div", { class: "meter-row" }, h("div", { class: "mhead" }, h("span", { class: "nowrap" }, label), h("strong", { class: "muted" }, "Not measured")), h("div", { class: "mfoot muted small" }, s.guidance ?? "This scope has no percentage.", reset ? " " : null, reset));
   }
   const left = Math.max(0, Math.min(100, s.remaining_percent));
   const text = `${Math.round(left)}% left`;
   const gauge = h("div", { class: "gauge", role: "meter", "aria-label": `${display(p.provider)}, ${label}: capacity left`, "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": Math.round(left), "aria-valuetext": text, "data-low": left <= LOW ? "true" : null }, h("i"));
   (gauge.firstElementChild as HTMLElement).style.setProperty("inline-size", `${left}%`);
-  return h("div", { class: "mrow" }, h("div", { class: "mhead" }, h("span", { class: "nowrap" }, label), h("strong", { class: "num nowrap" }, text)), gauge, h("div", { class: "mfoot muted small" }, reset ?? "No reset time reported"));
+  return h("div", { class: "meter-row" }, h("div", { class: "mhead" }, h("span", { class: "nowrap" }, label), h("strong", { class: "num nowrap" }, text)), gauge, h("div", { class: "mfoot muted small" }, reset ?? "No reset time reported"));
 }
 
 function providerCard(p: Provider, level: "h2" | "h3"): HTMLElement {

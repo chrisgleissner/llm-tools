@@ -169,18 +169,35 @@ export async function reflowProblems(page: Page): Promise<string[]> {
       }
       return false;
     };
+    /** Content of a closed <details> is not rendered, although the elements keep a box: it cannot overlap, be clipped or end the page. */
+    const unrendered = (el: Element): boolean => {
+      for (let d = el.closest("details"); d; d = d.parentElement?.closest("details") ?? null) {
+        const summary = el.closest("summary");
+        if (!d.open && !(summary && summary.parentElement === d)) return true;
+      }
+      return false;
+    };
     if (document.documentElement.scrollWidth > window.innerWidth + 1) out.push(`horizontal scroll: ${document.documentElement.scrollWidth} > ${window.innerWidth}`);
     for (const el of document.querySelectorAll<HTMLElement>("body *")) {
-      if (el.closest(".xterm, pre, [data-scroll-x], .diff, [hidden]") || el.offsetWidth === 0 || visuallyHidden(el)) continue;
+      if (el.closest(".xterm, pre, [data-scroll-x], .diff, [hidden]") || el.offsetWidth === 0 || visuallyHidden(el) || unrendered(el)) continue;
       const s = getComputedStyle(el);
       const clamp = s.getPropertyValue("-webkit-line-clamp");
       const clipsX = s.overflowX !== "visible" && el.scrollWidth > el.clientWidth + 1;
       const clipsY = s.overflowY === "hidden" && el.scrollHeight > el.clientHeight + 1 && (!clamp || clamp === "none");
       if ((clipsX || clipsY) && !el.closest("[title]") && (s.textOverflow === "ellipsis" || clipsY) && (el.textContent ?? "").trim().length > 0) out.push(`clipped without a revealable full text: ${el.tagName.toLowerCase()}.${el.className}`);
     }
-    const fixedAncestor = (e: Element): Element | null => { for (let a: Element | null = e; a && a !== document.body; a = a.parentElement) { const p = getComputedStyle(a).position; if (p === "fixed" || p === "sticky") return a; } return null; };
+    /** A sticky box sticks to its nearest scrolling ancestor: inside a container that clips (overflow hidden or auto) it never sticks to the viewport, so it is not a bar. */
+    const sticksToViewport = (a: Element): boolean => {
+      for (let p = a.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+        const o = getComputedStyle(p);
+        if (o.overflowX !== "visible" || o.overflowY !== "visible") return false;
+      }
+      return true;
+    };
+    const isBar = (a: Element): boolean => { const p = getComputedStyle(a).position; return p === "fixed" || (p === "sticky" && sticksToViewport(a)); };
+    const fixedAncestor = (e: Element): Element | null => { for (let a: Element | null = e; a && a !== document.body; a = a.parentElement) if (isBar(a)) return a; return null; };
     const label = (e: Element) => `${e.tagName.toLowerCase()} "${(e.textContent ?? "").trim().slice(0, 16)}"`;
-    const targets = [...document.querySelectorAll<HTMLElement>("button, a[href], input, select, textarea")].filter((e) => e.offsetWidth > 0 && !e.closest("[hidden], .xterm") && !visuallyHidden(e));
+    const targets = [...document.querySelectorAll<HTMLElement>("button, a[href], input, select, textarea")].filter((e) => e.offsetWidth > 0 && !e.closest("[hidden], .xterm") && !visuallyHidden(e) && !unrendered(e));
     // 1. Targets that scroll with the page must not overlap each other (measured in the page's own flow).
     const flow = targets.filter((e) => !fixedAncestor(e)).map((e) => ({ e, r: e.getBoundingClientRect() }));
     for (let i = 0; i < flow.length; i += 1) for (let j = i + 1; j < flow.length; j += 1) {
@@ -190,7 +207,7 @@ export async function reflowProblems(page: Page): Promise<string[]> {
       if (w > 4 && h > 4) out.push(`overlap: ${label(a.e)} and ${label(b.e)}`);
     }
     // 2. Every scrolling target, centred in the viewport, must not sit under a fixed bar. Covered while scrolled elsewhere is not a failure.
-    const bars = targets.length ? [...document.querySelectorAll<HTMLElement>("body *")].filter((e) => { const p = getComputedStyle(e).position; return (p === "fixed" || p === "sticky") && e.offsetWidth > window.innerWidth * 0.5 && e.offsetHeight > 0 && !e.closest("[hidden], dialog"); }) : [];
+    const bars = targets.length ? [...document.querySelectorAll<HTMLElement>("body *")].filter((e) => { return isBar(e) && e.offsetWidth > window.innerWidth * 0.5 && e.offsetHeight > 0 && !e.closest("[hidden], dialog"); }) : [];
     const barRects = () => bars.map((b) => b.getBoundingClientRect());
     const free = window.innerHeight - barRects().reduce((n, r) => (r.top < window.innerHeight / 2 ? Math.max(n, r.bottom) : n), 0) - barRects().reduce((n, r) => (r.top >= window.innerHeight / 2 ? Math.max(n, window.innerHeight - r.top) : n), 0);
     for (const e of flow.map((f) => f.e)) {
@@ -207,7 +224,7 @@ export async function reflowProblems(page: Page): Promise<string[]> {
     if (bottomBars.length) {
       const barTop = Math.min(...bottomBars.map((r) => r.top));
       const main = document.querySelector("main") ?? document.body;
-      const last = Math.max(0, ...[...main.querySelectorAll<HTMLElement>("*")].filter((e) => e.offsetWidth > 0 && !fixedAncestor(e) && !visuallyHidden(e) && getComputedStyle(e).position !== "absolute").map((e) => e.getBoundingClientRect().bottom));
+      const last = Math.max(0, ...[...main.querySelectorAll<HTMLElement>("*")].filter((e) => e.offsetWidth > 0 && !fixedAncestor(e) && !visuallyHidden(e) && !unrendered(e) && getComputedStyle(e).position !== "absolute").map((e) => e.getBoundingClientRect().bottom));
       if (last > barTop + 1) out.push(`the last element ends at ${Math.round(last)}px, under the bottom bar (top ${Math.round(barTop)}px) even at the end of the page: add bottom padding`);
     }
     window.scrollTo(0, 0);

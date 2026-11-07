@@ -24,7 +24,7 @@
 @media (hover: hover) and (pointer: fine) and (min-width: 60rem) { .keybar { display: none; } }
 /* Full screen: the pane covers the viewport and the navigation chrome is removed. */
 body[data-session-fs] { overflow: hidden; }
-body[data-session-fs] :is(header, nav, aside, footer, .top, .side):not(.session-pane *) { display: none; }
+body[data-session-fs] :is(header, nav, aside, footer, .top, .side, .mission-head, .mission-tabs, .mission-side, .mission-about):not(.session-pane *) { display: none; }
 body[data-session-fs] .session-pane { position: fixed; inset: 0; z-index: 60; block-size: 100svh; border: 0; border-radius: 0; }
 /* Soft keyboard open on a touch device: the pane takes the visible height (--vvh on iOS) below the collapsed header. */
 @media (pointer: coarse), (max-width: 47.99rem) { body[data-kb]:not([data-session-fs]) .session-pane { position: fixed; inset: var(--head-h) 0 auto; z-index: 25; block-size: calc(var(--vvh, 100svh) - var(--head-h)); min-block-size: 0; } }

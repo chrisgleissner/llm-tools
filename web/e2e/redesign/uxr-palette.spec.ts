@@ -67,7 +67,8 @@ uxr({ t: "T25", uxr: ["UXR-021", "UXR-046"], needs: [...NEEDS, "WP-2", "WP-3"] }
   const app = await openApp(page, { auth: "in", dataset: "dense" }, "/missions");
   await page.goto(MISSION_URL);
   await page.keyboard.press("c");
-  await expect(page.locator("[data-composer]").locator("textarea, input").first()).toBeFocused();
+  // The field when it takes typing; while the pane is view-only or connecting, Take control or the pane itself (spec 8.2): focus is inside the session pane either way.
+  await expect.poll(() => page.evaluate(() => Boolean(document.activeElement?.closest('[data-composer], [data-pane="session"]'))), { message: "focus moves into the session pane" }).toBe(true);
   await page.locator("body").click({ position: { x: 2, y: 2 } });
   await page.keyboard.press("p");
   await expect.poll(() => app.operations()).toContain("mission.pause");

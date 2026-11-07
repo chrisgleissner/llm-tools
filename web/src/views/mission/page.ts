@@ -46,6 +46,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   let session: SessionHandle | null = null;
   let sessionMounting = false;
   let sessionKind = "none";
+  let focusWhenMounted = false;
   let headSignature = "";
 
   // ---- derived facts
@@ -273,6 +274,8 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
           sessionKind = "pane";
           sessionSlot.replaceChildren(handle.element);
           handle.setAvailable(online());
+          if (focusWhenMounted) handle.focusComposer();
+          focusWhenMounted = false;
         })
         .catch(() => {
           sessionMounting = false;
@@ -492,9 +495,11 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
 
   // The shell's `c` key: show the session and move focus into it. A pane that cannot take typing yet focuses Take control instead (spec 8.2).
   const onShortcut = (e: Event): void => {
-    if ((e as CustomEvent<{ name: string }>).detail.name !== "compose" || !session) return;
+    if ((e as CustomEvent<{ name: string }>).detail.name !== "compose" || (!session && entry() && NEVER_STARTED.has(status()))) return;
     setTab("session");
-    session.focusComposer();
+    // The pane is a lazy chunk: a key pressed while it loads is answered as soon as it is mounted.
+    if (session) session.focusComposer();
+    else focusWhenMounted = true;
     e.preventDefault();
   };
   document.addEventListener(SHORTCUT_EVENT, onShortcut);

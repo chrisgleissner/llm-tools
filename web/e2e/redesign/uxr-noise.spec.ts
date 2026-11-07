@@ -62,7 +62,7 @@ uxr({ t: "T17", uxr: ["UXR-011"], needs: [...FOUNDATIONS, "WP-3"] }, "one operat
 uxr({ t: "T17", uxr: ["UXR-011"], needs: [...FOUNDATIONS, "WP-3"] }, "toasts: at most two visible (one on a phone), success toasts expire, error toasts stay, none covers a primary control", async ({ page }) => {
   const app = await openApp(page, { auth: "in", dataset: "dense", fakeClock: true }, DENSE_CALM_URL);
   for (const action of ["pause", "resume", "pause", "resume"]) {
-    await page.locator(`[data-action="${action}"]`).click();
+    await page.locator(`.mission-head [data-action="${action}"]`).click(); // the header action, not a task row's Resume
     await page.waitForTimeout(80);
   }
   const limit = isPhone(page) ? 1 : 2;

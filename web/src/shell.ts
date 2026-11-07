@@ -8,8 +8,8 @@ import { icon, type IconName } from "./icons";
 import { menu, type MenuItem } from "./menu";
 import type { PaletteAction } from "./palette";
 import type { DerivedState } from "./state";
-import { itemOf } from "./rows";
-import { store, subscribe } from "./store";
+import { needsYouCount } from "./rows";
+import { missionState, store, subscribe } from "./store";
 import { openPanel, say } from "./ui";
 
 export interface NavItem {
@@ -89,13 +89,13 @@ interface Needing {
   path: string;
   state: DerivedState;
 }
+type Summary = api.MissionInfo & { attention?: api.NeedsYou | null; task_counts?: Record<string, number> | null };
 
 function needing(): Needing[] {
   const out: Needing[] = [];
   for (const m of store.missions) {
-    const info = m.mission;
-    // The same derivation as the Inbox rows, so the badge, the tab title and the Inbox agree wherever the operator is.
-    const state = itemOf(m).state;
+    const info = m.mission as Summary;
+    const state = missionState(m, { needsYou: info.needs_you ?? info.attention ?? null, taskCounts: info.task_counts ?? null });
     if (state.rank <= 2) out.push({ key: `${m.worker}/${info.id}`, name: info.name, path: `/missions/${encodeURIComponent(m.worker)}/${encodeURIComponent(info.id)}`, state });
   }
   return out;
@@ -448,7 +448,9 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   };
   function paintAttention(): void {
     const list = needing();
-    count = countOverride ?? list.length;
+    // The badge and the tab title use the Inbox derivation (it reads the cached status of each mission), so they agree with the Inbox on every page;
+    // what is notified as new comes from the summaries only, so a mission whose status is read later is not announced as new.
+    count = countOverride ?? Math.max(needsYouCount(), list.length);
     needBadge.hidden = count === 0;
     needBadge.replaceChildren(String(count), h("span", { class: "sr-only" }, " need you"));
     syncTitle();

@@ -7,6 +7,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
 import { mockApp, MISSION_PATH, MISSION_START_PATH } from "./mock";
+import { showTab } from "./redesign/harness";
 import { SCREENS } from "./screens";
 import { IN } from "./screens/types";
 import { currentWorkSummary } from "../src/current-work";
@@ -37,9 +38,9 @@ for (const theme of ["light", "dark"] as const) {
 test("Codex queued-question attention opens the mission's live terminal", async ({ page }) => {
   await mockApp(page, { ...IN, providerQuestion: true });
   await page.goto("/");
-  const row = page.locator('[data-attention="provider-wait"]').first();
-  await expect(row).toContainText("Should I continue?");
-  await row.getByRole("link").click();
+  const row = page.locator('[data-section="needs-you"] [data-entity^="mission:"]', { hasText: "Should I continue?" }).first();
+  await expect(row.locator(".pill")).toHaveAttribute("data-state", "needs-input");
+  await row.locator("a.row-title").click();
   await expect(page).toHaveURL(/\/missions\/alpha\//);
   await expect(page.locator("#terminal-control")).toBeEnabled();
 });
@@ -52,7 +53,6 @@ test("running mission streams output read-only without a click or sending input"
     if (new URL(response.url()).pathname.endsWith(`/missions/${MISSION_PATH.split("/").at(-1)}`) && response.request().method() === "GET") statusReceivedAt = Date.now();
   });
   await page.goto(MISSION_PATH);
-  await expect(page.locator("#mission-current-work")).toContainText("Implement the new tokenizer");
   const status = page.locator("#terminal-status");
   await expect(status).toHaveAttribute("data-state", "live");
   await expect(status).toHaveAttribute("data-mode", "view");
@@ -78,20 +78,22 @@ test("current-work summary omits missing provider and model data", async () => {
   expect(currentWorkSummary({ current_task: { ordinal: 3, title: "Run checks" }, station_context: { last_launched_station: "codex" }, station_observation: { station: "unknown", model: "unknown" }, station_config: { models: { codex: "gpt-5" } } })).toBe("Task 3 · Run checks · codex · gpt-5");
 });
 
-test("running indicator respects reduced motion and keeps its geometry", async ({ page }) => {
-  await mockApp(page, IN);
+test("a running pill in a list never animates and keeps its geometry, with and without reduced motion", async ({ page }) => {
+  await mockApp(page, { ...IN, dataset: "dense" });
   await page.goto("/");
-  const dot = page.locator(".activity-dot").first();
-  await expect(dot).toBeVisible();
-  const before = await dot.boundingBox();
+  const ring = page.locator('.pill[data-state="running"] svg').first();
+  await expect(ring).toBeVisible();
+  const before = await ring.boundingBox();
   await page.waitForTimeout(250);
-  const after = await dot.boundingBox();
+  const after = await ring.boundingBox();
   expect(after?.x).toBe(before?.x);
   expect(after?.y).toBe(before?.y);
   expect(after?.width).toBe(before?.width);
   expect(after?.height).toBe(before?.height);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  expect(await ring.evaluate((el) => getComputedStyle(el).animationName), "list pills are calm").toBe("none");
   await page.emulateMedia({ reducedMotion: "reduce" });
-  await expect.poll(() => dot.evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+  await expect.poll(() => ring.evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
 });
 
 test("Pixel 4 mission journey records layout shift and interaction latency", async ({ page }, info) => {
@@ -118,9 +120,9 @@ test("Pixel 4 mission journey records layout shift and interaction latency", asy
   const runs: Array<{ cls: number; inpMs: number; shifts: Array<{ value: number; sources: string[] }> }> = [];
   for (let i = 0; i < 5; i++) {
     await page.goto("/");
-    await expect(page.locator('[data-attention="approval"]').first()).toBeVisible();
-    const approval = page.locator('[data-attention="approval"]').first();
-    await approval.locator("xpath=ancestor::li").getByRole("link").click();
+    const approval = page.locator('[data-section="needs-you"] [data-entity^="mission:"]', { has: page.locator('.pill[data-state="needs-approval"]') }).first();
+    await expect(approval).toBeVisible();
+    await approval.locator("a.row-title").click();
     await expect(page.locator("#terminal-status")).toHaveAttribute("data-mode", "view");
     await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
     await page.waitForTimeout(100);
@@ -147,8 +149,10 @@ test("mission task UI uses resource reads and idempotent resource mutations", as
   });
   await mockApp(page, IN);
   await page.goto(MISSION_PATH);
-  await expect(page.locator("#tasks-table tbody tr")).toHaveCount(6);
-  await page.getByRole("button", { name: "Pause task 5" }).click();
+  await showTab(page, "Tasks");
+  await expect(page.locator('[data-entity^="task:"]')).toHaveCount(5); // the sixth task is completed and sits in the closed Completed group
+  await page.getByRole("button", { name: "More actions for task 5" }).click();
+  await page.getByRole("menuitem", { name: "Pause task" }).click();
   await expect(page.locator(".toast.applied")).toBeVisible();
   expect(requests.some((request) => request.method === "GET" && request.path.endsWith("/tasks"))).toBe(true);
   expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/tasks/5/pause") && request.key)).toBe(true);
@@ -166,7 +170,7 @@ test("a created mission can be started from its detail page through the resource
   await expect(page.getByRole("heading", { name: "Add telemetry opt-out" })).toBeVisible();
   await page.getByRole("button", { name: "Start mission" }).click();
   await expect(page.locator(".toast.applied")).toContainText("Start mission");
-  await expect(page.locator("#mission-status")).toContainText("RUNNING");
+  await expect(page.locator(".mission-head .pill")).toHaveAttribute("data-state", "running");
   expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/start") && request.key)).toBe(true);
   expect(requests.some((request) => request.path.endsWith("/commands"))).toBe(false);
 });

@@ -24,7 +24,7 @@
 .row-title { grid-area: title; display: flex; align-items: center; min-block-size: var(--target); min-inline-size: 0; color: var(--text); font-weight: 500; text-decoration: none; }
 @media (hover: hover) { .row-title:hover { text-decoration: underline; } }
 .row-sub, .row-cells { grid-area: sub; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--sp-3); min-inline-size: 0; color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
-.row-reason { flex: 1 1 14rem; min-inline-size: 0; }
+.row-reason { flex: 1 1 10rem; min-inline-size: 0; }
 .row-meta { display: flex; flex-wrap: wrap; max-inline-size: 100%; }
 .row-meta > span + span::before { content: "\00b7"; margin-inline: var(--sp-2); }
 .row-cells { flex-wrap: nowrap; gap: var(--sp-4); }
@@ -55,7 +55,7 @@
 .inbox-grid { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); }
 .inbox-preview { display: none; }
 @container inbox (min-width: 70rem) {
-  .inbox-grid { grid-template-columns: minmax(0, 1fr) minmax(18rem, 26rem); }
+  .inbox-grid { grid-template-columns: minmax(0, 1fr) minmax(17rem, 22rem); }
   .inbox-preview { display: block; position: sticky; inset-block-start: calc(var(--head-h) + var(--sp-3)); align-self: start; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-3); padding: var(--sp-3) var(--sp-4); margin-block-start: var(--sp-3); }
   .inbox-preview h2 { margin-block-start: 0; }
 }

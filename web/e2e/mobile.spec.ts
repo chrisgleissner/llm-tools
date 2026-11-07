@@ -91,7 +91,7 @@ test("every page, menu and dialog fits the screen with large targets", async ({ 
   // Confirmation dialog, with the on-screen keyboard's worth of space not needed: it is short.
   await page.getByRole("button", { name: "Actions for worker phone-test" }).click();
   await page.getByRole("menuitem", { name: "Remove worker" }).click();
-  await fits("dialog.dialog");
+  await fits("dialog.dialog[open]");
   await audit(page, "confirmation dialog");
   await page.locator("#dialog-cancel").click();
   // User menu (a bottom sheet on a phone), shortcut help and the command palette.
