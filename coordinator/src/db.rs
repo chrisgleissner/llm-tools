@@ -732,21 +732,33 @@ impl Db {
     pub fn token_revoke(&self, name: &str) -> R<bool> {
         Ok(self.c().execute("DELETE FROM api_tokens WHERE name=?", params![name])? == 1)
     }
-    /// Name of the unexpired API token with this hash, touching `last_used` at most every `TOUCH_EVERY_SECS`.
+    /// Look up a pre-identification API token without relying on SQLite's early-exit string
+    /// equality. Every legacy digest is compared in constant time; new tokens use the indexed ID
+    /// lookup below. Touch `last_used` at most every `TOUCH_EVERY_SECS`.
     pub fn token_lookup(&self, hash: &str) -> R<Option<ApiToken>> {
         let c = self.c();
-        let row: Option<(String, Option<i64>, Option<i64>, String)> = c
-            .query_row(
-                "SELECT name, last_used, expires_at, scopes FROM api_tokens WHERE token_hash=?",
-                params![hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-        let Some((name, last, expires_at, scopes_json)) = row else { return Ok(None) };
         let now = crate::now();
-        if expires_at.is_some_and(|e| now >= e) {
-            return Ok(None);
+        let mut stmt = c.prepare("SELECT name, token_hash, last_used, expires_at, scopes FROM api_tokens WHERE token_id IS NULL ORDER BY name")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut matched = None;
+        for row in rows {
+            let (name, stored_hash, last, expires_at, scopes_json) = row?;
+            let matches = crate::auth::ct_eq(hash, &stored_hash);
+            let unexpired = expires_at.is_none_or(|expires| now < expires);
+            if matches & unexpired {
+                matched = Some((name, last, scopes_json));
+            }
         }
+        drop(stmt);
+        let Some((name, last, scopes_json)) = matched else { return Ok(None) };
         if last.is_none_or(|l| now - l >= TOUCH_EVERY_SECS) {
             c.execute("UPDATE api_tokens SET last_used=? WHERE name=?", params![now, name])?;
         }

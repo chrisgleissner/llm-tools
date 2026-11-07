@@ -107,7 +107,7 @@ worker protocol is `protocol.md`.
 - `bridge-coordinator token create NAME [--scope SCOPE]... [--expires-days N]` prints an API
   token once in the identifiable format `lbr_pat_<16-lowercase-hex-id>_<64-hex-character-secret>`; only its
   SHA-256 secret hash, public ID and grants are stored, and `token revoke NAME` revokes it.
-  Pre-prefix tokens remain accepted with their previous full-token hash until rotated.
+  Pre-prefix tokens remain accepted with their previous full-token hash until rotated; the coordinator scans their stored digests and compares each using the constant-time digest comparator.
   New tokens default to `read`; repeat `--scope` for `operate`, `terminal:view`, `terminal:write`
   or `admin`. `admin` grants every scope. Tokens expire after 90 days by default, and configured
   `max_token_lifetime_days` caps explicit expiry values; `--expires-days 0` creates a token with
