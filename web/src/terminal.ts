@@ -7,6 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import { button, h } from "./dom";
 import { announce } from "./ui";
 import { publishStreamMessage } from "./store";
+import { TERMINAL_THEME } from "./terminal-theme";
 import { ensureXtermCss } from "./xterm-css";
 
 // The stylesheet loads before this module finishes evaluating, so the terminal never measures or paints without its CSS.
@@ -180,11 +181,7 @@ export function terminalPanel(workerName: string, missionId: string): TerminalPa
       fontSize: window.matchMedia("(max-width: 720px)").matches ? 13 : 14,
       allowProposedApi: false,
       // The xterm defaults use ANSI red that is too dim on its black background at WCAG AA.
-      theme: {
-        background: "#0b0f14", foreground: "#e6edf3", cursor: "#e6edf3", selectionBackground: "#264f78",
-        black: "#484f58", red: "#ff7b72", green: "#7ee787", yellow: "#e3b341", blue: "#79c0ff", magenta: "#d2a8ff", cyan: "#76e3ea", white: "#f0f6fc",
-        brightBlack: "#6e7681", brightRed: "#ffa198", brightGreen: "#aff5b4", brightYellow: "#f2cc60", brightBlue: "#a5d6ff", brightMagenta: "#e2c5ff", brightCyan: "#b3f0ff", brightWhite: "#ffffff",
-      },
+      theme: TERMINAL_THEME,
     });
     fit = new FitAddon();
     t.loadAddon(fit);

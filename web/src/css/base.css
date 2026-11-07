@@ -47,6 +47,11 @@ li > :focus-visible, [role="row"] :focus-visible, .term-host :focus-visible, .xt
 .nowrap { white-space: nowrap; overflow-wrap: normal; min-width: 0; }
 .long-text { overflow-wrap: anywhere; }
 
+/* Reduced motion: no animation anywhere (the durations are also zero in tokens.css). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition-duration: 0ms !important; scroll-behavior: auto !important; }
+}
+
 @media (forced-colors: active) {
   .pill { border: 1px solid CanvasText; }
   [aria-current="page"] { border-inline-start: 4px solid Highlight; }

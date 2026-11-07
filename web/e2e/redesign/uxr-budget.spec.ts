@@ -24,11 +24,11 @@ function initialFiles(): string[] {
 
 uxrStatic({ t: "T39", uxr: ["UXR-039"], needs: ["WP-0"] }, "the sign-in, account and workers routes are not in the initial JavaScript graph", async () => {
   const initial = initialFiles().map((f) => readFileSync(join(dist, f), "utf8")).join("\n");
-  // One string that only the route's module renders (src/views/login.ts, account.ts, workers.ts).
-  for (const [route, marker] of [["login", "Create administrator"], ["account", "Change password"], ["workers", "Add worker"]] as const)
+  // One string that only the route's module renders (src/views/login.ts, account.ts, workers.ts). "Change password" is not one: the shell's account menu also has it.
+  for (const [route, marker] of [["login", "Create administrator"], ["account", "Create token"], ["workers", "Add worker"]] as const)
     expect(initial.includes(marker), `${route} module code ("${marker}") is in the initial graph; load it with import()`).toBe(false);
   const lazy = readdirSync(dist).filter((f) => f.startsWith("chunk-") && f.endsWith(".js") && !initialFiles().includes(f)).map((f) => readFileSync(join(dist, f), "utf8")).join("\n");
-  for (const marker of ["Create administrator", "Change password", "Add worker"]) expect(lazy.includes(marker), `"${marker}" is in a lazy chunk`).toBe(true);
+  for (const marker of ["Create administrator", "Create token", "Add worker"]) expect(lazy.includes(marker), `"${marker}" is in a lazy chunk`).toBe(true);
 });
 
 uxrStatic({ t: "T39", uxr: ["UXR-039"], needs: ["WP-5"] }, "budget.json records a routes cap and the lazy route chunks stay within it", async () => {

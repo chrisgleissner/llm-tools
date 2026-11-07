@@ -22,16 +22,26 @@ interface Row {
   replicationStale?: boolean;
   expect: { state: string; label: string; tier?: "alert" | "quiet" };
 }
-const toInput = (row: Row): Record<string, unknown> => ({
-  entity: row.entity,
-  status: row.status,
-  needsYou: row.needs ? { kind: row.needs.kind, tasks: row.needs.tasks ?? [] } : null,
-  tasks: row.tasks ?? [],
-  worker: row.worker ? { state: row.worker.state, lastSeen: row.worker.lastSeenSecondsAgo } : undefined,
-  provider: row.provider,
-  conn: row.conn ?? "live",
-  stale: row.replicationStale ?? false,
-});
+// WP-0 shape (web/src/state.ts): deriveState({entity, status, needsYou, taskCounts, taskOrdinal, worker, conn, now, reason}) returns
+// {id, label, tier, icon, rank, detail}. The adapter converts the row to that input and the result to {state, label, tier}.
+const toInput = (row: Row): Record<string, unknown> => {
+  const taskCounts: Record<string, number> = {};
+  for (const t of row.tasks ?? []) taskCounts[t.status] = (taskCounts[t.status] ?? 0) + 1;
+  const own = row.entity === "task" ? (row.tasks ?? []).find((t) => t.status === row.status) : undefined;
+  const now = Date.now();
+  return {
+    entity: row.entity,
+    status: row.entity === "provider" ? (row.provider?.ready ? "ready" : "unavailable") : row.entity === "worker" ? row.worker?.state : row.status,
+    needsYou: row.needs ? { kind: row.needs.kind, tasks: row.needs.tasks ?? [] } : null,
+    taskCounts: row.entity === "mission" ? taskCounts : null,
+    taskOrdinal: own?.ordinal ?? null,
+    worker: row.worker ? { state: row.worker.state, lastSeen: row.worker.lastSeenSecondsAgo === undefined ? null : now / 1000 - row.worker.lastSeenSecondsAgo } : null,
+    reason: row.provider?.reason ?? null,
+    conn: row.conn ?? "live",
+    now,
+    stale: row.replicationStale ?? false,
+  };
+};
 
 const ROWS: Row[] = [
   { title: "approval", entity: "mission", status: "RUNNING", needs: { kind: "approval", tasks: [2] }, expect: { state: "needs-approval", label: "Needs approval", tier: "alert" } },
@@ -70,13 +80,14 @@ const ROWS: Row[] = [
 
 uxrStatic({ t: "T05", uxr: ["UXR-002"], needs: ["WP-0"] }, "deriveState covers every row of section 5.1, rank ties, ignored stale flag and stream down", async () => {
   const mod = (await import(pathToFileURL(resolve(import.meta.dirname, "../../src/state.ts")).href)) as {
-    deriveState: (input: Record<string, unknown>) => { state: string; label?: string; tier?: string };
+    deriveState: (input: Record<string, unknown>) => { id: string; label?: string; tier?: string };
     labelFor?: (state: string) => string;
   };
   const failures: string[] = [];
   for (const row of ROWS) {
-    const got = mod.deriveState(toInput(row));
-    const label = got.label ?? mod.labelFor?.(got.state) ?? "";
+    const result = mod.deriveState(toInput(row));
+    const got = { state: result.id, label: result.label, tier: result.tier };
+    const label = got.label ?? "";
     if (got.state !== row.expect.state) failures.push(`${row.title}: state ${got.state}, expected ${row.expect.state}`);
     else if (label !== row.expect.label) failures.push(`${row.title}: label "${label}", expected "${row.expect.label}"`);
     else if (row.expect.tier && got.tier && got.tier !== row.expect.tier) failures.push(`${row.title}: tier ${got.tier}, expected ${row.expect.tier}`);
