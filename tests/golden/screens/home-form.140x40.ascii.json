@@ -14,11 +14,11 @@
     "",
     "> Providers: rotation: codex -> kilo-zai  (minimax not installed)",
     "     [1] codex",
-    "    >[2] kilo-zai     kilo | zai/glm-5.2",
-    "     [ ] claude",
+    "    >[2] kilo-zai     kilo | zai/glm-5.2  (not signed in: kilo auth login)",
+    "     [ ] claude       (not signed in: claude, then /login)",
     "     [ ] codex-spark  codex | gpt-5-spark",
-    "     [ ] copilot",
-    "     [ ] kilo",
+    "     [ ] copilot      (quota empty | resets in 24d)",
+    "     [ ] kilo         (not signed in: kilo auth login)",
     "     [ ] opencode",
     "",
     "  Folder: /home/golden/projects/release",
@@ -42,9 +42,9 @@
     "",
     "",
     "",
-    "Up/Down choose | Space toggle | Tab next field | numbers show rotation order",
+    "kilo-zai not signed in: kilo auth login | Space removes it from the rotation",
     "",
-    "Tab next field | Enter next | Esc back"
+    "Tab next field | Enter next | F5 start | Esc back"
   ],
   "segments": [
     [[0, "LLM BRIDGE", "brand"], [12, "* here: ", "brand"], [20, "~/projects/release", "heading"]],
@@ -56,11 +56,11 @@
     [],
     [[0, "> Providers: rotation: codex -> kilo-zai  (minimax not installed)                                                                           ", "selected"]],
     [[4, " [1] codex", "info"]],
-    [[0, "    ", "selected"], [4, ">[2] kilo-zai", "selected+underline"], [17, "     kilo | zai/glm-5.2                                                                                                    ", "selected"]],
-    [[4, " [ ] claude", "info"]],
+    [[0, "    ", "selected"], [4, ">[2] kilo-zai", "selected+underline"], [17, "     kilo | zai/glm-5.2  (not signed in: kilo auth login)                                                                  ", "selected"]],
+    [[4, " [ ] claude", "info"], [22, "(not signed in: claude, then /login)", "dim"]],
     [[4, " [ ] codex-spark", "info"], [22, "codex | gpt-5-spark", "dim"]],
-    [[4, " [ ] copilot", "info"]],
-    [[4, " [ ] kilo", "info"]],
+    [[4, " [ ] copilot", "info"], [22, "(quota empty | resets in 24d)", "warn"]],
+    [[4, " [ ] kilo", "info"], [22, "(not signed in: kilo auth login)", "dim"]],
     [[4, " [ ] opencode", "info"]],
     [],
     [[0, "  Folder: /home/golden/projects/release", "info"]],
@@ -84,8 +84,8 @@
     [],
     [],
     [],
-    [[0, "Up/Down choose | Space toggle | Tab next field | numbers show rotation order", "muted"]],
+    [[0, "kilo-zai not signed in: kilo auth login | Space removes it from the rotation", "muted"]],
     [],
-    [[0, "Tab", "key"], [3, " next field", "muted"], [14, " | ", "dim"], [17, "Enter", "key"], [22, " next", "muted"], [27, " | ", "dim"], [30, "Esc", "key"], [33, " back", "muted"]]
+    [[0, "Tab", "key"], [3, " next field", "muted"], [14, " | ", "dim"], [17, "Enter", "key"], [22, " next", "muted"], [27, " | ", "dim"], [30, "F5", "key"], [32, " start", "muted"], [38, " | ", "dim"], [41, "Esc", "key"], [44, " back", "muted"]]
   ]
 }

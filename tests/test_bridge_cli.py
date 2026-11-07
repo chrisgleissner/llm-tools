@@ -52,7 +52,7 @@ def test_mission_cli_create_status_tasks_events_and_evidence(tmp_path: Path, mon
     assert status["tasks"][0]["id"] == task_id
     assert status["tasks"][0]["status"] == "QUEUED"
 
-    assert main(["task", "verify", "--mission", mission_id, "--task", str(task_id), "--approve"]) == 2
+    assert main(["task", "verify", "--mission", mission_id, "--task", str(task_id), "--approve"]) == 4
     assert "not awaiting verification" in capsys.readouterr().err
 
     store = BridgeStore(state / "bridge.sqlite3")
@@ -71,10 +71,10 @@ def test_mission_cli_create_status_tasks_events_and_evidence(tmp_path: Path, mon
 
     assert main(["mission", "list", "--json"]) == 0
     assert [item["id"] for item in json.loads(capsys.readouterr().out)["missions"]] == [mission_id]
-    assert main(["doctor", "--mission", mission_id, "--json"]) == 0
+    assert main(["doctor", "--mission", mission_id, "--json"]) == 1  # exit 1: the isolated HOME has no signed-in provider
     doctor = json.loads(capsys.readouterr().out)
     assert doctor["sqlite_integrity"] == "ok" and doctor["mission"]["id"] == mission_id
-    assert main(["doctor", "--json"]) == 0
+    assert main(["doctor", "--json"]) == 1  # exit 1: the isolated HOME has no signed-in provider
     assert json.loads(capsys.readouterr().out)["mission"] is None
 
 
@@ -319,8 +319,8 @@ def test_proposal_cli_rejects_foreign_operation_provenance(tmp_path: Path, monke
     assert main([
         "proposal", "create", "--mission", second["id"], "--operation", operation,
         "--prompt", "must not cross mission", "--json",
-    ]) == 2
-    assert "same mission" in capsys.readouterr().err
+    ]) == 4
+    assert "same mission" in json.loads(capsys.readouterr().out)["error"]["message"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.list_proposals(second["id"]) == []
 
@@ -436,16 +436,16 @@ def test_finished_mission_reports_proposal_rejection_and_takes_follow_up_tasks(t
         proposal = store.propose_task(mission["id"], "future work", source_operation_id=operation)
         store.set_mission_status(mission["id"], "COMPLETED")
 
-    assert main(["proposal", "accept", "--mission", mission["id"], "--task", str(proposal), "--json"]) == 2
-    assert "takes no new proposals" in capsys.readouterr().err
+    assert main(["proposal", "accept", "--mission", mission["id"], "--task", str(proposal), "--json"]) == 4
+    assert "takes no new proposals" in json.loads(capsys.readouterr().out)["error"]["message"]
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.get_task(proposal)["proposal_status"] == "PENDING"
         assert len(store.list_tasks(mission["id"])) == 2
 
     assert main(["task", "add", "--mission", mission["id"], "--prompt", "follow-up"]) == 0
-    assert "Mission reopened · start it with: llm-bridge start" in capsys.readouterr().out
+    assert f"Mission {mission['id'][:8]} reopened · start it with: llm-bridge start" in capsys.readouterr().out
     with BridgeStore(state / "bridge.sqlite3") as store:
-        assert store.get_mission(mission["id"])["status"] == "STOPPED"
+        assert store.get_mission(mission["id"])["status"] == "CREATED"
         assert len(store.list_tasks(mission["id"])) == 3
 
 
@@ -500,9 +500,9 @@ def test_cli_station_view_and_invalid_steering_report_rejection(tmp_path: Path, 
     assert main(["station", "--mission", mission["id"], "codex", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["config"]["viewed_station"] == "codex"
     assert main(["station", "--mission", mission["id"], "claude", "--json"]) == 2
-    assert "not configured" in capsys.readouterr().err
+    assert "not configured" in json.loads(capsys.readouterr().out)["error"]["message"]  # --json: an error object on stdout
     assert main(["steer", "--mission", mission["id"], "--kind", "handoff", "--route", "missing", "--json"]) == 2
-    assert "not configured" in capsys.readouterr().err
+    assert "not in this mission's rotation" in json.loads(capsys.readouterr().out)["error"]["message"]
 
 
 @pytest.mark.parametrize(
@@ -536,7 +536,7 @@ def test_legacy_mode_starts_after_creating_durable_mission_and_missing_file_is_r
     with BridgeStore(state / "bridge.sqlite3") as store:
         assert store.list_missions()[0]["objective"] == "legacy objective"
     assert main(["--prompt-file", str(tmp_path / "missing.md"), "--cwd", str(tmp_path)]) == 2
-    assert "No such file" in capsys.readouterr().err
+    assert "no such file" in capsys.readouterr().err
 
 
 def test_console_legacy_aliases_share_public_task_and_event_handlers(tmp_path: Path, monkeypatch) -> None:
@@ -612,6 +612,7 @@ def test_main_routes_console_views_and_controller_through_injected_entrypoints(t
     calls: list[tuple[object, ...]] = []
     monkeypatch.setattr(bridge_tui, "run_console", lambda mid, **kwargs: calls.append(("console", mid)) or 31)
     monkeypatch.setattr(bridge_tui, "run_control", lambda mid, **kwargs: calls.append((kwargs["initial_view"], mid)) or 32)
+    monkeypatch.setattr("llm_tools.bridge._interactive_terminal", lambda: True)
     assert main(["console", "--mission", mission_id]) == 31
     assert main(["control", "--mission", mission_id]) == 32
     assert main(["usage", "--mission", mission_id]) == 32
@@ -640,7 +641,7 @@ def test_main_start_resume_attach_and_detach_entrypoints(tmp_path, monkeypatch) 
 
     class NoopLock:
         def __init__(self, *_args): pass
-        def acquire(self): pass
+        def acquire(self, **_kwargs): pass
         def release(self): pass
 
     monkeypatch.setattr("llm_tools.bridge.MissionLock", NoopLock)

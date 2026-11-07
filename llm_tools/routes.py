@@ -206,16 +206,8 @@ def record_local_block(
     }
     path = _route_block_path(route_id, env)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            path.parent.chmod(0o700)
-        except OSError:
-            pass
-        path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+        common.ensure_private_cache_dir(path.parent, env)
+        common.write_private_text(path, json.dumps(payload, separators=(",", ":")))
     except OSError:
         # Recording the block is best-effort. The orchestrator should never
         # crash on a permission error in the cache root.
@@ -457,6 +449,23 @@ def _apply_local_block_override(
     }
     snapshot["scopes"] = [blocked_scope]
     return snapshot, decision
+
+
+def apply_local_block_to_provider_decision(
+    provider: str,
+    snapshot: dict[str, Any],
+    decision: dict[str, Any],
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Provider-mode counterpart of the route block override.
+
+    A rotation of plain providers has no route ids, so a block recorded for a
+    provider (for example from a usage-limit notice on its native screen) is
+    stored under the provider name, which is also the id of the implicit route
+    ``--routes <provider>`` resolves to. The decision is changed exactly as for a route.
+    """
+    return _apply_local_block_override(route_for_provider({}, provider), snapshot, decision, env=env)
 
 
 def usage_snapshot_and_decision_for_route(
@@ -777,6 +786,7 @@ __all__ = [
     "COST_POLICY_METERED_BUDGET",
     "COST_POLICY_UNKNOWN",
     "DEFAULT_LOCAL_BLOCK_BACKOFF_SECONDS",
+    "apply_local_block_to_provider_decision",
     "clear_local_block",
     "default_backoff_seconds",
     "is_locally_blocked",

@@ -76,7 +76,7 @@ def test_force_stop_refuses_stale_ready_pid_while_real_controller_owns_lock(tmp_
         }), encoding="utf-8")
         stopped = _call(env, "stop", "--mission", mission_id, "--force")
 
-        assert stopped.returncode == 2
+        assert stopped.returncode == 1
         assert "controller PID no longer matches" in stopped.stderr
         assert _mission_status(database, mission_id) == "STOPPING"
         assert _controller_locked(state, mission_id)

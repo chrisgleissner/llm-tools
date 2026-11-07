@@ -1,0 +1,56 @@
+name: audit
+
+# Weekly dependency advisory audit (PRD-025). Response times are in SECURITY.md.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - coordinator/Cargo.lock
+      - web/package-lock.json
+      - pyproject.toml
+      - .github/workflows/audit.yml
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust-toolchain
+      - name: Audit Cargo.lock against the RustSec advisory database
+        working-directory: coordinator
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+      - name: Audit web dependencies
+        working-directory: web
+        run: npm audit --audit-level=moderate
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Audit the Python package's dependencies
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          python -m pip install .
+          pip-audit --skip-editable --local

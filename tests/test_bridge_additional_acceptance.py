@@ -180,9 +180,10 @@ def test_launcher_home_help_returns_to_same_selection_and_draft(tmp_path, monkey
     monkeypatch.setattr(curses, "wrapper", lambda callback: callback(next(windows)))
     monkeypatch.setattr(bridge_launcher, "_draw", lambda _window, state: states.append((state.creating, state.objective, state.selected)))
     help_calls = []
-    monkeypatch.setattr(bridge_viewer, "run_document", lambda source, *, title: help_calls.append((source, title)) or 0)
+    monkeypatch.setattr(bridge_viewer, "run_document", lambda source, *, title, **options: help_calls.append((source, title, options)) or 0)
     assert bridge_launcher.run_launcher(lambda _args: pytest.fail("help must not dispatch durable work")) == 0
-    assert help_calls and "quickstart" in help_calls[0][1]
+    assert help_calls and "home" in help_calls[0][1]  # the home screen's own help, not the quickstart
+    assert help_calls[0][2]["plain"] is True and help_calls[0][2]["switch"][0] == "T"
     assert states[0] == (False, "", 0)
     assert states[-1] == (True, "d?", 0)
 
@@ -235,7 +236,7 @@ def test_launcher_native_start_is_explicit_and_reopens_controls(tmp_path, monkey
             print(json.dumps({"mission": {"id": "m1"}}))
             return 0
         if args[0] == "start":
-            assert args == ["start", "--mission", "m1", "--native"]
+            assert args == ["start", "--mission", "m1", "--mode", "native"]
             return 0
         assert args == ["control", "--mission", "m1"]
         return 0

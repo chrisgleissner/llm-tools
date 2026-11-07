@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from . import bridge_events
 from .bridge_missions import MissionNotFound, resolve_mission_ref
 from .bridge_store import BridgeStore, TransitionError
 
@@ -186,6 +187,25 @@ def _validated_params(spec: OperationSpec, raw: Mapping[str, Any]) -> dict[str, 
     return values
 
 
+def with_task_numbers(value: Any) -> Any:
+    """A copy of ``value`` in which every task also carries ``number``, an alias of ``ordinal``.
+
+    ``number`` is what users type after ``--task``; ``id`` is the global ID, which only
+    ``--task-id`` accepts.
+    """
+    if isinstance(value, dict):
+        copy: dict[str, Any] = {}
+        task = "ordinal" in value and ("mission_id" in value or "title" in value) and "number" not in value
+        for key, item in value.items():
+            copy[key] = with_task_numbers(item)
+            if task and key == "ordinal" and isinstance(item, int) and not isinstance(item, bool):
+                copy["number"] = item
+        return copy
+    if isinstance(value, list):
+        return [with_task_numbers(item) for item in value]
+    return value
+
+
 # --------------------------------------------------------------------------- handlers
 # Each handler calls the CLI module's implementation through ``bridge`` so
 # existing tests that patch those names keep observing a single code path.
@@ -203,13 +223,24 @@ def _mission_list(store: BridgeStore | None, request: CommandRequest, params: di
     missions = cli.order_missions(store.list_missions())
     for item in missions:
         item["controller_running"] = cli.controller_running(str(item["id"]))
-    result: dict[str, Any] = {"missions": missions}
+    # "total" is the count before any display limit, so local and remote JSON have the same shape (CLIUX-015).
+    result: dict[str, Any] = {"missions": missions, "total": len(missions)}
     return result if params["include_config"] else cli.strip_frozen_config(result)
 
 
 def _mission_status(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """The bounded status projection (a few KB). ``full`` returns the whole local projection: ``llm-bridge status`` on the worker's own machine asks for it."""
     assert request.mission_id is not None
-    return dict(_cli().status_snapshot(request.mission_id))
+    if params["full"]:
+        return dict(_cli().status_snapshot(request.mission_id))
+    from .bridge_status_bound import STATUS_PROMPT_CHARS_MAX, bound_status
+
+    prompt_chars = params["prompt_chars"]
+    if not 0 <= prompt_chars <= STATUS_PROMPT_CHARS_MAX or params["task_limit"] < 0 or params["event_limit"] < 0:
+        raise CommandFailure("invalid-argument", f"mission.status: task_limit and event_limit must not be negative and prompt_chars must be 0-{STATUS_PROMPT_CHARS_MAX}")
+    # Read only the head of each prompt: bound_status drops it or keeps at most prompt_chars of it.
+    snapshot = _cli().status_snapshot(request.mission_id, prompt_chars=max(1, prompt_chars))
+    return bound_status(dict(snapshot), task_limit=params["task_limit"], prompt_chars=prompt_chars, event_limit=params["event_limit"])
 
 
 def _mission_steer(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
@@ -302,7 +333,12 @@ def _mission_events(store: BridgeStore | None, request: CommandRequest, params: 
     assert store is not None and request.mission_id is not None
     if params["limit"] < 1 or params["limit"] > 1000:
         raise CommandFailure("invalid-argument", "mission.events: limit must be between 1 and 1000")
-    return {"schema_version": 1, "events": store.events(request.mission_id, after=params["after"], limit=params["limit"])}
+    if params["since_seconds"] < 0:
+        raise CommandFailure("invalid-argument", "mission.events: since_seconds must not be negative")
+    exclude = bridge_events.plumbing_kinds() if params["hide_bookkeeping"] else frozenset()
+    filters = {"after": params["after"], "since_seconds": params["since_seconds"], "exclude_kinds": exclude}
+    events = store.events(request.mission_id, limit=params["limit"], newest=params["newest"], **filters)
+    return {"schema_version": 1, "events": events, "total": store.event_count(request.mission_id, **filters)}
 
 
 def _mission_control(action: str) -> Handler:
@@ -397,12 +433,41 @@ def _task_show(store: BridgeStore | None, request: CommandRequest, params: dict[
         raise CommandFailure("not-found", str(exc)) from None
 
 
+def _review_task(store: BridgeStore, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    """The task whose last run is read; ``dispatch`` has already turned ``task_number`` into ``task_id``."""
+    assert request.mission_id is not None
+    try:
+        return dict(_cli()._require_task(store, request.mission_id, params["task_id"]))
+    except TransitionError as exc:
+        raise CommandFailure("not-found", str(exc)) from None
+
+
+def _task_output(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from . import bridge_review
+
+    assert store is not None and request.mission_id is not None
+    return bridge_review.task_output(store, request.mission_id, _review_task(store, request, params))
+
+
+def _task_diff(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
+    from . import bridge_review
+
+    assert store is not None and request.mission_id is not None
+    return bridge_review.task_diff(store, request.mission_id, _review_task(store, request, params))
+
+
 def _task_list(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
     assert store is not None and request.mission_id is not None
     limit, offset = params["limit"], params["offset"]
     if not 0 <= limit <= 1000 or offset < 0:
         raise CommandFailure("invalid-argument", "task.list: limit must be 0-1000 and offset non-negative")
     tasks = store.list_tasks(request.mission_id, offset=offset) if params["all"] else store.list_tasks(request.mission_id, limit=limit, offset=offset)
+    prompt_chars = params["prompt_chars"]
+    if prompt_chars is not None:
+        # The console lists tasks by title; ``task.show`` returns one whole task.
+        if prompt_chars < 0:
+            raise CommandFailure("invalid-argument", "task.list: prompt_chars must not be negative")
+        tasks = [{**task, **{key: task[key][:prompt_chars] for key in ("prompt", "original_prompt") if isinstance(task.get(key), str)}} for task in tasks]
     return {
         "tasks": tasks,
         "total": store.task_counters(request.mission_id)["total"],
@@ -587,6 +652,9 @@ def _usage_snapshot(store: BridgeStore | None, request: CommandRequest, params: 
             "source": value["source"], "providers": value["providers"]}
 
 
+_SWITCH_PARAMS = frozenset({"hold", "requeue"})
+
+
 def _operator(action: str) -> Handler:
     """Apply an operator payload ``{"action": action, **params}`` through the durable command path."""
 
@@ -594,7 +662,8 @@ def _operator(action: str) -> Handler:
         cli = _cli()
         assert request.mission_id is not None
         payload: dict[str, Any] = {"action": action}
-        payload.update((name, value) for name, value in params.items() if not (name == "expected_revision" and value is None))
+        # Optional switches (hold, requeue) enter the durable payload only when set, so a plain command keeps its stored shape.
+        payload.update((name, value) for name, value in params.items() if not (name == "expected_revision" and value is None) and not (name in _SWITCH_PARAMS and not value))
         if action in {"task.add", "task.dependency"}:
             # CLI/resource adapters may send mission-local task numbers. Resolve
             # those on the worker, where the mission database is authoritative;
@@ -645,7 +714,9 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "headless": Param(bool, default=False), "native_tui": Param(bool, default=False),
                        "teams": Param(str), "token_spend": Param(str), "trust_folder": Param(bool, default=False),
                        "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
-        OperationSpec("mission.status", "Show one mission's status projection", False, True, _NO_PARAMS, _mission_status),
+        OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
+                      {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
+                       "event_limit": Param(int, default=0), "full": Param(bool, default=False)}, _mission_status),
         OperationSpec("mission.settings.get", "Read a mission's saved execution settings", False, True, _NO_PARAMS, _mission_settings_get),
         OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
                       {"auto_continue": Param(bool), "teams": Param(bool), "token_spend": Param(str),
@@ -661,10 +732,14 @@ OPERATIONS: dict[str, OperationSpec] = {
                       {"mission": Param(str)}, _mission_agents),
         OperationSpec(
             "mission.events",
-            "Page a mission's durable events after a cursor",
+            "Page a mission's durable events after a cursor, or read the newest ones",
             False,
             True,
-            {"after": Param(int, default=0), "limit": Param(int, default=50)},
+            {
+                "after": Param(int, default=0), "limit": Param(int, default=50),
+                "newest": Param(bool, default=False), "since_seconds": Param(int, default=0),
+                "hide_bookkeeping": Param(bool, default=False),
+            },
             _mission_events,
         ),
         OperationSpec(
@@ -696,10 +771,13 @@ OPERATIONS: dict[str, OperationSpec] = {
             "Page a mission's tasks in scheduling order",
             False,
             True,
-            {"limit": Param(int, default=50), "offset": Param(int, default=0), "all": Param(bool, default=False)},
+            {"limit": Param(int, default=50), "offset": Param(int, default=0), "all": Param(bool, default=False),
+             "prompt_chars": Param(int)},
             _task_list,
         ),
         OperationSpec("task.show", "Show one task", False, True, _TASK_SELECTOR, _task_show),
+        OperationSpec("task.output", "End of the retained provider log of a task's last run", False, True, _TASK_SELECTOR, _task_output),
+        OperationSpec("task.diff", "Workspace change since the start of a task's last run", False, True, _TASK_SELECTOR, _task_diff),
         OperationSpec(
             "task.add",
             "Add a task",
@@ -716,10 +794,10 @@ OPERATIONS: dict[str, OperationSpec] = {
             },
             _operator("task.add"),
         ),
-        _task_op("task.amend", "Amend a task prompt; creates a new revision", {"prompt": Param(str, required=True)}),
+        _task_op("task.amend", "Amend a task prompt; creates a new revision (a task awaiting review needs requeue)", {"prompt": Param(str, required=True), "requeue": Param(bool, default=False)}),
         _task_op("task.verify", "Record verification evidence; approve completes the task",
                  {"evidence": Param(str, default=""), "approved": Param(bool, default=False)}),
-        _task_op("task.reject", "Reject a task result", {"reason": Param(str, required=True)}),
+        _task_op("task.reject", "Reject a task result; it runs again unless hold is set", {"reason": Param(str, required=True), "hold": Param(bool, default=False)}),
         _task_op("task.priority", "Set task priority", {"priority": Param(int, required=True)}),
         _task_op("task.reorder", "Set task order among equal priorities", {"order": Param(int, required=True)}),
         _task_op("task.dependency", "Add a prerequisite task", {"depends_on": Param(int), "depends_on_number": Param(int)}),

@@ -126,9 +126,13 @@ class SchedulerConfig:
     tmux_pane: str = ""
     native_tui: bool = False
     process_started: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
-    process_observer: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    process_observer: Callable[[], int | None] | None = field(default=None, repr=False, compare=False)
     # Internal Bridge callback used to interrupt long capacity waits promptly.
     should_interrupt_wait: Callable[[], bool] | None = field(default=None, repr=False, compare=False)
+    # Internal Bridge flag: the caller already waited out ``max_unavailable_wait``
+    # for undeterminable capacity before this launch, so the scheduler launches
+    # optimistically at once instead of starting a second full wait.
+    unavailable_wait_done: bool = field(default=False, repr=False, compare=False)
     command_argv_transform: Callable[[list[str]], list[str]] | None = field(default=None, repr=False, compare=False)
     # Internal environment additions supplied by a managed Bridge operation.
     env_overrides: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
@@ -908,7 +912,7 @@ def wait_until_usable(cfg: SchedulerConfig, logs: common.RunLogs) -> None:
                 undetermined_since = now
             waited = now - undetermined_since
             max_wait = int(cfg.max_unavailable_wait)
-            if max_wait > 0 and waited >= max_wait:
+            if cfg.unavailable_wait_done or (max_wait > 0 and waited >= max_wait):
                 common.log_text(logs, f"usage undeterminable for {waited}s (reason={reason}); proceeding optimistically")
                 common.log_event(logs, "optimistic_proceed", {"reason": reason, "waited": waited, "max_unavailable_wait": max_wait})
                 return
@@ -939,10 +943,11 @@ def run_fresh_attached(cfg: SchedulerConfig, argv: list[str], output_file: Path,
     # particular, SIGWINCH must reach `script` so it can resize its PTY child.
     # Bridge-managed headless/native work has its own explicit process-group
     # ownership path and does not use this attached launch mode.
+    common.touch_private_file(output_file)  # script(1) keeps the mode of an existing file
     proc = subprocess.Popen(["script", "--return", "--quiet", "--flush", "--command", command_line, str(output_file)], cwd=cfg.cwd, env=provider_env(cfg))
     _record_popen_process(cfg, proc)
     return_code = proc.wait()
-    status_file.write_text(str(return_code), encoding="utf-8")
+    common.write_private_text(status_file, str(return_code))
     common.clean_capture_file(output_file)
     return return_code
 
@@ -1243,7 +1248,9 @@ class ProgressGuard:
     def __init__(self) -> None:
         self.idle_timeout = int(os.environ.get("LLM_SCHEDULER_IDLE_TIMEOUT", "600") or "600")
         self.question_idle_timeout = int(os.environ.get("LLM_SCHEDULER_QUESTION_IDLE_TIMEOUT", "30") or "30")
-        now = time.time()
+        # Elapsed-time checks use the monotonic clock so a wall-clock step (NTP,
+        # resume from suspend) cannot make a healthy run look stalled.
+        now = time.monotonic()
         self.last_progress = now
         self.question_seen_at: float | None = None
         self.provider_quota_diagnostic_seen = False
@@ -1254,33 +1261,43 @@ class ProgressGuard:
         *,
         structured_provider_error: bool = False,
         current_output: str = "",
+        from_stderr: bool = False,
     ) -> bool:
-        """Record fresh output. Returns True if an interactive prompt was seen."""
-        self.last_progress = time.time()
+        """Record fresh output. Returns True if an interactive prompt was seen.
+
+        ``from_stderr`` marks diagnostics from the error channel: they can show a
+        blocking prompt or a quota failure, but never arm or clear the pending
+        question, which is about what the model said on stdout.
+        """
+        self.last_progress = time.monotonic()
         if provider_quota_diagnostic(combined_tail, structured=structured_provider_error):
             self.provider_quota_diagnostic_seen = True
             if not has_explicit_prompt_cue(current_output or combined_tail):
                 # Quota diagnostics are provider failures, not evidence that a
                 # CLI is waiting for input. Keep the native exit status so
                 # Ralph can refresh capacity and Bridge can retry the task.
-                self.question_seen_at = None
+                if not from_stderr:
+                    self.question_seen_at = None
                 return False
+        scanned = combined_tail  # the question check needs more than the prompt tail to see a traceback block
         combined_tail = common.blocking_tail(combined_tail)
         if any(pattern.search(combined_tail) for pattern in common.BLOCKING_PROMPT_PATTERNS):
             return True
-        # Only treat the run as "waiting on a question" when the most recent
-        # output still ends in a question. If the model asked something and then
-        # resumed producing output, clear the pending-question state so we do not
-        # kill a provider that is actually making progress.
-        if common.QUESTION_LINE_RE.search(combined_tail[-4000:]):
-            self.question_seen_at = time.time()
+        if from_stderr:
+            return False
+        # The run counts as "waiting on a question" only while the most recent
+        # stdout line is a question. Any later output, including the tool
+        # activity marker, clears the pending question so a provider that asked
+        # something and then carried on is not killed.
+        if common.ends_with_question(scanned):
+            self.question_seen_at = time.monotonic()
         else:
             self.question_seen_at = None
         return False
 
     def overdue(self) -> str | None:
         """Return an abort reason when the run has stalled, else None."""
-        now = time.time()
+        now = time.monotonic()
         if self.idle_timeout > 0 and now - self.last_progress > self.idle_timeout:
             return f"no output progress for {self.idle_timeout}s"
         if (
@@ -1340,7 +1357,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                 combined_parts[0] = combined_parts[0][excess:]
                 retained_bytes -= excess
             output_truncated = True
-    start = time.time()
+    start = time.monotonic()
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
     exit_code = 124
     blocking = False
@@ -1348,14 +1365,18 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     guard = ProgressGuard()
 
     scan_buffer = b""
+    stderr_scan_buffer = b""
 
-    def scan_tail(scannable: bytes) -> bool:
-        nonlocal scan_buffer
+    def scan_tail(scannable: bytes, *, from_stderr: bool = False) -> bool:
+        nonlocal scan_buffer, stderr_scan_buffer
+        if from_stderr:
+            stderr_scan_buffer = (stderr_scan_buffer + scannable)[-8000:]
+            return guard.note_output(common.strip_ansi(stderr_scan_buffer.decode("utf-8", "replace")), from_stderr=True)
         scan_buffer = (scan_buffer + scannable)[-8000:]
         return guard.note_output(common.strip_ansi(scan_buffer.decode("utf-8", "replace")))
 
     while open_fds:
-        if time.time() - start > timeout:
+        if time.monotonic() - start > timeout:
             break
         reason = guard.overdue()
         if reason:
@@ -1383,7 +1404,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     stdout_buffer = b""
                 open_fds.pop(fd, None)
                 continue
-            guard.last_progress = time.time()
+            guard.last_progress = time.monotonic()
             if open_fds.get(fd) == "stdout":
                 stdout_buffer += chunk
                 if cfg.max_output_bytes > 0 and len(stdout_buffer) > cfg.max_output_bytes:
@@ -1413,7 +1434,7 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-                if scan_tail(chunk):
+                if scan_tail(chunk, from_stderr=True):
                     blocking = True
             if blocking:
                 break
@@ -1447,8 +1468,8 @@ def run_fresh_claude_stream_json(cfg: SchedulerConfig, argv: list[str], output_f
     output_text = b"".join(combined_parts).decode("utf-8", "replace")
     if output_truncated:
         output_text = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n" + output_text
-    output_file.write_text(output_text, encoding="utf-8")
-    status_file.write_text(str(exit_code), encoding="utf-8")
+    common.write_private_text(output_file, output_text)
+    common.write_private_text(status_file, str(exit_code))
     return exit_code
 
 
@@ -1487,7 +1508,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
                 combined_parts[0] = combined_parts[0][excess:]
                 retained_bytes -= excess
             output_truncated = True
-    start = time.time()
+    start = time.monotonic()
     timeout = int(os.environ.get("LLM_SCHEDULER_PTY_TIMEOUT", "3600") or "3600")
     exit_code = 124
     blocking = False
@@ -1498,16 +1519,23 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     stdout_buffer = b""
     discard_stdout_line = False
     scan_buffer = b""
+    stderr_scan_buffer = b""
 
-    def scan_prompt(data: bytes, *, structured_provider_error: bool = False) -> bool:
-        nonlocal scan_buffer
+    def scan_prompt(data: bytes, *, structured_provider_error: bool = False, from_stderr: bool = False) -> bool:
+        nonlocal scan_buffer, stderr_scan_buffer
         if not data:
             return False
-        scan_buffer = (scan_buffer + data)[-8000:]
+        if from_stderr:
+            stderr_scan_buffer = (stderr_scan_buffer + data)[-8000:]
+            buffer = stderr_scan_buffer
+        else:
+            scan_buffer = (scan_buffer + data)[-8000:]
+            buffer = scan_buffer
         return guard.note_output(
-            common.strip_ansi(scan_buffer.decode("utf-8", "replace")),
+            common.strip_ansi(buffer.decode("utf-8", "replace")),
             structured_provider_error=structured_provider_error,
             current_output=common.strip_ansi(data.decode("utf-8", "replace")),
+            from_stderr=from_stderr,
         )
 
     def write_stdout(data: bytes) -> bool:
@@ -1533,7 +1561,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
         return scan_prompt(renderer.scannable, structured_provider_error=renderer.provider_error)
 
     while open_fds:
-        if time.time() - start > timeout:
+        if time.monotonic() - start > timeout:
             break
         reason = guard.overdue()
         if reason:
@@ -1555,7 +1583,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
                 if blocking:
                     break
                 continue
-            guard.last_progress = time.time()
+            guard.last_progress = time.monotonic()
             if open_fds.get(fd) == "stdout":
                 if renderer is None:
                     # Keep the raw-output path byte-for-byte for custom provider commands.
@@ -1602,7 +1630,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
                     sys.stderr.buffer.flush()
                 except OSError:
                     pass
-                if scan_prompt(chunk):
+                if scan_prompt(chunk, from_stderr=True):
                     blocking = True
                     break
         if blocking:
@@ -1639,8 +1667,8 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
     output_text = b"".join(combined_parts).decode("utf-8", "replace")
     if output_truncated:
         output_text = "[Bridge retained only the latest bounded provider output. Earlier bytes were discarded.]\n" + output_text
-    output_file.write_text(output_text, encoding="utf-8")
-    status_file.write_text(str(exit_code), encoding="utf-8")
+    common.write_private_text(output_file, output_text)
+    common.write_private_text(status_file, str(exit_code))
     diagnostic = common.provider_failure_diagnostic(
         output_text,
         int(native_exit_code if native_exit_code is not None else exit_code),
@@ -1654,9 +1682,7 @@ def run_fresh_exact_stdout(cfg: SchedulerConfig, argv: list[str], output_file: P
         "provider_credit_diagnostic": provider_credit_diagnostic,
         "blocking_prompt": blocking,
     })
-    status_file.with_suffix(".diagnostic.json").write_text(
-        json.dumps(diagnostic, separators=(",", ":")), encoding="utf-8",
-    )
+    common.write_private_text(status_file.with_suffix(".diagnostic.json"), json.dumps(diagnostic, separators=(",", ":")))
     return exit_code
 
 
@@ -1668,8 +1694,8 @@ TMUX_PANE_CHECK_SECONDS = 10
 
 def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output_file: Path, status_file: Path) -> int:
     if not common.have_cmd("tmux"):
-        output_file.write_text("tmux not installed\n", encoding="utf-8")
-        status_file.write_text("127", encoding="utf-8")
+        common.write_private_text(output_file, "tmux not installed\n")
+        common.write_private_text(status_file, "127")
         return 127
     tmux_prefix = ["tmux", *( ["-S", cfg.tmux_socket] if cfg.tmux_socket else [] )]
 
@@ -1679,8 +1705,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     if ":" in cfg.tmux_target:
         session, window = cfg.tmux_target.split(":", 1)
         if not session or not window:
-            output_file.write_text(f"invalid tmux target: {cfg.tmux_target}\n", encoding="utf-8")
-            status_file.write_text("2", encoding="utf-8")
+            common.write_private_text(output_file, f"invalid tmux target: {cfg.tmux_target}\n")
+            common.write_private_text(status_file, "2")
             return 2
     else:
         session, window = cfg.tmux_target, "llm-scheduler"
@@ -1700,7 +1726,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     # A tmux pane inherits the server's environment, not ours; remove other providers' credentials there.
     for key in sorted(common.credential_variables_to_remove(os.environ, cfg.provider)):
         guard_exports += f"unset {shlex.quote(key)}\n"
-    cmd_file.write_text(
+    common.write_private_text(
+        cmd_file,
         "#!/usr/bin/env bash\n"
         f"# tmux target: {target}\n"
         "set -euo pipefail\n"
@@ -1711,15 +1738,14 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         "status=$?\n"
         f"printf %s \"$status\" > {shlex.quote(str(status_file))}\n"
         "exit \"$status\"\n",
-        encoding="utf-8",
     )
     cmd_file.chmod(0o700)
     invocation = f"bash {shlex.quote(str(cmd_file))}"
     owned_pane = bool(cfg.tmux_socket and cfg.tmux_pane)
     if tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
         if cfg.tmux_socket:
-            output_file.write_text("Bridge-owned tmux station is no longer available\n", encoding="utf-8")
-            status_file.write_text("143", encoding="utf-8")
+            common.write_private_text(output_file, "Bridge-owned tmux station is no longer available\n")
+            common.write_private_text(status_file, "143")
             return 143
         tmux(["new-session", "-d", "-s", session, "-n", window, invocation], check=False)
     elif owned_pane:
@@ -1738,8 +1764,8 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
             if "llm-bridge-wait" in start_command:
                 pane_dead = "1"
         if pane_dead != "1":
-            output_file.write_text("Bridge provider pane is busy; refusing to replace a live native process\n", encoding="utf-8")
-            status_file.write_text(str(common.AUTONOMY_ABORT_STATUS), encoding="utf-8")
+            common.write_private_text(output_file, "Bridge provider pane is busy; refusing to replace a live native process\n")
+            common.write_private_text(status_file, str(common.AUTONOMY_ABORT_STATUS))
             return common.AUTONOMY_ABORT_STATUS
         if cfg.max_output_bytes > 0:
             pipe_command = common.argv_to_command_line([
@@ -1753,11 +1779,11 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         else:
             pipe_command = f"cat >> {shlex.quote(str(output_file))}"
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        output_file.touch()
+        common.touch_private_file(output_file)
         respawn = tmux(["respawn-pane", "-k", "-t", target, "-c", common.tmux_literal(cfg.cwd), f"sleep 0.1; {invocation}"], check=False)
         if respawn.returncode != 0:
-            output_file.write_text("could not respawn provider pane\n", encoding="utf-8")
-            status_file.write_text("127", encoding="utf-8")
+            common.write_private_text(output_file, "could not respawn provider pane\n")
+            common.write_private_text(status_file, "127")
             return 127
         if cfg.process_started is not None:
             pane_pid = tmux(["display-message", "-p", "-t", target, "#{pane_pid}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
@@ -1779,28 +1805,32 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
     timeout = int(configured_timeout) if configured_timeout else (None if owned_pane else 3600)
     while (not status_file.is_file() or status_file.stat().st_size == 0) and (timeout is None or waited < timeout):
         if owned_pane and cfg.process_observer is not None:
-            cfg.process_observer()
+            ended = cfg.process_observer()
+            if ended:
+                # The observer has stopped the provider (for example after a usage-limit notice): end the run with its status.
+                common.write_private_text(status_file, str(ended))
+                break
         if owned_pane:
             # A provider that finishes writes its status file, which the loop
             # condition sees. The checks below only cover a station or provider
             # that vanished without one, so they need not start tmux every second.
             station_gone = not common.unix_socket_accepts(cfg.tmux_socket) and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0
             if station_gone:
-                status_file.write_text("143", encoding="utf-8")
+                common.write_private_text(status_file, "143")
                 break
             if waited % TMUX_PANE_CHECK_SECONDS == TMUX_PANE_CHECK_SECONDS - 1:
                 pane_dead = tmux(["display-message", "-p", "-t", target, "#{pane_dead}"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout.strip()
                 if pane_dead == "1":
                     time.sleep(0.05)
                     if not status_file.is_file() or status_file.stat().st_size == 0:
-                        status_file.write_text("124", encoding="utf-8")
+                        common.write_private_text(status_file, "124")
                         break
         elif cfg.tmux_socket and tmux(["has-session", "-t", session], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode != 0:
-            status_file.write_text("143", encoding="utf-8")
+            common.write_private_text(status_file, "143")
             break
         else:
             pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-            output_file.write_text(pane.stdout, encoding="utf-8")
+            common.write_private_text(output_file, pane.stdout)
         time.sleep(1)
         waited += 1
     if owned_pane:
@@ -1809,9 +1839,9 @@ def run_tmux(cfg: SchedulerConfig, logs: common.RunLogs, argv: list[str], output
         common.clean_capture_file(output_file)
     else:
         pane = tmux(["capture-pane", "-p", "-t", target], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
-        output_file.write_text(pane.stdout, encoding="utf-8")
+        common.write_private_text(output_file, pane.stdout)
     if not status_file.is_file() or status_file.stat().st_size == 0:
-        status_file.write_text("124", encoding="utf-8")
+        common.write_private_text(status_file, "124")
     try:
         return int(status_file.read_text(encoding="utf-8").strip())
     except ValueError:
@@ -1833,9 +1863,9 @@ def submit_once(cfg: SchedulerConfig, logs: common.RunLogs, attempt: int, argv: 
     else:
         status = run_fresh_headless(cfg, argv, output_file, status_file)
     if not status_file.is_file() or status_file.stat().st_size == 0:
-        status_file.write_text("124", encoding="utf-8")
+        common.write_private_text(status_file, "124")
     if not output_file.exists():
-        output_file.touch()
+        common.touch_private_file(output_file)
     try:
         status = int(status_file.read_text(encoding="utf-8").strip())
     except ValueError:

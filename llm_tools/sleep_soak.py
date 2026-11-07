@@ -232,9 +232,12 @@ def main(argv: list[str] | None = None) -> int:
     logs = common.setup_run_logs(common.soak_log_dir(env), "sleep-soak")
     common.log_event(logs, "start", {"cycles": cfg.cycles, "period": cfg.period, "gap": cfg.gap, "min_lead": cfg.min_lead, "watchdog": cfg.watchdog, "backend": common.power_backend(env)})
 
-    prior = common.incomplete_suspend_cycles(common.suspend_ledger_path(env))
+    ledger = common.suspend_ledger_path(env)
+    ledger_report = common.reconcile_suspend_ledger(ledger, dict(env))
+    prior = ledger_report.wedged
+    for _level, text in common.suspend_ledger_messages(ledger_report, ledger):
+        print(text, file=sys.stderr)
     if prior:
-        print(f"warning: {len(prior)} earlier suspend cycle(s) never recorded a resume — a prior wake may have wedged the machine.", file=sys.stderr)
         common.log_event(logs, "prior_incomplete", {"count": len(prior)})
 
     if common.power_backend(env) == "none" and env.get("LLM_SCHEDULER_NO_ACTUAL_SUSPEND", "0") != "1":

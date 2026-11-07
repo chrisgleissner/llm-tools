@@ -52,7 +52,7 @@ def test_formatting_helpers_handle_missing_and_odd_values() -> None:
 
 
 def test_controller_line_uses_lifecycle_status_when_mission_is_absent() -> None:
-    assert bridge_tui._controller_line({"lifecycle": {"status": "STOPPED"}}) == "stopped — type start or resume"
+    assert bridge_tui._controller_line({"lifecycle": {"status": "STOPPED"}}) == "stopped — type /start or /resume"
 
 
 def test_systems_accepts_text_execution_and_unavailable_capacity() -> None:

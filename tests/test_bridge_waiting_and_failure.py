@@ -103,8 +103,8 @@ def test_unavailable_providers_are_reported_by_reason_not_as_capacity(store, tmp
     decision = {"provider": "copilot", "usable": False, "reason": "not-authenticated", "windows": []}
     _wait_event(store, mission_id, [decision], all_limited=False)
     waiting = status_snapshot(mission_id)["waiting"]
-    assert waiting["reason"] == "unavailable" and waiting["detail"] == "copilot not-authenticated"
-    assert "for a usable provider · copilot not-authenticated" in bridge_format.format_waiting(waiting, "abc")
+    assert waiting["reason"] == "unavailable" and waiting["detail"] == "copilot is not signed in"
+    assert "for a usable provider · copilot is not signed in" in bridge_format.format_waiting(waiting, "abc")
 
 
 def test_waiting_message_names_each_provider_and_the_key_for_options() -> None:
@@ -268,7 +268,7 @@ def test_a_later_successful_run_clears_the_failure_reason(store, tmp_path, state
 def test_detached_launch_reports_the_recorded_reason_instead_of_a_bare_exit_status(store, tmp_path, state, monkeypatch) -> None:
     mission_id = _failing_mission(tmp_path, store, providers="copilot", frozen=RESTRICTED)
     monkeypatch.setenv("LLM_TOOLS_NO_INHIBIT", "1")
-    with pytest.raises(RuntimeError, match=r"controller exited with status 2: copilot is disabled by \[usage\]\.providers"):
+    with pytest.raises(RuntimeError, match=r"could not start: copilot is disabled by \[usage\]\.providers.*fix it with: llm-bridge rotation --mission "):
         bridge_runtime.launch_controller(mission_id, headless=True)
 
 
@@ -291,7 +291,8 @@ def _snapshot(status: str, **lifecycle: Any) -> dict[str, Any]:
     ("FAILED", "Controller  failed — reason not recorded; inspect with: llm-bridge events --mission abcdef12"),
 ])
 def test_status_never_shows_a_stale_heartbeat_for_a_finished_or_idle_mission(status: str, expected: str) -> None:
-    text = bridge_format.format_status(_snapshot(status))
+    # A paused mission whose controller is gone is INTERRUPTED (tests/test_bridge_status_honesty.py); here it is alive.
+    text = bridge_format.format_status(_snapshot(status, controller_running=status == "PAUSED" or False))
     assert expected in text.splitlines()
     assert "heartbeat" not in text
 

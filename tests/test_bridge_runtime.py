@@ -45,7 +45,8 @@ def test_pause_command_reports_active_provider_work_is_deferred(tmp_path, monkey
     [
         (42, "READY", "APPLIED"),
         (common.AUTONOMY_ABORT_STATUS, "BLOCKED", "PENDING"),
-        (common.AUTONOMY_ABORT_STATUS, "BLOCKED", None),
+        # A first watchdog stop with nothing pending is handed to the next rotation entry.
+        (common.AUTONOMY_ABORT_STATUS, "READY", None),
     ],
 )
 def test_native_provider_failure_applies_pending_amendment_before_retry(
@@ -672,6 +673,58 @@ def test_before_launch_rethrows_unrelated_operation_running_transition_error(tmp
     assert row["status"] == "PREPARED"
 
 
+def test_before_launch_declines_when_stop_force_reconciled_the_prepared_operation(tmp_path, monkeypatch) -> None:
+    """`stop --force` reconciles the PREPARED operation while the controller is still alive.
+
+    The controller then reaches ``mark_operation_running``, which refuses an UNCERTAIN operation. The launch
+    must be declined; raising here sent the controller through its failure handler and left the stopped
+    mission FAILED instead of STOPPED (test_native_start_from_a_script_ends_with_the_attach_command on slow CI).
+    """
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("forced", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    original = store.mark_operation_running
+
+    def forced_first(*args, **kwargs):
+        store.set_mission_status(mission["id"], "STOPPING")  # what `stop --force` does between the two controller steps
+        store.reconcile_interrupted_operations(mission["id"], cause="stop-force")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "mark_operation_running", forced_first)
+
+    assert hook.before_launch({"task_id": task_id}, {"provider": "codex"}, _provider_config("codex", tmp_path, tmp_path), 1) is False
+
+    row = store.db.execute("SELECT status FROM operations WHERE mission_id=?", (mission["id"],)).fetchone()
+    assert row["status"] == "UNCERTAIN"  # stop --force's verdict is kept
+
+
+def test_recording_a_provider_pid_after_stop_force_ends_the_provider_without_failing_the_controller(tmp_path) -> None:
+    """The same race one step later: `stop --force` reconciles the RUNNING operation just before its pid is recorded."""
+    import subprocess
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("forced", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    context = {"task_id": task_id}
+    assert hook.before_launch(context, {"provider": "codex"}, _provider_config("codex", tmp_path, tmp_path), 1)
+    store.set_mission_status(mission["id"], "STOPPING")
+    store.reconcile_interrupted_operations(mission["id"], cause="stop-force")
+    provider = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        hook._record_process(context["operation_id"], provider.pid)  # must not raise
+        assert provider.wait(timeout=10) < 0  # the unrecorded provider is ended: nothing else could find it
+    finally:
+        if provider.poll() is None:
+            provider.kill()
+            provider.wait()
+
+
 def test_before_launch_preserves_unresolvable_configured_cwd_without_claiming_checkpoint(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("unresolved cwd", "objective", cwd=tmp_path)
@@ -1205,11 +1258,15 @@ def test_headless_restart_refuses_running_operation_without_identity(tmp_path, m
     with pytest.raises(RuntimeError, match="cannot prove identity"):
         run_controller(mission["id"], headless=True)
 
-    assert store.get_operation(operation_id)["status"] == "UNCERTAIN"
-    assert store.get_task(task_id)["status"] == "BLOCKED"
+    # The refusal is durable: nothing was marked UNCERTAIN, so a second start refuses again (INT-003).
+    assert store.get_operation(operation_id)["status"] == "RUNNING"
+    assert store.get_task(task_id)["status"] == "RUNNING"
+    with pytest.raises(RuntimeError, match="stop --force"):
+        run_controller(mission["id"], headless=True)
+    assert store.get_operation(operation_id)["status"] == "RUNNING"
 
 
-def test_headless_restart_refuses_reused_provider_pid_without_signalling(tmp_path, monkeypatch) -> None:
+def test_headless_restart_skips_reused_provider_pid_without_signalling(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.delenv("LLM_BRIDGE_STATE_DIR", raising=False)
     store = BridgeStore(tmp_path / "llm-tools" / "llm-bridge" / "bridge.sqlite3")
@@ -1226,10 +1283,11 @@ def test_headless_restart_refuses_reused_provider_pid_without_signalling(tmp_pat
             "llm_tools.bridge_runtime._process_start_token",
             lambda pid: actual_token if int(pid) == process.pid else "",
         )
-        monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", lambda *_args, **_kwargs: pytest.fail("must not schedule around ambiguous provider"))
+        monkeypatch.setattr("llm_tools.bridge_runtime.ralph_robin.main", lambda *_args, **_kwargs: 0)
 
-        with pytest.raises(PermissionError, match="belongs to a different process"):
-            run_controller(mission["id"], headless=True)
+        # A start token that differs from the recorded one proves the recorded provider is gone and the PID
+        # now belongs to an unrelated process: recovery does not refuse (INT-003), and does not signal it.
+        run_controller(mission["id"], headless=True)
 
         assert process.poll() is None
         assert store.get_operation(operation_id)["status"] == "UNCERTAIN"
@@ -1245,68 +1303,64 @@ def test_headless_restart_refuses_reused_provider_pid_without_signalling(tmp_pat
     [(ProcessLookupError(), False), (PermissionError(), True)],
 )
 def test_unreadable_process_identity_only_counts_alive_after_kill_probe(tmp_path, monkeypatch, kill_error, expected) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def unreadable_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
+    def unreadable_proc_stat(path):
+        if path == "/proc/424242/stat":
             raise PermissionError("proc identity is hidden")
-        return original_read_text(path, *args, **kwargs)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", unreadable_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", unreadable_proc_stat)
     monkeypatch.setattr(bridge_runtime.os, "kill", lambda _pid, _sig: (_ for _ in ()).throw(kill_error))
 
     assert bridge_runtime._process_alive_but_unverifiable(424242) is expected
 
 
 def test_unverifiable_process_identity_with_successful_signal_zero_is_alive(tmp_path, monkeypatch) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def unreadable_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
+    def unreadable_proc_stat(path):
+        if path == "/proc/424242/stat":
             raise PermissionError("proc identity is hidden")
-        return original_read_text(path, *args, **kwargs)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", unreadable_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", unreadable_proc_stat)
     monkeypatch.setattr(bridge_runtime.os, "kill", lambda _pid, _sig: None)
 
     assert bridge_runtime._process_alive_but_unverifiable(424242) is True
 
 
 def test_process_identity_probe_reports_missing_proc_entry_as_not_alive(tmp_path, monkeypatch) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def missing_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
-            raise FileNotFoundError(str(path))
-        return original_read_text(path, *args, **kwargs)
+    def missing_proc_stat(path):
+        if path == "/proc/424242/stat":
+            raise FileNotFoundError(path)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", missing_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", missing_proc_stat)
 
     assert bridge_runtime._process_alive_but_unverifiable(424242) is False
 
 
 def test_proc_process_info_returns_none_for_missing_or_malformed_process_stat(tmp_path, monkeypatch) -> None:
-    from pathlib import Path as ConcretePath
     from llm_tools import bridge_runtime
 
     assert bridge_runtime._proc_process_info(999999999) is None
-    original_read_text = ConcretePath.read_text
+    original_read = bridge_runtime.read_proc_text
 
-    def malformed_proc_stat(path, *args, **kwargs):
-        if str(path) == "/proc/424242/stat":
+    def malformed_proc_stat(path):
+        if path == "/proc/424242/stat":
             return "424242 (broken) S 1"
-        return original_read_text(path, *args, **kwargs)
+        return original_read(path)
 
-    monkeypatch.setattr(ConcretePath, "read_text", malformed_proc_stat)
+    monkeypatch.setattr(bridge_runtime, "read_proc_text", malformed_proc_stat)
     assert bridge_runtime._proc_process_info(424242) is None
 
 
@@ -2241,7 +2295,7 @@ def test_controller_completed_stop_gives_up_when_the_controller_never_finishes(t
         lock.release()
 
 
-def test_force_stop_refuses_unidentified_headless_process_and_leaves_stopping(tmp_path, monkeypatch, capsys) -> None:
+def test_force_stop_refuses_a_recorded_pid_it_cannot_identify_and_leaves_stopping(tmp_path, monkeypatch, capsys) -> None:
     import subprocess
     import sys
 
@@ -2253,15 +2307,30 @@ def test_force_stop_refuses_unidentified_headless_process_and_leaves_stopping(tm
     store.set_mission_status(mission["id"], "RUNNING")
     operation = store.begin_operation(task, iteration=1, station="codex")
     process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
-    store.mark_operation_running(operation)
+    store.mark_operation_running(operation, process_pid=process.pid)  # a pid with no start token cannot be verified
     try:
-        assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 2
-        assert "no verifiable process identity" in capsys.readouterr().err
+        assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 1
+        error = capsys.readouterr().err
+        assert f"could not confirm that provider process {process.pid} belongs to this mission; it was left running. Check with: ps -p {process.pid}" in error
+        assert "verifiable" not in error
         assert process.poll() is None
         assert store.get_mission(mission["id"])["status"] == "STOPPING"
     finally:
         os.killpg(process.pid, 9)
         process.wait()
+
+
+def test_force_stop_with_no_recorded_provider_process_stops_and_says_so(tmp_path, monkeypatch, capsys) -> None:
+    state = tmp_path / "state"
+    monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(state))
+    store = BridgeStore(state / "bridge.sqlite3")
+    mission = store.create_mission("mission", "objective", cwd=tmp_path, config={"headless": True})
+    task = store.add_task(mission["id"], "active task")
+    store.set_mission_status(mission["id"], "RUNNING")
+    store.mark_operation_running(store.begin_operation(task, iteration=1, station="codex"))  # still waiting to launch
+    assert bridge.main(["stop", "--mission", mission["id"], "--force"]) == 0
+    assert f"Stopped · no provider process was running · mission {mission['id'][:8]} is STOPPED" in capsys.readouterr().out
+    assert store.get_mission(mission["id"])["status"] == "STOPPED"
 
 
 def test_detached_launch_never_accepts_a_stale_ready_file(tmp_path, monkeypatch) -> None:

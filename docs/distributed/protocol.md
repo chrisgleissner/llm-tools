@@ -41,12 +41,18 @@ Version negotiation: the worker lists the versions it speaks in `hello`
 (`protocol_versions`) and the coordinator answers with the selected version in
 `welcome`. When there is no common version, the coordinator closes the connection
 with WebSocket code 1002 and reason `unsupported version`. Only version 1 exists.
+Versions are whole numbers; there is no minor version. A peer from an adjacent release
+interoperates when it also lists a version the other side speaks (a newer worker lists
+`[1, 2]`): the coordinator selects the highest common one. The Python parser
+(`bridge_protocol.negotiate_version`, applied to every decoded `hello`) rejects a list with no
+common version with `unsupported-version`, naming both lists, and a list that is not
+whole numbers with `invalid-message`.
 
 ## Message types
 
 | Type | Direction | Payload |
 |---|---|---|
-| `hello` | worker → coordinator | `worker_id`, `name`, `software_version`, `protocol_versions`, `platform`, `capabilities` (the `operation_catalog()` output), `missions` (id, name, status, cwd basename, updated_at; active native missions may include bounded `needs_you`), `event_cursor` (highest local event id). |
+| `hello` | worker → coordinator | `worker_id`, `name`, `software_version`, `protocol_versions`, `platform`, `capabilities` (the `operation_catalog()` output), `missions` (mission summaries, see below), `event_cursor` (highest local event id). |
 | `welcome` | coordinator → worker | `generation`, `protocol_version`, `event_cursor` (highest event id the coordinator has stored for this worker). |
 | `command` | coordinator → worker | A `CommandRequest` object. |
 | `command.ack` | worker → coordinator | `request_id`, `status`: `received` or `duplicate`. Acknowledges delivery only. |
@@ -56,11 +62,35 @@ with WebSocket code 1002 and reason `unsupported version`. Only version 1 exists
 | `ping` / `pong` | both | `{}`; sent every 20 s, connection closed after 60 s silence. |
 | `error` | both | `code`, `message`, optional `details`, optional `in_reply_to`. An `error` is never answered with another message. |
 
+## Mission summaries
+
+A mission summary is a small object the worker sends in `hello` and in the `missions` list of
+an `events` message. The coordinator stores the newest summary of each mission and returns it
+in `mission` of every `GET /api/v1/missions` entry, so a console can draw its lists without
+asking the worker. Keys:
+
+| Key | Meaning |
+|---|---|
+| `id`, `name`, `status`, `folder`, `updated_at` | Identity and lifecycle. `folder` is the basename of the working directory. |
+| `task_counts` | Task count per task status (`{"COMPLETED": 36, "QUEUED": 4}`); states with no tasks are absent. |
+| `current_task` | `{ordinal, title}` of the task that is running or next, or `null`. Live missions only; `title` is at most 200 characters. |
+| `station`, `model` | The provider and model that are working, or `null`. Live missions only. |
+| `needs_kind`, `needs_tasks` | What needs the operator, as a kind (`approval`, `capacity`, `provider`, ...) and the number of tasks involved; `null` and `0` when nothing does. Live missions only. |
+| `needs_you` | Present on a running native mission: the provider's pending question (`{kind, message, command}`, message at most 2 KiB) or `null`. |
+
+"Live" means `CREATED`, `RUNNING`, `PAUSED` or `STOPPING`. A summary is about 300 bytes and
+never contains prompt, evidence or terminal text. The worker sends the summary of a mission
+when an event of that mission is in a batch, so the counts follow the replicated events; it does
+not send summaries on a timer, apart from the provider-question check described under event
+replication.
+
 ## Command delivery (PROTO-003, PROTO-004, WORK-006, WORK-007)
 
 1. The coordinator stores the command in its journal with state `pending`
-   before sending it, and sends it again after every reconnect until it has a
-   `command.result`.
+   before sending it. It sends a mutating command again after every
+   reconnect until it has a `command.result`. A read-only command is sent
+   only while the worker is connected and is never sent again: see
+   "Read-only commands and offline workers".
 2. The worker answers `command.ack` immediately. An ack never implies
    execution.
 3. The worker executes the request through `bridge_commands.execute`. A
@@ -71,6 +101,40 @@ with WebSocket code 1002 and reason `unsupported version`. Only version 1 exists
 4. The worker sends `command.result`. The coordinator stores it and marks the
    journal entry `done`. A result for an unknown or already completed request
    is ignored.
+
+### Read-only commands and offline workers (DOG-021)
+
+A read-only command (an operation whose advertised `mutating` is false) is useful only while a
+client waits for its answer. Replaying such commands after a reconnect sent 230 results of about
+81 KB each (18.6 MB in 30 s) to the coordinator, so reads are handled differently from writes:
+
+- The coordinator refuses a read for a worker that is not connected at once, with HTTP 503 and
+  error code `worker-offline`. It does not journal or queue it. A read whose `request_id` is already
+  in the journal returns the stored entry, as before.
+- When a worker disconnects, and again before the coordinator registers its next connection,
+  every unfinished read of that worker is finished with the failure result
+  `{"outcome": "failed", "error": {"code": "worker-offline", ...}}`. A client that waits on the
+  journal entry sees that failure; the read is not delivered after the reconnect.
+- Writes are unchanged: they are queued while the worker is offline (202, `state: pending`),
+  delivered in order after every reconnect and answered exactly once.
+
+### Result sizes
+
+Results of reads are bounded because they travel over the worker link and are stored in the
+coordinator's command journal:
+
+- `mission.status` returns the status projection without task prompts, evidence or event bodies:
+  at most `task_limit` (default 5, at most 50) tasks, unfinished ones first, each with identity,
+  title, status, priority, revision and timestamps but no prompt; `events` and `operator_events` are
+  empty unless `event_limit` (at most 20) asks for the newest ones; the mission object has no frozen
+  tool configuration and at most 160 characters of the objective; every string is clipped to 2 KiB and
+  every list to 20 items. The result is `bounded: true` and about 5 KB for a mission with a few dozen
+  tasks (the full projection was 125 KB measured). `task_total`, `task_counts`
+  and `event_page` still describe the whole mission. `prompt_chars` (at most 2000) adds that many
+  characters of each listed task's `prompt` and `original_prompt`.
+- `task.list` returns whole tasks unless `prompt_chars` clips their prompt fields. The web console
+  passes it. `task.show` returns one whole task, which is the way to read a full prompt.
+- `full: true` returns the whole local projection (the worker's own `llm-bridge status` sends it). The coordinator's resource route does not pass `full`, so a browser cannot ask for it; a client that posts `/commands` can, and then pays the size.
 
 Outcomes are `ok`, `accepted`, `applied`, `rejected`, `failed` and `uncertain`.
 `uncertain` means an unexpected failure happened during a mutation; the
@@ -109,7 +173,7 @@ the controller writes every few seconds; the coordinator does not interpret
 them and the console only lists them as hidden plumbing. The skipped ids still
 advance `through`, and a batch with no events and `through > after` is a
 valid way to move the cursor past them.
-The worker sends ordinary mission summaries only for mission IDs in an event
+The worker sends ordinary mission summaries (see "Mission summaries") only for mission IDs in an event
 batch. Every five seconds it checks active native missions for provider
 questions, and sends only summaries whose bounded `needs_you` value changed;
 it does not resend the full inventory with every task event or heartbeat. The
@@ -181,3 +245,12 @@ the worker resumes it and sends a fresh snapshot instead of the backlog.
 The coordinator keeps at most 256 KiB per browser viewer and closes a viewer
 that falls further behind (close code 1013); the browser reconnects and
 receives a fresh snapshot.
+
+## Byte budgets (DOG-020, DOG-021)
+
+With 3 running and 31 finished missions, the worker link carries under 2 KB/s in steady state, and
+the first seconds after a reconnect under 200 KB, including the `hello` (about 17 KB for 34 missions)
+and every queued write. The coordinator counts messages and bytes by direction and message type since
+it started (`link_bytes` in `GET /api/v1/diagnostics`: `worker_in`, `worker_out`, `browser_out`). The
+counters are in memory and are not sent anywhere. `tests/test_distributed_link_budget.py` measures the
+budgets with a real coordinator and worker.

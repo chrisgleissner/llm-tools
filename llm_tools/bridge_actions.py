@@ -21,6 +21,7 @@ class Action:
     mutable: bool = False
     slash: str = ""       # what the operator types or presses; "/" + command when empty
     handler: str = ""     # console-side handling instead of dispatching: "compose", "amend" or "prefill"
+    terminal: bool = False  # needs a provider terminal, so a Headless mission does not list it
 
     @property
     def typed(self) -> str:
@@ -32,11 +33,10 @@ class Action:
 _LIVE = ("CREATED", "RUNNING", "PAUSED", "STOPPING", "STOPPED")
 
 _REGISTRY: tuple[tuple[Action, Mapping[str, float]], ...] = (
+    # One entry for starting and resuming: `actions_for` shows it as Start for a new mission and Resume after a pause or a stop.
     (Action("start", "Start", "Launch the provider on the first ready task", mutable=True),
-     {"CREATED": 0, "STOPPED": 0}),
-    (Action("resume", "Resume", "Continue after a pause or a stop", mutable=True),
-     {"PAUSED": 0, "STOPPED": 1}),
-    (Action("attach", "Attach", "Open the provider terminal; Ctrl-] P comes back"),
+     {"CREATED": 0, "PAUSED": 0, "STOPPED": 0}),
+    (Action("attach", "Attach", "Open the provider terminal; Ctrl-] P comes back", terminal=True),
      {"RUNNING": 0, "PAUSED": 2}),
     (Action("pause", "Pause", "Hold after the current provider turn", mutable=True),
      {"RUNNING": 1}),
@@ -54,7 +54,7 @@ _REGISTRY: tuple[tuple[Action, Mapping[str, float]], ...] = (
      {status: 6 for status in _LIVE}),
     (Action("status", "Status", "Print the mission state, blockers and queue"),
      {status: 7 for status in (*_LIVE, *ENDED_MISSION_STATUSES)} | {status: 0 for status in ENDED_MISSION_STATUSES}),
-    (Action("detach", "Detach", "Leave the provider terminal; work keeps running"),
+    (Action("leave", "Leave", "Leave the provider terminal; work keeps running", terminal=True),
      {"RUNNING": 8, "PAUSED": 8}),
     (Action("cancel", "Cancel mission", "Cancel mission and unfinished tasks (asks first)", mutable=True),
      {status: 9 for status in _LIVE}),
@@ -72,19 +72,23 @@ def actions_for(
     pending_proposals: int = 0,
     selected_task: str | None = None,
     holding: bool = False,
+    has_terminal: bool = True,
 ) -> list[Action]:
     """Actions that apply to the mission state, most relevant first.
 
     A task awaiting approval puts `Approve task N` at the top. Terminal missions
     keep only read-only actions. `Proposals` is listed first among the rest only
-    when the agent has suggestions waiting.
+    when the agent has suggestions waiting. Actions that need a provider terminal
+    are left out when the mission has none (``has_terminal=False``, Headless mode).
     """
     state = status.upper()
     ranked: list[tuple[float, int, Action]] = []
     for index, (action, ranks) in enumerate(_REGISTRY):
         rank = ranks.get(state)
-        if rank is None:
+        if rank is None or (action.terminal and not has_terminal):
             continue
+        if action.command == "start" and state != "CREATED":
+            action = replace(action, command="resume", label="Resume", effect="Continue after a pause or a stop")
         if action.command == "proposal list" and pending_proposals:
             rank = -0.5
         if action.handler == "amend" and selected_task is not None:

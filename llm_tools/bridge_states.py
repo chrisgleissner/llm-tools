@@ -30,6 +30,10 @@ OPERATION_STATES = _names(*O)
 # (llm_tools.common.OPERATOR_DECLINED_STATUS; this module imports nothing, so it is repeated).
 OPERATOR_DECLINED_EXIT_CODE = 76
 
+# Exit status of a run that llm-scheduler's own watchdog stopped: no output progress, a question
+# that stayed unanswered, or a blocked prompt (llm_tools.common.AUTONOMY_ABORT_STATUS).
+AUTONOMY_ABORT_EXIT_CODE = 75
+
 # An operation that has been recorded but has not yet exited or been marked uncertain.
 ACTIVE_OPERATION_STATUSES = _names(O.INTENT, O.PREPARED, O.RUNNING)
 
@@ -48,6 +52,11 @@ STARTED_MISSION_STATUSES = _names(M.RUNNING, M.PAUSED)
 HALTED_MISSION_STATUSES = _names(M.PAUSED, M.STOPPING, M.STOPPED)
 
 FINISHED_TASK_STATUSES = _names(T.COMPLETED, T.CANCELLED)
+
+# A COMPLETED mission that receives a follow-up task goes back to this state (the one in which a mission
+# has work but no controller yet), and `start` runs the new task.  `BridgeStore.add_task` is the only
+# way out of COMPLETED, so the move is not in MISSION_TRANSITIONS, which stays empty for finished missions.
+REOPENED_MISSION_STATUS = M.CREATED.value
 
 # Current status -> statuses it may move to. A transition to the same status is
 # always accepted by the store and is not listed.

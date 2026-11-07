@@ -22,9 +22,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = common.read_copilot_live(os.environ)
         if result:
-            cache.parent.mkdir(parents=True, exist_ok=True)
+            common.ensure_private_cache_dir(cache.parent)
             tmp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(result, separators=(",", ":")) + "\n", encoding="utf-8")
+            common.write_private_text(tmp, json.dumps(result, separators=(",", ":")) + "\n")
             tmp.replace(cache)
         return 0
     finally:

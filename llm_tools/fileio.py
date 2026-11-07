@@ -7,6 +7,16 @@ import stat
 from typing import Any
 
 
+def read_proc_text(path: str) -> str:
+    """Read a ``/proc`` text file by its string name.
+
+    ``pathlib.Path(f"/proc/{pid}/stat")`` would intern the pid as a path component, and CPython 3.12 never frees
+    interned strings, so a controller that looks at one new process per provider run would keep one string per pid.
+    """
+    with open(path, encoding="ascii") as handle:
+        return handle.read()
+
+
 def open_regular_file(path: str | os.PathLike[str], *, follow_symlinks: bool = True) -> Any:
     """Open `path` for binary reading, refusing anything but a regular file.
 

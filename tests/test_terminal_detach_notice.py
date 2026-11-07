@@ -48,7 +48,9 @@ def _attach_and_detach(tmp_path: Path, session_name: str, env: dict[str, str], *
 
     process = subprocess.Popen(
         [sys.executable, "-c", code], stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env={**env, "TERM": "xterm-256color"}, preexec_fn=controlling_terminal,
+        # fit_line sizes the notice from COLUMNS (stdout is a pipe here, so the pty size is not seen); pytest-xdist
+        # workers export COLUMNS=80, which would cut the 91-column notice, so pin the width of the pty.
+        env={**env, "TERM": "xterm-256color", "COLUMNS": "100", "LINES": "30"}, preexec_fn=controlling_terminal,
     )
     try:
         deadline = time.monotonic() + 10
@@ -91,7 +93,7 @@ def test_detach_from_a_finished_mission_does_not_promise_it_keeps_running(tmp_pa
     code, out = _attach_and_detach(tmp_path, f"mission-{MISSION}", bridge_env, finish="CANCELLED")
 
     assert code == 0
-    assert out == "Detached from mission f292f491 (c64bridge) · the mission is cancelled\n"
+    assert out == "Mission f292f491 cancelled · 0/1 tasks\n"
 
 
 def test_other_sessions_keep_tmux_s_own_line(tmp_path: Path, bridge_env: dict[str, str]) -> None:

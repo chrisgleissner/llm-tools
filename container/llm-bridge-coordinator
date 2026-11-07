@@ -1,0 +1,122 @@
+#!/bin/sh
+# llm-bridge-coordinator: host-level administration of the LLM Bridge coordinator from an SSH
+# session, with one command name for every install method.
+#
+#   llm-bridge-coordinator reset-password [--temporary] [--keep-api-tokens] [--username NAME]
+#
+# reset-password sets a new web password for the (single) administrator account. On a terminal
+# it asks for the password twice without echo; with a pipe it reads one line from standard input.
+# --temporary generates a one-time password instead and forces a change at the next web sign-in.
+# All sessions are deleted; API tokens are revoked unless --keep-api-tokens is given.
+#
+# Where it runs (see docs/distributed/install.md, "Locked out or forgot the password"):
+#   container install  `docker compose exec coordinator bridge-coordinator admin reset-password`,
+#                      in the compose project that this wrapper finds by itself (the path that
+#                      container/install-cli.sh recorded, else the folder of this script). It uses
+#                      docker directly when the current user can reach it and sudo otherwise.
+#   native install     `sudo bridge-coordinator admin reset-password` (no sudo as root). The
+#                      binary uses the service's data directory by default and gives the database
+#                      files back to the service user.
+#
+# Environment: LLM_BRIDGE_COORDINATOR_COMPOSE_DIR picks the compose folder explicitly;
+# LLM_BRIDGE_COORDINATOR_CONFIG_DIR is where the recorded path lives (default
+# /etc/llm-bridge-coordinator, file compose-dir).
+set -eu
+
+name=llm-bridge-coordinator
+die() { echo "$name: $*" >&2; exit 1; }
+
+usage() {
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+script_dir() {
+    src=$0
+    while [ -L "$src" ]; do
+        target=$(readlink "$src")
+        case $target in
+            /*) src=$target ;;
+            *) src=$(dirname "$src")/$target ;;
+        esac
+    done
+    (cd "$(dirname "$src")" && pwd)
+}
+
+# Compose folder of a container install, or nothing.
+find_compose_dir() {
+    if [ -n "${LLM_BRIDGE_COORDINATOR_COMPOSE_DIR:-}" ]; then
+        printf '%s\n' "$LLM_BRIDGE_COORDINATOR_COMPOSE_DIR"
+        return
+    fi
+    record=${LLM_BRIDGE_COORDINATOR_CONFIG_DIR:-/etc/llm-bridge-coordinator}/compose-dir
+    if [ -r "$record" ]; then
+        # The folder itself may be unreadable for this user (mode 0700); sudo reads it.
+        dir=$(sed -n '1p' "$record")
+        [ -n "$dir" ] && { printf '%s\n' "$dir"; return; }
+    fi
+    here=$(script_dir)
+    if [ -f "$here/compose.yaml" ]; then
+        printf '%s\n' "$here"
+    fi
+}
+
+reset_container() {
+    dir=$1
+    shift
+    if docker info >/dev/null 2>&1; then
+        run_docker=docker
+    elif command -v sudo >/dev/null 2>&1; then
+        echo "$name: docker is not reachable for $(id -un) (not in the docker group); using sudo. You may be asked for your password." >&2
+        run_docker="sudo docker"
+    else
+        die "docker is not reachable for $(id -un) and sudo is not installed; run this as root or add the user to the docker group"
+    fi
+    if [ -t 0 ]; then
+        tty_flag=
+    else
+        tty_flag=-T
+    fi
+    # shellcheck disable=SC2086
+    exec $run_docker compose --project-directory "$dir" -f "$dir/compose.yaml" exec $tty_flag \
+        coordinator bridge-coordinator admin reset-password "$@"
+}
+
+reset_native() {
+    binary=$(command -v bridge-coordinator 2>/dev/null || true)
+    [ -n "$binary" ] || binary=/usr/local/bin/bridge-coordinator
+    if [ "$(id -u)" = 0 ] || [ "$(id -un)" = bridge ]; then
+        exec "$binary" admin reset-password "$@"
+    fi
+    command -v sudo >/dev/null 2>&1 || die "sudo is not installed; run this as root"
+    echo "$name: changing the coordinator's data needs root; using sudo. You may be asked for your password." >&2
+    exec sudo "$binary" admin reset-password "$@"
+}
+
+case ${1:-} in
+    reset-password)
+        shift
+        for arg in "$@"; do
+            case $arg in
+                -h|--help)
+                    echo "usage: $name reset-password [--temporary] [--keep-api-tokens] [--username NAME]"
+                    echo "  asks for the new password twice (no echo); --temporary generates one and forces a change at the next sign-in"
+                    echo "  There is exactly one administrator account; --username only has to match its name."
+                    exit 0 ;;
+            esac
+        done
+        dir=$(find_compose_dir)
+        if [ -n "$dir" ]; then
+            reset_container "$dir" "$@"
+        elif command -v bridge-coordinator >/dev/null 2>&1 || [ -x /usr/local/bin/bridge-coordinator ]; then
+            reset_native "$@"
+        else
+            die "cannot find the coordinator: no compose project (run container/install-cli.sh in the compose folder, or set LLM_BRIDGE_COORDINATOR_COMPOSE_DIR) and no bridge-coordinator binary"
+        fi
+        ;;
+    -h|--help|help|'')
+        usage ;;
+    *)
+        echo "$name: unknown command $1" >&2
+        usage >&2
+        exit 2 ;;
+esac

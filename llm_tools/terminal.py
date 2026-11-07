@@ -13,6 +13,7 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -26,6 +27,7 @@ from collections.abc import Callable, Iterator, Mapping
 from typing import Any, Literal
 
 from .bridge_glyphs import glyph, localize
+from .bridge_input import cell_width
 from .bridge_states import ENDED_MISSION_STATUSES
 from .common import resolve_executable, tmux_literal, unix_socket_accepts
 from .bridge_theme import mission_chip_style, resolve_cached, tmux_role_markup, tmux_style_markup
@@ -111,7 +113,7 @@ STATUS_CONTEXT_FORMAT = (
 # to the attached client's width.
 _STATUS_CONTEXT_MAX_CHARS = 80
 _STATUS_LABEL_MAX_CHARS = 20
-_STATUS_CONTEXT_SAFE_RE = re.compile(r"[^\w .:/·…●○◆✓✕‖*=|-]", re.UNICODE)
+_STATUS_CONTEXT_SAFE_RE = re.compile(r"[^\w .:/·…●○◆✓✕⊘‖*=|-]", re.UNICODE)
 
 
 # Terminal (tab/window) title: "Bridge · <mission label> · <state>". The initial
@@ -189,20 +191,34 @@ def detach_notice(session_name: str) -> str:
     if match is None:
         return ""
     mission_id = match.group(1)
-    name, status = "", ""
+    name, status, counts = "", "", ""
     try:
         from .bridge import open_store
         from .bridge_format import printable
 
         with open_store() as store:
             mission = store.get_mission(mission_id)
+            tasks = store.list_tasks(mission_id)
         name, status = " ".join(printable(mission.get("name") or "").split()), str(mission.get("status") or "")
+        if tasks:
+            counts = f" \u00b7 {sum(1 for task in tasks if task.get('status') == 'COMPLETED')}/{len(tasks)} tasks"
     except Exception:  # the notice is a courtesy; never fail a detach over a missing name
         pass
-    label = f"mission {mission_id[:8]}" + (f" ({name})" if name else "")
     if status in ENDED_MISSION_STATUSES:
-        return f"Detached from {label} · the mission is {status.lower()}"
-    return f"Detached from {label} · it keeps running · llm-bridge attach to return"
+        return f"Mission {mission_id[:8]} {status.lower()}{counts}"
+    label = f"mission {mission_id[:8]}" + (f" ({name})" if name else "")
+    return f"Detached from {label} \u00b7 it keeps running \u00b7 llm-bridge attach to return"
+
+
+def fit_line(text: str, columns: int | None = None) -> str:
+    """``text`` cut to the terminal width with an ellipsis, so a wrapped line never starts with ` \u00b7 `."""
+    width = columns if columns is not None else shutil.get_terminal_size((100, 24)).columns
+    if width <= 1 or cell_width(text) <= width:
+        return text
+    cut = text
+    while cut and cell_width(cut) > width - 1:
+        cut = cut[:-1]
+    return cut.rstrip() + "\u2026"
 
 
 def station_status_formats() -> tuple[str, str]:
@@ -1540,7 +1556,7 @@ class TmuxTerminalBackend:
         line = (result.stdout or "").strip()
         if line:
             notice = detach_notice(handle.session_name) if result.returncode == 0 and line.startswith("[detached") else ""
-            print(notice or line, flush=True)
+            print(fit_line(notice) if notice else line, flush=True)
         if result.returncode != 0:
             # attach-session starts a server when the station died after the
             # ownership check above; do not leave its dead socket behind.

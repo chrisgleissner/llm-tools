@@ -18,7 +18,8 @@ from tests.test_bridge_recovery_tmux import call, controller_released, wait_for
 
 def _statuses(database: Path, mission_id: str) -> list[str]:
     with BridgeStore(database) as store:
-        return [str(task["status"]) for task in store.list_tasks(mission_id)]
+        # list_tasks returns the scheduler order with finished tasks last (CLIUX-056); this test reads task 1 first.
+        return [str(task["status"]) for task in sorted(store.list_tasks(mission_id), key=lambda task: int(task["ordinal"]))]
 
 
 def _runs(directory: Path) -> list[str]:
@@ -72,7 +73,7 @@ def test_second_task_waits_for_approval_of_the_first(tmp_path: Path, env: dict[s
         with BridgeStore(database) as store:
             assert [event["kind"] for event in store.events(mission_id) if event["kind"].startswith("review-hold")] == ["review-hold"]
         handle = backend.open_existing(socket_path, f"mission-{mission_id}")
-        footer = "Task 1 is waiting for your review. Ctrl-] then B, then /approve or /reject."
+        footer = "Task 1 ready for review · Ctrl-] B then /approve"
         # The controller sets the footer text before it launches the provider; this holds on every tmux version.
         assert _review_hint(backend, handle) == footer
         if recorded_exit_status(backend, handle, timeout=15) == "0":

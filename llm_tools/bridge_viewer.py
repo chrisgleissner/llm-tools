@@ -61,8 +61,20 @@ def wheel_keys(buttons: int, *, wrap: bool, editing: bool) -> list[str]:
     return []
 
 
-def run_document(source: str, *, title: str, path: Path | None = None, follow: bool = False) -> int:
-    """Read-only document ownership; opening never starts mission/provider work."""
+def run_document(
+    source: str,
+    *,
+    title: str,
+    path: Path | None = None,
+    follow: bool = False,
+    plain: bool = False,
+    switch: tuple[str, str, str, str] | None = None,
+) -> int:
+    """Read-only document ownership; opening never starts mission/provider work.
+
+    ``plain`` shows a help page (word-wrapped, no file-viewer controls). ``switch``
+    is ``(key, hint label, title, source)``: pressing that key replaces the page with another one.
+    """
     from .bridge_documents import DocumentViewer
     from .bridge_tui import _ConsoleState, _draw_document, initialize_colors
     curses.use_env(False)
@@ -70,10 +82,10 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
     if path is not None:
         source=read_source(path)
     state=_ConsoleState('document', lambda *_: '', lambda _: {}, full=True)
-    state.document_viewer=DocumentViewer(title, source)
+    state.document_viewer=DocumentViewer(title, source, rendered=plain, plain=plain, footer_extra=f"{switch[0]} {switch[1]}" if switch else "")
     following=follow
     def loop(window: curses.window) -> int:
-        nonlocal following, seen
+        nonlocal following, seen, switch
         initialize_colors()
         window.keypad(True)
         bridge_hangup.set_timeout(window, 100)
@@ -156,6 +168,11 @@ def run_document(source: str, *, title: str, path: Path | None = None, follow: b
                 elif key in {'KEY_END','G'}:
                     following=True
                     checked=0.0
+            if switch is not None and key == switch[0] and state.document_viewer is not None and not state.document_search_editing:
+                state.document_viewer.release()
+                state.document_viewer=DocumentViewer(switch[2], switch[3], rendered=True, plain=True)
+                switch=None
+                continue
             state.handle_key(key)
         return 0
     try:

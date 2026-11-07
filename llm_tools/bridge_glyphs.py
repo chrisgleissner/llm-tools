@@ -6,14 +6,21 @@ terminal started with ``LANG=C`` (typically an SSH login) never receives
 bytes it cannot display.  ``ascii_mode`` follows the locale codeset, which is
 what curses will emit; ``sys.stdout.encoding`` is no help because Python's
 UTF-8 mode reports ``utf-8`` even under the C locale.
+
+Python 3.7+ coerces the C locale to UTF-8 (PEP 538), so the codeset alone says
+"UTF-8" for ``LANG=C``.  ``ascii_mode`` therefore also reads the locale the user
+set (``LC_ALL``, ``LC_CTYPE``, ``LANG``), and ``LLM_BRIDGE_ASCII=1`` forces ASCII.
 """
 
 from __future__ import annotations
 
 import functools
 import locale
+import os
 import sys
 import unicodedata
+
+from .bridge_vocab import MISSION_INTERRUPTED_LABEL, MISSION_NEEDS_YOU_LABEL, status_label
 
 # name -> (UTF-8, ASCII).  Composite forms come before the single glyphs they
 # contain, because ``localize`` replaces in table order.
@@ -38,14 +45,15 @@ GLYPHS: dict[str, tuple[str, str]] = {
     "hbar": ("─", "-"),
     "hbar_heavy": ("━", "-"),
     "chip": ("▌", "|"),
-    "square": ("■", "#"),
+    "square": ("■", "@"),
     # State glyphs (the colour is never the only cue).
     "running": ("●", "*"),
     "here": ("●", "*"),
     "waiting": ("○", "o"),
-    "review": ("◆", "#"),
-    "done": ("✓", "v"),
-    "failed": ("✕", "x"),
+    "review": ("◆", "?"),
+    "done": ("✓", "+"),
+    "failed": ("✕", "!"),
+    "cancelled": ("⊘", "-"),
     "paused": ("‖", "="),
     # Bars (capacity and usage dashboard).
     "bar_full": ("█", "#"),
@@ -67,10 +75,54 @@ def _locale_codeset() -> str:
         return getattr(sys.stdout, "encoding", "") or ""
 
 
+_FALSE_WORDS = {"", "0", "false", "no", "off"}
+_C_LOCALES = {"C", "POSIX"}
+
+
+def _ascii_forced() -> bool:
+    """``LLM_BRIDGE_ASCII`` set to anything but empty, ``0``, ``false``, ``no`` or ``off``."""
+    return os.environ.get("LLM_BRIDGE_ASCII", "").strip().lower() not in _FALSE_WORDS
+
+
+def _is_c_locale_name(name: str) -> bool:
+    """``C`` or ``POSIX`` without a UTF-8 codeset (``C.UTF-8`` is a real UTF-8 locale)."""
+    base, _, codeset = name.split("@")[0].partition(".")
+    return base in _C_LOCALES and codeset.lower().replace("-", "") != "utf8"
+
+
+def _user_locale_is_c() -> bool:
+    """True when the user's own locale settings select the C/POSIX locale, whatever Python coerced it to.
+
+    The effective locale is the first of ``LC_ALL``, ``LC_CTYPE`` and ``LANG`` that is set.
+    PEP 538 exports ``LC_CTYPE=C.UTF-8`` for a C locale when ``LC_ALL`` is unset, so that
+    value together with ``LANG=C`` is the coercion's own trace and still counts as C.
+    """
+    env = os.environ
+    effective = env.get("LC_ALL") or env.get("LC_CTYPE") or env.get("LANG") or ""
+    if _is_c_locale_name(effective):
+        return True
+    if not env.get("LC_ALL") and env.get("LC_CTYPE", "").lower().replace("-", "") == "c.utf8":
+        return _is_c_locale_name(env.get("LANG", ""))
+    return False
+
+
 @functools.lru_cache(maxsize=1)
 def ascii_mode() -> bool:
-    """True when the locale codeset is not UTF-8 (``LANG=C`` over SSH)."""
+    """True for ASCII glyphs: ``LLM_BRIDGE_ASCII=1``, a C/POSIX locale as the user set it, or a non-UTF-8 codeset."""
+    if _ascii_forced() or _user_locale_is_c():
+        return True
     return _locale_codeset().upper().replace("-", "").replace("_", "") != "UTF8"
+
+
+def glyph_report() -> str:
+    """One line for ``llm-bridge theme``: the active glyph set, why, and how to switch."""
+    if not ascii_mode():
+        return "UTF-8 (set LLM_BRIDGE_ASCII=1, or use LC_ALL=C, for plain ASCII symbols)"
+    if _ascii_forced():
+        return "ASCII (LLM_BRIDGE_ASCII is set)"
+    if _user_locale_is_c():
+        return "ASCII (the locale is C or POSIX; use a UTF-8 locale such as en_US.UTF-8 for symbols)"
+    return "ASCII (the terminal locale is not UTF-8)"
 
 
 def glyph(name: str) -> str:
@@ -138,10 +190,12 @@ STATE_LOOK: dict[str, tuple[str, str]] = {
     "CREATED": ("waiting", "state_waiting"), "WAITING": ("waiting", "state_waiting"),
     "INTENT": ("waiting", "state_waiting"), "PREPARED": ("waiting", "state_waiting"),
     "VERIFYING": ("review", "state_review"), "REVIEW": ("review", "state_review"),
+    MISSION_NEEDS_YOU_LABEL: ("review", "state_review"),
+    MISSION_INTERRUPTED_LABEL: ("failed", "state_failed"),
     "COMPLETED": ("done", "state_done"), "DONE": ("done", "state_done"), "SUCCEEDED": ("done", "state_done"),
     "FAILED": ("failed", "state_failed"), "BLOCKED": ("failed", "state_failed"),
     "UNAVAILABLE": ("failed", "state_failed"), "ERROR": ("failed", "state_failed"),
-    "CANCELLED": ("failed", "state_paused"),
+    "CANCELLED": ("cancelled", "state_paused"),
     "PAUSED": ("paused", "state_paused"), "PAUSING": ("paused", "state_paused"),
     "STOPPED": ("paused", "state_paused"), "STOPPING": ("paused", "state_paused"),
 }
@@ -155,7 +209,7 @@ def state_look(status: object) -> tuple[str, str] | None:
 
 def state_text(status: object, *, unicode: bool | None = None) -> str:
     """`● RUNNING`: the state glyph and word.  `unicode` forces the character set."""
-    word = str(status).strip().upper()
+    word = status_label(str(status).strip().upper())
     look = STATE_LOOK.get(word)
     if look is None:
         return word

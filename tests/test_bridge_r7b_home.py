@@ -134,7 +134,7 @@ def test_enter_attaches_to_a_live_native_mission_and_o_opens_controls(tmp_path) 
     headless["config"]["headless"] = True
     assert Launcher(str(tmp_path), missions=[headless], selected=1, probe=lambda ident: True).key("\n") == "open"
     created = Launcher(str(tmp_path), missions=[mission("New", "CREATED")], selected=1)
-    assert created.key("\n") == "open" and "Enter controls" in launcher.list_footer(created) and "S start" in launcher.list_footer(created)
+    assert created.key("\n") == "open" and "Enter open" in launcher.list_footer(created) and "S start" in launcher.list_footer(created)
     assert Launcher(str(tmp_path), missions=[mission("Done", "COMPLETED")], selected=1).key("s") is None
     assert created.key("S") == "start-selected"
     typed = Launcher(str(tmp_path), missions=[live_native()], selected=1, probe=lambda ident: True)

@@ -207,9 +207,10 @@ attempts = Path({str(attempts)!r})
 number = len(attempts.read_text().splitlines()) + 1 if attempts.exists() else 1
 with attempts.open('a', encoding='utf-8') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
+exhausted = {exhausted!r}
 if number == 1:
-    if {exhausted!r} is not None:
-        Path({str(usage_file)!r}).write_text({exhausted!r}, encoding='utf-8')
+    if exhausted is not None:
+        Path({str(usage_file)!r}).write_text(exhausted, encoding='utf-8')
     print(json.dumps({{'type': 'error', 'message': 'You\\u2019ve reached your usage limit. Please wait for limit to reset.'}}), flush=True)
     raise SystemExit(75)
 print(json.dumps({{'type': 'item.completed', 'item': {{'type': 'agent_message', 'text': 'done'}}}}), flush=True)

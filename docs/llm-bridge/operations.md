@@ -7,14 +7,15 @@ has happened before approving completion or retrying uncertain work.
 ## Install and create a mission
 
 Install `llm-tools` as usual. Native and Background missions use a tmux
-station, so they need `tmux`; Headless (`--headless`) runs a mission without it. The existing provider CLIs and credentials are
+station, so they need `tmux`; Headless (`--mode headless`) runs a mission without it. The existing provider CLIs and credentials are
 used by the scheduler. Bridge adds no provider SDK or network service.
 
 Run `llm-bridge` with no arguments from any working directory to open the home
 screen. It lists saved missions with status, short id (the id the CLI accepts
 as `--mission`), name, age and folder; `●` marks a
-mission whose folder is the current folder and `stale` marks a RUNNING or PAUSED
-mission whose controller is not running (open it and type `resume`). With no
+mission whose folder is the current folder and `✕ INTERRUPTED` replaces the status of a RUNNING or PAUSED
+mission whose controller stopped unexpectedly (crash, kill or reboot); the detail line gives the fix,
+`llm-bridge start --mission ID`. With no
 missions it explains what a mission is. Use Up/Down and Enter to choose a
 mission, or **N** for a new mission; **?** opens help and **Q** quits.
 The creation form defaults to the current folder and Native interactive. With
@@ -116,32 +117,115 @@ llm-bridge start --mission MISSION_ID
 A mission runs in one of three modes. The same three names appear in the home
 form, `--help`, `llm-bridge help` and `status`:
 
-| Mode | Flag | Provider | Station |
+| Mode | `--mode` | Provider | Station |
 | --- | --- | --- | --- |
-| Native | `--native` | the provider's own interactive terminal UI | tmux station with the provider in its pane; open it with `attach` |
-| Headless | `--headless` | runs without a terminal; Bridge shows its activity output | none; no tmux needed, nothing to attach to |
-| Background | neither flag (CLI default) | runs without a terminal, controlled by a background controller | tmux station whose provider pane tails the controller log; the Bridge pane takes control commands |
+| Native | `native` | the provider's own interactive terminal UI | tmux station with the provider in its pane; open it with `attach` |
+| Headless | `headless` | runs without a terminal; Bridge shows its activity output | none; no tmux needed, nothing to attach to |
+| Background | `background` (CLI default) | runs without a terminal, controlled by a background controller | tmux station whose provider pane tails the controller log; the Bridge pane takes control commands |
 
-The home form offers Native and Headless (Space switches); a mission created
-without either flag on the command line runs in Background mode. Older
-documentation and saved events call Background mode "autonomous".
+The home form offers all three (Space or Left/Right switches) and starts on
+Native, which is recommended for interactive work. The command line defaults to
+Background because it needs no terminal, so a script behaves the same on every
+machine. Older documentation and saved events call Background mode "autonomous".
+Mission JSON carries `"mode": "native|background|headless"` in `config`, next to
+the saved `headless` and `native_tui` booleans.
 
-Pass `--native` or `--headless` to `mission create` or `start`; a flag on
-`start` overrides the saved mode. Use one of them, not both: `mission create` and `start` both
-refuse the combination (`--headless and --native cannot be combined`). The
+Pass `--mode native|background|headless` to `mission create` or `start`; a mode
+on `start` overrides and saves the mission's mode. The older `--native` and
+`--headless` flags still work as aliases of `--mode native` and `--mode
+headless`. A flag that contradicts `--mode`, or `--native` with `--headless`,
+is refused (`--headless and --native cannot be combined`). The
 rotation comes from the llm-tools config (`[ralph]` before `[defaults]`),
-else the built-in `claude,codex,opencode`. `--routes` names configured route IDs and wins over
+else the built-in `claude,codex,opencode`, limited to the providers the config
+enables. `mission create --help` prints the rotation a new mission gets now.
+`--routes` names configured route IDs and wins over
 `--providers`. An explicit `--providers` without `--routes` clears configured
 routes, so the providers you list are what runs.
 
-`--mission` accepts a full mission ID or a unique prefix of 4 or more
+`mission create` and `start --providers/--routes` check every rotation entry
+with the check `rotation --set` uses: a name that is neither a provider nor a
+configured route is refused with a suggestion (`unknown rotation entry 'claud'
+· did you mean claude?`) before anything is saved. An entry whose CLI is
+installed but not signed in only produces a warning on stderr (`warning: codex
+is not signed in (run: codex login); it will be skipped until it is`), read
+offline from the same files as `doctor`; `LLM_BRIDGE_NO_SIGNIN_CHECK=1` turns the
+warning off. `start` refuses a cancelled or completed mission with a message and
+exit status 4 (wrong state), and prints `running` only after the controller has reported
+ready; a controller that fails first gives `mission ID could not start: REASON
+· fix it with: llm-bridge rotation --mission ID --set LIST`.
+
+`mission create` warns on stderr when the folder already has an unfinished
+mission (`warning: this folder already has unfinished mission 14f56611 "..."
+(CREATED); llm-bridge task add --mission 14f56611 ... adds to it`) and still
+creates the new one; `--new` suppresses the warning. The list printed when
+folder inference is ambiguous shows each mission's last-updated time, and the
+`Needs you` line and receipts spell out `--mission ID` so the command works as
+copied.
+
+`--mission` (short `-m`) accepts a full mission ID or a unique prefix of 3 or more
 characters. When it is omitted, Bridge uses the one unfinished mission whose
 folder is the current folder or a parent of it; a live mission wins over
 stopped or failed ones. With no match, or several, the error lists candidates.
-CLI commands print human-readable text; add `--json` for the stable
+CLI commands print human-readable text; add `--json` (short `-j`) for the stable
 machine-readable form.
 
-Mission creation accepts `--verifier-arg` (repeat once per argv element),
+### Command-line conventions
+
+* **One list command.** `llm-bridge mission list` and `llm-bridge missions` print the same
+  table: `ID`, `STATE`, `NEEDS YOU` (`review task 1` when a task awaits your review),
+  `TASKS` (done/total), `NAME`, `FOLDER` and `UPDATED`, live missions first. The
+  current provider and task are in `missions --json` (`provider`, `current_task`). `console` is
+  an internal command and is not listed.
+* **Task numbers.** A task is named by the number `task list` shows: `llm-bridge task approve 1`
+  is the same as `llm-bridge task approve --task 1` (short `-t`). `--task-id ID` takes the global
+  ID, which is internal; JSON task objects carry both `number` (an alias of `ordinal`, the
+  number you type) and `id` (the global ID). `proposal accept N` and `proposal reject N` take the
+  task number in the same way, and `llm-bridge view notes.md` reads a file without `--file`.
+* **Options are spelled out.** A long option is never accepted as a prefix: `stop --f` is an
+  error, not `stop --force`. Explicit aliases (`--prompt-file`, `-f`, `-m`, `-t`, `-j`) work.
+* **Pagination.** Every list command takes `--limit N` and ends a partial list with
+  `showing N of M <things> · --limit N shows more · <continuation>`: `events` (newest N,
+  `--after EVENT_ID` reads forward), `task list` (first N, `--offset N` continues; `--all` lists
+  every task), `proposal list` (`--after TASK_NUMBER`) and `mission list` / `missions` (live
+  first; 100 in text, all with `--json`). `--json` lists are objects (`{"tasks": [...],
+  "total": N, "offset": N}`, `{"missions": [...], "total": N}`, `{"events": [...]}`,
+  `{"proposals": [...]}`, `{"workers": [...]}`), never bare arrays.
+* **Coordinator URLs and `--target`.** `worker enroll --coordinator` and `remote login
+  --coordinator` accept either `https://HOST:PORT` or `wss://HOST:PORT` for the same coordinator
+  and store the scheme each command needs. `--target NAME` goes before the command (`llm-bridge
+  --target build-1 mission list`); after the command it is an error that shows the corrected
+  command line.
+
+### Exit status and error output
+
+| Status | Meaning |
+| --- | --- |
+| 0 | Success, or nothing to do (`Already paused`, `Already stopped`, `Nothing to pause`). |
+| 1 | Runtime failure: a provider, the controller, the disk or the network failed. `doctor` exits 1 when no provider can run. |
+| 2 | Usage error: unknown command or option, a value that is not valid, a command refused for a managed provider. |
+| 3 | Not found or ambiguous: no such mission, task, ID prefix or folder mission, or a prefix that matches several; also `task output`/`task diff` when there is nothing to show. With `--target`, 3 also means the target did not answer (the request stays queued). |
+| 4 | Wrong state: the mission or task is not in a state that allows the command (`start` on a cancelled mission, `task approve` on a task that is not in review, `finish` without a native provider, `attach` without a station). |
+
+With `--json`, an error is printed on standard output (not standard error) as
+
+```json
+{"error": {"code": "mission-not-found", "help": "https://github.com/chrisgleissner/llm-tools/blob/main/docs/llm-bridge/troubleshooting.md#mission-not-found", "hint": "run llm-bridge mission list", "message": "no mission matches 'zzzz'"}}
+```
+
+with the same exit status. `hint` is the command that fixes the problem, or an empty string. `help` is the
+address of the entry for the code in the [troubleshooting guide](troubleshooting.md); the entry heading is
+the code. In text mode an error exit (status 1 to 4) ends with the same address on its own line, `see: URL#CODE`.
+The codes are `usage` (exit 2), `invalid-argument` (2), `mission-not-found` (3), `task-not-found`
+(3), `not-found` (3), `mission-ambiguous` (3), `wrong-state` (4), `conflict` (4, a task changed
+since you read it), `schema-too-new` (4, the database was written by a newer llm-bridge; see
+"Database upgrades, backups and downgrades"), `refused-in-managed-session` (2) and `failed` (1). The same table is in
+`llm-bridge --help` under "Exit status". Every code, and the common symptoms, are explained in
+[troubleshooting](troubleshooting.md); `tests/test_docs_coverage.py` fails when a code produced by the source has
+no entry there. The [user guide](guide.md) covers the concepts and the five tasks every operator does,
+including `llm-bridge task amend`, `llm-bridge proposal list|accept|reject|create`, `llm-bridge pause`, `llm-bridge finish`,
+`llm-bridge usage`, `llm-bridge backup`, `llm-bridge restore` and the remote and worker commands.
+
+Mission creation accepts `--verifier 'COMMAND'` (split like a shell, not run through one) or the command last after `--`, `--verifier-arg` (repeat once per argv element),
 `--verifier-timeout` (default 300 seconds), `--log-max-bytes` (default 4 MiB),
 `--log-rotations` (default 3), `--log-retained-runs` (default 20), and
 `--capacity-refresh-seconds` (default 60). The verifier timeout range is
@@ -155,18 +239,64 @@ List missions with `llm-bridge mission list`, and inspect one with:
 
 ```bash
 llm-bridge status --mission MISSION_ID
-llm-bridge events --mission MISSION_ID --after 0 --limit 100
+llm-bridge events --mission MISSION_ID --limit 20
+llm-bridge events --mission MISSION_ID --since 10m --follow
 llm-bridge doctor --mission MISSION_ID
 ```
+
+`events` shows the newest events (the last 100 by default), oldest first, in the
+same words as the console's Activity view. Controller bookkeeping (heartbeats,
+mode, prompt and wake records) is hidden unless `--verbose` is given. `--since 10m`
+keeps only recent events (`90s`, `2h`, `1d`), `--follow` prints new events until
+Ctrl-C, and `--after ID` reads oldest first from an event ID. Event IDs are
+global across all missions, so a mission's first event is not ID 1. A
+`command-rejected` event carries the reason the command was refused. `--json`
+keeps the raw fields (`kind`, `data`) and adds the `total` of matching events.
 
 `status` reports the mission, tasks and their states, recent operations,
 pending commands, and recent events. `--json` selects machine-readable output;
 it does not create, start, or otherwise change a mission. `doctor` reports the
-state directory, SQLite integrity, and tmux availability. The monitor reports
+state directory, SQLite integrity, and tmux availability, then checks every provider the home form offers (or the mission's own rotation with `--mission`). It exits 0 when at least one provider is installed and signed in, and 1 otherwise; `--json` adds `ready` (boolean) and `blocking` (list of reasons). The monitor reports
 configured mode separately from actual controller mode. Actual mode is shown
 only after a verified controller-mode event; provider liveness and observed
 model remain `unknown` when no provider observation proves them. An operation's
 model is a configured scheduler pin, not an observed model.
+
+### Diagnostic bundle for bug reports
+
+```bash
+llm-bridge doctor --bundle                 # llm-bridge-bundle-<UTC time>.tar.gz in this folder
+llm-bridge doctor --bundle report.tar.gz   # or a path (a folder gets the default name inside it)
+```
+
+`doctor --bundle` writes one archive with mode 0600 and prints its path and a
+one-line note on what was removed. It never overwrites a file and exits 0 when
+the archive was written, whether or not a provider can run (that answer is in
+`doctor.json`). Members:
+
+| Member | Content |
+| --- | --- |
+| `versions.json` | llm-tools, Python and operating system versions |
+| `doctor.json` | the `doctor` report; the mission appears only as its ID and status |
+| `config/llm-tools.toml` | the llm-tools configuration file |
+| `config/worker.json`, `config/remote.json` | worker enrolment and coordinator metadata; the token is replaced by `token_present` |
+| `store-summary.json` | schema version, mission, task and event counts, statuses, and per-mission counts; no names or text |
+| `health.json` | controller liveness per mission |
+| `logs/...` | the last 200 lines (at most 64 KiB) of the controller log and of recent provider logs; prompt copies are never included |
+
+Every text member passes through one redaction function
+(`llm_tools/bridge_bundle.py`, `redact`). It removes bearer and API tokens
+(`sk-`, `ghp_`, `github_pat_`, JWT-shaped values, long hex and base64
+strings, private keys), values of keys named like token, secret, password,
+api_key or authorization, e-mail addresses, private and LAN addresses (10/8,
+172.16/12, 192.168/16, 100.64/10, 127/8, fc00::/7, fe80::/10, ::1), host names
+under `.home.arpa`, `.local`, `.lan` and `.internal`, and replaces the home
+folder with `~`. Mission names, objectives and task text are removed from log
+tails by exact match, line by line and word by word for long words. A
+provider that echoes a prompt reworded or wrapped differently can still leave
+a fragment, so read the archive before attaching it to a public issue. The
+coordinator has its own `bridge-coordinator support-bundle`; this command does
+not collect coordinator data.
 
 ## Task ordering and verification
 
@@ -174,6 +304,12 @@ The task lifecycle uses `QUEUED`, `READY`, `RUNNING`, `VERIFYING`, `COMPLETED`,
 `FAILED`, `BLOCKED`, `PAUSED`, and `CANCELLED`. Only `COMPLETED` tasks satisfy
 dependencies. Provider exit code zero moves work to `VERIFYING`; completion
 requires explicit operator approval or a passing configured verifier.
+
+`VERIFYING` is the stored value (database, JSON `status`, remote protocol). Every
+screen and table shows the same state as `REVIEW`, because the task is waiting for
+you, and task JSON also carries `"status_label": "REVIEW"`. A mission with a task in
+`REVIEW` shows `NEEDS YOU` instead of `RUNNING` in the console header, the station
+strip, the home list and the picker.
 
 Tasks are numbered within their mission: the first task of every mission is
 `task 1`, numbers are assigned at creation and never reused. `--task N`,
@@ -192,8 +328,10 @@ task:
 ```bash
 llm-bridge task add --mission MISSION_ID --file follow-up.md \
   --priority 5 --depends-on 1 --acceptance "tests pass"
-llm-bridge task list --mission MISSION_ID        # first 200 tasks; --all, or --limit N --offset N
+llm-bridge task list --mission MISSION_ID        # first 200 tasks in run order; --all, or --limit N --offset N
 llm-bridge task show --mission MISSION_ID --task N
+llm-bridge task output --mission MISSION_ID --task N   # provider log of the last run; --follow while it runs
+llm-bridge task diff --mission MISSION_ID --task N     # working-tree change since that run started
 llm-bridge task priority --mission MISSION_ID --task N --value 10
 llm-bridge task reorder --mission MISSION_ID --task N --value 20
 llm-bridge task dependencies --mission MISSION_ID --task N --add PREREQUISITE_N
@@ -203,6 +341,15 @@ llm-bridge task resume --mission MISSION_ID --task N
 llm-bridge task cancel --mission MISSION_ID --task N
 ```
 
+`task list` shows the tasks in the order the controller runs them, with finished
+tasks last. `RUNS` is the place of a task that still waits to run (1 runs next).
+`PRIORITY` and `ORDER` are the two stored sort keys and they sort in opposite
+directions: a higher priority number runs first (the default is 0, negative
+numbers run last; there are no P0 to P3 urgency levels), and among equal
+priorities a lower order number runs first. `task priority` and `task reorder`
+say where the task now runs, for example `Priority of task 3 set to -5 · runs
+after tasks 1 and 2`.
+
 Amend task text with `llm-bridge task amend --mission ID --task N --file
 revision.md`. Amendments preserve the earlier prompt and increment the task
 revision. When no provider step is working on the task, the new text applies at
@@ -211,32 +358,45 @@ task, the amendment waits for the end of that step; `task show` then lists it as
 `pending amendment (applies after the current step)` next to the text still in
 use. Since prior evidence may no longer apply, an amended task that was
 awaiting approval is queued again and must be verified against its new
-revision.
+revision. Because that changes what would be approved, `task amend` refuses a task
+that is in `REVIEW` unless you pass `--requeue`; the earlier result is then sent
+back and the amended task runs again (uses capacity). A task title that came from
+the first prompt line follows the new prompt.
 
-`task add` on a completed mission reopens it: the mission becomes `STOPPED`, a
-`mission-reopened` event is recorded and the receipt says `Mission reopened ·
-start it with: llm-bridge start`. A cancelled mission takes no tasks.
+`task add` on a completed mission reopens it, with or without `--mission` (the
+folder's one completed mission is used when no unfinished one exists): the
+mission becomes `CREATED` (not started yet), a `mission-reopened` event is
+recorded and the receipt says `Mission ID reopened · start it with: llm-bridge
+start --mission ID`. A cancelled mission takes no tasks.
 
-A provider's successful exit moves its task to `VERIFYING`; success alone does
+A provider's successful exit moves its task to `REVIEW` (stored as `VERIFYING`); success alone does
 not complete the task. `task verify --evidence TEXT` alone only records the
-note, which `task show` lists with its source and age; the task keeps awaiting
-approval. Approve it explicitly, with optional evidence:
+note, which `task show` lists with its source and age; the task stays in
+`REVIEW`. Approve it explicitly, with optional evidence:
 
 ```bash
-llm-bridge task verify --mission MISSION_ID --task N \
-  --approve --evidence "Reviewed implementation and test output"
+llm-bridge task approve --mission MISSION_ID --task N \
+  --evidence "Reviewed implementation and test output"
 ```
 
 To send a task back instead, give a reason. The task is queued for another
-attempt and its next prompt quotes the reason:
+attempt and its next prompt quotes the reason. The retry starts at once when a
+controller is running and uses paid capacity, and the receipt says so. Add
+`--hold` to keep the task paused instead (resume it with `task resume`). In the
+console, `/reject N REASON` asks for confirmation with two choices: `Y` rejects
+and retries, `H` rejects and holds (the same as `--hold`):
 
 ```bash
 llm-bridge task reject --mission MISSION_ID --task N --reason "tests were not run"
+llm-bridge task reject --mission MISSION_ID --task N --reason "tests were not run" --hold
 ```
 
-For deterministic checks, configure a verifier at mission creation. Each
-`--verifier-arg` is one argv item; Bridge does not invoke a shell. Repeat the
-flag to form the command. The `{context}` placeholder names a private JSON file
+For deterministic checks, configure a verifier at mission creation. Write the
+command as `--verifier 'python -m pytest -q'`, or after `--` at the end of the
+command line (`-- python -m pytest -q`). Bridge splits it into words as a shell
+would, does not invoke a shell, and prints the result as an argument list in the
+creation receipt. For exact quoting, `--verifier-arg` is one argv item; repeat the
+flag to form the command. Give only one of the three forms. The `{context}` placeholder names a private JSON file
 with the objective, task prompt, revision, and acceptance criteria. Other
 placeholders are `{cwd}`, `{mission_id}`, `{task_id}`, and `{revision}`. The
 verifier succeeds when it exits zero. JSON output is optional: when present,
@@ -247,8 +407,7 @@ must be greater than zero and no more than 3600 seconds.
 
 ```bash
 llm-bridge mission create --file objective.md --cwd "$PWD" \
-  --verifier-arg ./verify-task --verifier-arg '{context}' \
-  --verifier-timeout 120 --json
+  --verifier './verify-task {context}' --verifier-timeout 120 --json
 ```
 
 The provider works in the same folder as the verifier and can edit it. When the
@@ -257,7 +416,7 @@ script it interprets (for example `check.py` in `python check.py`) when they are
 inside `--cwd`, plus any file named with `--verifier-file PATH` (repeatable,
 relative to `--cwd`). If one of them has changed, been deleted or (for a
 symlink) been repointed by the time a task is verified, Bridge does not run the
-verifier and does not complete the task. The task stays in `VERIFYING` with a
+verifier and does not complete the task. The task stays in `REVIEW` with a
 `verification-failed` event whose reason is `verifier-modified` and which lists
 the changed paths, and you approve it explicitly. Programs outside `--cwd`
 (such as `/usr/bin/python3`) are not tracked. Missions created before this
@@ -267,7 +426,7 @@ check have no recorded hashes and behave as before.
 
 A native mission is interactive, so its controller does not start the next
 task while a finished task awaits your decision. After a provider run ends with
-task 1 in `VERIFYING`, the controller waits (it records a `review-hold` event)
+task 1 in `REVIEW`, the controller waits (it records a `review-hold` event)
 until you approve task 1 (`/approve 1`), reject it (`/reject 1 REASON`, which
 queues it again), or release the hold with `/continue`. Only then does the next
 task start. Background and headless missions are unattended and keep starting
@@ -275,7 +434,7 @@ the next task straight away.
 
 * `continue` (`/continue` in the console, `llm-bridge continue [--mission ID]`)
   releases the hold once: the next ready task starts while the reviewed task
-  stays in `VERIFYING`. If that task later returns for review, or the reviewed
+  stays in `REVIEW`. If that task later returns for review, or the reviewed
   task is rejected and comes back, the mission holds again. With no hold it
   reports `Nothing to continue` and changes nothing.
 * `--auto-continue` on `mission create`, or `llm-bridge mission set
@@ -289,6 +448,24 @@ the next task straight away.
 * Approve, reject, continue and auto-continue each end the hold with a
   `review-hold-released` event (`how` is `approved`, `rejected`, `continue` or
   `auto-continue`; `summary` is a human sentence).
+
+### Task notices to a running native provider
+
+While a native Claude Code, Codex or Copilot works, tasks added or amended
+meanwhile are announced to it with one line typed into its prompt (see the
+guide). The line is typed only when the prompt is empty: the pane is read with
+its escape sequences, and text after the prompt glyph counts as empty only when
+it is absent or drawn faint (SGR 2), bright black (90) or in a 256-colour or
+truecolour grey, which is how the providers draw their placeholder text. Any
+other text is treated as an unsent draft and is never submitted. A notice held
+back by a draft for ten minutes records one `task-notice-deferred` event. A
+provider that does not draw its placeholder in one of those styles never gets a
+notice; the queue still works. Turn the feature off with:
+
+```toml
+[bridge]
+task_notices = false # default true
+```
 
 ### Provider native teams and token spend preference
 
@@ -304,6 +481,8 @@ token_spend = "medium" # low | medium | high
 Override either choice for one mission with `mission create --teams on|off`
 and `--token-spend low|medium|high`. Change a saved mission with, for
 example, `llm-bridge mission set --mission ID --teams off --token-spend low`.
+`llm-bridge mission settings --mission ID` prints the saved settings (automatic
+continue, capacity-wait suspend, teams and token spend) without changing them.
 `llm-bridge status --json` reports `mission.execution_policy`; readable status
 and the station Overview show the effective settings. Explicit model, effort,
 authorization, and user prompt choices keep their existing precedence.
@@ -338,14 +517,14 @@ While holding, `status` prints `Needs you   task 1 awaits your review ·
 The snapshot carries `hold` (`{"reason": "review", "task_ordinal": 1, "tasks":
 [1], "since": ISO time}`, or `null`) and the same text in `needs_you` (`kind`
 `approval`, `hold: true`). In the station, the provider pane's footer after a
-clean provider exit reads `Provider exited (status 0) · Task 1 is waiting for
-your review. Ctrl-] then B, then /approve or /reject.`; tmux formats that
+clean provider exit reads `Provider exited (status 0) · Task 1 ready for
+review · Ctrl-] B then /approve` (`/reject` is listed in the controls); tmux formats that
 footer when the process exits, so the controller sets it before launching a
 native run (it is omitted when a verifier is configured or auto-continue is
 on). A provider pane that is still an empty placeholder shows the same
 sentence as its placeholder text.
 
-If no verifier is configured, the task remains in `VERIFYING` for operator
+If no verifier is configured, the task remains in `REVIEW` for operator
 review. A failing verifier or timeout also leaves it uncompleted. See
 `llm-bridge task verify --help` and `llm-bridge mission create --help` for the
 full flag list.
@@ -358,9 +537,12 @@ and press Enter; `help` lists the console commands. The `›` command line
 accepts slash commands as well as bare commands: `/help [TOPIC]`, `/start`
 (opens the provider station in native mode), `/attach` (also works from inside
 your own tmux), `/approve [N]` (approve task N; N may be omitted when exactly
-one task awaits approval), `/continue` (start the next task while a reviewed one still awaits approval), `/pause`, `/resume`, `/stop`, `/cancel`, `/status`,
-`/tasks` and `/events`. Tab completes command names, and an unknown command is
-answered with close matches. `cancel`, `stop --force`, task cancellation and
+one task is in `REVIEW`), `/continue` (start the next task while a reviewed one stays in `REVIEW`), `/pause`, `/resume`, `/stop`, `/cancel`, `/status`,
+`/tasks` and `/events`. Typing `/` opens a list of the slash commands with a
+one-line description each; it narrows as you type. Tab completes a single
+match, or only the common prefix of several (a second Tab names the matches),
+so an ambiguous prefix is never completed to the first command. An unknown
+command is answered with close matches. `cancel`, `stop --force`, task cancellation and
 approval ask for a compact confirmation: **Y** confirms, **N** or **Esc**
 cancels. The Overview's `Needs you` row names tasks awaiting approval.
 Console commands include mission controls (`pause`, `resume`, `stop`,
@@ -399,6 +581,21 @@ page controls make tasks past the first page reachable without loading the
 whole queue into the terminal process. Activity and Sessions views show recent
 bounded histories.
 
+`control` needs a terminal on both stdin and stdout. Without one (a pipe, a
+script, `ssh` without `-t`) it prints `llm-bridge: control needs an interactive
+terminal; use llm-bridge status` and exits 2. `llm-bridge usage` prints the
+`llm-usage` table once instead, so a script can read it.
+
+A mistyped command or option gets one line and exit status 2 (an error object on standard
+output with `--json`), for example
+`llm-bridge: unknown command 'stauts' · did you mean status? · llm-bridge --help
+lists commands`. Internal commands (`console`, `_controller`, `_station-gc`) are
+not listed or suggested.
+
+`llm-bridge screen --mission ID` prints the last 200 lines of a native
+provider's current terminal screen (each line cut at 1000 characters; `--json`
+adds a `truncated` flag). It reads the station and changes nothing.
+
 The Agents view shows roots across missions and exact parent-bound Codex children.
 Use `llm-bridge agents --mission ID` for one mission or `--all-missions` for the
 combined CLI map. Managed providers can inspect only their own mission. Root age
@@ -423,6 +620,12 @@ The Usage view retains the usage renderer's cell colours through Bridge's
 palette, including separate red, yellow, green and cyan guidance. Explicit
 `NO_COLOR`, `LLM_USAGE_NO_COLOR` and monochrome terminals still suppress colour.
 Text and column fitting use the same dashboard as `llm-usage`.
+The status line names the source (`live llm-usage read`). By default the view lists only the
+mission's rotation providers; `a` shows every enabled provider whose CLI is installed. Under a
+capacity injection (`LLM_SCHEDULER_USAGE_JSON`, `LLM_SCHEDULER_USAGE_JSON_FILE`) the view renders the
+same snapshots the controller reads. When a live read still differs from the controller's last
+observation by more than 5 percentage points for a window, a line under the status gives the
+controller's figures and their age. An exhausted weekly or monthly window reads `× empty`.
 
 Keyboard and mouse operate those views:
 
@@ -440,11 +643,12 @@ Keyboard and mouse operate those views:
 | Body Ctrl-E | Compose a new multiline task |
 | Tasks body Ctrl-R | Compose an amendment of the selected task |
 | Composer Ctrl-O | Open `$VISUAL` or `$EDITOR` |
-| Composer F2 / Ctrl-S | Save source; Enter inserts a newline |
+| Composer Ctrl-S | Save source; Enter inserts a newline (F-keys only switch views, so F2 is not Save) |
+| Composer Ctrl-X | Discard the draft; Escape or Ctrl-D closes it and keeps the draft |
 | Overview body `o` | Open the complete objective |
 | Actions `/` | Filter labelled actions; single click only selects |
 | Enter | Run the command in the input line |
-| Ctrl-P / Ctrl-N | Previous / next command history item |
+| Ctrl-P / Ctrl-N, or Up / Down in the focused input | Previous / next command history item |
 | Ctrl-U | Clear the input line |
 | Ctrl-K | Open Actions from any view, with the filter ready |
 | Ctrl-G | Focus the current command draft |
@@ -453,8 +657,16 @@ Keyboard and mouse operate those views:
 
 The composer keeps recoverable source in private state. Ctrl-O launches the
 external editor as argv on a private file; returning from that editor does not
-submit the task. F2/Ctrl-S explicitly saves the composed source. Escape retains
-the draft, while explicit discard is separate. Rejected saves keep their source. The UI accepts printable command text without
+submit the task. Ctrl-S explicitly saves the composed source. Escape or Ctrl-D closes
+the composer and keeps the draft (`Esc close (draft kept)`); Ctrl-E in the
+console reopens the newest kept task draft of the last 24 hours with `Restored
+draft from HH:MM · Ctrl-X discard`; Ctrl-X is the only key that discards. An empty
+task composer shows dim guidance on the first line (title, description, optional
+`Acceptance:` list). The footer shows a line count, and the byte count only above
+80% of the 1 MiB limit. Help pages (`?`, `/help`) open as a word-wrapped page
+with `↑↓ scroll · / find · Esc close` and none of the file viewer's controls; `?`
+on the home screen shows a short home-screen key summary, and `T` there opens the
+quickstart. Rejected saves keep their source. The UI accepts printable command text without
 using letters as view shortcuts. Actions and keyboard commands use the
 same dispatcher. The command result pane summarizes durable command envelopes
 as a concise applied/rejected message; detailed state remains available in the
@@ -462,7 +674,7 @@ Activity view, CLI status, and event history. The station follows terminal resiz
 events and is designed to remain usable down to 80 columns by 24 rows.
 
 For long initial objectives, Ctrl-E in the launcher opens the full-screen
-composer. Enter inserts a newline and F2/Ctrl-S saves to the form. Escape retains a
+composer. Enter inserts a newline and Ctrl-S saves to the form. Escape retains a
 private recovery draft that can be reopened with Ctrl-E. The interactive limit is
 1 MiB of UTF-8 source bytes; an oversized paste is rejected atomically. Use
 `mission create --file PATH` or `--file -` for larger inputs. In the document
@@ -471,9 +683,20 @@ wrapping, Left/Right scroll long source lines when wrapping is off, and `s`
 exports the complete original source to a new path. Source export never copies a
 rendered or abbreviated preview.
 
-Built-in help works offline: `llm-bridge help TOPIC` supports quickstart, keys,
-remote, prompts, markdown, providers, states, verification, and recovery. Type `help` in
-the console for the same topic guidance. A rendered document uses Rich when
+Built-in help works offline: `llm-bridge help` lists every topic with a one-line
+description (quickstart, terms, keys, console, prompts, markdown, providers,
+states, verification, recovery, remote and distributed; the list lives in
+`bridge_help.TOPIC_SUMMARIES` and feeds every other list of topics). The top-level
+`llm-bridge --help` groups the commands (Start here, Missions, Tasks, Run control,
+Station, Capacity and power, Data, Distributed, Appearance) and lists the global
+options `--version` and `--target WORKER`. Each command page has one example and,
+for commands that change something, an `Effects:` line, for example `start` uses
+paid capacity and `suspend-until-credits` suspends this computer. Type `/help` in
+the console for the slash commands generated from the same groups, with the shell
+command each shortcut stands for. `llm-bridge theme` ends with how to set the
+theme (`--palette-size` and `--colour` replace the older `--colors` and `--color`).
+`llm-bridge rotation --set LIST` is the one documented way to change a rotation;
+`--routes` and `--providers` still work. A rendered document uses Rich when
 available; source viewing and CLI help still work if Rich is unavailable.
 
 Providers distinguishes the station selected for viewing from the last station
@@ -501,7 +724,17 @@ in either UI and on the CLI:
 
 CLI form: `llm-bridge steer --mission ID --kind KIND`, with `--task N`
 (the per-mission task number; `--task-id ID` takes the global ID),
-`--route NAME`, and `--file PATH` or `--prompt TEXT` as required by that kind.
+`--to PROVIDER` (older name `--route`), and `--file PATH` or `--prompt TEXT` as
+required by that kind. `llm-bridge steer --help` lists only `handoff` and
+`review`. The other kinds still work for older scripts, but have their own
+commands: `task amend` (replace), `task verify` (verify), `pause`, and
+`pause --after-task` and `stop --after-task [N]` for the two boundary kinds.
+`pause --after-task` stores the same intent as `steer --kind pause-after-iteration`
+(the mission pauses when the provider's current invocation ends, also during a
+wait for capacity). `stop --after-task [N]` stores the same intent as
+`steer --kind stop-after-task --task N`; without N it waits for the task that
+is running now. It cannot be combined with `--force`. The steer spellings remain
+hidden aliases.
 See `llm-bridge steer --help` and `steer help` in the console for the live
 syntax.
 
@@ -560,17 +793,61 @@ capacity snapshot every 60 seconds by default, configurable with
 `--capacity-refresh-seconds`; those provider reads do not run on the terminal
 input path. A user or external power manager can still put the machine to
 sleep independently.
+A native Claude Code or Codex session that runs out of quota only prints a notice
+(for example `Usage limit reached · limit resets 11:40pm` or `You've hit your usage
+limit ... try again in 2 hours 13 minutes`) and waits for input. While a native
+provider runs, the controller reads its pane every couple of seconds. A line that
+begins with the provider's limit phrase on two consecutive reads (a sentence that only
+mentions a usage limit does not count) records a `provider-usage-limit` event, stops
+the provider, marks that provider rate-limited until the reset time (local time,
+the next day when the time has passed; the local-block backoff, 300 seconds by
+default, when no reset time is given) and continues the task with the next ready
+provider in the rotation. With no other ready provider the mission waits and `status`
+shows `Waiting for capacity` with the reset time.
 `resume` continues an active controller or starts one if needed.
 `stop` never cancels a mission. With no controller (a saved mission that is
 `CREATED`, `STOPPED` or `PAUSED`) it changes nothing and says `Nothing to stop ·
-mission ID is saved (CREATED) · start it with: llm-bridge start`. `pause` on a
-mission that is not running likewise says `Nothing to pause · mission is not
-running (CREATED)`. With a controller, `stop` asks it to stop at its next
+mission ID is saved (CREATED) · start it with: llm-bridge start` (`Already stopped
+· ...` when it is `STOPPED`). `pause` on a mission that is not running likewise says
+`Nothing to pause · mission is not running (CREATED)`, and on a paused one `Already
+paused · mission ID is PAUSED`. These no-ops exit 0. A `RUNNING` mission whose controller has died is
+moved straight to `STOPPED`, because nobody is left to finish a `STOPPING`; if a provider run was
+still recorded as active, the receipt names `stop --force` to end it. With a controller, `stop` asks it to stop at its next
 boundary and closes the owned station after the controller stops; in native mode it waits for the provider
 invocation to return and says how to finish if that takes a while; a later resume creates or reconnects the
 station as needed. `stop --force` reconciles unresolved work and terminates
 only a process group or tmux station whose persisted ownership can be
-validated. `cancel` durably cancels the mission and its unfinished tasks.
+validated. When no provider process was running it prints `Stopped · no provider
+process was running` and exits 0; it fails only when a recorded provider process
+cannot be confirmed as the mission's, and then names its PID. The task that
+`stop --force` interrupted is recorded as `interrupted by stop --force`, and the
+next `start` runs it again. Recovery at `start` and a repeated `stop --force` check the recorded
+provider identity again until termination has succeeded. A recorded process whose PID now has a
+different start token is treated as gone and is never signalled. When a `RUNNING` operation has no recorded
+process identity, `start` refuses on every attempt until you acknowledge with `stop --force`.
+
+A running controller with nothing it can run (every unfinished task is blocked, failed or paused, or the
+mission has no tasks) records one `mission-waiting-for-operator` event, shown in Activity as `Waiting for you`,
+and polls less often the longer nothing changes (0.5 s up to 4 s). `status` and the Overview's `Needs you`
+row say `waiting for you` and name the command to run (`task retry`, `task resume`, `task approve`). The
+controller continues by itself once you act. A task that was cancelled counts as finished: a mission whose
+other tasks are all completed completes, and a mission whose tasks are all cancelled stops.
+
+While a provider's capacity cannot be determined (not signed in, no usage data),
+the task stays READY and no operation is open: `status` shows `Waiting for
+capacity data · claude has no usage data, launches anyway in 14m (at 19:50)`.
+The deadline is fixed when the wait starts (`--max-unavailable-wait`, default
+900 s), so the countdown only goes down. After it passes, Bridge launches the
+provider anyway. `cancel` durably cancels the mission and its unfinished tasks, then ends the provider process of an
+active run using the same identity check as `stop --force`; if that process cannot be ended
+automatically, the receipt names `stop --force`.
+It ends the mission for good (`resume` and `start` refuse a cancelled mission), so
+it asks `This cannot be undone` on a terminal and needs `--yes` when there is no
+terminal to ask on, for example `llm-bridge cancel --mission ID --yes`. The
+console's own dialog offers `Cancel mission` and `Keep mission`. A repeated
+`pause` or `stop` on a mission that is already paused or stopped says `Already
+paused` or `Already stopped`. `llm-bridge help quickstart` has a table of all the
+ways to stop work.
 
 After a controller restart, Bridge reconciles any operation that was in
 progress. It may mark the operation uncertain and the task blocked for review;
@@ -650,8 +927,8 @@ to a login session. Log in over SSH (or open another terminal) to find a
 running mission, inspect it and attach without disturbing the local session:
 
 ```bash
-llm-bridge mission list            # "(no controller)" marks a RUNNING or PAUSED mission whose controller is gone
-llm-bridge status --mission 3f9a   # unique ID prefix of 4+ characters
+llm-bridge mission list            # "INTERRUPTED (was RUNNING)" marks a mission whose controller is gone
+llm-bridge status --mission 3f9a   # unique ID prefix of 3+ characters
 llm-bridge attach --mission 3f9a   # open the provider station
 # Ctrl-] then d detaches your terminal; mission and local session continue
 ```
@@ -689,7 +966,8 @@ Mission state defaults to
 `${XDG_STATE_HOME:-~/.local/state}/llm-tools/llm-bridge`. Set
 `LLM_BRIDGE_STATE_DIR` to use another directory. Bridge stores its SQLite
 database, private runtime files, and logs there. Shared `config.toml` supports
-`[bridge]` team and execution defaults plus `[bridge.theme]` appearance settings;
+`[bridge]` team and execution defaults, `[bridge.theme]` appearance settings and
+`[bridge.retention]` data-retention settings;
 choose providers, routes, and execution mode on mission creation/start commands.
 The selected shared tool configuration is
 captured for the mission so later changes do not silently alter its routing.
@@ -705,18 +983,221 @@ mission creation flags above.
 
 The controller records a heartbeat every few seconds and a capacity observation
 every minute. To keep the database bounded, it deletes heartbeats older than
-one hour, thins capacity observations older than one hour to one per 10 minutes,
-and records an `events-pruned` event for each pass that removed rows. The newest
-heartbeat and observation are always kept. Task, operation, verification and
-operator events are never pruned. An observation identical to the previous one
-updates that row instead of adding another. The database file does not shrink
+one hour, thins capacity observations and the `provider-wait` and
+`provider-selection` events written on every pass of a capacity wait older than
+one hour to one per 10 minutes, deletes finished commands (applied, rejected or
+failed) older than 30 days, and records an `events-pruned` event for each pass
+that removed rows. The newest event of each thinned kind is always kept. These
+rules apply to every mission. The longer-term rules for finished missions are in
+[Data retention](#data-retention). While a mission is not finished, its audit records
+(task, operation outcome, verification, command and operator events) are never pruned;
+only its diagnostic events older than `events_days` are. A
+`command-applied` or `command-rejected` event carries a short summary of a
+result larger than 4 KiB (for example the full prompt returned by `task.add`);
+the command record keeps the whole result. An observation identical to the
+previous one updates that row instead of adding another. The database file does not shrink
 after pruning; the freed space is reused (run `VACUUM` while no mission is
 running to return it).
+
+A provider run that Bridge's own watchdog stopped (status 75: no output for the
+idle timeout, a question that stayed unanswered, or a blocked prompt) is handed
+once to the next rotation entry. A second stop of the same task leaves it
+BLOCKED and records `provider-handoff-exhausted`. The question watchdog arms
+only while the last line of the provider's standard output is a question; later
+output, including a tool call, clears it, and standard error never arms it. A line
+is not a question when it is a warning (`<file>:<line>: SyntaxWarning: ...`,
+`DeprecationWarning`, `UserWarning`, `FutureWarning`, `RuntimeWarning`,
+`ResourceWarning`, Node `(node:123) Warning:`), sits in a Python traceback block, is
+quoted (`>`, quotation marks, backticks), is inside a code fence, or is indented as
+code; `common.pending_question` decides this for the headless and the PTY path alike.
+When a run stopped on a real question, Bridge records `task-awaiting-answer` with the
+question (up to 300 characters). While the task is BLOCKED, `status`, the Overview
+`Needs you` row and the `needs_you` and `awaiting_answer` keys of the JSON projection
+show the question and three ways forward: answer by putting the answer into the task
+text (`task amend --task N --file FILE`) and then `task retry`, continue unchanged
+(`task retry`), or reject (`task cancel`). The `mission-waiting-for-operator` event
+for that wait carries the question. If
+the controller fails, it stops the provider process groups of unresolved
+operations before the mission becomes FAILED; a group that cannot be stopped is
+recorded as a `provider-orphaned` event with its pid. Two `start` commands for one
+mission are serialized, and the controller records its pid and start token in its
+lock file, which `stop --force` uses when `controller-ready.json` is missing.
+
+### Data retention
+
+Bridge keeps four kinds of data on disk: the SQLite database (events, operations,
+commands, tasks), provider run logs, verifier files, and schema-migration backups.
+Each is bounded as follows. Terminal scrollback is not one of them (see the end of
+this section).
+
+Settings live in `[bridge.retention]` of `~/.config/llm-tools/config.toml`:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `events_days` | 90 | Diagnostic events older than this are deleted, in finished missions and in missions that are not finished. In a mission that is not finished the newest event of each kind stays and `capacity-refresh` events are thinned to one per hour instead of deleted. |
+| `finished_missions_days` | 365 | A mission that finished longer ago than this keeps its mission and task rows and its audit summary events. Its other events, remaining provider run logs and verifier files are deleted. |
+| `operations_days` | 180 | Operation rows of a finished mission are deleted this many days after they ended, once their logs are already pruned. |
+| `migration_backups_keep` | 3 | Newest `bridge.sqlite3.v*.bak` files to keep; older ones are deleted. Allowed range 1 to 1000. |
+
+The three `*_days` keys accept 0 to 3650; 0 turns that rule off. Values must be whole
+numbers. A misspelt key or an out-of-range value stops the tool with exit status 2 and a
+message such as `bridge.retention: unknown key 'event_days' (...); did you mean
+'events_days'?`. A config file that cannot be read when the controller prunes leaves the
+defaults in force.
+
+The log settings that are chosen per mission, not in the config file, belong to the same
+budget: `--log-max-bytes` (4 MiB per output file), `--log-rotations` (3) and
+`--log-retained-runs` (the latest 20 run directories) on `mission create`. When older run
+directories are pruned, Bridge records each log's size and SHA-256 in an
+`operation-log-pruned` event before it deletes the files.
+
+**What counts as finished.** A mission is finished when its status is COMPLETED or CANCELLED
+and it has no operation that is still preparing or running. Only a finished mission is subject to
+`finished_missions_days`, `operations_days` and the deletion of audit records. A mission that is
+not finished (running, paused, stopped, failed or created) is subject only to `events_days`, and
+only for diagnostic events: its audit records, audit summaries, tasks, operations and commands are
+never pruned, however old they are, and the events of an operation that is still preparing or
+running are never deleted. The age of a finished mission is the time of its last update. Reopening
+a completed mission changes its status and restarts the clock.
+
+**Event classes.** Every event kind belongs to one of three classes
+(`llm_tools/bridge_events.py`: `AUDIT_SUMMARY_KINDS`, `AUDIT_RECORD_KINDS`, `DIAGNOSTIC_KINDS`;
+a test requires each kind to be in exactly one):
+
+* Audit summary: `mission-created`, `mission-status`, `mission-reopened`, `task-verified`,
+  `verification-failed`, `events-pruned`, `operation-log-pruned`, `controller-failed` and
+  `controller-exited-unexpectedly`. Retention never deletes these.
+* Audit record: what the operator or controller decided or did, for example task edits and
+  proposals, `operation-exited`, `operation-uncertain`, provider handoffs and switches, rotation
+  changes, steering requests, review holds, suspend decisions, `command-failed` and
+  `command-rejected`. They stay while the mission is not finished and until
+  `finished_missions_days` after it finishes.
+* Diagnostic: bookkeeping that explains how the controller got there, for example
+  `repository-checkpoint`, `prompt-assembled`, `operation-progress`, `operation-process`,
+  `operation-prepared`, `provider-selection`, `task-status-transition`, `controller-config`,
+  `station-observation` and the capacity, heartbeat and wake events. A kind that this version does
+  not know (an old database may hold one) is treated as an audit record.
+
+**Enforcement.** The controller's background pruning pass (the same pass and 15-minute
+cadence as the heartbeat and capacity-refresh pruning above) applies the policy to every finished
+mission in the database, so a running mission's controller also cleans up finished ones and other
+missions' diagnostic events. Each pass
+deletes in transactions of at most 2000 rows and stops after about half a second; if work remains,
+it continues 0.25 seconds later. A pass that removed anything writes one `events-pruned` event
+on the controller's own mission with the number removed per category (`events`,
+`finished_mission_events`, `operations`, `managed_processes`, `operation_logs`, `verifier_files`,
+`migration_backups`), the cutoff times and the first 20 missions affected, and one `events-pruned`
+event on each other mission that lost rows or files. Deletion of old diagnostic events and thinning
+of capacity observations happen on most passes, so they are audited at most once an hour (the
+counts accumulate in between and are written when the controller stops); every other category is
+audited on the pass that removed it. Rows of an operation that is still active
+are never deleted. Event IDs keep their gaps, so replication cursors are not affected.
+The database file does not shrink; freed pages are reused.
+
+**Disk budget.** `scripts/bridge_retention_budget.py` writes the rows of provider runs through the
+store (event payload sizes taken from the fake-provider end-to-end tests) into a throwaway database
+and measures the file growth, including SQLite page and index overhead. Measured with SQLite page
+size 4096:
+
+| Row | Size |
+| --- | --- |
+| One provider run (task, operation, 12 events) | 8.7 KB |
+| One `capacity-refresh` event (two providers, four windows) | 2.2 KB |
+| One command record (`task.add`) | 1.6 KB |
+| One `events-pruned` audit event | 0.4 KB |
+
+The budget assumes **1 GiB for all Bridge state on a Pi's card**. This is an assumption, not
+a value Bridge enforces. The projection is for one mission that is never finished, running
+continuously for a year under the defaults: events are full size for the last 90 days; older
+events lose their diagnostic kinds, leaving the task row, the operation row and the three audit
+records of each run (3.7 KB per run instead of 8.7 KB); capacity observations are one per 10
+minutes for 90 days and one per hour before that. The script measures the 3.7 KB by running the
+retention rule over the rows it wrote.
+
+| Component | One run every 10 minutes (52,560 runs) | One run every 3 minutes (175,200 runs) |
+| --- | --- | --- |
+| Run rows, last 90 days | 107 MiB | 357 MiB |
+| Run rows, older | 140 MiB | 467 MiB |
+| Capacity observations | 40 MiB | 40 MiB |
+| Commands (30 days) | 6.5 MiB | 22 MiB |
+| Audit events written by pruning itself (about 120 a day) | 18 MiB | 18 MiB |
+| Heartbeats (last hour) | 0.2 MiB | 0.2 MiB |
+| Database total | 312 MiB | 904 MiB |
+| Provider run logs, worst case (20 runs, one output file each, 4 rotated files of 4 MiB) | 320 MiB | 320 MiB |
+| State total, worst case | 632 MiB (62% of 1 GiB) | 1224 MiB (120%) |
+
+A run every 10 minutes around the clock fits with a wide margin. A run every 3 minutes fits only
+because the provider logs rarely reach their worst case: the database alone is 904 MiB (88%),
+and the logs bring the worst case over 1 GiB. Creating the mission with
+`--log-max-bytes 1048576` lowers the log bound to 80 MiB and the worst case to 984 MiB (96%).
+Tasks, operations and audit records of a mission that is not finished are never pruned, so the
+database of such a mission still grows by about 3.7 KB per run (one task, one operation and
+three audit events); beyond one run every 3 minutes, finish the mission or split the work so
+the finished-mission rules can apply. Finished missions shrink: after `events_days` their
+diagnostic events go, and after `finished_missions_days` only mission and task rows and a
+handful of summary events remain (a few KB per task).
+
+**Terminal scrollback.** Bridge stores provider logs, not tmux scrollback. The isolated tmux server
+that runs a station keeps scrollback in memory only, bounded per pane by `history-limit`, which
+Bridge sets to 50,000 lines (`llm_tools/terminal.py`). It is discarded when the pane or the
+station ends and is never written to the state directory. Provider output that is kept on disk is
+the rotated log described above.
+
+### Database upgrades, backups and downgrades
+
+The database records its schema version in SQLite's `PRAGMA user_version`
+(currently 10). Migrations are forward-only and run automatically the first time
+a newer `llm-bridge` opens an older database, whichever command opens it. The
+release history has used versions 2, 3, 6 and 10 (1.1.0 and 1.2.x shipped 6; 1.3.0
+shipped 10).
+
+Before a migration changes the version, Bridge copies the database (using
+SQLite's online backup, so the copy is consistent) to
+
+```
+bridge.sqlite3.v<old schema>-<UTC timestamp>.bak     e.g. bridge.sqlite3.v6-20261106T094500Z.bak
+```
+
+in the same private state directory, mode 0600. It also appends
+`<time> schema 6 -> 10; backup <path>` to `migrations.log` in that directory. A
+database that does not exist yet is created without a backup, and opening a
+database that is already current writes nothing. The migration runs in one
+transaction: if it fails, the database stays at the old version and the backup
+remains. Each schema change adds one backup. The background retention pass
+removes the oldest beyond the newest `migration_backups_keep` (3 by default; see
+[Data retention](#data-retention)) and appends a `pruned schema ... backup` line
+to `migrations.log` for each one it deletes.
+
+An older `llm-bridge` refuses to open a database written by a newer one. It exits
+with status 4 (JSON error code `schema-too-new`) and changes nothing:
+
+```
+llm-bridge: this Bridge database is schema 12 but this llm-bridge understands up to 10;
+upgrade llm-tools, or restore the backup /path/bridge.sqlite3.v10-20261106T094500Z.bak made
+before the upgrade (copy it over /path/bridge.sqlite3)
+```
+
+The named backup is the newest one whose schema this `llm-bridge` understands.
+Restoring it discards everything recorded after that upgrade. Stop the
+controllers first, and copy the backup over `bridge.sqlite3` only after removing
+the old `bridge.sqlite3-wal` and `bridge.sqlite3-shm` files. If no backup is
+found, the message says so; upgrading `llm-tools` is then the only way forward.
+
+`tests/test_bridge_schema_migrations.py` opens a fixture database of every
+earlier schema version (`tests/fixtures/bridge-schema/`, rebuilt by
+`scripts/make_bridge_schema_fixtures.py`), checks that all rows survive and that
+the migrated schema matches a freshly created one. Versions 7 to 9 and 1, 4 and 5
+were never committed as source, so their fixtures are derived; `MANIFEST.json`
+says how each was made.
+
+To back up the database, restore it on another host or remove llm-tools
+completely, see [uninstall.md](uninstall.md): it lists every file, unit and
+socket llm-tools creates and the command that removes each.
 
 See `llm-bridge --help` and the command-specific `--help` output for all
 available CLI operations.
 
-Read a local textual artifact with `llm-bridge view --file notes.md`. Use
+Read a local textual artifact with `llm-bridge view notes.md` (`--file notes.md` also works). Use
 `--follow` explicitly for live output: Up pauses, End resumes; new output and
 file rotation/truncation are labelled. Retention remains bounded, and pruned
 content is unavailable. Without a TTY, `view` prints original source. Home `?`
@@ -734,24 +1215,30 @@ preserve its process identity.
 Each mission has an identity colour, one of eight hues (teal, azure, blue, indigo, violet,
 magenta, pink, slate) chosen from its ID. It appears as a `▌`
 chip before the mission name in the console header, the home list and the
-mission picker, and as the filled label in the tmux station's status row.
+mission picker, and as the filled label in the tmux station's status row. The
+console header also shows the mission's short ID after the name, `(9a3c51e0)`,
+so two missions with the same name stay distinguishable without the colour (the
+ID is left out only on a very narrow terminal).
 `llm-bridge mission colour [--mission ID] N|auto` pins a hue (1-8) or returns
 to the automatic one. `[bridge.theme.roles] mission_1 = "#5f87ff"` in the
 llm-tools config changes a hue. `llm-bridge theme` previews the palette.
 
 Colour never stands alone. Every state also has a glyph and a word:
-`● RUNNING`, `○ QUEUED`, `◆ VERIFYING`, `✓ COMPLETED`, `✕ FAILED`,
-`‖ PAUSED`. A locale that is not UTF-8 (for example `LANG=C` over SSH) gets
-ASCII forms (`*`, `o`, `#`, `v`, `x`, `=`), and the home screen draws `|`
-instead of `·`, `Up/Down` instead of `↑↓` and `...` instead of `…`. See the
+`● RUNNING`, `○ QUEUED`, `◆ REVIEW`, `✓ COMPLETED`, `✕ FAILED`,
+`‖ PAUSED`, `⊘ CANCELLED`. A locale of `C` or `POSIX` (set in `LC_ALL`, `LC_CTYPE`
+or `LANG`, for example `LANG=C` over SSH), a locale that is not UTF-8, or
+`LLM_BRIDGE_ASCII=1` gives ASCII forms (`*` running, `o` queued, `?` review,
+`+` completed, `!` failed, `-` cancelled, `=` paused, `@` for a provider), and
+the screens draw `|` instead of `·`, `Up/Down` instead of `↑↓` and `...`
+instead of `…`. `llm-bridge theme` shows which glyph set is active. See the
 [colour guide](colour-guide.md).
 
 The home list orders live missions first, then waiting ones (created, stopped,
 failed), then finished ones (dimmed), and re-reads the database every two
 seconds. At narrow widths the folder, then the provider, are dropped first.
 `/` (or Ctrl-F) filters by name, folder or ID prefix; Enter opens the match and
-Esc clears the filter. A mission with a task awaiting your review (`VERIFYING`)
-shows `◆ REVIEW` instead of `● RUNNING`, in the home list and in the picker, and
+Esc clears the filter. A mission with a task awaiting your review (`REVIEW`)
+shows `◆ NEEDS YOU` instead of `● RUNNING`, in the home list and in the picker, and
 its detail line says `task N awaits your review · Enter to open`.
 
 The mission picker (`llm-bridge missions --pick`, or Ctrl-] then M in a station)
@@ -762,7 +1249,7 @@ asks for confirmation (**Y**/**N**) and then closes that station through the sam
 safe path the controller uses: a station whose provider process is alive, or to
 which a terminal is attached, is kept. `llm-bridge gc [--json]` does the same for
 every finished mission. A RUNNING, PAUSED or STOPPING mission without a running
-controller shows the `stale` marker in the picker as on the home screen.
+controller shows `INTERRUPTED` in the picker as on the home screen.
 
 Choosing another mission in the picker moves your terminal to that station. The
 station you left keeps running, and one detach (Ctrl-] then d) from the new
@@ -829,8 +1316,8 @@ minute in total, not once per mission. The next task selection of a mission
 still reads the provider live.
 
 `pause` does not sleep the machine, and Bridge adds no network listener. A
-zero provider exit leaves a task in `VERIFYING` until an operator approves it
-(`/approve`, `task verify --approve`) or a configured verifier passes. A
+zero provider exit leaves a task in `REVIEW` until an operator approves it
+(`/approve`, `task approve`) or a configured verifier passes. A
 bounded live probe verified Codex native reply, controller stop, exact-ID
 restoration and context recall. Claude and Copilot live restoration is
 unverified.
@@ -851,7 +1338,7 @@ provider can do by habit or by prompt injection; it does not sandbox it.
   `LLM_BRIDGE_MANAGED=1` in every provider it launches. While that variable is
   set, `llm-bridge` runs only `status`, `events`, `task list`, `task show`,
   `proposal create`, `proposal list`, `mission list`, `missions` and `help`.
-  Anything else (`proposal accept`, `task verify --approve`, `cancel`, `stop`,
+  Anything else (`proposal accept`, `task approve`, `cancel`, `stop`,
   `steer`, `start`, `mission create`) exits with status 2 and
   `This command needs the operator; it is not available to the managed provider`.
   This is an advisory guard, not a security boundary: the provider has the same
@@ -992,7 +1479,7 @@ in `tests/fuzz/`:
 
 Each target checks invariants: no exception, no write outside the window, no
 command dispatched except by an explicit Enter or a confirming Y (or a
-composer Ctrl-S/F2), a pasted block reaches its destination byte for byte, read
+composer Ctrl-S), a pasted block reaches its destination byte for byte, read
 only commands leave the database unchanged, store transitions follow a
 reference model, and wrapped or clipped rows never exceed the width in cells.
 

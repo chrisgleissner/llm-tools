@@ -54,7 +54,9 @@ def test_real_launcher_paste_saves_64kib_objective_verbatim_without_start(tmp_pa
         frame = b"\x1b[200~" + source.encode("utf-8") + b"\x1b[201~"
         for offset in range(0, len(frame), 4096):
             os.write(master, frame[offset:offset + 4096])
-        wait_for(f"{total_bytes}/1048576 bytes".encode("ascii"), timeout=12)
+        # The composer shows bytes only near the limit (CLIUX-013); the line count reaches 6 only
+        # when the tail's last newline has arrived, so it marks the end of the paste.
+        wait_for("\u00b7 6 lines".encode("utf-8"), timeout=12)
         os.write(master, b"\x13")  # Save the complete composer source to the form.
         wait_for(b"Save mission only")
         os.write(master, b"\t\t\t\t")

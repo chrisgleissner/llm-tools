@@ -36,14 +36,15 @@ def test_mission_create_and_list_are_readable_and_json_is_unchanged(tmp_path, st
     text = capsys.readouterr().out
     mission = BridgeStore(state / "bridge.sqlite3").list_missions()[0]
     short = mission["id"][:8]
-    assert text.strip() == f'Created mission {short} "Fix the tests" · task 1 · teams on · token spend medium · start with: llm-bridge start --mission {short}'
+    assert text.strip() == f'Created mission {short} "Fix the tests" in {tmp_path} · task 1 · teams on · token spend medium · start with: llm-bridge start --mission {short}'
     assert "frozen_tool_config" not in text
 
     listing = _out(capsys, "mission", "list")
     lines = listing.splitlines()
-    assert lines[0].split() == ["ID", "STATUS", "UPDATED", "NAME", "FOLDER"]
-    assert lines[1].startswith(short) and "CREATED" in lines[1] and "just now" in lines[1] and "Fix the tests" in lines[1]
-    assert str(tmp_path) in lines[1]
+    assert lines[0] == "1 mission · 0 live"
+    assert lines[1].split() == ["ID", "STATE", "NEEDS", "YOU", "TASKS", "NAME", "FOLDER", "UPDATED"]
+    assert lines[2].startswith(short) and "CREATED" in lines[2] and "just now" in lines[2] and "Fix the tests" in lines[2] and "0/1" in lines[2]
+    assert str(tmp_path) in lines[2]
     assert "frozen_tool_config" not in listing
 
     machine = json.loads(_out(capsys, "mission", "list", "--json"))
@@ -61,17 +62,17 @@ def test_task_commands_print_receipts_and_tables(tmp_path, state, capsys) -> Non
     created = _create(tmp_path, capsys)
     mid = created["mission"]["id"]
     out = _out(capsys, "task", "add", "--mission", mid, "--prompt", "second job", "--title", "Second", "--priority", "3")
-    assert out.strip() == 'Added task 2 "Second" · QUEUED · priority 3'
+    assert out.strip() == 'Added task 2 "Second" · QUEUED · priority 3 · starts when the mission starts'
     table = _out(capsys, "task", "list", "--mission", mid).splitlines()
-    assert table[0].split() == ["TASK", "STATUS", "PRIORITY", "AFTER", "TITLE"]
-    assert ["2", "QUEUED", "3"] == next(line.split()[:3] for line in table if line.startswith("2"))
-    assert _out(capsys, "task", "amend", "--mission", mid, "--task", "2", "--prompt", "new text").strip() == "Amended · task 2 is now revision 2"
+    assert table[0].split() == ["TASK", "STATUS", "RUNS", "PRIORITY", "ORDER", "AFTER", "TITLE"]
+    assert ["2", "QUEUED", "1", "3"] == next(line.split()[:4] for line in table if line.startswith("2"))  # priority 3 runs before task 1
+    assert _out(capsys, "task", "amend", "--mission", mid, "--task", "2", "--prompt", "new text").strip() == "Amended · task 2 is now revision 2 · starts when the mission starts"
     shown = _out(capsys, "task", "show", "--mission", mid, "--task", "2")
     assert 'task 2 "Second"' in shown and "revision 2" in shown and "new text" in shown and "second job" not in shown
     assert "pending amendment" not in shown
     assert _out(capsys, "task", "pause", "--mission", mid, "--task", "2").startswith("Paused task 2")
-    assert _out(capsys, "task", "priority", "--mission", mid, "--task", "2", "--value", "9").startswith("Priority set for task 2")
-    assert _out(capsys, "task", "verify", "--mission", mid, "--task", "2", "--approve", code=2)  # not awaiting verification
+    assert _out(capsys, "task", "priority", "--mission", mid, "--task", "2", "--value", "9").startswith("Priority of task 2 set to 9")
+    assert _out(capsys, "task", "verify", "--mission", mid, "--task", "2", "--approve", code=4)  # not awaiting verification
 
 
 def test_task_verify_receipt(tmp_path, state, capsys) -> None:
@@ -93,8 +94,9 @@ def test_lifecycle_commands_print_one_line_receipts(tmp_path, state, capsys) -> 
     # With the controller lock held, resume only records the request and never launches a provider.
     with MissionLock(state / "locks", mid):
         assert _out(capsys, "resume", "--mission", mid).strip() == f"Resume requested · mission {short} is RUNNING"
-    assert _out(capsys, "stop", "--mission", mid).strip() == f"Stop requested · mission {short} is STOPPING"
-    assert _out(capsys, "cancel", "--mission", mid).strip() == f"Cancel requested · mission {short} is CANCELLED"
+    with MissionLock(state / "locks", mid):  # a live controller finishes the stop itself
+        assert _out(capsys, "stop", "--mission", mid).strip() == f"Stop requested · mission {short} is STOPPING"
+    assert _out(capsys, "cancel", "--mission", mid, "--yes").strip() == f"Cancel requested · mission {short} is CANCELLED"
 
 
 def test_status_events_doctor_and_proposals_are_readable(tmp_path, state, capsys) -> None:
@@ -110,7 +112,7 @@ def test_status_events_doctor_and_proposals_are_readable(tmp_path, state, capsys
         store.add_task(mid, "later", title="Later job")
     status = _out(capsys, "status", "--mission", mid)
     short = mid[:8]
-    assert f'Mission     {short} "Fix the tests" · RUNNING (background)' in status
+    assert f'Mission     {short} "Fix the tests" · INTERRUPTED (was RUNNING, background)' in status
     assert "Current     none" in status
     assert 'Next        task 1 "Do the work" · QUEUED' in status
     assert "Tasks       2 total: 2 QUEUED" in status
@@ -118,10 +120,14 @@ def test_status_events_doctor_and_proposals_are_readable(tmp_path, state, capsys
     assert "frozen_tool_config" not in status and len(status.splitlines()) < 15
 
     events = _out(capsys, "events", "--mission", mid).splitlines()
-    assert events[0].split() == ["ID", "TIME", "KIND", "DETAIL"]
-    assert any("provider-selection" in line and "provider=codex" in line for line in events)
+    assert events[0].split() == ["ID", "TIME", "EVENT"]
+    assert any("Mission created" in line for line in events) and not any("provider-selection" in line or "Selected codex" in line for line in events)
+    verbose = _out(capsys, "events", "--mission", mid, "--verbose").splitlines()
+    assert verbose[0].split() == ["ID", "TIME", "KIND", "EVENT"]
+    assert any("provider-selection" in line and "Selected codex (m)" in line for line in verbose)
 
-    doctor = _out(capsys, "doctor", "--mission", mid)
+    assert main(["doctor", "--mission", mid]) == 1  # the isolated HOME has no signed-in provider
+    doctor = capsys.readouterr().out
     assert "integrity ok" in doctor and f'Mission          {short} "Fix the tests"' in doctor
     assert "frozen_tool_config" not in doctor
     assert _out(capsys, "proposal", "list", "--mission", mid).strip() == "No proposals."
@@ -135,9 +141,9 @@ def test_mission_prefix_resolution_errors_and_success(tmp_path, state, monkeypat
         second = store.create_mission("second", "o", cwd=second_dir, mission_id="abcd2222" + "0" * 24)["id"]
     assert json.loads(_out(capsys, "status", "--mission", "abcd1", "--json"))["mission"]["id"] == first
     assert json.loads(_out(capsys, "status", "--mission", second, "--json"))["mission"]["id"] == second
-    err = _out(capsys, "status", "--mission", "abcd", code=2)
+    err = _out(capsys, "status", "--mission", "abcd", code=3)
     assert "ambiguous" in err and "abcd1111" in err and "abcd2222" in err and "first" in err
-    assert "no mission matches 'zzzz'; run llm-bridge mission list" in _out(capsys, "status", "--mission", "zzzz", code=2)
+    assert "no mission matches 'zzzz'; run llm-bridge mission list" in _out(capsys, "status", "--mission", "zzzz", code=3)
     assert "too short" in _out(capsys, "status", "--mission", "ab", code=2)
 
 
@@ -154,7 +160,7 @@ def test_mission_is_inferred_from_the_current_folder(tmp_path, state, monkeypatc
     assert json.loads(_out(capsys, "status", "--json"))["mission"]["id"] == mid
     assert "Mission     " + mid[:8] in _out(capsys, "status")
     monkeypatch.chdir(other)
-    err = _out(capsys, "status", code=2)
+    err = _out(capsys, "status", code=3)
     assert "no unfinished mission for folder" in err and "mission list" in err
 
 
@@ -173,7 +179,7 @@ def test_folder_inference_lists_candidates_and_prefers_live_missions(tmp_path, s
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.set_mission_status(live, "RUNNING")
         store.set_mission_status(live, "STOPPED")
-    err = _out(capsys, "status", code=2)
+    err = _out(capsys, "status", code=3)
     assert "several missions match" in err and stopped[:8] in err and live[:8] in err and "old stopped" in err
 
 
@@ -181,7 +187,8 @@ def test_doctor_does_not_infer_a_mission(tmp_path, state, monkeypatch, capsys) -
     with BridgeStore(state / "bridge.sqlite3") as store:
         store.create_mission("proj", "o", cwd=tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert json.loads(_out(capsys, "doctor", "--json"))["mission"] is None
+    assert main(["doctor", "--json"]) == 1  # the isolated HOME has no signed-in provider
+    assert json.loads(capsys.readouterr().out)["mission"] is None
 
 
 def test_console_accepts_slash_commands_and_exit_hint(tmp_path, state, capsys) -> None:
@@ -209,16 +216,17 @@ def test_native_stop_with_active_provider_explains_how_to_finish(tmp_path, state
         store.set_mission_status(mid, "RUNNING")
         operation = store.begin_operation(1, iteration=1, station="codex")
         store.mark_operation_running(operation, process_pid=os.getpid(), process_start="t")
-    out = _out(capsys, "stop", "--mission", mid)
-    assert out.splitlines()[0] == f"Stop requested · mission {mid[:8]} is STOPPING"
-    assert bridge_format.NATIVE_STOP_HINT in out
-    assert "llm-bridge stop --force --mission <id>" in out
-    assert "finish" not in out
-    status = _out(capsys, "status", "--mission", mid)
-    assert bridge_format.NATIVE_STOP_HINT in status
-    # The JSON receipt carries the same explanation for the console.
-    reply = json.loads(dispatch_console_command(mid, "stop"))
-    assert reply["result"]["detail"] == bridge_format.NATIVE_STOP_HINT
+    with MissionLock(state / "locks", mid):  # the native provider's controller is alive
+        out = _out(capsys, "stop", "--mission", mid)
+        assert out.splitlines()[0] == f"Stop requested · mission {mid[:8]} is STOPPING"
+        assert bridge_format.NATIVE_STOP_HINT in out
+        assert "llm-bridge stop --force --mission <id>" in out
+        assert "finish" not in out
+        status = _out(capsys, "status", "--mission", mid)
+        assert bridge_format.NATIVE_STOP_HINT in status
+        # The JSON receipt carries the same explanation for the console.
+        reply = json.loads(dispatch_console_command(mid, "stop"))
+        assert reply["result"]["detail"] == bridge_format.NATIVE_STOP_HINT
 
 
 def test_paused_native_stop_guidance_names_the_force_command(tmp_path, state, capsys, monkeypatch) -> None:
@@ -248,9 +256,10 @@ def test_attach_without_a_station_says_how_to_start_one(tmp_path, state, monkeyp
 
     mid = _create(tmp_path, capsys)["mission"]["id"]
     monkeypatch.setattr(bridge_runtime, "mission_socket_path", lambda _mission_id, **_kw: tmp_path / "none.sock")
-    err = _out(capsys, "attach", "--mission", mid, code=2)
+    err = _out(capsys, "attach", "--mission", mid, code=4)
     short = mid[:8]
-    assert f"No provider station is running for mission {short} · start it with: llm-bridge start --mission {short}" in err
+    assert f"No provider station is running for mission {short} · look at it without using capacity: llm-bridge control --mission {short}" in err
+    assert f"or start work: llm-bridge start --mission {short} (uses capacity)" in err  # CLIUX-079
     assert "tmux" not in err.lower()
 
 
@@ -300,7 +309,7 @@ def test_mission_create_help_describes_every_option_without_none_noise(capsys) -
         main(["stop", "--help"])
     stop = " ".join(capsys.readouterr().out.split())
     assert "[--mission ID]" in stop and "--force" in stop and "(default: False)" not in stop
-    assert "--mission 3f9a1c2b" in stop and "unique ID prefix" in stop
+    assert "--mission 3f9a1c2b" in stop and "unique prefix of 3+ characters" in stop
 
 
 def test_default_rotation_follows_the_llm_tools_config(tmp_path, monkeypatch, capsys) -> None:
@@ -312,7 +321,8 @@ def test_default_rotation_follows_the_llm_tools_config(tmp_path, monkeypatch, ca
     with pytest.raises(SystemExit):
         main(["mission", "create", "--help"])
     text = " ".join(capsys.readouterr().out.split())
-    assert "(default: claude,codex)" in text and "routes claude,kilo-zai-glm-52" in text
+    assert "routes claude,kilo-zai-glm-52" in text and "(default: claude,kilo-zai-glm-52)" in text
+    assert "(default: claude,codex)" not in text  # providers have no default while default routes are configured
     config.write_text("not = [valid", encoding="utf-8")
     assert bridge.default_rotation() == ("claude,codex,opencode", "")
 
@@ -342,7 +352,8 @@ def test_format_helpers_cover_edge_cases() -> None:
     assert bridge_format.format_events([]) == "No events."
     event = {"id": 7, "created_at": "2033-05-18T03:00:00+00:00", "kind": "provider-selection", "data": {"route": "codex", "rotation_reason": "even-burn"}}
     rendered = bridge_format.format_events([event])
-    assert "rotation_reason=spreading use" in rendered and "even-burn" not in rendered
+    assert "Selected codex" in rendered and "provider-selection" not in rendered
+    assert bridge_format.plain_reason("even-burn") == "spreading use"
     assert event["data"]["rotation_reason"] == "even-burn"
     assert bridge_format.format_proposals([]) == "No proposals."
     assert bridge_format.format_command_receipt("pause", {"mission_status": "PAUSED", "detail": "later"}, "a" * 32) == "Pause requested · mission aaaaaaaa is PAUSED\nlater"
@@ -383,12 +394,13 @@ def test_proposal_station_and_steer_receipts(tmp_path, state, capsys) -> None:
 
 def test_rejected_lifecycle_command_exits_nonzero_in_text_mode(tmp_path, state, capsys) -> None:
     mid = _create(tmp_path, capsys)["mission"]["id"]
-    assert main(["cancel", "--mission", mid]) == 0
+    assert main(["cancel", "--mission", mid, "--yes"]) == 0
     capsys.readouterr()
-    assert main(["resume", "--mission", mid]) == 2  # a cancelled mission cannot be resumed
+    assert main(["resume", "--mission", mid]) == 4  # a cancelled mission cannot be resumed
     assert "was cancelled and cannot be resumed" in capsys.readouterr().err
-    assert main(["resume", "--mission", mid, "--json"]) == 0  # --json keeps its historical exit status
-    assert json.loads(capsys.readouterr().out)["status"] == "REJECTED"
+    assert main(["resume", "--mission", mid, "--json"]) == 4  # with --json the refusal is an error object on stdout (CLIUX-015)
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert error["code"] == "wrong-state" and "was cancelled and cannot be resumed" in error["message"]
 
 
 def test_completed_mission_stop_prints_station_receipt(tmp_path, state, capsys) -> None:

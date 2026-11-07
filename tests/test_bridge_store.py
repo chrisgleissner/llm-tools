@@ -267,7 +267,7 @@ def test_version_one_database_migrates_original_prompts_and_new_tables(tmp_path:
     assert store.get_task(1)["original_prompt"] == "verbatim old prompt"
     assert store.get_task(1)["origin"] == "operator"
     assert store.get_task(1)["proposal_status"] == "NONE"
-    assert store.get_mission("old")["config"] == {}
+    assert store.get_mission("old")["config"] == {"mode": "background"}
     with sqlite3.connect(path) as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
 

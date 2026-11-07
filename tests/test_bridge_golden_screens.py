@@ -230,7 +230,7 @@ USAGE_TEXT = "\n".join([
 
 
 def _usage_block() -> dict[str, Any]:
-    return {"status": "ready", "age_seconds": 12, "error": "", "text": USAGE_TEXT, "rows": [
+    return {"status": "ready", "age_seconds": 12, "error": "", "text": USAGE_TEXT, "all_text": USAGE_TEXT, "rotation": ["claude", "codex"], "rows": [
         {"provider": "codex", "model": "gpt-5", "scope": "5h", "remaining_percent": 62.0},
         {"provider": "claude", "model": "sonnet-4", "scope": "5h", "remaining_percent": 8.0},
     ]}
@@ -423,6 +423,28 @@ def _overlay_document(rendered: bool) -> Callable[[Case], FakeScreen]:
     return build
 
 
+def _slash_list(typed: str) -> Callable[[Case], FakeScreen]:
+    def build(case: Case) -> FakeScreen:
+        state = case.console_state("Tasks")
+        for key in typed:
+            state.handle_key(key)
+        return _draw_console(case.screen(), state)
+
+    return build
+
+
+def _overlay_composer_empty(case: Case) -> FakeScreen:
+    screen = case.screen()
+    try:
+        bridge_tui.compose_document("", title="Add task prompt", window=screen, placeholder=bridge_tui.TASK_PLACEHOLDER)
+    except ScriptExhausted:
+        pass
+    for thread in threading.enumerate():
+        if thread.name == "llm-bridge-composer-checkpoint":
+            thread.join(5)
+    return screen
+
+
 def _overlay_composer(case: Case) -> FakeScreen:
     initial = "# Add retry logic\n\nAcceptance:\n- tests pass\n- no new dependencies\n"
     typed = (curses.KEY_UP, curses.KEY_END, " ", "(", "d", "r", "a", "f", "t", ")", "\n", "H", "é", "文")
@@ -502,9 +524,28 @@ def _home_form(case: Case) -> FakeScreen:
         directory=f"{FIXED_HOME}/projects/release",
         native=True,
         provider_cursor=1,
+        signins={"claude": (False, "claude, then /login"), "kilo": (False, "kilo auth login")},
+        exhausted={"copilot": bridge_launcher.CapacityNote("rate-limited", NOW + 24 * 86400 + 5 * 3600)},
     )
     state.cursors = [len(state.objective), 0, len(state.directory)]
     state.focus = 1  # row 1 is the (blank) providers row of the form
+    return _draw_launcher(case, state)
+
+
+def _home_form_start_waits(case: Case) -> FakeScreen:
+    """The Start row when the only selected provider has no quota: it says so instead of `Starts ... now`."""
+    state = _launcher(
+        case,
+        creating=True,
+        objective="# Ship the 2.1 patch",
+        providers="copilot",
+        directory=f"{FIXED_HOME}/projects/release",
+        native=True,
+        signins={"claude": (False, "claude, then /login")},
+        exhausted={"copilot": bridge_launcher.CapacityNote("rate-limited", NOW + 24 * 86400 + 5 * 3600)},
+    )
+    state.cursors = [len(state.objective), 0, len(state.directory)]
+    state.focus = 5
     return _draw_launcher(case, state)
 
 
@@ -578,8 +619,12 @@ SCREENS: dict[str, Callable[[Case], FakeScreen]] = {
     "overlay-document-source": _overlay_document(False),
     "overlay-document-rendered": _overlay_document(True),
     "overlay-composer": _overlay_composer,
+    "overlay-composer-empty": _overlay_composer_empty,
+    "console-slash-list": _slash_list("/"),
+    "console-slash-list-filtered": _slash_list("/s"),
     "home-list": _home_list,
     "home-form": _home_form,
+    "home-form-start-waits": _home_form_start_waits,
     "home-saved": _home_saved,
     "home-saved-note": _home_saved_with_note,
     "mission-picker": _mission_picker,

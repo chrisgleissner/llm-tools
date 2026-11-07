@@ -14,7 +14,7 @@ class _Completed:
 
 
 def _run(tmp_path: Path, monkeypatch, *, ticks_until_status: int, accepts: bool = True, session_alive: bool = True,
-         pane_dead_after: int | None = None):
+         pane_dead_after: int | None = None, observer=None):
     monkeypatch.setattr(common, "have_cmd", lambda _name: True)
     monkeypatch.setattr(common, "unix_socket_accepts", lambda _path, timeout=0.2: accepts)
     monkeypatch.delenv("LLM_SCHEDULER_TMUX_TIMEOUT", raising=False)
@@ -48,6 +48,7 @@ def _run(tmp_path: Path, monkeypatch, *, ticks_until_status: int, accepts: bool 
         provider="codex", cwd=str(tmp_path), exec_mode="tmux", tmux_target="bridge:station",
         tmux_socket=str(tmp_path / "bridge.sock"), tmux_pane="%1", native_tui=True,
     )
+    cfg.process_observer = observer
     result = scheduler.run_tmux(cfg, logs, ["true"], output, status)
     return result, commands, state["ticks"]
 
@@ -59,6 +60,18 @@ def test_a_running_provider_costs_no_tmux_process_per_second(tmp_path: Path, mon
     wait_phase = commands[commands.index("pipe-pane") + 1:]  # after the launch sequence
     assert "has-session" not in wait_phase
     assert wait_phase.count("display-message") == 60 // scheduler.TMUX_PANE_CHECK_SECONDS
+
+
+def test_an_observer_that_ended_the_provider_ends_the_wait_with_its_status(tmp_path: Path, monkeypatch) -> None:
+    seen: list[int] = []
+
+    def observer() -> int | None:
+        seen.append(1)
+        return common.AUTONOMY_ABORT_STATUS if len(seen) == 3 else None
+
+    result, _commands, ticks = _run(tmp_path, monkeypatch, ticks_until_status=1000, observer=observer)
+
+    assert result == common.AUTONOMY_ABORT_STATUS and len(seen) == 3 and ticks == 2
 
 
 def test_launch_reads_the_pane_state_and_start_command_in_one_process(tmp_path: Path, monkeypatch) -> None:

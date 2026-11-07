@@ -158,7 +158,10 @@ def test_console_opened_from_the_home_screen_is_pure_ascii_in_the_c_locale(seede
     output = run(env, work, OPEN_CONSOLE)
     assert [byte for byte in output if byte > 0x7F] == [], output[-600:]
     screen = tmux_screen(env, work, tmp_path, ["Down", "Enter"])
-    assert screen.splitlines()[0].startswith("LLM BRIDGE | | ") and "o CREATED" in screen.splitlines()[0]  # chip and state glyph fall back
+    header = screen.splitlines()[0]
+    # In ASCII mode the identity chip is left out (bridge_tui, ascii_mode) and the state glyph falls back to "o";
+    # the console golden screens (console-overview.*.ascii) show the same header shape.
+    assert header.startswith("LLM BRIDGE | ") and not header.startswith("LLM BRIDGE | | ") and "| o CREATED" in header
     assert "Ctrl-K actions" in screen and "?" in screen.splitlines()[-1]
     screen.encode("ascii")
 
@@ -167,7 +170,8 @@ def test_console_state_glyphs_and_chip_appear_in_a_utf8_locale(seeded, tmp_path)
     env, work = seeded
     env.update(LANG="C.UTF-8", LC_ALL="C.UTF-8")
     screen = tmux_screen(env, work, tmp_path, ["Down", "Enter"])
-    assert screen.splitlines()[0].startswith("LLM BRIDGE · ▌ Überprüfung 日本語 · ○ CREATED")
+    header = screen.splitlines()[0]
+    assert header.startswith("LLM BRIDGE · ▌ Überprüfung 日本語 (") and " · ○ CREATED" in header  # CLIUX-038: the short ID follows the name
     assert "Controller" in screen and "Ctrl-K actions" in screen
 
 

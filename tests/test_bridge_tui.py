@@ -167,7 +167,7 @@ def test_console_keyboard_mouse_views_and_palette_share_dispatch() -> None:
     state.handle_key("KEY_ENTER")
     _wait_for(lambda: not state.command_pending, state)
     assert calls == ["pause"]
-    assert {"steer --help", "attach", "detach", "task add --help", "proposal list", "start"} <= set(bridge_tui.PALETTE_COMMANDS)
+    assert {"steer --help", "attach", "leave", "task add --help", "proposal list", "start"} <= set(bridge_tui.PALETTE_COMMANDS)
     assert not {"usage", "control", "orders", "events"} & set(bridge_tui.PALETTE_COMMANDS)  # view tabs are not actions
 
 
@@ -262,13 +262,6 @@ def test_capacity_not_ready_is_labelled_and_never_next() -> None:
     assert labels == ["codex (active)", "claude (not ready)", "kilo (next)"]
 
 
-def test_event_summary_maps_only_reason_fields_to_plain_words() -> None:
-    from llm_tools.bridge_format import _event_summary
-
-    text = _event_summary({"title": "even-burn", "rotation_reason": "even-burn"})
-    assert "title=even-burn" in text and "rotation_reason=spreading use" in text
-
-
 def test_capacity_line_reads_as_plain_language(monkeypatch) -> None:
     monkeypatch.setenv("LLM_USAGE_NOW_EPOCH", "1000000")
     snapshot = {
@@ -297,9 +290,11 @@ def test_task_completion_and_click_to_focus_command_entry() -> None:
     state.command_cursor = len(state.command)
     state.input_focused = True
     state.handle_key("\t")
-    assert state.command == "task add"
+    assert state.command == "task "  # several subcommands match: Tab does not pick one
+    assert state.output[-1].startswith("Matches: task add")
+    state.command, state.command_cursor = "task ad", len("task ad")
     state.handle_key("\t")
-    assert state.command == "task list"
+    assert state.command == "task add"
 
     state.input_focused = False
     state.handle_mouse(22, 30, 24, 80)
@@ -416,7 +411,8 @@ def test_station_view_distinguishes_viewed_from_executing_and_enter_selects_view
     system_rows = "\n".join(state.rows())
     assert "Capacity" in system_rows and "selected kilo-zai / zai/glm-5.2" in system_rows
     assert "configured native · actual unverified" in system_rows
-    assert "Controller heartbeat  active · 8s ago · owner lock held · mission wants RUNNING" in system_rows
+    assert "Controller heartbeat  active · 8s ago · mission wants RUNNING" in system_rows
+    assert system_rows.endswith("Internals             owner lock held")
     assert "liveness" not in system_rows and "controller-heartbeat" not in system_rows
     assert "unbounded_payload" not in system_rows and "{" not in system_rows
 
@@ -440,7 +436,7 @@ def test_sessions_view_labels_operation_model_and_native_identity_separately() -
     header = state.column_header()
     assert header is not None and header.split() == ["op", "task", "provider", "model", "status", "native", "session", "restoration"]
     row = state.rows()[0]
-    assert row.split() == ["op-123", "9", "claude-sonnet", "sonnet", "EXITED", "session-", "RESTORED_NATIVE"]  # first 8 characters, like operation ids
+    assert row.split() == ["op-123", "9", "claude-sonnet", "sonnet", "EXITED", "session-", "resumed"]  # first 8 characters, like operation ids
     assert header.index("native") == row.index("session-")  # aligned under the header
     assert "None" not in row and "unknown" not in row
 
@@ -488,7 +484,7 @@ def test_orders_enter_inspects_task_details_and_ctrl_r_editor_starts_with_prompt
     assert "Dependencies: 12" in detail
     assert "tests pass" in detail and "pytest output" in detail
     assert "Pending amendment" in detail and "pending title" in detail
-    assert "Amendment history:" in detail and "revision 3 PENDING" in detail
+    assert "Amendment history:" in detail and "revision 3 pending: title: pending title" in detail
     assert "original prompt" in detail
     assert "unbounded_payload" not in str(state.snapshot)
 
