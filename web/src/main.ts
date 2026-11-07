@@ -3,6 +3,7 @@ import { deferSkeleton, errorBlock, h, startClock } from "./dom";
 import { applyTheme, installShortcuts, savedTheme, shell } from "./shell";
 import { startLive, stopLive, refresh } from "./store";
 import { announce, mountFeedback } from "./ui";
+import { ensureRouteCss, withCss } from "./route-css";
 import { ensureXtermCss } from "./xterm-css";
 import type { NoticeKind } from "./views/login";
 import { missionDetail } from "./views/mission";
@@ -10,13 +11,13 @@ import { missions } from "./views/missions";
 import { overview } from "./views/overview";
 
 // Routes that are not part of the first load: each is a separate chunk fetched when the route is first opened (spec 11.4, budget D18).
-const loadLogin = () => import("./views/login");
-const loadReset = () => import("./views/reset");
-const loadAccount = () => import("./views/account");
-const loadWorkers = () => import("./views/workers");
-const loadSessions = () => import("./views/sessions");
-const loadUsage = () => import("./views/usage");
-const loadDiagnostics = () => import("./views/diagnostics");
+const loadLogin = withCss("auth", () => import("./views/login"));
+const loadReset = withCss("auth", () => import("./views/reset"));
+const loadAccount = withCss("auth", () => import("./views/account"));
+const loadWorkers = withCss("fleet", () => import("./views/workers"));
+const loadSessions = withCss("fleet", () => import("./views/sessions"));
+const loadUsage = withCss("fleet", () => import("./views/usage"));
+const loadDiagnostics = withCss("fleet", () => import("./views/diagnostics"));
 
 const app = document.getElementById("app") as HTMLElement;
 let authed = false;
@@ -86,6 +87,7 @@ async function route(): Promise<void> {
   try {
     state = await api.authState();
   } catch (e) {
+    await ensureRouteCss("auth");
     app.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "Coordinator unreachable"), h("p", { role: "alert" }, e instanceof api.ApiError ? e.message : "Error"), h("div", { class: "actions" }, h("button", { class: "btn primary", type: "button", onclick: () => void route() }, "Retry")))));
     return;
   }
@@ -157,7 +159,7 @@ async function route(): Promise<void> {
   try {
     if (path === "/") cleanup = overview(main);
     else if (path === "/missions") cleanup = missions(main, new URLSearchParams(location.search));
-    else if (m && m[1] && m[2]) cleanup = missionDetail(main, decodeURIComponent(m[1]), decodeURIComponent(m[2]));
+    else if (m && m[1] && m[2]) cleanup = await lazyView(main, generation, () => ensureRouteCss("mission"), () => missionDetail(main, decodeURIComponent(m[1] as string), decodeURIComponent(m[2] as string)));
     else if (path === "/workers") cleanup = await lazyView(main, generation, loadWorkers, (v) => v.workers(main));
     else if (path === "/sessions") cleanup = await lazyView(main, generation, loadSessions, (v) => v.sessions(main, new URLSearchParams(location.search)));
     else if (path === "/usage") cleanup = await lazyView(main, generation, loadUsage, (v) => v.usage(main, new URLSearchParams(location.search)));
@@ -197,6 +199,7 @@ async function lazyView<T>(main: HTMLElement, generation: number, load: () => Pr
 }
 
 function showLoadError(into: HTMLElement, generation: number): void {
+  void ensureRouteCss("auth");
   into.replaceChildren(h("main", { id: "main", class: "auth" }, h("div", { class: "card auth-card" }, h("h1", {}, "This page could not be loaded"), errorBlock({ message: "Part of the console could not be fetched. Check the connection and try again.", retry: () => generation === routeGeneration && void route(), code: "chunk-load-failed" }))));
 }
 

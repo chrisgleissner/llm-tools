@@ -56,6 +56,11 @@ test("JavaScript and CSS stay within the recorded budget; the terminal loads laz
   const routes = chunks.filter((file) => !initialFiles.has(file) && file !== biggest).reduce((a, f) => ({ raw: a.raw + size(f).raw, gzip: a.gzip + size(f).gzip }), { raw: 0, gzip: 0 });
   expect(routes.raw, `routes raw (budget ${budget.routes["jsRaw"]})`).toBeLessThanOrEqual(budget.routes["jsRaw"] ?? 0);
   expect(routes.gzip, `routes gzip (budget ${budget.routes["jsGzip"]})`).toBeLessThanOrEqual(budget.routes["jsGzip"] ?? 0);
+  // Route stylesheets (fleet-*.css, auth-*.css) are fetched with their route and count under the routes cap too. The first-load
+  // stylesheet is the one index.html references; the xterm stylesheet belongs to the terminal chunk.
+  const routeCss = readdirSync(dist).filter((f) => f.endsWith(".css") && f !== css && !f.startsWith("xterm-")).reduce((a, f) => ({ raw: a.raw + size(f).raw, gzip: a.gzip + size(f).gzip }), { raw: 0, gzip: 0 });
+  expect(routeCss.raw, `route css raw (budget ${budget.routes["cssRaw"]})`).toBeLessThanOrEqual(budget.routes["cssRaw"] ?? 0);
+  expect(routeCss.gzip, `route css gzip (budget ${budget.routes["cssGzip"]})`).toBeLessThanOrEqual(budget.routes["cssGzip"] ?? 0);
   // The lazy routes are not in the initial graph: a marker string of each route module is absent from every initial file and present in a lazy chunk.
   const initialSource = [...initialFiles].map((file) => readFileSync(join(dist, file), "utf8")).join("\n");
   const lazySource = chunks.filter((file) => !initialFiles.has(file)).map((file) => readFileSync(join(dist, file), "utf8")).join("\n");
@@ -64,7 +69,7 @@ test("JavaScript and CSS stay within the recorded budget; the terminal loads laz
     expect(lazySource.includes(marker), `route "${route}" (marker "${marker}") must be in a lazy chunk`).toBe(true);
   }
   expect(statSync(join(dist, js)).size).toBe(size(js).raw);
-  console.log(`BUNDLE initial js ${initialJs.raw}/${initialJs.gzip} css ${c.raw}/${c.gzip} terminal ${terminal.raw}/${terminal.gzip} routes ${routes.raw}/${routes.gzip} (raw/gzip bytes)`);
+  console.log(`BUNDLE initial js ${initialJs.raw}/${initialJs.gzip} css ${c.raw}/${c.gzip} terminal ${terminal.raw}/${terminal.gzip} routes js ${routes.raw}/${routes.gzip} css ${routeCss.raw}/${routeCss.gzip} (raw/gzip bytes)`);
 });
 
 interface Sample {

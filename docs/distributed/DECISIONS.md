@@ -340,3 +340,33 @@ The new `routes` cap is interim: 40000 raw / 17000 gzip, which is the measured 3
 30 percent for the growth of the lazy pages (the palette, the fleet pages and the account pages are
 rebuilt in WP-1 to WP-5). It is replaced by the value measured after WP-5. If the first load exceeds a
 cap before then, `missions` and `overview` may move behind `import()` before any cap is raised.
+
+### D18 update: route stylesheets
+
+The page packages add CSS that only lazy routes use (WP-5 fleet and auth about 4.9 KB, WP-3 mission about 6.1 KB),
+which would push the first-load CSS over the 34000 / 9000 cap. Page CSS now loads with its route, the way the
+xterm stylesheet does. `build.mjs` builds `css/fleet.css` (workers, sessions, usage, diagnostics), `css/auth.css`
+(sign-in, setup, reset, account) and `css/route-mission.css` (imports `session.css` and `mission.css`) as separate
+hashed files and defines their URLs. `withCss(name, loader)` in `src/route-css.ts` starts the stylesheet fetch together
+with the route chunk's `import()` and resolves when both are done, so the route renders styled. The mission route awaits
+`ensureRouteCss("mission")` before it mounts. The sign-in page waits for its stylesheet in parallel with the `login`
+chunk (one more request, no extra round trip); the load test (`setupFormMsMax` 5000 ms at 4x CPU) measured a median form
+time of 1007 ms. `app.css` imports only tokens, base, components, shell, inbox and missions.
+
+How lazy CSS is counted: `routes` in `budget.json` now has `jsRaw` / `jsGzip` (route chunks, as before) and
+`cssRaw` / `cssGzip` (every stylesheet in `dist` except the one `index.html` references and the xterm stylesheet).
+`e2e/budget.spec.ts` checks both pairs. The initial CSS cap stays 34000 / 9000.
+
+| Measure | Before | After |
+|---|---:|---:|
+| Initial CSS, raw / gzip | 31854 / 6988 | 27888 / 6285 |
+| Route CSS (fleet empty, auth, mission), raw / gzip | in the first load | 4626 / 1631 |
+| Initial JavaScript, raw / gzip | 70785 / 26198 | 71388 / 26439 |
+
+The interim route CSS cap is 13000 / 3800, sized from the page packages' measured additions (about 11.8 KB raw together
+with the current files). It is replaced by the value measured after WP-5 together with the JS routes cap.
+
+Rules that a first-load page and a route stylesheet both use stay in `components.css` (`table.kv`, `.steps`,
+`.transition-summary`, `.event-controls`); the landscape header rule moved from `session.css` to `shell.css`. The
+page packages remove these with their legacy pages. The Coordinator-unreachable and load-error pages in `main.ts` use
+the auth page styles and load that stylesheet before they render.

@@ -9,5 +9,4 @@
 .keybar .btn[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 @media (orientation: landscape) and (max-height: 520px) {
   .term-host { height: calc(100dvh - 160px); min-height: 8rem; }
-  .top { position: static; }
 }

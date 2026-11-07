@@ -2,9 +2,6 @@
 @import "./css/base.css";
 @import "./css/components.css";
 @import "./css/shell.css";
-@import "./css/session.css";
-@import "./css/mission.css";
 @import "./css/inbox.css";
 @import "./css/missions.css";
-@import "./css/fleet.css";
-@import "./css/auth.css";
+/* css/fleet.css, css/auth.css and css/route-mission.css (session.css and mission.css) are separate route stylesheets (build.mjs, src/route-css.ts), not part of the first load. */

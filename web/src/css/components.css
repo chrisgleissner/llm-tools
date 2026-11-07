@@ -190,3 +190,13 @@ pre.cmd { background: var(--surface-2); border-radius: var(--r-2); padding: var(
 @media (max-width: 720px) { .pager .btn span { display: none; } }
 .row-actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .crumbs { font-size: var(--fs-md); }
+
+/* Rules the Overview page (first-load CSS) shares with the mission page (route CSS); the page packages remove them with the legacy pages. */
+.transition-summary { display: inline-block; margin-inline-start: var(--sp-2); padding: 1px 6px; border-radius: var(--r-1); background: var(--surface-2); color: var(--text); font-size: var(--fs-md); font-weight: 600; }
+.event-controls { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: var(--sp-2) 0; }
+.event-controls select { min-block-size: var(--control-h); }
+/* Key/value table (diagnostics, account, mission status) and numbered steps (sign-in help, worker enrolment): used by more than one route stylesheet, so they stay in the first-load CSS until the page packages replace them. */
+table.kv { max-inline-size: 640px; border: 1px solid var(--border); }
+table.kv th { inline-size: 40%; font-weight: 600; background: none; font-size: inherit; white-space: normal; }
+.steps { margin: var(--sp-2) 0; padding-inline-start: var(--sp-5); }
+.steps li { margin: var(--sp-1) 0; }

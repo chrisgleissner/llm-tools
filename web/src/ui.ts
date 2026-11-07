@@ -178,7 +178,7 @@ export function confirmDialog(opts: ConfirmOptions): Promise<string | null> {
         "div",
         { class: "actions end" },
         h("button", { type: "button", class: "btn", id: "dialog-cancel", onclick: () => dlg.close("cancel") }, "Go back"),
-        h("button", { type: "submit", class: `btn ${opts.danger ? "danger solid" : "primary"}`, id: "dialog-confirm", value: "ok" }, opts.confirmLabel),
+        h("button", { type: "submit", class: `btn ${opts.danger ? "danger solid" : "primary"}`, id: "dialog-confirm", value: "ok", "data-confirm": true }, opts.confirmLabel),
       ),
     );
     // The reason is validated inline (no browser bubble): an empty reason shows a message next to the field and keeps the dialog open.

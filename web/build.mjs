@@ -27,8 +27,24 @@ const xtermCss = await build({
 });
 const xtermFile = Object.keys(xtermCss.metafile.outputs).map((p) => basename(p)).find((f) => f.endsWith(".css"));
 if (!xtermFile) throw new Error("esbuild produced no xterm css output");
+// Page stylesheets that belong to lazy routes are separate hashed files too. The route chunk's loader fetches the stylesheet in
+// parallel with the chunk and waits for both before it renders (src/route-css.ts), so the first-load CSS stays small.
+const routeCssEntries = { fleet: "src/css/fleet.css", auth: "src/css/auth.css", mission: "src/css/route-mission.css" };
+const routeCss = await build({
+  entryPoints: routeCssEntries,
+  bundle: true,
+  minify: true,
+  outdir: "dist",
+  entryNames: "[name]-[hash]",
+  metafile: true,
+  logLevel: "warning",
+});
+const routeCssFiles = Object.fromEntries(
+  Object.entries(routeCss.metafile.outputs).map(([out, o]) => [Object.entries(routeCssEntries).find(([, src]) => src === o.entryPoint)?.[0] ?? "", `/${basename(out)}`]),
+);
+for (const name of Object.keys(routeCssEntries)) if (!routeCssFiles[name]) throw new Error(`esbuild produced no ${name} route css output`);
 const result = await build({
-  define: { __XTERM_CSS__: JSON.stringify(`/${xtermFile}`) },
+  define: { __XTERM_CSS__: JSON.stringify(`/${xtermFile}`), __ROUTE_CSS__: JSON.stringify(routeCssFiles) },
   entryPoints: { app: "src/main.ts" },
   bundle: true,
   minify: true,

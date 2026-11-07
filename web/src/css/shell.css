@@ -73,3 +73,4 @@ main { max-width: 1120px; margin: 0 auto; padding: var(--sp-4) var(--sp-4) calc(
   .account-btn .icon { display: none; }
   .account-btn { padding: 0 var(--sp-1) !important; }
 }
+@media (orientation: landscape) and (max-height: 520px) { .top { position: static; } }
