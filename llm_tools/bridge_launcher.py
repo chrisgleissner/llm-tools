@@ -622,6 +622,10 @@ class Launcher:
     burst_window: float = 0.0
     last_input: float = -1e9
     input_pending: Callable[[], bool] = field(default=lambda: False, repr=False)
+    # Set by ``note_ready`` just before the loop waits for a key. ``ready_at`` is the first such moment
+    # after the latest key; ``backlog`` is true when the next key had already arrived by then.
+    ready_at: float = -1e9
+    backlog: bool = False
     _probes: dict[str, tuple[float, bool | None]] = field(default_factory=dict, repr=False)
     # Task counts and active provider per mission id, loaded with the list.
     stats: dict[str, MissionStats] = field(default_factory=dict)
@@ -1037,10 +1041,26 @@ class Launcher:
             return
         self.provider_cursor = cursor
 
+    def note_ready(self) -> None:
+        """Record that the loop has finished with the previous key and is about to wait for the next.
+
+        The time a loaded machine spends drawing, or not running at all, between two keys of a paste
+        must not make them look like separate keystrokes. A key that is already waiting at this point
+        arrived while the loop was busy, so it belongs to the burst. For a key that has not arrived yet,
+        the gap is measured from this moment, so only the wait itself is counted.
+        """
+        if self.burst_window <= 0:
+            return
+        self.backlog = bool(self.input_pending())
+        if self.ready_at < self.last_input:
+            self.ready_at = time.monotonic()
+
     def _in_burst(self, now: float) -> bool:
         if self.burst_window <= 0:
             return False
-        return now - self.last_input < self.burst_window or bool(self.input_pending())
+        if self.backlog or self.input_pending():
+            return True
+        return now - max(self.last_input, self.ready_at) < self.burst_window
 
     def key(self, key: object, *, deliberate: bool = False) -> str | None:
         """Return an explicit action, leaving persistence outside curses.
@@ -1058,6 +1078,7 @@ class Launcher:
             if self.error.startswith(_BURST_HINT):
                 self.error = ""
         burst = self.creating and enter and not deliberate and self._in_burst(now)
+        self.backlog = False  # describes only the key that was just read
         if not self.creating:
             self.error = ""
             if self.filtering:
@@ -1989,6 +2010,7 @@ def _run_launcher(dispatch: Callable[[list[str]], int], probe: bridge_redraw.Sto
                 bridge_hangup.set_timeout(window, bridge_redraw.timeout_ms(wait))
             except AttributeError:
                 pass
+            state.note_ready()
             try:
                 key = bridge_hangup.read_wch(window)
             except curses.error:
