@@ -2949,8 +2949,6 @@ def _main(argv: list[str] | None = None) -> int:
     if _managed_session() and not _managed_allows(args):
         return _fail(MANAGED_REFUSAL, "refused-in-managed-session", EXIT_USAGE, bool(getattr(args, "json", False)))
     if target != commands.LOCAL_TARGET:
-        if args.command == "cancel" and target != commands.ALL_TARGET and not _confirm_cancel(args, str(args.mission or "in this folder")):
-            return 2
         # Never fall back to local execution for a named target (CLI-005).
         from .bridge_remote import run_cli
 

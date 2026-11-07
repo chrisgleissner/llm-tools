@@ -306,7 +306,7 @@ def test_run_cli_outcomes(capsys):
     assert remote.run_cli("ws", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (202, pending)})) == remote.EXIT_UNAVAILABLE
     assert "stays queued" in capsys.readouterr().err
     uncertain = {"state": "done", "result": {"outcome": "uncertain", "error": {"message": "disk"}}}
-    assert remote.run_cli("ws", args("cancel", "--mission", "m"), client=client({("POST", "/api/v1/missions/m/cancel"): (200, uncertain)})) == 2
+    assert remote.run_cli("ws", args("cancel", "--mission", "m", "--yes"), client=client({("POST", "/api/v1/missions/m/cancel"): (200, uncertain)})) == 2
     assert "uncertain" in capsys.readouterr().err
     refused = {"error": {"code": "unknown-target", "message": "no worker"}}
     assert remote.run_cli("x", args("status", "--mission", "m"), client=client({("GET", "/api/v1/missions/m"): (404, refused)})) == 2
@@ -412,3 +412,76 @@ def test_redirects_are_refused_so_the_token_is_never_resent(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+# --- cancel confirmation: `--yes` and the prompt behave the same locally and with --target ------------------
+
+def _status_answer(status: str, name: str = "Parser") -> tuple[int, dict]:
+    return 200, {"state": "done", "result": {"outcome": "ok", "result": {"mission": {"status": status, "name": name}}}}
+
+
+CANCEL_DONE = (200, {"state": "done", "result": {"outcome": "ok", "result": {"status": "APPLIED"}}})
+
+
+class _Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def _remote_cancel(monkeypatch, routes, *argv):
+    api = client(routes)
+    monkeypatch.setattr(remote, "load", lambda env=None: remote.RemoteConfig("https://c:8443", TOKEN))
+    monkeypatch.setattr(remote, "Client", lambda config, **kwargs: api)
+    return main(["--target", "ws", "cancel", *argv]), api
+
+
+def _forbid_prompt(monkeypatch):
+    def refuse(*_args):
+        raise AssertionError("the command asked for confirmation")
+
+    monkeypatch.setattr("builtins.input", refuse)
+
+
+def test_remote_cancel_with_yes_completes_without_a_prompt_or_a_status_query(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1", "--yes")
+    assert code == 0
+    assert [call[0] for call in api.opener.calls] == [("POST", "/api/v1/missions/m1/cancel")]
+    assert "--yes" not in json.dumps([call[1] for call in api.opener.calls])  # the flag is never a request field
+
+
+def test_remote_cancel_without_yes_and_without_a_terminal_asks_for_yes_like_the_local_command(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("RUNNING"), ("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert code == 2
+    assert "Pass --yes" in capsys.readouterr().err
+    assert ("POST", "/api/v1/missions/m1/cancel") not in [call[0] for call in api.opener.calls]  # nothing was cancelled
+
+
+def test_remote_cancel_of_a_finished_mission_needs_no_confirmation_like_the_local_command(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("COMPLETED"), ("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert code == 0
+    assert ("POST", "/api/v1/missions/m1/cancel") in [call[0] for call in api.opener.calls]
+
+
+@pytest.mark.parametrize(("answer", "code", "cancelled"), [("y\n", 0, True), ("\n", 2, False)])
+def test_remote_cancel_on_a_terminal_asks_with_the_mission_name(monkeypatch, answer, code, cancelled):
+    errors = _Terminal()
+    monkeypatch.setattr("sys.stdin", _Terminal(answer))
+    monkeypatch.setattr("sys.stderr", errors)
+    routes = {("GET", "/api/v1/missions/m1"): _status_answer("RUNNING", "Parser"), ("POST", "/api/v1/missions/m1/cancel"): CANCEL_DONE}
+    result, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert result == code
+    assert 'Parser' in errors.getvalue() and "cannot be undone" in errors.getvalue()
+    assert (("POST", "/api/v1/missions/m1/cancel") in [call[0] for call in api.opener.calls]) is cancelled
+
+
+def test_remote_cancel_asks_when_the_worker_cannot_say_whether_the_mission_is_finished(monkeypatch, capsys):
+    _forbid_prompt(monkeypatch)
+    routes = {("GET", "/api/v1/missions/m1"): (202, {"state": "pending", "result": None})}
+    code, api = _remote_cancel(monkeypatch, routes, "--mission", "m1")
+    assert code == 2 and "Pass --yes" in capsys.readouterr().err

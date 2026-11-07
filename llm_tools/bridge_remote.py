@@ -557,6 +557,29 @@ def _envelope_exit(envelope: dict[str, Any]) -> tuple[int, str | None]:
     return 2, message
 
 
+def _cancel_confirmed(target: str, args: argparse.Namespace, client: Client) -> bool:
+    """The local `cancel` confirmation, for a mission on ``target``: `--yes` skips it, a finished mission needs none.
+
+    The saved status and name come from the worker. When the worker cannot answer, the question is asked
+    with the mission reference alone, which is the safer choice.
+    """
+    from .bridge import _confirm_cancel
+    from .bridge_states import FINISHED_MISSION_STATUSES
+
+    if getattr(args, "yes", False):
+        return True
+    status, name = "", ""
+    try:
+        envelope = client.submit_resource(target, commands.CommandRequest("mission.status", mission_id=args.mission, target=target))
+        mission = ((envelope or {}).get("result") or {}).get("mission") or {}
+        status, name = str(mission.get("status") or ""), str(mission.get("name") or "")
+    except (RemoteError, ValueError, OSError):
+        pass
+    if status in FINISHED_MISSION_STATUSES:
+        return True
+    return _confirm_cancel(args, fmt.short_id(args.mission), fmt.clipped_name(name))
+
+
 def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = None) -> int:
     """Execute one parsed command on ``target`` (a worker name or ``all``)."""
     as_json = bool(getattr(args, "json", False))
@@ -567,6 +590,8 @@ def run_cli(target: str, args: argparse.Namespace, *, client: Client | None = No
         request, human = request_for(args, target)
         spec = commands.lookup(request.operation)
         if target != commands.ALL_TARGET:
+            if args.command == "cancel" and not _cancel_confirmed(target, args, client):
+                return 2
             resource_result = client.submit_resource(target, request)
             envelope = client.submit(target, request) if resource_result is None else resource_result
             code, message = _envelope_exit(envelope)

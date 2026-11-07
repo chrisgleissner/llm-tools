@@ -386,7 +386,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--to` | `mission.steer` typed field `route` for handoff (same as `--route`). |
 | `--verbose` | Client-side: sends `hide_bookkeeping:false` to `mission.events` and shows the kind column. |
 | `--verifier` | Local verifier configuration; remote mission creation returns `unsupported-remote-option`. |
-| `--yes` | Local confirmation for `cancel`; the client asks before sending a remote `cancel` and never sends it as a field. |
+| `--yes` | Confirmation for `cancel`, with the same meaning locally and with `--target`: it skips the question, is never sent to the worker, and is required when there is no terminal to ask on (exit status 2 otherwise). Without it the client asks first, naming the mission from the worker's saved name; a mission that is already finished is cancelled without a question, as locally. |
 | `-f` | Short form of `--follow` for `events`. |
 | `-j` | Short form of `--json`. |
 | `-m` | Short form of `--mission`. |
