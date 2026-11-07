@@ -259,11 +259,11 @@ The original 169 implementation IDs are covered by CI run 42181869238 on c81ccde
 | PRD-003 | [~] | Python Bridge store: fixtures of every earlier schema version (`tests/fixtures/bridge-schema/`, `scripts/make_bridge_schema_fixtures.py`), backup before migration, refusal of a newer database naming the backup with exit 4, and worker protocol version negotiation (`tests/test_bridge_schema_migrations.py`, `tests/test_bridge_protocol.py`). Coordinator database migrations and old/new worker–coordinator CI tests remain for phase B. |
 | PRD-004 | [~] | `bridge-coordinator check-config` and the start-up path report every configuration error at once (`config error: <key> = <value>: <problem>; fix: ...`), with a did-you-mean for unknown keys and checks of environment overrides; `coordinator/tests/config_check.rs` is table-driven (25 rows) and its three CLI tests failed before the change. Waiting for a green CI run ID. |
 | PRD-005 | [~] | `docs/llm-bridge/uninstall.md` with a drift test, service uninstall tests and backup portability (`tests/test_uninstall_portability.py`). Coordinator install methods remain for phase B. |
-| PRD-006 | [ ] | Not started. Documentation as product. |
+| PRD-006 | [~] | Documentation as product. CLI side done: docs/llm-bridge/guide.md, troubleshooting.md and uninstall.md, `llm-bridge help` links to the troubleshooting page (bridge_help.TROUBLESHOOTING_URL), tests/test_docs_coverage.py checks that every CLI command is documented. The REST API reference and the published site pages wait for PR #31 (phase B). |
 | PRD-007 | [ ] | Not started. Soak test. |
 | PRD-008 | [ ] | Not started. Chaos. |
 | PRD-009 | [ ] | Not started. Capacity limits. |
-| PRD-010 | [ ] | Not started. Data retention. |
+| PRD-010 | [~] | Data retention. Python side done: llm_tools/bridge_retention.py (`[bridge.retention]` policy, run_pass prunes finished missions' events, operations, run logs, verifier files and migration backups, and diagnostic events of active missions older than events_days), docs/llm-bridge/operations.md Data retention section, tests/test_bridge_retention.py, measurement script scripts/bridge_retention_budget.py. Coordinator-side retention waits for PR #31 (phase B). |
 | PRD-011 | [ ] | Not started. Observability for the operator. |
 | PRD-012 | [~] | `llm-bridge doctor --bundle` writes a redacted archive; `tests/test_bridge_bundle.py` proves that seeded secrets, tokens, prompt text and private addresses are absent. `bridge-coordinator support-bundle` remains for phase B. |
 | PRD-013 | [ ] | Not started. Backups by default. |
