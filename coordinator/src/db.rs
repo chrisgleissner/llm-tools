@@ -107,6 +107,7 @@ pub struct WorkerRow {
     pub host_name: Option<String>,
     pub remote_address: Option<String>,
     pub worker_policy: Option<Value>,
+    pub client_cert_fingerprint: Option<String>,
 }
 
 impl WorkerRow {
@@ -201,7 +202,7 @@ fn json_col(s: Option<String>) -> Option<Value> {
 }
 
 const WCOLS: &str =
-    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities, host_name, remote_address, worker_policy";
+    "name, worker_id, generation, event_cursor, mission_cursor, last_seen, hello_at, last_event_at, software_version, protocol_versions, platform, capabilities, host_name, remote_address, worker_policy, client_cert_fingerprint";
 
 fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
     Ok(WorkerRow {
@@ -220,6 +221,7 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<WorkerRow> {
         host_name: r.get(12)?,
         remote_address: r.get(13)?,
         worker_policy: json_col(r.get(14)?),
+        client_cert_fingerprint: r.get(15)?,
     })
 }
 
@@ -240,7 +242,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -296,6 +298,13 @@ CREATE INDEX security_notifications_principal ON security_notifications(principa
 ";
 /// Version 13: optionally restrict API tokens to explicitly configured client networks.
 const MIGRATE_V13: &str = "ALTER TABLE api_tokens ADD COLUMN allowed_cidrs TEXT NOT NULL DEFAULT '[]';";
+/// Version 14: bind optional worker client certificates and allow a bounded overlap during token rotation.
+const MIGRATE_V14: &str = "
+ALTER TABLE workers ADD COLUMN client_cert_fingerprint TEXT;
+ALTER TABLE workers ADD COLUMN pending_token_hash TEXT;
+ALTER TABLE workers ADD COLUMN pending_token_expires_at INTEGER;
+CREATE UNIQUE INDEX workers_pending_token_hash ON workers(pending_token_hash) WHERE pending_token_hash IS NOT NULL;
+";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -415,7 +424,18 @@ impl Db {
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V12} PRAGMA user_version = 12; COMMIT;"))?;
         }
         if version < 13 {
-            conn.execute_batch(&format!("BEGIN; {MIGRATE_V13} PRAGMA user_version = 13; COMMIT;"))?;
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='api_tokens'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let alter = if has_table { MIGRATE_V13 } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 13; COMMIT;"))?;
+        }
+        if version < 14 {
+            let has_table: bool = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workers'", [], |r| {
+                r.get::<_, i64>(0)
+            })? > 0;
+            let alter = if has_table { MIGRATE_V14 } else { "" };
+            conn.execute_batch(&format!("BEGIN; {alter} PRAGMA user_version = 14; COMMIT;"))?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -968,6 +988,12 @@ impl Db {
             params![name, hash, crate::now()],
         )? == 1)
     }
+    pub fn worker_add_with_client_certificate(&self, name: &str, hash: &str, fingerprint: &str) -> R<bool> {
+        Ok(self.c().execute(
+            "INSERT OR IGNORE INTO workers(name, token_hash, created_at, client_cert_fingerprint) VALUES(?,?,?,?)",
+            params![name, hash, crate::now(), fingerprint],
+        )? == 1)
+    }
     pub fn worker_revoke(&self, name: &str) -> R<bool> {
         Ok(self.c().execute("DELETE FROM workers WHERE name=?", params![name])? == 1)
     }
@@ -975,6 +1001,51 @@ impl Db {
         self.c()
             .query_row(&format!("SELECT {WCOLS} FROM workers WHERE token_hash=?"), params![hash], worker_row)
             .optional()
+    }
+    /// Authenticate a worker channel handshake with either the active token or a staged
+    /// rotation token. A pending token is not promoted until the worker sends a valid hello.
+    pub fn worker_by_connection_token(&self, hash: &str, now: i64) -> R<Option<(WorkerRow, bool)>> {
+        self.c()
+            .query_row(
+                &format!(
+                    "SELECT {WCOLS}, (pending_token_hash IS NOT NULL AND pending_token_hash=?1) FROM workers
+                     WHERE token_hash=?1 OR (pending_token_hash=?1 AND pending_token_expires_at>?2)"
+                ),
+                params![hash, now],
+                |r| Ok((worker_row(r)?, r.get::<_, i64>(16)? != 0)),
+            )
+            .optional()
+    }
+    /// Stage a new worker token while the old token remains valid for the given grace window.
+    pub fn worker_stage_token_rotation(&self, name: &str, hash: &str, expires_at: i64) -> R<bool> {
+        Ok(self.c().execute(
+            "UPDATE workers SET pending_token_hash=?, pending_token_expires_at=? WHERE name=?",
+            params![hash, expires_at, name],
+        )? == 1)
+    }
+    /// Promote a staged token only after the matching token completed a valid worker hello.
+    pub fn worker_promote_token_rotation(&self, name: &str, hash: &str, now: i64) -> R<bool> {
+        Ok(self.c().execute(
+            "UPDATE workers SET token_hash=pending_token_hash, pending_token_hash=NULL, pending_token_expires_at=NULL
+             WHERE name=? AND pending_token_hash=? AND pending_token_expires_at>?",
+            params![name, hash, now],
+        )? == 1)
+    }
+    pub fn worker_by_client_certificate(&self, fingerprint: &str) -> R<Option<WorkerRow>> {
+        self.c()
+            .query_row(
+                &format!("SELECT {WCOLS} FROM workers WHERE client_cert_fingerprint=?"),
+                params![fingerprint],
+                worker_row,
+            )
+            .optional()
+    }
+    pub fn worker_client_certificate_matches(&self, name: &str, fingerprint: &str) -> R<bool> {
+        Ok(self.c().query_row(
+            "SELECT EXISTS(SELECT 1 FROM workers WHERE name=? AND client_cert_fingerprint=?)",
+            params![name, fingerprint],
+            |r| r.get::<_, i64>(0),
+        )? != 0)
     }
     pub fn worker_get(&self, name: &str) -> R<Option<WorkerRow>> {
         self.c()

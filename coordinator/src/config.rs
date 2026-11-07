@@ -12,6 +12,9 @@ pub struct Config {
     /// Optional route-group listeners. If any is set, only the explicitly listed groups listen.
     pub listener_groups: ListenerGroups,
     pub exposure: Exposure,
+    /// Require coordinator-CA-issued client certificates on the worker channel. Browser/API
+    /// listeners remain authenticated by their own session or bearer credentials.
+    pub worker_mtls: bool,
     /// True only when a trusted reverse proxy serves the public certificate and forwards HTTPS
     /// traffic to this coordinator. The coordinator listener itself remains TLS-only.
     pub tls_terminator: bool,
@@ -92,6 +95,7 @@ impl Default for Config {
             bind: "127.0.0.1:8443".into(),
             listener_groups: ListenerGroups::default(),
             exposure: Exposure::Loopback,
+            worker_mtls: false,
             tls_terminator: false,
             security_webhook_url: None,
             min_tls: "1.3".into(),
@@ -153,6 +157,8 @@ pub fn config_text_for_exposure(bind: &str, exposure: Exposure) -> String {
     # Exposure: loopback (default), lan, or internet.\n\
     bind = \"{bind}\"\n\
     exposure = \"{exposure}\"\n\
+    # Optional mutual TLS for worker connections; certificates are issued at worker enrollment.\n\
+    worker_mtls = false\n\
     tls_terminator = false\n\
     # Optional HTTPS webhook for security notifications; required for internet exposure.\n\
     # security_webhook_url = \"https://admin.example.test/bridge-events\"\n\

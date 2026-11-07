@@ -61,7 +61,13 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
         _ => Box::new(crate::certs::InternalCaProvider),
     };
     let (tls_config, file_cert_resolver) = cert_provider.load(data_dir, &cfg.min_tls)?;
-    let tls = TlsAcceptor::from(tls_config);
+    let worker_mtls = cfg.worker_mtls;
+    let min_tls = cfg.min_tls.clone();
+    let worker_ca_pem = if worker_mtls {
+        Some(std::fs::read(data_dir.join("ca.pem")).map_err(|e| format!("cannot read coordinator CA for worker mTLS: {e}"))?)
+    } else {
+        None
+    };
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
     validate_internet_runtime(&cfg, &db)?;
     if let Some((principal, _)) = db.admin_get().map_err(|e| format!("cannot read coordinator administrator: {e}"))? {
@@ -166,9 +172,21 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     let mut tasks = Vec::with_capacity(listeners.len());
     for (index, (group, _, listener)) in listeners.into_iter().enumerate() {
         let app = http::router_for_group(state.clone(), group);
+        let listener_tls = if worker_mtls && matches!(group, crate::config::ListenerGroup::WorkerChannel | crate::config::ListenerGroup::Combined) {
+            let ca_pem = worker_ca_pem.as_deref().expect("CA is loaded when worker mTLS is enabled");
+            let required = group == crate::config::ListenerGroup::WorkerChannel;
+            TlsAcceptor::from(Arc::new(crate::certs::server_config_with_client_auth(
+                tls_config.cert_resolver.clone(),
+                ca_pem,
+                &min_tls,
+                required,
+            )?))
+        } else {
+            TlsAcceptor::from(tls_config.clone())
+        };
         tasks.push(tokio::spawn(accept_loop(ListenerTask {
             listener,
-            tls: tls.clone(),
+            tls: listener_tls,
             app,
             db: db.clone(),
             shutdown: shutdown_rx.clone(),
@@ -374,6 +392,16 @@ async fn accept_loop(task: ListenerTask) {
                 conns.spawn(async move {
                     let _held = (permit, ip_guard);
                     let Ok(Ok(stream)) = tokio::time::timeout(handshake, tls.accept(tcp)).await else { return };
+                    let client_fingerprint = stream
+                        .get_ref()
+                        .1
+                        .peer_certificates()
+                        .and_then(|certs| certs.first())
+                        .map(|cert| {
+                            use sha2::Digest;
+                            hex::encode(sha2::Sha256::digest(cert.as_ref()))
+                        });
+                    let app = http::with_worker_certificate(app, client_fingerprint);
                     let mut builder = http1::Builder::new();
                     builder.timer(TokioTimer::new()).header_read_timeout(header);
                     let conn = builder.serve_connection(TokioIo::new(stream), TowerToHyperService::new(app)).with_upgrades();

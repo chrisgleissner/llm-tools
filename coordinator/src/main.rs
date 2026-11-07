@@ -17,7 +17,7 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   backup --output FILE | restore --input FILE   (restore needs the server stopped)
   setup-token                   (new setup token; only while no administrator exists)
   serve [--web-dir DIR]
-  worker add NAME | worker revoke NAME
+  worker add NAME [--client-cert-file FILE --client-key-file FILE] | worker rotate-token NAME | worker revoke NAME
   admin reset-password [--keep-api-tokens]
                                 (new password on stdin; revokes all API tokens unless kept)
   cert renew [--hostname NAME]... [--ip ADDR]...   (new server certificate, same CA; names must be
@@ -40,6 +40,8 @@ struct Args {
     ips: Vec<IpAddr>,
     cert: Option<PathBuf>,
     key: Option<PathBuf>,
+    client_cert_file: Option<PathBuf>,
+    client_key_file: Option<PathBuf>,
     web_dir: Option<PathBuf>,
     output: Option<PathBuf>,
     input: Option<PathBuf>,
@@ -57,6 +59,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         ips: vec![],
         cert: None,
         key: None,
+        client_cert_file: None,
+        client_key_file: None,
         web_dir: None,
         output: None,
         input: None,
@@ -88,6 +92,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             "--scope" => a.scopes.push(value("--scope")?),
             "--keep-api-tokens" => a.keep_api_tokens = true,
             "--key" => a.key = Some(value("--key")?.into()),
+            "--client-cert-file" => a.client_cert_file = Some(value("--client-cert-file")?.into()),
+            "--client-key-file" => a.client_key_file = Some(value("--client-key-file")?.into()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => a.words.push(arg),
         }
@@ -183,11 +189,61 @@ async fn run(args: Args) -> Result<(), String> {
                 return Err("worker name must be lowercase letters, digits and '-' (at most 63)".into());
             }
             let db = open_db(&dir)?;
+            if db.worker_get(name).map_err(|e| e.to_string())?.is_some() {
+                return Err(format!("worker {name} already exists"));
+            }
+            if args.client_cert_file.is_some() != args.client_key_file.is_some() {
+                return Err("--client-cert-file and --client-key-file must be used together".into());
+            }
+            let cfg = config::Config::load(&dir)?;
+            if cfg.worker_mtls && args.client_cert_file.is_none() {
+                return Err("worker_mtls is enabled; provide --client-cert-file and --client-key-file".into());
+            }
+            if !cfg.worker_mtls && args.client_cert_file.is_some() {
+                return Err("worker_mtls is disabled; enable it in config.toml before requesting a client certificate".into());
+            }
             let token = auth::random_token();
-            if !db.worker_add(name, &auth::sha256_hex(&token)).map_err(|e| e.to_string())? {
+            let identity = if cfg.worker_mtls {
+                Some(certs::issue_worker_client_identity(&dir, name)?)
+            } else {
+                None
+            };
+            if let Some(identity) = &identity {
+                let cert_path = args.client_cert_file.as_deref().expect("client certificate path required");
+                let key_path = args.client_key_file.as_deref().expect("client key path required");
+                if !bridge_coordinator::write_new(cert_path, identity.cert_pem.as_bytes(), 0o644).map_err(|e| e.to_string())? {
+                    return Err(format!("{} already exists; refusing to overwrite a client certificate", cert_path.display()));
+                }
+                if !bridge_coordinator::write_new(key_path, identity.key_pem.as_bytes(), 0o600).map_err(|e| e.to_string())? {
+                    let _ = std::fs::remove_file(cert_path);
+                    return Err(format!("{} already exists; refusing to overwrite a client key", key_path.display()));
+                }
+                if !db
+                    .worker_add_with_client_certificate(name, &auth::sha256_hex(&token), &identity.fingerprint_sha256)
+                    .map_err(|e| e.to_string())?
+                {
+                    let _ = std::fs::remove_file(cert_path);
+                    let _ = std::fs::remove_file(key_path);
+                    return Err(format!("worker {name} already exists"));
+                }
+            } else if !db.worker_add(name, &auth::sha256_hex(&token)).map_err(|e| e.to_string())? {
                 return Err(format!("worker {name} already exists"));
             }
             db.audit("cli", "worker.add", name, "local");
+            println!("{token}");
+            Ok(())
+        }
+        ["worker", "rotate-token", name] => {
+            let db = open_db(&dir)?;
+            let token = auth::random_token();
+            let expires = bridge_coordinator::now() + 30 * 60;
+            if !db
+                .worker_stage_token_rotation(name, &auth::sha256_hex(&token), expires)
+                .map_err(|e| e.to_string())?
+            {
+                return Err(format!("no worker named {name}"));
+            }
+            db.audit("cli", "worker.token.rotate", name, "local");
             println!("{token}");
             Ok(())
         }

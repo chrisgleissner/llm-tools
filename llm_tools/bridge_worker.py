@@ -37,6 +37,8 @@ from .bridge_vocab import EventKind
 
 WORKER_FILE = "worker.json"
 CA_FILE = "coordinator-ca.pem"
+CLIENT_CERT_FILE = "worker-client.pem"
+CLIENT_KEY_FILE = "worker-client.key"
 AUDIT_FILE = "audit.jsonl"
 AUDIT_MAX_BYTES = 1024 * 1024  # one rotation is kept: audit.jsonl.1
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
@@ -72,6 +74,7 @@ class WorkerConfig:
     allow_roots: tuple[str, ...] = ()
     allow_power: bool = False
     allow_restore: bool = False
+    client_certificate: bool = False
 
     @property
     def terminal_view(self) -> bool:
@@ -83,7 +86,7 @@ class WorkerConfig:
         return {"worker_id": self.worker_id, "name": self.name, "coordinator_url": self.coordinator_url,
                 "allow_control": self.allow_control, "allow_terminal_view": self.terminal_view, "max_generation": self.max_generation,
                 "allow_create": self.allow_create, "allow_root": list(self.allow_roots), "allow_power": self.allow_power,
-                "allow_restore": self.allow_restore}
+                "allow_restore": self.allow_restore, "mutual_tls": self.client_certificate}
 
 
 def worker_dir(env: dict[str, str] | None = None) -> Path:
@@ -274,7 +277,8 @@ def _path_allowed(path: str, roots: tuple[str, ...]) -> bool:
 
 def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, allow_control: bool, env: dict[str, str] | None = None,
            allow_terminal_view: bool = False, allow_create: bool = False, allow_roots: tuple[str, ...] | list[str] = (),
-           allow_power: bool = False, allow_restore: bool = False) -> WorkerConfig:
+           allow_power: bool = False, allow_restore: bool = False, client_cert_pem: str | None = None,
+           client_key_pem: str | None = None) -> WorkerConfig:
     """Store the enrolment locally with private permissions; keeps an existing worker ID."""
     if not _NAME.fullmatch(name):
         raise WorkerConfigError("worker name must be lowercase letters, digits and '-' (at most 63)")
@@ -287,6 +291,12 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         raise WorkerConfigError("--allow-create requires at least one --allow-root")
     if allow_restore and not roots:
         raise WorkerConfigError("--allow-restore requires at least one --allow-root")
+    if (client_cert_pem is None) != (client_key_pem is None):
+        raise WorkerConfigError("client certificate and key must be supplied together")
+    if client_cert_pem is not None and "-----BEGIN CERTIFICATE-----" not in client_cert_pem:
+        raise WorkerConfigError("worker client certificate is not a PEM certificate")
+    if client_key_pem is not None and "PRIVATE KEY-----" not in client_key_pem:
+        raise WorkerConfigError("worker client key is not a PEM private key")
     directory = worker_dir(env)
     try:
         previous = load_config(env)
@@ -298,12 +308,17 @@ def enroll(name: str, coordinator_url: str, token: str, *, ca_pem: str | None, a
         if "-----BEGIN CERTIFICATE-----" not in ca_pem:
             raise WorkerConfigError("CA file is not a PEM certificate")
         _atomic_private_write(directory / CA_FILE, ca_pem)
+    if client_cert_pem is not None and client_key_pem is not None:
+        _atomic_private_write(directory / CLIENT_CERT_FILE, client_cert_pem)
+        _atomic_private_write(directory / CLIENT_KEY_FILE, client_key_pem)
+    client_certificate = client_cert_pem is not None or (directory / CLIENT_CERT_FILE).is_file() and (directory / CLIENT_KEY_FILE).is_file()
     config = WorkerConfig(worker_id, name, coordinator_url, token, allow_control, generation, allow_terminal_view,
-                          allow_create, roots, allow_power, allow_restore)
+                          allow_create, roots, allow_power, allow_restore, client_certificate)
     _save(config, env)
     audit("enroll", env, worker_id=worker_id, name=name, coordinator_url=coordinator_url, allow_control=allow_control,
           allow_terminal_view=allow_terminal_view, allow_create=allow_create, allow_root_count=len(roots),
-          allow_power=allow_power, allow_restore=allow_restore, ca_file=ca_pem is not None)
+          allow_power=allow_power, allow_restore=allow_restore, ca_file=ca_pem is not None,
+          mutual_tls=client_certificate)
     return config
 
 
@@ -322,11 +337,28 @@ def load_config(env: dict[str, str] | None = None) -> WorkerConfig:
             allow_create=bool(value.get("allow_create", False)),
             allow_roots=_stored_roots(value.get("allow_roots", [])),
             allow_power=bool(value.get("allow_power", False)), allow_restore=bool(value.get("allow_restore", False)),
+            client_certificate=bool(value.get("client_certificate", False)),
         )
     except FileNotFoundError:
         raise WorkerConfigError("this host is not enrolled as a worker; run llm-bridge worker enroll") from None
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise WorkerConfigError(f"worker configuration {path} is unreadable: {type(exc).__name__}") from None
+
+
+def rotate_token(token: str, env: dict[str, str] | None = None) -> WorkerConfig:
+    """Replace only this enrollment's bearer token after coordinator-side staging.
+
+    The worker ID, coordinator CA and optional client certificate remain in place, so this does
+    not re-enroll or reset the replication generation. Restart a foreground/service worker after
+    writing the token so its next connection proves the staged credential to the coordinator.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+        raise WorkerConfigError("worker token must be 32-256 URL-safe characters")
+    config = load_config(env)
+    updated = dataclasses.replace(config, token=token)
+    _save(updated, env)
+    audit("token.rotate", env, worker_id=config.worker_id, name=config.name)
+    return updated
 
 
 def unenroll(env: dict[str, str] | None = None) -> bool:
@@ -431,6 +463,13 @@ def tls_context(env: dict[str, str] | None = None) -> ssl.SSLContext:
     ca = worker_dir(env) / CA_FILE
     context = ssl.create_default_context(cafile=str(ca) if ca.exists() else None)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    config = load_config(env)
+    if config.client_certificate:
+        cert = worker_dir(env) / CLIENT_CERT_FILE
+        key = worker_dir(env) / CLIENT_KEY_FILE
+        if not cert.is_file() or not key.is_file():
+            raise WorkerConfigError("worker mTLS is enabled but the enrolled client certificate or key is missing")
+        context.load_cert_chain(certfile=str(cert), keyfile=str(key))
     return context
 
 

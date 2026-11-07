@@ -87,6 +87,23 @@ def test_enrolment_is_private_validated_and_hides_the_token(state, capsys):
     assert worker.unenroll() is True and worker.unenroll() is False
 
 
+def test_worker_token_rotation_preserves_opt_ins_and_client_identity(state, monkeypatch):
+    directory, _ = state
+    cert = "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----\n"
+    enrolled = worker.enroll("ws", "wss://c", TOKEN, ca_pem=None, allow_control=True,
+                             allow_create=True, allow_roots=[str(directory)], allow_power=True,
+                             allow_restore=True, client_cert_pem=cert, client_key_pem=key)
+    rotated = worker.rotate_token("n" * 40)
+    assert rotated.token == "n" * 40 and rotated.worker_id == enrolled.worker_id
+    assert rotated.client_certificate and rotated.allow_control and rotated.allow_create
+    assert rotated.allow_power and rotated.allow_restore and rotated.allow_roots == enrolled.allow_roots
+    assert stat.S_IMODE((directory / "worker" / worker.CLIENT_CERT_FILE).stat().st_mode) == 0o600
+    assert stat.S_IMODE((directory / "worker" / worker.CLIENT_KEY_FILE).stat().st_mode) == 0o600
+    assert "token" not in rotated.public()
+    assert TOKEN not in json.dumps(rotated.public())
+
+
 def test_worker_opt_ins_default_off_and_roots_are_canonical(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_BRIDGE_STATE_DIR", str(tmp_path / "state"))
     root = tmp_path / "workspace"

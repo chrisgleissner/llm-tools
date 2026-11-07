@@ -11906,6 +11906,16 @@
                 "schema": {
                   "additionalProperties": false,
                   "properties": {
+                    "client_certificate": {
+                      "type": "string"
+                    },
+                    "client_private_key": {
+                      "type": "string",
+                      "writeOnly": true
+                    },
+                    "mutual_tls": {
+                      "type": "boolean"
+                    },
                     "name": {
                       "type": "string"
                     },
@@ -11915,13 +11925,14 @@
                   },
                   "required": [
                     "name",
-                    "token"
+                    "token",
+                    "mutual_tls"
                   ],
                   "type": "object"
                 }
               }
             },
-            "description": "Worker enrolled; enrolment secret is returned once"
+            "description": "Worker enrolled; secrets and any client private key are returned once"
           },
           "202": {
             "content": {

@@ -1211,6 +1211,14 @@ fn migration_to_version_3_keeps_existing_sessions_on_the_original_policy() {
         .expect("a session idle for 3 h is valid under the original 8 h limit");
     assert!(s.remember);
     assert_eq!(s.idle_secs, bridge_coordinator::db::SESSION_IDLE_SECS);
+    drop(db);
+    let migrated_version: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(migrated_version, bridge_coordinator::db::SCHEMA_VERSION);
+    let reopened = bridge_coordinator::db::Db::open(&path).expect("partial legacy fixture remains reopenable after migration");
+    assert!(reopened.session_get("old").unwrap().is_some());
     let _ = std::fs::remove_dir_all(dir);
 }
 

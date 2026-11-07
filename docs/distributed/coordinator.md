@@ -110,6 +110,24 @@ worker protocol is `protocol.md`.
   `config.toml` from them.
 - `bridge-coordinator worker add NAME` prints a new worker token once and
   stores its SHA-256 hash; `worker revoke NAME` deletes it.
+- Optional worker mutual TLS is enabled with `worker_mtls = true` in
+  `config.toml`. Worker enrollment then requires a coordinator-CA-issued client
+  certificate. Run `bridge-coordinator worker add NAME --client-cert-file
+  worker-client.pem --client-key-file worker-client.key`; the private key file
+  is created with mode `0600`. The certificate and key are shown or written
+  only at enrollment. `POST /api/v1/workers` also issues the client identity
+  when this setting is on and returns it with the one-time token; keep the
+  private key on that worker.
+  The worker listener can be isolated with `listener_groups.worker_channel`;
+  when isolated, it requires mTLS. On a combined listener, the worker routes
+  still require a matching client certificate whenever `worker_mtls` is on.
+- To rotate a worker token without re-enrollment, run
+  `bridge-coordinator worker rotate-token NAME`, transfer the printed token
+  securely to the worker, then run `llm-bridge worker rotate-token
+  --token-file PATH` and restart the worker. The previous token remains valid
+  until the staged token completes a worker hello with the enrolled worker ID;
+  the staged token expires after 30 minutes. A wrong worker ID cannot promote
+  it. Rotation keeps the worker ID, generation, opt-ins and mTLS certificate.
 - `bridge-coordinator admin reset-password [--keep-api-tokens]` (local shell only)
   sets a new password from stdin, deletes all sessions and revokes every API token
   (the number is printed) unless `--keep-api-tokens` is given.
@@ -160,7 +178,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | POST | `/auth/passkeys/assertion/finish` | `{challenge_id, credential}` plus the browser ticket and same Origin; verifies UV and creates a normal short-lived session cookie. |
 | GET | `/workers` | name, stable id, state (`online`/`offline`), last_seen, versions, platform, capabilities, enrolled host name, and the active connection's peer address. The address is null while offline. |
 | GET | `/workers/{name}` | The same safe worker summary fields as the list route. |
-| POST | `/workers` | `{name}` → `{token}` shown once. |
+| POST | `/workers` | `{name}` → one-time `{token, mutual_tls}` and, when coordinator `worker_mtls` is enabled, the client certificate/private key. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |
 | GET | `/tokens` | Token name, public ID (null for legacy tokens), scopes, creation, last-use timestamp and client address, expiry metadata, and optional `allowed_cidrs`. Requires an administrator session or an `admin` token. |
 | POST | `/tokens` | `{name, scopes?, expires_days?, allowed_cidrs?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry on LAN). Explicit expiry cannot exceed `max_token_lifetime_days`. Up to 32 CIDRs may restrict client addresses. Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |

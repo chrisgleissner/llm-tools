@@ -13,6 +13,13 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[derive(Debug, Clone)]
+pub struct WorkerClientIdentity {
+    pub cert_pem: String,
+    pub key_pem: String,
+    pub fingerprint_sha256: String,
+}
+
 pub struct Sans {
     pub hostnames: Vec<String>,
     pub ips: Vec<IpAddr>,
@@ -125,6 +132,39 @@ fn server_pem(ca_key: &KeyPair, names: Vec<String>) -> Result<(String, String), 
     let issuer = Issuer::from_params(&issuer_params, ca_key);
     let cert = params.signed_by(&key, &issuer).map_err(|e| e.to_string())?;
     Ok((cert.pem(), key.serialize_pem()))
+}
+
+/// Issue one coordinator-CA client certificate for a named worker. The private key is returned
+/// only to the enrollment caller; the coordinator stores only the certificate fingerprint.
+pub fn issue_worker_client_identity(dir: &Path, worker_name: &str) -> Result<WorkerClientIdentity, String> {
+    if !crate::protocol::valid_name(worker_name) {
+        return Err("invalid worker name".into());
+    }
+    let ca_key_text = std::fs::read_to_string(dir.join("ca.key")).map_err(|e| format!("cannot read ca.key: {e}"))?;
+    let ca_key = KeyPair::from_pem(&ca_key_text).map_err(|e| format!("invalid ca.key: {e}"))?;
+    let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
+    params.distinguished_name.push(DnType::CommonName, format!("Bridge Worker {worker_name}"));
+    params.subject_alt_names.push(rcgen::SanType::URI(
+        format!("spiffe://llm-bridge/worker/{worker_name}")
+            .try_into()
+            .map_err(|e: rcgen::Error| e.to_string())?,
+    ));
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    params.is_ca = IsCa::ExplicitNoCa;
+    params.use_authority_key_identifier_extension = true;
+    set_validity(&mut params, 365);
+    let key = KeyPair::generate().map_err(|e| e.to_string())?;
+    let issuer_params = ca_params(None)?;
+    let issuer = Issuer::from_params(&issuer_params, &ca_key);
+    let cert = params.signed_by(&key, &issuer).map_err(|e| e.to_string())?;
+    use sha2::Digest;
+    let fingerprint_sha256 = hex::encode(sha2::Sha256::digest(cert.der().as_ref()));
+    Ok(WorkerClientIdentity {
+        cert_pem: cert.pem(),
+        key_pem: key.serialize_pem(),
+        fingerprint_sha256,
+    })
 }
 
 /// Sign a server certificate for exactly `names` with the CA key, without checking the CA's name
@@ -311,6 +351,41 @@ fn tls_versions(min_tls: &str) -> Result<Vec<&'static rustls::SupportedProtocolV
         "1.2" => Ok(vec![&rustls::version::TLS13, &rustls::version::TLS12]),
         _ => Err(format!("unsupported min_tls {min_tls:?}; choose \"1.3\" or \"1.2\"")),
     }
+}
+
+/// Rebuild the selected server identity with coordinator-CA client authentication. `required`
+/// is true only on a split worker-channel listener; a combined legacy listener requests and
+/// validates presented certificates but lets ordinary browser/API clients omit one.
+pub fn server_config_with_client_auth(
+    cert_resolver: Arc<dyn rustls::server::ResolvesServerCert>,
+    ca_pem: &[u8],
+    min_tls: &str,
+    required: bool,
+) -> Result<ServerConfig, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls::pki_types::CertificateDer::pem_slice_iter(ca_pem) {
+        roots
+            .add(cert.map_err(|e| format!("invalid coordinator CA certificate: {e}"))?)
+            .map_err(|e| format!("invalid coordinator CA certificate: {e}"))?;
+    }
+    if roots.is_empty() {
+        return Err("coordinator CA has no certificates".into());
+    }
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider());
+    let verifier = if required {
+        verifier.build()
+    } else {
+        verifier.allow_unauthenticated().build()
+    }
+    .map_err(|e| format!("cannot configure worker client certificate verification: {e}"))?;
+    let mut config = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&tls_versions(min_tls)?)
+        .map_err(|e| e.to_string())?
+        .with_client_cert_verifier(verifier)
+        .with_cert_resolver(cert_resolver);
+    disable_resumption_and_early_data(&mut config);
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 fn disable_resumption_and_early_data(config: &mut ServerConfig) {

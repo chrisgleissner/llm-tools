@@ -2,7 +2,7 @@
 
 use crate::auth::sha256_hex;
 use crate::db::{CommandRow, EventBatch, EventsOutcome, HelloOutcome};
-use crate::http::{Peer, St};
+use crate::http::{Peer, St, WorkerCertificate};
 use crate::hub::{ConnHandle, Outbound, PendingGuard, OUTBOUND_QUEUE};
 use crate::protocol::{self, Message, MAX_MESSAGE_BYTES, PROTOCOL_VERSION};
 use axum::extract::ws::{close_code, CloseFrame, Message as Ws, WebSocket, WebSocketUpgrade};
@@ -31,19 +31,40 @@ fn plain(status: StatusCode, text: &'static str) -> Response {
         .into_response()
 }
 
-pub async fn connect(State(st): State<St>, Extension(peer): Extension<Peer>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+pub async fn connect(
+    State(st): State<St>,
+    Extension(peer): Extension<Peer>,
+    cert: Option<Extension<WorkerCertificate>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
-    let worker = match token.map(|t| st.db.worker_by_token(&sha256_hex(t))) {
-        Some(Ok(Some(w))) => w,
+    let token_hash = token.map(sha256_hex);
+    let authentication = match token_hash.as_deref().map(|hash| st.db.worker_by_connection_token(hash, crate::now())) {
+        Some(Ok(Some(authenticated))) => authenticated,
         Some(Err(e)) => {
             eprintln!("database error: {e}");
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
         }
         _ => return plain(StatusCode::UNAUTHORIZED, "invalid or revoked worker token"),
     };
+    let (worker, pending_token) = authentication;
+    if st.cfg.worker_mtls {
+        let Some(fingerprint) = cert.and_then(|Extension(c)| c.0) else {
+            return plain(StatusCode::UNAUTHORIZED, "worker client certificate required");
+        };
+        match st.db.worker_client_certificate_matches(&worker.name, &fingerprint) {
+            Ok(true) => {}
+            Ok(false) => return plain(StatusCode::UNAUTHORIZED, "worker client certificate does not match token"),
+            Err(e) => {
+                eprintln!("database error: {e}");
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+            }
+        }
+    }
     let Some(guard) = st.hub.try_reserve() else {
         return plain(StatusCode::SERVICE_UNAVAILABLE, "too many worker connections");
     };
@@ -54,12 +75,13 @@ pub async fn connect(State(st): State<St>, Extension(peer): Extension<Peer>, hea
         return plain(StatusCode::TOO_MANY_REQUESTS, "a connection of this worker is already waiting for its hello");
     };
     let remote = peer.0.ip().to_string();
+    let token_hash = token_hash.expect("successful token authentication has a token hash");
     // Transport limit is twice the protocol limit so an oversized frame can be answered with our own close 1009.
     ws.max_message_size(2 * MAX_MESSAGE_BYTES)
         .max_frame_size(2 * MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _guard = guard;
-            run(st, name, remote, pending, socket).await;
+            run(st, name, remote, pending, pending_token, token_hash, socket).await;
         })
 }
 
@@ -114,7 +136,7 @@ fn classify(frame: Option<Result<Ws, axum::Error>>, name: &str, generation: u64)
     }
 }
 
-async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut socket: WebSocket) {
+async fn run(st: St, name: String, remote: String, pending: PendingGuard, pending_token: bool, token_hash: String, mut socket: WebSocket) {
     let mut shutdown = st.shutdown.clone();
     // ---- handshake: wait for a valid hello
     let deadline = Instant::now() + HELLO_TIMEOUT;
@@ -191,6 +213,20 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, mut so
             return;
         }
     };
+    if pending_token {
+        match st.db.worker_promote_token_rotation(&name, &token_hash, crate::now()) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = socket.send(close_frame(1008, "worker token rotation expired or was superseded")).await;
+                return;
+            }
+            Err(e) => {
+                eprintln!("database error: {e}");
+                let _ = socket.send(close_frame(1011, "internal error")).await;
+                return;
+            }
+        }
+    }
 
     // ---- register (closes any older connection) and welcome
     let conn_id = st.hub.next_conn_id();

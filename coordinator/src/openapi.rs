@@ -240,7 +240,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "type":"object","additionalProperties":false,"required":["name"],
             "properties":{"name":{"type":"string","minLength":1,"maxLength":63,"pattern":"^[a-z0-9][a-z0-9-]*$"}}
         });
-        op["responses"]["201"] = json!({"description":"Worker enrolled; enrolment secret is returned once","content":{"application/json":{"schema":{"type":"object","required":["name","token"],"properties":{"name":{"type":"string"},"token":{"type":"string"}},"additionalProperties":false}}}});
+        op["responses"]["201"] = json!({"description":"Worker enrolled; secrets and any client private key are returned once","content":{"application/json":{"schema":{"type":"object","required":["name","token","mutual_tls"],"properties":{"name":{"type":"string"},"token":{"type":"string"},"mutual_tls":{"type":"boolean"},"client_certificate":{"type":"string"},"client_private_key":{"type":"string","writeOnly":true}},"additionalProperties":false}}}});
     }
     // Logout revokes the authenticated session and has no request payload.
     // Describing the generic POST body here makes Schemathesis correctly flag

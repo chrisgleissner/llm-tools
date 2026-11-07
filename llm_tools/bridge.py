@@ -1311,7 +1311,12 @@ def _build_parser(
     worker_enroll.add_argument("--allow-root", action="append", default=[], metavar="DIR", help="canonical directory allowed for remote creation and restore inputs; repeat as needed")
     worker_enroll.add_argument("--allow-power", action="store_true", help="allow remote machine power operations")
     worker_enroll.add_argument("--allow-restore", action="store_true", help="allow remote restore operations (requires an enrolled --allow-root)")
+    worker_enroll.add_argument("--client-cert-file", metavar="PATH", help="coordinator-issued worker client certificate PEM for optional mTLS")
+    worker_enroll.add_argument("--client-key-file", metavar="PATH", help="matching worker client private key PEM for optional mTLS")
     _add_json_arg(worker_enroll)
+    worker_rotate = worker_sub.add_parser("rotate-token", help="install a coordinator-staged worker token without re-enrolling")
+    worker_rotate.add_argument("--token-file", required=True, metavar="PATH", help="file holding the one-time token from bridge-coordinator worker rotate-token")
+    _add_json_arg(worker_rotate)
     worker_status = worker_sub.add_parser("status", help="show this host's enrolment without the token")
     _add_json_arg(worker_status)
     worker_sub.add_parser("run", help="run the worker in the foreground until interrupted")
@@ -2086,11 +2091,19 @@ def _worker_command(args: argparse.Namespace) -> int:
     if args.worker_action == "enroll":
         token = (sys.stdin.read() if args.token_file == "-" else Path(args.token_file).expanduser().read_text(encoding="utf-8")).strip()
         ca_pem = Path(args.ca_file).expanduser().read_text(encoding="utf-8") if args.ca_file else None
+        client_cert_pem = Path(args.client_cert_file).expanduser().read_text(encoding="utf-8") if args.client_cert_file else None
+        client_key_pem = Path(args.client_key_file).expanduser().read_text(encoding="utf-8") if args.client_key_file else None
         config = worker.enroll(args.name or worker.default_worker_name(), args.coordinator, token, ca_pem=ca_pem, allow_control=bool(args.allow_control),
                                allow_terminal_view=bool(args.allow_terminal_view), allow_create=bool(args.allow_create),
-                               allow_roots=tuple(args.allow_root), allow_power=bool(args.allow_power), allow_restore=bool(args.allow_restore))
+                               allow_roots=tuple(args.allow_root), allow_power=bool(args.allow_power), allow_restore=bool(args.allow_restore),
+                               client_cert_pem=client_cert_pem, client_key_pem=client_key_pem)
         _print_result(config.public(), args.json, lambda value: f"Enrolled worker {value['name']} ({value['worker_id'][:8]}) for {value['coordinator_url']}; "
                       f"remote control {'allowed' if value['allow_control'] else 'read-only'}. Start it with: llm-bridge worker run")
+        return 0
+    if args.worker_action == "rotate-token":
+        token = Path(args.token_file).expanduser().read_text(encoding="utf-8").strip()
+        config = worker.rotate_token(token)
+        _print_result(config.public(), args.json, lambda value: f"Worker token updated for {value['name']}; restart the worker to complete rotation.")
         return 0
     if args.worker_action == "status":
         _print_result(worker.status_public(), args.json, _format_worker_status)

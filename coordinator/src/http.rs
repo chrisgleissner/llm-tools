@@ -43,6 +43,13 @@ const MAX_WAIT_MS: u64 = 30_000;
 #[derive(Clone, Copy)]
 pub struct Peer(pub SocketAddr);
 
+#[derive(Clone, Debug)]
+pub struct WorkerCertificate(pub Option<String>);
+
+pub fn with_worker_certificate(app: Router, fingerprint_sha256: Option<String>) -> Router {
+    app.layer(Extension(WorkerCertificate(fingerprint_sha256)))
+}
+
 pub struct AppState {
     pub db: Arc<Db>,
     pub hub: Arc<Hub>,
@@ -1456,6 +1463,7 @@ fn worker_json(st: &AppState, w: &crate::db::WorkerRow) -> Value {
            "host_name": w.host_name, "remote_address": if online { w.remote_address.clone() } else { None },
            "last_seen": last_seen, "generation": w.generation, "event_cursor": w.event_cursor,
            "versions": {"software": w.software_version, "protocol": w.protocol_versions},
+           "mutual_tls": w.client_cert_fingerprint.is_some(),
            "platform": w.platform, "capabilities": w.capabilities, "policy": policy})
 }
 
@@ -1483,11 +1491,33 @@ async fn add_worker(State(st): State<St>, Authed(p, ip): Authed, body: Buffered)
         ));
     }
     let token = auth::random_token();
-    if !st.db.worker_add(name, &auth::sha256_hex(&token))? {
+    let identity = if st.cfg.worker_mtls {
+        Some(crate::certs::issue_worker_client_identity(&st.data_dir, name).map_err(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "worker-certificate-error",
+                "failed to issue worker client certificate",
+            )
+        })?)
+    } else {
+        None
+    };
+    let added = if let Some(identity) = &identity {
+        st.db
+            .worker_add_with_client_certificate(name, &auth::sha256_hex(&token), &identity.fingerprint_sha256)?
+    } else {
+        st.db.worker_add(name, &auth::sha256_hex(&token))?
+    };
+    if !added {
         return Err(err(StatusCode::CONFLICT, "worker-exists", "a worker with this name exists"));
     }
     st.db.audit(&p.actor(), "worker.add", name, &ip);
-    Ok(json_ok(StatusCode::CREATED, json!({"name": name, "token": token})))
+    let mut response = json!({"name": name, "token": token, "mutual_tls": identity.is_some()});
+    if let Some(identity) = identity {
+        response["client_certificate"] = json!(identity.cert_pem);
+        response["client_private_key"] = json!(identity.key_pem);
+    }
+    Ok(json_ok(StatusCode::CREATED, response))
 }
 
 async fn revoke_worker(State(st): State<St>, Authed(p, ip): Authed, Path(name): Path<String>) -> ApiResult {

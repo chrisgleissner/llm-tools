@@ -283,6 +283,7 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `backup` | **API-016 incomplete:** `backup --target` is explicitly rejected. The worker only has an outbound WebSocket carrying durable `command` and `command.result` messages; the coordinator journals both request and result JSON. There is no ephemeral worker rendezvous, binary frame, or download channel. Returning bounded chunks as command results would therefore persist prompt/evidence bytes in the coordinator journal. A safe implementation needs a protocol extension for authenticated, bounded, non-journaled streaming with cancellation and cleanup. Until then run backup locally on the worker and transfer it outside the coordinator. |
 | `restore` | Typed `worker.restore`; admin-scoped resource `POST /api/v1/workers/{name}/restore`; worker requires `--allow-restore` and an input file inside an enrolled `--allow-root`. Restore refuses while controllers run and keeps a pre-restore backup. |
 | `worker enroll` | Exclusion: writes local worker credentials; coordinator-side worker creation is `POST /api/v1/workers` by an admin. |
+| `worker rotate-token` | Exclusion: installs a one-time staged secret in this host's private enrollment file; obtain it with the coordinator's local `worker rotate-token NAME` command and install it locally. The REST API never reads or writes worker credential files. |
 | `worker status` | Exclusion: reads this host enrolment; no remote equivalent; run locally. |
 | `worker run` | Exclusion: starts the outbound worker service; run locally on enrolled host. |
 | `worker audit` | Typed `worker.audit`; admin-scoped resource `GET /api/v1/workers/{name}/audit`. |
@@ -365,6 +366,8 @@ Each parser leaf and option has its own decision. “Typed command” means the 
 | `--allow-restore` | Local worker opt-in required for remote restore; no request can override the worker setting. |
 | `--allow-terminal-view` | Local worker enrollment terminal-view policy; terminal authorization remains scoped WebSocket. |
 | `--ca-file` | Local TLS trust configuration for worker/remote clients; not sent in API requests. |
+| `--client-cert-file` | Local output path for the coordinator-issued worker client certificate; local file only. |
+| `--client-key-file` | Local `0600` output path for the coordinator-issued worker private key; local file only. |
 | `--coordinator` | Local connection configuration; API base URL is client config, not request field. |
 | `--token-file` | Local credential input; token is stored privately and sent only as Authorization header. |
 | `--print` | Local service-unit preview; no API. |
