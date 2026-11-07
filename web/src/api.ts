@@ -19,6 +19,10 @@ export interface MissionInfo {
   folder: string;
   updated_at: string | null;
   needs_you?: { kind: string; message: string; command?: string } | null;
+  task_counts?: Record<string, number>;
+  current_task?: { ordinal?: number; title?: string } | null;
+  station?: string;
+  model?: string;
 }
 
 export interface MissionEntry {

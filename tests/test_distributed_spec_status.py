@@ -18,10 +18,10 @@ SPEC_GROUPS = {
     "NET": 10, "AUTH": 10, "SEC": 9, "WEB": 12, "DATA": 7, "OPS": 5, "TEST": 17, "QUAL": 10, "CONV": 12,
     "PI-FLASH": 13, "PI-BOOT": 5, "PI-HARD": 6, "PI-SYS": 6, "PI-WEAR": 10, "PI-UPD": 9,
     "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6,
-    "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 14, "PAR": 14,
+    "API": 16, "SEC2": 20, "PK": 12, "UX": 11, "REV": 8, "DOG": 23, "PAR": 14,
 }
 SPEC_EXPLICIT_IDS = {"PI-DEPLOY-000"}
-SPEC_OMITTED_IDS = {"PI-FLASH-008", "PI-FLASH-009"}
+SPEC_OMITTED_IDS = {"PI-FLASH-008", "PI-FLASH-009", *(f"DOG-{number:03d}" for number in range(15, 22))}
 ID_ROW = re.compile(r"^\| ([A-Za-z0-9][A-Za-z0-9-]*-\d{3}) \|")
 ID_PATTERN = r"[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)?-\d{3}"
 ROW = re.compile(rf"^\| ({ID_PATTERN}) \| (\[[ ~x!]\]) \|(.*)\|$")

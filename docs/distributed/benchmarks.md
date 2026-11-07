@@ -9,21 +9,21 @@ coordinator process only (`VmRSS`; peak is `VmHWM`).
 ## x86-64 host measurement
 
 Host: Intel Core i7-6700K, 8 logical CPUs, 48 GiB RAM, Linux 7.0, release build
-(`opt-level = "z"`, LTO, `panic = "abort"`), loopback network. Single run on 2026-11-05.
+(`opt-level = "z"`, LTO, `panic = "abort"`), loopback network. Single run on 2026-11-07.
 
 | Measurement | Result |
 |---|---|
-| Startup to `/healthz` (process spawn to first healthy answer) | 47 ms |
-| Idle RSS (2 s after healthy) | 6.2 MiB |
-| RSS after administrator setup and one login (Argon2id, 19 MiB working memory) | 25.4 MiB |
-| RSS after 1000 events | 26.4 MiB |
-| Peak RSS (`VmHWM`) up to and including the 1000-event load | 26.4 MiB |
-| RSS after 10 000 events | 29.9 MiB |
-| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.29 / 0.36 ms |
-| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.52 / 0.84 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | about 40 000 events/s |
-| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 5.2 / 10.3 ms |
-| Database growth for 10 000 events (main file + WAL) | 5.32 MiB (557 bytes/event) |
+| Startup to `/healthz` (process spawn to first healthy answer) | 53 ms |
+| Idle RSS (2 s after healthy) | 8.1 MiB |
+| RSS after administrator setup and one login (Argon2id, 19 MiB working memory) | 27.2 MiB |
+| RSS after 1000 events | 28.3 MiB |
+| Peak RSS (`VmHWM`) up to and including the 1000-event load | 28.3 MiB |
+| RSS after 10 000 events | 30.3 MiB |
+| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.22 / 0.28 ms |
+| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.44 / 1.08 ms |
+| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | 52 232 events/s |
+| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 49.8 / 59.0 ms |
+| Database growth for 10 000 events (main file + WAL) | 6.59 MiB (691 bytes/event) |
 
 Notes:
 
@@ -113,7 +113,7 @@ they share the host in the x86-64 run. The database was on the SD card
 | RSS after 10 000 events | 15.1 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 7.75 / 9.03 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 51.37 / 72.60 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 1506 events/s |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload; 2026-11-05, before the 128 KiB batch cap) | 1506 events/s |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 174.2 / 220.3 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 
@@ -189,7 +189,7 @@ Measurement harness, 512 MB and 1 CPU:
 | RSS after 10 000 events | 28.4 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.17 / 0.19 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.93 / 1.24 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 67 550 events/s |
+| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | pending rerun after the 128 KiB cap |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 1.3 / 2.8 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 | Container peak memory (`memory.peak`, includes page cache) | 21.7 MiB |
@@ -214,8 +214,9 @@ not a full Raspberry Pi OS. The runner is shared, so timings vary between runs.
 
 ## Storage writes (microSD wear)
 
-Platform: x86-64 host (ext4 on NVMe), release coordinator, one run per figure on
-2026-11-05, repeated three times with the same results to within 1 %. The figures
+Platform: x86-64 host (ext4 on NVMe), release coordinator. Event, command and daily-budget
+measurements are from the 2026-11-07 run; the one-hour idle figure is from 2026-11-05.
+The figures
 are not from a microSD card. They are bytes, not time, so they do not depend on
 the medium, but the Pi's file system (ext4 on the card) adds its own journal
 writes that are not counted here.
@@ -231,11 +232,16 @@ temporary directory, then `~/.cache`) and skips with that reason when none works
 | Workload | Measured | Bound asserted |
 |---|---|---|
 | 1000 replicated events (about 100-byte payload, committed at once, five batches of 200) | 0.60-0.64 MiB written, 631-668 bytes/event | 1.5 MiB |
+| Coordinator flood harness: six accepted 25-event batches (400-byte event payloads, with two browsers subscribed) | 258,048 bytes total, 43,008 bytes/batch | Reported for comparison |
 | Database file growth for those events (main file, after a checkpoint) | 369 bytes/event | 920 bytes/event |
 | `db_bytes` from `GET /api/v1/diagnostics` for the same events (after the checkpoint) | 369 bytes/event | 920 bytes/event |
-| 1000 `mission.list` commands round-tripped through a worker (16 in flight) | 66.6 MiB written, 68 KiB/command | 150 MiB |
+| 1000 `mission.list` command round-trips through a worker (16 in flight) | 86.6 MiB written, 88.7 KiB/round-trip | 150 MiB |
+| Flood harness: one command round-trip with a deliberately large 200 KiB result | 454,514 bytes written/round-trip | Reported for comparison |
 | Idle for 50 s: one connected worker (pinged every 20 s) and an API client reading the worker list every 5 s | 0 bytes | 8 KiB |
 | Idle for one hour, one connected worker, no clients | 104 KiB (16-20 KiB per 10 minutes) | not asserted (one-hour run) |
+| Budget extrapolation: 3 running missions at 1 accepted event/s each, 3 connected workers, 2 browser sessions (one event/page measurement above; conservative 4 KiB session touch every 5 minutes) | 183,081,370 bytes/day (174.6 MiB/day) | 1 GiB/day |
+
+The 174.6 MiB/day figure is an extrapolation from this local per-event measurement, not a 24-hour Pi measurement. The browser does not issue a full `mission.status` command on its overview, missions list, or mission-detail refresh: compact task counts and current-work labels arrive with the replicated mission summary, while activity details use the coordinator's local read-only events endpoint. Two sessions therefore add no command-result writes during ordinary view refresh; the budget model still reserves one 4 KiB database page every five minutes per session. The Pi's own filesystem and its real event rate still need a fresh 24-hour measurement after deployment.
 
 Reading the figures:
 
@@ -261,7 +267,7 @@ Reading the figures:
   and is read after the checkpoint as well.
 - The 557-558 bytes/event for 10 000 events in the load tables above counts the main file
   plus WAL and was not re-measured with this method.
-- A command costs much more than an event: about 17 database pages (68 KiB). The
+- A command costs much more than an event: 88.7 KiB per `mission.list` round-trip in the 2026-11-07 run, about 22 four-KiB pages. The
   coordinator commits five separate transactions per command (insert, audit row,
   `sent`, `acked`, `done`), each with `synchronous=FULL` and therefore an fsync
   of the WAL, and each rewrites the `commands` table page and its two indexes.
@@ -315,7 +321,7 @@ that attempt.
 | RSS after 10 000 events | 20.8 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 2.15 / 2.25 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 3.11 / 3.67 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 5933 events/s |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload; 2026-11-06, before the 128 KiB batch cap) | 5933 events/s |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 16.4 / 42.1 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 

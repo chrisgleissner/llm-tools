@@ -52,6 +52,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   let liveEvents: BridgeEvent[] = [];
   let eventShown = EVENT_PAGE;
   let eventStart = 0; // lowest cursor already requested
+  let eventCursor = 0; // highest global worker cursor already fetched
+  let eventsLoaded = false;
   let eventError = "";
   let eventFilter: "all" | EventCategory = "all";
   let eventKindFilter = "all";
@@ -63,6 +65,18 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   const entry = () => store.missions.find((m) => m.worker === workerName && m.mission.id === missionId);
   const online = () => store.conn === "live" && worker(workerName)?.state === "online";
   const isRunning = () => String((snapshot?.["mission"] as Record<string, unknown> | undefined)?.["status"] ?? entry()?.mission.status ?? "").toUpperCase() === "RUNNING";
+  const summarySnapshot = (): Record<string, unknown> | null => {
+    const mission = entry()?.mission;
+    if (!mission) return null;
+    return {
+      mission: { status: mission.status, name: mission.name, cwd: mission.folder, updated_at: mission.updated_at },
+      task_counts: mission.task_counts ?? {},
+      needs_you: mission.needs_you ?? null,
+      current_task: mission.current_task ?? null,
+      station: mission.station ?? "",
+      model: mission.model ?? "",
+    };
+  };
 
   function renderCurrentWork(): void {
     const needs = snapshot?.["needs_you"] as { message?: string } | null | undefined;
@@ -377,17 +391,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
 
   // ---- data
   async function loadSnapshot(): Promise<void> {
-    if (!online()) {
-      snapshotError = "The worker is offline, so live status is unavailable.";
-      renderStatus();
-      return;
-    }
-    try {
-      snapshot = await api.missionStatus(workerName, missionId);
-      snapshotError = snapshot ? "" : "The worker returned no status.";
-    } catch (e) {
-      snapshotError = e instanceof api.ApiError ? e.message : "Cannot load status.";
-    }
+    snapshot = summarySnapshot();
+    snapshotError = snapshot ? "" : "Waiting for worker data...";
     if (!disposed) renderStatus();
   }
 
@@ -421,8 +426,10 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const cursor = worker(workerName)?.event_cursor ?? 0;
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
-      const r = await api.missionEvents(workerName, missionId, eventStart, 1000);
+      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${eventStart}&limit=1000`);
       events = r.events.map(normalize).filter((e) => e.mission_id === missionId);
+      eventCursor = cursor;
+      eventsLoaded = true;
       eventError = "";
     } catch (e) {
       eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
@@ -434,7 +441,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const upto = eventStart;
     const from = Math.max(0, upto - EVENT_WINDOW);
     try {
-      const r = await api.missionEvents(workerName, missionId, from, EVENT_WINDOW);
+      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${from}&limit=${EVENT_WINDOW}`);
       const older = r.events.filter((x) => Number(x["id"]) <= upto).map(normalize).filter((e) => e.mission_id === missionId);
       events = [...older, ...events];
       eventStart = from;
@@ -443,6 +450,31 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
     }
     renderEvents();
+  }
+
+  async function loadNewEvents(cursor: number): Promise<void> {
+    if (!eventsLoaded) {
+      await loadEvents();
+      return;
+    }
+    if (cursor <= eventCursor) return;
+    const after = eventCursor;
+    if (cursor - after > 1000) {
+      await loadEvents();
+      return;
+    }
+    try {
+      const limit = Math.min(1000, cursor - after);
+      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${after}&limit=${limit}`);
+      const fresh = r.events.map(normalize).filter((e) => e.mission_id === missionId);
+      const known = new Set(events.map((e) => e.id));
+      events = [...events, ...fresh.filter((e) => !known.has(e.id))];
+      eventCursor = cursor;
+      renderEvents();
+    } catch (e) {
+      eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
+      renderEvents();
+    }
   }
 
   const offStream = onStream((msg) => {
@@ -464,26 +496,23 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       renderEvents();
       return;
     }
-    if (msg.type === "event" && msg.worker === workerName && msg.events) {
-      const mine = msg.events.filter((e) => e["mission_id"] === missionId).map(normalize);
-      if (mine.length) {
-        const known = new Set(events.map((e) => e.id));
-        events = [...events, ...mine.filter((e) => !known.has(e.id))];
-        renderEvents();
-        void loadTasks();
-        void loadSnapshot();
-        announce(`New event: ${humanizeEvent(mine[mine.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
-      }
+    if (msg.type === "event" && msg.worker === workerName) {
+      void loadNewEvents(Number(msg.cursor ?? 0));
+      const taskMissions = Array.isArray(msg.task_missions) ? msg.task_missions : [];
+      if (taskMissions.includes(missionId)) void loadTasks();
+      announce("Mission updated");
     }
   });
   let wasOnline = online();
   let viewKey = "";
   const offStore = subscribe(() => {
     const e = entry();
-    const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}`;
+    const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}|${e?.mission.updated_at}|${JSON.stringify(e?.mission.task_counts)}|${JSON.stringify(e?.mission.needs_you)}|${e?.mission.current_task?.title}|${e?.mission.station}|${e?.mission.model}`;
     if (key === viewKey) return;
     viewKey = key;
+    snapshot = summarySnapshot();
     renderHeader();
+    renderStatus();
     renderTasks();
     const now = online();
     termPanel?.setAvailable(now);

@@ -21,6 +21,7 @@ export interface StreamMessage {
   state?: string;
   cursor?: number;
   events?: Array<Record<string, unknown>>;
+  task_missions?: string[];
   command?: api.CommandRow;
   mission_id?: string;
   mode?: string;

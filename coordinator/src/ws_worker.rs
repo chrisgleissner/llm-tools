@@ -308,7 +308,7 @@ async fn run(st: St, name: String, remote: String, pending: PendingGuard, pendin
                 let Some(item) = item else { final_close = *close_rx.borrow(); break };
                 if !send(&mut socket, item.text).await { break }
                 if let Some(id) = item.command_id {
-                    if let Ok(Some(row)) = st.db.command_sent(&id) { st.hub.publish(json!({"type": "command", "command": row.to_json()})); }
+                    if let Ok(Some(row)) = st.db.command_sent(&id) { st.hub.publish(json!({"type": "command", "command": row.notification_json()})); }
                 }
             }
             _ = close_rx.changed() => {
@@ -348,7 +348,7 @@ async fn deliver_row(st: &St, socket: &mut WebSocket, worker_id: &str, generatio
         return false;
     }
     if let Ok(Some(r)) = st.db.command_sent(&row.request_id) {
-        st.hub.publish(json!({"type": "command", "command": r.to_json()}));
+        st.hub.publish(json!({"type": "command", "command": r.notification_json()}));
     }
     true
 }
@@ -398,7 +398,19 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
             {
                 EventsOutcome::Accepted { cursor, stored } => {
                     if stored > 0 {
-                        st.hub.publish(json!({"type": "event", "worker": name, "cursor": cursor, "events": events}));
+                        let mut task_missions = std::collections::BTreeSet::new();
+                        for event in &events {
+                            if event.get("task_id").is_some_and(|id| !id.is_null()) {
+                                if let Some(mission) = event.get("mission_id").and_then(Value::as_str) {
+                                    task_missions.insert(mission.to_string());
+                                }
+                            }
+                            if task_missions.len() >= 16 {
+                                break;
+                            }
+                        }
+                        st.hub
+                            .publish(json!({"type": "event", "worker": name, "cursor": cursor, "task_missions": task_missions}));
                     }
                     Ok(vec![])
                 }
@@ -413,14 +425,14 @@ fn handle(st: &St, name: &str, worker_id: &str, generation: u64, m: Message) -> 
         "command.ack" => {
             let id = m.payload["request_id"].as_str().unwrap_or_default();
             if let Some(row) = st.db.command_acked(name, id).map_err(db)? {
-                st.hub.publish(json!({"type": "command", "command": row.to_json()}));
+                st.hub.publish(json!({"type": "command", "command": row.notification_json()}));
             }
             Ok(vec![])
         }
         "command.result" => {
             let id = m.payload["request_id"].as_str().unwrap_or_default();
             if let Some(row) = st.db.command_done(name, id, &Value::Object(m.payload.clone())).map_err(db)? {
-                st.hub.publish(json!({"type": "command", "command": row.to_json()}));
+                st.hub.publish(json!({"type": "command", "command": row.notification_json()}));
             }
             Ok(vec![])
         }

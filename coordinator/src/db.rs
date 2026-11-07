@@ -27,7 +27,13 @@ pub const fn session_policy(remember: bool) -> (i64, i64) {
 /// moves an idle expiry by at most 4%.
 pub const TOUCH_EVERY_SECS: i64 = 300;
 pub const COMPLETED_COMMAND_KEEP_SECS: i64 = 7 * 86_400;
-pub const MAX_OPEN_COMMANDS_PER_WORKER: i64 = 1000;
+pub const MAX_OPEN_COMMANDS_PER_WORKER: i64 = 256;
+/// The journal is global durable state; count limits alone let large requests pin unbounded RAM
+/// during reconnect replay and consume the worker's finite disk. Keep both individual and total
+/// outstanding payloads bounded before inserting them.
+pub const MAX_COMMAND_REQUEST_BYTES: usize = 64 * 1024;
+pub const MAX_OPEN_COMMAND_BYTES_PER_WORKER: i64 = 512 * 1024;
+pub const MAX_OPEN_COMMAND_BYTES_TOTAL: i64 = 8 * 1024 * 1024;
 const AUDIT_KEEP: i64 = 100_000;
 
 const SCHEMA: &str = "
@@ -140,6 +146,11 @@ impl CommandRow {
                "request": self.request, "state": self.state, "result": self.result,
                "created_at": self.created_at, "updated_at": self.updated_at})
     }
+
+    /// Small live notification; full durable results remain available from the command resource.
+    pub fn notification_json(&self) -> Value {
+        json!({"request_id": self.request_id, "target": self.worker, "operation": self.operation, "state": self.state})
+    }
 }
 
 pub enum InsertOutcome {
@@ -147,6 +158,7 @@ pub enum InsertOutcome {
     Existing(CommandRow),
     Conflict,
     QueueFull,
+    RequestTooLarge,
 }
 
 pub enum EventsOutcome {
@@ -1372,6 +1384,10 @@ impl Db {
 
     pub fn command_insert(&self, worker: &str, operation: &str, mutating: bool, request: &Value) -> R<InsertOutcome> {
         let id = request.get("request_id").and_then(Value::as_str).unwrap_or_default().to_string();
+        let request_json = request.to_string();
+        if request_json.len() > MAX_COMMAND_REQUEST_BYTES {
+            return Ok(InsertOutcome::RequestTooLarge);
+        }
         let mut c = self.c();
         let tx = c.transaction()?;
         let existing: Option<CommandRow> = tx
@@ -1384,14 +1400,26 @@ impl Db {
                 InsertOutcome::Conflict
             });
         }
-        let open: i64 = tx.query_row("SELECT COUNT(*) FROM commands WHERE worker=? AND state!='done'", params![worker], |r| r.get(0))?;
-        if open >= MAX_OPEN_COMMANDS_PER_WORKER {
+        let (open, worker_bytes): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(request AS BLOB))),0) FROM commands WHERE worker=? AND state!='done'",
+            params![worker],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let total_bytes: i64 = tx.query_row(
+            "SELECT COALESCE(SUM(length(CAST(request AS BLOB))),0) FROM commands WHERE state!='done'",
+            [],
+            |r| r.get(0),
+        )?;
+        if open >= MAX_OPEN_COMMANDS_PER_WORKER
+            || worker_bytes + request_json.len() as i64 > MAX_OPEN_COMMAND_BYTES_PER_WORKER
+            || total_bytes + request_json.len() as i64 > MAX_OPEN_COMMAND_BYTES_TOTAL
+        {
             return Ok(InsertOutcome::QueueFull);
         }
         let now = crate::now();
         tx.execute(
             "INSERT INTO commands(request_id, worker, operation, mutating, request, state, created_at, updated_at) VALUES(?,?,?,?,?,'pending',?,?)",
-            params![id, worker, operation, mutating as i64, request.to_string(), now, now],
+            params![id, worker, operation, mutating as i64, request_json, now, now],
         )?;
         let row = tx.query_row(&format!("SELECT {CCOLS} FROM commands WHERE request_id=?"), params![id], command_row)?;
         tx.commit()?;

@@ -8,7 +8,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 pub const MAX_WORKER_CONNECTIONS: usize = 64;
 pub const OUTBOUND_QUEUE: usize = 256;
-pub const STREAM_BUFFER: usize = 256;
+pub const STREAM_BUFFER: usize = 32;
+/// Browser fan-out is advisory. Keep each retained message tiny and never duplicate event/result bodies.
+pub const MAX_STREAM_MESSAGE_BYTES: usize = 4 * 1024;
 pub const MAX_TERMINALS_PER_WORKER: usize = 16;
 pub const MAX_TERMINALS: usize = 64;
 
@@ -22,7 +24,7 @@ pub struct TermStatus {
 struct TermEntry {
     worker: String,
     attach: Option<oneshot::Sender<WebSocket>>,
-    status: mpsc::UnboundedSender<TermStatus>,
+    status: mpsc::Sender<TermStatus>,
 }
 
 /// A terminal session this coordinator opened. Dropping it frees the session slot.
@@ -30,7 +32,7 @@ pub struct TermReg {
     hub: Arc<Hub>,
     pub id: String,
     pub attach: oneshot::Receiver<WebSocket>,
-    pub status: mpsc::UnboundedReceiver<TermStatus>,
+    pub status: mpsc::Receiver<TermStatus>,
 }
 
 impl Drop for TermReg {
@@ -208,7 +210,7 @@ impl Hub {
             }
         };
         let (attach_tx, attach) = oneshot::channel();
-        let (status_tx, status) = mpsc::unbounded_channel();
+        let (status_tx, status) = mpsc::channel(16);
         terms.insert(
             id.clone(),
             TermEntry {
@@ -239,7 +241,7 @@ impl Hub {
     pub fn terminal_status(&self, worker: &str, session_id: &str, status: TermStatus) {
         if let Some(entry) = self.terms().get(session_id) {
             if entry.worker == worker {
-                let _ = entry.status.send(status);
+                let _ = entry.status.try_send(status);
             }
         }
     }
@@ -263,6 +265,29 @@ impl Hub {
     }
 
     pub fn publish(&self, value: serde_json::Value) {
-        let _ = self.stream.send(Arc::from(value.to_string()));
+        let mut value = value;
+        // Live notifications tell the SPA what changed; detail is fetched from the bounded API.
+        // Retaining an event batch or command result here multiplies its size by the ring and pins
+        // it for every browser subscriber, which used to let one large payload consume hundreds
+        // of MiB. Keep this defence in depth even if a caller accidentally passes a full row.
+        if let Some(object) = value.as_object_mut() {
+            match object.get("type").and_then(serde_json::Value::as_str) {
+                Some("event") => {
+                    object.remove("events");
+                    object.remove("missions");
+                }
+                Some("command") => {
+                    if let Some(command) = object.get_mut("command").and_then(serde_json::Value::as_object_mut) {
+                        command.remove("request");
+                        command.remove("result");
+                    }
+                }
+                _ => {}
+            }
+        }
+        let text = value.to_string();
+        if text.len() <= MAX_STREAM_MESSAGE_BYTES {
+            let _ = self.stream.send(Arc::from(text));
+        }
     }
 }
