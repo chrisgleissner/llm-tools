@@ -114,6 +114,7 @@ test("Codex queued-question attention opens the mission's live terminal", async 
 
 test("running mission streams output read-only without a click or sending input", async ({ page }) => {
   const mock = await mockApp(page, { ...IN, terminalScreen: true });
+  const journeyStartedAt = Date.now();
   let statusReceivedAt = 0;
   page.on("response", (response) => {
     if (new URL(response.url()).pathname.endsWith(`/missions/${MISSION_PATH.split("/").at(-1)}`) && response.request().method() === "GET") statusReceivedAt = Date.now();
@@ -128,6 +129,7 @@ test("running mission streams output read-only without a click or sending input"
   await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
   await expect(page.locator("#terminal-host .xterm-rows")).toBeInViewport({ ratio: 0.25 });
   const outputLatencyMs = Date.now() - statusReceivedAt;
+  console.log(`UX terminal task: mission navigation to visible output ${Date.now() - journeyStartedAt} ms; clicks 0`);
   console.log(`UX running mission: status response to visible output ${outputLatencyMs} ms; clicks 0`);
   expect(outputLatencyMs).toBeLessThan(1000);
   await page.locator("#terminal-host .xterm-helper-textarea").focus();
