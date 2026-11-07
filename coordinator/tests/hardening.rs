@@ -241,15 +241,16 @@ async fn buffered_large_bodies_are_bounded() {
     let api = env.admin().await;
     let slots = env.srv.state.big_bodies.clone();
     assert_eq!(slots.available_permits(), 8);
-    // Eight 200 kB bodies that stall after one byte take all the permits.
-    let mut held = Vec::new();
-    for _ in 0..8 {
+    // Establish all eight TLS connections concurrently so a slow runner cannot let the
+    // earliest stalled body time out while the later handshakes are still being made.
+    let held = futures_util::future::join_all((0..8).map(|_| async {
         let mut s = tls_connect(&env).await;
         s.write_all(authed_post_head(&env, &api, "/api/v1/commands", 200_000).as_bytes()).await.unwrap();
         s.write_all(b"{").await.unwrap();
-        held.push(s);
-    }
-    let end = Instant::now() + Duration::from_secs(2);
+        s
+    }))
+    .await;
+    let end = Instant::now() + Duration::from_secs(5);
     while slots.available_permits() > 0 && Instant::now() < end {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
