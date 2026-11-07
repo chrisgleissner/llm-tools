@@ -240,7 +240,7 @@ impl Db {
         })
     }
 
-    fn c(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn c(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -264,6 +264,8 @@ impl Db {
         tx.execute("UPDATE admin SET password_hash=? WHERE id=1", params![hash])?;
         tx.execute("DELETE FROM sessions", [])?;
         let revoked = if keep_api_tokens { 0 } else { tx.execute("DELETE FROM api_tokens", [])? };
+        // A new password ends a host reset (admin_reset.rs): no more change-required flag or notice.
+        tx.execute("DELETE FROM meta WHERE key IN ('password_change_required', 'password_reset_at')", [])?;
         tx.commit()?;
         Ok(revoked)
     }

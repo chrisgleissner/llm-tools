@@ -265,6 +265,17 @@ impl FromRequestParts<St> for Authed {
                 }
             }
         }
+        // After `admin reset-password --temporary` a sign-in only leads to the password change.
+        if matches!(principal, Principal::Session { .. })
+            && !matches!(parts.uri.path(), "/api/v1/auth/password" | "/api/v1/auth/logout")
+            && st.db.password_change_required()?
+        {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                crate::admin_reset::CHANGE_REQUIRED_CODE,
+                "the password was reset by an administrator on the host; change it with POST /api/v1/auth/password first",
+            ));
+        }
         let remote = parts.extensions.get::<Peer>().map(|p| p.0.ip().to_string()).unwrap_or_default();
         Ok(Authed(principal, remote))
     }
@@ -342,6 +353,10 @@ async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
         body["csrf_token"] = json!(csrf);
         body["username"] = json!(st.db.admin_get()?.map(|(u, _)| u));
         body["session"] = json!({"remember": remember, "expires_at": expires_at, "idle_timeout_secs": idle_secs});
+        body["password_change_required"] = json!(st.db.password_change_required()?);
+        if let Some(at) = st.db.password_reset_notice()? {
+            body["password_reset_notice"] = json!({"at": at, "message": crate::admin_reset::RESET_NOTICE});
+        }
     } else if matches!(authenticate(&st, &headers), Ok(Principal::Token { .. })) {
         body["authenticated"] = json!(true);
     }

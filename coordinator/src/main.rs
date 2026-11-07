@@ -1,5 +1,6 @@
 //! `bridge-coordinator` command line (see docs/distributed/coordinator.md).
 
+use bridge_coordinator::admin_reset;
 use bridge_coordinator::certs::{self, Sans};
 use bridge_coordinator::config;
 use bridge_coordinator::db::Db;
@@ -20,8 +21,14 @@ const USAGE: &str = "usage: bridge-coordinator <command> [--data-dir DIR]
   setup-token                   (new setup token; only while no administrator exists)
   serve [--web-dir DIR]
   worker add NAME | worker revoke NAME
-  admin reset-password [--keep-api-tokens]
-                                (new password on stdin; revokes all API tokens unless kept)
+  admin reset-password [--temporary] [--keep-api-tokens] [--username NAME]
+                                (on a terminal: asks for the new password twice, without echo;
+                                 otherwise reads it from stdin. --temporary generates a one-time
+                                 password, prints it once and forces a change at the next web
+                                 sign-in. Deletes all sessions; revokes all API tokens unless kept.
+                                 There is exactly one administrator account, so --username is only
+                                 checked against its name. Run as the service user, or as root:
+                                 the database files then keep the data directory's owner)
   cert renew [--hostname NAME]... [--ip ADDR]...   (new server certificate, same CA; names must be
                                                     within the CA's name constraints)
   cert new-ca [--hostname NAME]... [--ip ADDR]...  (new name-constrained CA and server certificate;
@@ -49,6 +56,8 @@ struct Args {
     bind: Option<String>,
     expires_days: Option<u32>,
     keep_api_tokens: bool,
+    temporary: bool,
+    username: Option<String>,
     words: Vec<String>,
 }
 
@@ -65,6 +74,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         bind: None,
         expires_days: None,
         keep_api_tokens: false,
+        temporary: false,
+        username: None,
         words: vec![],
     };
     let mut it = args.into_iter();
@@ -87,6 +98,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
                 a.expires_days = Some(v.parse().map_err(|_| format!("--expires-days must be a whole number of days, not {v:?}"))?);
             }
             "--keep-api-tokens" => a.keep_api_tokens = true,
+            "--temporary" => a.temporary = true,
+            "--username" => a.username = Some(value("--username")?),
             "--key" => a.key = Some(value("--key")?.into()),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => a.words.push(arg),
@@ -236,27 +249,15 @@ async fn run(args: Args) -> Result<(), String> {
         }
         ["admin", "reset-password"] => {
             let db = open_db(&dir)?;
-            if db.admin_get().map_err(|e| e.to_string())?.is_none() {
-                return Err("no administrator exists yet; use the setup token".into());
-            }
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).map_err(|e| e.to_string())?;
-            let password = line.trim_end_matches(['\n', '\r']);
-            auth::valid_password(password)?;
-            let revoked = db
-                .admin_set_password(&auth::hash_password(password), args.keep_api_tokens)
-                .map_err(|e| e.to_string())?;
-            db.audit(
-                "cli",
-                "password.reset",
-                &format!("all sessions deleted; {revoked} API token(s) revoked"),
-                "local",
-            );
-            if args.keep_api_tokens {
-                println!("password changed; all sessions deleted; API tokens kept (--keep-api-tokens)");
-            } else {
-                println!("password changed; all sessions deleted; {revoked} API token(s) revoked");
-            }
+            let opts = admin_reset::Options {
+                username: args.username.clone(),
+                keep_api_tokens: args.keep_api_tokens,
+                temporary: args.temporary,
+            };
+            let report = admin_reset::reset_password(&db, &opts, &mut admin_reset::TerminalInput::new());
+            drop(db);
+            admin_reset::restore_ownership(&dir);
+            print!("{}", report?.text(args.keep_api_tokens));
             Ok(())
         }
         ["cert", "renew"] => certs::renew(&dir, &sans),
