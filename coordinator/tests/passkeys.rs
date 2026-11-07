@@ -1,3 +1,5 @@
+mod common;
+
 use bridge_coordinator::db::{Db, WebauthnChallengeRow, SCHEMA_VERSION};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 8);
+    assert_eq!(SCHEMA_VERSION, 9);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),
@@ -81,6 +83,39 @@ fn challenge_insert_rejects_lifetime_over_five_minutes() {
 }
 
 #[test]
+fn canonical_passkey_origin_is_bound_once_and_cannot_be_changed() {
+    let path = db_path();
+    let db = Db::open(&path).unwrap();
+    assert_eq!(db.passkey_origin("admin").unwrap(), None);
+    let row = bridge_coordinator::db::PasskeyCredentialRow {
+        credential_id: "credential-1".into(),
+        principal_id: "admin".into(),
+        credential: "{}".into(),
+        user_name: "Phone".into(),
+        created_at: bridge_coordinator::now(),
+        last_used: None,
+        aaguid: None,
+        transports: "[]".into(),
+        backup_eligible: false,
+        backed_up: false,
+        sign_count: 0,
+    };
+    assert!(db.passkey_put_at_origin(&row, "https://bridge.example.test").unwrap());
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://bridge.example.test"));
+    assert!(db.passkey_origin_bind("admin", "https://bridge.example.test").unwrap());
+    assert!(!db.passkey_origin_bind("admin", "https://other.example.test").unwrap());
+    assert_eq!(db.passkey_origin("admin").unwrap().as_deref(), Some("https://bridge.example.test"));
+    let alternate = bridge_coordinator::db::PasskeyCredentialRow {
+        credential_id: "credential-2".into(),
+        ..row
+    };
+    assert!(!db.passkey_put_at_origin(&alternate, "https://other.example.test").unwrap());
+    assert_eq!(db.passkey_count("admin").unwrap(), 1, "failed origin race must not create another credential");
+    drop(db);
+    remove_database(&path);
+}
+
+#[test]
 fn expired_challenge_cannot_be_consumed() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
@@ -124,4 +159,77 @@ fn new_challenge_write_prunes_expired_rows() {
     drop(connection);
     drop(db);
     remove_database(&path);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_refuses_to_start_when_configured_passkey_origin_changes() {
+    let env = common::boot_with(|t| {
+        t.replace(
+            "allowed_origins = []",
+            "allowed_origins = [\"https://bridge.example.test\"]\npublic_origin = \"https://bridge.example.test\"",
+        )
+    })
+    .await;
+    let _ = env.admin().await;
+    let db = Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    let credential = bridge_coordinator::db::PasskeyCredentialRow {
+        credential_id: "credential-1".into(),
+        principal_id: "admin".into(),
+        credential: "{}".into(),
+        user_name: "Phone".into(),
+        created_at: bridge_coordinator::now(),
+        last_used: None,
+        aaguid: None,
+        transports: "[]".into(),
+        backup_eligible: false,
+        backed_up: false,
+        sign_count: 0,
+    };
+    db.passkey_put_at_origin(&credential, "https://bridge.example.test").unwrap();
+    drop(db);
+
+    env.srv.stop().await;
+    common::edit_config(&env.dir, |text| text.replace("https://bridge.example.test", "https://other.example.test"));
+    let error = match bridge_coordinator::server::start(&env.dir).await {
+        Ok(server) => {
+            server.stop().await;
+            panic!("server accepted a changed passkey origin while a passkey remained enrolled");
+        }
+        Err(error) => error,
+    };
+    assert!(error.contains("public_origin cannot change while passkeys are enrolled"), "{error}");
+    let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coordinator_requires_explicit_origin_for_legacy_unbound_passkeys() {
+    let env = common::boot().await;
+    let _ = env.admin().await;
+    let db = Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    db.passkey_put(&bridge_coordinator::db::PasskeyCredentialRow {
+        credential_id: "legacy-credential".into(),
+        principal_id: "admin".into(),
+        credential: "{}".into(),
+        user_name: "Phone".into(),
+        created_at: bridge_coordinator::now(),
+        last_used: None,
+        aaguid: None,
+        transports: "[]".into(),
+        backup_eligible: false,
+        backed_up: false,
+        sign_count: 0,
+    })
+    .unwrap();
+    drop(db);
+
+    env.srv.stop().await;
+    let error = match bridge_coordinator::server::start(&env.dir).await {
+        Ok(server) => {
+            server.stop().await;
+            panic!("server accepted legacy passkeys without an explicitly configured canonical origin");
+        }
+        Err(error) => error,
+    };
+    assert!(error.contains("existing passkeys have no recorded canonical origin"), "{error}");
+    let _ = std::fs::remove_dir_all(&env.dir);
 }

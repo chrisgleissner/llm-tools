@@ -57,6 +57,39 @@ pub async fn start_with(data_dir: &Path, web_dir: Option<&Path>) -> Result<Runni
     };
     let tls = TlsAcceptor::from(tls_config);
     let db = Arc::new(Db::open(&crate::db_path(data_dir)).map_err(|e| format!("cannot open database: {e}"))?);
+    if let Some((principal, _)) = db.admin_get().map_err(|e| format!("cannot read coordinator administrator: {e}"))? {
+        let passkey_count = db.passkey_count(&principal).map_err(|e| format!("cannot count passkeys: {e}"))?;
+        if let Some(configured_origin) = cfg.public_origin.as_deref() {
+            let stored_origin = db
+                .passkey_origin(&principal)
+                .map_err(|e| format!("cannot read canonical passkey origin: {e}"))?;
+            match stored_origin {
+                Some(stored) if stored != configured_origin => {
+                    return Err(format!(
+                        "public_origin cannot change while passkeys are enrolled (stored {stored:?}, configured {configured_origin:?}); remove and re-enrol the passkeys first"
+                    ));
+                }
+                None if passkey_count > 0
+                    && !db
+                        .passkey_origin_bind(&principal, configured_origin)
+                        .map_err(|e| format!("cannot bind canonical passkey origin: {e}"))? =>
+                {
+                    return Err("public_origin changed while binding existing passkeys".into());
+                }
+                _ => {}
+            }
+        } else if passkey_count > 0
+            && db
+                .passkey_origin(&principal)
+                .map_err(|e| format!("cannot read canonical passkey origin: {e}"))?
+                .is_none()
+        {
+            return Err(
+                "existing passkeys have no recorded canonical origin; configure public_origin explicitly before starting, then re-enrol passkeys if needed"
+                    .into(),
+            );
+        }
+    }
     let cursor_key = db.cursor_key().map_err(|e| format!("cannot load pagination cursor key: {e}"))?;
     let listener = TcpListener::bind(bind).await.map_err(|e| format!("cannot bind {bind}: {e}"))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;

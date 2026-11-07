@@ -233,3 +233,19 @@ deployment state or exceed the runner budget. A local pinned run selected 23 rea
 passed 4,201 generated cases across coverage, fuzzing and stateful phases in 30 seconds, and left
 the coordinator healthy. Revisit the scan scope if authored mutation coverage changes.
 
+## D16 Canonical passkey origin (PK-002)
+
+Bind the administrator's passkeys to one HTTPS DNS origin. The first successful
+registration binds the origin and credential in one SQLite transaction; an operator may
+preconfigure the same value as `public_origin`. The value is persisted in coordinator
+configuration after registration and remains database-authoritative if that write fails.
+Startup rejects a changed configured origin while credentials remain. Older credentials
+without a recorded origin require the operator to set `public_origin` explicitly before
+startup, so an upgrade cannot silently choose a new RP ID from whichever address is visited
+first. IP literals are rejected because they cannot be WebAuthn RP IDs. Explicit, confirmed
+re-enrolment UX remains future work.
+
+In the code: `coordinator/src/passkeys.rs::canonical_origin`, `coordinator/src/config.rs`,
+`coordinator/src/db.rs::passkey_put_at_origin`, and `coordinator/src/server.rs`; regressions
+are covered by `coordinator/tests/passkeys.rs` and `coordinator/tests/web_api.rs`.
+

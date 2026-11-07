@@ -108,6 +108,7 @@ stopped, password reset, certificate renewal, restart with data kept, and stop i
 5. Open `https://bridge.<tailnet>.ts.net:8443` once the renewer has created the certificate.
 
 If you already have a trusted certificate and hostname, supply those files instead; no domain provider integration is required.
+The first completed passkey registration fixes `public_origin`; existing passkeys from an earlier coordinator version need that origin set explicitly in `config.toml` before startup.
 
 ## Windows
 

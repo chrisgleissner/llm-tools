@@ -55,6 +55,8 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
     assert_eq!(st, 200);
     assert_eq!(body["password_policy"]["min_length"], bridge_coordinator::auth::MIN_PASSWORD_LEN);
     assert_eq!(body["password_policy"]["max_length"], bridge_coordinator::auth::MAX_PASSWORD_LEN);
+    assert_eq!(body["passkey_sign_in_available"], false);
+    assert!(body["passkey_canonical_origin"].is_null());
     assert!(
         body.get("username").is_none() && body.get("session").is_none(),
         "nothing about the session before sign-in: {body}"
@@ -74,6 +76,60 @@ async fn auth_state_publishes_the_password_policy_and_session_details() {
     assert_eq!(body["authenticated"], true);
     assert_eq!(body["username"], "admin");
     assert!(body["session"]["expires_at"].as_i64().unwrap() > bridge_coordinator::now());
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn passkey_sign_in_is_advertised_only_on_the_bound_canonical_origin() {
+    let env = boot_with(|t| {
+        t.replace(
+            "allowed_origins = []",
+            "allowed_origins = [\"https://bridge.example.test\"]\npublic_origin = \"https://bridge.example.test\"",
+        )
+    })
+    .await;
+    let _ = env.admin().await;
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    db.passkey_put_at_origin(
+        &bridge_coordinator::db::PasskeyCredentialRow {
+            credential_id: "credential".into(),
+            principal_id: "admin".into(),
+            credential: "{}".into(),
+            user_name: "Phone".into(),
+            created_at: bridge_coordinator::now(),
+            last_used: None,
+            aaguid: None,
+            transports: "[]".into(),
+            backup_eligible: false,
+            backed_up: false,
+            sign_count: 0,
+        },
+        "https://bridge.example.test",
+    )
+    .unwrap();
+    drop(db);
+
+    let api = env.api();
+    let (status, body) = api.get("/api/v1/auth/state").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["passkey_sign_in_available"], false, "IP origin must not advertise passkeys");
+    let response = api
+        .rb(Method::GET, "/api/v1/auth/state")
+        .header("origin", "https://bridge.example.test")
+        .send()
+        .await
+        .unwrap();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["passkey_sign_in_available"], true);
+    assert_eq!(body["passkey_canonical_origin"], "https://bridge.example.test");
+    let response = api
+        .rb(Method::GET, "/api/v1/auth/state")
+        .header("origin", "https://other.example.test")
+        .send()
+        .await
+        .unwrap();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["passkey_sign_in_available"], false);
     env.stop().await;
 }
 

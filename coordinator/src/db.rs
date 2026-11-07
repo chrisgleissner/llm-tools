@@ -236,7 +236,7 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -269,6 +269,11 @@ CREATE TABLE passkeys(
   aaguid TEXT, transports TEXT NOT NULL DEFAULT '[]', backup_eligible INTEGER NOT NULL DEFAULT 0,
   backed_up INTEGER NOT NULL DEFAULT 0, sign_count INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX passkeys_principal ON passkeys(principal_id);
+";
+/// Version 9: canonical WebAuthn origin, fixed by the first completed registration.
+const MIGRATE_V9: &str = "
+CREATE TABLE auth_policy(
+  principal_id TEXT PRIMARY KEY, passkey_origin TEXT);
 ";
 
 /// An address with a successful login within this many seconds is a known address.
@@ -367,6 +372,9 @@ impl Db {
         if version < 8 {
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V8} PRAGMA user_version = 8; COMMIT;"))?;
         }
+        if version < 9 {
+            conn.execute_batch(&format!("BEGIN; {MIGRATE_V9} PRAGMA user_version = 9; COMMIT;"))?;
+        }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
             conn: Mutex::new(conn),
@@ -453,6 +461,36 @@ impl Db {
         Ok(())
     }
 
+    /// Store the first credential and its canonical origin atomically. A racing first registration
+    /// at a different origin loses without leaving a locked origin or a credential behind.
+    pub fn passkey_put_at_origin(&self, row: &PasskeyCredentialRow, origin: &str) -> R<bool> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let existing: Option<String> = tx
+            .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [&row.principal_id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        match existing {
+            Some(current) if current != origin => {
+                tx.commit()?;
+                return Ok(false);
+            }
+            Some(_) => {}
+            None => {
+                tx.execute(
+                    "INSERT INTO auth_policy(principal_id,passkey_origin) VALUES(?,?)",
+                    params![row.principal_id, origin],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO passkeys(credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            params![row.credential_id,row.principal_id,row.credential,row.user_name,row.created_at,row.last_used,row.aaguid,row.transports,row.backup_eligible as i64,row.backed_up as i64,row.sign_count],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn passkeys_for_principal(&self, principal: &str) -> R<Vec<PasskeyCredentialRow>> {
         let c = self.c();
         let mut stmt = c.prepare("SELECT credential_id,principal_id,credential,user_name,created_at,last_used,aaguid,transports,backup_eligible,backed_up,sign_count FROM passkeys WHERE principal_id=? ORDER BY created_at,credential_id")?;
@@ -489,6 +527,38 @@ impl Db {
                 row.principal_id
             ],
         )? == 1)
+    }
+
+    /// Bind the first passkey to the canonical origin. A caller cannot silently move an existing
+    /// principal's credentials to a different RP ID; explicit re-enrolment must clear them first.
+    pub fn passkey_origin_bind(&self, principal: &str, origin: &str) -> R<bool> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let existing: Option<String> = tx
+            .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [principal], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let allowed = match existing {
+            Some(current) => current == origin,
+            None => {
+                tx.execute("INSERT INTO auth_policy(principal_id,passkey_origin) VALUES(?,?)", params![principal, origin])?;
+                true
+            }
+        };
+        tx.commit()?;
+        Ok(allowed)
+    }
+
+    pub fn passkey_origin(&self, principal: &str) -> R<Option<String>> {
+        self.c()
+            .query_row("SELECT passkey_origin FROM auth_policy WHERE principal_id=?", [principal], |r| r.get(0))
+            .optional()
+            .map(Option::flatten)
+    }
+
+    pub fn passkey_count(&self, principal: &str) -> R<i64> {
+        self.c()
+            .query_row("SELECT COUNT(*) FROM passkeys WHERE principal_id=?", [principal], |r| r.get(0))
     }
 
     // ---- admin ----

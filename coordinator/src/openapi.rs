@@ -99,6 +99,19 @@ fn token_create_schema() -> Value {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if path == "/api/v1/auth/state" && method == "GET" {
+        return json!({
+            "type":"object",
+            "required":["setup_required","authenticated","passkey_sign_in_available","passkey_canonical_origin"],
+            "properties":{
+                "setup_required":{"type":"boolean"},
+                "authenticated":{"type":"boolean"},
+                "passkey_sign_in_available":{"type":"boolean"},
+                "passkey_canonical_origin":{"type":["string","null"],"format":"uri"}
+            },
+            "additionalProperties":true
+        });
+    }
     if path.ends_with("/registration/start") && method == "POST" {
         return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
     }

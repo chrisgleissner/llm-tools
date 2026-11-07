@@ -119,6 +119,7 @@ export interface PasswordPolicy {
 export interface AuthState {
   setup_required: boolean;
   authenticated: boolean;
+  passkey_sign_in_available?: boolean;
   csrf_token?: string;
   password_policy?: PasswordPolicy;
   session_policy?: { remembered: { idle_secs: number; absolute_secs: number }; default: { idle_secs: number; absolute_secs: number } };
@@ -134,6 +135,20 @@ export async function authState(): Promise<AuthState> {
 
 export async function login(username: string, password: string, remember = false): Promise<void> {
   const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/login", { username, password, remember }, true);
+  setCsrf(r.csrf_token);
+}
+
+export interface PasskeyAssertionStart {
+  challenge_id: string;
+  options: { publicKey: unknown; mediation?: string };
+}
+
+export async function beginPasskeySignIn(): Promise<PasskeyAssertionStart> {
+  return request<PasskeyAssertionStart>("POST", "/api/v1/auth/passkeys/assertion/start", {}, true);
+}
+
+export async function finishPasskeySignIn(challenge_id: string, credential: unknown): Promise<void> {
+  const r = await request<{ csrf_token: string }>("POST", "/api/v1/auth/passkeys/assertion/finish", { challenge_id, credential }, true);
   setCsrf(r.csrf_token);
 }
 

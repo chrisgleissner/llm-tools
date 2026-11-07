@@ -13,6 +13,10 @@ export interface MockOptions {
   login?: "ok" | "wrong" | "limited";
   /** Response of POST /auth/setup. */
   setup?: "ok" | "bad-token";
+  /** Report that one or more passkeys are enrolled on the canonical origin. */
+  passkeySignInAvailable?: boolean;
+  /** Return discoverable-only assertion options so conditional UI can be exercised. */
+  passkeyDiscoverable?: boolean;
   workers?: "none" | "some";
   missions?: "none" | "some";
   sessionRemembered?: boolean;
@@ -113,12 +117,16 @@ export interface Mock {
   /** Switch what /auth/state reports (used to simulate an expired session). */
   setAuth(mode: AuthMode): void;
   terminalInputCount(): number;
+  passkeyAssertionStartCount(): number;
+  passkeyAssertionFinish(): Record<string, unknown> | null;
   emitStream(message: Record<string, unknown>): void;
 }
 
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
   let terminalInputs = 0;
+  let passkeyStarts = 0;
+  let passkeyFinish: Record<string, unknown> | null = null;
   let streamSocket: WebSocketRoute | null = null;
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
@@ -149,13 +157,33 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     if (path === "/auth/state") {
       if (auth === "in")
         return json(route, 200, { setup_required: false, authenticated: true, csrf_token: "csrf", password_policy: POLICY, session_policy: SESSION_POLICY, username: "admin", session: { remember: opts.sessionRemembered ?? false, expires_at: nowS + 43200 - 600, idle_timeout_secs: opts.sessionRemembered ? 28800 : 7200 } });
-      return json(route, 200, { setup_required: auth === "setup", authenticated: false, password_policy: POLICY, session_policy: SESSION_POLICY });
+      return json(route, 200, { setup_required: auth === "setup", authenticated: false, passkey_sign_in_available: opts.passkeySignInAvailable ?? false, password_policy: POLICY, session_policy: SESSION_POLICY });
     }
     if (path === "/auth/login") {
       if (opts.login === "wrong") return json(route, 401, { error: { code: "invalid-credentials", message: "invalid username or password" } });
       if (opts.login === "limited") return json(route, 429, { error: { code: "rate-limited", message: "too many failed attempts; try again later" } }, { "retry-after": "300" });
       auth = "in";
       return json(route, 200, { csrf_token: "csrf" });
+    }
+    if (path === "/auth/passkeys/assertion/start" && method === "POST") {
+      passkeyStarts += 1;
+      return json(route, 200, {
+        challenge_id: "mock-challenge-1",
+        options: {
+          publicKey: {
+            challenge: "AQID",
+            rpId: "localhost",
+            timeout: 60_000,
+            allowCredentials: opts.passkeyDiscoverable ? [] : [{ type: "public-key", id: "BAUG", transports: ["internal"] }],
+            userVerification: "required",
+          },
+        },
+      }, { "set-cookie": "__Host-bridge_passkey=mock-ticket; Path=/; Max-Age=300; Secure; HttpOnly; SameSite=Strict" });
+    }
+    if (path === "/auth/passkeys/assertion/finish" && method === "POST") {
+      passkeyFinish = JSON.parse(req.postData() ?? "{}") as Record<string, unknown>;
+      auth = "in";
+      return json(route, 200, { csrf_token: "csrf" }, { "set-cookie": "__Host-bridge_session=mock-session; Path=/; Secure; HttpOnly; SameSite=Strict" });
     }
     if (path === "/auth/setup") {
       if (opts.setup === "bad-token") return json(route, 403, { error: { code: "invalid-setup-token", message: "invalid setup token" } });
@@ -253,6 +281,8 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   return {
     setAuth: (m) => void (auth = m),
     terminalInputCount: () => terminalInputs,
+    passkeyAssertionStartCount: () => passkeyStarts,
+    passkeyAssertionFinish: () => passkeyFinish,
     emitStream: (message) => streamSocket?.send(JSON.stringify(message)),
   };
 }

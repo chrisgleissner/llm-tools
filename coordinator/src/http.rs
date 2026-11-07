@@ -326,7 +326,7 @@ pub fn origin_ok(headers: &HeaderMap, cfg: &Config) -> bool {
     let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    if cfg.allowed_origins.iter().any(|o| o == origin) {
+    if cfg.allowed_origins.iter().any(|o| o == origin) || cfg.public_origin.as_deref() == Some(origin) {
         return true;
     }
     headers
@@ -503,10 +503,32 @@ async fn healthz() -> Response {
 }
 
 async fn auth_state(State(st): State<St>, headers: HeaderMap) -> ApiResult {
-    let setup_required = st.db.admin_get()?.is_none();
+    let admin = st.db.admin_get()?;
+    let setup_required = admin.is_none();
+    let configured_origin = match (st.cfg.public_origin.clone(), admin.as_ref()) {
+        (Some(origin), _) => Some(origin),
+        (None, Some((username, _))) => st.db.passkey_origin(username)?,
+        (None, None) => None,
+    };
+    let request_origin = headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(|host| format!("https://{host}")))
+        .and_then(|origin| crate::passkeys::canonical_origin(&origin).ok());
+    let passkey_sign_in_available = if let Some((username, _)) = &admin {
+        configured_origin.is_some()
+            && configured_origin == request_origin
+            && crate::passkeys::verifier(request_origin.as_deref().unwrap_or_default()).is_ok()
+            && st.db.passkey_count(username)? > 0
+    } else {
+        false
+    };
     let mut body = json!({
         "setup_required": setup_required,
         "authenticated": false,
+        "passkey_sign_in_available": passkey_sign_in_available,
+        "passkey_canonical_origin": configured_origin,
         "password_policy": {"min_length": auth::MIN_PASSWORD_LEN, "max_length": auth::MAX_PASSWORD_LEN},
         "session_policy": {
             "remembered": {"idle_secs": crate::db::session_policy(true).0, "absolute_secs": crate::db::session_policy(true).1},
@@ -676,8 +698,34 @@ fn webauthn_origin(st: &AppState, headers: &HeaderMap) -> Result<String, ApiErro
         ));
     }
     let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()).unwrap_or("");
-    crate::passkeys::verifier(origin).map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
-    Ok(origin.to_string())
+    let canonical = crate::passkeys::canonical_origin(origin)
+        .map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    let principal = st.db.admin_get()?.map(|(username, _)| username);
+    let stored = match principal.as_deref() {
+        Some(username) => st.db.passkey_origin(username)?,
+        None => None,
+    };
+    let expected = st.cfg.public_origin.as_deref().or(stored.as_deref());
+    if expected.is_none() {
+        if let Some(username) = principal.as_deref() {
+            if st.db.passkey_count(username)? > 0 {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "canonical-origin-required",
+                    "existing passkeys need an explicitly configured canonical origin before they can be used",
+                ));
+            }
+        }
+    }
+    if expected.is_some_and(|expected| expected != canonical) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "canonical-origin-required",
+            "passkeys are available only at the coordinator's canonical origin",
+        ));
+    }
+    crate::passkeys::verifier(&canonical).map_err(|_| err(StatusCode::NOT_IMPLEMENTED, "passkeys-unavailable", "passkeys require a trusted HTTPS DNS name"))?;
+    Ok(canonical)
 }
 
 fn passkey_ticket(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -817,12 +865,28 @@ async fn passkey_register_finish(State(st): State<St>, Authed(p, ip): Authed, he
         backed_up: false,
         sign_count: 0,
     };
-    if let Err(e) = st.db.passkey_put(&row) {
-        if matches!(e, rusqlite::Error::SqliteFailure(ref code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY || code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE)
+    match st.db.passkey_put_at_origin(&row, &stored.origin) {
+        Ok(true) => {}
+        Ok(false) => {
+            st.db.audit(&username, "passkey.registration.denied", "canonical origin is already fixed", &ip);
+            return Err(err(
+                StatusCode::CONFLICT,
+                "canonical-origin-locked",
+                "passkeys are bound to the first registered origin; remove all passkeys and explicitly re-enrol to change it",
+            ));
+        }
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY || code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
         {
             return Err(err(StatusCode::CONFLICT, "credential-exists", "this passkey is already registered"));
         }
-        return Err(e.into());
+        Err(e) => return Err(e.into()),
+    }
+    if st.cfg.public_origin.is_none() {
+        if let Err(error) = crate::config::persist_public_origin(&st.data_dir, &stored.origin) {
+            st.db.audit(&username, "passkey.origin-persist-failed", &clean(&error), &ip);
+            eprintln!("could not persist the canonical passkey origin: {}", clean(&error));
+        }
     }
     st.db
         .audit(&username, "passkey.registration.success", &format!("credential_id={}", row.credential_id), &ip);

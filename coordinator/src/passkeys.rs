@@ -53,10 +53,10 @@ pub struct StoredCeremony {
     pub state: CeremonyState,
 }
 
-/// Construct a strict HTTPS-only WebAuthn verifier from the exact browser origin. An IP origin
-/// cannot form an RP ID and is rejected by `webauthn-rs`.
-pub fn verifier(origin: &str) -> Result<Webauthn, String> {
-    let url = Url::parse(origin).map_err(|_| "invalid WebAuthn origin".to_string())?;
+/// Return the canonical browser origin WebAuthn accepts. IP literals are excluded because they
+/// cannot be WebAuthn RP IDs, even when the operator supplies a trusted certificate for one.
+pub fn canonical_origin(origin: &str) -> Result<String, String> {
+    let url = Url::parse(origin).map_err(|_| "invalid public origin".to_string())?;
     if url.scheme() != "https"
         || url.host().is_none()
         || url.path() != "/"
@@ -64,9 +64,18 @@ pub fn verifier(origin: &str) -> Result<Webauthn, String> {
         || url.fragment().is_some()
         || !url.username().is_empty()
         || url.password().is_some()
+        || !matches!(url.host(), Some(url::Host::Domain(_)))
     {
-        return Err("WebAuthn requires an exact HTTPS origin".into());
+        return Err("public_origin must be an HTTPS DNS origin without a path, query, fragment or credentials".into());
     }
+    Ok(url.origin().ascii_serialization())
+}
+
+/// Construct a strict HTTPS-only WebAuthn verifier from the exact browser origin. An IP origin
+/// cannot form an RP ID and is rejected by `webauthn-rs`.
+pub fn verifier(origin: &str) -> Result<Webauthn, String> {
+    let canonical = canonical_origin(origin)?;
+    let url = Url::parse(&canonical).map_err(|_| "invalid WebAuthn origin".to_string())?;
     let rp_id = url.host_str().ok_or("invalid WebAuthn RP ID")?;
     WebauthnBuilder::new(rp_id, &url)
         .map_err(|_| "invalid WebAuthn RP ID/origin".to_string())?
@@ -151,5 +160,23 @@ mod tests {
             .rp_name("LLM Bridge")
             .build()
             .unwrap();
+    }
+
+    #[test]
+    fn canonical_origin_requires_exact_https_dns_origin() {
+        assert_eq!(canonical_origin("https://bridge.example.test").unwrap(), "https://bridge.example.test");
+        assert_eq!(
+            canonical_origin("https://BRIDGE.example.test:8443").unwrap(),
+            "https://bridge.example.test:8443"
+        );
+        for invalid in [
+            "http://bridge.example.test",
+            "https://192.0.2.1:8443",
+            "https://bridge.example.test/path",
+            "https://user@bridge.example.test",
+            "https://bridge.example.test?next=/",
+        ] {
+            assert!(canonical_origin(invalid).is_err(), "accepted {invalid}");
+        }
     }
 }

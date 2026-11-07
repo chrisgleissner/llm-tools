@@ -25,6 +25,9 @@ pub struct Config {
     pub tls_key_file: Option<String>,
     /// Exact SNI hostname for the operator-managed identity; all other names use the internal CA.
     pub tls_cert_name: Option<String>,
+    /// Canonical HTTPS DNS origin for passkeys. Once passkeys exist, the first registered origin
+    /// is persisted in the coordinator database and cannot be changed without re-enrolment.
+    pub public_origin: Option<String>,
     /// Total concurrent TCP connections; further connections are closed immediately (NET-010).
     pub max_connections: usize,
     /// Concurrent TCP connections from one client address (IPv6 clients counted by /64).
@@ -59,6 +62,7 @@ impl Default for Config {
             tls_cert_file: None,
             tls_key_file: None,
             tls_cert_name: None,
+            public_origin: None,
             max_connections: 256,
             max_connections_per_ip: 32,
             worker_reserve_connections: 16,
@@ -105,6 +109,8 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
     max_events_per_worker = {}\n\
     # Extra exact Origin values accepted for cookie-authenticated writes.\n\
     allowed_origins = []\n\
+    # Canonical HTTPS DNS origin for passkeys; omit to bind it at first registration.\n\
+    # public_origin = \"https://bridge.example.test\"\n\
     # Directory with the built web interface; default: web next to the executable, then\n\
     # /usr/share/bridge-coordinator/web.\n\
     # web_dir = \"/path/to/web\"\n\
@@ -136,6 +142,34 @@ pub fn config_text(bind: &str, lan_enabled: bool) -> String {
         d.mutation_limit_per_token,
         d.mutation_limit_per_address
     )
+}
+
+/// Persist the first completed passkey registration's canonical origin in `config.toml` when the
+/// operator did not preconfigure one. The database is still authoritative during the live
+/// process; this keeps the effective RP ID visible and stable across upgrades and restores.
+pub fn persist_public_origin(dir: &Path, origin: &str) -> Result<(), String> {
+    let canonical = crate::passkeys::canonical_origin(origin)?;
+    if canonical != origin {
+        return Err("passkey origin is not canonical".into());
+    }
+    let path = dir.join("config.toml");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let value: toml::Value = toml::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
+    if let Some(existing) = value.get("public_origin").and_then(toml::Value::as_str) {
+        return if existing == origin {
+            Ok(())
+        } else {
+            Err("configured public_origin does not match the registered passkey origin".into())
+        };
+    }
+    let mut updated = text;
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&format!(
+        "\n# Fixed by the first passkey registration. Re-enrol passkeys before changing this RP ID.\npublic_origin = \"{origin}\"\n"
+    ));
+    crate::write_replace(&path, updated.as_bytes(), 0o600).map_err(|e| format!("cannot persist public_origin: {e}"))
 }
 
 /// Parse a boolean environment value (`1/0`, `true/false`, `yes/no`, `on/off`).
@@ -174,6 +208,12 @@ impl Config {
         let file_provider_fields = [cfg.tls_cert_file.is_some(), cfg.tls_key_file.is_some(), cfg.tls_cert_name.is_some()];
         if file_provider_fields.iter().any(|set| *set) && !file_provider_fields.iter().all(|set| *set) {
             return Err("tls_cert_file, tls_key_file and tls_cert_name must be configured together".into());
+        }
+        if let Some(origin) = &cfg.public_origin {
+            let canonical = crate::passkeys::canonical_origin(origin)?;
+            if canonical != *origin {
+                return Err(format!("public_origin must use its canonical form {canonical:?}"));
+            }
         }
         if cfg.max_events_per_worker == 0 {
             return Err("max_events_per_worker must be at least 1".into());
@@ -239,5 +279,22 @@ mod tests {
         let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 0"));
         assert!(Config::load(&invalid).unwrap_err().contains("mutation limits"));
         std::fs::remove_dir_all(invalid).unwrap();
+    }
+
+    #[test]
+    fn first_passkey_origin_is_persisted_and_ip_origins_are_refused() {
+        let dir = temp_config(&config_text("127.0.0.1:8443", false));
+        persist_public_origin(&dir, "https://bridge.example.test").unwrap();
+        let config = Config::load(&dir).unwrap();
+        assert_eq!(config.public_origin.as_deref(), Some("https://bridge.example.test"));
+        assert!(persist_public_origin(&dir, "https://other.example.test").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let dir = temp_config(&format!(
+            "{}\npublic_origin = \"https://192.0.2.1:8443\"\n",
+            config_text("127.0.0.1:8443", false)
+        ));
+        assert!(Config::load(&dir).unwrap_err().contains("HTTPS DNS origin"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

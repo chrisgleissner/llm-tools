@@ -8,6 +8,7 @@ export type NoticeKind = "expired" | "signed-out" | "changed" | "info";
 
 export interface LoginOpts {
   setupRequired: boolean;
+  passkeySignInAvailable?: boolean;
   policy?: api.PasswordPolicy;
   sessionPolicy?: api.AuthState["session_policy"];
   notice?: { kind: NoticeKind; text: string } | null;
@@ -78,6 +79,7 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     ? `Leave this off on a shared computer: you are signed out after ${minutes(sp.default.idle_secs)} without activity or ${minutes(sp.default.absolute_secs)} at most, and when the browser closes. On, you stay signed in for up to ${minutes(sp.remembered.absolute_secs)}, until ${minutes(sp.remembered.idle_secs)} pass without activity.`
     : "Leave this off on a shared computer.";
   const submit = h("button", { type: "submit", class: "btn primary", id: "login-submit" }, "Sign in");
+  const passkey = h("button", { type: "button", class: "btn", id: "passkey-login", hidden: true }, "Sign in with a passkey");
   const form = h(
     "form",
     { class: "card auth-card", id: "login-form", novalidate: true },
@@ -90,11 +92,13 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     h("p", { class: "hint", id: "remember-hint" }, rememberHint),
     error,
     progress,
-    h("div", { class: "actions" }, submit),
+    h("div", { class: "actions login-actions" }, passkey, submit),
   );
   remember.setAttribute("aria-describedby", "remember-hint");
   let timer = 0;
   let blockedUntil = 0;
+  let passkeyController: AbortController | null = null;
+  let passkeyBusy = false;
   const label = "Sign in";
   const tick = (): void => {
     const left = Math.ceil((blockedUntil - Date.now()) / 1000);
@@ -109,6 +113,58 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
     error.textContent = `Too many failed sign-in attempts from this network. You can try again in ${left >= 60 ? `${Math.floor(left / 60)} min ${left % 60} s` : `${left} s`} (at ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}:${String(at.getSeconds()).padStart(2, "0")}).`;
     submit.textContent = `Try again in ${left >= 60 ? `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : `${left} s`}`;
   };
+  const resetProgress = (): void => {
+    submit.classList.remove("busy");
+    passkey.classList.remove("busy");
+    submit.disabled = false;
+    submit.textContent = label;
+    passkey.disabled = false;
+    passkey.textContent = "Sign in with a passkey";
+    progress.hidden = true;
+    progress.textContent = "";
+    passkeyBusy = false;
+  };
+  const runPasskey = async (conditional: boolean, prepared?: api.PasskeyAssertionStart): Promise<void> => {
+    if (!conditional && passkeyBusy) return;
+    if (!conditional) {
+      passkeyBusy = true;
+      submit.disabled = true;
+      passkey.disabled = true;
+      passkey.classList.add("busy");
+      passkey.textContent = "Waiting for your passkey…";
+      progress.textContent = "Waiting for your passkey…";
+      progress.hidden = false;
+    }
+    passkeyController?.abort();
+    const controller = new AbortController();
+    passkeyController = controller;
+    try {
+      const start = prepared ?? await api.beginPasskeySignIn();
+      const publicKey = requestOptions(start.options);
+      const credential = await navigator.credentials.get({
+        publicKey,
+        mediation: conditional ? "conditional" : "required",
+        signal: controller.signal,
+      });
+      if (!credential) return;
+      await api.finishPasskeySignIn(start.challenge_id, serializeAssertion(credential));
+      opts.onDone("Signed in with a passkey.");
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      if (conditional && err instanceof DOMException && err.name === "NotAllowedError") return;
+      error.textContent = err instanceof api.ApiError && err.status === 401
+        ? "That passkey could not sign you in. Try again or use your password."
+        : err instanceof DOMException && err.name === "NotAllowedError"
+          ? "No passkey was selected. Try again or use your password."
+          : err instanceof api.ApiError && err.status === 0
+            ? "Cannot reach the coordinator. Check your network connection and try again."
+            : err instanceof api.ApiError ? err.message : "Passkey sign-in did not complete. Try again or use your password.";
+    } finally {
+      if (passkeyController === controller) passkeyController = null;
+      if (!conditional) resetProgress();
+    }
+  };
+  passkey.addEventListener("click", () => void runPasskey(false));
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     error.textContent = "";
@@ -155,6 +211,103 @@ function signInView(root: HTMLElement, opts: LoginOpts): void {
   });
   authShell(root, form);
   user.input.focus();
+  if (opts.passkeySignInAvailable) {
+    void detectPasskeySupport().then((capability) => {
+      if (!capability.supported || !form.isConnected) return;
+      passkey.hidden = false;
+      if (capability.platformAuthenticator) passkey.dataset.platformAuthenticator = "available";
+      if (!capability.conditional) return;
+      void (async () => {
+        try {
+          const start = await api.beginPasskeySignIn();
+          const publicKey = requestOptions(start.options);
+          // Conditional UI requires discoverable credentials. Until the server advertises them,
+          // keep the normal button available and leave username autocomplete unchanged.
+          if (publicKey.allowCredentials && publicKey.allowCredentials.length > 0) return;
+          user.input.setAttribute("autocomplete", "username webauthn");
+          void runPasskey(true, start);
+        } catch {
+          // The password form stays usable if capability probing or challenge creation fails.
+        }
+      })();
+    }).catch(() => {});
+  }
+  form.addEventListener("submit", () => passkeyController?.abort());
+}
+
+type PasskeyCapability = { supported: boolean; conditional: boolean; platformAuthenticator: boolean };
+
+async function detectPasskeySupport(): Promise<PasskeyCapability> {
+  if (!window.isSecureContext || !navigator.credentials || typeof navigator.credentials.get !== "function" || !window.PublicKeyCredential) {
+    return { supported: false, conditional: false, platformAuthenticator: false };
+  }
+  const pk = window.PublicKeyCredential as typeof PublicKeyCredential & {
+    isConditionalMediationAvailable?: () => Promise<boolean>;
+    isUserVerifyingPlatformAuthenticatorAvailable?: () => Promise<boolean>;
+    getClientCapabilities?: () => Promise<{ conditionalGet?: boolean }>;
+  };
+  const [platformAuthenticator, mediation, caps] = await Promise.all([
+    pk.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false) ?? Promise.resolve(false),
+    pk.isConditionalMediationAvailable?.().catch(() => false) ?? Promise.resolve(false),
+    pk.getClientCapabilities?.().catch(() => ({})) ?? Promise.resolve({}),
+  ]);
+  const clientCapabilities = caps as { conditionalGet?: boolean };
+  return { supported: true, conditional: mediation || clientCapabilities.conditionalGet === true, platformAuthenticator };
+}
+
+function decodeBase64Url(value: string): ArrayBuffer {
+  const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function encodeBase64Url(value: ArrayBuffer | ArrayBufferView): string {
+  const bytes = value instanceof ArrayBuffer
+    ? new Uint8Array(value)
+    : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function requestOptions(options: api.PasskeyAssertionStart["options"]): PublicKeyCredentialRequestOptions {
+  const json = options.publicKey as {
+    challenge: string;
+    rpId?: string;
+    timeout?: number;
+    userVerification?: UserVerificationRequirement;
+    allowCredentials?: Array<Omit<PublicKeyCredentialDescriptor, "id"> & { id: string }>;
+    extensions?: AuthenticationExtensionsClientInputs;
+  };
+  return {
+    challenge: decodeBase64Url(json.challenge),
+    rpId: json.rpId,
+    timeout: json.timeout,
+    userVerification: json.userVerification,
+    allowCredentials: json.allowCredentials?.map((item) => ({ ...item, id: decodeBase64Url(item.id) })),
+    extensions: json.extensions,
+  };
+}
+
+function serializeAssertion(credential: Credential): Record<string, unknown> {
+  const value = credential as PublicKeyCredential;
+  const response = value.response as AuthenticatorAssertionResponse;
+  if (!value.rawId || !response?.clientDataJSON || !response.authenticatorData || !response.signature) {
+    throw new Error("The browser returned an incomplete passkey assertion.");
+  }
+  return {
+    id: value.id,
+    rawId: encodeBase64Url(value.rawId),
+    type: value.type,
+    response: {
+      clientDataJSON: encodeBase64Url(response.clientDataJSON),
+      authenticatorData: encodeBase64Url(response.authenticatorData),
+      signature: encodeBase64Url(response.signature),
+      userHandle: response.userHandle ? encodeBase64Url(response.userHandle) : null,
+    },
+    clientExtensionResults: value.getClientExtensionResults(),
+  };
 }
 
 // ------------------------------------------------------------------ first-run setup

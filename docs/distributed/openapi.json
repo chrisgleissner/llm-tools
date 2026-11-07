@@ -2433,6 +2433,30 @@
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
+                  "properties": {
+                    "authenticated": {
+                      "type": "boolean"
+                    },
+                    "passkey_canonical_origin": {
+                      "format": "uri",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "passkey_sign_in_available": {
+                      "type": "boolean"
+                    },
+                    "setup_required": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "setup_required",
+                    "authenticated",
+                    "passkey_sign_in_available",
+                    "passkey_canonical_origin"
+                  ],
                   "type": "object"
                 }
               }

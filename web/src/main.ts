@@ -93,6 +93,7 @@ async function route(): Promise<void> {
       setupRequired: state.setup_required,
       policy: state.password_policy,
       sessionPolicy: state.session_policy,
+      passkeySignInAvailable: state.passkey_sign_in_available === true,
       notice: n,
       onDone: (msg) => {
         authed = true;
