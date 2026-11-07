@@ -933,7 +933,19 @@ idle timeout, a question that stayed unanswered, or a blocked prompt) is handed
 once to the next rotation entry. A second stop of the same task leaves it
 BLOCKED and records `provider-handoff-exhausted`. The question watchdog arms
 only while the last line of the provider's standard output is a question; later
-output, including a tool call, clears it, and standard error never arms it. If
+output, including a tool call, clears it, and standard error never arms it. A line
+is not a question when it is a warning (`<file>:<line>: SyntaxWarning: ...`,
+`DeprecationWarning`, `UserWarning`, `FutureWarning`, `RuntimeWarning`,
+`ResourceWarning`, Node `(node:123) Warning:`), sits in a Python traceback block, is
+quoted (`>`, quotation marks, backticks), is inside a code fence, or is indented as
+code; `common.pending_question` decides this for the headless and the PTY path alike.
+When a run stopped on a real question, Bridge records `task-awaiting-answer` with the
+question (up to 300 characters). While the task is BLOCKED, `status`, the Overview
+`Needs you` row and the `needs_you` and `awaiting_answer` keys of the JSON projection
+show the question and three ways forward: answer by putting the answer into the task
+text (`task amend --task N --file FILE`) and then `task retry`, continue unchanged
+(`task retry`), or reject (`task cancel`). The `mission-waiting-for-operator` event
+for that wait carries the question. If
 the controller fails, it stops the provider process groups of unresolved
 operations before the mission becomes FAILED; a group that cannot be stopped is
 recorded as a `provider-orphaned` event with its pid. Two `start` commands for one

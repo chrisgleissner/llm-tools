@@ -376,6 +376,11 @@ def project_snapshot(
     # reviewed task before it starts the next one: {"reason": "review",
     # "task_ordinal", "tasks", "since"}; ``None`` otherwise.
     snapshot["hold"] = {key: value for key, value in hold.items() if key not in {"marker", "task_id"}} if hold else None
+    # ``awaiting_answer`` is the question the current task's latest provider run stopped on
+    # ({"question", "provider", "task_id", "operation_id"}); ``None`` when no such task is blocked.
+    current = snapshot.get("current_task")
+    asked = store.pending_question(mission_id, int(current["id"])) if isinstance(current, dict) and current.get("status") == "BLOCKED" else None
+    snapshot["awaiting_answer"] = asked
     snapshot["needs_you"] = needs_attention(cast("dict[str, Any]", snapshot))  # a TypedDict is a plain dict at run time
     return snapshot
 

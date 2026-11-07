@@ -4036,14 +4036,73 @@ def blocking_tail(text: str) -> str:
     return tail_lines(text, BLOCKING_PROMPT_TAIL_LINES)
 
 
+# Output that can end in "?" without being a question put to the user: compiler and runtime
+# warnings (Python ``<file>:<line>: SyntaxWarning: ... Did you mean "=="?``, Node
+# ``(node:123) Warning:``), the exception line of a traceback, and lines that quote or show code.
+_WARNING_LINE_RE = re.compile(
+    r"\b[A-Za-z]*Warning\s*:"  # Warning:, SyntaxWarning:, DeprecationWarning:, UserWarning: ...
+    r"|^\s*\(node:\d+\)"  # Node: (node:123) ...
+    r"|^\s*\S+:\d+(?::\d+)?:\s"  # <file>:<line>: <message>
+)
+_TRACEBACK_START = "Traceback (most recent call last):"
+_EXCEPTION_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit|Interrupt)\b")
+_QUESTION_SCAN_CHARS = 4000
+
+
+def _not_a_question_line(line: str) -> bool:
+    """Whether one line is a warning, an exception line, quoted text or an indented code line."""
+    stripped = line.strip()
+    if _WARNING_LINE_RE.search(line) or _EXCEPTION_LINE_RE.match(stripped):
+        return True
+    if stripped[:1] in {">", '"', "'", "`", "#", "$", "|"} or stripped.startswith("//"):
+        return True
+    return line.startswith(("    ", "\t"))
+
+
+def pending_question(text: str) -> str | None:
+    """The question the output ends on, or ``None``.
+
+    The last non-empty line counts only when it reads like a question put to the user and is
+    not a warning, a line inside a traceback block (from ``Traceback (most recent call last):``
+    to its exception line), a line inside or opening a code fence, quoted text, or code.
+    A question earlier in the output, followed by anything else (more model text, a tool
+    call), does not count: the run has moved on.
+    """
+    in_traceback = False
+    in_fence = False
+    last = ""
+    ignored = True
+    for raw in text[-_QUESTION_SCAN_CHARS:].splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            ignored = True
+        elif in_fence:
+            ignored = True
+        elif in_traceback:
+            ignored = True
+            if not line[:1].isspace():
+                in_traceback = False  # the exception line closes the block
+        elif stripped.startswith(_TRACEBACK_START):
+            in_traceback = True
+            ignored = True
+        else:
+            ignored = _not_a_question_line(line)
+        last = stripped
+    if not last or ignored or QUESTION_LINE_RE.match(last) is None:
+        return None
+    return last
+
+
 def ends_with_question(text: str) -> bool:
     """Whether the last non-empty line of ``text`` reads like a question put to the user.
 
-    A question earlier in the output, followed by anything else (more model
-    text, a tool call), does not count: the run has moved on.
+    Shared by the headless watchdog and the PTY capture; see ``pending_question``.
     """
-    last = tail_lines(text[-4000:], 1)
-    return bool(last) and QUESTION_LINE_RE.match(last) is not None
+    return pending_question(text) is not None
 
 
 def prompt_abort_reason(text: str, default: str = "interactive prompt detected", *, auto_confirm: bool = False) -> str:

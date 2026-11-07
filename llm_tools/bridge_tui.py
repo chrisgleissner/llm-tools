@@ -1704,6 +1704,11 @@ def _needs_you_rows(data: dict[str, object]) -> list[str]:
         if declined:
             rows.append(declined_message(declined))
             continue
+        asked = _dict(data.get("awaiting_answer"))
+        if asked.get("question") and asked.get("task_id") == task.get("id") and str(task.get("status", "")).upper() == "BLOCKED":
+            number = _text(task_number(task) if task_number(task) is not None else "?", 12)
+            rows.append(f'task {number} asked: "{_text(asked["question"], 160)}"{_SEP}/amend {number} FILE then /retry {number}{_SEP}/retry {number}{_SEP}/cancel {number}')
+            continue
         stuck.append(f"task {_text(task_number(task) if task_number(task) is not None else '?', 12)} {str(task.get('status')).upper()}")
     if stuck:
         rows.append(_SEP.join(stuck[:3]) + (f" (+{len(stuck) - 3} more)" if len(stuck) > 3 else "") + " — inspect in Tasks")

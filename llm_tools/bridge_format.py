@@ -679,6 +679,26 @@ def declined_message(provider: str) -> str:
     return f"{provider} was not allowed to trust this folder · trust it and run /start again, or choose another provider with /rotation"
 
 
+def question_attention(question: str, mid: str, number: Any) -> dict[str, Any]:
+    """``needs_you`` for a task that stopped on a question nobody answered: the text and three ways forward."""
+    amend = f"llm-bridge task amend --mission {mid} --task {number} --file TASK-WITH-ANSWER.txt"
+    retry = f"llm-bridge task retry --mission {mid} --task {number}"
+    cancel = f"llm-bridge task cancel --mission {mid} --task {number}"
+    return {
+        "kind": "question", "tasks": [int(number)] if isinstance(number, int) else [], "command": retry,
+        "question": question,
+        "actions": [
+            {"name": "answer", "command": amend, "label": "put the answer into the task text, then retry"},
+            {"name": "continue", "command": retry, "label": "run the task again unchanged"},
+            {"name": "reject", "command": cancel, "label": "drop the task"},
+        ],
+        "message": (
+            f'task {number} asked: "{question}" · answer: {amend}, then {retry} · '
+            f"or continue: {retry} · or reject: {cancel}"
+        ),
+    }
+
+
 def _operator_wait(snapshot: dict[str, Any], mission: dict[str, Any], mid: str, tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
     """A RUNNING mission whose controller idles because every unfinished task is blocked, failed or paused."""
     counts = snapshot.get("task_counts") or {}
@@ -744,6 +764,8 @@ def needs_attention(snapshot: dict[str, Any]) -> dict[str, Any] | None:
             if declined:
                 command = f"llm-bridge start --mission {mid}"
                 message = declined_message(declined)
+            elif isinstance(snapshot.get("awaiting_answer"), dict) and snapshot["awaiting_answer"].get("question"):
+                return question_attention(str(snapshot["awaiting_answer"]["question"]), mid, number)
         return {"kind": kind, "tasks": [int(number)] if isinstance(number, int) else [], "command": command, "message": message}
     pending = int((snapshot.get("proposal_counts") or {}).get("PENDING", 0))
     if pending:

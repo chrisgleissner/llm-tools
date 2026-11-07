@@ -1278,6 +1278,7 @@ class ProgressGuard:
                 if not from_stderr:
                     self.question_seen_at = None
                 return False
+        scanned = combined_tail  # the question check needs more than the prompt tail to see a traceback block
         combined_tail = common.blocking_tail(combined_tail)
         if any(pattern.search(combined_tail) for pattern in common.BLOCKING_PROMPT_PATTERNS):
             return True
@@ -1287,7 +1288,7 @@ class ProgressGuard:
         # stdout line is a question. Any later output, including the tool
         # activity marker, clears the pending question so a provider that asked
         # something and then carried on is not killed.
-        if common.ends_with_question(combined_tail):
+        if common.ends_with_question(scanned):
             self.question_seen_at = time.monotonic()
         else:
             self.question_seen_at = None

@@ -9,10 +9,10 @@ Method: read-only code review. Findings marked "reproduced" were confirmed with 
 | Severity | Count |
 | --- | --- |
 | critical | 0 |
-| high | 4 |
+| high | 5 |
 | medium | 8 |
 | low | 6 |
-| total | 18 |
+| total | 19 |
 
 Most important problems:
 
@@ -248,6 +248,31 @@ Location: `llm_tools/bridge.py:352-362` (`cancel` action) and `llm_tools/bridge_
 `cancel` marks the mission and all unfinished tasks CANCELLED and returns "cancel is durable; the active provider returns at its boundary". The running headless provider is not signalled, so it can continue for as long as its own run takes (hours) and keep spending quota and editing the worktree of a CANCELLED mission. Only `stop --force` terminates it, and that path then applies INT-005 to the already-cancelled tasks.
 
 Suggested fix: have `cancel` signal the owned process group (the same identity-checked termination that `stop --force` uses) when an operation is active, or print the `stop --force` hint in the cancel receipt.
+
+### INT-019 (high): a provider line that ends in `?` blocks a headless task with no visible reason
+
+Fixed (PRD-034, release blocker).
+
+Description: the shared question classifier (`common.ends_with_question`, used by the headless watchdog in `scheduler.ProgressGuard` and by `common.run_pty_capture`) treated the last non-empty output line as a question whenever it began with a question word and ended with `?`. It did not exclude warning lines, lines in a Python traceback block, quoted text or code lines. A run whose last line was such a line, followed by a pause longer than the question timeout, was stopped with status 75. The first stop goes to the next rotation entry (INT-004); the second leaves the task BLOCKED. `status` then said only that the provider run ended without a result. A genuine question had the same outcome: the question text was not recorded anywhere, so `status`, the Overview `Needs you` row and the JSON projection could not show it or the ways forward.
+
+The exact Python `SyntaxWarning` text (`<string>:1: SyntaxWarning: "is" with 'int' literal. Did you mean "=="?`) did not match `QUESTION_LINE_RE` before the fix, as INT-004 found, so the tests for that shape pass on the unfixed code as well. The shapes that did match and the tests that fail on the unfixed code are listed below.
+
+Severity: high. A false positive stops a healthy run; a true positive stops the mission with no visible cause.
+
+Fix:
+
+- `common.pending_question(text)` returns the question the output ends on. The last non-empty line does not count when it is a warning (`\w*Warning:`, Node `(node:N)`, `<file>:<line>:` prefix), an exception line, a line inside a `Traceback (most recent call last):` block (through its exception line), inside or opening a code fence, quoted (`>`, `"`, `'`, backtick, `#`, `$`, `|`, `//`) or indented by four spaces or a tab. `ends_with_question` is `pending_question(...) is not None`. `ProgressGuard.note_output` classifies the whole scan buffer instead of the eight-line prompt tail, so a long traceback keeps its header.
+- When a run stops with status 75 and cause `question-timeout`, `BridgeMissionHooks.after_iteration` records `task-awaiting-answer` (operation id, task id, provider, question up to 300 characters). `BridgeStore.pending_question` returns it while no later operation has run for the task.
+- `project_snapshot` adds `awaiting_answer`. `needs_attention` returns `kind: "question"` with `question`, `actions` (`answer` = `task amend --file`, then `task retry`; `continue` = `task retry`; `reject` = `task cancel`) and a `message` that names all three. `llm-bridge status` and the console Overview `Needs you` row use it.
+- `mission-waiting-for-operator` carries the question for a blocked task that asked one. The controller wait therefore always has an event (INT-001) and, for this case, the reason.
+
+Tests (`tests/test_bridge_question_blocking.py`):
+
+- Classifier cases for 16 non-question shapes and 6 genuine questions. Before the fix the quoted, indented, blockquote, code fence and traceback cases fail (`pending_question` did not exist, and `ends_with_question` returned True for the quoted and indented lines).
+- Fake headless provider (`run_fresh_exact_stdout`) and PTY provider (`run_pty_capture`) whose last line is a quoted, indented or traceback line, then a pause and `done`: status 75 before the fix, 0 after.
+- Fake `codex` through `BridgeMissionHooks` and `ralph_robin.run_scheduler_inline`: a provider that prints a quoted line last and finishes completes the task (before the fix: status 75). A provider that asks a question and stalls leaves the task BLOCKED after the second stop, with `task-awaiting-answer`, `needs_you.kind == "question"`, the actions in `status`, in the console rows and in the projection, and one `mission-waiting-for-operator` event that carries the question while the controller backs off (before the fix: `needs_you.kind == "blocked"`, no event).
+
+Not changed: a question on a task that the operator answers still needs `task amend` plus `task retry` as two steps. There is no `/answer` command.
 
 ## Evidence index
 
