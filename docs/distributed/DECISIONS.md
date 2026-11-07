@@ -260,3 +260,40 @@ rejected: a bound that large (144 MiB per day) hides a leak. The decision rests 
   runs are the evidence for longer, and the ceilings fail them if it does not hold. Python 3.13 or later should
   not need `RunPath`; this was not run. A periodic `malloc_trim` was rejected for now: it is glibc-specific and
   recovers about 1.5 to 3 MiB.
+
+## D17 Web initial JavaScript budget (WEB-010, PRD-020, PRD-036)
+
+The initial JavaScript caps in `web/budget.json` rose from 90000 raw / 31000 gzip to 91000 / 31750
+bytes. Bytes are the app entry plus the static chunks it imports, measured the way
+`e2e/budget.spec.ts` measures them (gzip level 9), by building each state in a clean tree. The
+starting point is the tree after PR #31 was merged, because that merge had already grown the first
+load from 88811 / 30944 (the follow-up branch before the merge) to 88984 / 31005, which is over the
+old gzip cap by 5 bytes.
+
+| State | Initial JS raw | gzip | Change raw | Change gzip |
+|---|---:|---:|---:|---:|
+| Merged main plus release readiness, before the PRD-036 web half | 88984 | 31005 | | |
+| + `api.ts`: 403 `password-change-required` handler, auth/state fields | 89053 | 31042 | +69 | +37 |
+| + `login.ts`: reset hint and link on the sign-in page | 89440 | 31215 | +387 | +173 |
+| + `account.ts`: `passwordForm` takes a page title and intro paragraphs | 89594 | 31291 | +154 | +76 |
+| + `main.ts` and `reset.ts` (forced screen and notice, static import) | 90997 | 31720 | +1403 | +429 |
+| Total | | | +2013 | +715 |
+
+The forced-change screen and the notice (`reset.ts`) are imported statically. Loading `reset.ts` with a
+dynamic import was built and rejected. Measured on the follow-up branch before the merge, it gave
+90055 / 32267 in 4 files against 90910 / 31692 in 2 files for the static import: 855 fewer raw bytes
+but 575 more gzip bytes. The hint, the form change and the 403 handler have to be in the first load
+either way, and `reset.ts` imports `passwordForm` from code that the account page also uses. esbuild
+therefore moved shared code into two extra small static chunks, and each chunk is compressed on its
+own (+1028 gzip bytes for +620 raw bytes). Gzip size is what crosses the network, and the lazy variant
+also costs two more requests on the first load.
+
+The messages of the forced screen and the hint were shortened by about 100 bytes so that the first
+load fits the raw cap of 91000, which is the ceiling the operator accepted. It now leaves 3 raw and 30
+gzip bytes of headroom, so the next change to the first load has to raise the caps or remove code. The
+total initial figure (JavaScript plus CSS) is 121034 raw / 39254 gzip against caps of 124000 / 40000
+and is unchanged in `budget.json`.
+
+The numbers come from builds in clean trees. `e2e/budget.spec.ts` on a working tree can differ by a
+byte of gzip because the chunk file names, which depend on the path, compress slightly differently.
+
