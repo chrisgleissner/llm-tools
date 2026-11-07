@@ -52,6 +52,7 @@ fn peak_rss_kib(pid: u32) -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "linux")]
 fn write_bytes(pid: u32) -> u64 {
     std::fs::read_to_string(format!("/proc/{pid}/io"))
         .unwrap()
@@ -88,6 +89,7 @@ async fn ws_connect(port: u16, tls: &std::sync::Arc<rustls::ClientConfig>, token
     tokio_tungstenite::client_async(req, tls).await.unwrap().0
 }
 
+#[cfg(target_os = "linux")]
 async fn browser_stream_connect(port: u16, tls: &std::sync::Arc<rustls::ClientConfig>, cookie: &str) -> Ws {
     let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let tls = TlsConnector::from(tls.clone())
@@ -239,9 +241,11 @@ async fn bench_coordinator() {
         commands.push(t.elapsed().as_secs_f64() * 1000.0);
     }
 
-    // ---- ingest throughput and DB growth: events 1001..=10000 in batches of 500
+    // ---- ingest throughput and DB growth: events 1001..=10000 in batches of 100
     let t = Instant::now();
-    worker.ingest(1000, 10_000, 500).await;
+    // The event frame has an independent 128 KiB cap; use 100 rows of the
+    // 200-byte fixture payload so every benchmark batch stays below it.
+    worker.ingest(1000, 10_000, 100).await;
     let secs = t.elapsed().as_secs_f64();
     let throughput = 9000.0 / secs;
     let growth = db_bytes(&dir).saturating_sub(db_empty);
@@ -270,7 +274,7 @@ async fn bench_coordinator() {
          | RSS after 10000 events | {:.1} MiB |\n\
          | GET /api/v1/missions p50 / p95 (100 requests) | {m50:.2} / {m95:.2} ms |\n\
          | POST /api/v1/commands p50 / p95 (100 requests) | {c50:.2} / {c95:.2} ms |\n\
-         | Event ingest throughput (9000 events, batches of 500, 200-byte payload) | {throughput:.0} events/s |\n\
+         | Event ingest throughput (9000 events, batches of 100, 200-byte payload) | {throughput:.0} events/s |\n\
          | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20) | {r50:.1} / {r95:.1} ms |\n\
          | Database growth for 10000 events (main file + WAL) | {:.2} MiB ({:.0} bytes/event) |\n",
         rss_idle as f64 / 1024.0,

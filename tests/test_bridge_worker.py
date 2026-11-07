@@ -194,16 +194,35 @@ def test_hello_caps_optional_needs_you_summary_fields(state, monkeypatch):
     directory, _ = state
     monkeypatch.setattr("llm_tools.bridge_monitor.project_snapshot", lambda *_a, **_k: {
         "task_counts": {"QUEUED": 1},
-        "current_task": None,
-        "station_context": {"last_launched_station": "unknown"},
-        "station_observation": {"station": "unknown", "model": "unknown"},
-        "needs_you": {"kind": "approval", "message": "m" * 5000, "command": "c" * 2000, "tasks": list(range(1, 1001))},
+        "current_task": {"ordinal": 7, "title": "t" * 300},
+        "station_context": {"last_launched_station": "codex"},
+        "station_observation": {"station": None, "model": "m" * 200},
+        "needs_you": {
+            "kind": "approval", "message": "m" * 5000, "command": "c" * 2000,
+            "tasks": list(range(1, 1001)), "hold": True,
+        },
     })
     session, _ = _session(directory, allow_control=False)
     summary = decode(session.hello().encode()).payload["missions"][0]
+    assert summary["current_task"] == {"ordinal": 7, "title": "t" * 256}
+    assert summary["station"] == "codex" and summary["model"] == "m" * 128
     assert len(summary["needs_you"]["message"]) == 2048
     assert len(summary["needs_you"]["command"]) == 512
     assert len(summary["needs_you"]["tasks"]) == 32
+    assert summary["needs_you"]["hold"] is True
+
+
+def test_mission_summary_falls_back_when_projection_fails(state, monkeypatch):
+    directory, mission_id = state
+
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("projection unavailable")
+
+    monkeypatch.setattr("llm_tools.bridge_monitor.project_snapshot", fail_projection)
+    session, _ = _session(directory, allow_control=False)
+    summary = decode(session.hello().encode()).payload["missions"][0]
+    assert summary["id"] == mission_id
+    assert summary["task_counts"] == {"QUEUED": 1}
 
 
 @pytest.mark.parametrize(("hostname", "expected"), [("Pi-Lab.Example", "pi-lab"), ("host_name", "host-name"), ("!!!", "worker")])

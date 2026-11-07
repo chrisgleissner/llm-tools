@@ -9,21 +9,21 @@ coordinator process only (`VmRSS`; peak is `VmHWM`).
 ## x86-64 host measurement
 
 Host: Intel Core i7-6700K, 8 logical CPUs, 48 GiB RAM, Linux 7.0, release build
-(`opt-level = "z"`, LTO, `panic = "abort"`), loopback network. Single run on 2026-11-05.
+(`opt-level = "z"`, LTO, `panic = "abort"`), loopback network. Single run on 2026-11-07.
 
 | Measurement | Result |
 |---|---|
-| Startup to `/healthz` (process spawn to first healthy answer) | 47 ms |
-| Idle RSS (2 s after healthy) | 6.2 MiB |
-| RSS after administrator setup and one login (Argon2id, 19 MiB working memory) | 25.4 MiB |
-| RSS after 1000 events | 26.4 MiB |
-| Peak RSS (`VmHWM`) up to and including the 1000-event load | 26.4 MiB |
-| RSS after 10 000 events | 29.9 MiB |
-| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.29 / 0.36 ms |
-| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.52 / 0.84 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | about 40 000 events/s |
-| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 5.2 / 10.3 ms |
-| Database growth for 10 000 events (main file + WAL) | 5.32 MiB (557 bytes/event) |
+| Startup to `/healthz` (process spawn to first healthy answer) | 53 ms |
+| Idle RSS (2 s after healthy) | 8.1 MiB |
+| RSS after administrator setup and one login (Argon2id, 19 MiB working memory) | 27.2 MiB |
+| RSS after 1000 events | 28.3 MiB |
+| Peak RSS (`VmHWM`) up to and including the 1000-event load | 28.3 MiB |
+| RSS after 10 000 events | 30.3 MiB |
+| `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.22 / 0.28 ms |
+| `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.44 / 1.08 ms |
+| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | 52 232 events/s |
+| Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 49.8 / 59.0 ms |
+| Database growth for 10 000 events (main file + WAL) | 6.59 MiB (691 bytes/event) |
 
 Notes:
 
@@ -113,7 +113,7 @@ they share the host in the x86-64 run. The database was on the SD card
 | RSS after 10 000 events | 15.1 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 7.75 / 9.03 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 51.37 / 72.60 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 1506 events/s |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload; 2026-11-05, before the 128 KiB batch cap) | 1506 events/s |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 174.2 / 220.3 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 
@@ -189,7 +189,7 @@ Measurement harness, 512 MB and 1 CPU:
 | RSS after 10 000 events | 28.4 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 0.17 / 0.19 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 0.93 / 1.24 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 67 550 events/s |
+| Event ingest throughput (9000 events, batches of 100, 200-byte payload) | pending rerun after the 128 KiB cap |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 1.3 / 2.8 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 | Container peak memory (`memory.peak`, includes page cache) | 21.7 MiB |
@@ -321,7 +321,7 @@ that attempt.
 | RSS after 10 000 events | 20.8 MiB |
 | `GET /api/v1/missions` p50 / p95 (100 sequential requests) | 2.15 / 2.25 ms |
 | `POST /api/v1/commands` p50 / p95 (100 sequential requests) | 3.11 / 3.67 ms |
-| Event ingest throughput (9000 events, batches of 500, 200-byte payload) | 5933 events/s |
+| Event ingest throughput (9000 events, batches of 500, 200-byte payload; 2026-11-06, before the 128 KiB batch cap) | 5933 events/s |
 | Reconnect (TLS + WebSocket + hello to welcome) p50 / p95 (20 reconnects) | 16.4 / 42.1 ms |
 | Database growth for 10 000 events (main file + WAL) | 5.32 MiB (558 bytes/event) |
 
