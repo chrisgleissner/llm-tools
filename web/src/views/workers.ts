@@ -111,14 +111,18 @@ function workerRow(w: api.WorkerInfo): HTMLElement {
   return h(
     "li",
     { class: "frow", "data-worker": w.name, "data-entity": `worker:${w.name}`, "data-l0": "workers.worker-row" },
-    h("div", { class: "row-main" }, statePill(state), h("strong", { class: "nowrap" }, w.name), h("span", { class: "muted small" }, seen), h("span", { class: "row-end" }, trigger)),
+    h("div", { class: "row-main" }, statePill(state), h("strong", { class: "nowrap" }, w.name), h("span", { class: "muted small row-seen" }, seen), h("span", { class: "row-end" }, trigger)),
     h(
       "div",
       { class: "row-sub small" },
-      h("span", { class: "nowrap muted" }, w.host_name || "unknown host"),
-      h("span", { class: "nowrap muted" }, w.remote_address || "no address"),
-      plat ? h("span", { class: "nowrap muted" }, plat) : null,
-      missions > 0 ? h("a", { class: "row-link nowrap", href: `/missions?worker=${encodeURIComponent(w.name)}` }, plural(missions, "mission")) : h("span", { class: "nowrap muted" }, "No missions"),
+      h(
+        "span",
+        { class: "row-facts" },
+        h("span", { class: "nowrap muted" }, w.host_name || "unknown host"),
+        h("span", { class: "nowrap muted" }, w.remote_address || "no address"),
+        plat ? h("span", { class: "nowrap muted" }, plat) : null,
+        missions > 0 ? h("a", { class: "row-link nowrap", href: `/missions?worker=${encodeURIComponent(w.name)}` }, plural(missions, "mission")) : h("span", { class: "nowrap muted" }, "No missions"),
+      ),
       h("span", { class: "row-end" }, details.button),
     ),
     details.panel,
@@ -148,7 +152,7 @@ export function workers(root: HTMLElement): () => void {
     answers.set({
       what: `${online} of ${plural(sorted.length, "worker")} online.`,
       needMe: offline.length === 0 ? "Nothing needs you." : `${offline.map((w) => w.name).join(", ")} ${offline.length === 1 ? "is" : "are"} offline.`,
-      next: offline.length === 0 ? "Nothing to do." : `Check that llm-bridge worker run is active on ${offline[0]?.host_name || offline[0]?.name}.`,
+      next: offline.length === 0 ? "Nothing to do." : `Start llm-bridge worker run on ${offline[0]?.host_name || offline[0]?.name}.`,
     });
     body.replaceChildren(h("ul", { class: "frows", "aria-label": "Workers", "data-section": "workers" }, ...sorted.map(workerRow)));
   };

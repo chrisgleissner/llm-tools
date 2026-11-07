@@ -22,6 +22,8 @@ export interface ComposerView {
   takeReason: string;
   /** The hint under the field. */
   note: string;
+  /** The note only repeats what the controls already show (it is not a reason), so a phone may leave it out. */
+  hint?: boolean;
 }
 
 export interface Composer {
@@ -44,7 +46,7 @@ export function composer(o: ComposerOpts): Composer {
   const input = h("textarea", { class: "composer-field", rows: 1, "aria-label": o.provider ? `Message ${o.provider}` : "Message to the session", "aria-describedby": "composer-note", autocomplete: "off", spellcheck: false });
   const note = h("p", { class: "composer-note small muted", id: "composer-note" });
   const take = button("Take control", () => o.takeControl(), { kind: "primary", action: "take-control", id: "terminal-control" });
-  const sendBtn = button("Send", () => submit(), { disabled: true });
+  const sendBtn = button("Send", () => submit(), { disabled: true, id: "composer-send" });
   const chips = h("div", { class: "cluster", "data-queued-steer": "", hidden: true });
   const grow = (): void => {
     input.style.blockSize = "auto";
@@ -88,6 +90,7 @@ export function composer(o: ComposerOpts): Composer {
       take.title = v.takeReason;
       note.textContent = v.note;
       note.hidden = !v.note;
+      note.dataset["hint"] = String(Boolean(v.hint));
       if (v.canType && !wasTyping) input.focus();
     },
     focus(): boolean {

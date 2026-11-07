@@ -95,13 +95,14 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
   .back .icon { display: inline; }
   .mission-answer { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
   .head-meta, .head-state .pill-meta { display: none; }
+  .mission-page { row-gap: var(--sp-1); }
   .mission-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--sp-2); row-gap: 0; align-items: center; }
   .mission-head > * { grid-column: 1 / -1; }
   .head-main, .head-id { display: contents; }
   .mission-head .crumbs { grid-column: 1; grid-row: 1; }
   .head-state { grid-column: 2; grid-row: 1; justify-self: end; }
   .head-id h1 { grid-row: 2; margin: 0 0 var(--sp-1); }
-  .head-actions { grid-row: 3; }
+  .head-actions { grid-column: 1 / -1; grid-row: 3; }
   .head-actions [data-action="pause"] > span, .head-actions [data-action="stop"] > span { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   body[data-kb] .crumbs, body[data-kb] .mission-answer, body[data-kb] .head-actions, body[data-kb] .head-state, body[data-kb] .mission-tabs { display: none; }
 }

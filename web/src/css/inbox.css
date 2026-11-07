@@ -1,5 +1,7 @@
 /* Inbox page (spec 8.3) and the MissionRow component it shares with the Missions page (rows.ts). */
 .page-title { margin-block: var(--sp-2) var(--sp-1); }
+/* Phones and tablets: the title sits directly under the top padding of the page. */
+@media (max-width: 63.99rem) { .page-title { margin-block-start: 0; } }
 .answer { display: flex; flex-wrap: wrap; margin: 0 0 var(--sp-3); color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
 .answer > span:empty { display: none; }
 .answer > [data-q="need-me"] { color: var(--text); font-weight: 600; }
@@ -9,6 +11,11 @@
 .section-head h2 { margin: 0; font-size: var(--fs-lg); line-height: var(--lh-lg); }
 .rows { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--sp-1); container-type: inline-size; }
 .quiet { margin-block: var(--sp-4); }
+/* Phones and tablets: tighter spacing around the page head so the first rows stay above the fold (the addendum's fold budget). */
+@media (max-width: 63.99rem) {
+  .answer { margin-block-end: var(--sp-2); }
+  .section-head { margin-block-start: var(--sp-2); }
+}
 
 /* MissionRow: pill, title, reason or cells, inline actions, menu. The layout follows the width of the list, not the device. */
 .mrow {
@@ -36,6 +43,14 @@
 @container (min-width: 60rem) {
   .mrow[data-layout="stack"] { grid-template-columns: 11rem minmax(0, 1fr) minmax(0, 1.1fr) auto auto; grid-template-areas: "pill title sub actions menu"; }
 }
+/* From 36rem to 48rem (a tablet) a row without inline actions keeps two lines: the provider, worker and age move up beside the title, and
+   the reason takes the whole second line. Without this, a running row wraps its reason and meta over three lines. */
+@container (min-width: 36rem) and (max-width: 47.99rem) {
+  .mrow[data-layout="stack"]:not(.has-actions) { grid-template-columns: 9rem minmax(0, 1fr) auto auto; grid-template-areas: "pill title meta menu" "pill reason reason menu"; }
+  .mrow[data-layout="stack"]:not(.has-actions) > .row-sub { display: contents; }
+  .mrow[data-layout="stack"]:not(.has-actions) .row-reason { grid-area: reason; }
+  .mrow[data-layout="stack"]:not(.has-actions) .row-meta { grid-area: meta; justify-self: end; max-inline-size: 22rem; }
+}
 /* Below 36rem the title shares the first line with the pill (Missions) or gets its own full-width line (Inbox). */
 @container (max-width: 36rem) {
   .mrow, .mrow[data-layout="cells"] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "pill title menu" "sub sub menu" "actions actions actions"; padding-block: 4px; }
@@ -61,3 +76,15 @@
 }
 .inbox-preview pre { max-block-size: 22rem; overflow: auto; font: var(--fs-xs)/var(--lh-xs) var(--mono); }
 
+/* Phone layout of the Sessions, Workers and Usage pages. It sits here and not in fleet.css because that route stylesheet is at the byte cap of
+   budget.json (routes.cssRaw), while the initial stylesheet has room. The answer line uses the small text size and tighter spacing, and a worker
+   row is two lines (pill and name, the last-seen time under them, the menu at the top right; then the facts beside Details), so the first rows of each page stay
+   above the fold of a 320x568 screen. */
+@media (max-width: 47.99rem) {
+  .fleet-head + .answers { margin-block: var(--sp-1) var(--sp-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .row-main:has(> .row-seen) { position: relative; padding-inline-end: var(--target); min-block-size: var(--target); }
+  .row-main:has(> .row-seen) > .row-end { position: absolute; inset: 0 0 auto auto; }
+  #view-status { margin-block-end: var(--sp-2); }
+  main .wsection + .wsection { margin-block-start: var(--sp-4); }
+  main .wname { margin-block-end: var(--sp-1); }
+}

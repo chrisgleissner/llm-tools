@@ -1,5 +1,6 @@
 /* ---- Missions page (spec 8.4): filters use .toolbar (components.css); the rows are MissionRow (inbox.css). */
 .selects { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+@media (max-width: 47.99rem) { .toolbar { margin-block: var(--sp-2); } }
 @media (max-width: 36rem) {
   .toolbar .search, .selects { flex-basis: 100%; }
   .selects { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }

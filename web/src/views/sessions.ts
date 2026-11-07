@@ -68,7 +68,12 @@ function sessionRow(s: Row): HTMLElement {
     "li",
     { class: "frow", "data-entity": `session:${s.operation_id}`, "data-l0": "sessions.session-row" },
     h("div", { class: "row-main" }, statePill(state), h("strong", { class: "nowrap" }, provider), s.model ? h("span", { class: "muted nowrap" }, s.model) : null, h("span", { class: "row-end muted small" }, ago(s.last_activity_at, "last activity"))),
-    h("div", { class: "row-sub small" }, rowLink(mission, `/missions/${encodeURIComponent(s.worker)}/${encodeURIComponent(s.mission_id)}`), s.task_ordinal === null ? null : h("span", { class: "muted nowrap" }, `Task ${s.task_ordinal}`), h("span", { class: "muted nowrap" }, s.worker), h("span", { class: "muted" }, ago(s.started_at, "started")), h("span", { class: "row-end" }, details.button)),
+    h(
+      "div",
+      { class: "row-sub small" },
+      h("span", { class: "row-facts" }, rowLink(mission, `/missions/${encodeURIComponent(s.worker)}/${encodeURIComponent(s.mission_id)}`), s.task_ordinal === null ? null : h("span", { class: "muted nowrap" }, `Task ${s.task_ordinal}`), h("span", { class: "muted nowrap" }, s.worker), h("span", { class: "muted" }, ago(s.started_at, "started"))),
+      h("span", { class: "row-end" }, details.button),
+    ),
     details.panel,
   );
 }

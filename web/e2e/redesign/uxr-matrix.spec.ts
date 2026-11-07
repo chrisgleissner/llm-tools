@@ -18,6 +18,14 @@ async function paneRows(page: import("@playwright/test").Page): Promise<number> 
   return (Math.min(box.y + box.height, vh) - Math.max(box.y, 0)) / (await rowHeightOf(page));
 }
 
+/** Terminal rows (without the 8 px padding of the host) that are above the fold: the usable height of the terminal itself, not of the pane around it. */
+async function terminalRowsAboveFold(page: import("@playwright/test").Page, line: number): Promise<number> {
+  const box = await page.locator("#terminal-host").boundingBox();
+  if (!box) return 0;
+  const visible = Math.min(box.y + box.height, line) - Math.max(box.y, 0);
+  return Math.max(0, visible - 16) / (await rowHeightOf(page));
+}
+
 // ---- T18: the Inbox queue is first and its action is above the fold -----------------------------------------------
 uxr({ t: "T18", uxr: ["UXR-012", "UXR-024"], needs: ["WP-0", "WP-1", "WP-4"] }, "the first Needs you row and its primary action are fully above the fold, ahead of Running", async ({ page }, info) => {
   const app = await openApp(page, { auth: "in", dataset: "dense" }, "/");
@@ -68,6 +76,9 @@ for (const def of PAGES) {
     if (def.id === "mission") {
       const need = { xxl: 60, xl: 40, lg: 30, md: 38, sm: 20, xs: viewport(page).height >= 640 ? 14 : 12 }[cls!];
       expect(await paneRows(page), "terminal rows above the fold").toBeGreaterThanOrEqual(need - 1);
+      // The pane rows above include the pane's own chrome (toolbar, composer, key bar). On the two smallest phones the header used to take so much
+      // that the terminal itself kept a sliver; it must keep at least six rows of its own, above the fold, in the Needs approval state.
+      if (cls === "xs") expect(await terminalRowsAboveFold(page, line), `terminal rows of the terminal itself above the fold at ${viewport(page).width}x${viewport(page).height}`).toBeGreaterThanOrEqual(6);
     }
     await evidence(page, info, ["UXR-024", "UXR-037"], `fold-${def.id}`);
   });

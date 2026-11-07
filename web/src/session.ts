@@ -142,6 +142,7 @@ export function sessionPane(workerName: string, missionId: string, opts: Session
       offerControl: !controlling,
       takeReason,
       note: controlling ? "Enter sends, Shift+Enter adds a line." : takeReason || (live ? "Take control to type" : "Not connected."),
+      hint: controlling || (live && !takeReason),
     });
     keys?.enable(controlling, "Take control to use the keys");
     renderMenu();

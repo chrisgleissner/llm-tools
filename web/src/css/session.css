@@ -17,8 +17,14 @@
 .term-host.pan { mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent); }
 .jump { position: absolute; inset: auto var(--sp-3) var(--sp-2) auto }
 .composer { position: sticky; inset-block-end: 0; padding: var(--sp-2); border-block-start: 1px solid var(--border); background: var(--surface-1); }
-@media (max-width: 47.99rem) { .composer { padding-block: var(--sp-1); } }
-.composer-field { flex: 1 1 8rem; min-block-size: var(--control-h); max-block-size: 6.25rem; resize: none; field-sizing: content; }
+/* Phones: the composer is one row. Without control the disabled message field and Send are left out, and so is a note that only repeats the controls (one that gives a reason stays). The terminal keeps six rows. */
+@media (max-width: 47.99rem) {
+  .composer, .session-bar { padding-block: 2px; }
+  .session-bar { row-gap: 0; }
+  .composer:has(.composer-field:disabled) :is(.composer-field, #composer-send), .composer-note[data-hint="true"] { display: none; }
+  body:not([data-kb]) .session-main { min-block-size: 7.25rem; }
+}
+.composer-field { flex: 1 1 5rem; min-inline-size: 0; min-block-size: var(--control-h); max-block-size: 6.25rem; resize: none; field-sizing: content; }
 .composer .menu-popover { inset-block: auto calc(100% + var(--sp-1)); }
 .queued-chip { border: 1px solid var(--alert-attention-bar); border-radius: var(--r-pill); background: var(--alert-attention-bg); color: var(--alert-attention-fg); padding: 2px var(--sp-3); }
 /* A grid, not a wrapping flex row: the height of a flex container that wraps is under-measured by the grid row of the pane, which clipped the second row at large text. */
