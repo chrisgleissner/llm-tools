@@ -285,7 +285,7 @@ and compatibility test are the reviewable contract for each release.
 | Pre-hello worker connections | 1 per worker token, 10 s to send hello (second connection: 429) | fixed |
 | Graceful shutdown | 10 s | fixed |
 | Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers) | fixed |
-| Stored events per worker | 50 000, oldest deleted first (worker databases keep the authoritative copy) | `max_events_per_worker` |
+| Stored events per worker | 50 000, oldest deleted first, in passes that keep 90 % of the cap once it is reached (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | 7 days | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
 | Bearer mutations | 30 per token and 120 per client address by default in a rolling 60-second window; rejected requests receive 429 with `Retry-After` | `mutation_limit_per_token`, `mutation_limit_per_address` (1–10,000) |
