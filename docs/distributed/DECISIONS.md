@@ -352,3 +352,14 @@ In the code: schema migration 19 and `Db::session_list_for` / `Db::session_revok
 `coordinator/tests/web_api.rs::browser_sessions_can_list_and_revoke_only_their_principals_sessions`
 and `coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place` cover the behavior.
 
+## D25 Configurable bounded global mutation budget (SEC2-010)
+
+Keep the global authenticated-mutation ceiling at 600 per rolling minute by default, while
+allowing operators to lower it for constrained deployments or raise it within a hard 10,000
+request maximum. Internet mode imposes a stricter 300-request ceiling. This also lets isolated
+load and security-scanner instances raise their budgets without changing production defaults.
+
+In the code: `mutation_limit_global` is loaded and validated by `coordinator/src/config.rs` and
+applied by `coordinator/src/http.rs`. Config tests cover the bound and Internet limit; the isolated
+storage-write integration test verifies the runtime setting by submitting 1,000 command requests.
+
