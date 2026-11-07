@@ -76,8 +76,14 @@ export async function setupViaUi(page: Page, coord: Coordinator, username = "adm
   await page.getByLabel("Administrator username").fill(username);
   await page.getByLabel("New password", { exact: true }).fill(PASSWORD);
   await page.getByLabel("Repeat password").fill(PASSWORD);
+  const setupResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname.endsWith("/auth/setup") && response.request().method() === "POST",
+    { timeout: 30_000 },
+  );
   await page.getByRole("button", { name: "Create administrator" }).click();
-  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+  const response = await setupResponse;
+  expect(response.ok(), `first-run setup returned HTTP ${response.status()}`).toBe(true);
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible({ timeout: 30_000 });
 }
 
 /** Open the account menu and sign out. */

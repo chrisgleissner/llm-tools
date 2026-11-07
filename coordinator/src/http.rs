@@ -2726,6 +2726,13 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
             ))
         }
         InsertOutcome::QueueFull => return Err(err(StatusCode::TOO_MANY_REQUESTS, "queue-full", "too many unfinished commands for this worker")),
+        InsertOutcome::RequestTooLarge => {
+            return Err(err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request-too-large",
+                "command request exceeds the 64 KiB limit",
+            ))
+        }
         InsertOutcome::Existing(row) => row,
         InsertOutcome::New(row) => {
             if mutating {
@@ -2735,7 +2742,7 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
                 );
                 st.db.audit(&p.actor(), "command.submit", &detail, &ip);
             }
-            st.hub.publish(json!({"type": "command", "command": row.to_json()}));
+            st.hub.publish(json!({"type": "command", "command": row.notification_json()}));
             let mut payload = request.clone();
             payload.insert("target".into(), json!("local"));
             payload.entry("params").or_insert_with(|| json!({}));

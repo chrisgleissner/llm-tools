@@ -52,7 +52,20 @@ export const WORKERS = [
 const mk = (n: number, worker: string, name: string, status: string, folder: string, ago: number) => ({
   worker,
   stale: worker === "beta",
-  mission: { id: `${String(n).padStart(2, "0")}a1b2c3d4e5f60718293a4b5c6d7e8f90`.slice(0, 32), name, status, folder, updated_at: iso(ago) },
+  mission: {
+    id: `${String(n).padStart(2, "0")}a1b2c3d4e5f60718293a4b5c6d7e8f90`.slice(0, 32),
+    name,
+    status,
+    folder,
+    updated_at: iso(ago),
+    ...(n === 1 ? {
+      task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 },
+      current_task: { ordinal: 2, title: "Implement the new tokenizer" },
+      station: "codex",
+      model: "gpt-5",
+      needs_you: { kind: "approval", tasks: [2], message: "task 2 awaits approval" },
+    } : {}),
+  },
 });
 export const MISSIONS = [
   mk(1, "alpha", "Refactor the parser", "RUNNING", "parser", 95),
@@ -216,6 +229,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         const status = missionAction[2] === "start" || missionAction[2] === "resume" || missionAction[2] === "continue" ? "RUNNING"
           : missionAction[2] === "pause" ? "PAUSED" : missionAction[2] === "stop" ? "STOPPED" : "CANCELLED";
         current.mission.status = status;
+        streamSocket?.send(JSON.stringify({ type: "event", mission_id: current.mission.id }));
       }
       return json(route, 200, { request_id: "resource-mock", target: url.searchParams.get("worker"), operation, state: "done", result: { outcome: "applied", result: { mission: current?.mission ?? null }, error: null } });
     }

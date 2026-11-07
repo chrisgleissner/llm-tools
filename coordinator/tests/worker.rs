@@ -620,10 +620,16 @@ async fn stream_broadcast() {
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let m = next(&mut stream).await;
     assert_eq!((m["type"].as_str(), m["state"].as_str()), (Some("worker"), Some("online")));
-    fw.send("events", json!({"after": 0, "through": 1, "events": [{"id": 1}]})).await;
+    fw.send(
+        "events",
+        json!({"after": 0, "through": 1, "events": [{"id": 1, "mission_id": "m1", "task_id": 2, "kind": "task-paused"}]}),
+    )
+    .await;
     let m = next(&mut stream).await;
     assert_eq!(m["type"], "event");
-    assert_eq!(m["events"][0]["id"], 1);
+    assert_eq!(m["cursor"], 1);
+    assert_eq!(m["task_missions"], json!(["m1"]));
+    assert!(m.get("events").is_none(), "browser notifications must not retain or fan out event bodies");
     api.post("/api/v1/commands", submit("s1")).await;
     assert_eq!(next(&mut stream).await["type"], "command");
     drop(fw);
@@ -634,6 +640,105 @@ async fn stream_broadcast() {
         }
     }
     env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_command_request_is_refused_with_documented_problem() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (_worker, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let mut command = request("oversized", "mission.list");
+    // Keep each JSON string within the global 64 KiB limit while making the
+    // complete command request exceed its independent 64 KiB budget.
+    command["params"] = json!({"first": "x".repeat(40 * 1024), "second": "y".repeat(40 * 1024)});
+    let (status, problem) = api.post("/api/v1/commands", json!({"target": "w1", "request": command})).await;
+    assert_eq!(status, 413, "{problem}");
+    assert_eq!(problem["code"], "request-too-large");
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/request-too-large");
+    let (_, spec) = env.api().get("/api/v1/openapi.json").await;
+    assert!(spec["paths"]["/api/v1/commands"]["post"]["responses"]["413"].is_object());
+    env.stop().await;
+}
+
+#[test]
+fn command_journal_refuses_excess_pending_bytes() {
+    use bridge_coordinator::db::{Db, InsertOutcome, MAX_OPEN_COMMAND_BYTES_PER_WORKER};
+    let dir = tmp_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = Db::open(&bridge_coordinator::db_path(&dir)).unwrap();
+    assert!(db.worker_add("w1", "hash").unwrap());
+    let padding = "x".repeat(60 * 1024);
+    let mut accepted = 0;
+    for i in 0..20 {
+        let mut row = request(&format!("queued-{i}"), "mission.list");
+        row["params"] = json!({"padding": padding});
+        if matches!(db.command_insert("w1", "mission.list", false, &row).unwrap(), InsertOutcome::New(_)) {
+            accepted += row.to_string().len();
+        } else {
+            break;
+        }
+    }
+    assert!(accepted <= MAX_OPEN_COMMAND_BYTES_PER_WORKER as usize);
+    assert!(accepted >= 400 * 1024, "the test should exercise the byte budget, accepted {accepted} bytes");
+    let mut too_large = request("single-oversized", "mission.list");
+    too_large["params"] = json!({"padding": "x".repeat(65 * 1024)});
+    assert!(matches!(
+        db.command_insert("w1", "mission.list", false, &too_large).unwrap(),
+        InsertOutcome::RequestTooLarge
+    ));
+
+    assert!(db.worker_add("w2", "hash-2").unwrap());
+    let multibyte = "🛑".repeat(10 * 1024);
+    let mut accepted = 0;
+    for i in 0..20 {
+        let mut row = request(&format!("unicode-{i}"), "mission.list");
+        row["params"] = json!({"padding": multibyte});
+        if matches!(db.command_insert("w2", "mission.list", false, &row).unwrap(), InsertOutcome::New(_)) {
+            accepted += row.to_string().len();
+        } else {
+            break;
+        }
+    }
+    assert!(
+        accepted <= MAX_OPEN_COMMAND_BYTES_PER_WORKER as usize,
+        "UTF-8 request bytes were undercounted: {accepted}"
+    );
+    assert!(accepted >= 400 * 1024);
+}
+
+#[test]
+fn event_batches_have_an_independent_byte_limit() {
+    use bridge_coordinator::protocol::{self, MAX_EVENT_BATCH_BYTES};
+    let raw = json!({
+        "v": 1, "type": "events", "id": "e1", "worker_id": "wid", "generation": 1,
+        "payload": {"after": 0, "through": 1, "events": [{"id": 1, "body": "x".repeat(MAX_EVENT_BATCH_BYTES)}]}
+    })
+    .to_string();
+    let error = protocol::decode(raw.as_bytes()).expect_err("oversized batch is refused before storage");
+    assert_eq!(error.code, "message-too-large");
+}
+
+#[test]
+fn hub_fanout_keeps_only_small_change_notifications_for_multiple_browsers() {
+    use bridge_coordinator::hub::{Hub, MAX_STREAM_MESSAGE_BYTES};
+    let hub = Hub::new();
+    let mut browser_one = hub.stream.subscribe();
+    let mut browser_two = hub.stream.subscribe();
+    hub.publish(json!({"type": "event", "worker": "w1", "cursor": 7, "events": [{"data": "x".repeat(200_000)}]}));
+    for browser in [&mut browser_one, &mut browser_two] {
+        let message = browser.try_recv().unwrap();
+        assert!(message.len() <= MAX_STREAM_MESSAGE_BYTES);
+        let value: Value = serde_json::from_str(&message).unwrap();
+        assert!(value.get("events").is_none());
+        assert_eq!(value["cursor"], 7);
+    }
+    hub.publish(json!({"type": "command", "command": {"request": {"params": "x".repeat(200_000)}, "result": {"result": "x".repeat(200_000)}}}));
+    let message = browser_one.try_recv().unwrap();
+    assert!(message.len() <= MAX_STREAM_MESSAGE_BYTES);
+    let value: Value = serde_json::from_str(&message).unwrap();
+    assert!(value["command"].get("request").is_none());
+    assert!(value["command"].get("result").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]

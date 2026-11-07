@@ -16,6 +16,7 @@ around them.
   worker verifies the coordinator certificate against the CA it trusted at
   enrolment.
 - Each WebSocket text frame carries exactly one JSON message of at most 1 MiB.
+- An `events` payload is limited to 500 events and 128 KiB of serialized event data, whichever comes first. The worker uses smaller batches under normal conditions.
   A larger frame closes the connection with code 1009.
 - Terminal byte streams use a separate WebSocket per terminal session
   (`/api/v1/worker/terminal/<session>`), so a slow terminal cannot delay

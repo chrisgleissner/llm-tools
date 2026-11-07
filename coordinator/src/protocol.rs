@@ -5,6 +5,7 @@ use serde_json::{json, Map, Value};
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_EVENTS_PER_BATCH: usize = 500;
+pub const MAX_EVENT_BATCH_BYTES: usize = 128 * 1024;
 pub const MAX_MISSIONS_PER_HELLO: usize = 5000;
 pub const COMMAND_SCHEMA_VERSION: u64 = 1;
 
@@ -140,6 +141,9 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
             let Some(events) = p["events"].as_array().filter(|e| e.len() <= MAX_EVENTS_PER_BATCH) else {
                 return perr("invalid-message", format!("events must be a list of at most {MAX_EVENTS_PER_BATCH}"));
             };
+            if serde_json::to_vec(events).map_or(true, |bytes| bytes.len() > MAX_EVENT_BATCH_BYTES) {
+                return perr("message-too-large", format!("event batch exceeds {MAX_EVENT_BATCH_BYTES} bytes"));
+            }
             let mut previous = after;
             for e in events {
                 if !e.is_object() {
@@ -180,7 +184,7 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
         }
         "hello" => {
             uint(p.get("event_cursor"), "event_cursor", 0)?;
-            if !p["capabilities"].is_array() || !p["missions"].is_array() {
+            if !p["capabilities"].is_array() || !p["missions"].as_array().is_some_and(|missions| missions.len() <= MAX_MISSIONS_PER_HELLO) {
                 return perr("invalid-message", "hello: capabilities and missions must be lists");
             }
         }
@@ -202,9 +206,9 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
                 "terminal.status"
                     if !matches!(p["state"].as_str(), Some("opened" | "refused" | "closed"))
                         || !matches!(p["mode"].as_str(), Some("view" | "write"))
-                        || !p["reason"].is_string() =>
+                        || !p["reason"].as_str().is_some_and(|reason| reason.len() <= 256) =>
                 {
-                    return perr("invalid-message", "terminal.status: bad state, mode or reason");
+                    return perr("invalid-message", "terminal.status: bad state, mode or reason (maximum 256 bytes)");
                 }
                 _ => {}
             }
