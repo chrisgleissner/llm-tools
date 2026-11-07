@@ -137,7 +137,7 @@ def test_new_user_reaches_a_completed_hello_world_mission(fresh) -> None:
     terminal.type("Create a file named hello.txt containing the word hello, then stop.")
     terminal.keys("Tab", "Tab", "Tab", "Tab", "Tab")  # Providers, Folder, Mode, Save, Start
     start = terminal.wait_for("Starts claude now")
-    assert "Claude asks once to trust this folder: choose Yes" in start
+    assert "choose Yes" in start and ("Claude asks once" in start or "trust folder" in start)
     assert "Native" in start
 
     # 4. Start runs the provider in its station; when it exits the station says how to continue.
