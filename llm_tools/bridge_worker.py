@@ -590,6 +590,25 @@ class WorkerSession:
             return None
         return {"kind": "provider", "message": message[:2048], "command": command[:512]}
 
+    @staticmethod
+    def _compact_needs(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """What needs the operator, bounded: the kind, the message, the command and the task numbers."""
+        needs = snapshot.get("needs_you")
+        if not isinstance(needs, dict):
+            return None
+        compact: dict[str, Any] = {}
+        if needs.get("kind") in {"approval", "failed", "blocked", "proposal", "capacity", "provider"}:
+            compact["kind"] = needs["kind"]
+        if isinstance(needs.get("message"), str):
+            compact["message"] = needs["message"][:2048]
+        if isinstance(needs.get("command"), str):
+            compact["command"] = needs["command"][:512]
+        if isinstance(needs.get("tasks"), list):
+            compact["tasks"] = [task for task in needs["tasks"][:32] if isinstance(task, int) and task > 0]
+        if isinstance(needs.get("hold"), bool):
+            compact["hold"] = needs["hold"]
+        return compact or None
+
     def _mission_summary(self, store: BridgeStore, row: dict[str, Any]) -> dict[str, Any]:
         mission_id = str(row["id"])
         summary: dict[str, Any] = {
@@ -605,16 +624,19 @@ class WorkerSession:
             # Task counts and the current task let a console draw its lists from the replicated
             # summary instead of asking the worker for the status of every active mission.
             summary.update(mission_digest(snapshot))
+            compact = self._compact_needs(snapshot)
+            if compact is not None:
+                summary["needs_you"] = compact
         else:
             counters = store.task_counters(mission_id)
             summary["task_counts"] = {str(key): int(value) for key, value in counters["status"].items()}
         if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
             question = self._provider_question(snapshot)
-            summary["needs_you"] = question
+            summary["needs_you"] = question if question is not None else summary.get("needs_you")
             self.mission_questions[mission_id] = question
         elif mission_id in self.mission_questions:
             # Event-driven summaries clear a question when its mission leaves RUNNING.
-            summary["needs_you"] = None
+            summary.setdefault("needs_you", None)
             self.mission_questions.pop(mission_id, None)
         return summary
 
@@ -695,7 +717,7 @@ class WorkerSession:
         if self.terminal_launcher is None:
             return [self._terminal_refused(session_id, "terminal access is not available on this worker")]
         if not self.config.terminal_view:
-            return [self._terminal_refused(session_id, "this worker does not share terminals; enrol it with --allow-terminal-view or --allow-control")]
+            return [self._terminal_refused(session_id, "Needs --allow-terminal-view or --allow-control")]
         with self.open_store() as store:
             known = store.mission_id_if_exists(mission_id)
         if known is None:

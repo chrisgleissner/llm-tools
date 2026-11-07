@@ -674,6 +674,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -892,6 +902,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -1078,6 +1098,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -1333,6 +1363,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -1550,6 +1590,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -1763,6 +1813,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -1959,6 +2019,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -2176,6 +2246,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -2404,6 +2484,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -2625,6 +2715,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -2857,6 +2957,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -3067,6 +3177,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -3337,6 +3457,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -3543,6 +3673,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -3740,6 +3880,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -3936,6 +4086,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -4220,6 +4380,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -4443,6 +4613,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -4674,6 +4854,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -4903,6 +5093,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -5164,6 +5364,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -5392,6 +5602,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -5652,6 +5872,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -5916,6 +6146,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -6142,6 +6382,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -6400,6 +6650,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -6630,6 +6890,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -6856,6 +7126,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -7111,6 +7391,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -7389,6 +7679,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -7618,6 +7918,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -7846,6 +8156,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -8107,6 +8427,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -8333,6 +8663,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -8581,6 +8921,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -8827,6 +9177,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -9076,6 +9436,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -9334,6 +9704,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -9583,6 +9963,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -9780,6 +10170,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -9966,6 +10366,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -10174,6 +10584,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -10370,6 +10790,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -10568,6 +10998,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -10764,6 +11204,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -11023,6 +11473,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -11230,6 +11690,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -11426,6 +11896,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -11628,6 +12108,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -11818,6 +12308,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -12059,6 +12559,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -12266,6 +12776,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -12470,6 +12990,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -12696,6 +13226,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -12924,6 +13464,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -13150,6 +13700,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -13366,6 +13926,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {
@@ -13584,6 +14154,16 @@
             },
             "description": "The supplied task revision is stale"
           },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
+          },
           "415": {
             "content": {
               "application/problem+json": {
@@ -13780,6 +14360,16 @@
               }
             },
             "description": "The supplied task revision is stale"
+          },
+          "413": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            },
+            "description": "The request body or command request exceeds its byte limit"
           },
           "415": {
             "content": {

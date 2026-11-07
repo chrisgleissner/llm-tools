@@ -46,7 +46,7 @@ MAX_BACKOFF = 0.5
 RECONNECT_BOUND = 5.0
 # A half-open link is noticed only through silence: SILENCE_LIMIT plus one ping interval and one idle read.
 STALL_DETECTION_BOUND = SILENCE_LIMIT + PING_INTERVAL + 1.0
-MAX_OPEN_COMMANDS = 1000  # coordinator/src/db.rs MAX_OPEN_COMMANDS_PER_WORKER
+MAX_OPEN_COMMANDS = 256  # coordinator/src/db.rs MAX_OPEN_COMMANDS_PER_WORKER
 OUTBOX_BOUND = 1024  # WorkerSession.outbox maxsize
 
 

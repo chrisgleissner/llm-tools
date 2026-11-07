@@ -184,6 +184,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "428": {"description":"A required If-Match precondition was not supplied","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "409": {"description":"The requested change conflicts with current state","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "413": {"description":"The request body or command request exceeds its byte limit","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "422": {"description":"The worker does not support this operation","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "405": {"description":"Method not allowed","headers":{"Allow":{"schema":{"type":"string"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},

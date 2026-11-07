@@ -59,6 +59,13 @@ WAL_FRAMES_PER_BATCH_BOUND = 12
 # last_used touch landing in the window) and nothing per ping.
 IDLE_SECONDS = 50
 IDLE_WRITE_BYTES_BOUND = 8 * 1024
+DAILY_WRITE_BUDGET_BYTES = 1 << 30
+ACTIVE_MISSIONS = 3
+ASSUMED_EVENTS_PER_MISSION_PER_SECOND = 1
+CONNECTED_WORKERS_FOR_BUDGET = 3
+HEARTBEAT_WRITE_BYTES_PER_HOUR = 104 * 1024  # measured one-hour idle run in benchmarks.md
+SESSION_TOUCH_BYTES_PER_WRITE = 4 * 1024  # conservative one-page allowance, once per five-minute touch
+BROWSER_SESSIONS_FOR_BUDGET = 2
 
 
 def _write_bytes(pid: int) -> int:
@@ -223,6 +230,16 @@ def test_one_thousand_replicated_events_stay_within_the_write_and_growth_bounds(
         assert written <= EVENTS_WRITE_BYTES_BOUND, f"{written} bytes written for {N} events"
         assert growth_files <= DB_GROWTH_BYTES_PER_EVENT_BOUND
         assert growth_logical <= DIAGNOSTICS_GROWTH_BYTES_PER_EVENT_BOUND
+        # Extrapolate from the measured event cost, not a guessed file-growth value. This is a
+        # deliberately busy one-event/second rate on each of three missions; add three connected
+        # workers' measured idle heartbeat writes and two sessions' maximum five-minute touches.
+        daily = (
+            written / N * ACTIVE_MISSIONS * ASSUMED_EVENTS_PER_MISSION_PER_SECOND * 86_400
+            + HEARTBEAT_WRITE_BYTES_PER_HOUR * 24 * CONNECTED_WORKERS_FOR_BUDGET
+            + SESSION_TOUCH_BYTES_PER_WRITE * BROWSER_SESSIONS_FOR_BUDGET * 12 * 24
+        )
+        print(f"DAILY_BUDGET_EXTRAPOLATION={daily:.0f} bytes ({daily / (1 << 20):.1f} MiB) at 1 event/s/mission, three workers and two browser sessions")
+        assert daily < DAILY_WRITE_BUDGET_BYTES, f"measured daily write estimate {daily:.0f} exceeds 1 GiB"
 
 
 def test_one_thousand_command_round_trips_stay_within_the_write_bound(tmp_path, monkeypatch, capsys, block_dir):

@@ -25,6 +25,10 @@ export interface StreamMessage {
   first_event_id?: number | null;
   last_event_id?: number | null;
   missions?: Array<{ id: string; events: number; last_event_id: number; summary: boolean }>;
+  /** `event`: ids of the missions whose tasks changed in the batch (at most 16). */
+  task_missions?: string[];
+  /** `event`: the mission list in the notice was cut; read the mission list again. */
+  truncated?: boolean;
   /** `command`: identity and state only; the request parameters and the result stay in `GET /api/v1/commands/{id}`. */
   command?: Partial<api.CommandRow> & { request_id: string; outcome?: string | null };
   mission_id?: string;

@@ -382,6 +382,9 @@ async fn deliver_row(st: &St, socket: &mut WebSocket, worker_id: &str, generatio
     true
 }
 
+/// Most missions named in one change notice; keeps the notice well below the hub's per-message limit.
+const MAX_NOTICE_MISSIONS: usize = 16;
+
 /// The browser-stream change notice for one accepted batch: counts per mission, not the events.
 /// A console that wants the details reads `GET /api/v1/events` (stored by the coordinator, so no
 /// worker round trip) or the mission list, whose entries carry the replicated summaries.
@@ -399,13 +402,32 @@ fn event_notice(worker: &str, cursor: u64, events: &[Value], summaries: &[Value]
             by_mission.entry(id.to_string()).or_default().2 = true;
         }
     }
+    // Missions whose tasks changed (an event with a task id), so an open mission page reads its task list.
+    let mut task_missions = std::collections::BTreeSet::new();
+    for event in events {
+        if event.get("task_id").is_some_and(|id| !id.is_null()) {
+            if let Some(mission) = event.get("mission_id").and_then(Value::as_str) {
+                task_missions.insert(mission.to_string());
+            }
+        }
+        if task_missions.len() >= MAX_NOTICE_MISSIONS {
+            break;
+        }
+    }
     let first = events.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).min();
     let last = events.iter().filter_map(|e| e.get("id").and_then(Value::as_u64)).max();
-    let missions: Vec<Value> = by_mission
+    // The hub drops a stream message above `MAX_STREAM_MESSAGE_BYTES`, so the list is capped: missions with
+    // events first. A console that sees `truncated` re-reads the mission list instead of trusting the list.
+    let mut entries: Vec<(String, (u64, u64, bool))> = by_mission.into_iter().collect();
+    entries.sort_by_key(|(id, (count, _, _))| (*count == 0, id.clone()));
+    let truncated = entries.len() > MAX_NOTICE_MISSIONS;
+    entries.truncate(MAX_NOTICE_MISSIONS);
+    let missions: Vec<Value> = entries
         .into_iter()
         .map(|(id, (count, last_id, summary))| json!({"id": id, "events": count, "last_event_id": last_id, "summary": summary}))
         .collect();
-    json!({"type": "event", "worker": worker, "cursor": cursor, "count": events.len(), "first_event_id": first, "last_event_id": last, "missions": missions})
+    json!({"type": "event", "worker": worker, "cursor": cursor, "count": events.len(), "first_event_id": first, "last_event_id": last,
+           "missions": missions, "task_missions": task_missions, "truncated": truncated})
 }
 
 /// The worker's `stale-generation` error in reply to our `welcome`.

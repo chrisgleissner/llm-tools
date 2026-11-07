@@ -3,7 +3,8 @@
 // The coordinator announces accepted event batches with a small notice (counts per mission, no events).
 // The console re-reads the mission list, whose entries carry the replicated digest (task counts, current
 // task, station, model), and reads new events from the coordinator. A worker command (the mission status or
-// the task list) is sent only when the digest of the open mission changed.
+// the task list) is sent only when the digest of the open mission changed. The mission page draws its
+// status from the digest and sends no status command at all; a changed digest reads the task list once.
 import { expect, test } from "./fixtures";
 import { mockApp, MISSION_PATH, MISSIONS, type MockOptions } from "./mock";
 
@@ -35,18 +36,18 @@ test("a notice for the open mission reads events from the coordinator, not tasks
   const mock = await mockApp(page, IN);
   await page.goto(MISSION_PATH);
   await expect(page.locator("#tasks-table tbody tr")).toHaveCount(6);
-  await expect(page.locator("#mission-status")).toContainText("healthy");
+  await expect(page.locator("#mission-status")).toContainText("RUNNING");
   await page.waitForTimeout(600);
   const before = mock.requestCounts();
   for (let i = 0; i < 3; i += 1) mock.emitStream(notice([{ id: RUNNING, events: 1 }]));
   await expect.poll(() => mock.requestCounts().events).toBeGreaterThan(before.events);
   await page.waitForTimeout(1500);
   const after = mock.requestCounts();
-  expect(after.status, "status is read again only when the digest changes").toBe(before.status);
+  expect(after.status, "the mission page never asks the worker for the status").toBe(0);
   expect(after.tasks).toBe(before.tasks);
 });
 
-test("a changed digest of the open mission reads its tasks and status once", async ({ page }) => {
+test("a changed digest of the open mission reads its tasks once and shows the new counts without a status read", async ({ page }) => {
   const mock = await mockApp(page, IN);
   await page.goto(MISSION_PATH);
   await expect(page.locator("#tasks-table tbody tr")).toHaveCount(6);
@@ -54,8 +55,9 @@ test("a changed digest of the open mission reads its tasks and status once", asy
   const before = mock.requestCounts();
   mock.patchMission(RUNNING, { task_counts: { COMPLETED: 2, VERIFYING: 0, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 } });
   mock.emitStream(notice([{ id: RUNNING, events: 1 }]));
-  await expect.poll(() => mock.requestCounts().status).toBe(before.status + 1);
   await expect.poll(() => mock.requestCounts().tasks).toBe(before.tasks + 1);
+  await expect(page.locator("#mission-status")).toContainText("completed 2");
   await page.waitForTimeout(1500);
-  expect(mock.requestCounts().status).toBe(before.status + 1);
+  expect(mock.requestCounts().tasks).toBe(before.tasks + 1);
+  expect(mock.requestCounts().status, "the status is drawn from the digest").toBe(0);
 });

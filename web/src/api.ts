@@ -21,7 +21,7 @@ export interface MissionInfo {
   needs_you?: { kind: string; message: string; command?: string } | null;
   /** Replicated with each mission summary (protocol.md, "Mission summaries"); absent when the worker predates it. */
   task_counts?: Record<string, number>;
-  current_task?: { ordinal: number; title: string } | null;
+  current_task?: { ordinal?: number; title?: string } | null;
   station?: string | null;
   model?: string | null;
   needs_kind?: string | null;

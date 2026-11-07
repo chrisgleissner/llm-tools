@@ -25,6 +25,9 @@ STATUS_EVENT_LIMIT_MAX = 20
 STATUS_STRING_CHARS = 2048  # longest string kept anywhere in the result (provider questions are at most this long)
 STATUS_LIST_ITEMS = 20
 STATUS_TITLE_CHARS = 200
+SUMMARY_TITLE_CHARS = 256
+SUMMARY_STATION_CHARS = 64
+SUMMARY_MODEL_CHARS = 128
 STATUS_OBJECTIVE_CHARS = 160
 STATUS_BYTE_LIMIT = 16 * 1024
 
@@ -146,9 +149,10 @@ def mission_digest(snapshot: dict[str, Any]) -> dict[str, Any]:
         "needs_kind": needs.get("kind") if isinstance(needs.get("kind"), str) else None,
         "needs_tasks": len(tasks) if isinstance(tasks, list) else 0,
         "task_counts": {str(key): int(value) for key, value in counts.items() if isinstance(value, int)} if isinstance(counts, dict) else {},
-        "current_task": {"ordinal": current.get("ordinal"), "title": _clip(str(current.get("title") or ""), STATUS_TITLE_CHARS)}
+        "current_task": {"ordinal": current.get("ordinal"), "title": str(current.get("title") or "")[:SUMMARY_TITLE_CHARS]}
         if isinstance(current, dict) and isinstance(current.get("ordinal"), int) else None,
-        "station": station,
-        "model": model,
+        # "unknown" is what the worker reports when it has not observed a provider yet.
+        "station": (station or "unknown")[:SUMMARY_STATION_CHARS],
+        "model": (model or "unknown")[:SUMMARY_MODEL_CHARS],
     }
     return digest

@@ -67,7 +67,7 @@ const SCREENS: Screen[] = [
   { name: "missions-filtered", mock: IN, path: "/missions?status=RUNNING", run: async (p) => { await expect(p.locator("#missions-table tbody tr")).toHaveCount(2); } },
   { name: "missions-no-match", mock: IN, path: "/missions?q=zzz", run: (p) => expect(p.getByRole("heading", { name: "No missions match" })).toBeVisible() },
   { name: "missions-none", mock: { auth: "in", missions: "none" }, path: "/missions", run: (p) => expect(p.getByRole("heading", { name: "No missions yet" })).toBeVisible() },
-  { name: "mission-detail", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await expect(p.locator("#events-list li").first()).toBeVisible(); await expect(p.locator("#events-list .transition-summary")).toContainText("RUNNING → VERIFYING"); await expect(p.locator("#events-list")).not.toContainText("do-not-render-this"); await expect(p.locator("#mission-status")).toContainText("healthy"); await expect(p.locator("#mission-current-work")).toContainText("Implement the new tokenizer"); await expect(p.locator("#terminal-status")).toHaveAttribute("data-mode", "view"); } },
+  { name: "mission-detail", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await expect(p.locator("#events-list li").first()).toBeVisible(); await expect(p.locator("#events-list .transition-summary")).toContainText("RUNNING → VERIFYING"); await expect(p.locator("#events-list")).not.toContainText("do-not-render-this"); await expect(p.locator("#mission-status")).toContainText("RUNNING"); await expect(p.locator("#mission-current-work")).toContainText("Implement the new tokenizer"); await expect(p.locator("#terminal-status")).toHaveAttribute("data-mode", "view"); } },
   { name: "mission-live-output", mock: { ...IN, terminalScreen: true }, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#terminal-status")).toContainText("Live - view only"); await expect(p.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs"); } },
   { name: "mission-confirm-reject", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await p.getByRole("button", { name: "Reject task 2" }).click(); await expect(p.getByRole("dialog")).toBeVisible(); } },
   { name: "mission-toast-applied", mock: IN, path: MISSION_PATH, run: async (p) => { await expect(p.locator("#tasks-table tbody tr")).toHaveCount(6); await p.getByRole("button", { name: "Pause task 5" }).click(); await expect(p.locator(".toast.applied")).toBeVisible(); } },
@@ -116,9 +116,9 @@ test("Codex queued-question attention opens the mission's live terminal", async 
 test("running mission streams output read-only without a click or sending input", async ({ page }) => {
   const mock = await mockApp(page, { ...IN, terminalScreen: true });
   const journeyStartedAt = Date.now();
-  let statusReceivedAt = 0;
+  let summaryReceivedAt = 0;
   page.on("response", (response) => {
-    if (new URL(response.url()).pathname.endsWith(`/missions/${MISSION_PATH.split("/").at(-1)}`) && response.request().method() === "GET") statusReceivedAt = Date.now();
+    if (new URL(response.url()).pathname.endsWith("/missions") && response.request().method() === "GET") summaryReceivedAt = Date.now();
   });
   await page.goto(MISSION_PATH);
   await expect(page.locator("#mission-current-work")).toContainText("Implement the new tokenizer");
@@ -129,9 +129,9 @@ test("running mission streams output read-only without a click or sending input"
   await expect(page.locator("#terminal-host")).toBeVisible();
   await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
   await expect(page.locator("#terminal-host .xterm-rows")).toBeInViewport({ ratio: 0.25 });
-  const outputLatencyMs = Date.now() - statusReceivedAt;
+  const outputLatencyMs = Date.now() - summaryReceivedAt;
   console.log(`UX terminal task: mission navigation to visible output ${Date.now() - journeyStartedAt} ms; clicks 0`);
-  console.log(`UX running mission: status response to visible output ${outputLatencyMs} ms; clicks 0`);
+  console.log(`UX running mission: summary response to visible output ${outputLatencyMs} ms; clicks 0`);
   expect(outputLatencyMs).toBeLessThan(1000);
   await page.locator("#terminal-host .xterm-helper-textarea").focus();
   await page.keyboard.type("must-not-send");

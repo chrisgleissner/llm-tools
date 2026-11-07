@@ -255,7 +255,7 @@ needs details reads them with an ordinary request when a notice says something c
 | `type` | Fields | Sent |
 |---|---|---|
 | `worker` | `worker`, `state` (`online`, `offline`, `revoked`), `generation` | A worker connected, disconnected or was revoked. |
-| `event` | `worker`, `cursor` (the worker's stored event cursor), `count` (events in the accepted batch), `first_event_id`, `last_event_id`, `missions`: a list of `{id, events, last_event_id, summary}`, one per mission that has events or a changed summary in the batch | The coordinator accepted an `events` batch that stored events or changed mission summaries. At most one per batch (25 events), about 100 bytes plus 80 bytes per mission. |
+| `event` | `worker`, `cursor` (the worker's stored event cursor), `count` (events in the accepted batch), `first_event_id`, `last_event_id`, `missions`: a list of `{id, events, last_event_id, summary}`, one per mission that has events or a changed summary in the batch (at most 16, missions with events first; `truncated` is true when more were cut), `task_missions`: ids of missions (at most 16) with an event that names a task | The coordinator accepted an `events` batch that stored events or changed mission summaries. At most one per batch (25 events), about 100 bytes plus 80 bytes per mission. The hub drops any stream message above 4 KiB. |
 | `command` | `command`: `request_id`, `target`, `operation`, `mutating`, `state`, `outcome` (when done), `created_at`, `updated_at` | A command was queued, sent, acknowledged or finished. It has no `request` and no `result`; `GET /commands/{request_id}` returns the whole entry. |
 | `terminal` | `worker`, `mission_id`, `state`, `mode`, `reason` | A terminal session changed state. |
 
@@ -348,11 +348,15 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Browser `/stream` and `/terminal` WebSockets | server ping every 30 s; closed with 1001 `idle timeout` when nothing (pong or message) arrived for 90 s, checked at each ping | `ws_ping_interval_secs`, `ws_idle_timeout_secs` |
 | Worker connections | 64; ping every 20 s; closed after 60 s of silence | fixed |
 | Terminal sessions | 16 per worker, 64 total | fixed |
+| Terminal relay queues | 256 KiB of worker output awaiting a browser and 128 KiB of browser input awaiting a worker per session; at the 64-session cap, queued frame text is at most 24 MiB total; browser input is also at most 64 KiB decoded per frame | fixed |
 | Request body | 1 MiB; 4 KiB on `/api/v1/auth/*` (413 above) | fixed |
 | Request bodies above 64 KiB buffered at once | 8 (over that: 503 `busy`, so at most 8 MiB of large bodies in memory); a body above 64 KiB takes a slot only after authentication | fixed |
 | Pre-hello worker connections | 1 per worker token, 10 s to send hello (second connection: 429) | fixed |
 | Graceful shutdown | 10 s | fixed |
-| Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers) | fixed |
+| Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers); durable pending requests also have a 64 KiB per-request, 512 KiB per-worker and 8 MiB coordinator-wide byte cap | fixed |
+| Worker protocol event batch | 500 events and 128 KiB serialized event data maximum (the whole message remains capped at 1 MiB) | fixed |
+| Browser change stream | 32 retained messages, each at most 4 KiB; event and command bodies are fetched through their scoped API resources rather than retained in the fan-out ring | fixed |
+| Worker terminal status queue | 16 small messages per terminal; reason text is capped at 256 bytes and excess advisory updates are dropped | fixed |
 | Stored events per worker | 50 000, oldest deleted first, in passes that keep 90 % of the cap once it is reached (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | 7 days | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |

@@ -52,6 +52,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   let liveEvents: BridgeEvent[] = [];
   let eventShown = EVENT_PAGE;
   let eventStart = 0; // lowest cursor already requested
+  let eventCursor = 0; // highest global worker cursor already fetched
+  let eventsLoaded = false;
   let eventError = "";
   let eventFilter: "all" | EventCategory = "all";
   let eventKindFilter = "all";
@@ -63,6 +65,18 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
   const entry = () => store.missions.find((m) => m.worker === workerName && m.mission.id === missionId);
   const online = () => store.conn === "live" && worker(workerName)?.state === "online";
   const isRunning = () => String((snapshot?.["mission"] as Record<string, unknown> | undefined)?.["status"] ?? entry()?.mission.status ?? "").toUpperCase() === "RUNNING";
+  const summarySnapshot = (): Record<string, unknown> | null => {
+    const mission = entry()?.mission;
+    if (!mission) return null;
+    return {
+      mission: { status: mission.status, name: mission.name, cwd: mission.folder, updated_at: mission.updated_at },
+      task_counts: mission.task_counts ?? {},
+      needs_you: mission.needs_you ?? null,
+      current_task: mission.current_task ?? null,
+      station: mission.station ?? "",
+      model: mission.model ?? "",
+    };
+  };
 
   function renderCurrentWork(): void {
     const needs = snapshot?.["needs_you"] as { message?: string } | null | undefined;
@@ -377,17 +391,8 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
 
   // ---- data
   async function loadSnapshot(): Promise<void> {
-    if (!online()) {
-      snapshotError = "The worker is offline, so live status is unavailable.";
-      renderStatus();
-      return;
-    }
-    try {
-      snapshot = await api.missionStatus(workerName, missionId);
-      snapshotError = snapshot ? "" : "The worker returned no status.";
-    } catch (e) {
-      snapshotError = e instanceof api.ApiError ? e.message : "Cannot load status.";
-    }
+    snapshot = summarySnapshot();
+    snapshotError = snapshot ? "" : "Waiting for worker data...";
     if (!disposed) renderStatus();
   }
 
@@ -419,11 +424,12 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
 
   async function loadEvents(): Promise<void> {
     const cursor = worker(workerName)?.event_cursor ?? 0;
-    eventCursor = Math.max(eventCursor, cursor);
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
-      const r = await api.missionEvents(workerName, missionId, eventStart, 1000);
+      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${eventStart}&limit=1000`);
       events = r.events.map(normalize).filter((e) => e.mission_id === missionId);
+      eventCursor = cursor;
+      eventsLoaded = true;
       eventError = "";
     } catch (e) {
       eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
@@ -435,7 +441,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     const upto = eventStart;
     const from = Math.max(0, upto - EVENT_WINDOW);
     try {
-      const r = await api.missionEvents(workerName, missionId, from, EVENT_WINDOW);
+      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${from}&limit=${EVENT_WINDOW}`);
       const older = r.events.filter((x) => Number(x["id"]) <= upto).map(normalize).filter((e) => e.mission_id === missionId);
       events = [...older, ...events];
       eventStart = from;
@@ -446,23 +452,35 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     renderEvents();
   }
 
-  let eventCursor = 0; // highest coordinator event id read for this view
-  async function loadNewEvents(): Promise<void> {
+  async function loadNewEvents(cursor: number): Promise<void> {
+    if (!eventsLoaded) {
+      await loadEvents();
+      return;
+    }
+    if (cursor <= eventCursor) return;
+    const after = eventCursor;
+    if (cursor - after > 1000) {
+      await loadEvents();
+      return;
+    }
     try {
-      const r = await api.get<{ events: Array<{ id: number; event: BridgeEvent }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${eventCursor}&limit=200`);
-      if (disposed || r.events.length === 0) return;
-      eventCursor = Math.max(eventCursor, ...r.events.map((x) => x.id));
-      const mine = r.events.map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
+      const limit = Math.min(1000, cursor - after);
+      const r = await api.get<{ events: Array<{ id: number; event: Record<string, unknown> }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${after}&limit=${limit}`);
+      const fresh = r.events.map(normalize).filter((e) => e.mission_id === missionId);
       const known = new Set(events.map((e) => e.id));
-      const fresh = mine.filter((e) => !known.has(e.id));
-      if (!fresh.length) return;
-      events = [...events, ...fresh];
+      const added = fresh.filter((e) => !known.has(e.id));
+      events = [...events, ...added];
+      eventCursor = cursor;
       renderEvents();
-      announce(`New event: ${humanizeEvent(fresh[fresh.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
-    } catch {
-      /* the next notice reads again */
+      if (added.length) announce(`New event: ${humanizeEvent(added[added.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
+    } catch (e) {
+      eventError = e instanceof api.ApiError ? e.message : "Cannot load events.";
+      renderEvents();
     }
   }
+
+  // One task read for the several triggers (a task event and a digest change usually arrive together).
+  const scheduleTasks = debounce(() => void loadTasks(), 150);
 
   const offStream = onStream((msg) => {
     // Coordinator worker-state broadcasts and terminal-relay statuses are live-only; neither is in /api/v1/events.
@@ -483,30 +501,34 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       renderEvents();
       return;
     }
-    // A change notice carries counts, not events. When it names this mission, read the new events from the
-    // coordinator's own store (no worker round trip); tasks and status follow the replicated digest below.
-    if (msg.type === "event" && msg.worker === workerName && msg.missions?.some((m) => m.id === missionId && m.events > 0)) void loadNewEvents();
+    // A change notice carries counts, not events. When it names this mission (or its mission list was cut), read
+    // the new events from the coordinator's own store, which needs no worker round trip. Tasks are read again
+    // only for a mission whose tasks changed in the batch.
+    if (msg.type === "event" && msg.worker === workerName) {
+      const named = msg.missions === undefined || msg.truncated === true || msg.missions.some((m) => m.id === missionId && m.events > 0);
+      if (named) void loadNewEvents(Number(msg.cursor ?? 0));
+      if (Array.isArray(msg.task_missions) && msg.task_missions.includes(missionId)) scheduleTasks();
+    }
   });
   let wasOnline = online();
   let viewKey = "";
   let workKey = "";
   const offStore = subscribe(() => {
     const e = entry();
-    // The tasks and the status are read again only when the replicated digest of this mission changed
-    // (task counts, current task, what needs the operator), never on a timer and not for every event.
+    // The tasks are read again when the replicated digest of this mission changed (status, task counts, current
+    // task, what needs the operator), never on a timer. The status itself is drawn from the digest.
     const nextWorkKey = e ? JSON.stringify([e.mission.status, e.mission.task_counts, e.mission.current_task, e.mission.needs_kind, e.mission.needs_you?.message]) : "";
     if (nextWorkKey !== workKey) {
       const first = workKey === "";
       workKey = nextWorkKey;
-      if (!first && online()) {
-        void loadTasks();
-        void loadSnapshot();
-      }
+      if (!first && online()) scheduleTasks();
     }
-    const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}`;
+    const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}|${e?.mission.updated_at}|${JSON.stringify(e?.mission.task_counts)}|${JSON.stringify(e?.mission.needs_you)}|${e?.mission.needs_kind}|${e?.mission.current_task?.title}|${e?.mission.station}|${e?.mission.model}`;
     if (key === viewKey) return;
     viewKey = key;
+    snapshot = summarySnapshot();
     renderHeader();
+    renderStatus();
     renderTasks();
     const now = online();
     termPanel?.setAvailable(now);

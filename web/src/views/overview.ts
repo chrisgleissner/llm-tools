@@ -96,7 +96,7 @@ export function overview(root: HTMLElement): () => void {
     checked = picked.length;
     snapshotsLoaded = true;
     render();
-    // A worker that is still starting may not answer yet: look again shortly (a few times at most).
+    // A worker that sent no digest and is still starting may not answer yet: look again shortly (a few times at most).
     if (snapshots.length < picked.length && retries++ < 4) schedule(3000);
   }
 
@@ -233,7 +233,7 @@ export function overview(root: HTMLElement): () => void {
     ));
   };
 
-  const key = () => store.missions.map((m) => `${m.worker}/${m.mission.id}/${m.mission.status}`).join("|") + store.workers.map((w) => `${w.name}:${w.state}`).join("|") + store.conn;
+  const key = () => store.missions.map((m) => `${m.worker}/${m.mission.id}/${m.mission.status}/${m.mission.updated_at}/${m.mission.needs_you?.message ?? ""}/${m.mission.needs_kind ?? ""}/${JSON.stringify(m.mission.task_counts ?? null)}/${m.mission.current_task?.title ?? ""}/${m.mission.station ?? ""}/${m.mission.model ?? ""}`).join("|") + store.workers.map((w) => `${w.name}:${w.state}`).join("|") + store.conn;
   const schedule = (delay = 500) => {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => {
