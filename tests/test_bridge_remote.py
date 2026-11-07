@@ -357,6 +357,7 @@ def test_mission_list_uses_worker_scoped_resource_route_and_preserves_cli_json(c
     assert json.loads(capsys.readouterr().out) == {"missions": [mission]}
     call = api.opener.calls[0]
     assert call[0] == ("GET", "/api/v1/missions")
+    assert "limit=500" in call[3]
     assert "worker=worker-a" in call[3]
     assert all(call[0][0] == "GET" for call in api.opener.calls)
 

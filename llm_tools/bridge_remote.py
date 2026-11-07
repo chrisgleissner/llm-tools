@@ -172,7 +172,9 @@ class Client:
             missions: list[dict[str, Any]] = []
             cursor: str | None = None
             while True:
-                query_values = {"worker": target, "limit": 1000}
+                # The public resource endpoint caps each page at 500. Continue through
+                # opaque cursors so the CLI still returns the complete mission list.
+                query_values = {"worker": target, "limit": 500}
                 if cursor:
                     query_values["cursor"] = cursor
                 status, body = self.call("GET", f"/api/v1/missions?{urllib.parse.urlencode(query_values)}", timeout=wait + 15)
