@@ -419,6 +419,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
 
   async function loadEvents(): Promise<void> {
     const cursor = worker(workerName)?.event_cursor ?? 0;
+    eventCursor = Math.max(eventCursor, cursor);
     eventStart = Math.max(0, cursor - EVENT_WINDOW);
     try {
       const r = await api.missionEvents(workerName, missionId, eventStart, 1000);
@@ -445,6 +446,24 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
     renderEvents();
   }
 
+  let eventCursor = 0; // highest coordinator event id read for this view
+  async function loadNewEvents(): Promise<void> {
+    try {
+      const r = await api.get<{ events: Array<{ id: number; event: BridgeEvent }> }>(`/api/v1/events?worker=${encodeURIComponent(workerName)}&after=${eventCursor}&limit=200`);
+      if (disposed || r.events.length === 0) return;
+      eventCursor = Math.max(eventCursor, ...r.events.map((x) => x.id));
+      const mine = r.events.map((x) => normalize({ ...x.event, id: x.id })).filter((e) => e.mission_id === missionId);
+      const known = new Set(events.map((e) => e.id));
+      const fresh = mine.filter((e) => !known.has(e.id));
+      if (!fresh.length) return;
+      events = [...events, ...fresh];
+      renderEvents();
+      announce(`New event: ${humanizeEvent(fresh[fresh.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
+    } catch {
+      /* the next notice reads again */
+    }
+  }
+
   const offStream = onStream((msg) => {
     // Coordinator worker-state broadcasts and terminal-relay statuses are live-only; neither is in /api/v1/events.
     if (msg.type === "worker" && msg.worker === workerName && (msg.state === "online" || msg.state === "offline")) {
@@ -464,22 +483,26 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       renderEvents();
       return;
     }
-    if (msg.type === "event" && msg.worker === workerName && msg.events) {
-      const mine = msg.events.filter((e) => e["mission_id"] === missionId).map(normalize);
-      if (mine.length) {
-        const known = new Set(events.map((e) => e.id));
-        events = [...events, ...mine.filter((e) => !known.has(e.id))];
-        renderEvents();
-        void loadTasks();
-        void loadSnapshot();
-        announce(`New event: ${humanizeEvent(mine[mine.length - 1] ?? { kind: "update", task_id: null, data: {} })}`);
-      }
-    }
+    // A change notice carries counts, not events. When it names this mission, read the new events from the
+    // coordinator's own store (no worker round trip); tasks and status follow the replicated digest below.
+    if (msg.type === "event" && msg.worker === workerName && msg.missions?.some((m) => m.id === missionId && m.events > 0)) void loadNewEvents();
   });
   let wasOnline = online();
   let viewKey = "";
+  let workKey = "";
   const offStore = subscribe(() => {
     const e = entry();
+    // The tasks and the status are read again only when the replicated digest of this mission changed
+    // (task counts, current task, what needs the operator), never on a timer and not for every event.
+    const nextWorkKey = e ? JSON.stringify([e.mission.status, e.mission.task_counts, e.mission.current_task, e.mission.needs_kind, e.mission.needs_you?.message]) : "";
+    if (nextWorkKey !== workKey) {
+      const first = workKey === "";
+      workKey = nextWorkKey;
+      if (!first && online()) {
+        void loadTasks();
+        void loadSnapshot();
+      }
+    }
     const key = `${online()}|${e?.mission.status}|${e ? isStale(e) : ""}|${e?.mission.name}`;
     if (key === viewKey) return;
     viewKey = key;
