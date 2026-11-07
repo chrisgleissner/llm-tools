@@ -460,3 +460,20 @@ def test_notice_reaches_a_real_provider_pane_at_its_idle_prompt(tmp_path: Path, 
     finally:
         store.close()
         backend.stop(handle)
+
+
+# Composer lines captured with ``tmux capture-pane -e`` from Claude Code and Codex CLI 0.167.0
+# on 2026-11-07, unchanged apart from the draft text. Claude Code separates its glyph from the
+# placeholder with a non-breaking space.
+REAL_COMPOSER_LINES = {
+    "claude-placeholder": ("\x1b[39m❯ \x1b[2mTry \"create a util logging.py that...\"\x1b[0m", True),
+    "codex-placeholder": ("\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m", True),
+    "claude-draft": ("\x1b[39m❯ fix the bug\x1b[0m", False),
+    "codex-draft": ("\x1b[1m›\x1b[0m please fix the bug", False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(REAL_COMPOSER_LINES))
+def test_real_provider_composer_lines_are_classified(name: str) -> None:
+    line, empty = REAL_COMPOSER_LINES[name]
+    assert bridge_task_notice.composer_is_empty(f"output above\n{line}\n") is empty
