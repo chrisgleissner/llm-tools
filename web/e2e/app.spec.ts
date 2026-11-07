@@ -103,10 +103,8 @@ test("keyboard: skip link, navigation and sign-in work without a mouse", async (
     await page.keyboard.press("Tab");
     reached.push(await name());
   }
-  const wide = (page.viewportSize()?.width ?? 0) >= 960;
-  for (const label of ["LLM Bridge", "Overview", "Workers", "Missions", wide ? "Diagnostics" : "More"]) expect(reached.some((r) => r.includes(label)), `${label} in ${reached.join(" | ")}`).toBe(true);
-  expect(reached.some((r) => r.startsWith("Theme:"))).toBe(true);
-  expect(reached.some((r) => r.includes("account menu"))).toBe(true);
+  for (const label of ["LLM Bridge", "Inbox", "Workers", "Missions", "Sessions", "Usage"]) expect(reached.some((r) => r.includes(label)), `${label} in ${reached.join(" | ")}`).toBe(true);
+  expect(reached.some((r) => r.includes("Account menu"))).toBe(true);
   await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Workers" }).focus();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/workers$/);
@@ -136,11 +134,13 @@ test("a live refresh of the overview keeps keyboard focus on the same tile", asy
 
 test("theme toggle cycles and persists", async ({ page, coord }) => {
   await setupViaUi(page, coord);
-  const toggle = page.locator("#theme-toggle");
-  await toggle.click();
-  await expect(toggle).toHaveAttribute("aria-label", /Theme: light/);
+  const toggle = async () => {
+    await page.locator("#account-button").click();
+    await page.locator("#menu-theme").click();
+  };
+  await toggle();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await toggle.click();
+  await toggle();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");

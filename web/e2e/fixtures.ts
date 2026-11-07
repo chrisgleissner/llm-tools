@@ -86,21 +86,18 @@ export async function setupViaUi(page: Page, coord: Coordinator, username = "adm
 /** Open the account menu and sign out. */
 export async function signOutViaUi(page: Page): Promise<void> {
   await page.locator("#account-button").click();
-  await page.locator("#account-panel").getByRole("button", { name: "Sign out" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
 }
 
-/** Go to a page through the navigation that the current viewport shows (side bar, tab bar or the More sheet). */
-export async function navTo(page: Page, name: "Overview" | "Workers" | "Missions" | "Sessions" | "Usage" | "Diagnostics" | "Account"): Promise<void> {
-  if (name === "Account") {
+/** Go to a page through the navigation the current viewport shows (rail, bottom bar or header links); Account and Diagnostics are in the user menu. */
+export async function navTo(page: Page, name: "Overview" | "Inbox" | "Workers" | "Missions" | "Sessions" | "Usage" | "Diagnostics" | "Account"): Promise<void> {
+  if (name === "Account" || name === "Diagnostics") {
     await page.locator("#account-button").click();
-    await page.locator("#account-panel").getByRole("button", { name: "Change password" }).click();
+    await page.getByRole("menuitem", { name }).click();
     return;
   }
-  const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true });
-  if (await link.isVisible()) return link.click();
-  await page.locator("#more-button").click();
-  await page.locator("#more-sheet").getByRole("link", { name, exact: true }).click();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: name === "Overview" ? "Inbox" : name, exact: true }).click();
 }
 
 export async function loginViaUi(page: Page, username = "admin", password = PASSWORD): Promise<void> {
