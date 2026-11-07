@@ -4,8 +4,6 @@ main.auth { max-width: none; min-height: 100vh; min-height: 100dvh; padding: var
 .auth-head { display: flex; align-items: center; gap: var(--sp-3); margin-block-end: var(--sp-2); }
 .auth-head .icon { color: var(--accent); }
 .auth-head h1 { margin: 0; font-size: var(--fs-display); line-height: 2.25rem; }
-.steps { margin: var(--sp-2) 0; padding-inline-start: var(--sp-5); }
-.steps li { margin: var(--sp-1) 0; }
 
 /* Help that is not needed to fill in the form sits behind a disclosure so the first phone screen shows the fields. */
 details.aside { margin: var(--sp-2) 0; }

@@ -1,5 +1,5 @@
 import { icon, type IconName } from "./icons";
-import { deriveState, shortId, type DerivedState } from "./state";
+import { shortId, type DerivedState } from "./state";
 
 type Child = Node | string | number | null | undefined | false;
 type Attrs = Record<string, string | number | boolean | EventListener | null | undefined>;
@@ -132,11 +132,6 @@ export function statePill(state: DerivedState, opts: { dense?: boolean; live?: b
     icon(state.icon, 16),
     state.label,
   );
-}
-
-/** Transitional shim for the pages that still call it: a mission or task status shown as a state pill. Deleted when the last page package lands. */
-export function statusBadge(status: string): HTMLElement {
-  return statePill(deriveState({ entity: "task", status }));
 }
 
 export interface ButtonOpts {
@@ -332,14 +327,6 @@ export function field(id: string, label: string, type = "text", extra: Attrs = {
       describe(Boolean(message));
     },
   };
-}
-
-/** A column header whose button sorts the list; `aria-sort` reflects the current order. */
-export function sortHeader(label: string, key: string, current: string, order: "asc" | "desc", onSort: (key: string) => void): HTMLElement {
-  const active = current === key;
-  const b = h("button", { type: "button", class: "sort", "data-sort": key }, label, active ? icon(order === "asc" ? "chevronUp" : "chevronDown", 16) : null);
-  b.addEventListener("click", () => onSort(key));
-  return h("th", { scope: "col", "aria-sort": active ? (order === "asc" ? "ascending" : "descending") : null }, b);
 }
 
 /** Debounce helper for search boxes. */

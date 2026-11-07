@@ -126,7 +126,6 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
   .mission-session > [data-pane] { block-size: 100%; }
   .mission-page[data-tab] .mission-session, .mission-page[data-tab] .mission-side { display: block; }
   .mission-side { overflow-y: auto; }
-  .tab-session { display: none; }
   /* A compact header: crumb and meta share a row, the pill sits beside the title, so the session keeps its height */
   .mission-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--sp-4); row-gap: 0; }
   .mission-head > * { grid-column: 1 / -1; }

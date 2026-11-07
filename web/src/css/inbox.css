@@ -61,5 +61,3 @@
 }
 .inbox-preview pre { max-block-size: 22rem; overflow: auto; font: var(--fs-xs)/var(--lh-xs) var(--mono); }
 
-.grid-2 { display: grid; gap: var(--sp-4); grid-template-columns: minmax(0, 1fr); } /* used by the Account page until WP-5 replaces it */
-@media (min-width: 960px) { .grid-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
