@@ -253,8 +253,9 @@ troubleshooting), [coordinator](./docs/distributed/coordinator.md) (configuratio
 HTTP API, limits), [protocol](./docs/distributed/protocol.md),
 [threat model](./docs/distributed/threat-model.md),
 [safe defaults](./docs/distributed/safe-defaults.md),
-[uninstall and moving to another host](./docs/llm-bridge/uninstall.md) and
-[benchmarks](./docs/distributed/benchmarks.md).
+[uninstall and moving to another host](./docs/llm-bridge/uninstall.md),
+[benchmarks](./docs/distributed/benchmarks.md) and
+[soak and fault-injection tests](./docs/distributed/soak-and-chaos.md) (`scripts/bridge_soak.py`, `scripts/bridge_chaos.py`).
 
 ## llm-usage
 

@@ -3251,5 +3251,41 @@
    "slow",
    "subprocess"
   ]
+ },
+ "tests/test_distributed_soak_harness.py": {
+  "test_provider_behaviours_have_distinct_observable_results": [
+   "subprocess"
+  ],
+  "test_proxy_relays_frames_in_both_directions_with_correct_masking": [
+   "subprocess"
+  ],
+  "test_proxy_drops_exactly_the_requested_frames": [
+   "subprocess"
+  ],
+  "test_proxy_probability_drop_is_seeded_and_clearable": [
+   "subprocess"
+  ],
+  "test_proxy_delay_holds_frames_without_reordering_or_loss": [
+   "subprocess"
+  ],
+  "test_proxy_reset_and_refusal_cut_the_link": [
+   "subprocess"
+  ],
+  "test_short_soak_with_real_coordinator_workers_and_fake_providers": [
+   "subprocess",
+   "slow"
+  ],
+  "test_cleanup_stops_every_process_that_carries_the_workers_runtime_directory": [
+   "subprocess"
+  ]
+ },
+ "tests/test_distributed_chaos.py": {
+  "test_clock_shim_shifts_wall_time_forward_and_backward_while_the_process_runs": [
+   "subprocess"
+  ],
+  "test_fault_meets_its_declared_outcome": [
+   "subprocess",
+   "slow"
+  ]
  }
 }
