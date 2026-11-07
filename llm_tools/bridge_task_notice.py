@@ -36,7 +36,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from . import config as toolconfig
 from .bridge_finish import COMPOSER_LINE, composer_is_idle
 from .bridge_states import ACTIVE_OPERATION_STATUSES
 
@@ -106,6 +105,8 @@ def strip_escapes(text: str) -> str:
 
 def notices_enabled() -> bool:
     """False when the llm-tools config sets ``[bridge] task_notices = false``; a broken config keeps the default."""
+    from . import config as toolconfig  # only the controller needs the llm-tools config
+
     try:
         config = toolconfig.load_config()
     except SystemExit:
