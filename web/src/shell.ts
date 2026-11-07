@@ -217,19 +217,9 @@ const KEYMAP: Binding[] = [
   { keys: ["Ctrl", "Cmd", "K"], mod: true, group: "Anywhere", label: "Command palette", run: () => void openPaletteLazy() },
 ];
 
+/** The dialog is part of the lazily loaded palette chunk; the keymap that feeds it stays here. */
 function shortcutDialog(): void {
-  const groups = [...new Set(KEYMAP.map((b) => b.group))];
-  const keys = (b: Binding): Array<Node | string> =>
-    b.mod
-      ? [h("kbd", {}, "Ctrl"), " or ", h("kbd", {}, "Cmd"), " + ", h("kbd", {}, "K")]
-      : b.keys.flatMap((k, i) => (i === 0 ? [h("kbd", {}, k)] : [" then ", h("kbd", {}, k)]));
-  const body = h(
-    "div",
-    {},
-    h("p", { class: "muted" }, "Shortcuts work when no text field or terminal has focus. Escape closes a dialog or menu."),
-    ...groups.flatMap((g) => [h("h3", {}, g), h("dl", { class: "shortcuts" }, ...KEYMAP.filter((b) => b.group === g).flatMap((b) => [h("dt", {}, ...keys(b)), h("dd", {}, b.label)]))]),
-  );
-  openPanel({ title: "Keyboard shortcuts", id: "shortcut-help", body });
+  void import("./palette").then((m) => m.shortcutHelp(KEYMAP));
 }
 
 let palettePending = false;
@@ -282,11 +272,11 @@ const TYPING_FIELD = "input:not([type=checkbox],[type=radio],[type=button],[type
 let leaveTyping = 0;
 export function syncTyping(now = false): void {
   window.clearTimeout(leaveTyping);
-  const on = (): boolean => !!document.activeElement?.matches(TYPING_FIELD) && !document.activeElement.closest(".xterm");
+  const typing = (): boolean => !!document.activeElement?.matches(TYPING_FIELD) && !document.activeElement.closest(".xterm");
+  const set = (): void => void document.body.toggleAttribute("data-typing", typing());
   // A tap on a button blurs the field first: keep the layout until the click has landed. A new page (now) has no click in flight.
-  if (on()) document.body.setAttribute("data-typing", "");
-  else if (now) document.body.removeAttribute("data-typing");
-  else leaveTyping = window.setTimeout(() => on() || document.body.removeAttribute("data-typing"), 300);
+  if (now || typing()) set();
+  else leaveTyping = window.setTimeout(set, 300);
 }
 
 export function installShortcuts(go: (path: string) => void): void {

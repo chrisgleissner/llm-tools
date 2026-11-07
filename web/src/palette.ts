@@ -3,6 +3,7 @@
 import * as api from "./api";
 import { h } from "./dom";
 import { missionState, store } from "./store";
+import { openPanel } from "./ui";
 
 export interface PaletteAction {
   title: string;
@@ -137,4 +138,28 @@ export function openPalette(ctx: PaletteContext, initial = ""): void {
       })
       .catch(() => {});
   }
+}
+
+interface Shortcut {
+  keys: string[];
+  /** Ctrl or Cmd plus the key. */
+  mod?: boolean;
+  group: string;
+  label: string;
+}
+
+/** The `?` dialog: one section per group of the shell's keyboard map. */
+export function shortcutHelp(keymap: Shortcut[]): void {
+  const groups = [...new Set(keymap.map((b) => b.group))];
+  const keys = (b: Shortcut): Array<Node | string> =>
+    b.mod
+      ? [h("kbd", {}, "Ctrl"), " or ", h("kbd", {}, "Cmd"), " + ", h("kbd", {}, "K")]
+      : b.keys.flatMap((k, i) => (i === 0 ? [h("kbd", {}, k)] : [" then ", h("kbd", {}, k)]));
+  const body = h(
+    "div",
+    {},
+    h("p", { class: "muted" }, "Shortcuts work when no text field or terminal has focus. Escape closes a dialog or menu."),
+    ...groups.flatMap((g) => [h("h3", {}, g), h("dl", { class: "shortcuts" }, ...keymap.filter((b) => b.group === g).flatMap((b) => [h("dt", {}, ...keys(b)), h("dd", {}, b.label)]))]),
+  );
+  openPanel({ title: "Keyboard shortcuts", id: "shortcut-help", body });
 }
