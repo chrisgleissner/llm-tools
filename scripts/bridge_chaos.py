@@ -147,22 +147,40 @@ class Fabric:
                 store.record_runtime_event(self.missions[name], "link-probe", {"tag": tag, "n": index})
 
     def events_replicated(self, name: str) -> bool:
-        node = self.nodes[name]
-        last = node.last_event_id()
-        return any(w["name"] == name and w.get("event_cursor") == last for w in self.coordinator.api.workers())
+        return self._replicated_through(name) is not None
 
-    def _replicated_check(self, name: str) -> Callable[[], bool]:
-        return lambda: self.events_replicated(name)
+    def _replicated_through(self, name: str) -> int | None:
+        """The worker's last event id when the coordinator's cursor for it has reached that id, else ``None``."""
+        last = self.nodes[name].last_event_id()
+        return last if any(w["name"] == name and w.get("event_cursor") == last for w in self.coordinator.api.workers()) else None
 
     def assert_events_replicated_exactly(self, timeout: float = 90.0) -> dict[str, int]:
-        """After recovery the coordinator holds exactly the events each worker holds: none lost, none invented, none repeated."""
+        """After recovery the coordinator holds exactly the events each worker holds: none lost, none invented, none repeated.
+
+        A worker may still be writing events (a command applied after the coordinator accepted it, a mission controller), so the
+        sets are read in an order that stays valid while it writes: events up to the id the coordinator had acknowledged when the
+        wait ended must all be there (none lost), and everything the coordinator holds must be in the worker's database read
+        afterwards (none invented). A single earlier read of the worker would report an event written and replicated between the
+        two reads as invented.
+        """
         counts = {}
         for name, node in self.nodes.items():
-            h.wait_until(self._replicated_check(name), timeout, message=f"{name} events replicated")
-            mine, theirs = node.event_ids(), self.coordinator.api.all_event_ids(name)
-            lost, extra = sorted(set(mine) - set(theirs)), sorted(set(theirs) - set(mine))
+            through: list[int] = []
+
+            def replicated() -> bool:
+                last = self._replicated_through(name)
+                if last is None:
+                    return False
+                through[:] = [last]
+                return True
+
+            h.wait_until(replicated, timeout, message=f"{name} events replicated")
+            before = [event for event in node.event_ids() if event <= through[0]]
+            theirs = self.coordinator.api.all_event_ids(name)
+            after = set(node.event_ids())
+            lost, extra = sorted(set(before) - set(theirs)), sorted(set(theirs) - after)
             expect(not lost and not extra and len(theirs) == len(set(theirs)),
-                   f"{name}: events lost {lost[:5]}, invented or duplicated {extra[:5]} ({len(mine)} on the worker, {len(theirs)} on the coordinator)")
+                   f"{name}: events lost {lost[:5]}, invented or duplicated {extra[:5]} ({len(after)} on the worker, {len(theirs)} on the coordinator)")
             counts[name] = len(theirs)
         return counts
 

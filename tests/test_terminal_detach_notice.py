@@ -48,7 +48,9 @@ def _attach_and_detach(tmp_path: Path, session_name: str, env: dict[str, str], *
 
     process = subprocess.Popen(
         [sys.executable, "-c", code], stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env={**env, "TERM": "xterm-256color"}, preexec_fn=controlling_terminal,
+        # fit_line sizes the notice from COLUMNS (stdout is a pipe here, so the pty size is not seen); pytest-xdist
+        # workers export COLUMNS=80, which would cut the 91-column notice, so pin the width of the pty.
+        env={**env, "TERM": "xterm-256color", "COLUMNS": "100", "LINES": "30"}, preexec_fn=controlling_terminal,
     )
     try:
         deadline = time.monotonic() + 10

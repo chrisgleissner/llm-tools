@@ -331,6 +331,11 @@ soak with two workers and four missions.
   (which checkpoints the WAL into the main file), and the first eight bytes of each page that stores the
   command's text are replaced with `0xFF`. The harness first checks that SQLite's `integrity_check` reports
   the damage.
+- Exact event replication. A worker can still be writing events while the check runs (it applies an
+  accepted command after the coordinator has answered). "Replicates exactly" therefore means: every event of
+  the worker up to the id the coordinator had acknowledged is on the coordinator (none lost), and every event
+  on the coordinator is in the worker's database read after the coordinator was read (none invented), with no
+  id repeated. Events written and replicated while the check runs are legitimate.
 
 ### Behaviour observed on this branch
 

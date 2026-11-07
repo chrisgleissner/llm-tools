@@ -140,3 +140,62 @@ def test_fault_meets_its_declared_outcome(fault, tmp_path):
         pytest.skip(result.reason)
     assert result.status == "pass", f"{fault.id}: {result.reason}\n{result.observed}"
     assert result.observed, "a passing fault reports what it observed"
+
+
+class _GrowingNode:
+    """A worker whose database gains events while the check runs: each read of the ids returns what exists at that moment."""
+
+    def __init__(self, reads: list[list[int]]):
+        self.reads = reads
+        self.position = 0
+
+    def event_ids(self) -> list[int]:
+        ids = self.reads[min(self.position, len(self.reads) - 1)]
+        self.position += 1
+        return list(ids)
+
+    def last_event_id(self) -> int:
+        return 51
+
+
+class _FakeCoordinatorApi:
+    def __init__(self, held: list[int]):
+        self.held = held
+
+    def workers(self) -> list[dict]:
+        return [{"name": "chaos-w1", "event_cursor": 51}]
+
+    def all_event_ids(self, _name: str) -> list[int]:
+        return list(self.held)
+
+
+def _fabric_with(node: _GrowingNode, coordinator_events: list[int]) -> bridge_chaos.Fabric:
+    fabric = object.__new__(bridge_chaos.Fabric)
+    fabric.nodes = {"chaos-w1": node}  # type: ignore[assignment]
+    fabric.coordinator = type("Coordinator", (), {"api": _FakeCoordinatorApi(coordinator_events)})()  # type: ignore[assignment]
+    return fabric
+
+
+def test_events_written_and_replicated_while_the_check_runs_are_not_reported_as_invented():
+    # The worker held 51 events when the worker was read first; it applied two more commands and the coordinator
+    # received them before the coordinator was read (the db-corrupt-page failure under load: 51 vs 53).
+    fabric = _fabric_with(_GrowingNode([list(range(1, 52)), list(range(1, 54))]), list(range(1, 54)))
+    assert fabric.assert_events_replicated_exactly(timeout=1) == {"chaos-w1": 53}
+
+
+def test_an_event_the_worker_never_wrote_is_still_reported_as_invented():
+    fabric = _fabric_with(_GrowingNode([list(range(1, 52))]), [*range(1, 52), 99])
+    with pytest.raises(bridge_chaos.Expectation, match=r"invented or duplicated \[99\]"):
+        fabric.assert_events_replicated_exactly(timeout=1)
+
+
+def test_an_acknowledged_event_missing_on_the_coordinator_is_still_reported_as_lost():
+    fabric = _fabric_with(_GrowingNode([list(range(1, 52))]), [event for event in range(1, 52) if event != 7])
+    with pytest.raises(bridge_chaos.Expectation, match=r"events lost \[7\]"):
+        fabric.assert_events_replicated_exactly(timeout=1)
+
+
+def test_a_repeated_event_on_the_coordinator_is_still_reported():
+    fabric = _fabric_with(_GrowingNode([list(range(1, 52))]), [*range(1, 52), 51])
+    with pytest.raises(bridge_chaos.Expectation, match="invented or duplicated"):
+        fabric.assert_events_replicated_exactly(timeout=1)
