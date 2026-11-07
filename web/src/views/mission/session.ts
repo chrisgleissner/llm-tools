@@ -8,6 +8,8 @@ export interface SessionOpts {
   running: boolean;
   /** The worker is online and the stream is live. */
   available: boolean;
+  /** Provider name for the composer label ("Message Codex"); omitted when unknown. */
+  provider?: string;
 }
 
 export interface SessionHandle {
@@ -15,8 +17,8 @@ export interface SessionHandle {
   focusComposer(): void;
   takeControl(): void;
   setAvailable(available: boolean): void;
-  /** Optional: tell the pane the mission started or stopped running. */
-  setRunning?(running: boolean): void;
+  /** Tell the pane the mission is (or stopped) running: a running mission is watched read-only without a click. */
+  setRunning(running: boolean): void;
   dispose(): void;
 }
 
@@ -27,15 +29,30 @@ interface LegacyPanel {
   dispose(): void;
 }
 
+/** The contract of `sessionPane` (spec 8.2) as the session package publishes it. */
+interface Pane {
+  element: HTMLElement;
+  focusComposer(): void;
+  takeControl(): void;
+  setAvailable(available: boolean): void;
+  openReadOnly(): void;
+  dispose(): void;
+}
+
 interface PaneModule {
-  sessionPane?: (workerName: string, missionId: string, opts: SessionOpts) => SessionHandle;
+  sessionPane?: (workerName: string, missionId: string, opts: { provider?: string }) => Pane;
   terminalPanel?: (workerName: string, missionId: string) => LegacyPanel;
 }
 
 /** The xterm.js code is the bulk of the bundle: it is loaded only on this page. */
 export async function loadSession(workerName: string, missionId: string, opts: SessionOpts): Promise<SessionHandle> {
   const mod = (await import("../../terminal")) as unknown as PaneModule;
-  if (mod.sessionPane) return mod.sessionPane(workerName, missionId, opts);
+  if (mod.sessionPane) {
+    const pane = mod.sessionPane(workerName, missionId, opts.provider ? { provider: opts.provider } : {});
+    pane.setAvailable(opts.available);
+    if (opts.running) pane.openReadOnly();
+    return { ...pane, element: pane.element, focusComposer: () => pane.focusComposer(), takeControl: () => pane.takeControl(), setAvailable: (a) => pane.setAvailable(a), setRunning: (r) => r && pane.openReadOnly(), dispose: () => pane.dispose() };
+  }
   return legacyPane(mod.terminalPanel as NonNullable<PaneModule["terminalPanel"]>, workerName, missionId, opts);
 }
 

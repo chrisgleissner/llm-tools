@@ -236,6 +236,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   }
 
   // ---- session slot
+  const providerName = (): string => providerModel(snapshot).split(" ")[0] ?? "";
   function syncSession(): void {
     const e = entry();
     if (!e) return;
@@ -257,7 +258,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     }
     if (!session && !sessionMounting) {
       sessionMounting = true;
-      void loadSession(workerName, missionId, { running: st === "RUNNING", available: online() })
+      void loadSession(workerName, missionId, { running: st === "RUNNING", available: online(), ...(providerName() ? { provider: providerName() } : {}) })
         .then((handle) => {
           if (disposed) return handle.dispose();
           session = handle;
@@ -272,7 +273,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
       return;
     }
     session?.setAvailable(online());
-    session?.setRunning?.(st === "RUNNING");
+    session?.setRunning(st === "RUNNING");
   }
 
   // ---- data
