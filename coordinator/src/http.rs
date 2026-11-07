@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_BODY: usize = 1024 * 1024;
-pub const MAX_JSON_DEPTH: usize = 8;
+pub const MAX_JSON_DEPTH: usize = 4;
 pub const MAX_JSON_STRING_BYTES: usize = 64 * 1024;
 pub const MAX_JSON_ARRAY_ITEMS: usize = 1000;
 pub const MAX_JSON_OBJECT_FIELDS: usize = 128;
@@ -2426,7 +2426,7 @@ async fn security_headers(mut r: Response) -> Response {
     // The static handler sets its own Content-Security-Policy and cache policy.
     for (k, v) in [
         ("cache-control", "no-store"),
-        ("content-security-policy", "default-src 'none'; frame-ancestors 'none'"),
+        ("content-security-policy", "default-src 'none'; form-action 'none'; frame-ancestors 'none'"),
     ] {
         if !h.contains_key(k) {
             h.insert(k, v.parse().expect("static header"));

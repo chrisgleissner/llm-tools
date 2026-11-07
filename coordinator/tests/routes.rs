@@ -248,6 +248,9 @@ async fn security_headers_cover_api_health_static_and_error_responses() {
         let csp = headers["content-security-policy"].to_str().unwrap();
         assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
         assert_eq!(csp.contains("default-src 'none'"), api_csp, "{path}: {csp}");
+        if api_csp {
+            assert!(csp.contains("form-action 'none'"), "{path}: {csp}");
+        }
     }
     env.stop().await;
 }

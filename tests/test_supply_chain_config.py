@@ -97,7 +97,7 @@ def test_openapi_json_depth_schema_stays_within_scanner_budget() -> None:
         (name for name in schemas if name.startswith("BoundedJsonValueDepth")),
         key=lambda name: int(name.removeprefix("BoundedJsonValueDepth")),
     )
-    assert depth_names == [f"BoundedJsonValueDepth{depth}" for depth in range(9)]
-    deepest = schemas["BoundedJsonValueDepth8"]["anyOf"]
+    assert depth_names == [f"BoundedJsonValueDepth{depth}" for depth in range(5)]
+    deepest = schemas["BoundedJsonValueDepth4"]["anyOf"]
     assert len(deepest) == 5
-    assert "8 nested levels" in schemas["BoundedRequestObject"]["description"]
+    assert "4 nested levels" in schemas["BoundedRequestObject"]["description"]

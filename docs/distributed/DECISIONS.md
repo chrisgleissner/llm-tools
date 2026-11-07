@@ -193,18 +193,28 @@ Linux's implicit `127/8` routing, which macOS runners do not provide.
 
 ## D13 JSON nesting limit and scanner compatibility (SEC2-003, SEC2-016)
 
-Keep arbitrary JSON bodies to eight nested levels, reflected by the runtime validator and the
+Keep arbitrary JSON bodies to four nested levels, reflected by the runtime validator and the
 generated OpenAPI schema. ZAP 2.17.0's Swagger/OpenAPI model deserializer recursively expands the
-bounded JSON `anyOf` references; the former sixteen-level schema exhausted its 4 GiB heap during
-the CI API scan. The eight-level schema imports all routes and reaches report generation in the
-pinned ZAP 2.17.0 container under a 6 GiB limit against a local static fixture; this validates the
-parser's resource profile, not the API findings. It preserves the documented per-level string,
-array and object bounds. Eight levels are sufficient for typed operation envelopes and leave a
-practical limit on attacker-controlled nesting. Keep the runtime and OpenAPI limits generated
-from the same constant; do not mask the issue by raising scanner heap size.
+bounded JSON `anyOf` references. Sixteen levels exhausted its 4 GiB CI heap; a later local scan of
+the full API document showed that eight levels still grew the ZAP JVM past 12 GiB before report
+generation. An earlier eight-level test against a static fixture only proved that ZAP could import
+the schema; it did not exercise the full API document. Four levels sharply bounds that expansion
+while retaining the documented per-level string, array and object bounds and allowing the typed
+operation payloads. Keep the runtime and OpenAPI limits generated from the same constant; do not
+mask schema growth by raising scanner heap size. Validate the full document in the pinned scanner
+before increasing this limit.
 
 The runner proxy also intercepted ZAP's own Python client's calls to its localhost control API;
 the CI log showed `ProxyError` for `http://localhost:<port>`. Both scanner containers now set
 upper- and lower-case `NO_PROXY` entries for localhost and 127.0.0.1 so that control traffic stays
 inside the container/network namespace.
+
+## D14 Reviewed xterm.js inline-style CSP exception (SEC2-002, SEC2-016)
+
+Keep `style-src 'unsafe-inline'` on the console while xterm.js requires runtime-injected styles.
+Do not weaken `script-src 'self'` or the API CSP. ZAP reports this as plugin 10055, medium, on the
+console pages. `scripts/check_zap_reports.py` accepts only that exact alert in the console JSON and
+only when each instance shows the expected policy (`default-src 'self'`, `script-src 'self'`, and
+the xterm inline-style directive). `docs/distributed/review-findings.md` records the evidence and
+residual risk. Other CSP findings and all other medium-or-higher alerts remain failures.
 

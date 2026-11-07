@@ -11,6 +11,31 @@ from pathlib import Path
 REPORTS = ("zap-api-report.json", "zap-console-report.json")
 
 
+def accepted_terminal_style_alert(report_name: str, alert: dict[str, object]) -> bool:
+    """Allow only the reviewed xterm.js inline-style CSP alert, with its exact evidence."""
+    if (
+        report_name != "zap-console-report.json"
+        or str(alert.get("pluginid")) != "10055"
+        or alert.get("alert") != "CSP: style-src unsafe-inline"
+    ):
+        return False
+    instances = alert.get("instances")
+    if not isinstance(instances, list) or not instances:
+        return False
+    for instance in instances:
+        if not isinstance(instance, dict):
+            return False
+        evidence = str(instance.get("evidence", ""))
+        if (
+            instance.get("param") != "content-security-policy"
+            or "script-src 'self'" not in evidence
+            or "style-src 'self' 'unsafe-inline'" not in evidence
+            or "default-src 'self'" not in evidence
+        ):
+            return False
+    return True
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: check_zap_reports.py REPORT_DIR")
@@ -21,12 +46,16 @@ def main() -> int:
         raise SystemExit("Missing ZAP JSON report(s): " + ", ".join(missing))
 
     findings: list[tuple[str, str, str, str]] = []
+    accepted = 0
     for path in paths:
         report = json.loads(path.read_text(encoding="utf-8"))
         for site in report.get("site", []):
             for alert in site.get("alerts", []):
                 risk = int(alert.get("riskcode", 0))
                 if risk >= 2:
+                    if accepted_terminal_style_alert(path.name, alert):
+                        accepted += 1
+                        continue
                     findings.append(
                         (
                             path.name,
@@ -39,6 +68,8 @@ def main() -> int:
         print("medium-or-higher ZAP alert:", " | ".join(finding))
     if findings:
         raise SystemExit(f"{len(findings)} ZAP alert(s) at medium severity or above")
+    if accepted:
+        print(f"Accepted {accepted} documented xterm.js inline-style CSP alert group(s)")
     print("No ZAP alerts at medium severity or above")
     return 0
 
