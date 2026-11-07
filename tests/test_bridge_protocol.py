@@ -113,3 +113,45 @@ def test_an_over_long_integer_is_a_protocol_error():
     text = '{"v":1,"type":"ping","id":"a","worker_id":"w","generation":' + "9" * 5000 + ',"payload":{}}'
     with pytest.raises(ProtocolError):
         decode(text)
+
+
+# Version negotiation. Protocol versions are whole numbers (there is no minor version), so a peer one
+# release older or newer is one that also offers a neighbouring number. It is accepted when the lists
+# overlap and refused, with both lists named, when they do not.
+
+
+def _hello(versions) -> str:
+    return Message("hello", "w-1", 0, {**VALID[0].payload, "protocol_versions": versions}).encode()
+
+
+@pytest.mark.parametrize(("offered", "selected"), [([1], 1), ([0, 1], 1), ([1, 2], 1), ([2, 1, 3], 1)])
+def test_a_peer_that_also_speaks_a_neighbouring_version_is_accepted(offered, selected):
+    message = decode(_hello(offered))
+    assert message.payload["protocol_versions"] == offered
+    assert proto.negotiate_version(offered) == selected
+
+
+@pytest.mark.parametrize("offered", [[2], [0], [2, 3], [99]])
+def test_a_peer_with_no_common_version_is_refused_naming_both_lists(offered):
+    with pytest.raises(ProtocolError) as caught:
+        decode(_hello(offered))
+    assert caught.value.code == "unsupported-version"
+    assert f"peer offers {sorted(set(offered))}" in str(caught.value) and "this build supports [1]" in str(caught.value)
+    assert caught.value.details == {"supported": [1], "offered": sorted(set(offered))}
+
+
+@pytest.mark.parametrize("offered", [[], "1", 1, None, ["1"], [True], [1.0], [-1], {"1": 1}])
+def test_a_malformed_version_list_is_an_invalid_message(offered):
+    with pytest.raises(ProtocolError) as caught:
+        decode(_hello(offered))
+    assert caught.value.code == "invalid-message"
+
+
+def test_the_highest_common_version_wins_when_this_build_speaks_several(monkeypatch):
+    monkeypatch.setattr(proto, "SUPPORTED_VERSIONS", (1, 2))
+    assert proto.negotiate_version([1]) == 1  # an older peer
+    assert proto.negotiate_version([2, 3]) == 2  # a newer peer
+    assert proto.negotiate_version([1, 2, 3]) == 2
+    with pytest.raises(ProtocolError, match=r"peer offers \[3\], this build supports \[1, 2\]"):
+        proto.negotiate_version([3])
+    assert decode(_hello([2])).payload["protocol_versions"] == [2]

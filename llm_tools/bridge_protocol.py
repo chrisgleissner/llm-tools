@@ -47,6 +47,25 @@ class ProtocolError(CommandFailure):
     """A malformed or unsupported protocol message."""
 
 
+def negotiate_version(offered: Any) -> int:
+    """The highest protocol version both a peer's ``protocol_versions`` list and ``SUPPORTED_VERSIONS`` contain.
+
+    Versions are whole numbers; there is no minor version. A peer that also speaks an older or
+    newer version than this build is accepted as long as the lists overlap, so a worker and a
+    coordinator from adjacent releases keep working. With no overlap the error names both lists.
+    """
+    if not isinstance(offered, list) or not offered or any(not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in offered):
+        raise ProtocolError("invalid-message", "hello: protocol_versions must be a non-empty list of whole numbers")
+    common = [version for version in SUPPORTED_VERSIONS if version in offered]
+    if not common:
+        raise ProtocolError(
+            "unsupported-version",
+            f"hello: no common protocol version (peer offers {sorted(set(offered))}, this build supports {sorted(SUPPORTED_VERSIONS)})",
+            details={"supported": list(SUPPORTED_VERSIONS), "offered": sorted(set(offered))},
+        )
+    return max(common)
+
+
 @dataclass(frozen=True)
 class Message:
     type: str
@@ -113,6 +132,7 @@ def _validate_payload(kind: str, payload: Mapping[str, Any]) -> None:
         _int(payload["event_cursor"], "event_cursor")
         if not isinstance(payload["capabilities"], list) or not isinstance(payload["missions"], list):
             raise ProtocolError("invalid-message", "hello: capabilities and missions must be lists")
+        negotiate_version(payload["protocol_versions"])
     elif kind.startswith("terminal."):
         if not isinstance(payload["session_id"], str) or not _ID.fullmatch(payload["session_id"]):
             raise ProtocolError("invalid-message", "session_id must be 1-128 characters of [A-Za-z0-9_.-]")
