@@ -392,5 +392,5 @@ negative tests remain incomplete unless explicitly recorded below.
 | PAR-010 | [ ] | Approval evidence and rejection reason across CLI/web/API remain. |
 | PAR-011 | [ ] | Live terminal open/view/write at Pixel 4 size across supported clients remains. |
 | PAR-012 | [ ] | Worker health and connection state across CLI/web/API remain. |
-| PAR-013 | [ ] | Password sign-in and sign-out across CLI/web remain. |
-| PAR-014 | [ ] | Passkey sign-in in Chromium virtual authenticator and physical Android (Pi task) remains. |
+| PAR-013 | [~] | The CLI's `remote login/status/logout` stores and removes an API token locally and is explicitly excluded from the REST surface in `docs/distributed/api.md`; `tests/test_bridge_remote.py::test_login_status_logout` checks token setup, status redaction and logout. The browser password-session login and sign-out flow is covered by `web/e2e/auth-ux.spec.ts`; password entry is not exposed by the CLI, so credential UX is intentionally client-specific. CI evidence for the current auth branch is pending. |
+| PAR-014 | [~] | `web/e2e/passkey-login.spec.ts::Chromium virtual authenticator completes registration and passwordless sign-in` creates a resident passkey with Chromium's internal virtual authenticator and signs in through the passkey UI against the real coordinator; it passes on Chromium desktop and Pixel 4. Physical Android verification remains with the Pi task. CI evidence for this auth branch is pending. |
