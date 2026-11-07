@@ -260,9 +260,9 @@ pub fn decode(raw: &[u8]) -> Result<Message, ProtocolError> {
 }
 
 pub fn new_id() -> String {
-    use rand::RngCore;
+    use rand::TryRng;
     let mut b = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut b);
+    rand::rngs::SysRng.try_fill_bytes(&mut b).expect("operating system random source");
     hex::encode(b)
 }
 

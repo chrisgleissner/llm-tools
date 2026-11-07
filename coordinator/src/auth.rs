@@ -3,8 +3,8 @@
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
-use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -33,7 +33,7 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
 /// 32 random bytes, URL-safe base64 without padding (43 characters).
 pub fn random_token() -> String {
     let mut b = [0u8; 32];
-    OsRng.fill_bytes(&mut b);
+    SysRng.try_fill_bytes(&mut b).expect("operating system random source");
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
 }
 
