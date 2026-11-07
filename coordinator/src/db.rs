@@ -2,6 +2,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -64,6 +65,10 @@ CREATE TABLE audit(
 pub struct Db {
     conn: Mutex<Connection>,
     path: PathBuf,
+    /// Stored event rows per worker, kept so that retention does not have to count them on every batch.
+    /// It is an upper-bound estimate: a revoke from another process or a replaced row leaves it high,
+    /// which only makes the next retention pass run early and correct the figure.
+    event_counts: Mutex<HashMap<String, u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,6 +376,7 @@ impl Db {
         Ok(Db {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
+            event_counts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -705,7 +711,9 @@ impl Db {
         )? == 1)
     }
     pub fn worker_revoke(&self, name: &str) -> R<bool> {
-        Ok(self.c().execute("DELETE FROM workers WHERE name=?", params![name])? == 1)
+        let revoked = self.c().execute("DELETE FROM workers WHERE name=?", params![name])? == 1;
+        self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
+        Ok(revoked)
     }
     pub fn worker_by_token(&self, hash: &str) -> R<Option<WorkerRow>> {
         self.c()
@@ -830,35 +838,50 @@ impl Db {
         if after != cursor as u64 {
             return Ok(EventsOutcome::Nack { expected: cursor as u64 });
         }
-        for e in events {
-            let id = e.get("id").and_then(Value::as_u64).unwrap_or(0) as i64;
-            tx.execute(
-                "INSERT OR REPLACE INTO events(worker, id, body) VALUES(?,?,?)",
-                params![worker, id, e.to_string()],
-            )?;
+        let known = self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).get(worker).copied();
+        let known = match known {
+            Some(n) => n,
+            None => tx.query_row("SELECT COUNT(*) FROM events WHERE worker=?", params![worker], |r| r.get::<_, i64>(0))? as u64,
+        };
+        {
+            let mut insert = tx.prepare_cached("INSERT OR REPLACE INTO events(worker, id, body) VALUES(?,?,?)")?;
+            for e in events {
+                let id = e.get("id").and_then(Value::as_u64).unwrap_or(0) as i64;
+                insert.execute(params![worker, id, e.to_string()])?;
+            }
         }
         if let Some(missions) = missions {
+            // A mission row is written only when its summary differs from the stored one: an unchanged
+            // summary would otherwise dirty (and write to the log) its page on every batch.
+            let mut upsert = tx.prepare_cached(
+                "INSERT INTO missions(worker, mission_id, info) VALUES(?1, ?2, ?3) \
+                 ON CONFLICT(worker, mission_id) DO UPDATE SET info=excluded.info WHERE info IS NOT excluded.info",
+            )?;
             for mission in missions {
                 if let Some(id) = mission.get("id").and_then(Value::as_str) {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO missions(worker, mission_id, info) VALUES(?,?,?)",
-                        params![worker, id, mission.to_string()],
-                    )?;
+                    upsert.execute(params![worker, id, mission.to_string()])?;
                 }
             }
         }
+        // One statement for the whole worker row update: the cursors and the time live on one page.
         tx.execute(
-            "UPDATE workers SET event_cursor=?, last_event_at=? WHERE name=?",
-            params![through as i64, crate::now(), worker],
+            "UPDATE workers SET event_cursor=?1, last_event_at=?2, mission_cursor=COALESCE(?3, mission_cursor) WHERE name=?4",
+            params![through as i64, crate::now(), mission_cursor.map(|m| m as i64), worker],
         )?;
-        if let Some(mission_cursor) = mission_cursor {
-            tx.execute("UPDATE workers SET mission_cursor=?1 WHERE name=?2", params![mission_cursor as i64, worker])?;
+        let mut count = known + events.len() as u64;
+        if count > max {
+            // Retention runs in one pass once the cap is exceeded and keeps `max - max / 10` events, so a
+            // worker at its cap does not delete a few of the oldest rows (and rebalance the left edge
+            // of the index) in every batch. The stored count never exceeds `max`.
+            let keep = max - max / 10;
+            tx.execute(
+                "DELETE FROM events WHERE worker=?1 AND id <= (SELECT id FROM events WHERE worker=?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
+                params![worker, keep as i64],
+            )?;
+            count = tx.query_row("SELECT COUNT(*) FROM events WHERE worker=?", params![worker], |r| r.get::<_, i64>(0))? as u64;
         }
-        tx.execute(
-            "DELETE FROM events WHERE worker=?1 AND id <= (SELECT id FROM events WHERE worker=?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
-            params![worker, max as i64],
-        )?;
         tx.commit()?;
+        self.event_counts.lock().unwrap_or_else(|e| e.into_inner()).insert(worker.to_string(), count);
         Ok(EventsOutcome::Accepted {
             cursor: through,
             stored: events.len(),
@@ -1006,5 +1029,185 @@ impl Db {
             depths.entry(w).or_insert_with(|| json!({})).as_object_mut().map(|o| o.insert(s, json!(n)));
         }
         Ok(json!({"db_bytes": pages * size + wal as i64, "command_queue_depths": depths}))
+    }
+}
+
+/// Write cost of accepting an event batch. The cost is measured as the number of frames the commit appends to the
+/// write-ahead log (a frame is one page image: 4096 bytes plus a 24-byte header), read from the size of the log file.
+/// Automatic checkpoints are switched off so the log only grows, and every figure is a count of pages, not time.
+#[cfg(test)]
+mod batch_write_cost {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const FRAME_BYTES: u64 = 4096 + 24;
+    /// Measured 9.30 frames per batch of 25 events (about 330 bytes each) below the cap, with and without the
+    /// 2026-11-07 change: the mission-row skip and the retention passes do not apply to this workload.
+    /// The bound fails a change that adds a page or two to every batch.
+    const AVERAGE_FRAMES_BELOW_CAP: f64 = 10.5;
+    /// Measured 13.40 frames per batch at the cap with retention passes; 16.62 with a delete in every batch.
+    const AVERAGE_FRAMES_AT_CAP: f64 = 15.0;
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture {
+        dir: PathBuf,
+        db: Db,
+        next_id: u64,
+    }
+
+    impl Fixture {
+        fn new() -> Fixture {
+            let dir = std::env::temp_dir().join(format!("bridge-batch-cost-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            std::fs::create_dir_all(&dir).unwrap();
+            let db = Db::open(&dir.join("test.sqlite3")).unwrap();
+            db.c().pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+            assert!(db.worker_add("w", "hash").unwrap());
+            Fixture { dir, db, next_id: 1 }
+        }
+
+        fn wal_frames(&self) -> u64 {
+            let len = std::fs::metadata(self.dir.join("test.sqlite3-wal")).map(|m| m.len()).unwrap_or(0);
+            len.saturating_sub(32) / FRAME_BYTES
+        }
+
+        fn events(&mut self, count: u64) -> Vec<Value> {
+            let events = (0..count)
+                .map(|i| {
+                    let id = self.next_id + i;
+                    json!({"id": id, "kind": "task-output", "mission_id": "m-0123456789abcdef", "created_at": 1_780_000_000 + id,
+                           "data": {"n": id, "text": "x".repeat(200)}})
+                })
+                .collect();
+            self.next_id += count;
+            events
+        }
+
+        /// Accept one batch of `count` events and return the number of log frames the commit wrote.
+        fn batch(&mut self, count: u64, max: u64, missions: Option<&[Value]>) -> u64 {
+            let events = self.events(count);
+            let before = self.wal_frames();
+            let outcome = self
+                .db
+                .events_store(EventBatch {
+                    worker: "w",
+                    after: self.next_id - 1 - count,
+                    through: self.next_id - 1,
+                    events: &events,
+                    mission_cursor: Some(self.next_id - 1),
+                    missions,
+                    max,
+                })
+                .unwrap();
+            assert!(matches!(outcome, EventsOutcome::Accepted { .. }));
+            self.wal_frames() - before
+        }
+
+        fn stored(&self) -> Vec<u64> {
+            self.db
+                .events_list(Some("w"), 0, 1_000_000)
+                .unwrap()
+                .iter()
+                .map(|e| e["id"].as_u64().unwrap())
+                .collect()
+        }
+
+        fn average_frames(&mut self, batches: u64, count: u64, max: u64) -> f64 {
+            let total: u64 = (0..batches).map(|_| self.batch(count, max, None)).sum();
+            total as f64 / batches as f64
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Production batches carry at most 25 events. Measured average per batch: see docs/distributed/benchmarks.md.
+    #[test]
+    fn a_production_sized_batch_writes_a_bounded_number_of_frames() {
+        let mut f = Fixture::new();
+        f.batch(25, 50_000, None); // the first batch also creates the first pages
+        let average = f.average_frames(40, 25, 50_000);
+        println!("FRAMES per batch of 25 events, below the cap: {average:.2}");
+        assert!(average <= AVERAGE_FRAMES_BELOW_CAP, "{average} frames per batch");
+    }
+
+    #[test]
+    fn a_batch_at_the_retention_cap_writes_a_bounded_number_of_frames() {
+        let mut f = Fixture::new();
+        for _ in 0..100 {
+            f.batch(25, 2000, None);
+        }
+        assert!(f.stored().len() as u64 <= 2000);
+        let average = f.average_frames(60, 25, 2000);
+        println!("FRAMES per batch of 25 events, at the cap: {average:.2}");
+        assert!(average <= AVERAGE_FRAMES_AT_CAP, "{average} frames per batch");
+    }
+
+    /// A batch without events that repeats a mission summary the coordinator already holds updates the worker row
+    /// (cursor and time) and nothing else. SQLite counts a row it did not modify as no change, whereas the previous
+    /// `INSERT OR REPLACE` rewrote the row, and its page, every time.
+    #[test]
+    fn an_unchanged_mission_summary_is_not_written_again() {
+        let mut f = Fixture::new();
+        let summary = json!({"id": "m1", "name": "n", "status": "RUNNING", "folder": "f", "updated_at": 1});
+        f.batch(5, 50_000, Some(std::slice::from_ref(&summary)));
+        let rows_changed = |f: &mut Fixture, summary: &Value| {
+            let before = f.db.c().total_changes();
+            f.batch(0, 50_000, Some(std::slice::from_ref(summary)));
+            f.db.c().total_changes() - before
+        };
+        assert_eq!(rows_changed(&mut f, &summary), 1, "the worker row only");
+        let changed = json!({"id": "m1", "name": "n", "status": "DONE", "folder": "f", "updated_at": 2});
+        assert_eq!(rows_changed(&mut f, &changed), 2, "the worker row and the mission row");
+        assert_eq!(f.db.missions_list().unwrap(), vec![("w".to_string(), changed)]);
+    }
+
+    /// Retention deletes in passes below the cap, never leaves more than the cap, and removes the oldest events first.
+    #[test]
+    fn retention_runs_in_passes_and_never_exceeds_the_cap() {
+        let mut f = Fixture::new();
+        let max = 100;
+        let mut passes = 0;
+        let mut previous = 0;
+        for _ in 0..60 {
+            f.batch(10, max, None);
+            let ids = f.stored();
+            assert!(ids.len() as u64 <= max, "{} events stored", ids.len());
+            assert_eq!(*ids.last().unwrap(), f.next_id - 1, "the newest event is kept");
+            assert!(
+                ids.windows(2).all(|w| w[1] == w[0] + 1),
+                "the oldest events go first, so the stored ids stay contiguous"
+            );
+            if ids.len() < previous {
+                passes += 1;
+            }
+            previous = ids.len();
+        }
+        // 60 batches of 10 events against a cap of 100: a pass keeps 90, so one pass every second batch at most.
+        assert!((20..=30).contains(&passes), "{passes} retention passes in 60 batches");
+    }
+
+    #[test]
+    fn a_small_cap_is_exact() {
+        let mut f = Fixture::new();
+        f.batch(3, 4, None);
+        f.batch(3, 4, None);
+        assert_eq!(f.stored(), vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_count_that_is_too_high_after_a_revoke_is_corrected_by_the_next_pass() {
+        let mut f = Fixture::new();
+        for _ in 0..9 {
+            f.batch(10, 100, None);
+        }
+        assert!(f.db.worker_revoke("w").unwrap());
+        assert!(f.db.worker_add("w", "hash2").unwrap());
+        f.next_id = 1;
+        f.batch(10, 100, None);
+        f.batch(10, 100, None);
+        assert_eq!(f.stored().len(), 20, "a new worker of the same name starts from an empty count");
     }
 }
