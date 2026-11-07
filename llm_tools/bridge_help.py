@@ -552,7 +552,6 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("mission create", "save a mission and its first task"),
         ("mission list", "list saved missions"),
         ("mission set", "change a mission setting"),
-        ("mission settings", "show the mission's saved settings"),
         ("missions", "every mission, live ones first; switch between them"),
         ("status", "what the mission is doing and what needs you"),
     )),
