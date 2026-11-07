@@ -71,6 +71,8 @@ export const TUI_EVENT_PHRASES: Readonly<Record<string, string>> = {
   "task-amendment-applied": "Task amendment applied",
   "task-awaiting-answer": "Task asked a question and is waiting for you · see the provider output",
   "task-evidence-recorded": "Task evidence recorded",
+  "task-notice-deferred": "Provider not told about queued task changes yet · its prompt holds unsent text",
+  "task-notice-delivered": "Provider told about queued task changes",
   "task-priority": "Task priority changed",
   "task-proposal-accepted": "Proposal accepted: task",
   "task-proposal-rejected": "Proposal rejected: task",
