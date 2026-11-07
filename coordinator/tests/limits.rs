@@ -33,8 +33,9 @@ async fn split_listeners_share_the_global_connection_budget() {
         .find(|(group, _)| *group == bridge_coordinator::config::ListenerGroup::WorkerChannel)
         .unwrap()
         .1;
-    let first = TcpStream::connect(env.addr).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Complete TLS so this consumes a live HTTP connection slot, then drop it to verify that
+    // the connection future releases its permits before another listener can accept a client.
+    let first = tls_connect(&env).await;
     let mut over_limit = TcpStream::connect(worker_addr).await.unwrap();
     let mut buffer = [0u8; 8];
     let result = tokio::time::timeout(Duration::from_secs(3), over_limit.read(&mut buffer))
@@ -51,7 +52,7 @@ async fn split_listeners_share_the_global_connection_budget() {
     })
     .await
     .expect("a shared slot must be released when the original listener's client disconnects");
-    assert!(reopened.is_ok());
+    assert!(reopened.is_ok(), "released connection slot should accept TLS again: {reopened:?}");
     env.stop().await;
 }
 
