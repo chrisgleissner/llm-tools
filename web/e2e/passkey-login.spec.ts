@@ -123,6 +123,16 @@ test("Chromium virtual authenticator completes registration and passwordless sig
       automaticPresenceSimulation: true,
     },
   });
+  // Keep this test on the explicit button path. Conditional mediation is covered separately;
+  // leaving it pending here can race the deliberate user click below.
+  await page.addInitScript(() => {
+    const pk = window.PublicKeyCredential as typeof PublicKeyCredential & {
+      isConditionalMediationAvailable?: () => Promise<boolean>;
+      getClientCapabilities?: () => Promise<{ conditionalGet?: boolean }>;
+    };
+    Object.defineProperty(pk, "isConditionalMediationAvailable", { configurable: true, value: async () => false });
+    Object.defineProperty(pk, "getClientCapabilities", { configurable: true, value: async () => ({ conditionalGet: false }) });
+  });
 
   // The test CA includes localhost as a DNS SAN. Using that name exercises the same secure,
   // DNS-origin path that passkeys require, while the coordinator still binds only to loopback.
@@ -198,54 +208,7 @@ test("Chromium virtual authenticator completes registration and passwordless sig
   });
   await page.goto(`${localUrl}/login`);
   await expect(page.getByRole("button", { name: "Sign in with a passkey" })).toBeVisible();
-  const assertionStatus = await page.evaluate(async () => {
-    const started = await fetch("/api/v1/auth/passkeys/assertion/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    if (!started.ok) throw new Error(`assertion start failed: ${started.status} ${await started.text()}`);
-    const ceremony = await started.json() as { challenge_id: string; options: { publicKey: Record<string, unknown> } };
-    const publicKey = ceremony.options.publicKey as Record<string, unknown> & {
-      challenge: string;
-      allowCredentials?: Array<{ id: string; type: "public-key"; transports?: AuthenticatorTransport[] }>;
-    };
-    const decode = (value: string) => Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
-    const credential = await navigator.credentials.get({ publicKey: {
-      ...publicKey,
-      challenge: decode(publicKey.challenge),
-      allowCredentials: publicKey.allowCredentials?.map((item) => ({ ...item, id: decode(item.id) })),
-    } as unknown as PublicKeyCredentialRequestOptions }) as PublicKeyCredential;
-    const response = credential.response as AuthenticatorAssertionResponse;
-    const encode = (value: ArrayBuffer | ArrayBufferView) => {
-      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      let binary = "";
-      for (const byte of bytes) binary += String.fromCharCode(byte);
-      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-    };
-    const finished = await fetch("/api/v1/auth/passkeys/assertion/finish", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challenge_id: ceremony.challenge_id,
-        credential: {
-          id: credential.id,
-          rawId: encode(credential.rawId),
-          type: credential.type,
-          response: {
-            clientDataJSON: encode(response.clientDataJSON),
-            authenticatorData: encode(response.authenticatorData),
-            signature: encode(response.signature),
-            userHandle: response.userHandle ? encode(response.userHandle) : null,
-          },
-          clientExtensionResults: credential.getClientExtensionResults(),
-        },
-      }),
-    });
-    return finished.status;
-  });
-  expect(assertionStatus).toBe(200);
-  await page.goto(`${localUrl}/`);
+  await page.getByRole("button", { name: "Sign in with a passkey" }).click();
   await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await cdp.detach();
 });
