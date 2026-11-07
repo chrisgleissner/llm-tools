@@ -177,9 +177,9 @@ export function account(root: HTMLElement, opts: AccountOpts): () => void {
     exp ? h("p", { class: "muted small" }, `That is ${relFromMs(exp.getTime()).replace("in ", "in about ")}.`) : null,
   );
   const passkeyGuidance = h("section", { id: "passkey-support-guidance", class: "card narrow", hidden: true });
-  void import("../passkeys").then(async ({ detectPasskeySupport }) => {
+  void import("../passkeys").then(async ({ detectPasskeySupport, supportsPasskeysOnHost }) => {
     const capability = await detectPasskeySupport();
-    if (!capability.supported) {
+    if (!capability.supported || !supportsPasskeysOnHost(window.location.hostname)) {
       passkeyGuidance.hidden = false;
       passkeyGuidance.replaceChildren(
         h("h2", {}, "Passkeys"),

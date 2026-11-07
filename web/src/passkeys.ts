@@ -2,6 +2,11 @@ import type * as api from "./api";
 
 export type PasskeyCapability = { supported: boolean; conditional: boolean; platformAuthenticator: boolean };
 
+export function supportsPasskeysOnHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return !host.includes(":") && !/^\d+(?:\.\d+){3}$/.test(host);
+}
+
 export async function detectPasskeySupport(): Promise<PasskeyCapability> {
   if (!window.isSecureContext || !navigator.credentials || typeof navigator.credentials.get !== "function" || !window.PublicKeyCredential) {
     return { supported: false, conditional: false, platformAuthenticator: false };

@@ -1,5 +1,13 @@
 import { expect, test } from "./fixtures";
 import { mockApp } from "./mock";
+import { supportsPasskeysOnHost } from "../src/passkeys";
+
+test("passkey RP support requires a DNS host, not an IP literal", () => {
+  expect(supportsPasskeysOnHost("bridge.example.test")).toBe(true);
+  expect(supportsPasskeysOnHost("localhost")).toBe(true);
+  expect(supportsPasskeysOnHost("192.0.2.7")).toBe(false);
+  expect(supportsPasskeysOnHost("[2001:db8::7]")).toBe(false);
+});
 
 async function installPasskeySupport(page: import("@playwright/test").Page, conditional = false): Promise<void> {
   await page.addInitScript((useConditional) => {
