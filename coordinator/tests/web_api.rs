@@ -1219,6 +1219,60 @@ async fn task_revision_etag_and_if_match_enforce_preconditions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn uncertain_worker_result_is_a_problem_and_keeps_a_command_location() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut worker, _) = Fw::connect(&env, &token, "uncertain-worker", 0).await;
+    let request_api = Api {
+        c: api.c.clone(),
+        base: api.base.clone(),
+        cookie: api.cookie.clone(),
+        csrf: api.csrf.clone(),
+        bearer: None,
+    };
+    let request = tokio::spawn(async move {
+        request_api
+            .rb(Method::PATCH, "/api/v1/missions/m1/tasks/2?worker=w1")
+            .header("idempotency-key", "uncertain-retry-1")
+            .json(&json!({"prompt":"retry later", "wait_ms":5000}))
+            .send()
+            .await
+            .unwrap()
+    });
+    let command = worker.recv().await;
+    assert_eq!(command["payload"]["operation"], "task.amend");
+    worker
+        .send(
+            "command.result",
+            json!({
+                "schema_version":1,
+                "request_id":command["payload"]["request_id"],
+                "operation":"task.amend",
+                "outcome":"uncertain",
+                "result":null,
+                "error":{"code":"uncertain","message":"worker lost confirmation"}
+            }),
+        )
+        .await;
+    let response = request.await.unwrap();
+    assert_eq!(response.status().as_u16(), 409);
+    assert_eq!(response.headers().get("content-type").unwrap(), "application/problem+json");
+    let location = response.headers().get("location").unwrap().to_str().unwrap().to_string();
+    assert_eq!(location, "/api/v1/commands/uncertain-retry-1");
+    let problem: Value = response.json().await.unwrap();
+    assert_eq!(problem["type"], "https://llm-tools.dev/problems/uncertain-outcome");
+    assert_eq!(problem["code"], "uncertain-outcome");
+    assert!(problem["detail"].as_str().unwrap().contains("before retrying"));
+
+    let (status, stored) = api.get(&location).await;
+    assert_eq!(status, 200);
+    assert_eq!(stored["state"], "done");
+    assert_eq!(stored["result"]["outcome"], "uncertain");
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
     let env = boot().await;
     let api = env.admin().await;

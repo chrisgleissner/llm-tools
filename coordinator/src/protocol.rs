@@ -128,7 +128,9 @@ fn validate_payload(kind: &str, p: &Map<String, Value>) -> Result<(), ProtocolEr
             }
             let ok = p["request_id"].as_str().is_some_and(valid_id)
                 && p["operation"].is_string()
-                && p["outcome"].is_string()
+                && p["outcome"]
+                    .as_str()
+                    .is_some_and(|outcome| matches!(outcome, "ok" | "accepted" | "applied" | "rejected" | "failed" | "uncertain"))
                 && (p["result"].is_null() || p["result"].is_object())
                 && (p["error"].is_null() || p["error"].is_object());
             if !ok {
@@ -398,5 +400,22 @@ mod tests {
         let decoded = decode(encode("hello", "worker-1", 0, malformed).as_bytes()).expect("envelope parse");
         let error = check_hello(&decoded).unwrap_err();
         assert_eq!(error.code, "invalid-message");
+    }
+
+    #[test]
+    fn command_results_reject_undocumented_outcomes() {
+        let result = |outcome: &str| {
+            encode(
+                "command.result",
+                "worker-1",
+                1,
+                json!({"schema_version":1,"request_id":"request-1","operation":"mission.stop",
+                    "outcome":outcome,"result":null,"error":null}),
+            )
+        };
+        for outcome in ["ok", "accepted", "applied", "rejected", "failed", "uncertain"] {
+            decode(result(outcome).as_bytes()).expect("documented command outcome");
+        }
+        assert_eq!(decode(result("success").as_bytes()).unwrap_err().code, "invalid-message");
     }
 }

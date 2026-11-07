@@ -183,7 +183,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             "404": {"description":"Resource not found","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "412": {"description":"The supplied task revision is stale","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "428": {"description":"A required If-Match precondition was not supplied","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
-            "409": {"description":"The requested change conflicts with current state","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
+            "409": {"description":"The requested change conflicts with current state, or a worker reports an uncertain outcome; inspect the command at Location before retrying","headers":{"Location":{"schema":{"type":"string","format":"uri-reference"}}},"content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "413": {"description":"The request body or command request exceeds its byte limit","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "422": {"description":"The worker does not support this operation","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},
             "415": {"description":"Mutation body is not application/json","content":{"application/problem+json":{"schema":{"$ref":"#/components/schemas/ProblemDetails"}}}},

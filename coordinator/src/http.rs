@@ -2778,6 +2778,19 @@ async fn post_command(State(st): State<St>, Authed(p, ip): Authed, headers: Head
             "the task changed since the supplied revision; fetch it again and retry",
         ));
     }
+    if row.state == "done" && row.result.as_ref().and_then(|result| result.get("outcome")).and_then(Value::as_str) == Some("uncertain") {
+        let mut response = err(
+            StatusCode::CONFLICT,
+            "uncertain-outcome",
+            "the worker could not determine whether this operation completed; inspect the command before retrying",
+        )
+        .into_response();
+        response.headers_mut().insert(
+            header::LOCATION,
+            format!("/api/v1/commands/{request_id}").parse().expect("validated request id"),
+        );
+        return Ok(response);
+    }
     let status = if row.state == "done" { StatusCode::OK } else { StatusCode::ACCEPTED };
     let mut value = row.to_json();
     if status == StatusCode::OK {
