@@ -24,6 +24,7 @@ for (const run of RUNS) {
         const inList = await el.evaluate((n) => Boolean(n.closest("[data-section] li, [data-section] [data-entity]")));
         const scrollable = await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY);
         seen.push({ what, y: box.y + box.height / 2, inList, scrollable });
+        if (["pause", "approve-mission", "answer-question", "take-control"].includes(run.id)) await evidence(page, info, ["UXR-046"], `reach-${run.id}`); // the state as the thumb finds it, before the press
       },
     });
     await run.run(ctx);
@@ -33,6 +34,5 @@ for (const run of RUNS) {
       const ok = s.y >= REACH * h || (s.inList && needed <= s.scrollable);
       expect(ok, `${s.what} is centred at ${Math.round(s.y)} px of ${h} px (${Math.round((s.y / h) * 100)}%); the zone starts at ${Math.round(REACH * h)} px${s.inList ? `; the list can scroll ${Math.round(s.scrollable)} px` : ""}`).toBe(true);
     }
-    if (seen.length) await evidence(page, info, ["UXR-046"], `reach-${run.id}`);
   });
 }

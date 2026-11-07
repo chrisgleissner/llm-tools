@@ -617,9 +617,12 @@ export const RUNS: PathRun[] = [
 
 /** `j` selects the first row; the approval row of the dense set is the first needs-you row, so focus is already there. Otherwise step down to it. */
 async function focusApprovalRow(page: Page): Promise<void> {
-  const target = needsRow(page, "approve");
-  for (let n = 0; n < 12 && !(await focused(target)); n += 1) await page.keyboard.press("j");
-  expect(await focused(target), "j reaches a row that can be approved").toBe(true);
+  await needsRow(page, "approve").waitFor(); // the approve button appears when the row's status has been read
+  // Rows are reordered while the other statuses are read (an approval row moves above a provider question), so test where the focus is after each `j`
+  // instead of counting presses: stop on the first row that has an Approve button.
+  const onApprovable = (): Promise<boolean> => page.evaluate(() => Boolean((document.activeElement as HTMLElement | null)?.closest("[data-entity]")?.querySelector('[data-action="approve"]')));
+  for (let n = 0; n < 40 && !(await onApprovable()); n += 1) await page.keyboard.press("j");
+  expect(await onApprovable(), "j reaches a row that can be approved").toBe(true);
 }
 
 export const isPhoneProject = (page: Page): boolean => isPhone(page);

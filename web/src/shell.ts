@@ -280,18 +280,19 @@ function paletteActions(): PaletteAction[] {
 /** While a text field has focus `body[data-typing]` is set, so a phone's bottom bar gives its height to the half of the screen the keyboard leaves. */
 const TYPING_FIELD = "input:not([type=checkbox],[type=radio],[type=button],[type=submit],[type=range]),textarea";
 let leaveTyping = 0;
-export function syncTyping(): void {
+export function syncTyping(now = false): void {
   window.clearTimeout(leaveTyping);
   const on = (): boolean => !!document.activeElement?.matches(TYPING_FIELD) && !document.activeElement.closest(".xterm");
-  // A tap on a button blurs the field first: keep the layout until the click has landed.
+  // A tap on a button blurs the field first: keep the layout until the click has landed. A new page (now) has no click in flight.
   if (on()) document.body.setAttribute("data-typing", "");
+  else if (now) document.body.removeAttribute("data-typing");
   else leaveTyping = window.setTimeout(() => on() || document.body.removeAttribute("data-typing"), 300);
 }
 
 export function installShortcuts(go: (path: string) => void): void {
   navigate = go;
-  document.addEventListener("focusin", syncTyping);
-  document.addEventListener("focusout", syncTyping);
+  document.addEventListener("focusin", () => syncTyping());
+  document.addEventListener("focusout", () => syncTyping());
   let pendingG = 0;
   document.addEventListener("keydown", (e) => {
     if (e.defaultPrevented) return;
@@ -499,7 +500,7 @@ export function shell(path: string, hooks: ShellHooks): { el: HTMLElement; dispo
   paintConn();
   paintAttention();
   live = { hooks, asks: () => void askNotify() };
-  syncTyping(); // a sign-in form that was replaced while it had focus fires no focusout
+  syncTyping(true); // a sign-in form that was replaced while it had focus fires no focusout
 
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
   const el = h(

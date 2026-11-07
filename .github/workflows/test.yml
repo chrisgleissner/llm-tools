@@ -166,6 +166,12 @@ jobs:
           # PRD-037 T45: fold budgets, reflow, target sizes, axe and keyboard simulation at 2560x1440, 1280x720,
           # 768x1024, 1024x768, 430x932, 360x640, 320x568 and the landscape phones 740x360 and 568x320.
           BRIDGE_SKIP_VISUAL=1 npx playwright test --project="matrix-*"
+      - name: Click paths on the two smallest phones (Chromium)
+        working-directory: web
+        run: |
+          # PRD-037 UXR-043 to UXR-046: the inventoried operator tasks (interaction counts), typing above a keyboard that covers half
+          # the screen, and thumb reach, at 320x568 and 360x640. The same specs run at 1440x900 and 353x745 in the step above.
+          BRIDGE_SKIP_VISUAL=1 npx playwright test --project="paths-*"
       - name: Visual regression (official Playwright image, Chromium desktop and Pixel 4)
         working-directory: web
         run: |
