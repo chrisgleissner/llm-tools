@@ -70,10 +70,10 @@ corrected it and merged; main CI run 42269767860 is green on every job.
 
 | Status | Count |
 |---|---:|
-| Verified `[x]` | 247 |
+| Verified `[x]` | 248 |
 | Incomplete `[~]` | 74 |
 | Blocked `[!]` | 6 |
-| Not started `[ ]` | 103 |
+| Not started `[ ]` | 102 |
 | **Total** | **430** |
 
 The original implementation IDs and operator addenda 2 to 7 remain verified. New physical and shared-tracking rows are counted from `SPEC_STATUS.md`; open rows are not described as complete.

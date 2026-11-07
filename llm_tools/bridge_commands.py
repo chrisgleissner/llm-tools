@@ -229,8 +229,10 @@ def _mission_list(store: BridgeStore | None, request: CommandRequest, params: di
 
 
 def _mission_status(store: BridgeStore | None, request: CommandRequest, params: dict[str, Any]) -> dict[str, Any]:
-    """The bounded status projection (a few KB). ``llm-bridge status`` on the worker's own machine still reads the whole projection."""
+    """The bounded status projection (a few KB). ``full`` returns the whole local projection: ``llm-bridge status`` on the worker's own machine asks for it."""
     assert request.mission_id is not None
+    if params["full"]:
+        return dict(_cli().status_snapshot(request.mission_id))
     from .bridge_status_bound import STATUS_PROMPT_CHARS_MAX, bound_status
 
     prompt_chars = params["prompt_chars"]
@@ -714,7 +716,7 @@ OPERATIONS: dict[str, OperationSpec] = {
                        "unsupported_options": Param(list, default=[], item=str)}, _mission_create),
         OperationSpec("mission.status", "Show one mission's bounded status projection", False, True,
                       {"task_limit": Param(int, default=5), "prompt_chars": Param(int, default=0),
-                       "event_limit": Param(int, default=0)}, _mission_status),
+                       "event_limit": Param(int, default=0), "full": Param(bool, default=False)}, _mission_status),
         OperationSpec("mission.settings.get", "Read a mission's saved execution settings", False, True, _NO_PARAMS, _mission_settings_get),
         OperationSpec("mission.settings.patch", "Update mission execution settings", True, True,
                       {"auto_continue": Param(bool), "teams": Param(bool), "token_spend": Param(str),

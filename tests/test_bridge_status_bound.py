@@ -126,3 +126,11 @@ def _status_full(mission_id):
     from llm_tools.bridge import status_snapshot
 
     return status_snapshot(mission_id)
+
+
+def test_local_status_command_still_prints_the_whole_projection(big_mission, capsys):
+    _, mission_id = big_mission
+    assert main(["status", "--mission", mission_id, "--json"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert len(printed["events"]) > 0 and "frozen_tool_config" in printed["mission"]["config"]
+    assert "prompt" in printed["tasks"][0] and "bounded" not in printed

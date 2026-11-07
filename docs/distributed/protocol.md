@@ -129,12 +129,12 @@ coordinator's command journal:
   empty unless `event_limit` (at most 20) asks for the newest ones; the mission object has no frozen
   tool configuration and at most 160 characters of the objective; every string is clipped to 2 KiB and
   every list to 20 items. The result is `bounded: true` and about 5 KB for a mission with a few dozen
-  tasks (a few KB at most; the full projection was 125 KB measured). `task_total`, `task_counts`
+  tasks (the full projection was 125 KB measured). `task_total`, `task_counts`
   and `event_page` still describe the whole mission. `prompt_chars` (at most 2000) adds that many
   characters of each listed task's `prompt` and `original_prompt`.
 - `task.list` returns whole tasks unless `prompt_chars` clips their prompt fields. The web console
   passes it. `task.show` returns one whole task, which is the way to read a full prompt.
-- `llm-bridge status` on the worker's own machine still reads the whole local projection.
+- `full: true` returns the whole local projection (the worker's own `llm-bridge status` sends it). The coordinator's resource route does not pass `full`, so a browser cannot ask for it; a client that posts `/commands` can, and then pays the size.
 
 Outcomes are `ok`, `accepted`, `applied`, `rejected`, `failed` and `uncertain`.
 `uncertain` means an unexpected failure happened during a mutation; the

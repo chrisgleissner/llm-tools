@@ -31,7 +31,7 @@ STATUS_BYTE_LIMIT = 16 * 1024
 # Task fields kept when the projection lists tasks. Prompts, acceptance text, evidence and amendment
 # histories are left out; they have their own reads.
 _TASK_FIELDS = (
-    "id", "mission_id", "ordinal", "title", "status", "priority", "ordering", "revision", "origin",
+    "id", "mission_id", "ordinal", "title", "status", "status_label", "priority", "ordering", "revision", "origin",
     "proposal_status", "proposed_by_operation", "depends_on_ordinals", "pending", "created_at", "updated_at",
 )
 _FINISHED_TASK_STATUSES = frozenset({"COMPLETED", "CANCELLED"})
