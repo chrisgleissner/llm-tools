@@ -101,8 +101,12 @@ export async function navTo(page: Page, name: "Overview" | "Workers" | "Missions
     return;
   }
   const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true });
+  const more = page.locator("#more-button");
+  await expect.poll(async () => (await link.isVisible()) || (await more.isVisible()), {
+    message: `navigation for ${name} should render before choosing its responsive control`,
+  }).toBe(true);
   if (await link.isVisible()) return link.click();
-  await page.locator("#more-button").click();
+  await more.click();
   await page.locator("#more-sheet").getByRole("link", { name, exact: true }).click();
 }
 
