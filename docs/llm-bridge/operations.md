@@ -449,6 +449,24 @@ the next task straight away.
   `review-hold-released` event (`how` is `approved`, `rejected`, `continue` or
   `auto-continue`; `summary` is a human sentence).
 
+### Task notices to a running native provider
+
+While a native Claude Code, Codex or Copilot works, tasks added or amended
+meanwhile are announced to it with one line typed into its prompt (see the
+guide). The line is typed only when the prompt is empty: the pane is read with
+its escape sequences, and text after the prompt glyph counts as empty only when
+it is absent or drawn faint (SGR 2), bright black (90) or in a 256-colour or
+truecolour grey, which is how the providers draw their placeholder text. Any
+other text is treated as an unsent draft and is never submitted. A notice held
+back by a draft for ten minutes records one `task-notice-deferred` event. A
+provider that does not draw its placeholder in one of those styles never gets a
+notice; the queue still works. Turn the feature off with:
+
+```toml
+[bridge]
+task_notices = false # default true
+```
+
 ### Provider native teams and token spend preference
 
 New missions default to provider-native team guidance enabled and Medium token

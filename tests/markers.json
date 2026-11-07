@@ -2311,6 +2311,9 @@
   ],
   "test_the_typed_command_result_carries_the_delivery": [
    "subprocess"
+  ],
+  "test_the_config_can_turn_task_notices_off": [
+   "subprocess"
   ]
  },
  "tests/test_bridge_theme.py": {

@@ -871,6 +871,8 @@ class BridgeMissionHooks:
         """Type one notice about tasks added or amended during this run into the idle provider pane (DOG-017)."""
         if self.handle is None or not self.native_tui or self.headless or provider not in bridge_task_notice.NOTICE_PROVIDERS:
             return
+        if not bridge_task_notice.notices_enabled():
+            return
         moment = time.monotonic()
         if moment < self._notice_next_look:
             return
@@ -884,7 +886,7 @@ class BridgeMissionHooks:
 
         def capture() -> str | None:
             try:
-                return backend.capture(handle, pane="provider")
+                return backend.capture(handle, pane="provider", ansi=True)  # escapes tell a placeholder from an operator draft
             except (OSError, RuntimeError, subprocess.SubprocessError):
                 return None
 

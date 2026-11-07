@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,8 +18,12 @@ from llm_tools.bridge_runtime import BridgeMissionHooks
 from llm_tools.bridge_store import BridgeStore
 from llm_tools.terminal import TerminalHandle, TmuxTerminalBackend
 
-IDLE_CODEX = "work output\n\n› Ask Codex to do something\n\n  gpt-5 · 100% context left\n"
+# Screens as `tmux capture-pane -e` returns them: the placeholder is faint, a draft is plain text.
+IDLE_CODEX = "work output\n\n\x1b[1m›\x1b[22m \x1b[2mAsk Codex to do something\x1b[22m\n\n  \x1b[2mgpt-5 · 100% context left\x1b[22m\n"
 IDLE_CLAUDE = "work output\n─────────────\n❯ \n─────────────\n  ⏵⏵ bypass permissions on\n"
+PLACEHOLDER_CLAUDE = "work output\n╭──────────────────────────────╮\n│ > \x1b[7mT\x1b[27m\x1b[2mry \"fix the failing test\"\x1b[22m   │\n╰──────────────────────────────╯\n"
+DRAFT_CODEX = "work output\n\n\x1b[1m›\x1b[22m refactor the parser first\n\n  \x1b[2mgpt-5 · 100% context left\x1b[22m\n"
+DRAFT_CLAUDE = "work output\n╭──────────────────────────────╮\n│ > \x1b[0mhalf typed draft\x1b[7m \x1b[27m   │\n╰──────────────────────────────╯\n"
 WORKING_CLAUDE = "● Reading files\n✻ Cogitating… (12s · esc to interrupt)\n─────────────\n❯ \n─────────────\n"
 APPROVAL = "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"
 HANDLE = TerminalHandle(Path("/tmp/dog017.sock"), Path("/tmp/dog017.conf"), "m-dog017", "%1", "%2", 8)
@@ -43,7 +48,7 @@ def native(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bridge_task_notice, "KEY_PAUSE_SECONDS", 0.0)
     pane = Pane()
 
-    monkeypatch.setattr(TmuxTerminalBackend, "capture", lambda _self, _handle, *, pane: pane_screen(pane))
+    monkeypatch.setattr(TmuxTerminalBackend, "capture", lambda _self, _handle, *, pane, ansi=False, **_k: pane_screen(pane) if ansi else bridge_task_notice.strip_escapes(pane_screen(pane)))
     monkeypatch.setattr(TmuxTerminalBackend, "send_keys", lambda _self, _handle, *, pane, keys: pane_send(pane, keys))
     monkeypatch.setattr(TmuxTerminalBackend, "pane_activity_screen", lambda _self, _handle, *, pane="provider", seen_epoch=None: (3, None if seen_epoch == 3 else pane_screen(pane)))
     state = SimpleNamespace(pane=pane)
@@ -203,6 +208,81 @@ def test_delivery_waits_for_a_screen_that_stays_unchanged() -> None:
     assert len(sent) == 1 and recorded[0]["through_event_id"] == 5
 
 
+@pytest.mark.parametrize(
+    ("screen", "empty"),
+    [
+        (IDLE_CODEX, True),
+        (IDLE_CLAUDE, True),
+        (PLACEHOLDER_CLAUDE, True),
+        ("\x1b[2m›\x1b[0m \x1b[90mgrey placeholder\x1b[0m\n", True),
+        ("› \x1b[38;5;244mmid grey placeholder\x1b[0m\n", True),
+        ("› \x1b[38;5;252mlight draft\x1b[0m\n", False),
+        ("› \x1b[38;2;120;120;120mtruecolour grey placeholder\x1b[0m\n", True),
+        ("› \x1b[38;2;240;240;240mtruecolour white draft\x1b[0m\n", False),
+        ("› \x1b[38;2;120;40;40mred text\x1b[0m\n", False),
+        (DRAFT_CODEX, False),
+        (DRAFT_CLAUDE, False),
+        ("› typed with no styling at all\n", False),
+        ("› \x1b[32mgreen draft\x1b[0m\n", False),
+        ("› \x1b[2mfaint start\x1b[22m then plain\n", False),
+        ("no composer on this screen\n", False),
+    ],
+)
+def test_composer_is_empty_only_for_a_missing_or_faint_placeholder(screen: str, empty: bool) -> None:
+    assert bridge_task_notice.composer_is_empty(screen) is empty
+
+
+def test_a_draft_in_the_composer_is_never_submitted_and_the_notice_waits(native) -> None:
+    run = native.start()
+    native.store.add_task(run.mission_id, "write the docs", title="Write docs")
+    for draft in (DRAFT_CODEX, "work output\n\n› fix this\n", DRAFT_CODEX):
+        native.pane.screen = draft
+        observe(run)
+        assert native.pane.sent == [], "typing would submit the operator's draft"
+    assert notices(native, run) == [], "the notice stays pending"
+
+    native.pane.screen = IDLE_CODEX  # the draft was sent or cleared
+    observe(run)
+    assert len(native.pane.sent) == 2 and 'task 2 "Write docs"' in native.pane.sent[0]
+    assert len(notices(native, run)) == 1
+
+
+def test_a_dim_placeholder_does_not_block_the_notice(native) -> None:
+    run = native.start("claude")
+    native.pane.screen = PLACEHOLDER_CLAUDE
+    native.store.add_task(run.mission_id, "write the docs", title="Write docs")
+    observe(run)
+    assert len(native.pane.sent) == 2
+
+
+def test_a_draft_that_blocks_delivery_for_a_long_time_is_reported_once() -> None:
+    deferred: list[dict[str, Any]] = []
+    store = SimpleNamespace(
+        task_notice_cursor=lambda *_a: 0,
+        task_notice_candidates=lambda _mission, after, **_k: [{"id": 5, "kind": "task-added", "task_id": 9, "ordinal": 2, "title": "Docs", "status": "QUEUED"}] if after < 5 else [],
+        record_task_notice=lambda *a, **k: None,
+        record_task_notice_deferred=lambda mission, operation, **kw: deferred.append(kw),
+    )
+    delivery = bridge_task_notice.TaskNoticeDelivery("mid", "op", store=store, quiet_seconds=0.0)
+    sent: list[str] = []
+    for now in (0.0, 60.0, 599.0, 600.0, 900.0, 5000.0):
+        assert delivery.poll(capture=lambda: DRAFT_CODEX, send=sent.append, now=now) == []
+    assert sent == [] and len(deferred) == 1
+    assert deferred[0]["reason"] == "composer-draft" and deferred[0]["waited_seconds"] == 600 and deferred[0]["tasks"][0]["ordinal"] == 2
+    assert delivery.poll(capture=lambda: IDLE_CODEX, send=sent.append, now=5001.0) and len(sent) == 1
+
+
+def test_the_deferred_event_is_stored_and_phrased(native) -> None:
+    from llm_tools.bridge_event_text import _humanize_event
+
+    run = native.start()
+    native.store.record_task_notice_deferred(run.mission_id, run.operation, reason="composer-draft", tasks=[{"ordinal": 2}], waited_seconds=660)
+    event = next(item for item in native.store.events(run.mission_id) if item["kind"] == "task-notice-deferred")
+    assert event["data"]["reason"] == "composer-draft" and event["operation_id"] == run.operation
+    phrase, _plumbing = _humanize_event(event)
+    assert "not told" in phrase and "11 min" in phrase and "unsent text" in phrase
+
+
 # ------------------------------------------------------------------ CLI and command results
 
 
@@ -279,6 +359,38 @@ def test_the_console_acknowledgement_includes_the_delivery(cli, capsys) -> None:
     assert feedback == "Task 2 added \u2014 delivered to the running provider at its next prompt"
 
 
+def test_the_config_can_turn_task_notices_off(native, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = tmp_path / "off.toml"
+    config.write_text("[bridge]\ntask_notices = false\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(config))
+    assert bridge_task_notice.notices_enabled() is False
+    run = native.start()
+    native.store.add_task(run.mission_id, "docs", title="Docs")
+    observe(run)
+    assert native.pane.sent == [] and notices(native, run) == []
+    with BridgeStore(tmp_path / "state" / "bridge.sqlite3") as store:
+        delivery = bridge_task_notice.task_delivery(store, run.mission_id, 2, controller_live=True)
+    assert delivery == {"mode": "queue", "text": "starts after task 1", "after_task": 1}, "the receipt must not promise a notice"
+
+    config.write_text("[bridge]\ntask_notices = true\n", encoding="utf-8")
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(config))
+    assert bridge_task_notice.notices_enabled() is True
+    observe(run)
+    assert len(native.pane.sent) == 2
+
+
+def test_task_notices_default_to_on_and_the_config_value_must_be_a_boolean(native, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert bridge_task_notice.notices_enabled() is True
+    bad = tmp_path / "bad.toml"
+    bad.write_text('[bridge]\ntask_notices = "no"\n', encoding="utf-8")
+    monkeypatch.setenv("LLM_TOOLS_CONFIG", str(bad))
+    from llm_tools import config as toolconfig
+
+    with pytest.raises(SystemExit):
+        toolconfig.load_config()
+    assert bridge_task_notice.notices_enabled() is True, "an invalid config never stops the controller from running"
+
+
 # ------------------------------------------------------------------ real tmux
 
 
@@ -324,7 +436,16 @@ def test_notice_reaches_a_real_provider_pane_at_its_idle_prompt(tmp_path: Path, 
         hooks = BridgeMissionHooks(mission_id, handle=handle, headless=False, native_tui=True, controller_logs=tmp_path / "controller.log")
         hooks.bind(store)
         assert wait_for(lambda: "›" in backend.capture(handle, pane="provider"), 6.0, 0.05)
+        backend.send_keys(handle, pane="provider", keys="half-typed draft")  # the operator is typing; no Enter
+        assert wait_for(lambda: "half-typed draft" in backend.capture(handle, pane="provider"), 6.0, 0.05)
         store.add_task(mission_id, "write the docs", title="Write docs")
+        for _ in range(12):
+            hooks._observe_native_operation(operation, "codex", "")
+            time.sleep(0.1)
+        assert not received.exists() or received.read_text(encoding="utf-8") == "", "the draft must not be submitted"
+        assert "half-typed draft" in backend.capture(handle, pane="provider")
+        backend.send_keys(handle, pane="provider", keys="C-u")  # the operator clears the draft
+        assert wait_for(lambda: "half-typed draft" not in backend.capture(handle, pane="provider"), 6.0, 0.05)
 
         def delivered() -> bool:
             hooks._observe_native_operation(operation, "codex", "")

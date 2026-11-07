@@ -2324,6 +2324,18 @@ class BridgeStore:
                 "text_bytes": int(text_bytes),
             }, operation_id=operation_id)
 
+    def record_task_notice_deferred(self, mission_id: str, operation_id: str, *, reason: str, tasks: list[dict[str, Any]], waited_seconds: int) -> None:
+        """Record once that a notice could not be typed (for example the composer holds an unsent draft)."""
+        with self._transaction():
+            self._mission_row(mission_id)
+            self._event(mission_id, "task-notice-deferred", {
+                "operation_id": operation_id,
+                "reason": reason,
+                "tasks": tasks[:50],
+                "task_count": len(tasks),
+                "waited_seconds": int(waited_seconds),
+            }, operation_id=operation_id)
+
     def set_mission_config_value(self, mission_id: str, key: str, value: Any, *, event_kind: str) -> dict[str, Any]:
         if not key or key in {"id", "cwd", "objective"}:
             raise ValueError("invalid mutable mission config key")
