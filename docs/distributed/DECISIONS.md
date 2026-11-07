@@ -380,7 +380,7 @@ All page packages are merged. The caps that were fixed before (initial JavaScrip
 | Measure | Measured | Cap |
 |---|---:|---:|
 | Initial JavaScript, raw / gzip | 81867 / 31590 | 91000 / 31750 (unchanged) |
-| Initial CSS, raw / gzip | 29105 / 6583 | 34000 / 9000 (unchanged) |
+| Initial CSS, raw / gzip | 29107 / 6584 | 34000 / 9000 (unchanged) |
 | Terminal chunk, raw / gzip | 354858 / 92149 | 360000 / 93000 (unchanged) |
 | Route JavaScript (all lazy chunks but the terminal), raw / gzip | 90026 / 37084 | 94000 / 38700 |
 | Route CSS (`fleet`, `auth`, `mission`), raw / gzip | 17937 / 4739 | 18400 / 4900 |
