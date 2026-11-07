@@ -2,7 +2,7 @@
 
 use crate::{write_new, write_replace};
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, KeyPair, KeyUsagePurpose,
+    BasicConstraints, Certificate, CertificateParams, CidrSubnet, DnType, ExtendedKeyUsagePurpose, GeneralSubtree, IsCa, Issuer, KeyPair, KeyUsagePurpose,
     NameConstraints,
 };
 use rustls::crypto::CryptoProvider;
@@ -94,7 +94,7 @@ fn constraints_for(names: &[String]) -> NameConstraints {
 /// also rebuilt from its stored key (with `None`) as the issuer when signing a renewed server
 /// certificate: signing needs only the subject name and key, so the stored `ca.pem` stays the
 /// certificate clients trust and its constraints are checked afterwards by [`verify_names`].
-fn ca_certificate(ca_key: &KeyPair, constrain: Option<&[String]>) -> Result<Certificate, String> {
+fn ca_params(constrain: Option<&[String]>) -> Result<CertificateParams, String> {
     let mut params = CertificateParams::new(Vec::<String>::new()).map_err(|e| e.to_string())?;
     params.distinguished_name.push(DnType::CommonName, "Bridge Coordinator CA");
     // pathLenConstraint = 0: the CA signs server certificates only, never another CA.
@@ -102,7 +102,11 @@ fn ca_certificate(ca_key: &KeyPair, constrain: Option<&[String]>) -> Result<Cert
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.name_constraints = constrain.map(constraints_for);
     set_validity(&mut params, CA_VALID_DAYS);
-    params.self_signed(ca_key).map_err(|e| e.to_string())
+    Ok(params)
+}
+
+fn ca_certificate(ca_key: &KeyPair, constrain: Option<&[String]>) -> Result<Certificate, String> {
+    ca_params(constrain)?.self_signed(ca_key).map_err(|e| e.to_string())
 }
 
 fn server_pem(ca_key: &KeyPair, names: Vec<String>) -> Result<(String, String), String> {
@@ -117,8 +121,9 @@ fn server_pem(ca_key: &KeyPair, names: Vec<String>) -> Result<(String, String), 
     params.use_authority_key_identifier_extension = true;
     set_validity(&mut params, 825);
     let key = KeyPair::generate().map_err(|e| e.to_string())?;
-    let ca = ca_certificate(ca_key, None)?;
-    let cert = params.signed_by(&key, &ca, ca_key).map_err(|e| e.to_string())?;
+    let issuer_params = ca_params(None)?;
+    let issuer = Issuer::from_params(&issuer_params, ca_key);
+    let cert = params.signed_by(&key, &issuer).map_err(|e| e.to_string())?;
     Ok((cert.pem(), key.serialize_pem()))
 }
 

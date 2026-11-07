@@ -56,6 +56,17 @@ def test_dependabot_covers_workflow_and_dependency_manifests() -> None:
         assert f"directory: {directory}" in config
 
 
+def test_dependabot_groups_every_ecosystem_into_one_pull_request() -> None:
+    config = (ROOT / ".github" / "dependabot.yml").read_text()
+    updates = config.split("  - package-ecosystem: ")[1:]
+    assert len(updates) == 4
+    for update in updates:
+        ecosystem = update.splitlines()[0]
+        assert "interval: weekly" in update, ecosystem
+        assert "open-pull-requests-limit: 1" in update, ecosystem
+        assert f"      {ecosystem}:\n        patterns: [\"*\"]" in update, ecosystem
+
+
 def test_dynamic_security_scans_are_pinned_and_fail_on_medium_alerts() -> None:
     workflow = (ROOT / ".github" / "workflows" / "security-dynamic.yml").read_text()
     assert "schemathesis==4.33.1" in workflow

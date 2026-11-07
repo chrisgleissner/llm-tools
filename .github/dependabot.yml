@@ -1,18 +1,44 @@
+# One pull request per ecosystem and schedule. Every update of an ecosystem is collected in a
+# single group, so a run of Dependabot opens at most one PR for pip, one for cargo, one for
+# github-actions and one for npm, instead of one PR per dependency.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ["*"]
+
   - package-ecosystem: cargo
     directory: /coordinator
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 1
+    groups:
+      cargo:
+        patterns: ["*"]
+
   - package-ecosystem: npm
     directory: /web
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 1
+    groups:
+      npm:
+        patterns: ["*"]
+
   - package-ecosystem: pip
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 1
+    groups:
+      pip:
+        patterns: ["*"]
