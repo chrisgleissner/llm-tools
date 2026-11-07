@@ -449,15 +449,18 @@ class WsFrameProxy:
             link.path = request.split(b" ", 2)[1].decode("latin-1").split("?", 1)[0] if request.count(b" ") >= 2 else ""
             upstream.sendall(request)
             response = self._read_head(upstream)
-            client.sendall(response)
             if b" 101 " not in response.split(b"\r\n", 1)[0]:
+                client.sendall(response)
                 return
             client.settimeout(None)
             upstream.settimeout(None)
+            # The link is counted and registered before the client sees the 101: a client that reads the counters (or calls
+            # reset_all) as soon as its connect returns must find this link there.
             with self._lock:
                 self._links.append(link)
             self.accepted += 1
             self.accepted_paths[link.path] = self.accepted_paths.get(link.path, 0) + 1
+            client.sendall(response)
             pump = threading.Thread(target=self._pump, args=(link, client, upstream, UP), daemon=True, name="ws-frame-proxy-pump")
             pump.start()
             self._pump(link, upstream, client, DOWN)
