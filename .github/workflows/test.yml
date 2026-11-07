@@ -80,7 +80,7 @@ jobs:
           python -m coverage xml
 
       - name: Keep the coverage report for the upload job
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-${{ matrix.python-version }}
           path: coverage.xml
@@ -166,7 +166,7 @@ jobs:
             node node_modules/@playwright/test/cli.js test e2e/screenshots.spec.ts --project=chromium-desktop --project=chromium-mobile
       - name: Keep the Playwright report and the load measurement
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-playwright
           path: |
@@ -355,7 +355,7 @@ jobs:
           } >bench-arm64.md
           cat bench-arm64.md
           { echo; cat bench-arm64.md; } >>"$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: bench-arm64
