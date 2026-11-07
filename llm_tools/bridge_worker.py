@@ -698,7 +698,7 @@ class WorkerSession:
         if self.terminal_launcher is None:
             return [self._terminal_refused(session_id, "terminal access is not available on this worker")]
         if not self.config.terminal_view:
-            return [self._terminal_refused(session_id, "this worker does not share terminals; enrol it with --allow-terminal-view or --allow-control")]
+            return [self._terminal_refused(session_id, "Needs --allow-terminal-view or --allow-control")]
         with self.open_store() as store:
             known = store.mission_id_if_exists(mission_id)
         if known is None:

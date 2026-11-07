@@ -771,7 +771,8 @@ def test_read_only_worker_shares_terminals_only_with_the_view_opt_in(state, tmp_
         return session.handle(Message("terminal.open", "c", 1, {"session_id": session_id, "mission_id": mission_id, "mode": "view", "cols": 80, "rows": 24}))
 
     plain = worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False)
-    assert "--allow-terminal-view" in open_terminal(plain, "t1")[0].payload["reason"] and opened == []
+    refusal = open_terminal(plain, "t1")[0].payload["reason"]
+    assert "--allow-terminal-view" in refusal and len(refusal.encode("utf-8")) <= 64 and opened == []
     viewer = worker.enroll("ws-1", "wss://c:1", TOKEN, ca_pem=None, allow_control=False, allow_terminal_view=True)
     assert open_terminal(viewer, "t2") == [] and opened == [("t2", "view", False)]
     assert worker.load_config().public()["allow_terminal_view"] is True

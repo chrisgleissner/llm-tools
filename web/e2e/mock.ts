@@ -229,6 +229,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
         const status = missionAction[2] === "start" || missionAction[2] === "resume" || missionAction[2] === "continue" ? "RUNNING"
           : missionAction[2] === "pause" ? "PAUSED" : missionAction[2] === "stop" ? "STOPPED" : "CANCELLED";
         current.mission.status = status;
+        streamSocket?.send(JSON.stringify({ type: "event", mission_id: current.mission.id }));
       }
       return json(route, 200, { request_id: "resource-mock", target: url.searchParams.get("worker"), operation, state: "done", result: { outcome: "applied", result: { mission: current?.mission ?? null }, error: null } });
     }
