@@ -167,17 +167,21 @@ test("Pixel 4 mission journey records layout shift and interaction latency", asy
   const cdp = await context.newCDPSession(page);
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
   await page.addInitScript(() => {
-    const metrics = { cls: 0, interactions: [] as number[] };
+    const metrics = { cls: 0, interactions: [] as number[], shifts: [] as Array<{ value: number; sources: string[] }> };
     (window as Window & { __uxMetrics?: typeof metrics }).__uxMetrics = metrics;
     new PerformanceObserver((list) => {
-      for (const entry of list.getEntries() as Array<PerformanceEntry & { value?: number; hadRecentInput?: boolean }>) if (!entry.hadRecentInput) metrics.cls += entry.value ?? 0;
+      for (const entry of list.getEntries() as Array<PerformanceEntry & { value?: number; hadRecentInput?: boolean; sources?: Array<{ node?: Node }> }>) {
+        if (entry.hadRecentInput) continue;
+        metrics.cls += entry.value ?? 0;
+        metrics.shifts.push({ value: entry.value ?? 0, sources: (entry.sources ?? []).map(({ node }) => node instanceof Element ? `${node.tagName.toLowerCase()}#${node.id}.${String(node.className).replace(/\s+/g, ".")}` : "unknown") });
+      }
     }).observe({ type: "layout-shift", buffered: true });
     new PerformanceObserver((list) => {
       for (const entry of list.getEntries() as Array<PerformanceEntry & { duration: number }>) metrics.interactions.push(entry.duration);
     }).observe({ type: "event", buffered: true, durationThreshold: 16 } as PerformanceObserverInit & { durationThreshold: number });
   });
   await mockApp(page, { ...IN, terminalScreen: true });
-  const runs: Array<{ cls: number; inpMs: number }> = [];
+  const runs: Array<{ cls: number; inpMs: number; shifts: Array<{ value: number; sources: string[] }> }> = [];
   for (let i = 0; i < 5; i++) {
     await page.goto("/");
     await expect(page.locator('[data-attention="approval"]').first()).toBeVisible();
@@ -187,14 +191,14 @@ test("Pixel 4 mission journey records layout shift and interaction latency", asy
     await expect(page.locator("#terminal-host .xterm-rows")).toContainText("Reading src/tokenizer.rs");
     await page.waitForTimeout(100);
     runs.push(await page.evaluate(() => {
-      const collected = (window as Window & { __uxMetrics?: { cls: number; interactions: number[] } }).__uxMetrics;
-      return { cls: collected?.cls ?? 0, inpMs: Math.max(0, ...(collected?.interactions ?? [])) };
+      const collected = (window as Window & { __uxMetrics?: { cls: number; interactions: number[]; shifts: Array<{ value: number; sources: string[] }> } }).__uxMetrics;
+      return { cls: collected?.cls ?? 0, inpMs: Math.max(0, ...(collected?.interactions ?? [])), shifts: collected?.shifts ?? [] };
     }));
   }
   const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
   const clsMedian = median(runs.map((r) => r.cls));
   const inpMedian = median(runs.map((r) => r.inpMs));
-  console.log(`UX Pixel 4 at 4x CPU, 5 runs: clicks 1, CLS ${runs.map((r) => r.cls.toFixed(3)).join(",")}, median ${clsMedian.toFixed(3)}; max observed interaction-event duration (INP lab proxy) ${runs.map((r) => r.inpMs.toFixed(0)).join(",")} ms, median ${inpMedian.toFixed(0)} ms`);
+  console.log(`UX Pixel 4 at 4x CPU, 5 runs: clicks 1, CLS ${runs.map((r) => r.cls.toFixed(3)).join(",")}, median ${clsMedian.toFixed(3)}; max observed interaction-event duration (INP lab proxy) ${runs.map((r) => r.inpMs.toFixed(0)).join(",")} ms, median ${inpMedian.toFixed(0)} ms; shifts ${JSON.stringify(runs.map((r) => r.shifts))}`);
   expect(Math.max(...runs.map((r) => r.cls))).toBeLessThan(0.1);
   await cdp.detach();
 });

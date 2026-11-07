@@ -1076,7 +1076,28 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BoundedRequestObject"
+                "additionalProperties": false,
+                "properties": {
+                  "password": {
+                    "maxLength": 256,
+                    "minLength": 12,
+                    "type": "string"
+                  },
+                  "remember": {
+                    "type": "boolean"
+                  },
+                  "username": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9._@-]+$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "username",
+                  "password"
+                ],
+                "type": "object"
               }
             }
           },
@@ -2344,7 +2365,7 @@
             "name": "q",
             "required": false,
             "schema": {
-              "maxLength": 1024,
+              "maxLength": 256,
               "type": "string"
             }
           },

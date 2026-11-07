@@ -177,6 +177,11 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
 
   function renderStatus(): void {
     renderCurrentWork();
+    const loadingStatus = online()
+      ? h("div", { class: "status-skeleton" },
+          h("p", { class: "sr-only", role: "status" }, "Loading mission status"),
+        )
+      : h("p", { class: "muted" }, "Waiting for worker data...");
     const rows: Array<[string, Node | string]> = [];
     if (snapshot) {
       const mission = (snapshot["mission"] ?? {}) as Record<string, unknown>;
@@ -195,7 +200,7 @@ export function missionDetail(root: HTMLElement, workerName: string, missionId: 
       snapshotError
         ? h("p", { class: "notice", role: "status" }, snapshotError)
         : !snapshot
-          ? h("p", { class: "muted" }, "Loading...")
+          ? loadingStatus
           : h("table", { class: "kv" }, h("caption", { class: "sr-only" }, "Mission status"), h("tbody", {}, ...rows.map(([k, v]) => h("tr", {}, h("th", { scope: "row" }, k), h("td", {}, v))))),
     );
   }

@@ -151,7 +151,7 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
     }
     if path == "/api/v1/missions" && method == "GET" {
         op["parameters"] = json!([
-            {"name":"q","in":"query","required":false,"schema":{"type":"string","maxLength":1024}},
+            {"name":"q","in":"query","required":false,"schema":{"type":"string","maxLength":256}},
             {"name":"worker","in":"query","required":false,"schema":{"type":"string","maxLength":63}},
             {"name":"status","in":"query","required":false,"schema":{"type":"string","maxLength":256}},
             {"name":"sort","in":"query","required":false,"schema":{"type":"string","enum":["name","status","worker","updated"]}},
@@ -171,6 +171,21 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
         op["requestBody"] = json!({
             "required":true,
             "content":{"application/json":{"schema":{"$ref":"#/components/schemas/TokenCreate"}}}
+        });
+    }
+    if path == "/api/v1/auth/login" && method == "POST" {
+        op["requestBody"] = json!({
+            "required":true,
+            "content":{"application/json":{"schema":{
+                "type":"object",
+                "additionalProperties":false,
+                "required":["username","password"],
+                "properties":{
+                    "username":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9._@-]+$"},
+                    "password":{"type":"string","minLength":12,"maxLength":256},
+                    "remember":{"type":"boolean"}
+                }
+            }}}
         });
     }
     if path == "/api/v1/missions" && method == "POST" {
@@ -505,5 +520,17 @@ mod tests {
     fn generated_openapi_matches_committed_snapshot() {
         let snapshot: Value = serde_json::from_str(include_str!("../../docs/distributed/openapi.json")).expect("valid snapshot");
         assert_eq!(openapi_value(), snapshot);
+    }
+
+    #[test]
+    fn login_schema_describes_the_fields_the_handler_accepts() {
+        let doc = openapi_value();
+        let schema = &doc["paths"]["/api/v1/auth/login"]["post"]["requestBody"]["content"]["application/json"]["schema"];
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["username", "password"]));
+        assert_eq!(schema["properties"]["username"]["type"], "string");
+        assert_eq!(schema["properties"]["password"]["type"], "string");
+        assert_eq!(schema["properties"]["password"]["minLength"], crate::auth::MIN_PASSWORD_LEN);
+        assert_eq!(schema["properties"]["remember"]["type"], "boolean");
     }
 }

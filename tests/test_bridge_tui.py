@@ -750,7 +750,7 @@ def test_tui_compact_and_full_render_at_supported_sizes(monkeypatch) -> None:
     assert "LLM BRIDGE" in compact.lines[0]
     assert "[Overview]" in compact.lines[2]
     assert compact.lines[4].startswith("› ")
-    assert "Ctrl-] P provider" in compact.lines[5] and compact.lines[5].rstrip().endswith("? help")
+    assert "Tab/F1-9 views" in compact.lines[5] and compact.lines[5].rstrip().endswith("? help")
 
     state.full = True
     full = FakeWindow(24, 80)

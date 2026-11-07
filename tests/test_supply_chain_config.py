@@ -27,7 +27,7 @@ def test_supply_chain_policy_and_audit_jobs_are_wired() -> None:
     assert "allow = [" in deny
 
     workflow = (ROOT / ".github" / "workflows" / "supply-chain.yml").read_text()
-    assert "cargo audit --file coordinator/Cargo.lock" in workflow
+    assert "cargo audit --ignore RUSTSEC-2023-0071 --file coordinator/Cargo.lock" in workflow
     assert "cargo deny check advisories licenses bans sources)" in workflow
     assert "npm audit --omit=dev" in workflow
     assert "python -m pip_audit -r requirements-dev.txt" in workflow

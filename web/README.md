@@ -47,6 +47,7 @@ the pixel comparison and keep the axe checks. Update the image tag together with
 
 ## Bundle budget and load time
 
-`e2e/budget.spec.ts` fails when the initial JavaScript or CSS (the files `index.html` references) or the lazily loaded
-terminal chunk exceed `budget.json`, and when the entry imports the terminal chunk statically. It also measures the
+`e2e/budget.spec.ts` counts the app entry and its transitive static JavaScript imports as initial load, and counts
+chunks reachable only through dynamic imports as lazy load. It fails when either group or CSS exceeds `budget.json`,
+or when the terminal chunk is imported statically. It also measures the
 first-run page on Pixel 4 emulation with and without 4x CPU throttling and writes `test-results/load-metrics.json`.

@@ -23,7 +23,8 @@ jobs:
           cargo install --locked cargo-deny --version 0.20.2
       - name: Audit Rust dependencies
         run: |
-          cargo audit --file coordinator/Cargo.lock
+          # RUSTSEC-2023-0071 is narrowly accepted for WebAuthn public-key verification; rationale and limits in DECISIONS.md and threat-model.md.
+          cargo audit --ignore RUSTSEC-2023-0071 --file coordinator/Cargo.lock
           (cd coordinator && cargo deny check advisories licenses bans sources)
 
   npm:

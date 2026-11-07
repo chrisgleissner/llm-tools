@@ -15,6 +15,7 @@ enrolled worker has no network surface and is out of scope (SEC-001).
 | Ability to type into a provider terminal | Worker tmux station; reachable remotely only through a writer terminal session. |
 | Administrator password, sessions, API tokens, worker tokens | Coordinator database, as Argon2id or SHA-256 hashes. An API token has the same power as the administrator session (see the threats table). |
 | Coordinator CA key and server key | Coordinator data directory, 0600. The CA is name-constrained (see the threats table). |
+| Passkey credential public keys and ceremony state | Coordinator database; credential keys are public, and in-flight state is session-bound, single-use and expires within five minutes. The coordinator does not store RSA private keys. |
 | Worker token and trusted CA | `<state>/worker/`, 0600. |
 
 ## Trust boundaries
@@ -60,6 +61,7 @@ enrolled worker has no network surface and is out of scope (SEC-001).
 | Slow or hostile consumer exhausting memory | Message size limits, bounded queues, a viewer backlog limit with disconnect, tmux pause-after with snapshot resync, a request body limit, an event retention cap (values: `protocol.md` and `coordinator.md`). | A flood of valid requests from an authenticated client is limited only by connection limits. |
 | Secrets in logs | Worker audit and logs record identifiers, outcomes and byte counts only; tokens are never printed after enrolment; `worker status` and `remote status` omit tokens. | Prompt text is part of mission data and is replicated to the coordinator in events. |
 | Downgrade to plain HTTP | Workers refuse non-`wss://` URLs and the remote CLI requires `https://`. The coordinator serves TLS only. | None known. |
+| RSA private-key timing attacks in passkey verification | `webauthn-rs` 0.6.2 pulls `rsa 0.10.0-rc.19`, flagged by RUSTSEC-2023-0071. The coordinator uses the WebAuthn library only to verify authenticator signatures against stored public credential keys; it creates, stores, signs with and decrypts with no RSA private key. The exception is limited to this public-key verification path and recorded for both audit tools in `DECISIONS.md`. | The Rust dependency contains vulnerable private-key operations even though this coordinator path does not call them. Revisit on any auth-path change or when a maintained `webauthn-rs` release removes the dependency; do not reuse this exception for private-key operations. |
 
 ## Out of scope
 

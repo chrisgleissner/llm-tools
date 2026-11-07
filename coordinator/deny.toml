@@ -1,6 +1,8 @@
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "webauthn-rs 0.6.2 uses the rsa crate for public-key assertion verification. The coordinator never creates, decrypts with or signs using RSA private keys. Downgrading to 0.5.5 removes rsa but adds a system OpenSSL runtime dependency, which breaks the static FROM scratch container and cross-target builds. Revisit when webauthn-rs 0.6.x removes rsa or the coordinator can use a compatible verifier." },
+]
 
 [licenses]
 version = 2
@@ -10,6 +12,7 @@ allow = [
     "BSD-3-Clause",
     "ISC",
     "MIT",
+    "MPL-2.0",
     "Unicode-3.0",
 ]
 confidence-threshold = 0.8
@@ -18,13 +21,30 @@ confidence-threshold = 0.8
 multiple-versions = "deny"
 # Current upstream trees require both major-compatible families; keep these
 # narrowly versioned exceptions visible so new duplicate families still fail.
+# WebAuthn 0.6.2's crypto-glue also carries its own RustCrypto 0.11/0.10 family.
 skip = [
+    { name = "block-buffer", version = "0.12.1" },
     { name = "base64", version = "0.23.1" },
+    { name = "base64", version = "0.21.7" },
+    { name = "cpufeatures", version = "0.3.1" },
+    { name = "crypto-common", version = "0.2.2" },
+    { name = "digest", version = "0.11.3" },
     { name = "getrandom", version = "0.3.4" },
+    { name = "getrandom", version = "0.4.3" },
     { name = "hashbrown", version = "0.17.1" },
     { name = "rand", version = "0.9.5" },
+    { name = "rand", version = "0.10.3" },
     { name = "rand_chacha", version = "0.9.0" },
+    { name = "rand_chacha", version = "0.10.0" },
     { name = "rand_core", version = "0.9.5" },
+    { name = "rand_core", version = "0.10.1" },
+    { name = "r-efi", version = "6.0.0" },
+    { name = "sha1", version = "0.11.0" },
+    { name = "sha2", version = "0.11.1" },
+    { name = "syn", version = "3.0.9" },
+    { name = "synstructure", version = "0.14.0" },
+    { name = "thiserror", version = "1.0.69" },
+    { name = "thiserror-impl", version = "1.0.69" },
     { name = "windows-sys", version = "0.61.2" },
 ]
 wildcards = "deny"

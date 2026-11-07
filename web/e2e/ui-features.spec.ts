@@ -21,7 +21,7 @@ test.describe("workers page", () => {
     await expectAccessible(page, "worker added dialog");
     await result.getByRole("button", { name: "Done" }).click();
     const row = page.locator('tr[data-worker="build-1"]');
-    await expect(row.getByText("offline", { exact: true })).toBeVisible();
+    await expect(row.locator('[data-label="State"]')).toContainText("offline");
     // Duplicate names are refused inline.
     await page.locator("#add-worker-button").click();
     await page.getByRole("dialog", { name: "Add a worker" }).getByLabel("Worker name").fill("build-1");

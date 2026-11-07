@@ -432,38 +432,53 @@ async fn mission_and_task_mutations_adapt_to_typed_worker_commands() {
         .worker_hello("build-1", "worker-id-mutation-test", &hello, &json!(capabilities), "203.0.113.7")
         .unwrap();
 
-    for (path, body, expected_operation) in [
+    for (method, path, body, expected_operation) in [
         (
+            Method::POST,
             "/api/v1/missions/mission-1/start?worker=build-1",
             json!({"headless":true,"providers":"codex"}),
             "mission.start",
         ),
-        ("/api/v1/missions/mission-1/resume?worker=build-1", json!({}), "mission.resume"),
-        ("/api/v1/missions/mission-1/pause?worker=build-1", json!({}), "mission.pause"),
-        ("/api/v1/missions/mission-1/stop?worker=build-1", json!({"force":true}), "mission.stop"),
+        (Method::POST, "/api/v1/missions/mission-1/resume?worker=build-1", json!({}), "mission.resume"),
+        (Method::POST, "/api/v1/missions/mission-1/pause?worker=build-1", json!({}), "mission.pause"),
         (
+            Method::POST,
+            "/api/v1/missions/mission-1/stop?worker=build-1",
+            json!({"force":true}),
+            "mission.stop",
+        ),
+        (
+            Method::POST,
             "/api/v1/missions/mission-1/tasks?worker=build-1",
             json!({"title":"A task","prompt":"Do the work","priority":3,"depends_on":[1,3],"acceptance":[]}),
             "task.add",
         ),
-        ("/api/v1/missions/mission-1/tasks/10?worker=build-1", json!({"depends_on":2}), "task.dependency"),
         (
+            Method::PATCH,
+            "/api/v1/missions/mission-1/tasks/10?worker=build-1",
+            json!({"depends_on":2}),
+            "task.dependency",
+        ),
+        (
+            Method::POST,
             "/api/v1/missions/mission-1/tasks/7/verify?worker=build-1",
             json!({"approved":true,"evidence":"Reviewed output","expected_revision":3}),
             "task.verify",
         ),
         (
+            Method::POST,
             "/api/v1/missions/mission-1/tasks/8/verify?worker=build-1",
             json!({"approved":false,"reason":"Missing evidence","expected_revision":1}),
             "task.reject",
         ),
         (
+            Method::POST,
             "/api/v1/missions/mission-1/tasks/9/retry?worker=build-1",
             json!({"expected_revision":2}),
             "task.retry",
         ),
     ] {
-        let (status, command) = api.post(path, body).await;
+        let (status, command) = api.send(api.rb(method, path).json(&body)).await;
         assert_eq!(status, 202, "{path}: {command}");
         assert_eq!(command["operation"], expected_operation, "{path}: {command}");
         assert_eq!(command["target"], "build-1");
