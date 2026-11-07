@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from llm_tools import bridge_worker as worker
 from llm_tools.bridge_commands import CommandRequest
 from llm_tools.bridge_store import BridgeStore
 from tests.conftest import scaled, wait_for
@@ -103,6 +104,13 @@ def _synced(system, store_path: Path) -> None:
 
 
 def test_one_thousand_replicated_events_stay_within_the_write_and_growth_bounds(tmp_path, monkeypatch, capsys, block_dir):
+    # The bounds below were measured with batches of 200 events. The coordinator commits one transaction
+    # per batch, and the worker's production batches (25 events, 16 KiB, 20 KiB/s) are deliberately small
+    # for slow links, which multiplies the commits and the write-ahead log pages written per event. Pin
+    # the batch shape here so that this test keeps measuring the coordinator's cost per stored event.
+    monkeypatch.setattr(worker, "EVENT_BATCH", 200)
+    monkeypatch.setattr(worker, "EVENT_BATCH_BYTES", 1024 * 1024)
+    monkeypatch.setattr(worker, "EVENT_RATE_BYTES_PER_SECOND", 1e9)
     with running_system(tmp_path, monkeypatch, capsys, allow_control=False, data_dir=block_dir / "coordinator") as system:
         store_path = system.state / "bridge.sqlite3"
         _synced(system, store_path)
