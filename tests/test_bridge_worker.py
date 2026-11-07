@@ -322,7 +322,8 @@ def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_pa
     summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
     assert first_id not in summaries and len(summaries) == 1
     assert batch.payload["mission_cursor"] == batch.payload["through"]
-    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at"} for mission in summaries.values())
+    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at", "task_counts", "current_task", "station", "model", "needs_kind", "needs_tasks"} for mission in summaries.values())
+    assert all(mission["task_counts"] == {"QUEUED": 1} for mission in summaries.values())
 
 
 def test_worker_replicates_new_provider_question_without_a_database_event(state, monkeypatch):

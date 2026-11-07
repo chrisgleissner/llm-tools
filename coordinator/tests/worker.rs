@@ -504,10 +504,12 @@ async fn stream_broadcast() {
     let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
     let m = next(&mut stream).await;
     assert_eq!((m["type"].as_str(), m["state"].as_str()), (Some("worker"), Some("online")));
-    fw.send("events", json!({"after": 0, "through": 1, "events": [{"id": 1}]})).await;
+    fw.send("events", json!({"after": 0, "through": 1, "events": [{"id": 1, "mission_id": "m1"}]}))
+        .await;
     let m = next(&mut stream).await;
     assert_eq!(m["type"], "event");
-    assert_eq!(m["events"][0]["id"], 1);
+    assert_eq!((m["cursor"].as_u64(), m["count"].as_u64()), (Some(1), Some(1)));
+    assert_eq!(m["missions"][0]["id"], "m1");
     api.post("/api/v1/commands", submit("s1")).await;
     assert_eq!(next(&mut stream).await["type"], "command");
     drop(fw);
@@ -591,4 +593,153 @@ fn completed_command_retention() {
     assert_eq!(keep, 7 * 86_400, "retention is the documented seven days");
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Wait until the worker is listed offline.
+async fn wait_offline(api: &Api) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while api.get("/api/v1/workers/w1").await.1["state"] != "offline" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker goes offline");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reads_for_an_offline_worker_are_refused_and_writes_stay_queued() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (fw, _) = Fw::connect(&env, &token, "wid1", 0).await; // the hello advertises the operations
+    drop(fw);
+    wait_offline(&api).await;
+
+    // A read is refused at once, through /commands and through the resource routes, and leaves no journal entry.
+    for (id, op) in [("read-1", "mission.list"), ("read-2", "mission.status")] {
+        let (st, body) = api.post("/api/v1/commands", json!({"target": "w1", "request": request(id, op)})).await;
+        assert_eq!((st, body["error"]["code"].as_str()), (503, Some("worker-offline")), "{body}");
+        assert_eq!(api.get(&format!("/api/v1/commands/{id}")).await.0, 404, "a refused read must not be journaled");
+    }
+    let (st, body) = api.get("/api/v1/missions/m1?worker=w1").await;
+    assert_eq!((st, body["error"]["code"].as_str()), (503, Some("worker-offline")), "{body}");
+    let (st, body) = api.get("/api/v1/missions/m1/tasks?worker=w1").await;
+    assert_eq!((st, body["error"]["code"].as_str()), (503, Some("worker-offline")), "{body}");
+
+    // A write is queued as before and is delivered once after the reconnect, with no read before it.
+    assert_eq!(api.post("/api/v1/commands", submit("write-1")).await.0, 202);
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let delivered = fw.recv().await;
+    assert_eq!(delivered["payload"]["request_id"], "write-1");
+    fw.barrier().await; // anything else queued would have arrived before the pong
+    assert_eq!(api.get("/api/v1/commands/read-1").await.0, 404);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unanswered_reads_fail_when_the_worker_disconnects_and_are_not_replayed() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    let (st, _) = api
+        .post("/api/v1/commands", json!({"target": "w1", "request": request("read-open", "mission.list")}))
+        .await;
+    assert_eq!(st, 202);
+    assert_eq!(fw.recv().await["payload"]["request_id"], "read-open");
+    assert_eq!(api.post("/api/v1/commands", submit("write-open")).await.0, 202);
+    assert_eq!(fw.recv().await["payload"]["request_id"], "write-open");
+    drop(fw);
+    wait_offline(&api).await;
+
+    // The read is finished with the failure a client can read; the write stays open.
+    let (_, read) = api.get("/api/v1/commands/read-open").await;
+    assert_eq!(read["state"], "done", "{read}");
+    assert_eq!(
+        (read["result"]["outcome"].as_str(), read["result"]["error"]["code"].as_str()),
+        (Some("failed"), Some("worker-offline"))
+    );
+    assert_eq!(api.get("/api/v1/commands/write-open").await.1["state"], "sent");
+
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    assert_eq!(fw.recv().await["payload"]["request_id"], "write-open");
+    fw.barrier().await;
+    assert_eq!(api.get("/api/v1/diagnostics").await.1["command_queue_depths"]["w1"], json!({"sent": 1}));
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_stream_gets_change_notices_not_event_bodies_or_command_results() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let token = api.add_worker("w1").await;
+    let origin = env.origin();
+    let cookie = format!("__Host-bridge_session={}", api.cookie.as_ref().unwrap());
+    let mut stream = env.ws("/api/v1/stream", &[("cookie", &cookie), ("origin", &origin)]).await.unwrap();
+    let (mut fw, _) = Fw::connect(&env, &token, "wid1", 0).await;
+    assert_eq!(next(&mut stream).await["state"], "online");
+
+    let events: Vec<Value> = (1..=25)
+        .map(|id| json!({"id": id, "mission_id": if id % 5 == 0 { "m2" } else { "m1" }, "kind": "task-note", "data": {"text": "x".repeat(600)}}))
+        .collect();
+    fw.send(
+        "events",
+        json!({"after": 0, "through": 25, "events": events, "missions": [{"id": "m3", "name": "n", "status": "RUNNING", "folder": "f", "updated_at": null}]}),
+    )
+    .await;
+    let notice = next(&mut stream).await;
+    let text = notice.to_string();
+    assert!(text.len() < 600, "a 25-event batch of 15 KB produced a {} byte notice", text.len());
+    assert!(notice.get("events").is_none() && !text.contains("xxxx"), "{notice}");
+    assert_eq!((notice["cursor"].as_u64(), notice["count"].as_u64()), (Some(25), Some(25)));
+    assert_eq!((notice["first_event_id"].as_u64(), notice["last_event_id"].as_u64()), (Some(1), Some(25)));
+    let missions = notice["missions"].as_array().unwrap();
+    let by_id = |id: &str| missions.iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("no mission {id} in {notice}"));
+    assert_eq!((by_id("m1")["events"].as_u64(), by_id("m1")["last_event_id"].as_u64()), (Some(20), Some(24)));
+    assert_eq!((by_id("m2")["events"].as_u64(), by_id("m2")["summary"].as_bool()), (Some(5), Some(false)));
+    assert_eq!((by_id("m3")["events"].as_u64(), by_id("m3")["summary"].as_bool()), (Some(0), Some(true)));
+
+    // A summary-only update (a newly pending provider question) is announced as well.
+    fw.send(
+        "events",
+        json!({"after": 25, "through": 25, "events": [], "missions": [{"id": "m3", "name": "n", "status": "RUNNING", "folder": "f", "updated_at": null}]}),
+    )
+    .await;
+    let notice = next(&mut stream).await;
+    assert_eq!(
+        (notice["type"].as_str(), notice["count"].as_u64(), notice["missions"][0]["summary"].as_bool()),
+        (Some("event"), Some(0), Some(true))
+    );
+
+    // A command notice names the command and its state but carries neither the request parameters nor the result.
+    assert_eq!(api.post("/api/v1/commands", submit("cmd-1")).await.0, 202);
+    assert_eq!(fw.recv().await["payload"]["request_id"], "cmd-1");
+    let big = json!({"schema_version": 1, "request_id": "cmd-1", "operation": "task.add", "outcome": "applied", "result": {"blob": "y".repeat(50_000)}, "error": null});
+    fw.send("command.result", big).await;
+    let mut done = None;
+    while done.is_none() {
+        let m = next(&mut stream).await;
+        if m["type"] == "command" && m["command"]["state"] == "done" {
+            done = Some(m);
+        }
+    }
+    let done = done.unwrap();
+    assert!(done.to_string().len() < 600, "{done}");
+    assert_eq!(
+        (done["command"]["outcome"].as_str(), done["command"]["request_id"].as_str()),
+        (Some("applied"), Some("cmd-1"))
+    );
+    assert!(done["command"].get("result").is_none() && done["command"].get("request").is_none());
+    // The full entry stays available from the journal.
+    assert!(api.get("/api/v1/commands/cmd-1").await.1["result"]["result"]["blob"].as_str().unwrap().len() == 50_000);
+
+    // The diagnostics count messages and bytes by direction and type.
+    let (_, diagnostics) = api.get("/api/v1/diagnostics").await;
+    let link = &diagnostics["link_bytes"];
+    assert_eq!(link["worker_in"]["events"]["messages"], 2);
+    assert!(link["worker_in"]["command.result"]["bytes"].as_u64().unwrap() > 50_000);
+    assert!(link["browser_out"]["event"]["messages"].as_u64().unwrap() >= 2);
+    assert!(link["browser_out"]["event"]["bytes"].as_u64().unwrap() < 2_000, "{link}");
+    assert!(link["worker_out"]["welcome"]["messages"].as_u64().unwrap() >= 1);
+    env.stop().await;
 }

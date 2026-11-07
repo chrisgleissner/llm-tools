@@ -339,6 +339,7 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
             "203.0.113.7",
         )
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-resource-test");
 
     let (status, command) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=25&offset=5").await;
     assert_eq!(status, 202, "{command}");
@@ -354,6 +355,16 @@ async fn mission_task_resource_adapts_to_the_typed_worker_command() {
     let (status, status_command) = api.get("/api/v1/missions/mission-1?worker=build-1").await;
     assert_eq!(status, 202, "{status_command}");
     assert_eq!(status_command["operation"], "mission.status");
+    // The size controls of the bounded reads pass through; nothing else does.
+    let (status, sized) = api
+        .get("/api/v1/missions/mission-1?worker=build-1&task_limit=2&prompt_chars=80&event_limit=3")
+        .await;
+    assert_eq!(status, 202, "{sized}");
+    assert_eq!(sized["request"]["params"], json!({"task_limit":2,"prompt_chars":80,"event_limit":3}));
+    let (status, clipped) = api.get("/api/v1/missions/mission-1/tasks?worker=build-1&limit=10&prompt_chars=0").await;
+    assert_eq!(status, 202, "{clipped}");
+    assert_eq!(clipped["request"]["params"], json!({"limit":10,"offset":0,"prompt_chars":0}));
+    assert_eq!(api.get("/api/v1/missions/mission-1?worker=build-1&limit=5").await.0, 400);
     env.stop().await;
 }
 
@@ -456,6 +467,7 @@ async fn cli_parity_resource_adapters_queue_the_expected_typed_operations() {
         .db
         .worker_hello("build-1", "worker-id-parity", &hello, &json!(capabilities), "203.0.113.8")
         .unwrap();
+    let _connection = mark_online(&env, "build-1", "worker-id-parity");
     let routes = [
         (
             Method::GET,

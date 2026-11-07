@@ -307,3 +307,21 @@ pub async fn expect_close(ws: &mut Ws) -> Option<u16> {
         }
     }
 }
+
+/// Register a live connection for `name` that nobody reads, so the coordinator treats the worker as
+/// online (it refuses read-only commands for an offline worker). Keep the returned receiver alive.
+pub fn mark_online(env: &Env, name: &str, worker_id: &str) -> tokio::sync::mpsc::Receiver<bridge_coordinator::hub::Outbound> {
+    let (tx, rx) = tokio::sync::mpsc::channel(bridge_coordinator::hub::OUTBOUND_QUEUE);
+    let (close, _) = tokio::sync::watch::channel(None);
+    env.srv.state.hub.register(
+        name,
+        bridge_coordinator::hub::ConnHandle {
+            conn_id: env.srv.state.hub.next_conn_id(),
+            generation: 1,
+            worker_id: worker_id.to_string(),
+            tx,
+            close,
+        },
+    );
+    rx
+}

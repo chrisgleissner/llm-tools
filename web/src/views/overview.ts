@@ -2,7 +2,7 @@ import * as api from "../api";
 import type { BridgeEvent, MissionEntry } from "../api";
 import { button, emptyState, h, keepFocus, relTime, timeEl } from "../dom";
 import { icon, type IconName } from "../icons";
-import { currentWorkSummary } from "../current-work";
+import { currentWorkSummary, digestSummary } from "../current-work";
 import { onStream, store, subscribe, worker, workerState } from "../store";
 import { humanizeEvent, isPlumbing, transitionSummary } from "../event-humanizer";
 
@@ -49,26 +49,45 @@ export function overview(root: HTMLElement): () => void {
 
   const missionName = (w: string, id: string) => store.missions.find((m) => m.worker === w && m.mission.id === id)?.mission.name || id.slice(0, 8);
 
+  // Task counts, the current task and what needs the operator come with each replicated mission summary
+  // (`/api/v1/missions`), which the store re-reads when the coordinator announces new events. No worker
+  // command is sent for a mission that has them. A mission whose worker sent no digest (an older worker)
+  // is asked once per change of its `updated_at`.
+  const fallback = new Map<string, Snapshot | null>();
+  const fromDigest = (m: MissionEntry): Snapshot | null => {
+    const info = m.mission;
+    const summary = digestSummary(info);
+    if (summary === null) return null;
+    const needs = info.needs_you ?? (info.needs_kind ? { kind: info.needs_kind, tasks: Array.from({ length: info.needs_tasks ?? 0 }, (_, i) => i) } : null);
+    return { worker: m.worker, id: info.id, name: info.name, counts: info.task_counts ?? {}, needs: needs as Snapshot["needs"], nowDoing: summary };
+  };
+
   async function loadSnapshots(): Promise<void> {
     const targets = store.missions.filter((m) => ACTIVE.has(m.mission.status.toUpperCase()) && worker(m.worker)?.state === "online" && store.conn === "live");
-    // Missions doing something come first; the rest by most recent update. Only the first few are asked.
+    // Missions doing something come first; the rest by most recent update.
     const rank = (m: MissionEntry) => ["RUNNING", "PAUSED", "STOPPING", "CREATED"].indexOf(m.mission.status.toUpperCase());
     targets.sort((a, b) => rank(a) - rank(b) || (b.mission.updated_at ?? "").localeCompare(a.mission.updated_at ?? ""));
     eligible = targets.length;
     const picked = targets.slice(0, MAX_SNAPSHOTS);
-    // A few at a time: each answer is a full status snapshot, and a worker should not be asked for a dozen at once.
-    const results: Array<Snapshot | null> = new Array(picked.length).fill(null);
+    const results: Array<Snapshot | null> = picked.map(fromDigest);
+    const legacy = picked.map((m, i) => ({ m, i })).filter(({ i }) => results[i] === null);
+    // A few at a time: a worker should not be asked for a dozen statuses at once.
     let next = 0;
     const lane = async (): Promise<void> => {
-      while (next < picked.length && !disposed) {
-        const i = next++;
-        const m = picked[i] as MissionEntry;
+      while (next < legacy.length && !disposed) {
+        const { m, i } = legacy[next++] as { m: MissionEntry; i: number };
+        const key = `${m.worker}/${m.mission.id}/${m.mission.updated_at ?? ""}`;
+        if (fallback.has(key)) {
+          results[i] = fallback.get(key) ?? null;
+          continue;
+        }
         try {
           const r = await api.missionStatus(m.worker, m.mission.id);
           results[i] = { worker: m.worker, id: m.mission.id, name: m.mission.name, counts: (r["task_counts"] as Record<string, number> | undefined) ?? {}, needs: (r["needs_you"] as Snapshot["needs"]) ?? m.mission.needs_you ?? null, nowDoing: currentWorkSummary(r) };
         } catch {
           results[i] = null;
         }
+        fallback.set(key, results[i] ?? null);
       }
     };
     await Promise.all([lane(), lane(), lane()]);

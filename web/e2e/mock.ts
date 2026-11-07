@@ -22,6 +22,8 @@ export interface MockOptions {
   terminalClose?: boolean;
   /** A typed, text-free Codex question indication for Needs attention. */
   providerQuestion?: boolean;
+  /** Mission summaries carry the replicated digest (task counts, current task, station, model) like a current worker sends. */
+  digest?: boolean;
 }
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
@@ -114,18 +116,27 @@ export interface Mock {
   setAuth(mode: AuthMode): void;
   terminalInputCount(): number;
   emitStream(message: Record<string, unknown>): void;
+  /** Requests answered so far, by kind: `status` is GET /missions/{id} (a worker command), `tasks` the task list, `events` GET /events (coordinator only). */
+  requestCounts(): { status: number; tasks: number; events: number };
+  /** Change fields of a mission summary, as a replicated summary update would. */
+  patchMission(id: string, patch: Record<string, unknown>): void;
 }
 
 export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
   let auth = opts.auth;
   let terminalInputs = 0;
   let streamSocket: WebSocketRoute | null = null;
+  const requestCounts = { status: 0, tasks: 0, events: 0 };
+  const digestOf = (entry: (typeof MISSIONS)[number]) => entry.mission.status === "RUNNING"
+    ? { task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: { ordinal: 2, title: "Implement the new tokenizer" }, station: "codex", model: "gpt-5", needs_kind: "approval", needs_tasks: 1 }
+    : { task_counts: { COMPLETED: 2 }, current_task: null, station: null, model: null, needs_kind: null, needs_tasks: 0 };
   await page.clock.setFixedTime(NOW);
   const workers = opts.workers === "none" ? [] : WORKERS;
   const providerNeedsYou = { kind: "provider", tasks: [], message: "Codex asks: Should I continue? · Choices: 1. Continue; 2. Stop · take control of the terminal to answer", command: "llm-bridge attach --mission 01a1b2c3" };
-  const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS.map((entry, i) =>
-    opts.providerQuestion && i === 0 ? { ...entry, mission: { ...entry.mission, needs_you: providerNeedsYou } } : { ...entry, mission: { ...entry.mission } },
-  );
+  const missions = opts.missions === "none" || opts.workers === "none" ? [] : MISSIONS.map((entry, i) => {
+    const withDigest = opts.digest ? { ...entry, mission: { ...entry.mission, ...digestOf(entry) } } : { ...entry, mission: { ...entry.mission } };
+    return opts.providerQuestion && i === 0 ? { ...withDigest, mission: { ...withDigest.mission, needs_you: providerNeedsYou } } : withDigest;
+  });
   const tokens: Array<{ name: string; scopes: string[]; created_at: string; last_used: string | null; expires_at: string | null }> = [];
   await page.routeWebSocket(/\/api\/v1\/stream/, (ws) => {
     streamSocket = ws;
@@ -192,6 +203,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     const missionResource = path.match(/^\/missions\/([^/]+)$/);
     if (missionResource && method === "GET") {
+      requestCounts.status += 1;
       const current = missions.find((mission) => mission.mission.id === missionResource[1]) ?? MISSIONS[0]!;
       const isProviderQuestion = opts.providerQuestion && current.mission.id === MISSIONS[0]!.mission.id;
       const result = { mission: { ...current.mission, cwd: "/home/demo/acme-api", created_at: iso(86400), updated_at: iso(95) }, task_counts: { COMPLETED: 1, VERIFYING: 1, FAILED: 1, BLOCKED: 1, QUEUED: 1, PAUSED: 1 }, current_task: current.mission.status === "RUNNING" ? { ordinal: 2, title: "Implement the new tokenizer", status: "RUNNING" } : null, station_context: { last_launched_station: "codex" }, station_observation: { station: "codex", model: "gpt-5" }, needs_you: isProviderQuestion ? providerNeedsYou : { kind: "approval", tasks: [2], message: "task 2 awaits approval" }, health: { state: "healthy" } };
@@ -202,6 +214,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     }
     const taskRoute = path.match(/^\/missions\/([^/]+)\/tasks(?:\/(\d+)(?:\/([a-z-]+))?)?$/);
     if (taskRoute) {
+      if (method === "GET") requestCounts.tasks += 1;
       let operation = "task.list";
       let result: unknown = { tasks: TASKS, total: TASKS.length, offset: 0 };
       if (method === "POST") {
@@ -217,6 +230,7 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
       return json(route, 200, { request_id: "resource-mock", target: "alpha", operation, state: "done", result: { outcome: operation === "task.list" ? "ok" : "applied", result, error: null } });
     }
     if (path === "/events") {
+      requestCounts.events += 1;
       const target = url.searchParams.get("worker");
       const missionIds = new Set(missions.filter((mission) => !target || mission.worker === target).map((mission) => mission.mission.id));
       return json(route, 200, { events: [...EVENTS].filter((row) => missionIds.has(row.event.mission_id)).reverse() });
@@ -254,5 +268,10 @@ export async function mockApp(page: Page, opts: MockOptions): Promise<Mock> {
     setAuth: (m) => void (auth = m),
     terminalInputCount: () => terminalInputs,
     emitStream: (message) => streamSocket?.send(JSON.stringify(message)),
+    requestCounts: () => ({ ...requestCounts }),
+    patchMission: (id, patch) => {
+      const entry = missions.find((m) => m.mission.id === id);
+      if (entry) Object.assign(entry.mission, patch);
+    },
   };
 }

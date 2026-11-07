@@ -3239,7 +3239,7 @@ def _main(argv: list[str] | None = None) -> int:
             _print_result(result, bool(getattr(args, "json", False)), human)
             return 0
         if args.command == "status":
-            result = commands.dispatch(commands.CommandRequest("mission.status", mission_id=args.mission))
+            result = commands.dispatch(commands.CommandRequest("mission.status", {"full": True}, mission_id=args.mission))
             _print_result(result, args.json, fmt.format_status)
             return 0
         if args.command == "agents":

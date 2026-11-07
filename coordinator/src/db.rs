@@ -146,6 +146,17 @@ impl CommandRow {
     }
 }
 
+impl CommandRow {
+    /// The change notice published on the browser stream: identity and state without the request
+    /// parameters or the result body (a status result alone is several KB, a task list far more).
+    /// A client that needs them reads `GET /api/v1/commands/{request_id}`.
+    pub fn to_notice(&self) -> Value {
+        let outcome = self.result.as_ref().and_then(|r| r.get("outcome")).cloned().unwrap_or(Value::Null);
+        json!({"request_id": self.request_id, "target": self.worker, "operation": self.operation, "mutating": self.mutating,
+               "state": self.state, "outcome": outcome, "created_at": self.created_at, "updated_at": self.updated_at})
+    }
+}
+
 pub enum InsertOutcome {
     New(CommandRow),
     Existing(CommandRow),
@@ -933,13 +944,52 @@ impl Db {
         Ok(InsertOutcome::New(row))
     }
 
+    /// Unfinished mutating commands, oldest first, for redelivery after a reconnect.
+    /// Read-only commands are not redelivered: see [`Db::commands_expire_reads`].
     pub fn commands_resend(&self, worker: &str) -> R<Vec<CommandRow>> {
         let c = self.c();
         let mut st = c.prepare(&format!(
-            "SELECT {CCOLS} FROM commands WHERE worker=? AND state IN ('pending','sent','acked') ORDER BY rowid"
+            "SELECT {CCOLS} FROM commands WHERE worker=? AND mutating=1 AND state IN ('pending','sent','acked') ORDER BY rowid"
         ))?;
         let rows = st.query_map(params![worker], command_row)?.collect();
         rows
+    }
+
+    /// Finish every unfinished read-only command of `worker` with a `worker-offline` failure and
+    /// return the rows. A read is only worth answering while a client waits for it; replaying a
+    /// backlog of them after a reconnect sent hundreds of large results (18.6 MB in 30 s measured).
+    /// The failure is the same `command.result` shape a worker sends, so a client polling the
+    /// journal entry sees a normal failed read.
+    pub fn commands_expire_reads(&self, worker: &str) -> R<Vec<CommandRow>> {
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let rows: Vec<CommandRow> = {
+            let mut st = tx.prepare(&format!(
+                "SELECT {CCOLS} FROM commands WHERE worker=? AND mutating=0 AND state IN ('pending','sent','acked') ORDER BY rowid"
+            ))?;
+            let rows = st.query_map(params![worker], command_row)?.collect::<Result<_, _>>()?;
+            rows
+        };
+        let now = crate::now();
+        let mut done = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            let result = json!({
+                "request_id": row.request_id,
+                "operation": row.operation,
+                "outcome": "failed",
+                "error": {"code": "worker-offline", "message": "the worker disconnected before it answered this read-only command; read-only commands are not queued for an offline worker"},
+            });
+            tx.execute(
+                "UPDATE commands SET state='done', result=?1, updated_at=?2 WHERE request_id=?3 AND state!='done'",
+                params![result.to_string(), now, row.request_id],
+            )?;
+            row.state = "done".into();
+            row.result = Some(result);
+            row.updated_at = now;
+            done.push(row);
+        }
+        tx.commit()?;
+        Ok(done)
     }
 
     fn transition(&self, sql: &str, args: &[&dyn rusqlite::ToSql], id: &str) -> R<Option<CommandRow>> {
