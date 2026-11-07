@@ -1545,8 +1545,8 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-021 | medium | fixed | 80f2676. Plain messages for unreadable files, empty prompts and handoff without a route; a test checks CLI stderr and `raise` texts for `None`, `Errno` and `{}`. `tests/test_bridge_error_messages.py`, failed before the fix. |
 | CLIUX-022 | medium | fixed | The station strip shows REVIEW as soon as the provider exits 0; the review message fits 80 columns. `tests/test_bridge_cliux_console.py` |
 | CLIUX-023 | medium | fixed | `control` outside the station shows an `outside station · /attach` badge; stale notices are withdrawn; a finished mission exits to the shell with a one-line notice. `tests/test_bridge_cliux_console.py` |
-| CLIUX-024 | medium | partial | `cancel` asks on a terminal and needs `--yes` otherwise; repeated pause/stop say Already; `help quickstart` has a Stopping work table. Folding steer pause/stop kinds into `pause/stop --after-task` is not done. `tests/test_bridge_cliux_lifecycle.py` |
-| CLIUX-025 | medium | partial | The reject receipt says the task runs again now and names `task pause`; `--hold` rejects and pauses in one step. The console Reject-and-hold button is not added. `tests/test_bridge_cliux_lifecycle.py` |
+| CLIUX-024 | medium | fixed | `pause --after-task` and `stop --after-task [N]` store the same intent as the steer kinds; `tests/test_bridge_cliux_batch3.py` |
+| CLIUX-025 | medium | fixed | console reject dialog offers H Reject and hold; `tests/test_bridge_cliux_batch3.py` |
 | CLIUX-026 | medium | fixed | `task amend` on a task in REVIEW is refused unless `--requeue`; a derived title follows the new prompt. `tests/test_bridge_cliux_lifecycle.py` |
 | CLIUX-027 | medium | fixed | 4cf1bf0. Help pages open word-wrapped with `↑↓ scroll · / find · Esc close` and no file-viewer controls; home `?` shows home keys (`T` opens the quickstart). Plain-text reflow instead of Markdown rendering, because the renderer merged command lines. `tests/test_bridge_cli_ux_console.py::test_help_pages_wrap_at_word_boundaries` failed before the fix. |
 | CLIUX-028 | medium | fixed | Console `/help` is generated from the CLI command groups, with Views and a slash-to-shell table. `tests/test_bridge_help_ux.py` |
@@ -1559,7 +1559,7 @@ llm-bridge task verify --mission 3f9a1c2b --task 1 --approve
 | CLIUX-035 | medium | fixed | `mission create --verifier 'CMD'` and `-- CMD` are accepted; the receipt shows the verifier argv. `tests/test_bridge_help_ux.py` |
 | CLIUX-036 | low | fixed | `doctor --mission` shows the mission's Needs-you hint as Next. `tests/test_bridge_cliux_lifecycle.py` |
 | CLIUX-037 | low | fixed | Distinct ASCII state glyphs; UTF-8 cancelled is `⊘`. `tests/test_bridge_cliux_output.py` |
-| CLIUX-038 | low | open | Not fixed: the short ID is shown in lists, pickers, status and receipts, but not in the console header next to the identity bar. |
+| CLIUX-038 | low | fixed | console header shows the short mission ID next to the name; `tests/test_bridge_cliux_batch3.py` |
 | CLIUX-039 | low | fixed | `theme` says how to set the theme; `--palette-size` and `--colour` (old names kept as hidden aliases). `tests/test_bridge_help_ux.py` |
 | CLIUX-040 | low | fixed | `steer` help shows `--kind {handoff,review}` and `--to`; errors name the missing piece with an example. `tests/test_bridge_help_ux.py` |
 | CLIUX-041 | low | fixed | `worker enroll` and `remote login` accept `https://` or `wss://`; `--target` after the command shows the corrected command line. `tests/test_bridge_cli_conventions.py` |
