@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 _DRIVER = """
 import contextlib, io, json, sys
+import pathlib  # Python 3.11's pathlib imports urllib.parse; every Bridge module needs pathlib, so it is not a startup cost
 baseline = set(sys.modules)
 from llm_tools import bridge
 sink = io.StringIO()

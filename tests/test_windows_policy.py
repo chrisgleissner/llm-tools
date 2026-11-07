@@ -75,6 +75,9 @@ def test_the_windows_modules_import_without_curses() -> None:
         "sys.modules['_curses'] = None\n"
         "for name in ('bridge', 'bridge_remote', 'bridge_runtime', 'terminal', 'bridge_commands', 'bridge_protocol', 'bridge_ws', 'bridge_input'):\n"
         "    importlib.import_module('llm_tools.' + name)\n"
+        "if sys.platform != 'win32':\n"
+        "    from llm_tools import bridge_missions\n"
+        "    bridge_missions.station_live('probe')  # mission list orders by liveness; it must not load the console\n"
     )
     root = Path(__file__).resolve().parent.parent
     result = subprocess.run([sys.executable, "-c", program], cwd=root, capture_output=True, text=True, timeout=60)

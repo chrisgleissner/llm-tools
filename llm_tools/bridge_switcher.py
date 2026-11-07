@@ -12,8 +12,6 @@ import curses
 import locale
 import os
 import shutil
-import socket
-import stat
 import subprocess
 import sys
 import time
@@ -26,6 +24,7 @@ from .bridge_format import printable
 from .bridge_glyphs import FINISHED_STATES, GLYPHS, provider_role, state_look, state_text
 from .bridge_vocab import MISSION_INTERRUPTED_LABEL, MISSION_NEEDS_YOU_LABEL
 from .bridge_input import cell_slice, cell_width
+from .bridge_missions import default_station_probe, socket_listening  # noqa: F401  (re-exported; defined where mission list can use them without curses)
 from .bridge_mouse import enable_mouse, read_mouse, wheel_delta
 from .bridge_store import BridgeStore, controller_running, store_path
 from .bridge_theme import mission_role
@@ -296,39 +295,6 @@ def _rotation(config: dict[str, Any]) -> str:
     value = config.get("routes") or config.get("providers") or ""
     names = [item.strip() for item in str(value).split(",") if item.strip()]
     return ",".join(names)
-
-
-def socket_listening(path: str | Path, timeout: float = 0.2) -> bool:
-    """Whether a server accepts connections on the Unix socket ``path``; a dead socket file refuses."""
-    try:
-        if not stat.S_ISSOCK(os.lstat(path).st_mode):
-            return False
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    except OSError:
-        return False
-    try:
-        probe.settimeout(timeout)
-        probe.connect(str(path))
-    except OSError:  # refused, gone, or not answering in time
-        return False
-    finally:
-        probe.close()
-    return True
-
-
-def default_station_probe(mission_id: str) -> bool:
-    """Whether a tmux server is listening on this mission's station socket.
-
-    This is for display (the mission lists), so it only connects to the socket
-    in-process instead of starting a tmux client per mission. Actions that act
-    on a station (close, attach, switch) check ownership themselves.
-    """
-    try:
-        from .bridge_runtime import mission_socket_path
-
-        return socket_listening(mission_socket_path(mission_id))
-    except (OSError, RuntimeError, ValueError):
-        return False
 
 
 def default_controller_probe(mission_id: str) -> bool:

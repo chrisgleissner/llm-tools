@@ -74,9 +74,9 @@ def test_request_json_round_trip_and_strict_decoding():
 
 
 def _without_cli_additions(value):
-    """The CLI adds ``number`` (an alias of a task's ``ordinal``) and a list ``total``; the wire has neither."""
+    """The CLI adds ``number``, an alias of a task's ``ordinal``; the wire does not."""
     if isinstance(value, dict):
-        return {key: _without_cli_additions(item) for key, item in value.items() if key != "number" and not (key == "total" and "missions" in value)}
+        return {key: _without_cli_additions(item) for key, item in value.items() if key != "number"}
     if isinstance(value, list):
         return [_without_cli_additions(item) for item in value]
     return value

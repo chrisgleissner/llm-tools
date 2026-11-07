@@ -11,6 +11,9 @@ database reads go through named ``BridgeStore`` methods (``mission_id_if_exists`
 
 from __future__ import annotations
 
+import os
+import socket
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,11 +40,44 @@ class MissionAmbiguous(ValueError):
     """An ID prefix or a folder matches several missions."""
 
 
+# The two probes below live here, not in ``bridge_switcher``, so that ``mission list`` can order
+# missions without importing curses (Windows has none) or the provider launcher.
+def socket_listening(path: str | Path, timeout: float = 0.2) -> bool:
+    """Whether a server accepts connections on the Unix socket ``path``; a dead socket file refuses."""
+    try:
+        if not stat.S_ISSOCK(os.lstat(path).st_mode):
+            return False
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    except OSError:
+        return False
+    try:
+        probe.settimeout(timeout)
+        probe.connect(str(path))
+    except OSError:  # refused, gone, or not answering in time
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def default_station_probe(mission_id: str) -> bool:
+    """Whether a tmux server is listening on this mission's station socket.
+
+    This is for display (the mission lists), so it only connects to the socket
+    in-process instead of starting a tmux client per mission. Actions that act
+    on a station (close, attach, switch) check ownership themselves.
+    """
+    try:
+        from .bridge_runtime import mission_socket_path
+
+        return socket_listening(mission_socket_path(mission_id))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def station_live(mission_id: str) -> bool:
     """Whether a Bridge-owned provider station is running for this mission."""
-    from . import bridge_switcher
-
-    return bool(bridge_switcher.default_station_probe(mission_id))
+    return bool(default_station_probe(mission_id))
 
 
 def mission_live(mission_id: str) -> bool:

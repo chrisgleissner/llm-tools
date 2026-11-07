@@ -13,7 +13,6 @@ import time
 from typing import Any, Callable, cast
 
 from . import bridge_retention
-from . import config as toolconfig
 from .bridge_store import BridgeStore, utc_now
 
 
@@ -307,6 +306,8 @@ class CapacityRefreshWorker:
 
     def _retention_policy(self) -> bridge_retention.RetentionPolicy:
         """The ``[bridge.retention]`` policy; the defaults when the config file cannot be read or is invalid."""
+        from . import config as toolconfig
+
         try:
             return bridge_retention.policy_from_config(toolconfig.load_config())
         except (SystemExit, OSError, ValueError):
