@@ -97,6 +97,10 @@ export async function navTo(page: Page, name: "Overview" | "Workers" | "Missions
     await page.locator("#account-panel").getByRole("button", { name: "Change password" }).click();
     return;
   }
+  // The shell (side bar, tab bar and More button) is built only after the page's auth-state request returns, which
+  // can be after the load event of a goto. isVisible() does not wait, so without this the check below can run before
+  // any navigation exists and fall through to a More button that is not there yet (or is hidden on desktop).
+  await page.locator("#more-button").waitFor({ state: "attached" });
   const link = page.getByRole("navigation", { name: "Main" }).getByRole("link", { name, exact: true });
   if (await link.isVisible()) return link.click();
   await page.locator("#more-button").click();
