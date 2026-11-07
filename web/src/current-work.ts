@@ -8,9 +8,9 @@ export function currentWorkSummary(snapshot: Record<string, unknown>): string {
   const pieces: string[] = [];
   if (task && typeof task["ordinal"] === "number") pieces.push(`Task ${task["ordinal"]}`);
   if (task && typeof task["title"] === "string" && task["title"].trim()) pieces.push(task["title"].trim());
-  const station = [observed["station"], context["last_launched_station"]].find((v) => typeof v === "string" && v.trim() && v.toLowerCase() !== "unknown");
+  const station = [snapshot["station"], observed["station"], context["last_launched_station"]].find((v) => typeof v === "string" && v.trim() && v.toLowerCase() !== "unknown");
   pieces.push(typeof station === "string" ? station : "Provider unknown");
-  const model = [observed["model"], typeof station === "string" ? models[station] : undefined].find((v) => typeof v === "string" && v.trim() && v.toLowerCase() !== "unknown");
+  const model = [snapshot["model"], observed["model"], typeof station === "string" ? models[station] : undefined].find((v) => typeof v === "string" && v.trim() && v.toLowerCase() !== "unknown");
   pieces.push(typeof model === "string" ? model : "Model unknown");
   return pieces.length ? pieces.join(" · ") : "Waiting for the next task";
 }

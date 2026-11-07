@@ -233,6 +233,11 @@ asset and WebSocket requests receive a problem response. This supplements exact
 Origin and CSRF checks; it does not replace them. Requests without Fetch Metadata
 remain available to non-browser clients and still need normal authentication.
 
+The low-level command adapter rejects an embedded command request over 64 KiB
+with `413 request-too-large`. A worker or global pending-command byte budget
+returns `429 queue-full`; these limits are represented in the generated
+OpenAPI problem responses.
+
 Bearer-authenticated mutations are limited to 30 requests per token and 120 per
 client address in a rolling 60-second window. The limit applies after authentication
 and scope checks; rejected requests return `429` with `Retry-After`. Each bearer

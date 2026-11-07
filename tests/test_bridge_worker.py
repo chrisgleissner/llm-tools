@@ -179,11 +179,31 @@ def test_hello_reports_inventory_and_only_permitted_operations(state, monkeypatc
     monkeypatch.setattr(worker.platform, "node", lambda: "test-host.example")
     hello = decode(session.hello().encode())
     assert hello.payload["missions"][0]["id"] == mission_id
+    summary = hello.payload["missions"][0]
+    assert summary["task_counts"]["QUEUED"] == 1
+    assert summary["station"] == "unknown" and summary["model"] == "unknown"
+    assert "cwd" not in summary and "config" not in summary
     assert hello.payload["host_name"] == "test-host.example"
     assert hello.payload["event_cursor"] > 0
     operations = {spec["operation"] for spec in hello.payload["capabilities"]}
     assert "mission.status" in operations and not any(spec["mutating"] for spec in hello.payload["capabilities"])
     assert "token" not in session.hello().encode()
+
+
+def test_hello_caps_optional_needs_you_summary_fields(state, monkeypatch):
+    directory, _ = state
+    monkeypatch.setattr("llm_tools.bridge_monitor.project_snapshot", lambda *_a, **_k: {
+        "task_counts": {"QUEUED": 1},
+        "current_task": None,
+        "station_context": {"last_launched_station": "unknown"},
+        "station_observation": {"station": "unknown", "model": "unknown"},
+        "needs_you": {"kind": "approval", "message": "m" * 5000, "command": "c" * 2000, "tasks": list(range(1, 1001))},
+    })
+    session, _ = _session(directory, allow_control=False)
+    summary = decode(session.hello().encode()).payload["missions"][0]
+    assert len(summary["needs_you"]["message"]) == 2048
+    assert len(summary["needs_you"]["command"]) == 512
+    assert len(summary["needs_you"]["tasks"]) == 32
 
 
 @pytest.mark.parametrize(("hostname", "expected"), [("Pi-Lab.Example", "pi-lab"), ("host_name", "host-name"), ("!!!", "worker")])
@@ -391,7 +411,7 @@ def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_pa
     summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
     assert first_id not in summaries and len(summaries) == 1
     assert batch.payload["mission_cursor"] == batch.payload["through"]
-    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at"} for mission in summaries.values())
+    assert all({"id", "name", "status", "folder", "updated_at", "task_counts", "station", "model"} <= set(mission) for mission in summaries.values())
 
 
 def test_worker_replicates_new_provider_question_without_a_database_event(state, monkeypatch):

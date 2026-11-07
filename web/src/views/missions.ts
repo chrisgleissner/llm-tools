@@ -86,22 +86,13 @@ export function missions(root: HTMLElement, query: URLSearchParams): () => void 
     renderBody();
     renderControls();
   }
-  async function loadCurrentWork(r: Reply, requestSeq: number): Promise<void> {
+  function loadCurrentWork(r: Reply, requestSeq: number): void {
     const active = r.missions.filter((m) => m.mission.status.toUpperCase() === "RUNNING" && !m.stale).slice(0, 12);
-    let next = 0;
-    const lane = async (): Promise<void> => {
-      while (next < active.length && !disposed && requestSeq === seq) {
-        const mission = active[next++];
-        if (!mission) continue;
-        try {
-          const status = await api.missionStatus(mission.worker, mission.mission.id);
-          if (disposed || requestSeq !== seq) return;
-          nowDoing.set(`${mission.worker}/${mission.mission.id}`, currentWorkSummary(status));
-        } catch { /* list remains useful if a worker status read is unavailable */ }
-      }
-    };
-    await Promise.all([lane(), lane(), lane()]);
-    if (!disposed && requestSeq === seq) renderBody();
+    if (disposed || requestSeq !== seq) return;
+    for (const mission of active) {
+      nowDoing.set(`${mission.worker}/${mission.mission.id}`, currentWorkSummary(mission.mission as unknown as Record<string, unknown>));
+    }
+    renderBody();
   }
   const reload = debounce(() => void load(), 250);
   const changed = (resetPage = true): void => {

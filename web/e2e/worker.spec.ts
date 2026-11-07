@@ -72,12 +72,18 @@ test.describe("with a connected worker", () => {
       await expectNoHorizontalScroll(page);
       await expectAccessible(page, "missions with data");
 
-      // Mission detail: status and tasks come from the worker via commands.
+      let fullStatusReads = 0;
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (request.method() === "GET" && url.pathname === `/api/v1/missions/${fake.missionId}`) fullStatusReads += 1;
+      });
+      // Compact status is already in the replicated mission row; tasks remain an on-demand worker read.
       await link.click();
       await expect(page.getByRole("heading", { name: "Browser E2E mission" })).toBeVisible();
       const tasks = page.locator("#tasks-table tbody tr");
       await expect(tasks).toHaveCount(2, { timeout: 20_000 });
       await expect(page.locator("#mission-status")).toContainText("status");
+      expect(fullStatusReads).toBe(0);
       await expect(page.locator("#events-list li").first()).toBeVisible({ timeout: 20_000 });
       await expect(page.locator("#events-list .ev-kind").filter({ hasText: "Mission created" })).toHaveCount(1);
       await expectNoHorizontalScroll(page);

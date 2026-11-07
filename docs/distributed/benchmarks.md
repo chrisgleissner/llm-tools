@@ -214,8 +214,9 @@ not a full Raspberry Pi OS. The runner is shared, so timings vary between runs.
 
 ## Storage writes (microSD wear)
 
-Platform: x86-64 host (ext4 on NVMe), release coordinator, one run per figure on
-2026-11-05, repeated three times with the same results to within 1 %. The figures
+Platform: x86-64 host (ext4 on NVMe), release coordinator. Event, command and daily-budget
+measurements are from the 2026-11-07 run; the one-hour idle figure is from 2026-11-05.
+The figures
 are not from a microSD card. They are bytes, not time, so they do not depend on
 the medium, but the Pi's file system (ext4 on the card) adds its own journal
 writes that are not counted here.
@@ -231,11 +232,16 @@ temporary directory, then `~/.cache`) and skips with that reason when none works
 | Workload | Measured | Bound asserted |
 |---|---|---|
 | 1000 replicated events (about 100-byte payload, committed at once, five batches of 200) | 0.60-0.64 MiB written, 631-668 bytes/event | 1.5 MiB |
+| Coordinator flood harness: six accepted 25-event batches (400-byte event payloads, with two browsers subscribed) | 258,048 bytes total, 43,008 bytes/batch | Reported for comparison |
 | Database file growth for those events (main file, after a checkpoint) | 369 bytes/event | 920 bytes/event |
 | `db_bytes` from `GET /api/v1/diagnostics` for the same events (after the checkpoint) | 369 bytes/event | 920 bytes/event |
-| 1000 `mission.list` commands round-tripped through a worker (16 in flight) | 66.6 MiB written, 68 KiB/command | 150 MiB |
+| 1000 `mission.list` command round-trips through a worker (16 in flight) | 86.6 MiB written, 88.7 KiB/round-trip | 150 MiB |
+| Flood harness: one command round-trip with a deliberately large 200 KiB result | 454,514 bytes written/round-trip | Reported for comparison |
 | Idle for 50 s: one connected worker (pinged every 20 s) and an API client reading the worker list every 5 s | 0 bytes | 8 KiB |
 | Idle for one hour, one connected worker, no clients | 104 KiB (16-20 KiB per 10 minutes) | not asserted (one-hour run) |
+| Budget extrapolation: 3 running missions at 1 accepted event/s each, 3 connected workers, 2 browser sessions (one event/page measurement above; conservative 4 KiB session touch every 5 minutes) | 183,081,370 bytes/day (174.6 MiB/day) | 1 GiB/day |
+
+The 174.6 MiB/day figure is an extrapolation from this local per-event measurement, not a 24-hour Pi measurement. The browser does not issue a full `mission.status` command on its overview, missions list, or mission-detail refresh: compact task counts and current-work labels arrive with the replicated mission summary, while activity details use the coordinator's local read-only events endpoint. Two sessions therefore add no command-result writes during ordinary view refresh; the budget model still reserves one 4 KiB database page every five minutes per session. The Pi's own filesystem and its real event rate still need a fresh 24-hour measurement after deployment.
 
 Reading the figures:
 
@@ -261,7 +267,7 @@ Reading the figures:
   and is read after the checkpoint as well.
 - The 557-558 bytes/event for 10 000 events in the load tables above counts the main file
   plus WAL and was not re-measured with this method.
-- A command costs much more than an event: about 17 database pages (68 KiB). The
+- A command costs much more than an event: 88.7 KiB per `mission.list` round-trip in the 2026-11-07 run, about 22 four-KiB pages. The
   coordinator commits five separate transactions per command (insert, audit row,
   `sent`, `acked`, `done`), each with `synchronous=FULL` and therefore an fsync
   of the WAL, and each rewrites the `commands` table page and its two indexes.

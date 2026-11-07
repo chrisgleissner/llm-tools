@@ -45,40 +45,29 @@ export function overview(root: HTMLElement): () => void {
   let disposed = false;
   let lastKey = "";
   let timer = 0;
-  let retries = 0;
 
   const missionName = (w: string, id: string) => store.missions.find((m) => m.worker === w && m.mission.id === id)?.mission.name || id.slice(0, 8);
 
   async function loadSnapshots(): Promise<void> {
     const targets = store.missions.filter((m) => ACTIVE.has(m.mission.status.toUpperCase()) && worker(m.worker)?.state === "online" && store.conn === "live");
-    // Missions doing something come first; the rest by most recent update. Only the first few are asked.
+    // Missions doing something come first; the rest by most recent update. The worker keeps this
+    // compact projection with the replicated mission row, avoiding durable status-result writes.
     const rank = (m: MissionEntry) => ["RUNNING", "PAUSED", "STOPPING", "CREATED"].indexOf(m.mission.status.toUpperCase());
     targets.sort((a, b) => rank(a) - rank(b) || (b.mission.updated_at ?? "").localeCompare(a.mission.updated_at ?? ""));
     eligible = targets.length;
     const picked = targets.slice(0, MAX_SNAPSHOTS);
-    // A few at a time: each answer is a full status snapshot, and a worker should not be asked for a dozen at once.
-    const results: Array<Snapshot | null> = new Array(picked.length).fill(null);
-    let next = 0;
-    const lane = async (): Promise<void> => {
-      while (next < picked.length && !disposed) {
-        const i = next++;
-        const m = picked[i] as MissionEntry;
-        try {
-          const r = await api.missionStatus(m.worker, m.mission.id);
-          results[i] = { worker: m.worker, id: m.mission.id, name: m.mission.name, counts: (r["task_counts"] as Record<string, number> | undefined) ?? {}, needs: (r["needs_you"] as Snapshot["needs"]) ?? m.mission.needs_you ?? null, nowDoing: currentWorkSummary(r) };
-        } catch {
-          results[i] = null;
-        }
-      }
-    };
-    await Promise.all([lane(), lane(), lane()]);
     if (disposed) return;
-    snapshots = results.filter((s): s is Snapshot => s !== null);
-    checked = picked.length;
+    snapshots = picked.map((m) => ({
+      worker: m.worker,
+      id: m.mission.id,
+      name: m.mission.name,
+      counts: m.mission.task_counts ?? {},
+      needs: m.mission.needs_you ?? null,
+      nowDoing: currentWorkSummary(m.mission as unknown as Record<string, unknown>),
+    }));
+    checked = snapshots.length;
     snapshotsLoaded = true;
     render();
-    // A worker that is still starting may not answer yet: look again shortly (a few times at most).
-    if (snapshots.length < picked.length && retries++ < 4) schedule(3000);
   }
 
   async function loadActivity(): Promise<void> {
@@ -214,7 +203,7 @@ export function overview(root: HTMLElement): () => void {
     ));
   };
 
-  const key = () => store.missions.map((m) => `${m.worker}/${m.mission.id}/${m.mission.status}`).join("|") + store.workers.map((w) => `${w.name}:${w.state}`).join("|") + store.conn;
+  const key = () => store.missions.map((m) => `${m.worker}/${m.mission.id}/${m.mission.status}/${m.mission.updated_at}/${m.mission.needs_you?.message ?? ""}`).join("|") + store.workers.map((w) => `${w.name}:${w.state}`).join("|") + store.conn;
   const schedule = (delay = 500) => {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => {
@@ -227,7 +216,6 @@ export function overview(root: HTMLElement): () => void {
     const k = key();
     if (k !== lastKey) {
       lastKey = k;
-      retries = 0;
       schedule();
     }
   });

@@ -574,6 +574,42 @@ class WorkerSession:
             "folder": Path(str(row["cwd"])).name,
             "updated_at": row.get("updated_at"),
         }
+        # Console cards need only the current task and provider labels. Replicate this small
+        # projection with the mission snapshot so the browser does not persist a 100+ KiB
+        # mission.status command result on every refresh.
+        try:
+            from .bridge_monitor import project_snapshot
+
+            projected = project_snapshot(store, mission_id, task_limit=1, prompt_chars=0)
+            summary["task_counts"] = projected.get("task_counts") or {}
+            task = projected.get("current_task")
+            if isinstance(task, dict):
+                summary["current_task"] = {
+                    "ordinal": task.get("ordinal"),
+                    "title": str(task.get("title") or "")[:256],
+                }
+            context = projected.get("station_context") or {}
+            observed = projected.get("station_observation") or {}
+            station = str(observed.get("station") or context.get("last_launched_station") or "")[:64]
+            model = str(observed.get("model") or "")[:128]
+            summary["station"] = station
+            summary["model"] = model
+            needs = projected.get("needs_you")
+            if isinstance(needs, dict):
+                compact: dict[str, Any] = {}
+                if needs.get("kind") in {"approval", "failed", "blocked", "proposal", "capacity", "provider"}:
+                    compact["kind"] = needs["kind"]
+                if isinstance(needs.get("message"), str):
+                    compact["message"] = needs["message"][:2048]
+                if isinstance(needs.get("command"), str):
+                    compact["command"] = needs["command"][:512]
+                if isinstance(needs.get("tasks"), list):
+                    compact["tasks"] = [task for task in needs["tasks"][:32] if isinstance(task, int) and task > 0]
+                if isinstance(needs.get("hold"), bool):
+                    compact["hold"] = needs["hold"]
+                summary["needs_you"] = compact or None
+        except Exception:  # noqa: BLE001 - summary enrichment must never interrupt replication
+            summary["task_counts"] = store.task_counters(mission_id).get("status", {})
         config = row.get("config")
         if row.get("status") == "RUNNING" and isinstance(config, dict) and config.get("native_tui") is True:
             question = self._provider_question(store, mission_id)

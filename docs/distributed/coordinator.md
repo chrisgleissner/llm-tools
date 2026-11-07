@@ -283,7 +283,10 @@ The coordinator ignores `Forwarded` and `X-Forwarded-For` unless the direct TCP 
 | Request bodies above 64 KiB buffered at once | 8 (over that: 503 `busy`, so at most 8 MiB of large bodies in memory); a body above 64 KiB takes a slot only after authentication | fixed |
 | Pre-hello worker connections | 1 per worker token, 10 s to send hello (second connection: 429) | fixed |
 | Graceful shutdown | 10 s | fixed |
-| Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers) | fixed |
+| Per-connection outbound queue | 256 messages (full queue closes the connection; the worker reconnects and the journal redelivers); durable pending requests also have a 64 KiB per-request, 512 KiB per-worker and 8 MiB coordinator-wide byte cap | fixed |
+| Worker protocol event batch | 500 events and 128 KiB serialized event data maximum (the whole message remains capped at 1 MiB) | fixed |
+| Browser change stream | 32 retained messages, each at most 4 KiB; event and command bodies are fetched through their scoped API resources rather than retained in the fan-out ring | fixed |
+| Worker terminal status queue | 16 small messages per terminal; reason text is capped at 256 bytes and excess advisory updates are dropped | fixed |
 | Stored events per worker | 50 000, oldest deleted first (worker databases keep the authoritative copy) | `max_events_per_worker` |
 | Completed commands kept | 7 days | fixed |
 | Login failures | 5 per minute per client address (IPv6 by /64) and per username; see below | fixed |
