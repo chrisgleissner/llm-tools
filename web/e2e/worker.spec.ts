@@ -49,26 +49,26 @@ async function startFakeWorker(coord: Coordinator): Promise<Fake> {
 test.describe("with a connected worker", () => {
   test.skip(!existsSync(python), "repo .venv python is missing");
 
-  test("mission appears, a pause/resume/cancel round-trips, and stale marking follows the worker", async ({ page, coord }) => {
+  test("mission appears, a pause/resume/cancel round-trips, and the offline state follows the worker", async ({ page, coord }) => {
     const fake = await startFakeWorker(coord);
     try {
       await setupViaUi(page, coord);
       // Workers: online.
       await navTo(page, "Workers");
-      const online = page.locator('tr[data-worker="e2e-worker"] .badge.w-online');
-      await expect(online).toHaveText("online", { timeout: 20_000 });
-      await expect.poll(() => online.evaluate((el) => getComputedStyle(el, "::after").animationName)).toBe("pulse");
-      await page.emulateMedia({ reducedMotion: "reduce" });
-      await expect.poll(() => online.evaluate((el) => getComputedStyle(el, "::after").animationName)).toBe("none");
+      const online = page.locator('tr[data-worker="e2e-worker"] .pill[data-state="online"]');
+      await expect(online).toHaveText("Online", { timeout: 20_000 });
+      // A pill in a list never animates (calm design: at most one running animation per document).
       await page.emulateMedia({ reducedMotion: "no-preference" });
-      // Missions index: shows the mission, not stale.
+      expect(await online.locator("svg").evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+      // Missions index: shows the mission, not offline.
       await navTo(page, "Missions");
       const link = page.getByRole("link", { name: "Browser E2E mission" });
       await expect(link).toBeVisible({ timeout: 20_000 });
       await expect(link).toHaveAttribute("href", `/missions/e2e-worker/${fake.missionId}`);
       const row = page.locator("#missions-table tbody tr").first();
       await expect(row).toContainText("e2e-worker");
-      await expect(row.locator(".badge.stale")).toHaveCount(0);
+      await expect(row.locator('.pill[data-state="offline"]')).toHaveCount(0);
+      await expect(row).not.toContainText(/stale/i);
       await expectNoHorizontalScroll(page);
       await expectAccessible(page, "missions with data");
 
@@ -86,10 +86,10 @@ test.describe("with a connected worker", () => {
       // Pause task 2 (round trip through coordinator, worker, SQLite and back).
       const second = page.locator("#tasks-table tbody tr", { hasText: "Second task" });
       await second.getByRole("button", { name: "Pause" }).click();
-      await expect(second.locator(".badge")).toHaveText("paused", { timeout: 20_000 });
+      await expect(second.locator(".pill")).toHaveText("Paused", { timeout: 20_000 });
       await expect(page.locator(".toast", { hasText: /Pause task 2/ })).toBeVisible();
       await second.getByRole("button", { name: "Resume" }).click();
-      await expect(second.locator(".badge")).not.toHaveText("paused", { timeout: 20_000 });
+      await expect(second.locator(".pill")).not.toHaveText("Paused", { timeout: 20_000 });
 
       // Destructive action: cancel asks for confirmation; declining changes nothing.
       await second.getByRole("button", { name: "Cancel" }).click();
@@ -98,24 +98,24 @@ test.describe("with a connected worker", () => {
       await expectAccessible(page, "confirmation dialog");
       await dialog.getByRole("button", { name: "Go back" }).click();
       await expect(dialog).toBeHidden();
-      await expect(second.locator(".badge")).not.toHaveText("cancelled");
+      await expect(second.locator(".pill")).not.toHaveText("Cancelled");
       await second.getByRole("button", { name: "Cancel" }).click();
       await page.keyboard.press("Escape");
       await expect(dialog).toBeHidden();
-      await expect(second.locator(".badge")).not.toHaveText("cancelled");
+      await expect(second.locator(".pill")).not.toHaveText("Cancelled");
       await second.getByRole("button", { name: "Cancel" }).click();
       await page.locator("#dialog-confirm").click();
-      await expect(second.locator(".badge")).toHaveText("cancelled", { timeout: 20_000 });
+      await expect(second.locator(".pill")).toHaveText("Cancelled", { timeout: 20_000 });
 
-      // Stop the worker: the mission and worker become stale/offline while the page is open.
+      // Stop the worker: the mission and worker become offline while the page is open.
       await fake.stopWorker();
       await expect(page.locator("#mission-tasks").getByRole("button", { name: "Pause" }).first()).toBeDisabled({ timeout: 20_000 });
-      await expect(page.locator(".page-head .badge.stale")).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('.page-head .pill[data-state="offline"]')).toBeVisible({ timeout: 20_000 });
       await expect(page.locator("#mission-actions .notice")).toContainText("not connected");
       await navTo(page, "Workers");
-      await expect(page.locator('tr[data-worker="e2e-worker"] .badge.w-offline')).toHaveText("offline");
+      await expect(page.locator('tr[data-worker="e2e-worker"] .pill[data-state="offline"]')).toHaveText("Offline");
       await navTo(page, "Missions");
-      await expect(page.locator("#missions-table .badge.stale")).toBeVisible();
+      await expect(page.locator('#missions-table .pill[data-state="offline"]')).toBeVisible();
     } finally {
       fake.cleanup();
     }

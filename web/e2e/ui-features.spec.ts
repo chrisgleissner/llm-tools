@@ -21,7 +21,7 @@ test.describe("workers page", () => {
     await expectAccessible(page, "worker added dialog");
     await result.getByRole("button", { name: "Done" }).click();
     const row = page.locator('tr[data-worker="build-1"]');
-    await expect(row.locator('[data-label="State"]')).toContainText("offline");
+    await expect(row.locator('[data-label="State"]')).toContainText(/offline/i);
     // Duplicate names are refused inline.
     await page.locator("#add-worker-button").click();
     await page.getByRole("dialog", { name: "Add a worker" }).getByLabel("Worker name").fill("build-1");
@@ -153,7 +153,7 @@ test.describe("with a seeded worker", () => {
       await page.goto("/");
       const workerStarted = Date.now();
       await navTo(page, "Workers");
-      await expect(page.locator('#workers-table tbody tr[data-worker="seed-worker"] [data-label="State"]')).toContainText("online");
+      await expect(page.locator('#workers-table tbody tr[data-worker="seed-worker"] [data-label="State"]')).toContainText("Online");
       const workerElapsedMs = Date.now() - workerStarted;
       if (browserName === "chromium") console.log(`UX task worker health: ${isMobile ? "Pixel 4" : "1440x900"}, one click, ${workerElapsedMs} ms`);
     } finally {
@@ -180,9 +180,11 @@ test.describe("with a seeded worker", () => {
       await expect(page.locator("#tasks-table tbody tr")).toHaveCount(5);
       await page.locator("#task-sort").selectOption("title");
       await expect(page.locator("#tasks-table tbody tr").first()).toContainText("Implement it");
-      // Copy the mission ID: the clipboard holds the full ID and a toast says so.
+      // Copy the mission ID: the clipboard holds the full ID, the button confirms inline and the live region says so; no toast opens.
       await page.locator(".page-head").getByRole("button", { name: "Copy mission ID" }).click();
-      await expect(page.locator(".toast").last()).toContainText("Copied mission ID");
+      await expect(page.locator(".page-head .check-flash")).toBeVisible();
+      await expect(page.locator("#live-status")).toContainText("Copied mission ID");
+      await expect(page.locator(".toast")).toHaveCount(0);
       const id = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
       if (id) expect(id).toMatch(/^[0-9a-f]{32}$/);
       // Rejecting a task asks for a reason, then reports the outcome in a toast that names it.

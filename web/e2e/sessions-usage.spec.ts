@@ -65,7 +65,7 @@ test.describe("sessions and usage views", () => {
     try {
       await setupViaUi(page, coord);
       await navTo(page, "Workers");
-      await expect(page.locator('tr[data-worker="su-worker"]').getByText("online", { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('tr[data-worker="su-worker"]').getByText("Online", { exact: true })).toBeVisible({ timeout: 20_000 });
 
       await navTo(page, "Sessions");
       await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
