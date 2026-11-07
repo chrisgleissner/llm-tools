@@ -48,7 +48,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest coverage
+          python -m pip install -e . pytest pytest-xdist==3.8.0 coverage
 
       - name: Byte-compile every module with this interpreter
         run: python -m compileall -q -f llm_tools scripts tests docs
@@ -69,17 +69,30 @@ jobs:
       - name: Build the Rust coordinator for cross-component tests
         run: cargo build --locked --manifest-path coordinator/Cargo.toml
 
+      # Coverage is measured on the primary Python version (3.11) only; the other versions run the same
+      # suite without it. The suite runs in parallel (pytest-xdist). Each xdist worker is a separate
+      # process, so COVERAGE_PROCESS_START makes sitecustomize.py start measurement in the workers (as it
+      # does for CLI subprocesses); `coverage combine` merges the per-process data files.
       - name: Run tests with coverage
+        if: matrix.python-version == '3.11'
         env:
           BRIDGE_REQUIRE_COORDINATOR: "1"
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
         run: |
-          python -m coverage run -m pytest
+          python -m coverage run -m pytest -n auto
           python -m coverage combine
           python -m coverage report --fail-under=85
           python -m coverage report --include='llm_tools/bridge*.py,llm_tools/terminal.py' --fail-under=90
           python -m coverage xml
 
+      - name: Run tests without coverage
+        if: matrix.python-version != '3.11'
+        env:
+          BRIDGE_REQUIRE_COORDINATOR: "1"
+        run: python -m pytest -n auto
+
       - name: Keep the coverage report for the upload job
+        if: matrix.python-version == '3.11'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-${{ matrix.python-version }}
@@ -228,7 +241,7 @@ jobs:
         uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
         with:
           use_oidc: true
-          files: ./coverage-reports/coverage-3.11/coverage.xml,./coverage-reports/coverage-3.15/coverage.xml
+          files: ./coverage-reports/coverage-3.11/coverage.xml
           fail_ci_if_error: true
 
   # Native ARM64 (GitHub-hosted ubuntu-24.04-arm, Cobalt 100). This is not a Raspberry Pi: the
@@ -270,14 +283,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y tmux
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest
+          python -m pip install -e . pytest pytest-xdist==3.8.0
       - name: Python suite (including the distributed integration tests) against the ARM64 binary
         env:
           BRIDGE_REQUIRE_COORDINATOR: "1"
           BRIDGE_COORDINATOR_BIN: ${{ github.workspace }}/coordinator/target/release/bridge-coordinator
         run: |
           file "$BRIDGE_COORDINATOR_BIN"
-          python -m pytest -q
+          python -m pytest -q -n auto
 
   arm64-container:
     name: ARM64 container (build, smoke, limits)
