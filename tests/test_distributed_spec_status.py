@@ -18,7 +18,7 @@ SPEC_GROUPS = {
     "PI-FLASH": 13, "PI-BOOT": 5, "PI-HARD": 6, "PI-SYS": 6, "PI-WEAR": 10, "PI-UPD": 9,
     "PI-DEPLOY": 7, "PI-VERIFY": 13, "PI-REPO": 6, "PRD": 36,
 }
-SPEC_EXPLICIT_IDS = {"PI-DEPLOY-000"}
+SPEC_EXPLICIT_IDS = {"PI-DEPLOY-000", "DOG-017"}
 SPEC_OMITTED_IDS = {"PI-FLASH-008", "PI-FLASH-009"}
 ID_ROW = re.compile(r"^\| ([A-Za-z0-9][A-Za-z0-9-]*-\d{3}) \|")
 ID_PATTERN = r"[A-Z][A-Z0-9]*(?:-[A-Z][A-Z0-9]*)?-\d{3}"

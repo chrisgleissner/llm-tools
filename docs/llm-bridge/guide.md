@@ -79,6 +79,19 @@ creates a mission.
    llm-bridge task cancel --task 3
    ```
 
+   What the provider sees depends on the mission mode. A new or amended task is
+   stored in the queue and runs in its turn. In a native mission with a running
+   Claude Code, Codex or Copilot, Bridge also types one short notice into that
+   provider's terminal at its next idle prompt (the pane has not changed for a few
+   seconds, the composer is empty and no approval dialog is open). The notice
+   names the task number and title and the command to read it
+   (`llm-bridge task show --mission ID --task N`), and tells the provider not to
+   start the task: Bridge still starts it after the current one. Several changes
+   made before the provider is idle become one notice, and a task is announced
+   once. The receipt says which case applies: `delivered to the running provider
+   at its next prompt`, or `starts after task N`. Headless and background missions
+   have no provider terminal to type into and keep the plain queue.
+
 4. Change who works, at the next safe point:
 
    ```bash

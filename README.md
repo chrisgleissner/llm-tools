@@ -91,6 +91,8 @@ llm-bridge task diff --task 1          # the files it changed since the run star
 llm-bridge task approve --task 1
 ```
 
+A task added or amended while a native Claude Code, Codex or Copilot is working (with `task add`, the console or a remote client) waits in the queue. Bridge also types a short notice about it into the provider's terminal at its next idle prompt, and the `task add` receipt says whether that will happen (`delivered to the running provider at its next prompt`) or when the task starts (`starts after task 2`). Headless and background missions keep the plain queue.
+
 ## The 60-second tour
 
 ```bash
