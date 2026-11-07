@@ -589,3 +589,31 @@ def test_per_process_check_is_inconclusive_when_no_process_lives_past_its_warmup
     bound = h.SlopeBound(per_hour=512.0, floor=256.0, unit="KiB", per_process=True)
     result = h.check_per_process_slope("controllers_rss_kib", {"1": [(0.0, 1.0), (30.0, 1.0)]}, bound, warmup_seconds=1200.0)
     assert result.verdict == "inconclusive"
+
+
+def _worker_fleet(slope_kib_per_hour: float, *, processes: int = 4, samples_count: int = 240) -> list[dict]:
+    """Workers rise by 1.8 MiB while they settle (measured), then move by ``slope_kib_per_hour``."""
+    samples = []
+    for index in range(samples_count):
+        t = index * 30.0
+        by_pid = {str(200 + number): 32_000 + 1_800 * (1 - 0.5 ** (t / 400.0)) + (number * 700) + slope_kib_per_hour / 3600.0 * max(0.0, t - 1200.0)
+                  for number in range(processes)}
+        samples.append({"t": t, "workers": {"rss_kib": sum(by_pid.values()), "running": len(by_pid), "by_pid": by_pid}})
+    return samples
+
+
+def test_workers_are_judged_per_process_with_a_bound_below_the_old_three_mib_per_hour():
+    bound = {"workers_rss_kib": h.DEFAULT_BOUNDS["workers_rss_kib"]}
+    assert bound["workers_rss_kib"].per_hour <= 512 and bound["workers_rss_kib"].per_process
+    scaled = h.scale_bounds(bound, workers=4, controllers=1)
+
+    def verdict(rate: float):
+        return h.evaluate_resources(_worker_fleet(rate), scaled, warmup_seconds=1200.0, ceilings={}, process_bounds=bound)[0]
+
+    assert verdict(0.0).verdict == "pass"
+    assert verdict(200.0).verdict == "pass"  # the largest slope measured after warm-up in a 3 hour run is 225 KiB per hour
+    leaking = verdict(2048.0)  # the rate first read from the 45-minute soak; the old bound of 3 MiB per hour let it pass
+    assert leaking.verdict == "fail" and "median slope" in leaking.detail
+    summed = h.check_slope("workers_rss_kib", [(s["t"], s["workers"]["rss_kib"]) for s in _worker_fleet(2048.0)],
+                           h.SlopeBound(3 * 1024 * 4, 1024 * 4, "KiB"), warmup_seconds=1200.0)
+    assert summed.verdict == "pass"

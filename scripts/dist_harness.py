@@ -107,7 +107,7 @@ DEFAULT_BOUNDS: dict[str, SlopeBound] = {
     "coordinator_fds": SlopeBound(per_hour=4, floor=4, unit="descriptors"),
     "coordinator_threads": SlopeBound(per_hour=2, floor=4, unit="threads"),
     "coordinator_db_bytes": SlopeBound(per_hour=32 * 1024 * 1024, floor=8 * 1024 * 1024, unit="bytes"),
-    "workers_rss_kib": SlopeBound(per_hour=3 * 1024, floor=1024, unit="KiB", per_process=True),
+    "workers_rss_kib": SlopeBound(per_hour=512, floor=1024, unit="KiB", per_process=True),
     "workers_fds": SlopeBound(per_hour=1, floor=1, unit="descriptors", per_process=True),
     "workers_threads": SlopeBound(per_hour=1, floor=1, unit="threads", per_process=True),
     "controllers_rss_kib": SlopeBound(per_hour=1536, floor=512, unit="KiB", per_process=True),
@@ -1047,7 +1047,7 @@ class Sampler:
     def take(self) -> dict[str, Any]:
         elapsed = self.clock() - self._origin
         coordinator = self.coordinator.stats() or {}
-        workers = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0}
+        workers: dict[str, Any] = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0, "by_pid": {}}
         controllers: dict[str, Any] = {"rss_kib": 0, "fds": 0, "threads": 0, "running": 0, "max_rss_kib": 0, "by_pid": {}}
         tasks: Counter[str] = Counter()
         nodes = list(self.nodes())
@@ -1059,6 +1059,7 @@ class Sampler:
                 for key in ("rss_kib", "fds", "threads"):
                     workers[key] += stats[key]
                 workers["max_rss_kib"] = max(workers["max_rss_kib"], stats["rss_kib"])
+                workers["by_pid"][str(node.pid)] = stats["rss_kib"]
             for pid in by_runtime.get(str(node.runtime), []):
                 stats = proc_stats(pid)
                 if stats:
@@ -1114,8 +1115,8 @@ def metric_value(sample: dict[str, Any], metric: str) -> float | None:
 def evaluate_resources(samples: list[dict[str, Any]], bounds: dict[str, SlopeBound], *, warmup_fraction: float = 0.25, min_samples: int = 4,
                        warmup_seconds: float | None = None, ceilings: dict[str, tuple[float, str]] | None = None,
                        process_bounds: dict[str, SlopeBound] | None = None) -> list[SlopeResult]:
-    """Slope and ceiling checks. ``process_bounds`` holds the unscaled bound of ``controllers_rss_kib``: when the samples carry
-    the per-process sizes of the controllers, that metric is judged per process (``check_per_process_slope``), not on the sum."""
+    """Slope and ceiling checks. ``process_bounds`` holds the unscaled bounds of ``controllers_rss_kib`` and ``workers_rss_kib``: when
+    the samples carry the per-process sizes (``by_pid``), that metric is judged per process (``check_per_process_slope``), not on the sum."""
     results = []
     rows = [(float(s["t"]), float(sum((s.get("rows") or {}).values()))) for s in samples]
 
@@ -1128,14 +1129,15 @@ def evaluate_resources(samples: list[dict[str, Any]], bounds: dict[str, SlopeBou
     def coordinator_memory_explained_by_rows(first: float, last: float) -> float:
         return max(0.0, rows_at(last) - rows_at(first)) * COORDINATOR_RSS_BYTES_PER_ROW / 1024.0
 
-    controllers_by_pid: dict[str, list[tuple[float, float]]] = {}
-    for sample in samples:
-        for pid, kib in ((sample.get("controllers") or {}).get("by_pid") or {}).items():
-            controllers_by_pid.setdefault(str(pid), []).append((float(sample["t"]), float(kib)))
+    by_pid: dict[str, dict[str, list[tuple[float, float]]]] = {"controllers_rss_kib": {}, "workers_rss_kib": {}}
+    for metric, table in by_pid.items():
+        for sample in samples:
+            for pid, kib in ((sample.get(metric.split("_")[0]) or {}).get("by_pid") or {}).items():
+                table.setdefault(str(pid), []).append((float(sample["t"]), float(kib)))
 
     for metric, bound in bounds.items():
-        if metric == "controllers_rss_kib" and controllers_by_pid and process_bounds and metric in process_bounds:
-            results.append(check_per_process_slope(metric, controllers_by_pid, process_bounds[metric],
+        if by_pid.get(metric) and process_bounds and metric in process_bounds:
+            results.append(check_per_process_slope(metric, by_pid[metric], process_bounds[metric],
                                                    warmup_seconds=warmup_seconds if warmup_seconds is not None else 0.0, min_samples=min_samples))
             continue
         points = [(float(s["t"]), float(v)) for s in samples if (v := metric_value(s, metric)) is not None]
