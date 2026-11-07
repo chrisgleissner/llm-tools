@@ -6,6 +6,7 @@ try:  # POSIX-only; Windows runs only the remote client (docs/distributed/DECISI
     import fcntl
 except ImportError:  # pragma: no cover - exercised on Windows CI
     fcntl = None  # type: ignore[assignment]
+import glob
 import json
 import os
 import re
@@ -34,6 +35,8 @@ SCHEMA_VERSION = 10
 # Written into every event row. It is independent of SCHEMA_VERSION: index-only
 # schema changes do not change what an event row means.
 EVENT_SCHEMA_VERSION = 7
+# <suffix after the database file name>: ".v6-20260101T000000Z.bak", with an optional "-N" for a second backup in one second.
+_BACKUP_NAME = re.compile(r"\.v(\d+)-(\d{8}T\d{6}Z(?:-\d+)?)\.bak")
 REJECTION_REASON_LIMIT = 2000
 MAX_PROPOSAL_BYTES = 64 * 1024
 MAX_PROPOSALS_PER_OPERATION = 20
@@ -62,6 +65,10 @@ def _with_mode(config: dict[str, Any]) -> dict[str, Any]:
     """The mission config with ``mode`` (native, background or headless) added next to the two saved booleans."""
     config["mode"] = mission_mode(config)
     return config
+
+
+class SchemaTooNew(RuntimeError):
+    """The database was written by a newer llm-bridge than this one (``llm-bridge`` exits with status 4)."""
 
 
 class TransitionError(ValueError):
@@ -358,6 +365,7 @@ class BridgeStore:
             hint = f" · fix with: chmod 700 {shlex.quote(str(self.path.parent))}" if parent_info.st_uid == os.getuid() else ""
             raise PermissionError(f"Bridge state directory must be owned by this user and private: {self.path.parent}{hint}")
         self.readonly = False
+        self.migration_backup: Path | None = None  # set when this open migrated the schema (see _backup_before_migration)
         import sqlite3  # imported on first open so commands that never open a store do not load it
 
         if readonly and self.path.exists():
@@ -408,7 +416,7 @@ class BridgeStore:
         """
         current_version = self._user_version()
         if current_version > SCHEMA_VERSION:
-            raise RuntimeError(f"Bridge database schema {current_version} is newer than supported schema {SCHEMA_VERSION}")
+            raise self._schema_too_new(current_version)
         if current_version == SCHEMA_VERSION:
             return
         self.db.execute("BEGIN IMMEDIATE")
@@ -416,8 +424,9 @@ class BridgeStore:
             # Another process may have migrated while this one waited for the write lock.
             current_version = self._user_version()
             if current_version > SCHEMA_VERSION:
-                raise RuntimeError(f"Bridge database schema {current_version} is newer than supported schema {SCHEMA_VERSION}")
+                raise self._schema_too_new(current_version)
             if current_version < SCHEMA_VERSION:
+                self._backup_before_migration(current_version)
                 self._migrate(current_version)
                 self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             self.db.execute("COMMIT")
@@ -426,6 +435,68 @@ class BridgeStore:
                 self.db.execute("ROLLBACK")
             raise
         self._secure_sqlite_files()
+
+    def _backups(self) -> list[tuple[str, int, Path]]:
+        """Backups made next to this database, as (UTC timestamp, schema version before the migration, path), oldest first."""
+        found: list[tuple[str, int, Path]] = []
+        for candidate in self.path.parent.glob(f"{glob.escape(self.path.name)}.v*-*.bak"):
+            match = _BACKUP_NAME.fullmatch(candidate.name[len(self.path.name):])
+            if match:
+                found.append((match.group(2), int(match.group(1)), candidate))
+        return sorted(found)
+
+    def _schema_too_new(self, found: int) -> SchemaTooNew:
+        """The refusal for a database newer than ``SCHEMA_VERSION``; names the newest backup this llm-bridge can open."""
+        usable = [path for _stamp, version, path in self._backups() if version <= SCHEMA_VERSION]
+        advice = (f"upgrade llm-tools, or restore the backup {usable[-1]} made before the upgrade (copy it over {self.path})"
+                  if usable else f"upgrade llm-tools (no backup of {self.path} was found next to it)")
+        return SchemaTooNew(f"this Bridge database is schema {found} but this llm-bridge understands up to {SCHEMA_VERSION}; {advice}")
+
+    def _backup_before_migration(self, old_version: int) -> None:
+        """Copy the database to ``<name>.v<old>-<UTC timestamp>.bak`` (0600) before a migration changes it.
+
+        Runs inside the migration's write transaction, so the copy is the last committed state and
+        no other process can change it meanwhile. A database with no tables yet is new and has nothing to
+        keep. The path is kept in ``migration_backup`` and appended to ``migrations.log``
+        beside the database.
+        """
+        import sqlite3
+
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone() is None:
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = self.path.with_name(f"{self.path.name}.v{old_version}-{stamp}.bak")
+        counter = 0
+        while True:
+            try:
+                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                break
+            except FileExistsError:
+                counter += 1
+                target = self.path.with_name(f"{self.path.name}.v{old_version}-{stamp}-{counter}.bak")
+        os.close(descriptor)
+        # A second, read-only connection reads the last committed state while this one holds the write
+        # lock. (Backing up from the connection that holds the lock waits on itself forever.)
+        source = sqlite3.connect(f"file:{_sqlite_uri_path(self.path)}?mode=ro", uri=True, timeout=10.0)
+        copy = sqlite3.connect(target)
+        try:
+            source.backup(copy)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+        finally:
+            copy.close()
+            source.close()
+        for suffix in ("-wal", "-shm", "-journal"):
+            Path(str(target) + suffix).unlink(missing_ok=True)
+        target.chmod(0o600)
+        self.migration_backup = target
+        line = f"{utc_now()} schema {old_version} -> {SCHEMA_VERSION}; backup {target}\n"
+        log = os.open(self.path.with_name("migrations.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(log, line.encode("utf-8"))
+        finally:
+            os.close(log)
 
     def _migrate(self, current_version: int) -> None:
         """Create missing tables, columns and indexes, then run the one-time data backfills."""
@@ -602,8 +673,8 @@ class BridgeStore:
         operation_id: str | None = None,
     ) -> None:
         self.db.execute(
-            "INSERT INTO events(mission_id,task_id,operation_id,kind,data_json,created_at) VALUES(?,?,?,?,?,?)",
-            (mission_id, task_id, operation_id, kind, self._json(data), utc_now()),
+            "INSERT INTO events(mission_id,task_id,operation_id,schema_version,kind,data_json,created_at) VALUES(?,?,?,?,?,?,?)",
+            (mission_id, task_id, operation_id, EVENT_SCHEMA_VERSION, kind, self._json(data), utc_now()),
         )
 
     def mission_id_if_exists(self, mission_id: str) -> str | None:

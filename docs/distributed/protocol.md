@@ -41,6 +41,12 @@ Version negotiation: the worker lists the versions it speaks in `hello`
 (`protocol_versions`) and the coordinator answers with the selected version in
 `welcome`. When there is no common version, the coordinator closes the connection
 with WebSocket code 1002 and reason `unsupported version`. Only version 1 exists.
+Versions are whole numbers; there is no minor version. A peer from an adjacent release
+interoperates when it also lists a version the other side speaks (a newer worker lists
+`[1, 2]`): the coordinator selects the highest common one. The Python parser
+(`bridge_protocol.negotiate_version`, applied to every decoded `hello`) rejects a list with no
+common version with `unsupported-version`, naming both lists, and a list that is not
+whole numbers with `invalid-message`.
 
 ## Message types
 

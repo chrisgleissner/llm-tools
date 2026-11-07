@@ -215,7 +215,8 @@ With `--json`, an error is printed on standard output (not standard error) as
 with the same exit status. `hint` is the command that fixes the problem, or an empty string.
 The codes are `usage` (exit 2), `invalid-argument` (2), `mission-not-found` (3), `task-not-found`
 (3), `not-found` (3), `mission-ambiguous` (3), `wrong-state` (4), `conflict` (4, a task changed
-since you read it), `refused-in-managed-session` (2) and `failed` (1). The same table is in
+since you read it), `schema-too-new` (4, the database was written by a newer llm-bridge; see
+"Database upgrades, backups and downgrades"), `refused-in-managed-session` (2) and `failed` (1). The same table is in
 `llm-bridge --help` under "Exit status".
 
 Mission creation accepts `--verifier 'COMMAND'` (split like a shell, not run through one) or the command last after `--`, `--verifier-arg` (repeat once per argv element),
@@ -951,6 +952,51 @@ operations before the mission becomes FAILED; a group that cannot be stopped is
 recorded as a `provider-orphaned` event with its pid. Two `start` commands for one
 mission are serialized, and the controller records its pid and start token in its
 lock file, which `stop --force` uses when `controller-ready.json` is missing.
+
+### Database upgrades, backups and downgrades
+
+The database records its schema version in SQLite's `PRAGMA user_version`
+(currently 10). Migrations are forward-only and run automatically the first time
+a newer `llm-bridge` opens an older database, whichever command opens it. The
+release history has used versions 2, 3, 6 and 10 (1.1.0 and 1.2.x shipped 6; 1.3.0
+shipped 10).
+
+Before a migration changes the version, Bridge copies the database (using
+SQLite's online backup, so the copy is consistent) to
+
+```
+bridge.sqlite3.v<old schema>-<UTC timestamp>.bak     e.g. bridge.sqlite3.v6-20261106T094500Z.bak
+```
+
+in the same private state directory, mode 0600. It also appends
+`<time> schema 6 -> 10; backup <path>` to `migrations.log` in that directory. A
+database that does not exist yet is created without a backup, and opening a
+database that is already current writes nothing. The migration runs in one
+transaction: if it fails, the database stays at the old version and the backup
+remains. Backups are never deleted automatically; each schema change adds one, so
+remove old ones when you no longer need them.
+
+An older `llm-bridge` refuses to open a database written by a newer one. It exits
+with status 4 (JSON error code `schema-too-new`) and changes nothing:
+
+```
+llm-bridge: this Bridge database is schema 12 but this llm-bridge understands up to 10;
+upgrade llm-tools, or restore the backup /path/bridge.sqlite3.v10-20261106T094500Z.bak made
+before the upgrade (copy it over /path/bridge.sqlite3)
+```
+
+The named backup is the newest one whose schema this `llm-bridge` understands.
+Restoring it discards everything recorded after that upgrade. Stop the
+controllers first, and copy the backup over `bridge.sqlite3` only after removing
+the old `bridge.sqlite3-wal` and `bridge.sqlite3-shm` files. If no backup is
+found, the message says so; upgrading `llm-tools` is then the only way forward.
+
+`tests/test_bridge_schema_migrations.py` opens a fixture database of every
+earlier schema version (`tests/fixtures/bridge-schema/`, rebuilt by
+`scripts/make_bridge_schema_fixtures.py`), checks that all rows survive and that
+the migrated schema matches a freshly created one. Versions 7 to 9 and 1, 4 and 5
+were never committed as source, so their fixtures are derived; `MANIFEST.json`
+says how each was made.
 
 See `llm-bridge --help` and the command-specific `--help` output for all
 available CLI operations.

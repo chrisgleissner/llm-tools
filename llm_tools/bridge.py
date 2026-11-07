@@ -16,7 +16,7 @@ from typing import Any, Callable, NoReturn, Sequence, TYPE_CHECKING, cast
 from . import bridge_commands as commands
 from . import bridge_format as fmt
 from .bridge_format import NATIVE_STOP_HINT
-from .bridge_store import BridgeStore, MissionLock, TaskNotFound, TransitionError, default_state_dir, derive_mission_name, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
+from .bridge_store import BridgeStore, MissionLock, SchemaTooNew, TaskNotFound, TransitionError, default_state_dir, derive_mission_name, derive_title, mission_transition_message, prune_old_drafts, rotation_label, store_path
 from .bridge_store import controller_running as _controller_running
 from .bridge_states import (
     ACTIVE_OPERATION_STATUSES, ENDED_MISSION_STATUSES, FINISHED_MISSION_STATUSES, FINISHED_TASK_STATUSES,
@@ -265,6 +265,8 @@ def _classify_error(exc: BaseException) -> tuple[str, int]:
         return exc.code, EXIT_USAGE if exc.code.startswith("invalid") else EXIT_FAILED
     if isinstance(exc, (TransitionError, WrongState)):
         return "wrong-state", EXIT_WRONG_STATE
+    if isinstance(exc, SchemaTooNew):
+        return "schema-too-new", EXIT_WRONG_STATE
     if isinstance(exc, KeyError):
         return "not-found", EXIT_NOT_FOUND
     if isinstance(exc, ValueError):
