@@ -103,6 +103,22 @@ fn token_create_schema() -> Value {
 }
 
 fn response_schema(path: &str, method: &str) -> Value {
+    if path == "/api/v1/auth/passkeys" && method == "GET" {
+        return json!({
+            "type":"object","required":["passkeys"],"additionalProperties":false,
+            "properties":{"passkeys":{"type":"array","maxItems":128,"items":{
+                "type":"object","required":["id","name","provider_aaguid","created_at","last_used","synced","backup_eligible"],"additionalProperties":false,
+                "properties":{
+                    "id":{"type":"string","minLength":1,"maxLength":1024},
+                    "name":{"type":"string","minLength":1,"maxLength":128},
+                    "provider_aaguid":{"type":["string","null"],"maxLength":36},
+                    "created_at":{"type":"string","format":"date-time"},
+                    "last_used":{"type":["string","null"],"format":"date-time"},
+                    "synced":{"type":"boolean"},"backup_eligible":{"type":"boolean"}
+                }
+            }}}
+        });
+    }
     if path == "/api/v1/auth/state" && method == "GET" {
         return json!({
             "type":"object",

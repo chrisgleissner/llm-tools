@@ -1001,6 +1001,29 @@ async fn passkey_reenroll(State(st): State<St>, Authed(p, ip): Authed, headers: 
     Ok(json_ok(StatusCode::OK, json!({"ok":true,"origin":origin,"registration_required":true})))
 }
 
+async fn list_passkeys(State(st): State<St>, _session: Authed) -> ApiResult {
+    let Some((principal, _)) = st.db.admin_get()? else {
+        return Err(unauthorized());
+    };
+    let passkeys = st
+        .db
+        .passkeys_for_principal(&principal)?
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.credential_id,
+                "name": row.user_name,
+                "provider_aaguid": row.aaguid,
+                "created_at": timestamp(Some(row.created_at)),
+                "last_used": timestamp(row.last_used),
+                "synced": row.backup_eligible && row.backed_up,
+                "backup_eligible": row.backup_eligible,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json_ok(StatusCode::OK, json!({"passkeys":passkeys})))
+}
+
 async fn passkey_assert_start(State(st): State<St>, Remote(ip): Remote, headers: HeaderMap, body: Buffered) -> ApiResult {
     check_public_origin(&st, &headers)?;
     check_address_mutation_limit(&st, &ip)?;
@@ -3026,6 +3049,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/auth/login", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/registration/start", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/registration/finish", &["POST"], Access::Session, ""),
+    ("/api/v1/auth/passkeys", &["GET"], Access::Session, ""),
     ("/api/v1/auth/passkeys/re-enroll", &["POST"], Access::Session, ""),
     ("/api/v1/auth/passkeys/assertion/start", &["POST"], Access::Public, ""),
     ("/api/v1/auth/passkeys/assertion/finish", &["POST"], Access::Public, ""),
@@ -3217,6 +3241,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/auth/state", get(auth_state))
         .route("/api/v1/auth/setup", post(setup).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
         .route("/api/v1/auth/login", post(login).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)))
+        .route("/api/v1/auth/passkeys", get(list_passkeys))
         .route(
             "/api/v1/auth/passkeys/registration/start",
             post(passkey_register_start).layer(DefaultBodyLimit::max(AUTH_BODY_MAX)),

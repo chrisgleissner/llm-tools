@@ -104,6 +104,41 @@ async fn passkey_origin_reenrollment_requires_password_and_atomically_clears_cre
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn passkey_list_returns_only_declared_management_metadata() {
+    let env = boot().await;
+    let api = env.admin().await;
+    let db = bridge_coordinator::db::Db::open(&bridge_coordinator::db_path(&env.dir)).unwrap();
+    db.passkey_put(&bridge_coordinator::db::PasskeyCredentialRow {
+        credential_id: "public-handle".into(),
+        principal_id: "admin".into(),
+        credential: "private-credential-json-must-not-leak".into(),
+        user_name: "phone".into(),
+        created_at: bridge_coordinator::now(),
+        last_used: Some(bridge_coordinator::now()),
+        aaguid: Some("00112233-4455-6677-8899-aabbccddeeff".into()),
+        transports: "[\"internal\"]".into(),
+        backup_eligible: true,
+        backed_up: true,
+        sign_count: 42,
+    })
+    .unwrap();
+    let (status, body) = api.get("/api/v1/auth/passkeys").await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body["passkeys"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["name"], "phone");
+    assert_eq!(rows[0]["provider_aaguid"], "00112233-4455-6677-8899-aabbccddeeff");
+    assert_eq!(rows[0]["synced"], true);
+    assert!(rows[0].get("credential").is_none());
+    assert!(rows[0].get("transports").is_none());
+    assert!(rows[0].get("sign_count").is_none());
+    assert!(!body.to_string().contains("private-credential-json-must-not-leak"));
+    let (status, _) = api.get("/api/v1/auth/passkeys").await;
+    assert_eq!(status, 200);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn malformed_numeric_path_parameters_use_problem_json() {
     let env = boot().await;
     let api = env.admin().await;

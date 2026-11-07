@@ -90,6 +90,27 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("account lists passkey metadata without exposing credential material", async ({ page, coord }) => {
+    await setupViaUi(page, coord);
+    await page.route("**/api/v1/auth/state", async (route) => {
+      const response = await route.fetch();
+      const state = await response.json();
+      state.passkey_canonical_origin = "https://example.test";
+      await route.fulfill({ response, json: state });
+    });
+    await page.route("**/api/v1/auth/passkeys", (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ passkeys: [{ id: "opaque-id", name: "Phone", provider_aaguid: "00112233-4455-6677-8899-aabbccddeeff", created_at: "2026-11-07T10:00:00Z", last_used: null, synced: true, backup_eligible: true }] }),
+    }));
+    await page.goto("/account");
+    const list = page.getByRole("list", { name: "Registered passkeys" });
+    await expect(list).toContainText("Phone");
+    await expect(list).toContainText("Provider 00112233-4455-6677-8899-aabbccddeeff");
+    await expect(list).toContainText("Synced passkey");
+    await expect(list).not.toContainText("private-credential");
+  });
+
   test("passkey re-enrolment requires a password and explicit reset confirmation", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await page.route("**/api/v1/auth/state", async (route) => {
