@@ -552,6 +552,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("mission create", "save a mission and its first task"),
         ("mission list", "list saved missions"),
         ("mission set", "change a mission setting"),
+        ("mission settings", "show the mission's saved settings"),
         ("missions", "every mission, live ones first; switch between them"),
         ("status", "what the mission is doing and what needs you"),
     )),
@@ -582,6 +583,7 @@ COMMAND_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("station", "choose which provider's terminal the controls show"),
         ("control", "open the full control view"),
         ("agents", "live provider operations and native child agents"),
+        ("screen", "read what the provider's terminal shows now"),
     )),
     ("Capacity and power", (
         ("usage", "capacity left for each provider"),
@@ -716,7 +718,9 @@ COMMANDS: dict[str, tuple[str, str]] = {
     "mission": ("Save and inspect durable missions", "mission list"),
     "mission create": ("Save an objective and its first task; no provider starts", "mission create --name demo --mode native --file prompt.md --cwd ."),
     "mission list": ("List every mission, live ones first (the same listing as missions); no state changes or provider work", "mission list --json"),
+    "mission settings": ("Show a mission's saved execution settings; no state changes or provider work", "mission settings --mission ID"),
     "status": ("Inspect desired state, observed work and blockers", "status --mission ID"),
+    "screen": ("Print a bounded snapshot (the last 200 lines) of a native provider's current screen; no state changes", "screen --mission ID"),
     "agents": ("Inspect current Bridge operations and provider-owned child agents; use --mission ID or --all-missions", "agents --all-missions --json"),
     "suspend-until-credits": ("Arm a wake timer and suspend after a fresh capacity and safety check", "suspend-until-credits --mission ID"),
     "task": ("Add, inspect, amend, approve and reject mission tasks", "task list --mission ID"),
@@ -841,7 +845,7 @@ EFFECTS: dict[str, str] = {
 
 # Subcommand order on group pages, most common first; commands not named follow in registered order.
 _COMMAND_ORDER: dict[str, tuple[str, ...]] = {
-    "mission": ("create", "list", "set", "colour"),
+    "mission": ("create", "list", "set", "settings", "colour"),
     "task": ("add", "list", "show", "approve", "reject", "amend", "verify", "output", "diff", "pause", "resume", "cancel", "retry", "priority", "reorder", "dependencies"),
     "proposal": ("list", "accept", "reject", "create"),
 }
