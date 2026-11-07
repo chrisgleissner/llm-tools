@@ -182,3 +182,12 @@ paths, operations or fields and newly required fields. Breaking changes require 
 version; the checker treats a version change as a new compatibility line. This gives future
 changes a stable gate without inventing a pre-existing published contract.
 
+## D12 Bounded mutation budgets (SEC2-010)
+
+Authenticated mutation budgets default to 30 requests per token and 120 per client address in a
+rolling 60-second window. Keep those defaults configurable within 1–10,000. This lets deployments
+and stress tests tune the address budget without changing enforcement logic. The offline queue
+stress harness raises only its configured address budget and uses one portable loopback address;
+the coordinator hardening test still checks the production defaults. This avoids relying on
+Linux's implicit `127/8` routing, which macOS runners do not provide.
+

@@ -42,7 +42,7 @@ This is a traceability aid for the follow-up requirements in [SPEC_STATUS.md](SP
 | SEC2-007 | ASVS 06.02, 06.03; NIST 3.1.1.2; API2:2023 | `[~]` Current password policy and Argon2id exist. NIST length policy, offline breached-password blocklist and measured configurable cost remain. |
 | SEC2-008 | ASVS 03.03, 03.04, 07.02, 07.04, 07.05; API2:2023 | `[ ]` Session rotation, per-session CSRF, active-session management and step-up remain. |
 | SEC2-009 | ASVS 07.02, 08.02, 09.01, 10.03; NIST 3.2.7; API2:2023 | `[~]` Scoped hashed bearer tokens exist. Prefixed format, token binding, maximum lifetime and one-time WebSocket tickets remain. |
-| SEC2-010 | ASVS 02.03, 02.04, 06.03, 08.02; NIST 3.2.2; API4:2023, API6:2023 | `[~]` Login limits exist. Address/token mutation limits, back-off, alerts and global cap remain. |
+| SEC2-010 | ASVS 02.03, 02.04, 06.03, 08.02; NIST 3.2.2; API4:2023, API6:2023 | `[~]` Login limits exist. Authenticated mutations default to 30/token and 120/address per rolling 60 seconds, configurable within 1–10,000. The Rust hardening test covers both default budgets and `Retry-After`; exponential back-off, repeated-failure alerts and a global request cap remain. |
 | SEC2-011 | ASVS 08.02, 08.03; API1:2023, API3:2023, API5:2023 | `[~]` Route scope and principal declarations exist. Centralized object policy and cross-principal negative tests remain. |
 | SEC2-012 | ASVS 04.02, 16.05; API3:2023, API4:2023 | `[~]` Problem details exist. Schema-driven least-data responses, generic correlated 5xx and page caps remain. |
 | SEC2-013 | ASVS 16.02, 16.03, 16.04; API8:2023 | `[~]` Existing audit rows cover several mutations. Append-only hash-chained security log and admin API remain. |
