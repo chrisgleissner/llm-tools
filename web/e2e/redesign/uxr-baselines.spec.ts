@@ -1,63 +1,55 @@
-// T42 (UXR-038, UXR-030): visual baselines for every screen listed in e2e/screens/*.ts, in light and dark, on the two Chromium
-// projects (desktop and Pixel 4). Baselines are generated in the Playwright image (web/README.md), like screenshots.spec.ts,
-// and are skipped when BRIDGE_SKIP_VISUAL=1 or the platform is not Linux.
-import { test as base, expect } from "@playwright/test";
+// T42 (UXR-038, UXR-030): every screen listed in e2e/screens/*.ts has a visual baseline in light and dark on the two Chromium
+// projects. The screens are rendered and compared by e2e/screenshots.spec.ts (one runner, so one set of baseline files);
+// this spec checks the lists themselves: they are found, names are unique, each screen has its baseline files, and the Inbox
+// and Mission detail lists cover the empty, sparse, dense and error states.
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { test } from "../fixtures";
-import { mockApp } from "../mock";
-import { isLanded, uxr, type Wp } from "./gate";
-import { settle } from "./harness";
-import type { ScreenDef } from "./screens";
+import { expect, uxrStatic } from "./gate";
 
+interface ScreenLike { name: string; narrowOnly?: boolean; wideOnly?: boolean }
 const dir = join(import.meta.dirname, "..", "screens");
-const PACKAGE_OF: Record<string, Wp> = { shell: "WP-1", session: "WP-2", mission: "WP-3", inbox: "WP-4", fleet: "WP-5", auth: "WP-5" };
+const baselines = join(import.meta.dirname, "..", "__screenshots__");
 
-const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".ts")) : [];
-const loaded: Array<{ pkg: string; wp: Wp; screens: ScreenDef[] }> = [];
-for (const file of files) {
-  const pkg = file.replace(/\.ts$/, "");
-  const mod = (await import(pathToFileURL(join(dir, file)).href)) as { screens?: ScreenDef[] };
-  loaded.push({ pkg, wp: PACKAGE_OF[pkg] ?? "WP-0", screens: mod.screens ?? [] });
-}
-
-if (loaded.length === 0) {
-  // Registered so the test is listed (and visible as fixme) before any package has added its screens.
-  uxr({ t: "T42", uxr: ["UXR-038"], needs: ["WP-0"] }, "e2e/screens/*.ts lists the screens that get a baseline", async () => {
-    expect(readdirSync(dir).filter((f) => f.endsWith(".ts")).length, "screen lists in web/e2e/screens").toBeGreaterThan(0);
-  });
-}
-
-for (const { pkg, wp, screens } of loaded) {
-  for (const s of screens) {
-    for (const theme of ["light", "dark"] as const) {
-      const title = `T42 UXR-038 UXR-030: ${s.name} (${theme})`;
-      const run = isLanded("WP-0") && isLanded(wp);
-      const body = async ({ page, browserName }: { page: import("@playwright/test").Page; browserName: string }, info: import("@playwright/test").TestInfo) => {
-        const width = page.viewportSize()?.width ?? 1000;
-        base.skip(Boolean((s.narrowOnly && width > 720) || (s.wideOnly && width <= 720)), "screen is for the other viewport class");
-        await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
-        await mockApp(page, s.mock);
-        await page.goto(s.path);
-        await settle(page);
-        await s.run(page);
-        if (process.env["BRIDGE_SKIP_VISUAL"] !== "1" && process.platform === "linux" && info.project.name.startsWith("chromium") && browserName === "chromium")
-          await expect(page).toHaveScreenshot(`${s.name}-${theme}.png`);
-      };
-      const details = { tag: ["@T42", "@UXR-038", `@${wp}`], annotation: [{ type: "needs", description: `${wp} (${pkg})` }] };
-      if (run) test(title, details, body);
-      else test.fixme(`${title} [fixme until ${wp}]`, details, body);
-    }
+/** Every `e2e/screens/<package>.ts` (not index.ts, types.ts) with the screens it exports as `SCREENS`. */
+async function loadScreens(): Promise<Array<{ pkg: string; screens: ScreenLike[] }>> {
+  if (!existsSync(dir)) return [];
+  const out: Array<{ pkg: string; screens: ScreenLike[] }> = [];
+  for (const file of readdirSync(dir).filter((f) => f.endsWith(".ts") && f !== "index.ts" && f !== "types.ts").sort()) {
+    const mod = (await import(pathToFileURL(join(dir, file)).href)) as { SCREENS?: ScreenLike[] };
+    out.push({ pkg: file.replace(/\.ts$/, ""), screens: mod.SCREENS ?? [] });
   }
+  return out;
 }
 
-// The Inbox and Mission detail each need empty, sparse, dense and error variants.
+uxrStatic({ t: "T42", uxr: ["UXR-038"], needs: ["WP-0"] }, "e2e/screens/*.ts export SCREENS, names are unique, and the lists are not empty", async () => {
+  const lists = await loadScreens();
+  const all = lists.flatMap((l) => l.screens.map((s) => s.name));
+  expect(lists.length, "screen lists found in web/e2e/screens (each exports SCREENS)").toBeGreaterThan(0);
+  expect(all.length, "screens found in those lists").toBeGreaterThan(0);
+  for (const l of lists) expect(l.screens.length, `${l.pkg}.ts exports at least one screen in SCREENS`).toBeGreaterThan(0);
+  expect(all.filter((n, i) => all.indexOf(n) !== i), "screen names that appear twice").toEqual([]);
+});
+
+uxrStatic({ t: "T42", uxr: ["UXR-038", "UXR-030"], needs: ["WP-0"] }, "every screen has a baseline in light and dark for the Chromium projects it runs on", async () => {
+  const screens = (await loadScreens()).flatMap((l) => l.screens);
+  expect(screens.length, "screens found").toBeGreaterThan(0);
+  const missing: string[] = [];
+  for (const [project, narrow] of [["chromium-desktop", false], ["chromium-mobile", true]] as const)
+    for (const s of screens) {
+      if ((s.narrowOnly && !narrow) || (s.wideOnly && narrow)) continue;
+      for (const theme of ["light", "dark"]) if (!existsSync(join(baselines, project, `${s.name}-${theme}.png`))) missing.push(`${project}/${s.name}-${theme}.png`);
+    }
+  expect(missing, "baseline files missing (regenerate in the Playwright image, web/README.md)").toEqual([]);
+});
+
+// The Inbox and Mission detail each need empty, sparse, dense and error variants. A variant is recognised by the screen name.
+const VARIANT: Record<string, RegExp> = { empty: /(^|-)(empty|none|no-)/, sparse: /sparse/, dense: /dense/, error: /error/ };
 for (const [pkg, wp] of [["inbox", "WP-4"], ["mission", "WP-3"]] as const) {
-  uxr({ t: "T42", uxr: ["UXR-038"], needs: ["WP-0", wp] }, `${pkg} has empty, sparse, dense and error screens`, async () => {
-    const entry = loaded.find((l) => l.pkg === pkg);
+  uxrStatic({ t: "T42", uxr: ["UXR-038"], needs: ["WP-0", wp] }, `${pkg} screens cover the empty, sparse, dense and error states`, async () => {
+    const entry = (await loadScreens()).find((l) => l.pkg === pkg);
     expect(entry, `e2e/screens/${pkg}.ts exists`).toBeDefined();
-    const variants = new Set(entry?.screens.map((s) => s.variant));
-    for (const v of ["empty", "sparse", "dense", "error"] as const) expect(variants.has(v), `${pkg} screen variant "${v}"`).toBe(true);
+    const names = entry!.screens.map((s) => s.name);
+    for (const [variant, pattern] of Object.entries(VARIANT)) expect(names.some((n) => pattern.test(n)), `a ${pkg} screen for the ${variant} state (names: ${names.join(", ")})`).toBe(true);
   });
 }
