@@ -109,7 +109,7 @@ export function headerActions(m: HeaderModel, hd: HeaderHandlers): HTMLElement[]
   let primaryUsed = false;
   const primary = (): string => (primaryUsed ? "" : ((primaryUsed = true), "primary"));
 
-  if (!finished && s === "failed" && status !== "RUNNING" && status !== "PAUSED") {
+  if (status === "FAILED") {
     const n = retryOrdinal(m);
     const t = find(n);
     out.push(b(n ? `Retry task ${n}` : "Retry", "retry", () => t && hd.retry(t), primary(), why || (t ? "" : "Loading the task list")));

@@ -89,7 +89,7 @@ export function activityPanel(onOlder: () => void): ActivityPanel {
       "div",
       { class: "seg small", role: "group", "aria-label": "Activity detail" },
       ...(["milestones", "all"] as const).map((v) => {
-        const b = h("button", { type: "button", class: "seg-btn", "aria-pressed": String(view === v), "data-view": v }, v === "milestones" ? "Milestones" : "All activity");
+        const b = h("button", { type: "button", class: "seg-btn", "aria-pressed": String(view === v), "data-view": v }, h("span", {}, v === "milestones" ? "Milestones" : "All activity"));
         b.addEventListener("click", () => setView(v));
         return b;
       }),

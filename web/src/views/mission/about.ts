@@ -1,6 +1,6 @@
 // "About" (spec 8.1, level 1): folder, worker host and address, created time, and the full mission id with Copy.
 import type { WorkerInfo } from "../../api";
-import { disclosure, h, idChip, timeEl } from "../../dom";
+import { h, idChip, timeEl } from "../../dom";
 
 export interface AboutModel {
   missionId: string;
@@ -16,8 +16,9 @@ export interface About {
 }
 
 export function aboutBlock(): About {
-  const el = disclosure("About", h("p", { class: "muted" }, "Loading..."), { id: "mission-about" });
-  const body = el.querySelector(".disclosure-body") as HTMLElement;
+  // Built here, not with `disclosure()`, so the one-word label sits in its own span: a summary that holds bare text is as tall as its tap target.
+  const body = h("div", { class: "disclosure-body" }, h("p", { class: "muted" }, "Loading..."));
+  const el = h("details", { class: "disclosure", id: "mission-about" }, h("summary", {}, h("span", {}, "About")), body);
   return {
     el,
     update(m) {

@@ -92,7 +92,7 @@ pre.diff, pre.evidence-out { margin: var(--sp-2) 0; padding: var(--sp-2); backgr
 .raw-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px var(--sp-3); margin: 0 0 var(--sp-2); font-size: var(--fs-xs); }
 .raw-fields dd { margin: 0; }
 .plumbing-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
-.about-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-1) var(--sp-4); margin: 0; }
+.about-fields { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: start; gap: var(--sp-1) var(--sp-4); margin: 0; }
 .about-fields dd { margin: 0; display: flex; align-items: center; }
 
 /* Phones: back chevron, two-line answer, no meta line (About has it), compact header while the keyboard is open */

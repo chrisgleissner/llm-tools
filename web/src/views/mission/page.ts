@@ -44,7 +44,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   let disposed = false;
   let session: SessionHandle | null = null;
   let sessionMounting = false;
-  let sessionKind: "none" | "empty" | "pane" = "none";
+  let sessionKind = "none";
   let headSignature = "";
 
   // ---- derived facts
@@ -82,7 +82,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const tasksCount = h("span", { class: "n num" });
   const tabsEl = h("div", { class: "seg mission-tabs", role: "tablist", "aria-label": "Mission views" });
   for (const t of TABS) {
-    const b = h("button", { type: "button", role: "tab", class: `seg-btn tab-${t.id}`, id: `tab-${t.id}`, "data-tab": t.id, "aria-selected": "false", tabindex: "-1" }, t.label, t.id === "tasks" ? tasksCount : null);
+    const b = h("button", { type: "button", role: "tab", class: `seg-btn tab-${t.id}`, id: `tab-${t.id}`, "data-tab": t.id, "aria-selected": "false", tabindex: "-1" }, h("span", {}, t.label), t.id === "tasks" ? tasksCount : null);
     if (t.id !== "session") b.setAttribute("aria-controls", `panel-${t.id}`);
     b.addEventListener("click", () => setTab(t.id));
     tabButtons.set(t.id, b);
@@ -241,8 +241,9 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     if (!e) return;
     const st = status();
     if (NEVER_STARTED.has(st) && !session) {
-      if (sessionKind !== "empty") {
-        sessionKind = "empty";
+      const key = `empty|${blocked()}`;
+      if (sessionKind !== key) {
+        sessionKind = key;
         sessionSlot.replaceChildren(
           emptyState({
             icon: "terminal",

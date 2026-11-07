@@ -201,6 +201,7 @@ uxr({ t: "T15", uxr: ["UXR-009"], needs: [...ALL_MISSION_WPS] }, "activity shows
 uxr({ t: "T21", uxr: ["UXR-020"], needs: [...ALL_MISSION_WPS] }, "Add task takes at most 3 interactions plus typing and posts task.add", async ({ page }, info) => {
   const app = await openApp(page, { auth: "in" }, MISSION_URL);
   await showTasks(page);
+  await app.ix.reset(); // the click path starts in the Tasks view; on a phone, switching to it is navigation, not part of adding a task
   await page.getByRole("button", { name: /add task/i }).click();
   await expect.poll(() => page.evaluate(() => /^(textarea|input)$/i.test(document.activeElement?.tagName ?? "")), { message: "the new-task field takes focus" }).toBe(true);
   await page.keyboard.type("Write the migration guide");
