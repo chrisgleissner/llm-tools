@@ -1,13 +1,14 @@
-// Remote terminal panel (WEB-007, WEB-008): xterm.js bound to the coordinator's /api/v1/terminal relay.
-// Frames are JSON text: server -> browser {t:"o",d}, {t:"s",cols,rows,mode,reason}, {t:"x",reason};
+// The session pane (PRD-037 spec 8.2): xterm.js bound to the coordinator's /api/v1/terminal relay, with a toolbar, the composer
+// and the key bar. Frames are JSON text: server -> browser {t:"o",d}, {t:"s",cols,rows,mode,reason}, {t:"x",reason};
 // browser -> server {t:"i",d} (input, write mode only) and {t:"r",cols,rows} (resize, write mode only).
-import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 
+import { composer } from "./composer";
 import { button, h } from "./dom";
-import { announce } from "./ui";
+import { menu, type MenuItem } from "./menu";
 import { publishStreamMessage } from "./store";
 import { TERMINAL_THEME } from "./terminal-theme";
+import { say } from "./ui";
 import { ensureXtermCss } from "./xterm-css";
 
 // The stylesheet loads before this module finishes evaluating, so the terminal never measures or paints without its CSS.
@@ -15,26 +16,13 @@ await ensureXtermCss();
 
 export type TermState = "idle" | "connecting" | "live" | "reconnecting" | "ended";
 
-const MAX_INPUT_CHUNK = 32 * 1024;
-const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
-
-/** A task the Steer dialogs can name (review, verify, replace and stop-after-task need a task number). */
-export interface SteerTask {
-  ordinal: number;
-  title: string;
-}
-
 export interface SessionPaneOpts {
-  /** Provider name for the composer placeholder ("Message Codex..."). */
+  /** Provider name for the composer label ("Message Codex"). */
   provider?: string;
-  /** Provider routes a hand-off can go to. Without it the hand-off dialog asks for a name. */
-  routes?: () => string[];
-  /** The mission's tasks for the Steer dialogs. Without it the pane fetches them when a dialog opens. */
-  tasks?: () => SteerTask[];
 }
 
 /**
- * The session pane (spec 8.2): a toolbar, the terminal, a sticky composer and the key bar in one grid.
+ * The session pane: a toolbar, the terminal, a sticky composer and the key bar in one grid.
  * WP-3 mounts `element`, calls `setAvailable(online)` on every worker presence change and `openReadOnly()` once the mission runs.
  */
 export interface SessionPane {
@@ -42,7 +30,7 @@ export interface SessionPane {
   element: HTMLElement;
   /** Move focus to the composer field (the `c` shortcut, `?focus=composer`). A view-only pane focuses Take control instead. */
   focusComposer(): void;
-  /** Ask for the writer role (same as pressing Take control). */
+  /** Ask for the writer role (the same as pressing Take control). */
   takeControl(): void;
   /** Enable or disable connecting (false while the worker is offline). */
   setAvailable(available: boolean): void;
@@ -51,172 +39,236 @@ export interface SessionPane {
   dispose(): void;
 }
 
+const MAX_INPUT_CHUNK = 32 * 1024;
+const BACKOFF_MS = [500, 1000, 2000, 4000, 8000];
+/** Phones, tablets and anything touch: the shared PTY is never resized to such a screen unless the operator asks. */
+const NARROW = "(pointer: coarse), (max-width: 60rem)";
+const SCROLLBAR = 14;
+const enc = new TextEncoder();
+
 function toBase64(bytes: Uint8Array): string {
   let s = "";
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
 }
 
-function fromBase64(d: string): Uint8Array {
-  const s = atob(d);
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-  return out;
-}
+const fromBase64 = (d: string): Uint8Array => Uint8Array.from(atob(d), (c) => c.charCodeAt(0));
 
-export function sessionPane(workerName: string, missionId: string, _opts: SessionPaneOpts = {}): SessionPane {
-  const status = h("p", { id: "terminal-status", class: "term-status", role: "status", "aria-live": "polite", "data-state": "idle" }, "Not connected.");
-  const hint = h("p", { class: "muted small", id: "terminal-hint" }, "Press F6 inside the terminal to move focus back to the buttons. Copy with Ctrl+Shift+C or Cmd+C.");
+export function sessionPane(workerName: string, missionId: string, opts: SessionPaneOpts = {}): SessionPane {
+  const narrow = window.matchMedia(NARROW);
+  const status = h("p", { id: "terminal-status", class: "term-status", role: "status", "aria-live": "polite", "data-state": "idle", "data-mode": "view" }, "Not connected.");
   const host = h("div", { id: "terminal-host", class: "term-host", role: "region", "aria-label": "Terminal output", hidden: true });
-  const openView = button("Open terminal", () => start("view"), { kind: "primary" });
-  const openWrite = button("Take control", () => start("write"));
-  const closeBtn = button("Close terminal", () => stop("Closed by you."));
-  closeBtn.hidden = true;
-  openView.id = "terminal-open";
-  openWrite.id = "terminal-control";
-  closeBtn.id = "terminal-close";
-  // On-screen keys for devices without a hardware keyboard. They never take focus from the terminal, so the
-  // soft keyboard stays open, and they send bytes only while this browser holds the writer role.
+  const transcript = h("pre", { class: "transcript", tabindex: "0", "aria-label": "Session transcript", hidden: true });
+  const panNote = h("p", { class: "small muted", hidden: true });
+  const jump = button("Jump to latest", () => toBottom(), { kind: "small", icon: "chevronDown" });
+  jump.classList.add("jump");
+  jump.hidden = true;
+  const watch = button("Watch live", () => start("view"), { kind: "small", id: "terminal-open" });
+  const followBtn = button("Following", () => (follow ? pause() : toBottom()), { kind: "small ghost" });
+  const transcriptBtn = button("Transcript", () => showTranscript(!!transcript.hidden), { kind: "small ghost" });
+  const expandBtn = button("Expand", () => toggleFull(), { kind: "small ghost", label: "Expand to full screen" });
+  const menuSlot = h("span", { class: "pane-menu" });
+  const bar = h("div", { class: "session-bar" }, status, watch, followBtn, transcriptBtn, expandBtn, menuSlot);
+
+  // On-screen keys (lazy, see session-extras.ts). They never take focus from the terminal and send bytes only with the writer role.
   const keybar = h("div", { class: "keybar", id: "terminal-keys", role: "toolbar", "aria-label": "Terminal keys" });
-  let ctrlArmed = false;
-  const keyButtons = new Map<string, HTMLButtonElement>();
-  const addKey = (id: string, text: string, label: string, bytes: (() => string) | null): void => {
-    const b = h("button", { type: "button", class: "btn", id: `key-${id}`, "data-key": id, "aria-label": label }, text);
-    // Keep the terminal focused: a button must not take focus on press.
-    b.addEventListener("pointerdown", (e) => e.preventDefault());
-    b.addEventListener("mousedown", (e) => e.preventDefault());
-    b.addEventListener("click", () => {
-      if (mode !== "write") return;
-      if (bytes) sendInput(new TextEncoder().encode(bytes()));
-      else {
-        ctrlArmed = !ctrlArmed;
-        b.setAttribute("aria-pressed", String(ctrlArmed));
-      }
-      term?.focus();
-    });
-    if (!bytes) b.setAttribute("aria-pressed", "false");
-    keyButtons.set(id, b);
-    keybar.append(b);
-  };
-  const arrow = (c: string) => () => (term?.modes.applicationCursorKeysMode ? `\x1bO${c}` : `\x1b[${c}`);
-  addKey("esc", "Esc", "Esc, the Escape key", () => "\x1b");
-  addKey("tab", "Tab", "Tab key", () => "\t");
-  addKey("ctrl", "Ctrl", "Ctrl, applies to the next key you type", null);
-  addKey("up", "\u2191", "Arrow up", arrow("A"));
-  addKey("down", "\u2193", "Arrow down", arrow("B"));
-  addKey("left", "\u2190", "Arrow left", arrow("D"));
-  addKey("right", "\u2192", "Arrow right", arrow("C"));
-  const touchLike = window.matchMedia("(pointer: coarse), (max-width: 720px)");
+  let keys: { enable(on: boolean, why: string): void; typed(d: string): string } | null = null;
+
+  const input = composer({
+    workerName,
+    missionId,
+    ...(opts.provider ? { provider: opts.provider } : {}),
+    send: sendText,
+    takeControl: () => start("write"),
+  });
   const element = h(
     "section",
-    { id: "terminal-region", "aria-labelledby": "ms-term", class: "term-region" },
-    h("h2", { id: "ms-term" }, "Terminal"),
-    h("div", { class: "actions" }, openView, openWrite, closeBtn),
-    status,
-    host,
+    { id: "terminal-region", class: "session-pane", "data-pane": "session", "aria-label": "Live session" },
+    bar,
+    h("div", { class: "session-main" }, host, transcript, jump),
+    panNote,
+    input.element,
     keybar,
-    hint,
   );
 
   let term: Terminal | null = null;
-  let fit: FitAddon | null = null;
   let ws: WebSocket | null = null;
   let observer: ResizeObserver | null = null;
   let requested: "view" | "write" = "view";
   let mode: "view" | "write" = "view";
   let reason = "";
   let state: TermState = "idle";
+  let detail = "";
   let attempt = 0;
   let timer = 0;
   let resizeTimer = 0;
+  let transcriptTimer = 0;
   let available = true;
   let disposed = false;
   let paneCols = 0;
   let paneRows = 0;
   let follow = true; // keep the newest output in view until the user scrolls up
+  let pausedAt = 0;
   let activityOpened = false;
+  let menuKey = "";
 
-  function setState(next: TermState, detail = ""): void {
+  // ---- state shown to the operator
+  function setState(next: TermState, why = ""): void {
     state = next;
-    const label: Record<TermState, string> = { idle: "Not connected.", connecting: "Connecting...", live: "Live", reconnecting: "Connection lost, reconnecting...", ended: "Session ended" };
-    const grant = next === "live" ? ` - ${mode === "write" ? "you have control" : "view only"}${reason ? `: ${reason}` : ""}` : "";
-    const text = `${label[next]}${grant}${detail ? ` ${detail}` : ""}`;
-    status.textContent = text;
-    status.dataset["state"] = next;
-    status.dataset["mode"] = mode;
-    closeBtn.hidden = next === "idle" || next === "ended";
-    openView.hidden = next === "live";
-    openWrite.hidden = next === "live" && mode === "write";
-    updateButtons();
-    paintKeys();
+    detail = why;
+    paint();
   }
 
-  function updateButtons(): void {
+  function paint(): void {
     const busy = state === "connecting" || state === "reconnecting";
-    openView.disabled = busy || state === "live" || !available;
-    openWrite.disabled = busy || (state === "live" && mode === "write") || !available;
+    const live = state === "live";
+    let text: string;
+    if (live) text = mode === "write" ? "You have control" : `Watching, read only${reason ? `: ${reason}` : ""}`;
+    else if (state === "idle") text = available ? "Not connected." : "Session not available: the worker is offline.";
+    else text = ({ connecting: "Connecting...", reconnecting: "Connection lost, reconnecting...", ended: "Session ended" } as Record<string, string>)[state] ?? "";
+    status.textContent = detail && !live ? `${text} ${detail}` : text;
+    status.dataset["state"] = state;
+    status.dataset["mode"] = mode;
+    watch.hidden = live || busy;
+    watch.disabled = !available;
+    const controlling = live && mode === "write";
+    let takeReason = "";
+    if (!available) takeReason = "The worker is offline.";
+    else if (busy) takeReason = state === "connecting" ? "Connecting..." : "Reconnecting...";
+    else if (live && mode === "view" && reason) takeReason = reason;
+    input.set({
+      canType: controlling,
+      offerControl: !controlling,
+      takeReason,
+      note: controlling ? "" : takeReason || (live ? "Take control to type" : "Not connected."),
+    });
+    keys?.enable(controlling, "Take control to use the keys");
+    renderMenu();
+    followBtn.disabled = transcriptBtn.disabled = !term;
   }
 
-  function paintKeys(): void {
-    const on = state === "live" && mode === "write" && touchLike.matches;
-    keybar.classList.toggle("on", on);
-    if (!on) {
-      ctrlArmed = false;
-      keyButtons.get("ctrl")?.setAttribute("aria-pressed", "false");
-    }
-  }
-  touchLike.addEventListener("change", paintKeys);
-
-  /** Typed text: an armed on-screen Ctrl turns the next letter into its control code (Ctrl+C is 0x03). */
-  function typed(d: string): void {
-    if (ctrlArmed && d.length === 1 && /[A-Za-z@[\\\]^_]/.test(d)) {
-      ctrlArmed = false;
-      keyButtons.get("ctrl")?.setAttribute("aria-pressed", "false");
-      d = String.fromCharCode(d.toUpperCase().charCodeAt(0) & 0x1f);
-    }
-    sendInput(new TextEncoder().encode(d));
+  function renderMenu(): void {
+    const writer = state === "live" && mode === "write";
+    const items: MenuItem[] = [
+      { label: "Resize session to this screen", onSelect: () => void resizeToScreen(), disabled: !writer, reason: "Take control first" },
+      { label: writer ? "Release control" : "Reconnect", onSelect: () => restart("view"), disabled: !available },
+      { label: "Disconnect", id: "terminal-close", onSelect: () => stop("Closed by you."), disabled: state === "idle" || state === "ended" },
+    ];
+    const key = `${writer}${available}${state === "idle" || state === "ended"}`;
+    if (key === menuKey) return;
+    menuKey = key;
+    menuSlot.replaceChildren(menu({ label: "Session options", id: "session-menu" }, items));
   }
 
-  function send(frame: Record<string, unknown>): void {
-    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(frame));
+  function restart(m: "view" | "write"): void {
+    stop("");
+    start(m, false);
   }
 
-  function sendInput(bytes: Uint8Array): void {
-    if (mode !== "write") return;
+  // ---- input
+  const typed = (d: string): void => void sendInput(enc.encode(keys ? keys.typed(d) : d));
+
+  function send(frame: Record<string, unknown>): boolean {
+    if (ws?.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(frame));
+    return true;
+  }
+
+  function sendInput(bytes: Uint8Array): boolean {
+    if (mode !== "write" || ws?.readyState !== WebSocket.OPEN) return false;
     for (let i = 0; i < bytes.length; i += MAX_INPUT_CHUNK) send({ t: "i", d: toBase64(bytes.subarray(i, i + MAX_INPUT_CHUNK)) });
+    return true;
   }
 
+  /** The composer's Send: the text, in bracketed paste when the terminal asks for it, then Enter. */
+  function sendText(text: string): boolean {
+    const body = text.replace(/\r?\n/g, "\r");
+    return sendInput(enc.encode(term?.modes.bracketedPasteMode ? `\x1b[200~${body}\x1b[201~\r` : `${body}\r`));
+  }
+
+  /** The columns and rows that fit the pane, from the rendered cell size (the same arithmetic as xterm's fit addon, which costs 2 KB). */
   function proposed(): { cols: number; rows: number } | undefined {
-    const p = fit?.proposeDimensions();
-    if (!p || !Number.isFinite(p.cols) || !Number.isFinite(p.rows)) return undefined;
-    return { cols: Math.min(1000, Math.max(2, p.cols)), rows: Math.min(1000, Math.max(1, p.rows)) };
+    const screen = host.querySelector<HTMLElement>(".xterm-screen");
+    if (!term || !screen?.clientWidth || !screen.clientHeight) return undefined;
+    const box = getComputedStyle(host);
+    const room = (size: number, pads: string[], cell: number): number => Math.floor((size - pads.reduce((n, k) => n + parseFloat(box.getPropertyValue(k)), 0)) / cell);
+    return {
+      cols: Math.min(1000, Math.max(2, room(host.clientWidth - SCROLLBAR, ["padding-left", "padding-right"], screen.clientWidth / term.cols))),
+      rows: Math.min(1000, Math.max(1, room(host.clientHeight, ["padding-top", "padding-bottom"], screen.clientHeight / term.rows))),
+    };
   }
 
+  /** The explicit resize: the only way a phone changes the size of the shared PTY. */
+  async function resizeToScreen(): Promise<void> {
+    if (!(await (await extras()).confirmResize())) return;
+    const p = proposed();
+    if (p && mode === "write") send({ t: "r", cols: p.cols, rows: p.rows });
+  }
+
+  // ---- follow, jump, transcript
+  const atTail = (): boolean => {
+    const b = term?.buffer.active;
+    return !b || b.viewportY >= b.baseY - 5;
+  };
+  const baseY = (): number => term?.buffer.active.baseY ?? 0;
+  const label = (b: HTMLElement, text: string): string => (b.querySelector("span")!.textContent = text);
+  function paintFollow(): void {
+    label(followBtn, follow ? "Following" : "Paused");
+    followBtn.setAttribute("aria-pressed", String(follow));
+    jump.hidden = follow || !transcript.hidden;
+    label(jump, baseY() > pausedAt ? `Jump to latest ${baseY() - pausedAt}` : "Jump to latest");
+  }
+  function pause(): void {
+    follow = false;
+    pausedAt = baseY();
+    paintFollow();
+  }
+  function toBottom(): void {
+    follow = true;
+    term?.scrollToBottom();
+    paintFollow();
+  }
+
+  function renderTranscript(): void {
+    window.clearTimeout(transcriptTimer);
+    transcriptTimer = 0;
+    if (term) void extras().then((m) => (transcript.textContent = m.transcriptText(term!)));
+  }
+  function showTranscript(on: boolean): void {
+    transcript.hidden = !on;
+    host.hidden = on || !term;
+    transcriptBtn.setAttribute("aria-pressed", String(on));
+    if (on) renderTranscript();
+    else if (follow) term?.scrollToBottom();
+    paintFollow();
+  }
+  transcriptBtn.setAttribute("aria-pressed", "false");
+
+  // ---- terminal
   function ensureTerminal(): Terminal {
     if (term) return term;
     host.hidden = false;
     const t = new Terminal({
-      cols: 80,
-      rows: 24,
       scrollback: 2000,
-      convertEol: false,
       cursorBlink: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-      fontSize: window.matchMedia("(max-width: 720px)").matches ? 13 : 14,
-      allowProposedApi: false,
-      // The xterm defaults use ANSI red that is too dim on its black background at WCAG AA.
+      fontSize: narrow.matches ? 12 : 14,
       theme: TERMINAL_THEME,
     });
-    fit = new FitAddon();
-    t.loadAddon(fit);
     t.open(host);
     t.textarea?.setAttribute("aria-label", "Terminal input");
     t.onData(typed);
     t.onBinary((d) => sendInput(Uint8Array.from(d, (c) => c.charCodeAt(0) & 0xff)));
+    t.onScroll(() => {
+      const tail = atTail();
+      if (tail === follow) return;
+      if (tail) toBottom();
+      else pause();
+    });
     t.attachCustomKeyEventHandler((e) => {
       if (e.type !== "keydown") return true;
       if (e.key === "F6") {
-        closeBtn.hidden ? openView.focus() : closeBtn.focus();
+        if (!input.focus()) (watch.hidden ? expandBtn : watch).focus();
         return false;
       }
       const copy = e.key.toLowerCase() === "c" && t.hasSelection() && ((e.ctrlKey && e.shiftKey) || e.metaKey || (e.ctrlKey && mode === "view"));
@@ -228,17 +280,13 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
       if (e.key === "Tab" && mode === "view") return false;
       return true;
     });
-    const settle = (): void => {
-      window.setTimeout(() => {
-        const b = t.buffer.active;
-        follow = b.viewportY >= b.baseY;
-      }, 80);
-    };
-    for (const ev of ["wheel", "touchend"]) host.addEventListener(ev, settle, { passive: true });
     observer = new ResizeObserver(() => {
       window.clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        if (mode !== "write") return;
+        panNote.hidden = !(narrow.matches && host.scrollWidth > host.clientWidth + 1);
+        host.classList.toggle("pan", !panNote.hidden);
+        // Never auto-resize on a narrow screen: the PTY is shared with other viewers and the tmux station (UXR-041).
+        if (mode !== "write" || narrow.matches) return;
         const p = proposed();
         if (p && (p.cols !== paneCols || p.rows !== paneRows)) send({ t: "r", cols: p.cols, rows: p.rows });
       }, 150);
@@ -247,6 +295,8 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
     term = t;
     return t;
   }
+
+  const activity = (state: string, why: string): void => publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state, mode, reason: why });
 
   function url(): string {
     const p = proposed();
@@ -269,6 +319,8 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
       if (f.t === "o" && typeof f.d === "string") {
         t.write(fromBase64(f.d), () => {
           if (follow) t.scrollToBottom();
+          else paintFollow();
+          if (!transcript.hidden && !transcriptTimer) transcriptTimer = window.setTimeout(renderTranscript, 1000);
         });
       } else if (f.t === "s" && typeof f.cols === "number" && typeof f.rows === "number") {
         attempt = 0;
@@ -278,12 +330,8 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
         paneCols = f.cols;
         paneRows = f.rows;
         // The browser sees this worker status over the scoped terminal relay; it is live activity, not event history.
-        if (!activityOpened) {
-          activityOpened = true;
-          publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: "opened", mode, reason });
-        } else if (was !== `${mode}|${reason}`) {
-          publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: "mode-changed", mode, reason });
-        }
+        if (!activityOpened || was !== `${mode}|${reason}`) activity(activityOpened ? "mode-changed" : "opened", reason);
+        activityOpened = true;
         if (t.cols !== f.cols || t.rows !== f.rows) {
           t.resize(f.cols, f.rows);
           // Shrinking the pane can leave the scroll position mid-buffer; keep following the tail unless the user scrolled away.
@@ -293,11 +341,10 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
           }
         }
         setState("live");
-        if (was !== `${mode}|${reason}`) announce(mode === "write" ? "Terminal: you have control." : `Terminal: view only${reason ? ` (${reason})` : ""}.`);
-        if (mode === "write") t.focus();
+        if (was !== `${mode}|${reason}`) say(mode === "write" ? "You have control of the terminal." : `Watching the terminal, read only${reason ? `: ${reason}` : ""}.`);
       } else if (f.t === "x") {
         const endReason = typeof f.reason === "string" && f.reason ? f.reason : "The session ended.";
-        publishStreamMessage({ type: "terminal", worker: workerName, mission_id: missionId, state: activityOpened ? "closed" : "refused", mode, reason: endReason });
+        activity(activityOpened ? "closed" : "refused", endReason);
         activityOpened = false;
         endSession(endReason);
       }
@@ -329,7 +376,7 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
     socket?.close(1000, "done");
     mode = "view";
     setState("ended", `(${why})`);
-    announce(`Terminal ended: ${why}`);
+    say(`Terminal ended: ${why}`);
   }
 
   function start(m: "view" | "write", focus = true): void {
@@ -361,10 +408,7 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
     setState("connecting");
     connect();
     // xterm.js does not paint while the terminal is outside the viewport, so bring it into view.
-    if (focus) {
-      host.scrollIntoView({ block: "nearest" });
-      term?.focus();
-    }
+    if (focus && m === "view") host.scrollIntoView({ block: "nearest" });
   }
 
   function stop(why: string): void {
@@ -374,22 +418,38 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
     socket?.close(1000, "closed");
     mode = "view";
     setState("idle");
-    status.textContent = why;
-    openView.focus();
+    if (why) status.textContent = why;
   }
 
-  setState("idle");
+  // ---- full screen and the soft keyboard (lazy: see session-extras.ts)
+  const extras = (): Promise<typeof import("./session-extras")> => import("./session-extras");
+  let screen: ReturnType<typeof import("./session-extras").fullScreen> | null = null;
+  let keyboard: { dispose(): void } | null = null;
+  const toggleFull = (): void => void extras().then((m) => {
+    screen ??= m.fullScreen(expandBtn, () => mode === "write" && host.contains(document.activeElement));
+    screen.set(!screen.on());
+  });
+  expandBtn.setAttribute("aria-pressed", "false");
+  void extras().then((m) => {
+    if (disposed) return;
+    keyboard = m.keyboardLayout(element, input.element, narrow);
+    keys = m.keyBar(keybar, { write: (d) => void sendInput(enc.encode(d)), appKeys: () => Boolean(term?.modes.applicationCursorKeysMode), focus: () => term?.focus(), writer: () => mode === "write" });
+    paint();
+  });
+  paintFollow();
+  paint();
+
   return {
     element,
-    setAvailable(a: boolean): void {
-      available = a;
-      updateButtons();
-    },
     focusComposer(): void {
-      openWrite.focus();
+      if (!input.focus()) (element.querySelector<HTMLElement>("#terminal-control:not(:disabled)") ?? element).focus();
     },
     takeControl(): void {
       start("write");
+    },
+    setAvailable(a: boolean): void {
+      available = a;
+      paint();
     },
     openReadOnly(): void {
       if (available && state === "idle") start("view", false);
@@ -398,7 +458,11 @@ export function sessionPane(workerName: string, missionId: string, _opts: Sessio
       disposed = true;
       window.clearTimeout(timer);
       window.clearTimeout(resizeTimer);
+      window.clearTimeout(transcriptTimer);
       observer?.disconnect();
+      screen?.dispose();
+      keyboard?.dispose();
+      input.dispose();
       const socket = ws;
       ws = null;
       socket?.close(1000, "left page");
