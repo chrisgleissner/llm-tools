@@ -29,7 +29,11 @@ def test_attached_control_caret_and_exact_source_cells(tmp_path: Path, env):
                       'tui._draw_full=draw\n'
                       'tui.run_control("caret", lambda *_: "ok", lambda *_args, **_kwargs: '
                       '{"mission": {"id": "caret", "name": "Caret acceptance", "status": "CREATED"}})\n')
-    env = dict(env, PYTHONPATH=str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH', ''))
+    env = dict(
+        env,
+        PYTHONPATH=str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH', ''),
+        TERM='xterm-256color',
+    )
     backend = TmuxTerminalBackend()
     handle = backend.start(provider_argv=['env', *[f'{key}={value}' for key, value in env.items()
                             if key in {'HOME','PATH','PYTHONPATH','COVERAGE_PROCESS_START','COVERAGE_FILE','TERM'}],
@@ -49,7 +53,9 @@ def test_attached_control_caret_and_exact_source_cells(tmp_path: Path, env):
                 try: os.read(master, 65536)
                 except OSError: pass
             if predicate(): return
-        assert predicate(), repr(backend.capture(handle, pane='provider')) + ' cursor=' + caret() + ' client=' + str(client.poll()) + ' state=' + (tmp_path/'cursor.json').read_text()
+        state_path = tmp_path/'cursor.json'
+        state = state_path.read_text() if state_path.exists() else '<draw hook did not run>'
+        assert predicate(), repr(backend.capture(handle, pane='provider')) + ' cursor=' + caret() + ' client=' + str(client.poll()) + ' state=' + state
 
     def caret():
         return subprocess.check_output(['tmux','-S',str(handle.socket_path),'display-message','-p','-t',handle.provider_pane,
