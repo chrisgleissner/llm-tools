@@ -340,10 +340,9 @@ async fn worker_reserve_admits_workers_when_general_slots_are_full() {
     let env = boot_with(|t| set("worker_reserve_connections", "2")(set("max_connections", "8")(set("max_connections_per_ip", "100")(t)))).await;
     let api = env.admin().await;
     let token = api.add_worker("w1").await;
-    // Six idle sockets (no TLS handshake yet) take every general slot.
-    let fill: Vec<_> = futures_util::future::join_all((0..6).map(|_| TcpStream::connect(env.addr))).await;
-    let _fill: Vec<_> = fill.into_iter().map(Result::unwrap).collect();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Hold every general slot with completed TLS connections, so the accept loop has
+    // definitely assigned them before the reserve probes below.
+    let _fill = futures_util::future::join_all((0..6).map(|_| tls_connect(&env))).await;
     // A browser-style request lands in the reserve and is refused.
     let mut s = tls_connect(&env).await;
     s.write_all(format!("GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", env.addr.port()).as_bytes())
@@ -577,6 +576,7 @@ fn version_1_database_is_migrated_in_place() {
         "existing tokens keep working and do not expire"
     );
     assert_eq!(db.token_lookup("h2").unwrap().unwrap().scopes, vec!["admin"]);
+    assert_eq!(db.api_tokens_list().unwrap()[0].token_id, None, "migrated tokens have no public ID");
     let v: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
