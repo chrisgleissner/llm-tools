@@ -559,7 +559,11 @@ class BridgeMissionHooks:
             task_state = self.store.get_task(int(context["task_id"]))["status"]
             mission_state = self.store.get_mission(self.mission_id)["status"]
             if mission_state != "RUNNING" or task_state in {"PAUSED", "CANCELLED"}:
-                self.store.abort_prepared_operation(operation_id, reason="operator state change won before provider launch")
+                row = self.store.db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
+                if row is not None and row["status"] == "PREPARED":
+                    self.store.abort_prepared_operation(operation_id, reason="operator state change won before provider launch")
+                # Otherwise `stop --force` already marked the operation UNCERTAIN while this controller was
+                # still running; that verdict stays, and the launch is simply declined.
                 return False
             raise
         context["operation_id"] = operation_id
@@ -926,7 +930,22 @@ class BridgeMissionHooks:
             # operation will be resolved by after_iteration; a crash in this
             # small interval remains uncertain and cannot be force-signalled.
             return
-        self.store.record_operation_process(operation_id, process_pid=process_pid, process_start=token)
+        try:
+            self.store.record_operation_process(operation_id, process_pid=process_pid, process_start=token)
+        except TransitionError:
+            if self.store.get_mission(self.mission_id)["status"] == "RUNNING":
+                raise
+            # `stop --force` marked the operation UNCERTAIN before this pid was recorded, so nothing else knows
+            # about the provider. End it here and let the controller finish its stop; the caller would otherwise
+            # raise into the controller's failure handler and leave the stopped mission FAILED.
+            try:
+                os.killpg(process_pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    os.kill(process_pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            return
         if self._pending_wake_cycle_id:
             operation = self.store.get_operation(operation_id)
             self.store.record_runtime_event(self.mission_id, "suspend-provider-started", {

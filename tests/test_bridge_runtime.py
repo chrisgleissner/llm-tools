@@ -673,6 +673,58 @@ def test_before_launch_rethrows_unrelated_operation_running_transition_error(tmp
     assert row["status"] == "PREPARED"
 
 
+def test_before_launch_declines_when_stop_force_reconciled_the_prepared_operation(tmp_path, monkeypatch) -> None:
+    """`stop --force` reconciles the PREPARED operation while the controller is still alive.
+
+    The controller then reaches ``mark_operation_running``, which refuses an UNCERTAIN operation. The launch
+    must be declined; raising here sent the controller through its failure handler and left the stopped
+    mission FAILED instead of STOPPED (test_native_start_from_a_script_ends_with_the_attach_command on slow CI).
+    """
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("forced", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    original = store.mark_operation_running
+
+    def forced_first(*args, **kwargs):
+        store.set_mission_status(mission["id"], "STOPPING")  # what `stop --force` does between the two controller steps
+        store.reconcile_interrupted_operations(mission["id"], cause="stop-force")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "mark_operation_running", forced_first)
+
+    assert hook.before_launch({"task_id": task_id}, {"provider": "codex"}, _provider_config("codex", tmp_path, tmp_path), 1) is False
+
+    row = store.db.execute("SELECT status FROM operations WHERE mission_id=?", (mission["id"],)).fetchone()
+    assert row["status"] == "UNCERTAIN"  # stop --force's verdict is kept
+
+
+def test_recording_a_provider_pid_after_stop_force_ends_the_provider_without_failing_the_controller(tmp_path) -> None:
+    """The same race one step later: `stop --force` reconciles the RUNNING operation just before its pid is recorded."""
+    import subprocess
+
+    store = BridgeStore(tmp_path / "bridge.sqlite3")
+    mission = store.create_mission("forced", "objective", cwd=tmp_path)
+    task_id = store.add_task(mission["id"], "work")
+    store.set_mission_status(mission["id"], "RUNNING")
+    hook = BridgeMissionHooks(mission["id"], handle=None, headless=True, controller_logs=tmp_path / "controller.log")
+    hook.bind(store)
+    context = {"task_id": task_id}
+    assert hook.before_launch(context, {"provider": "codex"}, _provider_config("codex", tmp_path, tmp_path), 1)
+    store.set_mission_status(mission["id"], "STOPPING")
+    store.reconcile_interrupted_operations(mission["id"], cause="stop-force")
+    provider = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        hook._record_process(context["operation_id"], provider.pid)  # must not raise
+        assert provider.wait(timeout=10) < 0  # the unrecorded provider is ended: nothing else could find it
+    finally:
+        if provider.poll() is None:
+            provider.kill()
+            provider.wait()
+
+
 def test_before_launch_preserves_unresolvable_configured_cwd_without_claiming_checkpoint(tmp_path) -> None:
     store = BridgeStore(tmp_path / "bridge.sqlite3")
     mission = store.create_mission("unresolved cwd", "objective", cwd=tmp_path)
