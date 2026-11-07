@@ -862,6 +862,7 @@ async fn mission_task_cursor_is_bound_and_returns_an_opaque_next_page() {
             json!({"schema_version":1,"request_id":request_id,"operation":"task.list","outcome":"ok","result":{"tasks":[{"ordinal":4}],"total":5,"offset":3},"error":null}),
         )
         .await;
+    worker.barrier().await;
     let response = get.await.unwrap();
     assert_eq!(response.status().as_u16(), 200);
     let body: Value = response.json().await.unwrap();

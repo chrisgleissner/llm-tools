@@ -283,11 +283,11 @@ mod tests {
 
         let valid = temp_config(&config_text("127.0.0.1:8443", false));
         assert_eq!(Config::load(&valid).unwrap().mutation_limit_per_token, 30);
-        std::fs::remove_dir_all(valid).unwrap();
+        let _ = std::fs::remove_dir_all(valid);
 
         let invalid = temp_config(&config_text("127.0.0.1:8443", false).replace("mutation_limit_per_address = 120", "mutation_limit_per_address = 0"));
         assert!(Config::load(&invalid).unwrap_err().contains("mutation limits"));
-        std::fs::remove_dir_all(invalid).unwrap();
+        let _ = std::fs::remove_dir_all(invalid);
     }
 
     #[test]
