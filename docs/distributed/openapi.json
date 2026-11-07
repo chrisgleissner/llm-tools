@@ -266,6 +266,49 @@
                 "mission": {
                   "additionalProperties": true,
                   "properties": {
+                    "attention": {
+                      "description": "Why the operator is needed, from the worker's mission status (same kinds as the CLI hint). Absent when the worker predates the field; null when nothing is needed.",
+                      "oneOf": [
+                        {
+                          "additionalProperties": false,
+                          "properties": {
+                            "kind": {
+                              "enum": [
+                                "approval",
+                                "failed",
+                                "blocked",
+                                "operator",
+                                "proposal",
+                                "capacity",
+                                "provider"
+                              ],
+                              "type": "string"
+                            },
+                            "message": {
+                              "maxLength": 240,
+                              "type": "string"
+                            },
+                            "tasks": {
+                              "items": {
+                                "minimum": 1,
+                                "type": "integer"
+                              },
+                              "maxItems": 8,
+                              "type": "array"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "message",
+                            "tasks"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
                     "needs_you": {
                       "oneOf": [
                         {
@@ -294,6 +337,14 @@
                           "type": "null"
                         }
                       ]
+                    },
+                    "task_counts": {
+                      "additionalProperties": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "description": "Tasks per status (QUEUED, READY, RUNNING, PAUSED, BLOCKED, VERIFYING, COMPLETED, FAILED, CANCELLED); statuses without tasks are absent. Absent when the worker predates the field.",
+                      "type": "object"
                     }
                   },
                   "type": "object"

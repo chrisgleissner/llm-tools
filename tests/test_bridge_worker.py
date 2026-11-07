@@ -319,7 +319,7 @@ def test_event_batch_carries_current_mission_inventory_after_hello(state, tmp_pa
     summaries = {mission["id"]: mission for mission in batch.payload["missions"]}
     assert first_id not in summaries and len(summaries) == 1
     assert batch.payload["mission_cursor"] == batch.payload["through"]
-    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at"} for mission in summaries.values())
+    assert all(set(mission) == {"id", "name", "status", "folder", "updated_at", "task_counts", "attention"} for mission in summaries.values())
 
 
 def test_worker_replicates_new_provider_question_without_a_database_event(state, monkeypatch):
@@ -349,6 +349,7 @@ def test_worker_replicates_new_provider_question_without_a_database_event(state,
     summary = batch.payload["missions"][0]
     assert summary["id"] == mission_id and summary["status"] == "RUNNING"
     assert summary["needs_you"] == question
+    assert summary["attention"]["kind"] == "provider" and summary["attention"]["message"].startswith("Codex asks: Should I reconnect?")
     decode(batch.encode())
 
 
