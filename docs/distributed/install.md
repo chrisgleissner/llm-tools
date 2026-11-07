@@ -65,7 +65,7 @@ docker compose cp coordinator:/data/setup-token .              # create the admi
 docker compose exec coordinator bridge-coordinator info
 docker compose exec coordinator bridge-coordinator worker add build-1     # prints the worker token once
 docker compose exec coordinator bridge-coordinator token create laptop    # API token for llm-bridge remote login (expires in 90 days; --expires-days N)
-docker compose exec -T coordinator bridge-coordinator admin reset-password < new-password.txt
+docker compose exec coordinator bridge-coordinator admin reset-password          # prompts twice; over SSH use llm-bridge-coordinator (Locked out or forgot the password)
 docker compose exec coordinator bridge-coordinator cert renew             # new server certificate; names must be within the CA's name constraints (see "Trusting the certificate")
 docker compose exec coordinator bridge-coordinator backup --output /data/backup-2026-11-05.sqlite3
 docker compose stop && docker compose run --rm coordinator restore --input /data/backup-2026-11-05.sqlite3 && docker compose start
@@ -320,15 +320,123 @@ password changed after the backup, the old one is back: run `admin reset-passwor
 Schema version 2 added the expiry of API tokens; tokens created before it never expire,
 so revoke and recreate them with `token create` to get the 90-day default.
 
+## Locked out or forgot the password
+
+The web password can be reset from a shell on the machine that runs the coordinator,
+for example in an SSH session. No web sign-in is needed, and a person who has no shell
+on the host cannot do it. One command name works for every install method:
+
+```sh
+llm-bridge-coordinator reset-password [--temporary] [--keep-api-tokens] [--username NAME]
+```
+
+| Install method | What the command runs | How it is installed |
+| --- | --- | --- |
+| Container (`container/compose.yaml`, including the Raspberry Pi profile) | `docker compose exec coordinator bridge-coordinator admin reset-password` in the compose folder. The wrapper finds that folder itself (the path recorded by `install-cli.sh`, else the folder of the script). It calls docker directly when your user can reach it, otherwise through `sudo` and says so. | `sudo ./install-cli.sh` in the compose folder, once. It copies the wrapper to `/usr/local/bin` and records the compose folder in `/etc/llm-bridge-coordinator/compose-dir`, so it works even when the compose folder (for example `/opt/llm-bridge`) is not readable by your user. |
+| Native systemd install | `sudo bridge-coordinator admin reset-password` (no `sudo` when you are root or the service user `bridge`). The data directory defaults to `/var/lib/bridge-coordinator`, the service's. | `deploy/install.sh` installs the wrapper next to the binary. On an older install: `sudo install -m 0755 container/llm-bridge-coordinator /usr/local/bin/`. |
+
+What the command does:
+
+- On a terminal it asks for the new password twice without echoing it. The password must
+  satisfy the rules of the web interface: at least 12 and at most 256 bytes. If the two
+  entries differ or the password breaks a rule, nothing is changed and the command exits
+  with status 1.
+- With standard input redirected it reads one line instead, for scripts:
+  `printf '%s\n' "$NEW" | llm-bridge-coordinator reset-password`.
+- `--temporary` does not ask. It generates a one-time password, prints it once and does
+  not store it. The next web sign-in with it only reaches the password change: every other
+  request of that session is answered with `403` and the error code
+  `password-change-required` until the password is changed (sign-out stays available).
+  Use it when the new password is passed on to someone else or typed over a channel you do
+  not trust. A temporary password does not affect API tokens that you keep with
+  `--keep-api-tokens`; they are separate credentials.
+- All web sessions are deleted. All API tokens are revoked and their number is printed,
+  unless `--keep-api-tokens` is given.
+- An audit entry `password.reset` (actor `cli`, remote `local`) records the reset, the
+  number of revoked tokens and whether the password is temporary. The password is not logged.
+- After the reset, the next web sign-in is told "Your password was reset by an
+  administrator on the host." The notice stays until the password is changed in the web
+  interface or seven days have passed.
+- There is exactly one administrator account. `--username NAME` is accepted for clarity
+  and must be that account's name (the command refuses any other name); without it the
+  account is selected automatically.
+
+### Container install: SSH session
+
+Your user is not in the docker group and the compose folder is private (the case on the
+Raspberry Pi profile):
+
+```text
+$ ssh operator@<Pi LAN address>
+operator@pi:~$ llm-bridge-coordinator reset-password
+llm-bridge-coordinator: docker is not reachable for operator (not in the docker group); using sudo. You may be asked for your password.
+[sudo] password for operator:
+New password:
+Repeat new password:
+password changed; all sessions deleted; 2 API token(s) revoked
+```
+
+With a one-time password:
+
+```text
+operator@pi:~$ llm-bridge-coordinator reset-password --temporary
+llm-bridge-coordinator: docker is not reachable for operator (not in the docker group); using sudo. You may be asked for your password.
+[sudo] password for operator:
+password reset; all sessions deleted; 2 API token(s) revoked
+temporary password (shown once): kQ7m-Xe2p-Wn4r-Zb8t
+It must be changed at the next sign-in; until then the web interface only accepts the password change.
+```
+
+A user in the docker group sees the same output without the `sudo` line and password
+prompt. Without the wrapper, run in the compose folder as a user that can use docker (add
+`sudo` if not):
+`docker compose exec coordinator bridge-coordinator admin reset-password`. Add `-T` when
+standard input is a pipe: `printf '%s\n' "$NEW" | docker compose exec -T coordinator
+bridge-coordinator admin reset-password`.
+
+### Native install: SSH session
+
+```text
+$ ssh operator@<host name or address>
+operator@host:~$ llm-bridge-coordinator reset-password
+llm-bridge-coordinator: changing the coordinator's data needs root; using sudo. You may be asked for your password.
+[sudo] password for operator:
+New password:
+Repeat new password:
+password changed; all sessions deleted; 0 API token(s) revoked
+```
+
+This is the same as `sudo bridge-coordinator admin reset-password`. The command opens the
+database as root, so it gives `coordinator.sqlite3` and its `-wal` and `-shm` files back to
+the owner of the data directory (the service user `bridge`) before it exits; the running
+service keeps working and needs no restart. If the service uses another data directory
+than `/var/lib/bridge-coordinator`, add `--data-dir DIR`, because `sudo` does not pass the
+service's `BRIDGE_COORDINATOR_DATA_DIR`. If you run the binary as the service user instead
+(`sudo -u bridge bridge-coordinator admin reset-password`), nothing needs to change
+ownership.
+
+### After the reset
+
+Open the web interface and sign in with the new password (the temporary one, after
+`--temporary`). The browser shows that the host reset the password. After `--temporary`
+the web interface asks for a new password first; the new password has to satisfy the same
+rules. Signing in again with the temporary password is then refused.
+
+If sign-in still fails, check that you are using the right coordinator (`bridge-coordinator
+info` or `docker compose exec coordinator bridge-coordinator info` prints its URL) and
+that the login rate limit has not been hit: it allows a limited number of failed
+attempts per address and per window (`coordinator.md`, Limits and timeouts). The
+command's audit entry and every failed sign-in are visible in the audit log
+(`operations.md`).
+
 ## Recovery
 
 All recovery commands run on the machine, as the service user, with the same data
 directory (`--data-dir` or `BRIDGE_COORDINATOR_DATA_DIR`).
 
-- Lost administrator password: `bridge-coordinator admin reset-password` reads the new
-  password from standard input (at least the minimum length), deletes every
-  session and revokes every API token (it prints how many; `--keep-api-tokens` keeps
-  them). Example: `printf '%s\n' "$NEW" | bridge-coordinator admin reset-password`.
+- Lost administrator password: see "Locked out or forgot the password" above
+  (`llm-bridge-coordinator reset-password` from an SSH session). The underlying command
+  is `bridge-coordinator admin reset-password`.
 - Expired certificate, or the machine's address or name changed: run
   `bridge-coordinator cert renew --hostname NAME --ip ADDR` (or without options to
   rediscover this machine's names) and restart the service. The CA is unchanged, so

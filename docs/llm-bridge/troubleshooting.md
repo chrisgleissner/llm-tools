@@ -135,6 +135,32 @@ directory belongs to another user (for example after using `sudo`), set
 `LLM_BRIDGE_STATE_DIR` to a directory you own, or fix the owner with
 `chown`. Never loosen the permissions to make the message go away.
 
+### Locked out of the coordinator web interface
+
+What you see: the coordinator's sign-in page rejects the administrator password
+(`invalid username or password`), or the password is forgotten. `llm-bridge
+remote login` with an API token may still work.
+
+Why: the password is only stored as a hash and cannot be recovered. It can be
+replaced from a shell on the machine that runs the coordinator, which proves
+that you control the host.
+
+What to do: in an SSH session on the coordinator host run
+
+```sh
+llm-bridge-coordinator reset-password
+```
+
+It asks for a new password twice (without echo). Use `--temporary` to
+generate a one-time password that the web interface forces you to change at the
+next sign-in, and `--keep-api-tokens` to keep API tokens (they are revoked by
+default, as are all web sessions). The command uses docker through `sudo` when
+your user is not in the docker group, or `sudo bridge-coordinator admin
+reset-password` on a native install. The wrapper is installed with the compose
+files (`sudo container/install-cli.sh`) or by `deploy/install.sh`. The exact
+sessions and output are in
+[install](../distributed/install.md#locked-out-or-forgot-the-password).
+
 ## Error codes
 
 The status is the process exit status. A `--json` error is printed on standard

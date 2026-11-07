@@ -121,9 +121,21 @@ worker protocol is `protocol.md`.
   `config.toml` from them.
 - `bridge-coordinator worker add NAME` prints a new worker token once and
   stores its SHA-256 hash; `worker revoke NAME` deletes it.
-- `bridge-coordinator admin reset-password [--keep-api-tokens]` (local shell only)
-  sets a new password from stdin, deletes all sessions and revokes every API token
-  (the number is printed) unless `--keep-api-tokens` is given.
+- `bridge-coordinator admin reset-password [--temporary] [--keep-api-tokens] [--username NAME]`
+  (local shell only; over SSH use the wrapper `llm-bridge-coordinator reset-password`, which
+  runs it through `docker compose exec` or `sudo`; `install.md`, Locked out or forgot the
+  password). On a terminal it asks for the new password twice without echo; with standard
+  input redirected it reads one line. The password rules are those of `POST /auth/setup`
+  and `/auth/password` (at least 12, at most 256 bytes). It deletes all sessions and
+  revokes every API token (the number is printed) unless `--keep-api-tokens` is given,
+  and writes the audit entry `password.reset` (actor `cli`, remote `local`).
+  `--temporary` generates a one-time password, prints it once, and sets the
+  change-required flag (see below). `--username` must name the only administrator
+  account (there is exactly one). The command runs as the service user or as root; as
+  root it gives the database files back to the data directory's owner.
+  The change-required flag and the reset time are kept in the `meta` table (keys
+  `password_change_required` and `password_reset_at`), so no schema migration is involved;
+  a password change through `POST /auth/password` deletes both keys.
 - `bridge-coordinator cert renew [--hostname ...] [--ip ...]` replaces the
   server certificate from the existing CA (names must be within the CA's name
   constraints); `cert new-ca` replaces the CA; `cert install --cert F --key F`
@@ -141,7 +153,7 @@ Public:
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/healthz` | `{"status":"ok"}` only. |
-| GET | `/api/v1/auth/state` | `{setup_required, authenticated, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
+| GET | `/api/v1/auth/state` | `{setup_required, authenticated, password_policy: {min_length, max_length}, session_policy: {remembered, default}}` (each policy entry has `idle_secs` and `absolute_secs`). With a session cookie it adds `csrf_token`, `username` and `session: {remember, expires_at, idle_timeout_secs}`. It also adds `password_change_required` (true while a temporary password from `admin reset-password --temporary` has not been replaced) and, after a reset on the host, `password_reset_notice: {at, message}` (`at` is the UTC epoch of the reset; the message is "Your password was reset by an administrator on the host."). The notice stays until the password is changed through `/auth/password` or seven days pass. The password policy is the one `POST /auth/setup` and `/auth/password` enforce (length in bytes), so the browser shows the real rules before submission. |
 | POST | `/api/v1/auth/setup` | `{setup_token, username, password}`; only while no administrator exists; consumes the token. |
 | POST | `/api/v1/auth/login` | `{username, password, remember?}`; `remember` (boolean, default false) selects the session lifetime: remembered sessions use an 8 h idle and 7 day absolute limit and a persistent cookie (`Max-Age`); other sessions use a 2 h idle and 12 h absolute limit and a browser-session cookie (no `Max-Age`). Sets cookie `__Host-bridge_session` (HttpOnly, Secure, SameSite=Strict, Path=/, no Domain; the `__Host-` prefix makes browsers refuse a copy set by another host name); returns `{csrf_token}`. Same error and comparable timing for unknown user and wrong password. |
 
@@ -150,7 +162,7 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/auth/logout` | Deletes the session. |
-| POST | `/auth/password` | `{current, new}`; deletes every session. |
+| POST | `/auth/password` | `{current, new}`; deletes every session. While `password_change_required` is true, every request made with a session cookie except this one, `/auth/logout` and `GET /auth/state` is answered with `403` and error code `password-change-required`. API tokens are not affected. A successful change clears the flag and the reset notice. |
 | GET | `/workers` | name, id, state (`online`/`offline`), last_seen, versions, platform, capabilities. |
 | POST | `/workers` | `{name}` → `{token}` shown once. |
 | DELETE | `/workers/{name}` | Revoke; closes its connection. |

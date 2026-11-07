@@ -228,6 +228,11 @@ unknown or offline target fails and never falls back to local execution. Copy
 `ca.pem` and `setup-token` out of the coordinator as described in the install guide.
 The same command line is shown by `llm-bridge help distributed`.
 
+Forgot the web password? In an SSH session on the coordinator host run
+`llm-bridge-coordinator reset-password` (container and native installs; add
+`--temporary` to force a change at the next sign-in). See
+[Locked out or forgot the password](./docs/distributed/install.md#locked-out-or-forgot-the-password).
+
 Platforms (CI runs all of them on GitHub-hosted runners): Linux x86-64 and ARM64
 support every role. macOS ARM64 and Intel support the coordinator, the web interface,
 the remote client and the usage tools (`llm-usage`, `llm-scheduler`, `ralph-robin`),
