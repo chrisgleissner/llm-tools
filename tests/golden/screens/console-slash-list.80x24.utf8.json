@@ -26,7 +26,7 @@
     "  /pause    Hold after the current provider turn",
     "  /stop     Stop after the current step; progress is kept",
     "  /status   Print the mission state, blockers and queue",
-    "  34 more · keep typing to narrow the list",
+    "  35 more · keep typing to narrow the list",
     "› /",
     "Enter run · Tab complete · Ctrl-P/Ctrl-N history · Ctrl-U clear · /help commands"
   ],
@@ -52,7 +52,7 @@
     [[0, "  ", "info"], [2, "/pause", "key"], [8, "    ", "info"], [12, "Hold after the current provider turn", "muted"], [48, "                                ", "info"]],
     [[0, "  ", "info"], [2, "/stop", "key"], [7, "     ", "info"], [12, "Stop after the current step; progress is kept", "muted"], [57, "                       ", "info"]],
     [[0, "  ", "info"], [2, "/status", "key"], [9, "   ", "info"], [12, "Print the mission state, blockers and queue", "muted"], [55, "                         ", "info"]],
-    [[0, "  34 more · keep typing to narrow the list", "dim"], [42, "                                      ", "info"]],
+    [[0, "  35 more · keep typing to narrow the list", "dim"], [42, "                                      ", "info"]],
     [[0, "› ", "accent"], [2, "/", "info"]],
     [[0, "Enter", "key"], [5, " run", "muted"], [9, " · ", "dim"], [12, "Tab", "key"], [15, " complete", "muted"], [24, " · ", "dim"], [27, "Ctrl-P/Ctrl-N", "key"], [40, " history", "muted"], [48, " · ", "dim"], [51, "Ctrl-U", "key"], [57, " clear", "muted"], [63, " · ", "dim"], [66, "/help", "key"], [71, " commands", "muted"]]
   ]

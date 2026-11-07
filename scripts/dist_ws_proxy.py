@@ -299,8 +299,9 @@ class WsFrameProxy:
                         time.sleep(delay)
                 if link.closed.is_set():
                     break
-                sink.sendall(bridge_ws.encode_frame(frame.opcode, frame.payload, mask=direction == UP, fin=frame.fin))
+                # Counted before the send: a reader that has received the frame must already see it counted.
                 self.forwarded[(direction, label)] = self.forwarded.get((direction, label), 0) + 1
+                sink.sendall(bridge_ws.encode_frame(frame.opcode, frame.payload, mask=direction == UP, fin=frame.fin))
                 if frame.opcode == bridge_ws.OP_CLOSE:
                     break
         except (OSError, ssl.SSLError, bridge_ws.WebSocketError):
