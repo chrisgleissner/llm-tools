@@ -117,6 +117,22 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   const side = h("div", { class: "mission-side" }, tasksWrap, activityWrap);
   const page = h("div", { class: "mission-page", "data-tab": tab }, head, tabsEl, sessionSlot, side, h("div", { class: "mission-about" }, about.el));
   const wrap = h("div", { class: "mission-wrap" }, page);
+  // The page is shown once what decides the header's height is known: the attention of the mission (carried by the list entry, else read with the status),
+  // so a late "Needs approval" does not push the session pane down after the page was on screen. The wait is bounded.
+  const REVEAL_MS = 800;
+  let revealed = false;
+  const needsSnapshot = (): boolean => {
+    const e = entry();
+    return !store.loaded || (Boolean(e) && online() && (e?.mission as { attention?: unknown } | undefined)?.attention === undefined && !["COMPLETED", "CANCELLED"].includes(status()));
+  };
+  const reveal = (): void => {
+    if (revealed) return;
+    revealed = true;
+    window.clearTimeout(revealTimer);
+    wrap.style.removeProperty("visibility");
+  };
+  wrap.style.visibility = "hidden";
+  const revealTimer = window.setTimeout(reveal, REVEAL_MS);
   root.append(wrap);
 
   function setTab(next: Tab, replaceUrl = true): void {
@@ -210,6 +226,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     // A mission the coordinator does not know has nothing but its message: no tabs, panels or session box.
     if (store.loaded && !m) page.dataset["missing"] = "";
     else delete page.dataset["missing"];
+    if (!needsSnapshot()) reveal();
     if (!m) {
       const loaded = store.loaded;
       const sig = `none|${loaded}`;
@@ -325,6 +342,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
     renderTasks();
     renderAbout();
     syncSession();
+    reveal();
   }
 
   async function loadTasks(): Promise<void> {
@@ -517,6 +535,7 @@ export function missionPage(root: HTMLElement, workerName: string, missionId: st
   return () => {
     disposed = true;
     resizeObserver?.disconnect();
+    window.clearTimeout(revealTimer);
     document.removeEventListener(SHORTCUT_EVENT, onShortcut);
     offStream();
     offStore();
