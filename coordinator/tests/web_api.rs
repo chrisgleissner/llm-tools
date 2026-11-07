@@ -126,6 +126,34 @@ async fn security_notifications_are_durable_scoped_and_dismissible() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn security_audit_api_is_admin_only_and_detects_tampering() {
+    let env = boot().await;
+    let admin = env.admin().await;
+    let (_, token) = admin.post("/api/v1/tokens", json!({"name":"audit-read","scopes":["read"]})).await;
+    let denied = admin
+        .bare(Method::GET, "/api/v1/audit")
+        .bearer_auth(token["secret"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status().as_u16(), 403);
+
+    let (status, body) = admin.get("/api/v1/audit").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["chain_valid"], true);
+    let entry = body["entries"].as_array().unwrap().first().unwrap();
+    assert!(entry["entry_hash"].as_str().unwrap().len() == 64);
+    assert!(entry["prev_hash"].as_str().unwrap().len() == 64);
+    let id = entry["id"].as_i64().unwrap();
+    let conn = rusqlite::Connection::open(bridge_coordinator::db_path(&env.dir)).unwrap();
+    conn.execute("UPDATE audit SET detail='tampered' WHERE id=?", [id]).unwrap();
+    let (status, body) = admin.get("/api/v1/audit").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["chain_valid"], false);
+    env.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn successful_sign_in_from_a_new_device_creates_a_notice_without_storing_user_agent() {
     let env = boot().await;
     let mut api = env.admin().await;

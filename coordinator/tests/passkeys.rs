@@ -25,7 +25,7 @@ fn remove_database(path: &std::path::Path) {
 fn migrations_add_passkey_tables_and_challenge_is_session_bound_single_use() {
     let path = db_path();
     let db = Db::open(&path).unwrap();
-    assert_eq!(SCHEMA_VERSION, 17);
+    assert_eq!(SCHEMA_VERSION, 18);
     let now = bridge_coordinator::now();
     let state = WebauthnChallengeRow {
         principal_id: "admin".into(),
@@ -88,6 +88,10 @@ fn schema_10_tokens_migrate_with_empty_last_use_addresses() {
     assert_eq!(tokens[0].last_used, Some(20));
     assert_eq!(tokens[0].last_address, None);
     assert_eq!(tokens[0].expires_at, Some(30));
+    assert!(
+        db.audit_chain_valid().unwrap(),
+        "a legacy schema without an audit table migrates to an empty valid chain"
+    );
     remove_database(&path);
 }
 

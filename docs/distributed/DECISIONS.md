@@ -326,3 +326,17 @@ to the license identifier and retain `cargo deny`'s default deny for all other u
 In the code: `coordinator/deny.toml` adds the exact identifier. The license terms are published by
 [the Community Data License Agreement project](https://cdla.dev/permissive-2-0/).
 
+## D23 Bounded hash-chained coordinator audit log (SEC2-013)
+
+Keep the existing audit table and append SHA-256 links in the same SQLite transaction as each
+record. Canonicalize fields as a JSON tuple before hashing to avoid delimiter ambiguity. Migration
+18 backfills the previous log in ID order; retention keeps the newest 10,000 records and preserves
+the oldest retained row's link to the preceding hash. The admin-only API returns at most 500 newest
+records and verifies the retained segment. This detects edits or deletions within the retained
+segment without storing a second audit copy or adding a write-ahead service.
+
+In the code: `coordinator/src/db.rs::audit_checked` appends, `audit_chain_valid` verifies, and
+`coordinator/src/http.rs::audit_resource` exposes the bounded admin read. Regression coverage is in
+`coordinator/tests/web_api.rs::security_audit_api_is_admin_only_and_detects_tampering` and
+`coordinator/tests/hardening.rs::version_1_database_is_migrated_in_place`.
+

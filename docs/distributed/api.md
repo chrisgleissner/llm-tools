@@ -423,6 +423,7 @@ Coordinator router declarations (`http::ROUTES`), including supporting auth, wor
 | `GET /api/v1/tokens` |
 | `POST /api/v1/tokens` |
 | `DELETE /api/v1/tokens/{name}` |
+| `GET /api/v1/audit` |
 | `GET /api/v1/security/notifications` |
 | `DELETE /api/v1/security/notifications/{id}` |
 | `GET /api/v1/missions` |

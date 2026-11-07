@@ -168,6 +168,17 @@ fn response_schema(path: &str, method: &str) -> Value {
             },"additionalProperties":false
         }}},"additionalProperties":false});
     }
+    if path == "/api/v1/audit" && method == "GET" {
+        return json!({"type":"object","required":["entries","chain_valid"],"properties":{
+            "entries":{"type":"array","items":{"type":"object","required":["id","ts","actor","action","detail","remote","principal_id","prev_hash","entry_hash"],"properties":{
+                "id":{"type":"integer","minimum":1},"ts":{"type":"string","format":"date-time"},
+                "actor":{"type":"string"},"action":{"type":"string"},"detail":{"type":"string"},"remote":{"type":"string"},
+                "principal_id":{"type":"string"},"prev_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+                "entry_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}
+            },"additionalProperties":false}},
+            "chain_valid":{"type":"boolean"}
+        },"additionalProperties":false});
+    }
     if path.ends_with("/registration/start") && method == "POST" {
         return json!({"type":"object","required":["challenge_id","options"],"properties":{"challenge_id":{"type":"string","minLength":64,"maxLength":64},"options":{"type":"object"}},"additionalProperties":false});
     }
@@ -255,6 +266,9 @@ fn operation(path: &str, method: &str, access: Access, scope: &str) -> Value {
             {"name":"cursor","in":"query","required":false,"description":"Authenticated and encrypted opaque cursor returned as next_cursor; bound to this filter set.","schema":{"type":"string","maxLength":2048}},
             {"name":"offset","in":"query","required":false,"deprecated":true,"description":"Legacy pagination; use cursor.","schema":{"type":"integer","minimum":0}}
         ]);
+    }
+    if path == "/api/v1/audit" && method == "GET" {
+        op["parameters"] = json!([{"name":"limit","in":"query","required":false,"description":"Maximum audit entries, default 100, maximum 500.","schema":{"type":"integer","minimum":1,"maximum":500}}]);
     }
     if method == "POST" || method == "PATCH" || method == "PUT" {
         op["requestBody"] = json!({

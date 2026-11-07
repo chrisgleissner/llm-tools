@@ -272,7 +272,8 @@ fn command_row(r: &rusqlite::Row) -> rusqlite::Result<CommandRow> {
 }
 
 /// Highest `PRAGMA user_version` this binary understands. Migrations are forward-only.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
+pub const MAX_AUDIT_ROWS: i64 = 10_000;
 
 /// Version 2: API token expiry, per-name generation high-water mark (survives worker revoke),
 /// salted hashes of addresses with a recent successful login, and a small key/value table.
@@ -342,6 +343,7 @@ const MIGRATE_V16: &str = "CREATE TABLE known_login_devices(principal_id TEXT NO
 /// Version 17: durable principal ownership for security records and reserved sender-binding
 /// columns for future DPoP/mTLS constrained API tokens.
 const MIGRATE_V17_BASE: &str = "CREATE TABLE principals(id TEXT PRIMARY KEY, username TEXT UNIQUE, role TEXT NOT NULL, created_at INTEGER NOT NULL); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('system',NULL,'system',0); INSERT OR IGNORE INTO principals(id,username,role,created_at) VALUES('admin',NULL,'admin',0);";
+const MIGRATE_V18: &str = "ALTER TABLE audit ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE audit ADD COLUMN entry_hash TEXT NOT NULL DEFAULT '';";
 
 /// An address with a successful login within this many seconds is a known address.
 pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
@@ -349,9 +351,14 @@ pub const KNOWN_ADDR_SECS: i64 = 7 * 86_400;
 type R<T> = rusqlite::Result<T>;
 type IdentifiedTokenRow = (String, String, Option<i64>, Option<i64>, String, String, String, String);
 
+fn audit_entry_hash(prev_hash: &str, ts: i64, actor: &str, action: &str, detail: &str, remote: &str, principal_id: &str) -> String {
+    let canonical = serde_json::to_string(&(prev_hash, ts, actor, action, detail, remote, principal_id)).expect("audit fields serialize");
+    crate::auth::sha256_hex(&canonical)
+}
+
 impl Db {
     pub fn open(path: &Path) -> R<Db> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
@@ -515,6 +522,44 @@ impl Db {
                 }
             }
             conn.execute_batch(&format!("BEGIN; {MIGRATE_V17_BASE} {alter} PRAGMA user_version = 17; COMMIT;"))?;
+        }
+        if version < 18 {
+            let tx = conn.transaction()?;
+            let has_audit: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='audit')", [], |row| {
+                row.get(0)
+            })?;
+            if has_audit {
+                tx.execute_batch(MIGRATE_V18)?;
+            } else {
+                tx.execute_batch("CREATE TABLE audit(id INTEGER PRIMARY KEY AUTOINCREMENT,ts INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL,remote TEXT NOT NULL,principal_id TEXT NOT NULL DEFAULT 'system',prev_hash TEXT NOT NULL DEFAULT '',entry_hash TEXT NOT NULL DEFAULT '');")?;
+            }
+            let mut stmt = tx.prepare("SELECT id,ts,actor,action,detail,remote,principal_id FROM audit ORDER BY id")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })?
+                .collect::<R<Vec<_>>>()?;
+            drop(stmt);
+            let mut previous = "0".repeat(64);
+            for (id, ts, actor, action, detail, remote, principal_id) in rows {
+                let entry_hash = audit_entry_hash(&previous, ts, &actor, &action, &detail, &remote, &principal_id);
+                tx.execute("UPDATE audit SET prev_hash=?,entry_hash=? WHERE id=?", params![previous, entry_hash, id])?;
+                previous = entry_hash;
+            }
+            tx.execute(
+                "DELETE FROM audit WHERE id <= (SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET ?)",
+                [MAX_AUDIT_ROWS],
+            )?;
+            tx.pragma_update(None, "user_version", 18)?;
+            tx.commit()?;
         }
         crate::restrict_permissions(path, 0o600);
         Ok(Db {
@@ -1472,24 +1517,73 @@ impl Db {
     }
 
     pub fn audit_checked(&self, actor: &str, action: &str, detail: &str, remote: &str) -> R<()> {
-        self.c().execute(
-            "INSERT INTO audit(ts, actor, action, detail, remote,principal_id) VALUES(?,?,?,?,?,COALESCE((SELECT id FROM principals WHERE username=?),CASE WHEN ?='admin' THEN 'admin' WHEN substr(?,1,6)='token:' THEN (SELECT principal_id FROM api_tokens WHERE name=substr(?,7)) ELSE 'system' END))",
-            params![crate::now(), actor, action, detail, remote, actor, actor, actor, actor],
+        let mut c = self.c();
+        let tx = c.transaction()?;
+        let principal_id: String = tx.query_row(
+            "SELECT COALESCE((SELECT id FROM principals WHERE username=?),CASE WHEN ?='admin' THEN 'admin' WHEN substr(?,1,6)='token:' THEN (SELECT principal_id FROM api_tokens WHERE name=substr(?,7)) ELSE 'system' END)",
+            params![actor, actor, actor, actor],
+            |row| row.get(0),
         )?;
+        let previous: Option<String> = tx
+            .query_row("SELECT entry_hash FROM audit ORDER BY id DESC LIMIT 1", [], |row| row.get(0))
+            .optional()?;
+        let previous = previous.unwrap_or_else(|| "0".repeat(64));
+        let ts = crate::now();
+        let entry_hash = audit_entry_hash(&previous, ts, actor, action, detail, remote, &principal_id);
+        tx.execute(
+            "INSERT INTO audit(ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash) VALUES(?,?,?,?,?,?,?,?)",
+            params![ts, actor, action, detail, remote, principal_id, previous, entry_hash],
+        )?;
+        tx.execute(
+            "DELETE FROM audit WHERE id <= (SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET ?)",
+            [MAX_AUDIT_ROWS],
+        )?;
+        tx.commit()?;
         Ok(())
     }
     pub fn audit_list(&self, limit: i64) -> R<Vec<Value>> {
         let c = self.c();
-        let mut st = c.prepare("SELECT ts, actor, action, detail, remote FROM audit ORDER BY id DESC LIMIT ?")?;
+        let limit = limit.clamp(1, 500);
+        let mut st = c.prepare("SELECT id,ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash FROM audit ORDER BY id DESC LIMIT ?")?;
         let rows = st
             .query_map(params![limit], |r| {
                 Ok(
-                    json!({"ts": r.get::<_, i64>(0)?, "actor": r.get::<_, String>(1)?, "action": r.get::<_, String>(2)?,
-            "detail": r.get::<_, String>(3)?, "remote": r.get::<_, String>(4)?}),
+                    json!({"id":r.get::<_,i64>(0)?,"ts":r.get::<_,i64>(1)?,"actor":r.get::<_,String>(2)?,"action":r.get::<_,String>(3)?,
+            "detail":r.get::<_,String>(4)?,"remote":r.get::<_,String>(5)?,"principal_id":r.get::<_,String>(6)?,"prev_hash":r.get::<_,String>(7)?,"entry_hash":r.get::<_,String>(8)?}),
                 )
             })?
             .collect();
         rows
+    }
+
+    pub fn audit_chain_valid(&self) -> R<bool> {
+        let c = self.c();
+        let mut st = c.prepare("SELECT ts,actor,action,detail,remote,principal_id,prev_hash,entry_hash FROM audit ORDER BY id")?;
+        let rows = st.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut expected_previous: Option<String> = None;
+        for row in rows {
+            let (ts, actor, action, detail, remote, principal_id, previous, stored) = row?;
+            if expected_previous.as_ref().is_some_and(|expected| expected != &previous) {
+                return Ok(false);
+            }
+            let actual = audit_entry_hash(&previous, ts, &actor, &action, &detail, &remote, &principal_id);
+            if actual != stored {
+                return Ok(false);
+            }
+            expected_previous = Some(stored);
+        }
+        Ok(true)
     }
 
     pub fn maintenance(&self) -> R<()> {

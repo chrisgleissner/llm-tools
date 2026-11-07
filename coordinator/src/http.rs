@@ -154,6 +154,7 @@ fn normalize_api_timestamps(value: &mut Value) {
         "last_used_at",
         "occurred_at",
         "timestamp",
+        "ts",
     ];
     match value {
         Value::Object(fields) => {
@@ -1461,6 +1462,24 @@ async fn list_tokens(State(st): State<St>, _a: Authed) -> ApiResult {
         })
         .collect();
     Ok(json_ok(StatusCode::OK, json!({"tokens": tokens})))
+}
+
+async fn audit_resource(State(st): State<St>, _admin: Authed, Query(q): Query<HashMap<String, String>>) -> ApiResult {
+    if q.keys().any(|key| key != "limit") {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "unknown query parameter"));
+    }
+    let limit = q.get("limit").map_or(Ok(100_i64), |value| {
+        value
+            .parse::<i64>()
+            .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be an integer between 1 and 500"))
+    })?;
+    if !(1..=500).contains(&limit) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid-request", "limit must be between 1 and 500"));
+    }
+    Ok(json_ok(
+        StatusCode::OK,
+        json!({"entries":st.db.audit_list(limit)?,"chain_valid":st.db.audit_chain_valid()?}),
+    ))
 }
 
 async fn create_token(State(st): State<St>, Authed(p, ip): Authed, body: Buffered) -> ApiResult {
@@ -3431,6 +3450,7 @@ pub const ROUTES: &[(&str, &[&str], Access, &str)] = &[
     ("/api/v1/workers/{name}/audit", &["GET"], Access::Authed, "admin"),
     ("/api/v1/workers/{name}/gc", &["POST"], Access::Authed, "operate"),
     ("/api/v1/tokens", &["GET", "POST"], Access::Authed, "admin"),
+    ("/api/v1/audit", &["GET"], Access::Authed, "admin"),
     ("/api/v1/tokens/{name}", &["DELETE"], Access::Authed, "admin"),
     ("/api/v1/security/notifications", &["GET"], Access::Authed, "admin"),
     ("/api/v1/security/notifications/{id}", &["DELETE"], Access::Authed, "admin"),
@@ -3669,6 +3689,7 @@ fn build_router(st: St, group: Option<crate::config::ListenerGroup>) -> Router {
         .route("/api/v1/workers/{name}/audit", get(worker_audit_resource))
         .route("/api/v1/workers/{name}/gc", post(worker_gc_resource))
         .route("/api/v1/tokens", get(list_tokens).post(create_token))
+        .route("/api/v1/audit", get(audit_resource))
         .route("/api/v1/tokens/{name}", delete(revoke_token))
         .route("/api/v1/security/notifications", get(list_security_notifications))
         .route("/api/v1/security/notifications/{id}", delete(dismiss_security_notification))

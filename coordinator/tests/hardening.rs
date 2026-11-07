@@ -659,6 +659,14 @@ fn version_1_database_is_migrated_in_place() {
         .unwrap();
     assert_eq!(session_principal, "admin");
     assert_eq!(audit_principal, "admin");
+    assert!(
+        db.audit_chain_valid().unwrap(),
+        "version-one audit history is backfilled into a valid hash chain"
+    );
+    let audit_entry = db.audit_list(1).unwrap().remove(0);
+    assert_eq!(audit_entry["action"], "old-action");
+    assert_eq!(audit_entry["prev_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(audit_entry["entry_hash"].as_str().unwrap().len(), 64);
     let v: i64 = rusqlite::Connection::open(&path)
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
