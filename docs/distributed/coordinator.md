@@ -191,16 +191,35 @@ Authenticated (session cookie, or `Authorization: Bearer <api token>`):
 | POST | `/tokens` | `{name, scopes?, expires_days?}`; `scopes` defaults to `read`, expiry to 90 days (`0` means no expiry). Returns the secret once. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Creation is audited. |
 | DELETE | `/tokens/{name}` | Revoke a token. Requires an administrator session with CSRF and exact Origin, or an `admin` token. Revocation is audited. |
 | GET | `/missions` | Mission index across workers with `worker`, `stale` (worker offline or last hello older than its last event). A mission may include bounded `needs_you: {kind, message, command}` when its native provider is waiting on a structured question; the message contains only question/choice text and the local answer command. Optional query: `q` (case-insensitive substring of name, id, folder or worker), `worker`, `status` (comma list), `sort` (`name`, `status`, `worker`, `updated`), `order` (`asc`, `desc`), `limit` (default 100, maximum 500), `cursor`, or legacy `offset`. The reply adds `total`, `offset`, `next_cursor` and `statuses` (match counts per status, ignoring the status filter). Cursors are authenticated and encrypted, opaque, bound to the normalized filters and sort order, and cannot be combined with `offset`; use the returned `next_cursor` unchanged to fetch the next page. |
-| POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
+| POST | `/commands` | `{target, request}` where `request` is a `CommandRequest`. Optional `Idempotency-Key` replaces its `request_id`; replay returns the stored journal entry. A mutating command for an offline worker is queued with `state: pending`, returns 202 and `Location: /api/v1/commands/{request_id}`, and is delivered on reconnect. A read-only command for an offline worker is refused with 503 `worker-offline` and is not queued (protocol.md, "Read-only commands and offline workers"). The coordinator rejects unknown targets (404 `unknown-target`) and operations the worker did not advertise (`unsupported-operation`). Optional `wait_ms` (≤ 30000) waits for the result. |
 | GET | `/commands/{request_id}` | Journal entry: `state` (`pending`/`sent`/`acked`/`done`), `result`. |
 | GET | `/missions/{id}/tasks?worker=&limit=&cursor=` | Typed `task.list`; default limit 50, maximum 1000. Returns a command result with `next_cursor` when another page exists. |
 | GET | `/missions/{id}/events?worker=&limit=&cursor=` | Typed `mission.events`; default limit 50, maximum 1000. Legacy `after` remains available. |
 | GET | `/missions/{id}/operations?worker=&limit=&cursor=` | Typed `session.list`; default limit 100, maximum 1000; returns metadata only. |
 | GET | `/events?worker=&after=&limit=` | Stored events, ascending. |
-| GET | `/stream` | WebSocket; pushes `worker`, `event` and `command` updates. |
+| GET | `/stream` | WebSocket; pushes change notices: `worker` (state), `event`, `command` and `terminal`. A notice never carries events, request parameters or results, so its size does not depend on the data: see "Browser stream" below. |
 | GET | `/terminal?worker=&mission=&mode=view\|write&cols=&rows=` | WebSocket for one remote terminal session. Session cookie (with exact Origin) or API token. The coordinator opens the session on the worker with `terminal.open` and relays the frames of `protocol.md` (Terminal sessions) unchanged after validation; the frame and backlog bounds are specified there and the session counts are in the limits table below (over the cap: `x` frame, close 1013). Each open is audited as `terminal.open`. The worker, not the coordinator, decides the writer role. |
 | GET | `/worker/terminal/{session_id}` | Worker side of a session; worker bearer token; accepted once, only for a session opened for that worker. |
-| GET | `/diagnostics` | versions, uptime, RSS, DB size, connected workers, queue depths. |
+| GET | `/diagnostics` | versions, uptime, RSS, DB size, connected workers, queue depths, and `link_bytes`: messages and bytes since start by direction (`worker_in`, `worker_out`, `browser_out`) and message type. |
+
+### Browser stream
+
+`/stream` sends one JSON text message per change; none of them grows with the data. A console that
+needs details reads them with an ordinary request when a notice says something changed.
+
+| `type` | Fields | Sent |
+|---|---|---|
+| `worker` | `worker`, `state` (`online`, `offline`, `revoked`), `generation` | A worker connected, disconnected or was revoked. |
+| `event` | `worker`, `cursor` (the worker's stored event cursor), `count` (events in the accepted batch), `first_event_id`, `last_event_id`, `missions`: a list of `{id, events, last_event_id, summary}`, one per mission that has events or a changed summary in the batch | The coordinator accepted an `events` batch that stored events or changed mission summaries. At most one per batch (25 events), about 100 bytes plus 80 bytes per mission. |
+| `command` | `command`: `request_id`, `target`, `operation`, `mutating`, `state`, `outcome` (when done), `created_at`, `updated_at` | A command was queued, sent, acknowledged or finished. It has no `request` and no `result`; `GET /commands/{request_id}` returns the whole entry. |
+| `terminal` | `worker`, `mission_id`, `state`, `mode`, `reason` | A terminal session changed state. |
+
+Before DOG-021 an `event` message carried the whole batch (up to 16 KB) and a `command` message the
+whole journal entry including the result, and a browser received 414 MB in one session. A console
+now reacts to an `event` notice by reading `GET /missions` (replicated summaries with task counts,
+current task, station and model; see protocol.md, "Mission summaries") and `GET /events?worker=&after=`
+(stored events, no worker round trip). It sends a worker command (status or task list) for a mission
+only when that mission's summary changed.
 
 Every state-changing request authenticated by cookie needs header
 `X-CSRF-Token` equal to the session's token and an `Origin` equal to the
