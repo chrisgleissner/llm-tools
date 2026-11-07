@@ -14,6 +14,9 @@ const inboxReady = async (p: import("@playwright/test").Page): Promise<void> => 
   await expect(p.locator('[data-section="needs-you"] [data-entity^="mission:"]').first()).toBeVisible();
   await expect(p.locator("[data-q=need-me]")).not.toHaveText("Checking...");
   await expect(p.locator('[data-section="needs-you"] [data-action="approve"]').first()).toBeVisible();
+  // The rows that need a second read (the failing task of a failed mission, the verifier of an approval) are complete before the page is captured.
+  await expect(p.locator('[data-section="needs-you"] .mrow[data-state="failed"]:not(:has([data-action="retry"]))')).toHaveCount(0);
+  await expect(p.locator('[data-section="needs-you"] .mrow[data-state="needs-approval"]').first()).toContainText("Verifier:");
 };
 const withProviders = async (p: import("@playwright/test").Page): Promise<void> => {
   await expect(p.locator('[data-section="running"] [data-entity^="mission:"]').first()).toContainText(/Codex/);

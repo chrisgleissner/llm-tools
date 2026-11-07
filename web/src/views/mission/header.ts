@@ -85,8 +85,8 @@ export function answers(m: HeaderModel): { what: string; needMe: string; next: s
     case "waiting": return { what: "Waiting for provider capacity.", needMe: none, next: "It continues when capacity returns." };
     case "paused": return { what: "Paused.", needMe: none, next: "Resume when you are ready." };
     case "queued": return { what: "Created, not started.", needMe: "Waiting for you.", next: "Start it to begin." };
-    case "done": return { what: "All tasks finished.", needMe: none, next: "Review them under Tasks." };
-    case "stopped": return { what: m.status === "CANCELLED" ? "Cancelled." : "Stopped.", needMe: none, next: m.status === "CANCELLED" ? "Review Activity." : "Start it again to continue." };
+    case "done": return { what: "All tasks finished.", needMe: none, next: "See Tasks." };
+    case "stopped": return { what: m.status === "CANCELLED" ? "Cancelled." : "Stopped.", needMe: none, next: m.status === "CANCELLED" ? "See Activity." : "Start it again to continue." };
     case "needs-approval": return { what: end(said ?? `${task} awaits your approval`) + verifier, needMe: needs, next: ord ? "Approve or reject." : "Review the tasks." };
     case "needs-input": return { what: end(said ?? "The provider is waiting for an answer"), needMe: needs, next: "Take control to answer." };
     case "failed": return { what: end(said ?? `${task} failed`), needMe: needs, next: ord ? "Retry it, or check Activity." : "Check Activity." };

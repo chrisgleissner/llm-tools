@@ -43,7 +43,7 @@ export function score(query: string, title: string, more: string): number {
 }
 
 // The palette is the only user of these rules, so they load with its chunk and stay out of the first-load stylesheet (budget.json).
-const STYLE = `dialog.palette { padding: var(--sp-3); inline-size: min(calc(100vw - 2 * var(--sp-4)), 40rem); margin-block-start: 12vh; } .palette-input { font-size: var(--fs-lg); } #palette-list { margin-block-start: var(--sp-2); max-block-size: 50vh; overflow-y: auto; } .palette-option { display: flex; align-items: baseline; gap: var(--sp-3); min-block-size: var(--control-h); padding: var(--sp-1) var(--sp-3); border-radius: var(--r-2); cursor: pointer; } .palette-option[aria-selected="true"] { background: var(--accent-tint); color: var(--accent-strong); } .palette-option .kind { flex: none; inline-size: 4.5rem; color: var(--text-muted); font-size: var(--fs-xs); } .palette-option .title { flex: 1; min-inline-size: 0; } .palette-option .detail { flex: 0 1 10rem; min-inline-size: 0; text-align: end; font-size: var(--fs-xs); } .palette-empty { padding: var(--sp-3); }`;
+const STYLE = `dialog.palette { padding: var(--sp-3); inline-size: min(calc(100vw - 2 * var(--sp-4)), 40rem); margin-block-start: 12vh; } #palette-list { margin-block-start: var(--sp-2); max-block-size: 50vh; overflow-y: auto; } .palette-option { display: flex; align-items: baseline; gap: var(--sp-3); min-block-size: var(--control-h); padding: var(--sp-1) var(--sp-3); border-radius: var(--r-2); cursor: pointer; } .palette-option[aria-selected="true"] { background: var(--accent-tint); color: var(--accent-strong); } .palette-option .kind { flex: none; inline-size: 3.5rem; color: var(--text-muted); font-size: var(--fs-xs); } .palette-option .title { flex: 1; min-inline-size: 0; } .palette-option .detail { flex: 0 1 7rem; min-inline-size: 0; text-align: end; font-size: var(--fs-xs); } .palette-empty { padding: var(--sp-3); }`;
 
 const path = (worker: string, id: string): string => `/missions/${encodeURIComponent(worker)}/${encodeURIComponent(id)}`;
 
@@ -133,9 +133,11 @@ export function openPalette(ctx: PaletteContext, initial = ""): void {
         const rows = (row.result?.result?.["sessions"] as Array<Record<string, string | number | null>> | undefined) ?? [];
         for (const s of rows) {
           const id = String(s["mission_id"] ?? "");
+          // A mission lives on one worker: the same operation reported by two workers is one session (as on the Sessions page).
+          if (sessions.some((x) => x.more.includes(String(s["operation_id"])))) continue;
           // A session reads differently from its mission: the task, the provider, its state and how long ago it was active.
           const prov = String(s["route_id"] ?? s["provider"] ?? "");
-          sessions.push({ kind: "Session", title: `${String(s["mission_name"] || id)}${s["task_ordinal"] ? ` · task ${s["task_ordinal"]}` : ""}`, detail: `${prov.replace(/^./, (c) => c.toUpperCase())} ${String(s["state"] ?? "").toLowerCase()}, ${compactAge((Date.now() - (Date.parse(String(s["last_activity_at"])) || Date.now())) / 1000)}`, more: `${w.name} ${String(s["provider"] ?? "")} ${String(s["model"] ?? "")} ${String(s["native_session_id"] ?? "")}`, run: () => ctx.go(path(w.name, id)) });
+          sessions.push({ kind: "Session", title: `${String(s["mission_name"] || id)}${s["task_ordinal"] ? ` · task ${s["task_ordinal"]}` : ""}`, detail: `${prov.replace(/^./, (c) => c.toUpperCase())} ${String(s["state"] ?? "").toLowerCase()}, ${compactAge((Date.now() - (Date.parse(String(s["last_activity_at"])) || Date.now())) / 1000)}`, more: `${w.name} ${String(s["operation_id"])} ${String(s["provider"] ?? "")} ${String(s["model"] ?? "")} ${String(s["native_session_id"] ?? "")}`, run: () => ctx.go(path(w.name, id)) });
         }
         if (dlg.isConnected) render();
       })

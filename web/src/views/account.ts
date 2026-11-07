@@ -16,7 +16,7 @@ const SCOPE_NAMES = ["read", "operate", "terminal:view", "terminal:write", "admi
 /** What each permission allows, in a few words; the last two are powerful and say so. */
 const SCOPE_HELP: Record<(typeof SCOPE_NAMES)[number], string> = {
   read: "See missions and usage.",
-  operate: "Start, pause and stop missions.",
+  operate: "Start, pause, stop missions.",
   "terminal:view": "Watch live terminals.",
   "terminal:write": "Type into terminals. Powerful.",
   admin: "Manage workers and tokens. Powerful.",

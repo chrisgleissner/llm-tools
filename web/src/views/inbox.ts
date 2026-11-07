@@ -16,6 +16,8 @@ const PREVIEW_LINES = 20;
 const WEEK_MS = 7 * 86400000;
 
 const updatedMs = (i: Item) => Date.parse(i.entry.mission.updated_at ?? "") || 0;
+/** The order of the Needs you group (spec 8.3): failed, approval, input; oldest first within each. */
+const needsOrder = (items: Item[]): Item[] => items.filter((i) => sectionOf(i.state) === "needs-you").sort((a, b) => (a.state.id === "failed" ? 0 : a.state.id === "needs-approval" ? 1 : 2) - (b.state.id === "failed" ? 0 : b.state.id === "needs-approval" ? 1 : 2) || updatedMs(a) - updatedMs(b));
 // The control characters of terminal output are removed before it is shown as text.
 const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]|${String.fromCharCode(27)}[()][0-9A-B]`, "g");
 const CONTROL = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(8)}${String.fromCharCode(11)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`, "g");
@@ -95,7 +97,7 @@ export function inbox(root: HTMLElement): () => void {
     const l = everything ? t.lines : t.lines.filter((e) => !hasLine(e));
     if (s.length) void loadStatuses(s, () => disposed);
     if (l.length) void loadLines(l, () => disposed);
-    void loadRowEvidence(all().filter((i) => i.state.tier === "alert").slice(0, expandedNeeds ? 50 : NEEDS_VISIBLE), () => disposed);
+    void loadRowEvidence(needsOrder(all()).slice(0, expandedNeeds ? 50 : NEEDS_VISIBLE), () => disposed);
   }
 
   async function afterAction(item: Item): Promise<void> {
@@ -148,8 +150,7 @@ export function inbox(root: HTMLElement): () => void {
     const count = attentionCount(store.missions);
     const groups: Record<string, Item[]> = { "needs-you": [], running: [], waiting: [], finished: [] };
     for (const i of items) groups[sectionOf(i.state)]!.push(i);
-    const kindOrder = (i: Item) => (i.state.id === "failed" ? 0 : i.state.id === "needs-approval" ? 1 : 2);
-    groups["needs-you"]!.sort((a, b) => kindOrder(a) - kindOrder(b) || updatedMs(a) - updatedMs(b));
+    groups["needs-you"] = needsOrder(groups["needs-you"]!);
     groups["running"]!.sort((a, b) => updatedMs(b) - updatedMs(a));
     groups["waiting"]!.sort((a, b) => stateOrder(a.state) - stateOrder(b.state) || updatedMs(b) - updatedMs(a));
     const needs = groups["needs-you"]!;

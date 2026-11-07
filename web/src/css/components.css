@@ -21,7 +21,7 @@
 .btn.icon { padding: 0; inline-size: var(--control-h); }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
-.btn.primary:disabled { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
+.btn.primary:disabled, .btn.danger:disabled { background: var(--surface-2); color: var(--text-muted); border-color: var(--border); }
 .btn.danger { color: var(--danger); border-color: var(--danger); }
 .btn.danger.solid { background: var(--danger); color: var(--on-danger); }
 .btn.small { min-block-size: var(--control-h-sm); padding: 0 var(--sp-2); font-size: var(--fs-sm); }
@@ -37,7 +37,6 @@
   .btn.busy::after { animation: spin 0.7s linear infinite; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.btn .check-flash { color: var(--icon-done); }
 
 /* ---------------------------------------------------------------- fields */
 .field { margin: var(--sp-3) 0; display: flex; flex-direction: column; gap: var(--sp-1); }

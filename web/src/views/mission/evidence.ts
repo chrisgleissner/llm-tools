@@ -76,7 +76,7 @@ export async function readEvidence(workerName: string, missionId: string, ordina
   const e: Evidence = { title: asText(rec(rec(shown)["task"] ?? shown)["title"]), verifier: verifierText(shown), changes: "Diff unavailable: the worker did not answer", diffOk: false, files: [], diff: "", tail: "", outputNote: "" };
   if (diff.status === "fulfilled" && diff.value.available !== false && typeof diff.value.text === "string") {
     const sum = parseDiff(diff.value.text);
-    Object.assign(e, { diffOk: true, files: sum.files, diff: diff.value.text, changes: sum.files.length === 0 ? "No changed files" : `${sum.files.length} ${sum.files.length === 1 ? "file" : "files"}, +${sum.added} -${sum.removed}` });
+    Object.assign(e, { diffOk: true, files: sum.files, diff: diff.value.text, changes: sum.files.length === 0 ? "No changed files" : `${sum.files.length} ${sum.files.length === 1 ? "file" : "files"}, +${sum.added}\u00a0-${sum.removed}` });
   } else if (diff.status === "fulfilled") e.changes = unavailable("Diff", diff.value);
   if (out.status === "fulfilled" && out.value) {
     if (out.value.available !== false && typeof out.value.text === "string") e.tail = out.value.text.split("\n").filter((l) => l.trim()).slice(-8).join("\n");

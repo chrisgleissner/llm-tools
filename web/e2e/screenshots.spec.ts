@@ -171,7 +171,7 @@ test("a created mission can be started from its detail page through the resource
   await page.goto(MISSION_START_PATH);
   await expect(page.getByRole("heading", { name: "Add telemetry opt-out" })).toBeVisible();
   await page.getByRole("button", { name: "Start mission" }).click();
-  await expect(page.locator(".toast.applied")).toContainText("Start mission");
+  await expect(page.locator(".toast.applied")).toContainText("Mission started");
   await expect(page.locator(".mission-head .pill")).not.toHaveAttribute("data-state", "queued"); // the header no longer offers Start
   expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/start") && request.key)).toBe(true);
   expect(requests.some((request) => request.path.endsWith("/commands"))).toBe(false);

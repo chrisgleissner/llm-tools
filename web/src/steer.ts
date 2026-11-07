@@ -75,7 +75,7 @@ export async function runSteer(o: SteerTarget, kind: api.SteerKind, label: strin
           pick.value = String((["VERIFYING", "RUNNING"].map((st) => list.find((t) => t["status"] === st)).find(Boolean) ?? list[0])?.["ordinal"] ?? "");
           pick.disabled = !list.length;
         });
-    const answer = confirmDialog({ title: label, message: `${HELP[kind]} Queued, applied at the next safe point.`, confirmLabel: handoff ? "Hand off" : `Queue ${{ review: "review", verify: "verify", replace: "new prompt" }[kind as string] ?? "stop"}`, details: h("div", {}, ...body) });
+    const answer = confirmDialog({ title: label, message: `${HELP[kind]} Applied at the next safe point.`, confirmLabel: handoff ? "Hand off" : `Queue ${{ review: "review", verify: "verify", replace: "new prompt" }[kind as string] ?? "stop"}`, details: h("div", {}, ...body) });
     (withPrompt ? text : handoff ? route : pick).focus();
     if ((await answer) === null) return;
     await loaded.catch(() => {});
