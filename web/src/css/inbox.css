@@ -2,7 +2,7 @@
 .page-title { margin-block: var(--sp-2) var(--sp-1); }
 /* Phones and tablets: the title sits directly under the top padding of the page. */
 @media (max-width: 63.99rem) { .page-title { margin-block-start: 0; } }
-.answer { display: flex; flex-wrap: wrap; margin: 0 0 var(--sp-3); color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.answer { display: flex; min-block-size: var(--lh-sm); flex-wrap: wrap; margin: 0 0 var(--sp-3); color: var(--text-muted); font-size: var(--fs-sm); line-height: var(--lh-sm); }
 .answer > span:empty { display: none; }
 .answer > [data-q="need-me"] { color: var(--text); font-weight: 600; }
 .answer > span:not(:last-child):not(:empty)::after { content: "\00b7"; margin-inline: var(--sp-2); }
