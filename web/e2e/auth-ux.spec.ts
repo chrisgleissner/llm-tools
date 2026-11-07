@@ -9,14 +9,14 @@ test.describe("first-run registration", () => {
     await expect(page.locator("#token-help")).toContainText("bridge-coordinator setup-token");
     await expect(page.locator("#token-help")).toContainText("setup-token");
     await expect(page.locator("#policy-list li")).toHaveCount(2);
-    await expect(page.locator('#policy-list li[data-rule="min"]')).toContainText("At least 12 characters");
+    await expect(page.locator('#policy-list li[data-rule="min"]')).toContainText("At least 15 characters");
     await expect(page.locator('#policy-list li[data-rule="min"]')).not.toHaveClass(/met/);
 
     const pass = page.getByLabel("New password", { exact: true });
     const strengthText = page.locator("#strength-text");
     await pass.fill("short");
     await expect(strengthText).toContainText("Too short");
-    await expect(strengthText).toContainText("5 of 12");
+    await expect(strengthText).toContainText("5 of 15");
     await expect(page.locator(".meter")).toHaveAttribute("data-level", "0");
     await pass.fill("aaaaaaaaaaaaaaaa");
     await expect(strengthText).toContainText("Weak");
@@ -42,7 +42,7 @@ test.describe("first-run registration", () => {
     await expect(page.locator("#setup-token-error")).toHaveAttribute("role", "alert");
     await expect(token).toHaveAttribute("aria-describedby", /setup-token-error/);
     await expect(page.locator("#username-error")).toContainText("Choose a username");
-    await expect(page.locator("#password-error")).toContainText("at least 12 characters");
+    await expect(page.locator("#password-error")).toContainText("at least 15 characters");
     await expect(page.locator("#form-error")).toContainText("Fix the highlighted fields");
     await expectAccessible(page, "setup with validation errors");
 
@@ -90,6 +90,25 @@ test.describe("first-run registration", () => {
 });
 
 test.describe("sign-in", () => {
+  test("an administrator can revoke another active browser session", async ({ page, browser, coord }) => {
+    await setupViaUi(page, coord);
+    const otherContext = await browser.newContext({ baseURL: coord.url });
+    try {
+      const otherPage = await otherContext.newPage();
+      await loginViaUi(otherPage);
+      await page.goto("/account");
+      const sessions = page.getByRole("list", { name: "Active sessions" });
+      await expect(sessions).toContainText("This device");
+      await expect(sessions).toContainText("Other device");
+      await sessions.getByRole("button", { name: /^Revoke session created/ }).click();
+      await expect(sessions).not.toContainText("Other device");
+      await otherPage.reload();
+      await expect(otherPage.getByRole("heading", { name: "Sign in" })).toBeVisible();
+    } finally {
+      await otherContext.close();
+    }
+  });
+
   test("account lists passkey metadata without exposing credential material", async ({ page, coord }) => {
     await setupViaUi(page, coord);
     await page.route("**/api/v1/auth/state", async (route) => {
